@@ -227,13 +227,14 @@ export function handleManagedRealtimeCall(
   const userId = request.headers.get("x-nanocodex-realtime-owner");
   if (request.method !== "POST" || url.origin !== "https://nanocodex.internal"
     || url.pathname !== "/v1/realtime/calls" || url.search
-    || !subject || !MANAGED_SESSION_SUBJECT.test(subject)
+    || !subject || !(MANAGED_SESSION_SUBJECT.test(subject) || /^[0-9a-f]{64}$/.test(subject))
     || !userId || !CHIEF_USER_ID.test(userId)) {
     return Promise.resolve(Response.json({ error: "invalid_managed_realtime_call" }, { status: 403 }));
   }
   // The authenticated ingress already checked the Session's current owner,
-  // organization, team, epoch, and deletion/export state. Only this private
-  // entrypoint may carry that result past the generic agent egress boundary.
+  // organization, team, epoch, and deletion/export state for either retained
+  // subject strategy. Legacy calls need no directory rebind/readback. Only this
+  // private entrypoint may carry the result past generic agent egress.
   return handleEgressWithOwner(request, env, ctx, fetch, undefined, undefined, { subject, userId });
 }
 

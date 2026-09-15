@@ -51,7 +51,7 @@ describe("voice relay geography", () => {
 });
 
 describe("private voice egress admission", () => {
-  async function fixture(owned: boolean, privateBinding = true) {
+  async function fixture(owned: boolean, privateBinding = true, direct = true, sideband = false) {
     const owner = "11111111-1111-4111-8111-111111111111";
     const id = "a".repeat(64);
     const token = `ncx_live_${"k".repeat(12)}_${"s".repeat(43)}`;
@@ -59,9 +59,9 @@ describe("private voice egress admission", () => {
       "SHA-256", new TextEncoder().encode(token),
     )))).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
     const relay = vi.fn(async (_request: Request) => new Response("v=0", { status: 201 }));
-    const generic = vi.fn(async (_request: Request) => new Response("v=0", { status: 201 }));
+    const generic = vi.fn(async (_request: RequestInfo | URL, _init?: RequestInit) => new Response("v=0", { status: 201 }));
     const ownership = vi.fn(async (_url: string, _init: RequestInit) => owned
-      ? Response.json({ subject: `managed-session-v1_${id}`, strategy: "session_v1" })
+      ? Response.json({ subject: direct ? `managed-session-v1_${id}` : id, strategy: direct ? "session_v1" : "directory_v1" })
       : new Response(null, { status: 404 }));
     const env = {
       NANOCODEX_API_KEYS: { getByName: () => ({ fetch: async () => Response.json({
@@ -75,27 +75,33 @@ describe("private voice egress admission", () => {
       ...(privateBinding ? { NANOCODEX_REALTIME: { fetch: relay } } : {}),
     } as unknown as Parameters<typeof routeManagedRealtimeTransport>[1];
     const url = new URL("https://test.example/v1/agents/11111111-1111-7111-8111-111111111111/realtime/calls");
+    if (sideband) {
+      url.pathname = url.pathname.replace(/calls$/, "sideband");
+      url.search = "call_id=rtc_fixture&voice_session_id=22222222-2222-7222-8222-222222222222";
+    }
     const request = new Request(url, {
-      method: "POST", headers: {
+      method: sideband ? "GET" : "POST", headers: {
+        ...(sideband ? { upgrade: "websocket" } : {}),
         authorization: `Bearer ${token}`, "content-type": "application/json",
         "x-nanocodex-voice-session-id": "22222222-2222-7222-8222-222222222222",
         "x-nanocodex-realtime-owner": "attacker", "x-nanocodex-voice-region": "wnam",
-      }, body: JSON.stringify({ sdp: "v=0", session: session() }),
+      }, ...(sideband ? {} : { body: JSON.stringify({ sdp: "v=0", session: session() }) }),
     });
     const response = await routeManagedRealtimeTransport(request, env, url, 1000);
     return { response, relay, generic, ownership, owner };
   }
-  it("checks ownership before forwarding its own owner assertion", async () => {
-    const f = await fixture(true);
+  it.each([true, false])("checks Session ownership without rebinding or resolving a directory (direct=%s)", async (direct) => {
+    const f = await fixture(true, true, direct);
     expect(f.response?.status).toBe(201);
     expect(f.ownership).toHaveBeenCalledTimes(1);
     expect(f.generic).not.toHaveBeenCalled();
     const request = f.relay.mock.calls[0]![0];
+    expect(request.headers.get("x-nanocodex-subject")).toBe(direct ? `managed-session-v1_${"a".repeat(64)}` : "a".repeat(64));
     expect(request.headers.get("x-nanocodex-realtime-owner")).toBe(f.owner);
     expect(request.headers.has("x-nanocodex-voice-region")).toBe(false);
   });
-  it("does not reach either egress capability when ownership is denied", async () => {
-    const f = await fixture(false);
+  it.each([true, false])("does not reach either egress capability when ownership is denied (direct=%s)", async (direct) => {
+    const f = await fixture(false, true, direct);
     expect(f.response?.status).toBe(404);
     expect(f.relay).not.toHaveBeenCalled();
     expect(f.generic).not.toHaveBeenCalled();
@@ -103,6 +109,15 @@ describe("private voice egress admission", () => {
   it("retains the generic broker's ownership check while the binding is absent", async () => {
     const f = await fixture(true, false);
     expect(f.response?.status).toBe(201);
-    expect(f.generic.mock.calls[0]![0].headers.has("x-nanocodex-realtime-owner")).toBe(false);
+    expect((f.generic.mock.calls[0]![0] as Request).headers.has("x-nanocodex-realtime-owner")).toBe(false);
+  });
+  it.each([true, false])("repairs legacy directory state when private call egress cannot be used (sideband=%s)", async (sideband) => {
+    const f = await fixture(true, sideband, false, sideband);
+    expect(f.response?.status).toBe(201);
+    expect(f.relay).not.toHaveBeenCalled();
+    expect(f.generic).toHaveBeenCalledTimes(2);
+    expect(f.generic.mock.calls[0]![0]).toBe(`https://broker.internal/subjects/${"a".repeat(64)}`);
+    expect(f.generic.mock.calls[0]![1]).toMatchObject({ method: "PUT", body: JSON.stringify({ user_id: f.owner }) });
+    expect((f.generic.mock.calls[1]![0] as Request).headers.has("x-nanocodex-realtime-owner")).toBe(false);
   });
 });

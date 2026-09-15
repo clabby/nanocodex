@@ -52,10 +52,12 @@ describe("regional subscription voice relay", () => {
 describe("private managed voice ownership capability", () => {
   const subject = `managed-session-v1_${"a".repeat(64)}`;
   const owner = "11111111-1111-4111-8111-111111111111";
-  it("uses the ingress's verified owner only on the dedicated private call entrypoint", async () => {
+  it.each([subject, "a".repeat(64)])("uses the ingress's verified owner without a directory lookup for %s", async (subject) => {
     const f = fixture("wnam");
     f.request.headers.set("x-nanocodex-subject", subject);
     f.request.headers.set("x-nanocodex-realtime-owner", owner);
+    const directory = vi.fn(async () => { throw new Error("directory must not be read"); });
+    f.env.AGENT_SUBJECTS = { getByName: directory } as unknown as EgressEnv["AGENT_SUBJECTS"];
     const credentials = vi.fn(async () => ({ status: 200, credential: {
       kind: "chatgpt", revision: 1, secret: "private-test-token", accountId: "test-account" },
     }));
@@ -63,15 +65,17 @@ describe("private managed voice ownership capability", () => {
     f.env.USER_CREDENTIALS = { getByName } as unknown as EgressEnv["USER_CREDENTIALS"];
     expect((await handleManagedRealtimeCall(f.request, f.env)).status).toBe(201);
     expect(getByName).toHaveBeenCalledWith(owner);
+    expect(directory).not.toHaveBeenCalled();
     expect(f.relay.mock.calls[0]![0].headers.has("x-nanocodex-realtime-owner")).toBe(false);
   });
-  it("does not trust the same owner header on generic agent egress", async () => {
+  it.each([subject, "a".repeat(64)])("does not trust the owner header on generic agent egress for %s", async (subject) => {
     const f = fixture("wnam");
     f.request.headers.set("x-nanocodex-subject", subject);
     f.request.headers.set("x-nanocodex-realtime-owner", owner);
     f.env.MANAGED_AGENT_OWNERSHIP = {
       fetch: async () => new Response(null, { status: 404 }),
     } as unknown as Fetcher;
+    f.env.AGENT_SUBJECTS = { getByName: () => ({ fetch: async () => new Response(null, { status: 404 }) }) } as unknown as EgressEnv["AGENT_SUBJECTS"];
     expect((await handleEgress(f.request, f.env)).status).toBe(403);
     expect(f.relay).not.toHaveBeenCalled();
   });
@@ -80,7 +84,7 @@ describe("private managed voice ownership capability", () => {
     f.request.headers.set("x-nanocodex-subject", subject);
     f.request.headers.set("x-nanocodex-realtime-owner", owner);
     if (invalid === "owner") f.request.headers.set("x-nanocodex-realtime-owner", "arbitrary-user");
-    if (invalid === "subject") f.request.headers.set("x-nanocodex-subject", "a".repeat(64));
+    if (invalid === "subject") f.request.headers.set("x-nanocodex-subject", "a".repeat(63));
     if (invalid === "placeholder") f.request.headers.set("authorization", "Bearer untrusted");
     const request = invalid === "path" ? new Request("https://nanocodex.internal/v1/responses", f.request) : f.request;
     expect((await handleManagedRealtimeCall(request, f.env)).status).toBe(403);

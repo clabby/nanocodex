@@ -89,14 +89,17 @@ export async function routeManagedRealtimeTransport(
   }
 
   try {
-    // Creation installs this mapping. Rebinding here also repairs broker state
-    // that was lost independently without exposing either account credential.
-    if (!direct) await bindAgentCredential(env.NANOCODEX, subject, principal.userId, ownershipTimeoutMs);
+    // Private call egress uses the Session's just-verified owner for either
+    // retained strategy. Legacy sidebands and older deployments still repair
+    // their directory mapping before the generic broker resolves it.
+    if (!direct && (resource !== "calls" || !env.NANOCODEX_REALTIME)) {
+      await bindAgentCredential(env.NANOCODEX, subject, principal.userId, ownershipTimeoutMs);
+    }
   } catch {
     return json({ error: "credential_broker_unavailable" }, 503);
   }
 
-  if (resource === "calls") return realtimeCall(callBody!, env, agentId, voiceSessionId, subject, voiceRelayRegion(request), direct ? principal.userId : undefined);
+  if (resource === "calls") return realtimeCall(callBody!, env, agentId, voiceSessionId, subject, voiceRelayRegion(request), principal.userId);
   return realtimeSideband(callId!, env, agentId, voiceSessionId, subject);
 }
 

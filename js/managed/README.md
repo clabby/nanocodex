@@ -153,6 +153,8 @@ storage ownership.
   container startup time; provider credentials remain server-side.
   After live Session ownership validation, managed calls use the private
   `ManagedRealtimeEgress` binding so the broker does not repeat that lookup.
+  This also covers retained legacy subjects: call creation skips the redundant
+  directory rebind and readback. Legacy sidebands still repair their mapping.
   Generic agent egress cannot use the owner assertion. Deploy egress before
   managed to install the entrypoint; without the binding, calls retain the
   generic broker path and its ownership check.
