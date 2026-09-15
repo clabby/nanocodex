@@ -1,5 +1,6 @@
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { handleEgress, handleManagedRealtimeCall, type EgressEnv } from "../src/egress";
+import { handleEgress, handleManagedRealtimeCall, ManagedRealtimeEgress, type EgressEnv } from "../src/egress";
 
 function fixture(region?: string) {
   const relay = vi.fn(async (_request: Request) => new Response("v=0\r\n", { status: 201 }));
@@ -52,6 +53,19 @@ describe("regional subscription voice relay", () => {
 describe("private managed voice ownership capability", () => {
   const subject = `managed-session-v1_${"a".repeat(64)}`;
   const owner = "11111111-1111-4111-8111-111111111111";
+  it("returns complete SDP through private RPC and retains credential/ownership policy", async () => {
+    const f = fixture("wnam");
+    f.request.headers.set("x-nanocodex-subject", subject);
+    f.request.headers.set("x-nanocodex-realtime-owner", owner);
+    const entrypoint = new ManagedRealtimeEgress(createExecutionContext(), f.env);
+    const reply = await entrypoint.createCall(await f.request.text(), Object.fromEntries(f.request.headers));
+    expect(reply.status).toBe(201);
+    expect(reply.body).toBe("v=0\r\n");
+    expect(JSON.stringify(reply)).not.toContain("private-test-token");
+    const denied = await entrypoint.createCall("{}", {});
+    expect(denied.status).toBe(403);
+    expect(f.relay).toHaveBeenCalledTimes(1);
+  });
   it.each([subject, "a".repeat(64)])("uses the ingress's verified owner without a directory lookup for %s", async (subject) => {
     const f = fixture("wnam");
     f.request.headers.set("x-nanocodex-subject", subject);

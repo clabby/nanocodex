@@ -224,6 +224,16 @@ export class ManagedRealtimeEgress extends WorkerEntrypoint<EgressEnv> {
   fetch(request: Request): Promise<Response> {
     return handleManagedRealtimeCall(request, this.env, this.ctx);
   }
+
+  /** SDP is a small, complete reply; transport it with its headers in one RPC. */
+  async createCall(body: string, headers: Record<string, string>): Promise<{
+    status: number; headers: Record<string, string>; body: string;
+  }> {
+    const response = await this.fetch(new Request("https://nanocodex.internal/v1/realtime/calls", {
+      method: "POST", headers, body,
+    }));
+    return { status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() };
+  }
 }
 
 /** This private capability is never dispatched by the default/public handler. */

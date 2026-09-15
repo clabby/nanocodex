@@ -21,7 +21,11 @@ const REALTIME_VOICES = new Set([
 
 type ManagedRealtimeTransportEnv = AccountAuthEnv & {
   NANOCODEX: Fetcher;
-  NANOCODEX_REALTIME?: Fetcher;
+  NANOCODEX_REALTIME?: Fetcher & {
+    createCall?(body: string, headers: Record<string, string>): Promise<{
+      status: number; headers: Record<string, string>; body: string;
+    }>;
+  };
   NANOCODEX_SESSIONS: {
     get(id: DurableObjectId): Fetcher & {
       resolveCredentialSubject?(assertions: Record<string, string>): Promise<unknown>;
@@ -70,6 +74,7 @@ export async function routeManagedRealtimeTransport(
     if (validated instanceof Response) return validated;
     ({ callId, voiceSessionId } = validated);
   }
+  const validatedAt = performance.now();
   const durableId = env.NANOCODEX_SESSIONS.idFromName(agentId);
   const ownershipHeaders = new Headers();
   forwardPrincipalAssertions(ownershipHeaders, principal);
@@ -82,13 +87,13 @@ export async function routeManagedRealtimeTransport(
           await stub.resolveCredentialSubject!(Object.fromEntries(ownershipHeaders)), durableId.toString(),
         ))
       : await fetchResponseWithDeadline(
-      stub,
-      "https://session.internal/credential-subject",
-      { headers: ownershipHeaders },
-      ownershipTimeoutMs,
-      "managed Realtime ownership assertion",
-      (response) => readSessionCredentialSubject(response, durableId.toString()),
-    );
+        stub,
+        "https://session.internal/credential-subject",
+        { headers: ownershipHeaders },
+        ownershipTimeoutMs,
+        "managed Realtime ownership assertion",
+        (response) => readSessionCredentialSubject(response, durableId.toString()),
+      );
   } catch {
     return json({ error: "agent_ownership_unavailable" }, 503);
   }
@@ -114,7 +119,8 @@ export async function routeManagedRealtimeTransport(
     const response = await realtimeCall(callBody!, env, agentId, voiceSessionId, subject, voiceRelayRegion(request), principal.userId);
     response.headers.append("server-timing", [
       `voice_auth;dur=${(authenticated - began).toFixed(1)}`,
-      `voice_ownership;dur=${(authorized - authenticated).toFixed(1)}`,
+      `voice_validate;dur=${(validatedAt - authenticated).toFixed(1)}`,
+      `voice_ownership;dur=${(authorized - validatedAt).toFixed(1)}`,
       `voice_egress;dur=${(performance.now() - authorized).toFixed(1)}`,
     ].join(", "));
     return response;
@@ -155,14 +161,16 @@ async function realtimeCall(
   if (region) headers.set("x-nanocodex-voice-region", region);
   const binding = verifiedOwner && env.NANOCODEX_REALTIME ? env.NANOCODEX_REALTIME : env.NANOCODEX;
   if (binding === env.NANOCODEX_REALTIME) headers.set("x-nanocodex-realtime-owner", verifiedOwner!);
-  const response = await binding.fetch(new Request(
-    "https://nanocodex.internal/v1/realtime/calls",
-    {
-      method: "POST",
-      headers,
-      body,
-    },
-  ));
+  const privateBinding = env.NANOCODEX_REALTIME;
+  let response: Response;
+  if (binding === privateBinding && typeof privateBinding?.createCall === "function") {
+    const reply = await privateBinding.createCall(body, Object.fromEntries(headers));
+    response = new Response(reply.body, { status: reply.status, headers: reply.headers });
+  } else {
+    response = await binding.fetch(new Request("https://nanocodex.internal/v1/realtime/calls", {
+      method: "POST", headers, body,
+    }));
+  }
   const responseHeaders = sanitizedHeaders(response.headers);
   const location = responseHeaders.get("location");
   if (location) {
