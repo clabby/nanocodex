@@ -15,6 +15,20 @@ afterEach(() => {
 });
 
 describe("Service-Binding-only ChatGPT credential import", () => {
+  it("returns live subscription snapshots through RPC and observes revocation", async () => {
+    const user = "rpc-credential-subscription";
+    const stub = workerEnv.USER_CREDENTIALS.getByName(user);
+    expect(await stub.resolveModelCredential(false)).toEqual({ status: 404, credential: null });
+    expect((await importThroughControl(user, importedCredential("rpc-account"))).status).toBe(204);
+    const first = await stub.resolveModelCredential(false);
+    expect(first).toMatchObject({ status: 200, credential: { kind: "chatgpt", accountId: "rpc-account" } });
+    expect(first.credential).toEqual((await internalCredential(stub)).body);
+    // A recovery for an old revision must use the newer credential, not refresh it.
+    expect(await stub.resolveModelCredential(true, -1)).toEqual(first);
+    expect((await stub.fetch("https://credentials.internal/v1/chatgpt", { method: "DELETE" })).status).toBe(204);
+    expect(await stub.resolveModelCredential(false)).toEqual({ status: 404, credential: null });
+  });
+
   it("accepts only the exact bounded five-field document", async () => {
     const valid = importedCredential("bounds-account");
     const invalid: unknown[] = [

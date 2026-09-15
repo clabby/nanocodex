@@ -338,6 +338,24 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     });
   }
 
+  /** Return the small snapshot inline over RPC, without remote HTTP body streams. */
+  async resolveModelCredential(recover: boolean, revision?: number): Promise<{
+    status: number;
+    credential: UserCredentialSnapshot | null;
+  }> {
+    // Reuse the serialized fetch handler, including refresh and durable-state
+    // recovery on failure. Both HTTP bodies are consumed inside this object.
+    const response = await this.fetch(new Request("https://credentials.internal/v1/credential", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ recover, ...(revision === undefined ? {} : { revision }) }),
+    }));
+    return {
+      status: response.status,
+      credential: response.ok ? await response.json<UserCredentialSnapshot>() : null,
+    };
+  }
+
   alarm(): Promise<void> {
     return this.#exclusive(async () => {
       await this.#ready;

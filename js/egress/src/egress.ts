@@ -2463,17 +2463,12 @@ async function resolveUserCredential(
   recover: boolean,
   revision?: number,
 ): Promise<UserCredentialSnapshot> {
-  const response = await userBroker(env, userId).fetch("https://credentials.internal/v1/credential", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ recover, ...(revision === undefined ? {} : { revision }) }),
-  });
-  if (!response.ok) {
-    await readBoundedText(response, MAX_BROKER_RESPONSE_BYTES);
-    throw new EgressFailure(response.status === 404 ? 409 : 503, "user_credential_unavailable");
+  const result = await userBroker(env, userId).resolveModelCredential(recover, revision);
+  if (result.status < 200 || result.status >= 300) {
+    throw new EgressFailure(result.status === 404 ? 409 : 503, "user_credential_unavailable");
   }
-  const value = await response.json<UserCredentialSnapshot>();
-  if ((value.kind !== "openai" && value.kind !== "chatgpt") || !value.secret
+  const value = result.credential;
+  if (!value || (value.kind !== "openai" && value.kind !== "chatgpt") || !value.secret
     || !Number.isSafeInteger(value.revision)) {
     throw new EgressFailure(503, "invalid_credential_response");
   }

@@ -10,9 +10,9 @@ describe("Realtime upstream failure diagnostics", () => {
       const log = vi.spyOn(console, "error").mockImplementation(() => {});
       const env = {
         AGENT_SUBJECTS: { getByName: () => ({ fetch: async () => Response.json({ user_id: "fixture-user" }) }) },
-        USER_CREDENTIALS: { getByName: () => ({ fetch: async () => Response.json({
+        USER_CREDENTIALS: { getByName: () => ({ resolveModelCredential: async () => ({ status: 200, credential: {
           kind: "chatgpt", revision: 1, secret: "fixture-provider-secret", accountId: "fixture-account",
-        }) }) },
+        } }) }) },
       } as unknown as EgressEnv;
       const request = new Request("https://nanocodex.internal/v1/realtime/calls", {
         method: "POST",

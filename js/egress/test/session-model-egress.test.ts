@@ -16,8 +16,8 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("Session-only model egress", () => {
   it("uses the private binding's live Session assertion without a callback and still reads current credentials", async () => {
-    const lookup = vi.fn(async () => Response.json({ kind: "openai", revision: 1, secret: "fixture-provider-secret" }));
-    const getByName = vi.fn(() => ({ fetch: lookup }));
+    const lookup = vi.fn(async () => ({ status: 200, credential: { kind: "openai", revision: 1, secret: "fixture-provider-secret" } }));
+    const getByName = vi.fn(() => ({ resolveModelCredential: lookup }));
     const callback = vi.fn(async () => { throw new Error("unexpected ownership callback"); });
     const upstream = vi.fn(async (input: Request) => {
       expect(input.url).toBe("https://api.openai.com/v1/responses");
