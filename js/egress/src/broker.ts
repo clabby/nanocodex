@@ -345,7 +345,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     });
   }
 
-  /** Return the small snapshot inline over RPC, without remote HTTP body streams. */
+  /** Read the live snapshot under the same serialization and recovery as HTTP. */
   async resolveModelCredential(recover: boolean, revision?: number): Promise<{
     status: number;
     credential: UserCredentialSnapshot | null;
@@ -356,19 +356,21 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   }> {
     const startedAt = Date.now();
     const resolveId = crypto.randomUUID();
-    // Reuse the serialized fetch handler, including refresh and durable-state
-    // recovery on failure. Both HTTP bodies are consumed inside this object.
-    const response = await this.fetch(new Request("https://credentials.internal/v1/credential", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ recover, ...(revision === undefined ? {} : { revision }) }),
-    }));
-    const credential = response.ok ? await response.json<UserCredentialSnapshot>() : null;
-    console.info({ type: "egress.credential.rpc", resolve_id: resolveId, status: response.status });
+    const result = await this.#exclusive(async () => {
+      await this.#ready;
+      try {
+        return { status: 200, credential: await this.#credential(
+          recover === true, Number.isSafeInteger(revision) ? revision : undefined,
+        ) };
+      } catch (error) {
+        const problem = await this.#recoverFailedOperation(error);
+        return { status: problem.status, credential: null };
+      }
+    });
+    console.info({ type: "egress.credential.rpc", resolve_id: resolveId, status: result.status });
     return {
       resolve_id: resolveId,
-      status: response.status,
-      credential,
+      ...result,
       resolve_ms: Date.now() - startedAt,
       activation_ms: this.#activationMs,
       activation_age_ms: Date.now() - this.#activatedAt,
@@ -946,13 +948,17 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       }
       return jsonError(404, "not_found");
     } catch (error) {
-      const problem = failure(error);
-      // A failed seal or storage write must never leave an uncommitted
-      // credential usable from this isolate's memory. Reload the last durable
-      // encrypted state, or fail closed if it cannot be opened.
-      await this.#restoreDurableState();
+      const problem = await this.#recoverFailedOperation(error);
       return jsonError(problem.status, problem.code);
     }
+  }
+
+  async #recoverFailedOperation(error: unknown): Promise<BrokerFailure> {
+    const problem = failure(error);
+    // HTTP and RPC both restore durable state after a failed seal or write.
+    // Uncommitted credentials must never remain usable in this isolate.
+    await this.#restoreDurableState();
+    return problem;
   }
 
   async #publicStatus(): Promise<Record<string, unknown>> {

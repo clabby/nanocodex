@@ -118,6 +118,9 @@ object can be distinguished from a slow call to an already-active object.
 zero-duration timers alone do not establish zero elapsed work. Restoring a
 credential broker preserves its persisted alarm, repairing it only when missing;
 activation does not rewrite an already scheduled refresh alarm.
+Credential RPC calls the credential operation directly, without constructing or
+parsing local HTTP bodies. It shares the HTTP path's serialized mutation queue
+and durable-state recovery after failures.
 `upstream_ms` includes our
 subscription relay and must not be interpreted as provider-only latency.
 

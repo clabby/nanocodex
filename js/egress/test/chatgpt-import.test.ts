@@ -108,6 +108,22 @@ describe("Service-Binding-only ChatGPT credential import", () => {
     expect(await oversized.json()).toEqual({ error: "body_too_large" });
   });
 
+  it("restores committed credentials when an RPC refresh claim cannot be persisted", async () => {
+    const user = "rpc-refresh-write-failure";
+    const stub = workerEnv.USER_CREDENTIALS.getByName(user);
+    const imported = importedCredential("rpc-refresh-account");
+    expect((await importThroughControl(user, imported)).status).toBe(204);
+    await runInDurableObject(stub, async (instance: UserCredentialBroker, state) => {
+      const write = vi.spyOn(state.storage, "put").mockRejectedValueOnce(new Error("injected write failure"));
+      try {
+        expect(await instance.resolveModelCredential(true, 0))
+          .toMatchObject({ status: 503, credential: null });
+      } finally { write.mockRestore(); }
+      expect(await instance.resolveModelCredential(false))
+        .toMatchObject({ status: 200, credential: { secret: imported.access_token, revision: 0 } });
+    });
+  });
+
   it("preserves an opaque refresh token in encrypted missing state", async () => {
     const user = "encrypted-import";
     const stub = workerEnv.USER_CREDENTIALS.getByName(user);
