@@ -352,8 +352,10 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     resolve_ms: number;
     activation_ms: number;
     activation_age_ms: number;
+    resolve_id: string;
   }> {
     const startedAt = Date.now();
+    const resolveId = crypto.randomUUID();
     // Reuse the serialized fetch handler, including refresh and durable-state
     // recovery on failure. Both HTTP bodies are consumed inside this object.
     const response = await this.fetch(new Request("https://credentials.internal/v1/credential", {
@@ -362,7 +364,9 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       body: JSON.stringify({ recover, ...(revision === undefined ? {} : { revision }) }),
     }));
     const credential = response.ok ? await response.json<UserCredentialSnapshot>() : null;
+    console.info({ type: "egress.credential.rpc", resolve_id: resolveId, status: response.status });
     return {
+      resolve_id: resolveId,
       status: response.status,
       credential,
       resolve_ms: Date.now() - startedAt,
@@ -417,7 +421,12 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     } else if (installed.changed || opened.reseal) {
       await this.#persist();
     }
-    await this.#schedule();
+    // An existing alarm survives eviction. Rewriting it on every activation
+    // adds a storage write and can postpone an alarm that woke this object.
+    if (await this.#state.storage.getAlarm() === null) {
+      const alarm = this.#nextAlarm();
+      if (alarm !== undefined) await this.#state.storage.setAlarm(alarm);
+    }
   }
 
   async #dispatch(request: Request): Promise<Response> {

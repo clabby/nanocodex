@@ -113,6 +113,11 @@ RPC that returned the snapshot; `credential_ms` also includes time outside that
 method, such as routing and object activation. Activation duration and the
 broker's age since activation are returned with the same result, so a cold
 object can be distinguished from a slow call to an already-active object.
+`credential_broker_resolve_id` joins that connection to the broker's
+`egress.credential.rpc` log and Cloudflare invocation wall/CPU timings. Internal
+zero-duration timers alone do not establish zero elapsed work. Restoring a
+credential broker preserves its persisted alarm, repairing it only when missing;
+activation does not rewrite an already scheduled refresh alarm.
 `upstream_ms` includes our
 subscription relay and must not be interpreted as provider-only latency.
 

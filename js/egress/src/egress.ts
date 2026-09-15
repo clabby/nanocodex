@@ -461,6 +461,7 @@ async function handleEgressWithOwner(
     const credentialBrokerMs = credential.broker_ms;
     const credentialBrokerActivationMs = credential.broker_activation_ms;
     const credentialBrokerAgeMs = credential.broker_age_ms;
+    const credentialBrokerResolveId = credential.broker_resolve_id;
     if (operation.chatGptOnly && credential.kind !== "chatgpt") {
       return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started, {
         user_id: userId,
@@ -545,6 +546,7 @@ async function handleEgressWithOwner(
         credential_broker_ms: credentialBrokerMs,
         credential_broker_activation_ms: credentialBrokerActivationMs,
         credential_broker_age_ms: credentialBrokerAgeMs,
+        credential_broker_resolve_id: credentialBrokerResolveId,
         upstream_ms: Date.now() - upstreamStartedAt,
       });
       if (credential.source === "sponsored" && operation.id === "responses") {
@@ -2478,6 +2480,7 @@ type ResolvedModelCredential = UserCredentialSnapshot & Readonly<{
   broker_ms?: number;
   broker_activation_ms?: number;
   broker_age_ms?: number;
+  broker_resolve_id?: string;
 }>;
 
 async function resolveSponsoredChatGptCredential(
@@ -2538,7 +2541,7 @@ async function resolveUserCredential(
   userId: string,
   recover: boolean,
   revision?: number,
-): Promise<UserCredentialSnapshot & Pick<ResolvedModelCredential, "broker_ms" | "broker_activation_ms" | "broker_age_ms">> {
+): Promise<UserCredentialSnapshot & Pick<ResolvedModelCredential, "broker_ms" | "broker_activation_ms" | "broker_age_ms" | "broker_resolve_id">> {
   const result = await userBroker(env, userId).resolveModelCredential(recover, revision);
   if (result.status < 200 || result.status >= 300) {
     throw new EgressFailure(result.status === 404 ? 409 : 503, "user_credential_unavailable");
@@ -2554,6 +2557,8 @@ async function resolveUserCredential(
       ? { broker_activation_ms: result.activation_ms } : {}),
     ...(Number.isFinite(result.activation_age_ms) && result.activation_age_ms >= 0
       ? { broker_age_ms: result.activation_age_ms } : {}),
+    ...(typeof result.resolve_id === "string" && /^[0-9a-f-]{36}$/.test(result.resolve_id)
+      ? { broker_resolve_id: result.resolve_id } : {}),
   };
 }
 
@@ -2743,6 +2748,9 @@ function audit(
   const safeDetail = {
     ...(detail.credential_kind === "chatgpt" || detail.credential_kind === "openai"
       ? { credential_kind: detail.credential_kind } : {}),
+    ...(typeof detail.credential_broker_resolve_id === "string"
+      && /^[0-9a-f-]{36}$/.test(detail.credential_broker_resolve_id)
+      ? { credential_broker_resolve_id: detail.credential_broker_resolve_id } : {}),
     ...Object.fromEntries(["subject_ms", "credential_ms", "credential_broker_ms", "credential_broker_activation_ms", "credential_broker_age_ms", "upstream_ms"].flatMap((key) => (
       typeof detail[key] === "number" && Number.isFinite(detail[key]) && detail[key] >= 0
         ? [[key, detail[key]]] : []

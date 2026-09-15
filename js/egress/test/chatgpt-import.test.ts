@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ChatGptCredentialImport, UserCredentialBroker } from "../src/broker";
+import { type ChatGptCredentialImport, UserCredentialBroker } from "../src/broker";
 import { CredentialVault, type EncryptedEnvelope } from "../src/credential-vault";
 import { handleEgress, type EgressEnv } from "../src/egress";
 
@@ -15,13 +15,48 @@ afterEach(() => {
 });
 
 describe("Service-Binding-only ChatGPT credential import", () => {
+  it("preserves an existing refresh alarm across activation without writing it again", async () => {
+    const user = "restore-existing-refresh-alarm";
+    const stub = workerEnv.USER_CREDENTIALS.getByName(user);
+    const imported = importedCredential("restored-account");
+    expect((await importThroughControl(user, imported)).status).toBe(204);
+    await runInDurableObject(stub, async (_instance, state) => {
+      // A persisted alarm earlier than the normal refresh time must not be postponed.
+      const existing = Date.now() + 60_000;
+      await state.storage.setAlarm(existing);
+      const set = vi.spyOn(state.storage, "setAlarm");
+      const remove = vi.spyOn(state.storage, "deleteAlarm");
+      const restored = new UserCredentialBroker(state, workerEnv);
+      expect((await restored.resolveModelCredential(false)).status).toBe(200);
+      expect(await state.storage.getAlarm()).toBe(existing);
+      expect(set).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+    });
+  });
+
+  it("repairs a missing refresh alarm when restoring credentials", async () => {
+    const user = "restore-missing-refresh-alarm";
+    const stub = workerEnv.USER_CREDENTIALS.getByName(user);
+    const imported = importedCredential("missing-alarm-account");
+    expect((await importThroughControl(user, imported)).status).toBe(204);
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.deleteAlarm();
+      const restored = new UserCredentialBroker(state, workerEnv);
+      expect((await restored.resolveModelCredential(false)).status).toBe(200);
+      expect(await state.storage.getAlarm()).toBe(imported.expires_at - REFRESH_EARLY_MS);
+    });
+  });
+
   it("returns live subscription snapshots through RPC and observes revocation", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
     const user = "rpc-credential-subscription";
     const stub = workerEnv.USER_CREDENTIALS.getByName(user);
     expect(await stub.resolveModelCredential(false)).toMatchObject({ status: 404, credential: null, resolve_ms: expect.any(Number) });
     expect((await importThroughControl(user, importedCredential("rpc-account"))).status).toBe(204);
     const first = await stub.resolveModelCredential(false);
     expect(first).toMatchObject({ status: 200, credential: { kind: "chatgpt", accountId: "rpc-account" } });
+    expect(first.resolve_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(info).toHaveBeenCalledWith({ type: "egress.credential.rpc", resolve_id: first.resolve_id, status: 200 });
     expect(first.credential).toEqual((await internalCredential(stub)).body);
     // A recovery for an old revision must use the newer credential, not refresh it.
     expect((await stub.resolveModelCredential(true, -1)).credential).toEqual(first.credential);

@@ -16,7 +16,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("Session-only model egress", () => {
   it("uses the private binding's live Session assertion without a callback and still reads current credentials", async () => {
-    const lookup = vi.fn(async () => ({ status: 200, resolve_ms: 3, credential: { kind: "openai", revision: 1, secret: "fixture-provider-secret" } }));
+    const lookup = vi.fn(async () => ({ status: 200, resolve_ms: 3, resolve_id: "01234567-0123-4567-89ab-0123456789ab", credential: { kind: "openai", revision: 1, secret: "fixture-provider-secret" } }));
     const getByName = vi.fn(() => ({ resolveModelCredential: lookup }));
     const callback = vi.fn(async () => { throw new Error("unexpected ownership callback"); });
     const upstream = vi.fn(async (input: Request) => {
@@ -35,7 +35,7 @@ describe("Session-only model egress", () => {
     expect(callback).not.toHaveBeenCalled();
     expect(upstream).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(log.mock.calls)).not.toContain("fixture-provider-secret");
-    expect(log.mock.calls[0]?.[0]).toMatchObject({ credential_kind: "openai", subject_ms: expect.any(Number), credential_ms: expect.any(Number), credential_broker_ms: 3, upstream_ms: expect.any(Number) });
+    expect(log.mock.calls[0]?.[0]).toMatchObject({ credential_kind: "openai", subject_ms: expect.any(Number), credential_ms: expect.any(Number), credential_broker_ms: 3, credential_broker_resolve_id: "01234567-0123-4567-89ab-0123456789ab", upstream_ms: expect.any(Number) });
   });
 
   it("never accepts the owner header through the general broker", async () => {
