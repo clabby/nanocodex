@@ -16,7 +16,7 @@ const principal: Principal = {
   capabilities: ["agents:read", "agents:write", "tools:use"],
 };
 
-function fixtureEnvironment() {
+function fixtureEnvironment(createStatus = 200) {
   const requests: Array<{ agentId: string; path: string; key: string | null; body: string }> = [];
   const turns = new Map<string, { input: unknown; receipt: Record<string, unknown> }>();
   const sessions = {
@@ -32,10 +32,7 @@ function fixtureEnvironment() {
           key: request.headers.get("idempotency-key"),
           body,
         });
-        if (path === "/credential-binding") return new Response(null, { status: 200 });
-        if (path === "/credential-binding/bind") return new Response(null, { status: 204 });
-        if (path === "/initialize") return new Response(null, { status: 200 });
-        if (path === "/credential-binding/commit") return new Response(null, { status: 204 });
+        if (path === "/create") return Response.json({ prepare_ms: 1, initialize_ms: 1, commit_ms: 1 }, { status: createStatus });
         if (path === "/turns") {
           const value = JSON.parse(body) as { id: string; input: unknown };
           const retained = turns.get(value.id);
@@ -65,7 +62,7 @@ function fixtureEnvironment() {
     }),
   };
   const memory = {
-    getByName: () => ({ fetch: async () => new Response(null, { status: 204 }) }),
+    getByName: () => { throw new Error("Creation must not initialize memory eagerly"); },
   };
   return {
     requests,
@@ -89,6 +86,19 @@ function run(runtime: Env, body: unknown, key?: string, actor = principal) {
 }
 
 describe("combined managed agent creation", () => {
+  it.each([false, true])("retains only keyed preparations after exhausted creation retries (keyed=%s)", async (keyed) => {
+    const { runtime, requests } = fixtureEnvironment(503);
+    const response = await worker.fetch(new Request("https://nanocodex.example/v1/agents", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(keyed ? { "idempotency-key": "create:retry" } : {}) },
+      body: JSON.stringify({ settings: { model: "gpt-6-astra", thinking: "low", reasoning_mode: "standard", fast_mode: false } }),
+    }), runtime, createExecutionContext(), principal);
+    expect(response.status).toBe(503);
+    expect(requests.filter(({ path }) => path === "/create")).toHaveLength(5);
+    expect(new Set(requests.map(({ agentId }) => agentId)).size).toBe(1);
+    expect(requests.filter(({ path }) => path === "/session")).toHaveLength(keyed ? 0 : 1);
+  });
+
   it("converges creation and first-turn retries on stable server-owned identities", async () => {
     const { runtime, requests } = fixtureEnvironment();
     const body = {
@@ -111,6 +121,8 @@ describe("combined managed agent creation", () => {
     expect(firstReceipt.agent_id).toMatch(/^[0-9a-f-]{36}$/);
     expect(firstReceipt.turn_id).toMatch(/^[0-9a-f-]{36}$/);
     expect(firstReceipt.turn_idempotency_key).toMatch(/^agent-run:[0-9a-f]{64}$/);
+    expect(requests.filter(({ path }) => path !== "/turns").map(({ path }) => path))
+      .toEqual(["/create", "/create"]);
     const turnRequests = requests.filter(({ path }) => path === "/turns");
     expect(turnRequests).toHaveLength(2);
     expect(new Set(turnRequests.map(({ agentId }) => agentId)).size).toBe(1);

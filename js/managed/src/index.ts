@@ -1200,6 +1200,10 @@ const SAFE_OBSERVATION_FIELDS = new Set([
   "commit_ms",
   "create_ms",
   "credential_prepare_ms",
+  "session_create_ms",
+  "session_prepare_ms",
+  "session_initialize_ms",
+  "session_commit_ms",
   "error_code",
   "error_kind",
   "initialization_ms",
@@ -1796,6 +1800,38 @@ async function managedFetch(
       const subject = env.NANOCODEX_SESSIONS.idFromName(agentId).toString();
       const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
       const ownershipTimeoutMs = managedOwnershipTimeoutMs(env);
+      if (durabilityArchive === undefined) {
+        let created: Response;
+        const sessionCreationStartedAt = performance.now();
+        try {
+          created = await fetchCreateStage(stub, "https://session.internal/create", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              session_id: agentId, owner_id: principal.userId,
+              organization_id: principal.organizationId, team_id: principal.teamId,
+              authorization_epoch: principal.authorizationEpoch, public_origin: url.origin,
+              settings: creationSettings, configuration: creationConfiguration,
+            }),
+          }, ownershipTimeoutMs, "agent creation", 5);
+        } catch {
+          if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
+          return json({ error: "agent creation failed" }, { status: 503 });
+        }
+        if (!created.ok) {
+          if (created.status >= 500 && requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
+          return created;
+        }
+        const phases = await created.json<Record<string, number>>();
+        observeManagedPrincipal(env, "managed.agent.created", principal, {
+          agent_id: agentId, thread_id: agentId, outcome: "success",
+          auth_ms: roundMilliseconds(authenticatedAt - creationStartedAt),
+          session_create_ms: roundMilliseconds(performance.now() - sessionCreationStartedAt),
+          session_prepare_ms: phases.prepare_ms,
+          session_initialize_ms: phases.initialize_ms, session_commit_ms: phases.commit_ms,
+          create_ms: roundMilliseconds(performance.now() - creationStartedAt),
+        });
+        return agentCreationResponse(url, agentId, creationSettings, true);
+      }
       let prepared: Response;
       const credentialPreparationStartedAt = performance.now();
       try {
@@ -1860,9 +1896,8 @@ async function managedFetch(
           }
         }
       }
-      const memory = env.NANOCODEX_MEMORY.getByName(principal.organizationId);
       const initializationStartedAt = performance.now();
-      const [credentialBinding, initialization, memoryInitialization] = await Promise.allSettled([
+      const [credentialBinding, initialization] = await Promise.allSettled([
         fetchCreateStage(
           stub,
           "https://session.internal/credential-binding/bind",
@@ -1884,16 +1919,12 @@ async function managedFetch(
             configuration: creationConfiguration,
           }),
         }, ownershipTimeoutMs, "agent initialization"),
-        initializeMemoryScope(memory, principal.organizationId),
       ]);
       if (initialization.status === "fulfilled") {
         await initialization.value.body?.cancel();
       }
       if (credentialBinding.status === "fulfilled") {
         await credentialBinding.value.body?.cancel();
-      }
-      if (memoryInitialization.status === "fulfilled") {
-        await memoryInitialization.value.body?.cancel();
       }
       if (initialization.status === "fulfilled" && initialization.value.status === 409) {
         return json({ error: "agent_initialization_conflict", message: "The retained agent has different settings or configuration." }, { status: 409 });
@@ -1903,9 +1934,7 @@ async function managedFetch(
         || !credentialBinding.value.ok;
       if (credentialUnavailable
         || initialization.status === "rejected"
-        || memoryInitialization.status === "rejected"
-        || !initialization.value.ok
-        || !memoryInitialization.value.ok) {
+        || !initialization.value.ok) {
         // A keyed caller can safely replay this exact AgentDO. Keep the
         // persisted preparation and its watchdog alive instead of racing the
         // replay with deletion. Keyless legacy callers have no identity they
@@ -1978,9 +2007,6 @@ async function managedFetch(
           });
         }
       }
-      const routeBase = "/v1/agents";
-      const websocketUrl = new URL(`${routeBase}/${agentId}/ws`, url);
-      websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
       observeManagedPrincipal(env, "managed.agent.created", principal, {
         agent_id: agentId,
         thread_id: agentId,
@@ -1992,31 +2018,8 @@ async function managedFetch(
         commit_ms: roundMilliseconds(committedAt - commitStartedAt),
         create_ms: roundMilliseconds(performance.now() - creationStartedAt),
       });
-      return json({
-        agent_id: agentId,
-        session_id: agentId,
-        durability_id: durabilityStateId ?? agentId,
-        events_url: new URL(`${routeBase}/${agentId}/events`, url).href,
-        websocket_url: websocketUrl.href,
-        ...(durabilityImport === undefined && retainedImport === undefined ? {
-          initial_state: {
-            agent_id: agentId,
-            session_id: agentId,
-            has_snapshot: false,
-            completed_turns: 0,
-            last_active: Date.now(),
-            active_turns: [],
-            agent_loaded: false,
-            connected_clients: 0,
-            capabilities: AGENT_CAPABILITIES,
-            latest_event_cursor: "1",
-            stream_error: null,
-            settings: creationSettings,
-          },
-        } : {}),
-      }, {
-        status: 201,
-      });
+      return agentCreationResponse(url, agentId, creationSettings,
+        durabilityImport === undefined && retainedImport === undefined, durabilityStateId);
     }
     const match = url.pathname.match(/^\/v1\/agents\/([^/]+)(?:\/(.*))?$/);
     if (!match || !SESSION_ID.test(match[1] ?? "")) {
@@ -2746,6 +2749,38 @@ async function chiefManagedFailure(response: Response): Promise<Error> {
   return new Error(`chief_managed_${code}`);
 }
 
+function agentCreationResponse(url: URL, agentId: string, settings: ManagedAgentSettings,
+  fresh: boolean, durabilityId?: string): Response {
+  const routeBase = "/v1/agents";
+  const websocketUrl = new URL(`${routeBase}/${agentId}/ws`, url);
+  websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
+  return json({
+    agent_id: agentId,
+    session_id: agentId,
+    durability_id: durabilityId ?? agentId,
+    events_url: new URL(`${routeBase}/${agentId}/events`, url).href,
+    websocket_url: websocketUrl.href,
+    ...(fresh ? {
+      initial_state: {
+        agent_id: agentId,
+        session_id: agentId,
+        has_snapshot: false,
+        completed_turns: 0,
+        last_active: Date.now(),
+        active_turns: [],
+        agent_loaded: false,
+        connected_clients: 0,
+        capabilities: AGENT_CAPABILITIES,
+        latest_event_cursor: "1",
+        stream_error: null,
+        settings,
+      },
+    } : {}),
+  }, {
+    status: 201,
+  });
+}
+
 export default {
   fetch: managedFetch,
 };
@@ -3142,138 +3177,17 @@ export class DurableAgentSession extends DurableComputerSession {
         ? new Response(null, { status: 204 })
         : json({ error: "not_found" }, { status: 404 });
     }
+    if (request.method === "POST" && url.pathname === "/create") {
+      return this.#createHttp(request);
+    }
     if (request.method === "PUT" && url.pathname === "/credential-binding") {
-      if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
-      let ownership: Partial<CredentialBindingOwnership> & { durability_import?: unknown };
-      try {
-        ownership = await request.json<Partial<CredentialBindingOwnership> & {
-          durability_import?: unknown;
-        }>();
-      }
-      catch { return new Response(null, { status: 400 }); }
-      if (!isUserId(ownership.owner_id)
-        || typeof ownership.session_id !== "string"
-        || !SESSION_ID.test(ownership.session_id)
-        || typeof ownership.subject !== "string"
-        || ownership.subject !== this.ctx.id.toString()
-        || !validDurabilityImportPreparation(ownership.durability_import)) {
-        return new Response(null, { status: 400 });
-      }
-      const requestedImport = ownership.durability_import as {
-        request_hash: string;
-        source_agent_id: string | null;
-        state_id: string;
-      } | null;
-      const retainedImport = await this.ctx.storage.get<DurabilityImportReceipt>(
-        DURABILITY_IMPORT_RECEIPT_KEY,
-      );
-      const current = this.#credentialBinding;
-      if (current && (current.owner_id !== ownership.owner_id
-        || current.session_id !== ownership.session_id
-        || current.subject !== ownership.subject)) {
-        return new Response(null, { status: 409 });
-      }
-      if (current && (retainedImport !== undefined) !== (requestedImport !== null)) {
-        return new Response(null, { status: 409 });
-      }
-      if (retainedImport && requestedImport && (
-        retainedImport.owner_id !== ownership.owner_id
-        || retainedImport.request_hash !== requestedImport.request_hash
-        || retainedImport.source_agent_id !== requestedImport.source_agent_id
-        || retainedImport.state_id !== requestedImport.state_id
-      )) return new Response(null, { status: 409 });
-      if (!current) {
-        const prepared: CredentialBindingOwnership = {
-          cleanup_at: Date.now() + this.#credentialPreparationLeaseMs(),
-          owner_id: ownership.owner_id,
-          session_id: ownership.session_id,
-          state: "preparing",
-          subject: ownership.subject,
-          ...(this.env.MANAGED_AGENT_DIRECT_CREDENTIALS === "true" ? { strategy: "session_v1" as const } : {}),
-        };
-        await this.ctx.storage.transaction(async (transaction) => {
-          await transaction.put(CREDENTIAL_BINDING_KEY, prepared);
-          if (requestedImport) {
-            await transaction.put(DURABILITY_IMPORT_STATE_KEY, "pending");
-            await transaction.put(DURABILITY_IMPORT_RECEIPT_KEY, {
-              owner_id: ownership.owner_id!,
-              request_hash: requestedImport.request_hash,
-              source_agent_id: requestedImport.source_agent_id,
-              stage: "pending",
-              state_id: requestedImport.state_id,
-            } satisfies DurabilityImportReceipt);
-          }
-          await transaction.setAlarm(prepared.cleanup_at);
-        });
-        this.#credentialBinding = prepared;
-        this.#durabilityImportState = requestedImport ? "pending" : undefined;
-      } else if (current.state === "preparing") {
-        const refreshed = {
-          ...current,
-          cleanup_at: Date.now() + this.#credentialPreparationLeaseMs(),
-        };
-        await this.ctx.storage.transaction(async (transaction) => {
-          await transaction.put(CREDENTIAL_BINDING_KEY, refreshed);
-          await transaction.setAlarm(refreshed.cleanup_at);
-        });
-        this.#credentialBinding = refreshed;
-      }
-      if (requestedImport) {
-        const receipt = await this.ctx.storage.get<DurabilityImportReceipt>(
-          DURABILITY_IMPORT_RECEIPT_KEY,
-        );
-        if (!receipt) return new Response(null, { status: 409 });
-        return json(receipt, { headers: { "cache-control": "no-store" } });
-      }
-      return new Response(null, { status: 204 });
+      return this.#prepareCredentialBinding(request);
     }
     if (request.method === "POST" && url.pathname === "/credential-binding/bind") {
-      const ownership = await this.#refreshCredentialPreparation();
-      if (!ownership || this.#deleting || this.#deleted) {
-        return new Response(null, { status: 409 });
-      }
-      if (ownership.strategy === "session_v1") return new Response(null, { status: 204 });
-      try {
-        await this.#track(bindAgentCredential(
-          this.env.NANOCODEX,
-          ownership.subject,
-          ownership.owner_id,
-          this.#ownershipIoTimeoutMs(),
-        ));
-      } catch {
-        return new Response(null, { status: 503 });
-      }
-      return new Response(null, { status: this.#deleting || this.#deleted ? 409 : 204 });
+      return this.#bindPreparedCredential();
     }
     if (request.method === "POST" && url.pathname === "/credential-binding/commit") {
-      if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
-      if (this.#durabilityImportState === "pending") return new Response(null, { status: 409 });
-      const ownership = await this.#refreshCredentialPreparation();
-      const session = this.#session();
-      if (!ownership || !session
-        || ownership.owner_id !== session.owner_id
-        || ownership.session_id !== session.session_id) {
-        return new Response(null, { status: 409 });
-      }
-      try {
-        await this.#track(attachAgent(
-          this.env,
-          ownership.owner_id,
-          ownership.session_id,
-          this.#ownershipIoTimeoutMs(),
-          this.#cronTriggers.hasTriggers(),
-        ));
-      } catch {
-        return new Response(null, { status: 503 });
-      }
-      if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
-      if (ownership.state !== "active") {
-        const active = { ...ownership, state: "active" as const };
-        await this.ctx.storage.put(CREDENTIAL_BINDING_KEY, active);
-        this.#credentialBinding = active;
-      }
-      await this.#scheduleNextAlarm();
-      return new Response(null, { status: 204 });
+      return this.#commitPreparedCredential();
     }
     if (request.method === "POST" && url.pathname === "/durability/import") {
       if (this.#settingsRequests.size > 0) {
@@ -3893,6 +3807,184 @@ export class DurableAgentSession extends DurableComputerSession {
     await this.#shutdownAgent();
     if (this.#recoverableTurnCount() > 0) this.#scheduleRecovery();
     else await this.#scheduleNextAlarm();
+  }
+
+  async #prepareCredentialBinding(request: Request): Promise<Response> {
+    if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
+    let ownership: Partial<CredentialBindingOwnership> & { durability_import?: unknown };
+    try {
+      ownership = await request.json<Partial<CredentialBindingOwnership> & {
+        durability_import?: unknown;
+      }>();
+    }
+    catch { return new Response(null, { status: 400 }); }
+    if (!isUserId(ownership.owner_id)
+      || typeof ownership.session_id !== "string"
+      || !SESSION_ID.test(ownership.session_id)
+      || typeof ownership.subject !== "string"
+      || ownership.subject !== this.ctx.id.toString()
+      || !validDurabilityImportPreparation(ownership.durability_import)) {
+      return new Response(null, { status: 400 });
+    }
+    const requestedImport = ownership.durability_import as {
+      request_hash: string;
+      source_agent_id: string | null;
+      state_id: string;
+    } | null;
+    const retainedImport = await this.ctx.storage.get<DurabilityImportReceipt>(
+      DURABILITY_IMPORT_RECEIPT_KEY,
+    );
+    const current = this.#credentialBinding;
+    if (current && (current.owner_id !== ownership.owner_id
+      || current.session_id !== ownership.session_id
+      || current.subject !== ownership.subject)) {
+      return new Response(null, { status: 409 });
+    }
+    if (current && (retainedImport !== undefined) !== (requestedImport !== null)) {
+      return new Response(null, { status: 409 });
+    }
+    if (retainedImport && requestedImport && (
+      retainedImport.owner_id !== ownership.owner_id
+      || retainedImport.request_hash !== requestedImport.request_hash
+      || retainedImport.source_agent_id !== requestedImport.source_agent_id
+      || retainedImport.state_id !== requestedImport.state_id
+    )) return new Response(null, { status: 409 });
+    if (!current) {
+      const prepared: CredentialBindingOwnership = {
+        cleanup_at: Date.now() + this.#credentialPreparationLeaseMs(),
+        owner_id: ownership.owner_id,
+        session_id: ownership.session_id,
+        state: "preparing",
+        subject: ownership.subject,
+        ...(this.env.MANAGED_AGENT_DIRECT_CREDENTIALS === "true" ? { strategy: "session_v1" as const } : {}),
+      };
+      await this.ctx.storage.transaction(async (transaction) => {
+        await transaction.put(CREDENTIAL_BINDING_KEY, prepared);
+        if (requestedImport) {
+          await transaction.put(DURABILITY_IMPORT_STATE_KEY, "pending");
+          await transaction.put(DURABILITY_IMPORT_RECEIPT_KEY, {
+            owner_id: ownership.owner_id!,
+            request_hash: requestedImport.request_hash,
+            source_agent_id: requestedImport.source_agent_id,
+            stage: "pending",
+            state_id: requestedImport.state_id,
+          } satisfies DurabilityImportReceipt);
+        }
+        await transaction.setAlarm(prepared.cleanup_at);
+      });
+      this.#credentialBinding = prepared;
+      this.#durabilityImportState = requestedImport ? "pending" : undefined;
+    } else if (current.state === "preparing") {
+      const refreshed = {
+        ...current,
+        cleanup_at: Date.now() + this.#credentialPreparationLeaseMs(),
+      };
+      await this.ctx.storage.transaction(async (transaction) => {
+        await transaction.put(CREDENTIAL_BINDING_KEY, refreshed);
+        await transaction.setAlarm(refreshed.cleanup_at);
+      });
+      this.#credentialBinding = refreshed;
+    }
+    if (requestedImport) {
+      const receipt = await this.ctx.storage.get<DurabilityImportReceipt>(
+        DURABILITY_IMPORT_RECEIPT_KEY,
+      );
+      if (!receipt) return new Response(null, { status: 409 });
+      return json(receipt, { headers: { "cache-control": "no-store" } });
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  async #bindPreparedCredential(): Promise<Response> {
+    const ownership = await this.#refreshCredentialPreparation();
+    if (!ownership || this.#deleting || this.#deleted) {
+      return new Response(null, { status: 409 });
+    }
+    if (ownership.strategy === "session_v1") return new Response(null, { status: 204 });
+    try {
+      await this.#track(bindAgentCredential(
+        this.env.NANOCODEX,
+        ownership.subject,
+        ownership.owner_id,
+        this.#ownershipIoTimeoutMs(),
+      ));
+    } catch {
+      return new Response(null, { status: 503 });
+    }
+    return new Response(null, { status: this.#deleting || this.#deleted ? 409 : 204 });
+  }
+
+  async #commitPreparedCredential(): Promise<Response> {
+    if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
+    if (this.#durabilityImportState === "pending") return new Response(null, { status: 409 });
+    const ownership = await this.#refreshCredentialPreparation();
+    const session = this.#session();
+    if (!ownership || !session
+      || ownership.owner_id !== session.owner_id
+      || ownership.session_id !== session.session_id) {
+      return new Response(null, { status: 409 });
+    }
+    try {
+      await this.#track(attachAgent(
+        this.env,
+        ownership.owner_id,
+        ownership.session_id,
+        this.#ownershipIoTimeoutMs(),
+        this.#cronTriggers.hasTriggers(),
+      ));
+    } catch {
+      return new Response(null, { status: 503 });
+    }
+    if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
+    if (ownership.state !== "active") {
+      const active = { ...ownership, state: "active" as const };
+      await this.ctx.storage.put(CREDENTIAL_BINDING_KEY, active);
+      this.#credentialBinding = active;
+    }
+    await this.#scheduleNextAlarm();
+    return new Response(null, { status: 204 });
+  }
+
+  async #createHttp(request: Request): Promise<Response> {
+    if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
+    const body = await request.text();
+    if (body.length > 2048) return new Response(null, { status: 400 });
+    let initialization: SessionInitialization;
+    try {
+      initialization = JSON.parse(body) as SessionInitialization;
+      if (!initialization || typeof initialization !== "object"
+        || Array.isArray(initialization)
+        || (initialization.runtime_profile !== undefined && initialization.runtime_profile !== "managed")) {
+        return new Response(null, { status: 400 });
+      }
+    } catch { return new Response(null, { status: 400 }); }
+    const started = performance.now();
+    // Keep preparation and its crash-cleanup lease durable before doing work.
+    // Replays use the same lifecycle checks as the staged import protocol.
+    const prepared = await this.#prepareCredentialBinding(new Request("https://session.internal/credential-binding", {
+      method: "PUT", body: JSON.stringify({
+        owner_id: initialization.owner_id, session_id: initialization.session_id,
+        subject: this.ctx.id.toString(), durability_import: null,
+      }),
+    }));
+    if (!prepared.ok) return json({ error: prepared.status === 409
+      ? "agent_creation_expired" : "agent cleanup initialization failed" }, { status: prepared.status });
+    const preparedAt = performance.now();
+    const [binding, initialized] = await Promise.allSettled([
+      this.#bindPreparedCredential(), Promise.resolve().then(() => this.#initializeSession(initialization)),
+    ]);
+    if (initialized.status === "fulfilled" && initialized.value.status === 409) return json({ error: "agent_initialization_conflict",
+      message: "The retained agent has different settings or configuration." }, { status: 409 });
+    if (binding.status === "rejected" || !binding.value.ok) return json({ error: "credential_broker_unavailable" }, { status: 503 });
+    if (initialized.status === "rejected" || !initialized.value.ok) return json({ error: "agent initialization failed" }, { status: 503 });
+    const initializedAt = performance.now();
+    const committed = await this.#commitPreparedCredential();
+    if (!committed.ok) return json({ error: "agent cleanup commit failed" }, { status: 503 });
+    return json({
+      prepare_ms: roundMilliseconds(preparedAt - started),
+      initialize_ms: roundMilliseconds(initializedAt - preparedAt),
+      commit_ms: roundMilliseconds(performance.now() - initializedAt),
+    });
   }
 
   async #createLive(request: Request, url: URL): Promise<Response> {
@@ -10217,16 +10309,6 @@ async function historySearchResponseError(response: Response): Promise<HistorySe
   const code = typeof value?.error === "string" ? value.error : "history_search_failed";
   const message = typeof value?.message === "string" ? value.message : `history search failed with HTTP ${response.status}`;
   return new HistorySearchError(response.status, code, message);
-}
-
-function initializeMemoryScope(
-  memory: DurableObjectStub<MemoryScope>,
-  organizationId: string,
-): Promise<Response> {
-  return memory.fetch("https://memory.internal/initialize", {
-    method: "PUT",
-    headers: { [MEMORY_ORGANIZATION_ASSERTION]: organizationId },
-  });
 }
 
 async function hashManagedInput(input: PromptInput): Promise<string> {

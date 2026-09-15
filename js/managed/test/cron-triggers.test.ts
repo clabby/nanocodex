@@ -291,7 +291,10 @@ describe("cron Durable Object protocol", () => {
             fetch: async (input: RequestInfo, init?: RequestInit) => {
               const req = new Request(input, init);
               const path = new URL(req.url).pathname;
-              if (path === "/initialize") creations.push({ agentId, body: await req.json() });
+              if (path === "/create") {
+                creations.push({ agentId, body: await req.json() });
+                return Response.json({ prepare_ms: 0, initialize_ms: 0, commit_ms: 0 });
+              }
               if (path === "/turns") {
                 expect(req.headers.get("x-nanocodex-owner-id")).toBe(owner);
                 expect(JSON.parse(req.headers.get("x-nanocodex-capabilities")!)).toEqual(["agents:read", "agents:write", "tools:use"]);

@@ -151,6 +151,50 @@ describe("Session-owned credential authority", () => {
       });
     }
 
+    it(`creates and replays through one Session request (direct=${direct})`, async () => {
+      const sessions = (env as unknown as { NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession> }).NANOCODEX_SESSIONS;
+      const stub = sessions.getByName(crypto.randomUUID());
+      const initialization = {
+        session_id: sessionId, owner_id: ownerId,
+        organization_id: "22222222-2222-4222-8222-222222222222",
+        team_id: "33333333-3333-4333-8333-333333333333", authorization_epoch: 1,
+        public_origin: "https://nanocodex.example", settings: DEFAULT_AGENT_SETTINGS,
+      };
+      let registrationAvailable = false;
+      let binds = 0;
+      const create = async (input = initialization) => runInDurableObject(stub, async (session, state) => {
+        const originalEnv = (session as unknown as { env: Record<string, unknown> }).env;
+        Object.defineProperty(session, "env", { configurable: true, value: {
+          ...originalEnv, MANAGED_AGENT_DIRECT_CREDENTIALS: String(direct),
+          NANOCODEX: { fetch: async () => { binds += 1; return new Response(null, { status: 204 }); } },
+          NANOCODEX_USERS: { getByName: () => ({ fetch: async () => new Response(null, {
+            status: registrationAvailable ? 204 : 503,
+          }) }) },
+          NANOCODEX_MEMORY: { getByName: () => { throw new Error("Unexpected memory initialization"); } },
+        } });
+        const response = await session.fetch(new Request("https://session.internal/create", {
+          method: "POST", body: JSON.stringify(input),
+        }));
+        const ownership = await state.storage.get<{ state: string }>("nanocodex:credential-binding");
+        return { status: response.status, body: await response.json(), ownership,
+          initializations: state.storage.sql.exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM session_initialization_ownership",
+          ).toArray()[0]!.count };
+      });
+      // A failed registration retains its preparation; eviction must not lose
+      // the watchdog or publish credential authority before commit.
+      expect(await create()).toMatchObject({ status: 503, ownership: { state: "preparing" } });
+      await evictDurableObject(stub);
+      registrationAvailable = true;
+      expect(await create()).toMatchObject({ status: 200, ownership: { state: "active" }, initializations: 1 });
+      const replays = await Promise.all([create(), create()]);
+      for (const replay of replays) expect(replay).toMatchObject({ status: 200, ownership: { state: "active" }, initializations: 1 });
+      expect((await create({ ...initialization, owner_id: "44444444-4444-4444-8444-444444444444" })).status).toBe(409);
+      expect((await create({ ...initialization, settings: { ...DEFAULT_AGENT_SETTINGS, fast_mode: !DEFAULT_AGENT_SETTINGS.fast_mode } })).status).toBe(409);
+      expect(binds).toBe(direct ? 0 : 5);
+      await runInDurableObject(stub, async (_session, state) => { await state.storage.deleteAlarm(); });
+    });
+
     it(`preserves creation strategy through prepare, commit and tombstone (direct=${direct})`, async () => {
       const sessions = (env as unknown as {
         NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
