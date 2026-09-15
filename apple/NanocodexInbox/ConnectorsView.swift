@@ -67,6 +67,7 @@ struct ConnectorsView: View {
                             ConnectorRow(
                                 provider: provider,
                                 action: nil,
+                                detail: connectedDetail(provider),
                                 busy: center.operation == provider.id
                             )
                         }
@@ -153,7 +154,11 @@ struct ConnectorsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search connectors")
         .refreshable { await center.load(using: model) }
-        .task { if center.overview == nil { await center.load(using: model) } }
+        .task {
+            openRequestedMusicConnector()
+            await center.load(using: model)
+        }
+        .onChange(of: model.musicConnectorToOpen) { _, _ in openRequestedMusicConnector() }
         .sheet(isPresented: $showingAddMcp) {
             AddMcpView(model: model, center: center)
         }
@@ -167,6 +172,12 @@ struct ConnectorsView: View {
             }
         }
         .accessibilityIdentifier("connectors-list")
+    }
+
+    private func openRequestedMusicConnector() {
+        guard let provider = model.musicConnectorToOpen else { return }
+        showingMusic = provider
+        model.musicConnectorToOpen = nil
     }
 
     private func connectedDetail(_ provider: ConnectorProviderDefinition) -> String {
@@ -280,6 +291,19 @@ private struct ConnectorProviderView: View {
                     }
                 }
             }
+            Section {
+                Button {
+                    Task { await center.connect(provider, using: model) }
+                } label: {
+                    HStack {
+                        Label(connections.isEmpty ? "Connect" : "Add another account", systemImage: "plus.circle")
+                        Spacer()
+                        if center.operation == provider.id { ProgressView() }
+                    }
+                }
+                .disabled(center.operation != nil)
+                .accessibilityIdentifier("connector-add-account")
+            }
             if provider.capabilities.count > 1 {
                 Section("Services") {
                     ForEach(provider.capabilities) { capability in
@@ -295,19 +319,6 @@ private struct ConnectorProviderView: View {
                         }
                     }
                 }
-            }
-            Section {
-                Button {
-                    Task { await center.connect(provider, using: model) }
-                } label: {
-                    HStack {
-                        Label(connections.isEmpty ? "Connect" : "Add another account", systemImage: "plus.circle")
-                        Spacer()
-                        if center.operation == provider.id { ProgressView() }
-                    }
-                }
-                .disabled(center.operation != nil)
-                .accessibilityIdentifier("connector-add-account")
             }
             if let error = center.error {
                 Section { Text(error).font(.subheadline).foregroundStyle(.secondary) }
@@ -355,15 +366,20 @@ private struct ConnectorProviderView: View {
 private struct ConnectorRow: View {
     let provider: ConnectorProviderDefinition
     let action: String?
+    var detail: String? = nil
     let busy: Bool
 
     var body: some View {
         HStack(spacing: 12) {
             ConnectorLogo(provider: provider.id, size: 34)
-            Text(provider.name).font(.body).lineLimit(1)
+            Text(provider.name).font(.body).lineLimit(1).layoutPriority(1)
             Spacer(minLength: 10)
             if busy { ProgressView() }
             else if let action { Text(action).font(.body.weight(.medium)).foregroundStyle(.blue) }
+            else {
+                if let detail { Text(detail).font(.subheadline).foregroundStyle(.secondary).lineLimit(1) }
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            }
         }
         .contentShape(Rectangle())
     }
@@ -396,6 +412,8 @@ private struct ConnectorLogo: View {
         case "github": "chevron.left.forwardslash.chevron.right"
         case "slack": "number"
         case "x": "xmark"
+        case "spotify": "music.note"
+        case "soundcloud": "cloud.fill"
         case "mcp": "network"
         default: "link"
         }
@@ -404,6 +422,8 @@ private struct ConnectorLogo: View {
         switch provider {
         case "google": .blue
         case "slack": .purple
+        case "spotify": .green
+        case "soundcloud": .orange
         default: .primary
         }
     }

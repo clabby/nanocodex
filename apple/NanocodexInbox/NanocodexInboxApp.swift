@@ -1,4 +1,5 @@
 import SwiftUI
+import InboxCore
 
 @main
 struct NanocodexInboxApp: App {
@@ -32,7 +33,7 @@ struct NanocodexInboxApp: App {
                 }
                 .onOpenURL { url in
                     if url.scheme == "nanocodex", url.host == "connect", ["/spotify", "/soundcloud"].contains(url.path), url.query == nil, url.fragment == nil {
-                        model.openMusicSettings = true
+                        model.musicConnectorToOpen = MusicLoopbackProvider(rawValue: String(url.path.dropFirst()))
                     } else { model.openAgentActivity(url) }
                 }
                 .onChange(of: scenePhase, initial: true) { _, phase in

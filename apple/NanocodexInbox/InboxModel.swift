@@ -63,7 +63,7 @@ final class InboxModel: ObservableObject {
     @Published var connection = "Disconnected" { didSet { scheduleAgentNotifications() } }
     @Published var error: String?
     @Published var notice: String?
-    @Published var openMusicSettings = false
+    @Published var musicConnectorToOpen: MusicLoopbackProvider?
     @Published var connected = false
     @Published private(set) var restoringAccount = true
     @Published private(set) var restorationError: String?

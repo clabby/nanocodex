@@ -695,7 +695,7 @@ microphone-to-audible-response latency or establish identical latency to Codex.
 
 ## Spotify connection
 
-Open **Settings → Connected accounts → Connect Spotify**. Spotify opens in an
+Open **Connectors → Spotify → Connect Spotify**. Spotify opens in an
 in-app Safari view; ncspot is the application name on its consent screen. The
 phone receives Spotify's loopback callback and forwards the authorization code
 to the encrypted Nanocodex broker. Agents use the resulting account connection
@@ -711,7 +711,7 @@ on iOS with a nonsecret fixture; real Spotify authorization is a separate live g
 
 SoundCloud uses the same foreground phone flow with its own fixed listener at
 `http://127.0.0.1:8788/callback`. **Connect SoundCloud** is available under
-Settings → Connected accounts and Connectors; `nanocodex://connect/soundcloud`
-opens these settings. The app receives only the code and state. App credentials,
+Connectors (also linked from Account Settings); `nanocodex://connect/soundcloud`
+opens that connector in the list. The app receives only the code and state. App credentials,
 PKCE, tokens, and refresh remain in the broker. SoundCloud app registration is a
 one-time deployment setup; ordinary users authorize their own accounts on the phone.

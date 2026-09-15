@@ -98,7 +98,9 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.buttons["connector-add-account"].exists)
         app.buttons["Revoke"].firstMatch.tap()
         XCTAssertTrue(app.buttons["Revoke account"].waitForExistence(timeout: 3))
-        app.buttons["Cancel"].tap()
+        if app.buttons["Cancel"].exists { app.buttons["Cancel"].tap() }
+        else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.55)).tap() }
+        gone(app.buttons["Revoke account"])
         capture(app, "mobile-connector-account-detail")
 
         app.navigationBars.buttons.firstMatch.tap()
@@ -107,6 +109,15 @@ final class InboxUITests: XCTestCase {
         search.tap(); search.typeText("Slack")
         XCTAssertTrue(app.buttons["connector-available:slack"].exists)
         XCTAssertFalse(app.buttons["connector-connected:google"].exists)
+        search.tap(); app.buttons["Clear text"].tap(); search.typeText("Spotify")
+        XCTAssertTrue(app.buttons["connector-connected:spotify"].exists)
+        XCTAssertFalse(app.buttons["connector-available:slack"].exists)
+        search.tap(); app.buttons["Clear text"].tap(); search.typeText("SoundCloud")
+        let soundcloud = app.buttons["connector-available:soundcloud"]
+        XCTAssertTrue(soundcloud.exists)
+        soundcloud.tap()
+        XCTAssertTrue(app.buttons["connect-soundcloud"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
         search.tap(); app.buttons["Clear text"].tap(); search.typeText("Mercator")
         XCTAssertTrue(app.buttons["mcp-connected:" + String(repeating: "m", count: 43)].exists)
         XCTAssertFalse(app.buttons["connector-available:slack"].exists)

@@ -101,11 +101,11 @@ struct InboxView: View {
             composerFocused = false
             if model.focused != nil { model.openThread() }
         }
-        .onChange(of: model.openMusicSettings) { _, open in
-            if open && model.connected { showSettings = true; model.openMusicSettings = false }
+        .onChange(of: model.musicConnectorToOpen) { _, provider in
+            if provider != nil && model.connected { showSettings = false; showConnectors = true }
         }
         .onChange(of: model.connected) { _, connected in
-            if connected && model.openMusicSettings { showSettings = true; model.openMusicSettings = false }
+            if connected && model.musicConnectorToOpen != nil { showConnectors = true }
             if !connected { showScreens = false; showScheduledJobs = false; showConnectors = false; showSettings = false; showOverview = false; readingPositions.values.removeAll() }
         }
         .onChange(of: draggingTabs) { _, dragging in
@@ -390,10 +390,13 @@ struct InboxView: View {
                 }
             }
             if !model.isDemo {
-                Section("Connected accounts") {
-                    ForEach(MusicLoopbackProvider.allCases) { provider in
-                        MusicConnectionView(model: model, provider: provider)
+                Section {
+                    NavigationLink {
+                        ConnectorsView(model: model)
+                    } label: {
+                        Label("Connectors", systemImage: "link")
                     }
+                    .accessibilityIdentifier("settings-connectors")
                 }
                 Section("This device") {
                     Toggle("Make this device available as a Hand", isOn: $model.deviceHandEnabled)

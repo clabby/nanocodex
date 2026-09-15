@@ -106,9 +106,7 @@ export async function routeConnectorRequest(
     if (url.search || (request.method !== "POST" && (callback || !["GET", "DELETE"].includes(request.method)))) {
       return json({ error: "method_not_allowed" }, 405);
     }
-    const authenticated = await authenticate(request, env, url);
-    const principal = authenticated?.kind === "account_session"
-      ? await authenticatePersistentAccount(request, env, url) : authenticated;
+    const principal = await authenticateConnectorManagement(request, env, url);
     if (!canManageNativeConnectors(principal)) return json({ error: "unauthorized" }, 401);
     if (request.method === "GET") {
       const response = await env.NANOCODEX.fetch(`https://broker.internal/users/${encodeURIComponent(principal!.userId)}/connectors`);
@@ -136,7 +134,7 @@ export async function routeConnectorRequest(
     if ((request.method !== "GET" && request.method !== "POST") || url.search) {
       return json({ error: "method_not_allowed" }, 405);
     }
-    const principal = await authenticatePersistentAccount(request, env, url);
+    const principal = await authenticateConnectorManagement(request, env, url);
     if (!principal) return json({ error: "unauthorized" }, 401);
     if (request.method === "POST") {
       const originFailure = requireSameOriginMutation(request, url, principal);
@@ -228,7 +226,9 @@ export async function routeConnectorRequest(
       || (operation === "callback" && request.method !== "GET")) {
       return json({ error: "method_not_allowed" }, 405);
     }
-    const principal = await authenticatePersistentAccount(request, env, url);
+    const principal = operation === "callback"
+      ? await authenticatePersistentAccount(request, env, url)
+      : await authenticateConnectorManagement(request, env, url);
     if (!principal) return json({ error: "unauthorized" }, 401);
     if (operation !== "callback") {
       const originFailure = requireSameOriginMutation(request, url, principal);
@@ -263,14 +263,14 @@ export async function routeConnectorRequest(
 
   if (url.pathname === "/v1/connectors/catalog") {
     if (request.method !== "GET" || url.search) return json({ error: "method_not_allowed" }, 405);
-    const principal = await authenticatePersistentAccount(request, env, url);
+    const principal = await authenticateConnectorManagement(request, env, url);
     if (!principal) return json({ error: "unauthorized" }, 401);
     return json({ providers: CONNECTOR_PROVIDER_CATALOG }, 200);
   }
 
   if (url.pathname === "/v1/connectors") {
     if (request.method !== "GET" || url.search) return json({ error: "method_not_allowed" }, 405);
-    const principal = await authenticatePersistentAccount(request, env, url);
+    const principal = await authenticateConnectorManagement(request, env, url);
     if (!principal) return json({ error: "unauthorized" }, 401);
     return env.NANOCODEX.fetch(
       `https://broker.internal/users/${encodeURIComponent(principal.userId)}/connectors`,
@@ -294,7 +294,9 @@ export async function routeConnectorRequest(
     return json({ error: "method_not_allowed" }, 405);
   }
 
-  const principal = await authenticatePersistentAccount(request, env, url);
+  const principal = callback
+    ? await authenticatePersistentAccount(request, env, url)
+    : await authenticateConnectorManagement(request, env, url);
   if (!principal) return json({ error: "unauthorized" }, 401);
   if (!callback) {
     const originFailure = requireSameOriginMutation(request, url, principal);
@@ -798,6 +800,20 @@ export async function readSpotifyLoopbackBody(request: Request, callback: boolea
       || /[\u0000-\u001f\u007f]/.test(result)) return;
     return { state: value.state, [field]: result };
   } catch { return; } finally { reader.releaseLock(); }
+}
+
+// The native app uses an owner device key; browsers use a persistent account
+// session. Delegated Connect grants and scoped agent keys cannot manage accounts.
+async function authenticateConnectorManagement(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+): Promise<Principal | undefined> {
+  const principal = await authenticate(request, env, url);
+  if (principal?.kind === "account_session") {
+    return authenticatePersistentAccount(request, env, url);
+  }
+  return canManageNativeConnectors(principal) ? principal : undefined;
 }
 
 export function canManageNativeConnectors(principal: Principal | undefined): boolean {

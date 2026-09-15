@@ -208,6 +208,54 @@ describe("Connect grant assertions", () => {
 });
 
 describe("connector route compatibility", () => {
+  it("lets owner device keys list and manage connectors without granting agent keys account control", async () => {
+    const local = portableEnv();
+    const token = `ncx_live_${"a".repeat(12)}_${"b".repeat(43)}`;
+    const digest = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest(
+      "SHA-256", new TextEncoder().encode(token),
+    )))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const key = {
+      id: "a".repeat(12), label: "iPhone", prefix: `ncx_live_${"a".repeat(12)}`,
+      createdAt: 1, digest, userId: USER_ID, organizationId: ORGANIZATION_ID,
+      teamId: TEAM_ID, role: "owner", authorizationEpoch: 1,
+      capabilities: ["api_keys:write", "tools:use"],
+    };
+    let currentKey: unknown = key;
+    const seen: Request[] = [];
+    const env = { ...local.env,
+      NANOCODEX_API_KEYS: { getByName: () => ({ async fetch() {
+        return currentKey ? Response.json(currentKey) : new Response(null, { status: 404 });
+      } }) } as unknown as AccountAuthEnv["NANOCODEX_API_KEYS"],
+      NANOCODEX: { async fetch(input: RequestInfo | URL, init?: RequestInit) {
+        const request = new Request(input, init); seen.push(request);
+        return request.method === "DELETE" ? new Response(null, { status: 204 })
+          : Response.json({ connectors: {}, mcp_connections: [] });
+      } } as Fetcher,
+    };
+    const routes = [
+      ["GET", "/v1/connectors/catalog", 200],
+      ["GET", "/v1/connectors", 200],
+      ["GET", "/v1/connectors/mcp-connections", 200],
+      ["DELETE", `/v1/connectors/spotify/connections/${CONNECTOR_CONNECTION_ID}`, 204],
+      ["DELETE", `/v1/connectors/mcp-connections/${CONNECT_MCP_ID}`, 204],
+    ] as const;
+    for (const [method, path, status] of routes) {
+      const url = new URL(path, "https://nanocodex.example");
+      const call = () => routeConnectorRequest(new Request(url, {
+        method, headers: { authorization: `Bearer ${token}` },
+      }), env, url);
+      currentKey = key;
+      expect((await call())?.status, path).toBe(status);
+      for (const denied of [null, { ...key, role: "writer" }, { ...key, capabilities: ["tools:use"] }]) {
+        currentKey = denied;
+        const prior = seen.length;
+        expect((await call())?.status, path).toBe(401);
+        expect(seen).toHaveLength(prior);
+      }
+    }
+    expect(seen.every(request => new URL(request.url).pathname.startsWith(`/users/${USER_ID}/`))).toBe(true);
+  });
+
   it.each(["spotify", "soundcloud"])("keeps %s phone callbacks owner-bound and stamps the provider flow", async (provider) => {
     const local = portableEnv();
     const cookie = persistentAccountCookie(local, USER_ID, "d");
