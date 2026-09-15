@@ -105,6 +105,17 @@ The internal `GET /users/:user/credentials/vault` control route returns only
 the existing public vault metadata projection. Managed startup uses it instead
 of full credential status, which can also derive legacy SSH public keys.
 
+The internal `GET /users/:user/catalog` route reads public connector and MCP
+metadata together from their account-owned broker. It never includes MCP
+endpoints or credentials. Deploy egress before managed consumers of this route.
+Model connection logs include `credential_broker_ms`, measured inside the exact
+RPC that returned the snapshot; `credential_ms` also includes time outside that
+method, such as routing and object activation. Activation duration and the
+broker's age since activation are returned with the same result, so a cold
+object can be distinguished from a slow call to an already-active object.
+`upstream_ms` includes our
+subscription relay and must not be interpreted as provider-only latency.
+
 Model traffic accepts only the fixed internal URLs, methods, headers, and
 credential placeholder. The broker resolves the subject, chooses that user's
 active credential, injects it only for the approved upstream or configured

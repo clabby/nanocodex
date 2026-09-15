@@ -572,6 +572,10 @@ export class McpConnectionOwner {
     if (connection.lifecycle === "disabled") throw new McpFailure(409, "connection_disabled");
   }
 
+  publicMetadata() {
+    return this.#publicWire();
+  }
+
   #publicWire(connections = Object.values(this.#state.connections)): {
     mcp_connections: Array<{ id: string; name: string; status: PublicStatus }>;
   } {

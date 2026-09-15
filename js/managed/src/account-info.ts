@@ -83,6 +83,8 @@ export type AccountInfo = Readonly<{
 }>;
 
 export type AccountInfoOptions = Readonly<{
+  /** Admission-scoped live catalog; never retained between turns. */
+  catalog?: Promise<unknown>;
   allowedConnectors?: readonly ConnectorCapabilityId[];
   allowedConnections?: ConnectorConnectionSelection;
   enabled: boolean;
@@ -101,23 +103,28 @@ export async function accountInfo(
     apis = [],
     machines = [],
     signal,
+    catalog,
   }: AccountInfoOptions,
 ): Promise<AccountInfo> {
   if (!enabled) return emptyInfo("disabled", machines, apis);
   signal?.throwIfAborted();
   try {
     const encodedUserId = encodeURIComponent(userId);
-    const [response, vault] = await Promise.all([
-      signal === undefined
-        ? binding.fetch(`https://broker.internal/users/${encodedUserId}/connectors`)
-        : binding.fetch(`https://broker.internal/users/${encodedUserId}/connectors`, { signal }),
+    const [connectorMetadata, vault] = await Promise.all([
+      catalog ?? (async () => {
+        const response = await (signal === undefined
+          ? binding.fetch(`https://broker.internal/users/${encodedUserId}/connectors`)
+          : binding.fetch(`https://broker.internal/users/${encodedUserId}/connectors`, { signal }));
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new Error("account connector status unavailable");
+        }
+        return response.json();
+      })(),
       accountVault(binding, encodedUserId, signal),
     ]);
-    if (!response.ok) {
-      await response.body?.cancel();
-      return emptyInfo("unavailable", machines, apis);
-    }
-    const statuses = connectorStatuses(await response.json());
+    signal?.throwIfAborted();
+    const statuses = connectorStatuses(connectorMetadata);
     const allowed = allowedConnectors === undefined ? undefined : new Set(allowedConnectors);
     const authenticated: ConnectorCapabilityId[] = [];
     const accounts: Partial<Record<ConnectorCapabilityId, string>> = {};

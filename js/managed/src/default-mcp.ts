@@ -64,8 +64,9 @@ export function defaultManagedMcpServers(
 export async function connectedManagedAccountMcps(
   broker: Fetcher,
   userId: string,
+  catalog?: Promise<unknown>,
 ): Promise<readonly ManagedAccountMcpConnection[]> {
-  return fetchResponseWithDeadline(
+  const value = catalog === undefined ? await fetchResponseWithDeadline(
     broker,
     `https://broker.internal/users/${encodeURIComponent(userId)}/mcp-connections`,
     {},
@@ -75,31 +76,31 @@ export async function connectedManagedAccountMcps(
       if (!response.ok) {
         throw new Error(`account MCP listing failed with HTTP ${response.status}`);
       }
-      const value: unknown = await response.json();
-      if (!isRecord(value) || !Array.isArray(value.mcp_connections)
-        || value.mcp_connections.length > 64) {
-        throw new Error("account MCP listing returned an invalid response");
-      }
-      const seen = new Set<string>();
-      const connected: ManagedAccountMcpConnection[] = [];
-      for (const candidate of value.mcp_connections) {
-        if (!isRecord(candidate)
-          || typeof candidate.id !== "string" || !MCP_CONNECTION_ID.test(candidate.id)
-          || typeof candidate.name !== "string" || !MCP_CONNECTION_NAME.test(candidate.name)
-          || candidate.name.trim().length === 0
-          || typeof candidate.status !== "string"
-          || !["authorization_required", "connected", "reauthorization_required", "disabled", "revoked"].includes(candidate.status)
-          || seen.has(candidate.id)) {
-          throw new Error("account MCP listing returned an invalid response");
-        }
-        seen.add(candidate.id);
-        if (candidate.status === "connected") {
-          connected.push(Object.freeze({ id: candidate.id, name: candidate.name }));
-        }
-      }
-      return Object.freeze(connected);
+      return response.json<unknown>();
     },
-  );
+  ) : await catalog;
+  if (!isRecord(value) || !Array.isArray(value.mcp_connections)
+    || value.mcp_connections.length > 64) {
+    throw new Error("account MCP listing returned an invalid response");
+  }
+  const seen = new Set<string>();
+  const connected: ManagedAccountMcpConnection[] = [];
+  for (const candidate of value.mcp_connections) {
+    if (!isRecord(candidate)
+      || typeof candidate.id !== "string" || !MCP_CONNECTION_ID.test(candidate.id)
+      || typeof candidate.name !== "string" || !MCP_CONNECTION_NAME.test(candidate.name)
+      || candidate.name.trim().length === 0
+      || typeof candidate.status !== "string"
+      || !["authorization_required", "connected", "reauthorization_required", "disabled", "revoked"].includes(candidate.status)
+      || seen.has(candidate.id)) {
+      throw new Error("account MCP listing returned an invalid response");
+    }
+    seen.add(candidate.id);
+    if (candidate.status === "connected") {
+      connected.push(Object.freeze({ id: candidate.id, name: candidate.name }));
+    }
+  }
+  return Object.freeze(connected);
 }
 
 export function managedAccountMcpServers(

@@ -448,6 +448,9 @@ async function handleEgressWithOwner(
       && operation.id === "responses";
     let credential = await resolveCredential(env, userId, false, undefined, sponsoredDemo);
     const credentialResolvedAt = Date.now();
+    const credentialBrokerMs = credential.broker_ms;
+    const credentialBrokerActivationMs = credential.broker_activation_ms;
+    const credentialBrokerAgeMs = credential.broker_age_ms;
     if (operation.chatGptOnly && credential.kind !== "chatgpt") {
       return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started, {
         user_id: userId,
@@ -529,6 +532,9 @@ async function handleEgressWithOwner(
         credential_kind: credential.kind,
         subject_ms: subjectResolvedAt - started,
         credential_ms: credentialResolvedAt - subjectResolvedAt,
+        credential_broker_ms: credentialBrokerMs,
+        credential_broker_activation_ms: credentialBrokerActivationMs,
+        credential_broker_age_ms: credentialBrokerAgeMs,
         upstream_ms: Date.now() - upstreamStartedAt,
       });
       if (credential.source === "sponsored" && operation.id === "responses") {
@@ -1823,6 +1829,12 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
     return jsonError(405, "method_not_allowed");
   }
 
+  const catalogOwner = url.pathname.match(/^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/catalog$/)?.[1];
+  if (catalogOwner) {
+    if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+    return connectorBroker(env, catalogOwner).fetch("https://connectors.internal/v1/catalog");
+  }
+
   const mcpMatch = url.pathname.match(
     /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/mcp-connections(?:\/([A-Za-z0-9_-]{43})(?:\/(start|callback))?)?$/,
   );
@@ -2453,6 +2465,9 @@ async function resolveCredential(
 
 type ResolvedModelCredential = UserCredentialSnapshot & Readonly<{
   source: "sponsored" | "user";
+  broker_ms?: number;
+  broker_activation_ms?: number;
+  broker_age_ms?: number;
 }>;
 
 async function resolveSponsoredChatGptCredential(
@@ -2513,7 +2528,7 @@ async function resolveUserCredential(
   userId: string,
   recover: boolean,
   revision?: number,
-): Promise<UserCredentialSnapshot> {
+): Promise<UserCredentialSnapshot & Pick<ResolvedModelCredential, "broker_ms" | "broker_activation_ms" | "broker_age_ms">> {
   const result = await userBroker(env, userId).resolveModelCredential(recover, revision);
   if (result.status < 200 || result.status >= 300) {
     throw new EgressFailure(result.status === 404 ? 409 : 503, "user_credential_unavailable");
@@ -2523,7 +2538,13 @@ async function resolveUserCredential(
     || !Number.isSafeInteger(value.revision)) {
     throw new EgressFailure(503, "invalid_credential_response");
   }
-  return value;
+  return { ...value, ...(Number.isFinite(result.resolve_ms) && result.resolve_ms >= 0
+    ? { broker_ms: result.resolve_ms } : {}),
+    ...(Number.isFinite(result.activation_ms) && result.activation_ms >= 0
+      ? { broker_activation_ms: result.activation_ms } : {}),
+    ...(Number.isFinite(result.activation_age_ms) && result.activation_age_ms >= 0
+      ? { broker_age_ms: result.activation_age_ms } : {}),
+  };
 }
 
 async function resolveSshIdentity(
@@ -2712,7 +2733,7 @@ function audit(
   const safeDetail = {
     ...(detail.credential_kind === "chatgpt" || detail.credential_kind === "openai"
       ? { credential_kind: detail.credential_kind } : {}),
-    ...Object.fromEntries(["subject_ms", "credential_ms", "upstream_ms"].flatMap((key) => (
+    ...Object.fromEntries(["subject_ms", "credential_ms", "credential_broker_ms", "credential_broker_activation_ms", "credential_broker_age_ms", "upstream_ms"].flatMap((key) => (
       typeof detail[key] === "number" && Number.isFinite(detail[key]) && detail[key] >= 0
         ? [[key, detail[key]]] : []
     ))),

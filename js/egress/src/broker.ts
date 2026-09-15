@@ -308,6 +308,8 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   readonly #env: BrokerEnv;
   readonly #vault: CredentialVault;
   readonly #ready: Promise<void>;
+  #activatedAt = 0;
+  #activationMs = 0;
   #credentials: CredentialState = { version: 1, active: null };
   #tail: Promise<void> = Promise.resolve();
 
@@ -316,7 +318,12 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     this.#state = state;
     this.#env = env;
     this.#vault = new CredentialVault(env, `user/${state.id.toString()}`);
-    this.#ready = state.blockConcurrencyWhile(() => this.#initialize());
+    const startedAt = Date.now();
+    this.#ready = state.blockConcurrencyWhile(async () => {
+      await this.#initialize();
+      this.#activatedAt = Date.now();
+      this.#activationMs = this.#activatedAt - startedAt;
+    });
   }
 
   fetch(request: Request): Promise<Response> {
@@ -342,7 +349,11 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   async resolveModelCredential(recover: boolean, revision?: number): Promise<{
     status: number;
     credential: UserCredentialSnapshot | null;
+    resolve_ms: number;
+    activation_ms: number;
+    activation_age_ms: number;
   }> {
+    const startedAt = Date.now();
     // Reuse the serialized fetch handler, including refresh and durable-state
     // recovery on failure. Both HTTP bodies are consumed inside this object.
     const response = await this.fetch(new Request("https://credentials.internal/v1/credential", {
@@ -350,9 +361,13 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ recover, ...(revision === undefined ? {} : { revision }) }),
     }));
+    const credential = response.ok ? await response.json<UserCredentialSnapshot>() : null;
     return {
       status: response.status,
-      credential: response.ok ? await response.json<UserCredentialSnapshot>() : null,
+      credential,
+      resolve_ms: Date.now() - startedAt,
+      activation_ms: this.#activationMs,
+      activation_age_ms: Date.now() - this.#activatedAt,
     };
   }
 

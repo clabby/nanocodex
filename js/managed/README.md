@@ -61,6 +61,12 @@ tools. Credential selection remains live in the broker. Without the optional
 binding, the transport retains the usual broker ownership lookup; legacy
 directory subjects retain their existing authority.
 
+First-turn runtime discovery and environment bootstrap share one live connector
+and MCP catalog read. This snapshot is scoped to that admission, never cached
+across turns. Warm-turn discovery and later explicit account-info calls still
+read current state. Egress must expose `/users/:user/catalog` before deploying
+this managed startup path.
+
 The resolver reads retained ownership without constructing the agent runtime.
 Deleted, exported, or pending-import sessions deny resolution; egress never
 falls back to a directory entry after a direct-subject denial.

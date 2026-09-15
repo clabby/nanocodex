@@ -53,6 +53,17 @@ const contextText = (state: DurableObjectState) => state.storage.sql.exec<{ cont
 ).one().content;
 
 describe("managed first-prompt bootstrap boundary", () => {
+  it("requests a shared catalog only while startup preparation is pending", async () => {
+    await withStartup(async (startup) => {
+      expect(startup.needsPreparation("first")).toBe(false);
+      startup.reserve("first", await plan(firstPrompt));
+      expect(startup.needsPreparation("first")).toBe(true);
+      await startup.prepare("first", async () => ({}), async () => environment, assertActive);
+      expect(startup.needsPreparation("first")).toBe(false);
+      expect(startup.needsPreparation("follow-up")).toBe(false);
+    });
+  });
+
   it("does not retrieve history or account context excluded by agent configuration", async () => {
     const original = await plan(firstPrompt);
     expect(original.calls.length).toBeGreaterThan(0);

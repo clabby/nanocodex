@@ -212,6 +212,7 @@ import {
   accountInfo,
   type AccountMachine,
 } from "./account-info";
+import { accountCatalog } from "./account-catalog";
 import { accountConnectorsTool } from "./account-connectors-tool";
 import {
   MANAGED_CLOUDFLARE_PROVIDER,
@@ -6051,7 +6052,12 @@ export class DurableAgentSession extends DurableComputerSession {
           throw retryableError("agent became unavailable during environment bootstrap");
         }
       };
-      const agentReady = this.#ensureAgent().then((agent) => {
+      const session = this.#session()!;
+      const catalog = dispatchInputJson === undefined && row.state !== "cancelling"
+        && session.runtime_profile === "managed" && accountToolsEnabled(this.#configuration())
+        && this.#startupContext.needsPreparation(row.id)
+        ? accountCatalog(this.env.NANOCODEX, session.owner_id) : undefined;
+      const agentReady = this.#ensureAgent(catalog).then((agent) => {
         assertActive();
         if (this.#agent !== agent) throw retryableError("agent became unavailable during admission");
         // Runtime replacement can clear the queue. Establish this turn's
@@ -6078,6 +6084,7 @@ export class DurableAgentSession extends DurableComputerSession {
                   allowedConnectors: accountConnectorProjection(authorization),
                   allowedConnections: accountConnectionProjection(authorization),
                   enabled: session.runtime_profile === "managed", signal,
+                  ...(catalog === undefined ? {} : { catalog }),
                 },
               )).catch(() => accountInfo(this.env.NANOCODEX, session.owner_id, { enabled: false })
                 .then((info) => ({ ...info, status: "unavailable" as const }))),
@@ -6706,7 +6713,7 @@ export class DurableAgentSession extends DurableComputerSession {
     await this.#scheduleNextAlarm();
   }
 
-  async #ensureAgent(): Promise<CloudflareAgent.Agent> {
+  async #ensureAgent(catalog?: Promise<unknown>): Promise<CloudflareAgent.Agent> {
     if (this.#durabilityExported) throw new Error("durability state was exported");
     if (this.#deleting || this.#deleted) throw retryableError("agent is being deleted");
     const session = this.#session();
@@ -6714,7 +6721,7 @@ export class DurableAgentSession extends DurableComputerSession {
     if (session?.runtime_profile === "managed" && accountToolsEnabled(this.#configuration())) {
       const refreshStartedAt = performance.now();
       await Promise.all([
-        this.#refreshAccountMcpConnections(session),
+        this.#refreshAccountMcpConnections(session, catalog),
         this.#refreshAccountHostedTools(session),
       ]);
       accountMcpRefreshMs = roundMilliseconds(performance.now() - refreshStartedAt);
@@ -6860,7 +6867,7 @@ export class DurableAgentSession extends DurableComputerSession {
     return shutdown;
   }
 
-  async #refreshAccountMcpConnections(session: SessionRow): Promise<void> {
+  async #refreshAccountMcpConnections(session: SessionRow, catalog?: Promise<unknown>): Promise<void> {
     const current = this.#accountMcpRefreshTask;
     if (current) return current;
     const refreshing = (async () => {
@@ -6869,6 +6876,7 @@ export class DurableAgentSession extends DurableComputerSession {
         connected = [...await connectedManagedAccountMcps(
           this.env.NANOCODEX,
           session.owner_id,
+          catalog,
         )].sort((left, right) => left.id.localeCompare(right.id));
       } catch (error) {
         console.warn({

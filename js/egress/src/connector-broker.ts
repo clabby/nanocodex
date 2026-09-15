@@ -299,6 +299,9 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       if (request.method === "GET" && url.pathname === "/v1/status") {
         return json({ connectors: this.#publicStatus() }, 200);
       }
+      if (request.method === "GET" && url.pathname === "/v1/catalog") {
+        return json({ connectors: this.#publicStatus(), ...this.#mcpConnections.publicMetadata() }, 200);
+      }
       const match = url.pathname.match(
         /^\/v1\/(github|google|gmail|gdrive|slack|x)(?:\/(start|callback)|\/connections\/([A-Za-z0-9_-]{43}))?$/,
       );

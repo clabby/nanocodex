@@ -130,6 +130,10 @@ export class ManagedStartupContext {
     this.storage.sql.exec("INSERT OR IGNORE INTO managed_startup_context (turn_id, content) VALUES (?, ?)", turnId, content);
   }
 
+  needsPreparation(turnId: string): boolean {
+    return this.calls(turnId).length > 0 && !this.context(turnId);
+  }
+
   /** Voice steering carries the prepared context with its original utterance. */
   enrich(turnId: string, input: PromptInput): PromptInput {
     const context = this.context(turnId);
