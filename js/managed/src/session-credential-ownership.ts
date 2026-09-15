@@ -69,6 +69,7 @@ export function scopedManagedModelEgress(
   binding: Fetcher,
   storageId: string,
   subject: string,
+  sessionModel?: Readonly<{ binding: Fetcher; owner(): string | undefined }>,
 ): Pick<Fetcher, "fetch"> {
   if (subject !== managedCredentialSubject(storageId)) throw new TypeError("invalid managed subject");
   return {
@@ -78,6 +79,14 @@ export function scopedManagedModelEgress(
         throw new TypeError("managed model subject mismatch");
       }
       request.headers.set("x-nanocodex-subject", subject);
+      if (sessionModel && request.url === "https://nanocodex.internal/v1/responses" && request.method === "GET") {
+        // Check authoritative local state at connection time, including every
+        // reconnect. Do not retain an owner across deletion or durability export.
+        const owner = sessionModel.owner();
+        if (!owner) throw new Error("managed model ownership is unavailable");
+        request.headers.set("x-nanocodex-session-model-owner", owner);
+        return sessionModel.binding.fetch(request);
+      }
       return binding.fetch(request);
     },
   };

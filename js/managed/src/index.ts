@@ -348,6 +348,7 @@ export interface Env extends
   NANOCODEX_MEMORY: DurableObjectNamespace<MemoryScope>;
   NANOCODEX_SANDBOXES: DurableObjectNamespace<Sandbox>;
   NANOCODEX: Fetcher;
+  NANOCODEX_SESSION_MODEL_EGRESS?: Fetcher;
   NANOCODEX_X?: Fetcher;
   NANOCODEX_HISTORY: R2Bucket;
   NANOCODEX_WORKSPACES: R2Bucket;
@@ -1193,6 +1194,11 @@ function isUniqueStringArray(value: unknown): value is string[] {
 }
 
 const SAFE_OBSERVATION_FIELDS = new Set([
+  "runtime_ready_ms",
+  "bootstrap_ready_ms",
+  "inject_ms",
+  "admission_ms",
+  "accepted_to_dispatch_ms",
   "account_mcp_refresh_ms",
   "attempt_count",
   "auth_kind",
@@ -6022,6 +6028,7 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   async #startManagedTurn(row: ManagedTurnRow, replayed: boolean): Promise<ManagedTurnRow> {
+    const admissionStartedAt = performance.now();
     await this.#settingsMutationTail;
     const latest = this.#managedTurn(row.id);
     if (!latest || isTerminalState(latest.state)) return latest ?? row;
@@ -6051,6 +6058,8 @@ export class DurableAgentSession extends DurableComputerSession {
         this.#eventTurnQueue.push(row.id);
         return agent;
       });
+      let runtimeReadyAt = admissionStartedAt;
+      void agentReady.then(() => { runtimeReadyAt = performance.now(); }, () => {});
       const tools = this.#memoryTools(row);
       const bootstrap = dispatchInputJson !== undefined || row.state === "cancelling"
         ? Promise.resolve() : this.#startupContext.prepare(
@@ -6090,6 +6099,7 @@ export class DurableAgentSession extends DurableComputerSession {
       // Drain construction even if bootstrap fails, so its admission-queue
       // publication cannot race the failure cleanup below.
       const [runtimeResult, bootstrapResult] = await Promise.allSettled([agentReady, bootstrap]);
+      const bootstrapReadyAt = performance.now();
       if (runtimeResult.status === "rejected") throw runtimeResult.reason;
       if (bootstrapResult.status === "rejected") throw bootstrapResult.reason;
       const agent = runtimeResult.value;
@@ -6113,6 +6123,15 @@ export class DurableAgentSession extends DurableComputerSession {
       // Freeze the exact Rust admission input immediately before dispatch.
       // This is the only accepted representation of a managed operation.
       this.#freezeManagedDispatchInput(row.id, dispatchInputJson);
+      this.#observe("managed.turn.dispatch", {
+        turn_id: row.id,
+        replayed,
+        runtime_ready_ms: roundMilliseconds(runtimeReadyAt - admissionStartedAt),
+        bootstrap_ready_ms: roundMilliseconds(bootstrapReadyAt - admissionStartedAt),
+        inject_ms: roundMilliseconds(performance.now() - bootstrapReadyAt),
+        admission_ms: roundMilliseconds(performance.now() - admissionStartedAt),
+        ...(row.accepted_at === null ? {} : { accepted_to_dispatch_ms: Date.now() - row.accepted_at }),
+      });
       turn = agent.turn.prompt({
         id: row.id,
         input: JSON.parse(dispatchInputJson) as PromptInput,
@@ -7306,6 +7325,16 @@ export class DurableAgentSession extends DurableComputerSession {
         ctx: this.ctx,
         env: { NANOCODEX: scopedManagedModelEgress(
           this.env.NANOCODEX, this.ctx.id.toString(), this.#credentialSubject(),
+          this.env.NANOCODEX_SESSION_MODEL_EGRESS === undefined ? undefined : {
+            binding: this.env.NANOCODEX_SESSION_MODEL_EGRESS,
+            owner: () => sessionCredentialOwner({
+              subject: this.#credentialSubject(), storageId: this.ctx.id.toString(),
+              binding: this.#credentialBinding, session: this.#session(),
+              initialization: this.#initializationOwnership(),
+              deleting: this.#deleting, deleted: this.#deleted,
+              exported: this.#durabilityExported, importPending: this.#durabilityImportState === "pending",
+            }),
+          },
         ) },
       } : this;
       agent = await CloudflareAgent.create(owner, agentOptions);

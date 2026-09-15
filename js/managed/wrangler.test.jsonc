@@ -38,6 +38,10 @@
       {
         "name": "NANOCODEX_USERS",
         "class_name": "UserAccount"
+      },
+      {
+        "name": "NANOCODEX_ORGANIZATIONS",
+        "class_name": "Organization"
       }
     ]
   },
@@ -61,6 +65,10 @@
     {
       "tag": "user-account-test-v1",
       "new_sqlite_classes": ["UserAccount"]
+    },
+    {
+      "tag": "organization-test-v1",
+      "new_sqlite_classes": ["Organization"]
     }
   ]
 }

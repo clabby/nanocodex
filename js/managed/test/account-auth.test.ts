@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { env as workerEnv, runInDurableObject } from "cloudflare:test";
 
 import {
   authenticate,
@@ -32,6 +33,110 @@ const TWILIO_VERIFY_SERVICE_SID = `VA${"f".repeat(32)}`;
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("API key live authorization", () => {
+  async function fixture() {
+    const { env } = portableEnv();
+    const token = `ncx_live_${"a".repeat(12)}_${"b".repeat(43)}`;
+    const digest = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest(
+      "SHA-256", new TextEncoder().encode(token),
+    )))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const key = {
+      id: "a".repeat(12), label: "test", prefix: `ncx_live_${"a".repeat(12)}`,
+      createdAt: 1, digest, userId: USER_ID, organizationId: ORGANIZATION_ID,
+      teamId: TEAM_ID, role: "writer", authorizationEpoch: 1, capabilities: ["agents:read"],
+    };
+    let currentKey: unknown = key;
+    let currentAccount: unknown = account(USER_ID, true);
+    let grant: unknown = {
+      organizationId: ORGANIZATION_ID, teamId: TEAM_ID, role: "owner",
+      authorizationEpoch: 1, capabilities: ["agents:read", "agents:write"],
+    };
+    let releaseAccount!: () => void;
+    const accountGate = new Promise<void>((resolve) => { releaseAccount = resolve; });
+    const keyFetch = vi.fn(async () => currentKey ? Response.json(currentKey) : new Response(null, { status: 404 }));
+    const userFetch = vi.fn(async () => {
+      await accountGate;
+      return currentAccount ? Response.json(currentAccount) : new Response(null, { status: 404 });
+    });
+    const orgFetch = vi.fn(async () => grant ? Response.json(grant) : new Response(null, { status: 404 }));
+    const namespace = (fetch: () => Promise<Response>) => ({ getByName: () => ({ fetch }) }) as unknown as DurableObjectNamespace;
+    const testEnv = { ...env, NANOCODEX_API_KEYS: namespace(keyFetch), NANOCODEX_USERS: namespace(userFetch), NANOCODEX_ORGANIZATIONS: namespace(orgFetch) } as unknown as AccountAuthEnv;
+    return {
+      authenticate: () => authenticate(new Request("https://example.com/v1/agents", { headers: { authorization: `Bearer ${token}` } }), testEnv),
+      releaseAccount: () => releaseAccount(), userFetch, orgFetch,
+      setKey: (value: unknown) => { currentKey = value; },
+      setAccount: (value: unknown) => { currentAccount = value; },
+      setGrant: (value: unknown) => { grant = value; },
+    };
+  }
+
+  it("starts membership resolution while the live account check is pending", async () => {
+    const f = await fixture();
+    const pending = f.authenticate();
+    await vi.waitFor(() => expect(f.orgFetch).toHaveBeenCalledTimes(1));
+    expect(f.userFetch).toHaveBeenCalledTimes(1);
+    f.releaseAccount();
+    expect(await pending).toMatchObject({ kind: "api_key", role: "writer", capabilities: ["agents:read"] });
+  });
+
+  it("checks key revocation and membership changes on every request", async () => {
+    const f = await fixture();
+    f.releaseAccount();
+    expect(await f.authenticate()).toBeDefined();
+    for (const change of [
+      { authorizationEpoch: 2 }, { teamId: SECOND_USER_ID }, { organizationId: SECOND_USER_ID },
+      { role: "reader" }, { capabilities: [] },
+    ]) {
+      f.setGrant({ organizationId: ORGANIZATION_ID, teamId: TEAM_ID, role: "owner", authorizationEpoch: 1, capabilities: ["agents:read"], ...change });
+      expect(await f.authenticate()).toBeUndefined();
+    }
+    f.setKey(undefined);
+    expect(await f.authenticate()).toBeUndefined();
+  });
+
+  it("rejects missing or mismatched accounts even when the parallel grant succeeds", async () => {
+    const f = await fixture();
+    f.releaseAccount();
+    for (const current of [undefined, account(SECOND_USER_ID, true), { ...account(USER_ID, true), organizationId: SECOND_USER_ID }]) {
+      f.setAccount(current);
+      expect(await f.authenticate()).toBeUndefined();
+    }
+  });
+});
+
+describe("account-owned live authorization", () => {
+  it("observes membership revocation and epoch changes without caching grants", async () => {
+    const env = workerEnv as unknown as AccountAuthEnv;
+    const userId = crypto.randomUUID();
+    await ensureAccount(env, userId, true);
+    const user = env.NANOCODEX_USERS.getByName(userId);
+    const read = () => user.fetch("https://user.internal/authorization");
+    const first = await (await read()).json<{ userId: string; grant: { organizationId: string; authorizationEpoch: number } }>();
+    expect(first.userId).toBe(userId);
+    expect(first.grant.authorizationEpoch).toBe(1);
+    const organization = env.NANOCODEX_ORGANIZATIONS.getByName(first.grant.organizationId);
+    await runInDurableObject(organization, async (_instance, state) => {
+      const metadata = await state.storage.get<Record<string, unknown>>("metadata");
+      await state.storage.put("metadata", { ...metadata, authorizationEpoch: 2 });
+    });
+    expect(await (await read()).json()).toMatchObject({ grant: { authorizationEpoch: 2 } });
+    await runInDurableObject(organization, async (_instance, state) => {
+      await state.storage.delete(`membership:user:${userId}`);
+    });
+    expect((await read()).status).toBe(404);
+  });
+
+  it("rejects absent accounts and wrong-user authorization responses", async () => {
+    const env = workerEnv as unknown as AccountAuthEnv;
+    const missing = env.NANOCODEX_USERS.getByName(crypto.randomUUID());
+    expect((await missing.fetch("https://user.internal/authorization")).status).toBe(404);
+    const local = portableEnv();
+    const otherUser = local.env.NANOCODEX_USERS.getByName(SECOND_USER_ID);
+    local.env.NANOCODEX_USERS = { getByName: () => otherUser } as unknown as AccountAuthEnv["NANOCODEX_USERS"];
+    expect(await resolveChiefOfStaffPrincipal(local.env, USER_ID, `chief:${"a".repeat(64)}`)).toBeUndefined();
+  });
 });
 
 describe("Connect grant assertions", () => {
@@ -1306,6 +1411,10 @@ function portableEnv(secret = LOCAL_HMAC_KEY): {
       return {
         async fetch(input: RequestInfo | URL, init?: RequestInit) {
           const request = new Request(input, init);
+          if (new URL(request.url).pathname === "/authorization") {
+            const grant = await (await organizations.getByName(ORGANIZATION_ID).fetch("https://organization.internal/resolve")).json();
+            return Response.json({ userId, grant });
+          }
           if (new URL(request.url).pathname !== "/account") {
             return new Response(null, { status: 404 });
           }

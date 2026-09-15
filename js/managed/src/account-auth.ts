@@ -739,11 +739,15 @@ export async function authenticate(
   }
   const record = await response.json<StoredApiKey>();
   if (record.digest !== digest || !isStoredApiKey(record)) return undefined;
-  const account = await readAccount(env, record.userId);
+  // The key already supplies both lookup coordinates. Check the current
+  // account and membership concurrently; neither authorization is cached.
+  const [account, grant] = await Promise.all([
+    readAccount(env, record.userId),
+    resolveOrganizationGrant(env, { id: record.userId, organizationId: record.organizationId }),
+  ]);
   if (!account || account.organizationId !== record.organizationId) {
     return undefined;
   }
-  const grant = await resolveOrganizationGrant(env, account);
   if (!grant
     || grant.teamId !== record.teamId
     || grant.authorizationEpoch !== record.authorizationEpoch
@@ -769,10 +773,16 @@ async function resolveUserPrincipal(
   userId: string,
   credentialId: string,
 ): Promise<Principal | undefined> {
-  const account = await readAccount(env, userId);
-  if (!account) return undefined;
-  const grant = await resolveOrganizationGrant(env, account);
-  if (!grant) return undefined;
+  // Resolve live membership beside the account record, avoiding a second
+  // edge-to-Durable-Object round trip for browser/passkey sessions.
+  const response = await env.NANOCODEX_USERS.getByName(userId).fetch("https://user.internal/authorization");
+  if (!response.ok) {
+    await response.body?.cancel();
+    return undefined;
+  }
+  const value = await response.json<{ userId?: unknown; grant?: unknown }>();
+  if (value.userId !== userId || !isOrganizationGrant(value.grant)) return undefined;
+  const grant = value.grant;
   return {
     kind: "account_session",
     userId,
@@ -1390,7 +1400,7 @@ async function readAccount(env: AccountAuthEnv, userId: string): Promise<UserRec
     return undefined;
   }
   const record = await response.json<UserRecord>();
-  return isUserRecord(record) ? record : undefined;
+  return isUserRecord(record) && record.id === userId ? record : undefined;
 }
 
 export async function isPersistentAccount(env: AccountAuthEnv, userId: string): Promise<boolean> {
@@ -1399,7 +1409,7 @@ export async function isPersistentAccount(env: AccountAuthEnv, userId: string): 
 
 async function resolveOrganizationGrant(
   env: AccountAuthEnv,
-  account: UserRecord,
+  account: Pick<UserRecord, "id" | "organizationId">,
 ): Promise<OrganizationGrant | undefined> {
   const response = await env.NANOCODEX_ORGANIZATIONS.getByName(account.organizationId).fetch(
     `https://organization.internal/resolve?userId=${encodeURIComponent(account.id)}`,
@@ -1696,6 +1706,18 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
     const url = new URL(request.url);
     if (/^\/(agent-definitions|environment-templates)(?:\/|$)/.test(url.pathname)) {
       return configurationCatalog(request, this.ctx.storage);
+    }
+    if (url.pathname === "/authorization" && request.method === "GET") {
+      const account = await this.ctx.storage.get<UserRecord>("account");
+      if (!isUserRecord(account)) return json({ error: "not_found" }, { status: 404 });
+      const grant = await resolveOrganizationGrant(this.env, account);
+      // Account ownership may change while the membership request is in flight.
+      const current = await this.ctx.storage.get<UserRecord>("account");
+      if (!grant || !isUserRecord(current)
+        || current.id !== account.id || current.organizationId !== account.organizationId) {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      return json({ userId: account.id, grant });
     }
     if (url.pathname === "/account") {
       if (request.method === "PUT") {

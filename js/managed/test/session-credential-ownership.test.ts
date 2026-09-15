@@ -21,6 +21,27 @@ const active = {
 };
 
 describe("Session-owned credential authority", () => {
+  it("checks local lifecycle authority on every private model connection and keeps other egress untrusted", async () => {
+    const general = { fetch: vi.fn(async () => new Response(null, { status: 204 })) } as unknown as Fetcher;
+    const requests: Request[] = [];
+    const model = { fetch: vi.fn(async (request: Request) => { requests.push(request); return new Response(null, { status: 204 }); }) } as unknown as Fetcher;
+    let available = true;
+    const owner = vi.fn(() => available ? sessionCredentialOwner(active) : undefined);
+    const scoped = scopedManagedModelEgress(general, storageId, active.subject, { binding: model, owner });
+    const headers = { "x-nanocodex-subject": storageId, upgrade: "websocket" };
+    await scoped.fetch("https://nanocodex.internal/v1/responses", { headers });
+    expect(requests[0]?.headers.get("x-nanocodex-session-model-owner")).toBe(ownerId);
+    expect(requests[0]?.headers.get("x-nanocodex-subject")).toBe(active.subject);
+    expect(general.fetch).not.toHaveBeenCalled();
+    available = false;
+    expect(() => scoped.fetch("https://nanocodex.internal/v1/responses", { headers })).toThrow(/ownership is unavailable/);
+    expect(model.fetch).toHaveBeenCalledTimes(1);
+    expect(owner).toHaveBeenCalledTimes(2);
+    await scoped.fetch("https://nanocodex.internal/v1/search", { method: "POST", headers });
+    expect(general.fetch).toHaveBeenCalledTimes(1);
+    expect(model.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("reads the persisted voice strategy and rejects mismatched identities", async () => {
     for (const direct of [false, true]) {
       const subject = direct ? active.subject : storageId;

@@ -226,6 +226,24 @@ export class ChiefOfStaffEgress extends WorkerEntrypoint<EgressEnv> {
   }
 }
 
+const SESSION_MODEL_OWNER_HEADER = "x-nanocodex-session-model-owner";
+
+/** Bound only to the managed Session's private model transport, never tools. */
+export class SessionModelEgress extends WorkerEntrypoint<EgressEnv> {
+  fetch(request: Request): Promise<Response> {
+    const owner = request.headers.get(SESSION_MODEL_OWNER_HEADER);
+    const subject = request.headers.get(SUBJECT_HEADER);
+    if (request.url !== "https://nanocodex.internal/v1/responses"
+      || request.method !== "GET" || !owner || !USER_ID.test(owner)
+      || !subject || !MANAGED_SESSION_SUBJECT.test(subject)) {
+      return Promise.resolve(jsonError(403, "invalid_session_model_authority"));
+    }
+    const forwarded = new Request(request);
+    forwarded.headers.delete(SESSION_MODEL_OWNER_HEADER);
+    return handleEgress(forwarded, this.env, this.ctx, fetch, undefined, { subject, owner });
+  }
+}
+
 type ModelOperation = Readonly<{
   id: "responses" | "search" | "image-generation" | "image-edit"
     | "realtime-call" | "realtime-sideband";
@@ -304,8 +322,12 @@ export async function handleEgress(
   ctx?: Pick<ExecutionContext, "waitUntil">,
   upstreamFetch: typeof fetch = fetch,
   diagnostics?: Readonly<{ upstreamException(error: Readonly<{ name: string }>): void }>,
+  sessionModelAuthority?: Readonly<{ subject: string; owner: string }>,
 ): Promise<Response> {
   const started = Date.now();
+  // Headers on the general broker are never an ownership assertion. Only the
+  // dedicated Worker entrypoint may supply already-validated Session authority.
+  if (request.headers.has(SESSION_MODEL_OWNER_HEADER)) return jsonError(403, "invalid_session_model_authority");
   let url: URL;
   try { url = new URL(request.url); } catch { return jsonError(400, "invalid_url"); }
   if (url.username || url.password || url.hash) return jsonError(403, "destination_denied");
@@ -375,10 +397,15 @@ export async function handleEgress(
 
   let userId: string | undefined;
   try {
-    userId = await resolveSubject(env, subject);
+    if (sessionModelAuthority && (operation.id !== "responses" || sessionModelAuthority.subject !== subject)) {
+      return jsonError(403, "invalid_session_model_authority");
+    }
+    userId = sessionModelAuthority?.owner ?? await resolveSubject(env, subject);
+    const subjectResolvedAt = Date.now();
     const sponsoredDemo = EPHEMERAL_BROWSER_MODEL_SUBJECT.test(subject)
       && operation.id === "responses";
     let credential = await resolveCredential(env, userId, false, undefined, sponsoredDemo);
+    const credentialResolvedAt = Date.now();
     if (operation.chatGptOnly && credential.kind !== "chatgpt") {
       return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started, {
         user_id: userId,
@@ -390,6 +417,7 @@ export async function handleEgress(
       : undefined;
     try {
       const body = await replayableBody(request, operation);
+      const upstreamStartedAt = Date.now();
       let upstream = await fetchUpstream(
         env,
         userId,
@@ -454,6 +482,10 @@ export async function handleEgress(
         model_source: credential.source,
         user_id: userId,
         deployment_sha: env.DEPLOYMENT_SHA,
+        credential_kind: credential.kind,
+        subject_ms: subjectResolvedAt - started,
+        credential_ms: credentialResolvedAt - subjectResolvedAt,
+        upstream_ms: Date.now() - upstreamStartedAt,
       });
       if (credential.source === "sponsored" && operation.id === "responses") {
         if (!sponsoredConnectionId) {
@@ -2626,6 +2658,12 @@ function audit(
     || rule === "slack" || rule === "x" || rule === "mcp";
   const log = action === "error" ? console.error : action === "deny" ? console.warn : console.info;
   const safeDetail = {
+    ...(detail.credential_kind === "chatgpt" || detail.credential_kind === "openai"
+      ? { credential_kind: detail.credential_kind } : {}),
+    ...Object.fromEntries(["subject_ms", "credential_ms", "upstream_ms"].flatMap((key) => (
+      typeof detail[key] === "number" && Number.isFinite(detail[key]) && detail[key] >= 0
+        ? [[key, detail[key]]] : []
+    ))),
     ...(typeof detail.code === "string" ? { code: detail.code } : {}),
     ...(typeof detail.status === "number" ? { status: detail.status } : {}),
     ...(typeof detail.upstream_status === "number" ? { upstream_status: detail.upstream_status } : {}),
