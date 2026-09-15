@@ -5,11 +5,63 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/gakonst/nanocodex/releases/tag/v0.6.0) - 2026-09-15
+
+### Rust API migration
+
+Read the [0.5 → 0.6 Rust API changelog and migration guide](https://github.com/gakonst/nanocodex/blob/v0.6.0/docs/MIGRATING_0_6.md) before upgrading.
+
+- **Breaking:** turn usage and snapshots are optional; session IDs are strings; prompt wrappers now target `PromptRequest`.
+- **Breaking:** `hosted` tool APIs move to `embedded`; Code Mode execution/wait returns `Result`; protocol literals gain asynchronous fields.
+- **Behavior:** default model/reasoning changes to Astra/low; resumed sessions use current instructions and tools; billing-uncertainty metrics and generic MCP resource helpers are removed.
+- **Optional SDK layers:** durable execution with caller-owned storage, reusable subagent orchestration, and a managed backend. Browser, egress, VM, and voice leave experimental paths; computer and evals retain the label.
+
+### Bug Fixes
+
+- [apple] Preserve repository tree in native playtest update
+- [apple] Preserve reading position and playtest navigation edge cases
+- [durability] Fence authoritative execution end to end
+
+### Documentation
+
+- Handle optional turn usage
+- [durability] Show progressive composition
+
+### Features
+
+- Align Astra defaults and Code Mode with Codex ([#275](https://github.com/gakonst/nanocodex/issues/275))
+- Complete GPT-6 Astra integration
+- [facade] Expose local and managed backends by feature
+- [subagents] Configure spawned model and thinking
+- [agent] Journal durable prompts and steps
+
+### Miscellaneous Tasks
+
+- Prepare release 0.6.0
+
+### Other
+
+- Merge pull request [#251](https://github.com/gakonst/nanocodex/issues/251) from gakonst/feat/gpt-6-astra-readiness
+- Merge remote-tracking branch 'origin/master' into codex/cloud-accounts-playground
+- Merge pull request [#181](https://github.com/gakonst/nanocodex/issues/181) from gakonst/feat/durable-runtime
+- Merge remote-tracking branch 'origin/master' into agent/eval-cluster-dashboard
+
+### Refactor
+
+- [agent] Make turn results backend-neutral
+- [durability] Own agent integration above lifecycle
+- [agent] Unify durable prompt submission
+
 ## [0.5.0](https://github.com/gakonst/nanocodex/releases/tag/v0.5.0) - 2026-08-12
 
 ### Miscellaneous Tasks
 
+- [release] Refresh 0.5.0 changelogs
 - [release] Prepare 0.5.0
+
+### Other
+
+- Merge pull request [#169](https://github.com/gakonst/nanocodex/issues/169) from gakonst/release/0.5.0
 
 ## [0.4.0](https://github.com/gakonst/nanocodex/releases/tag/v0.4.0) - 2026-08-11
 
