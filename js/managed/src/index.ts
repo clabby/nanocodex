@@ -277,6 +277,7 @@ import {
 } from "./durable-memory";
 import { memorySessionTools } from "./memory-session-tools";
 import { ManagedStartupContext } from "./startup-context";
+import { managedPromptCacheKey } from "./prompt-cache-key";
 import { MemoryScope, MEMORY_INITIALIZE_ASSERTION } from "./memory-scope";
 export { MemoryScope } from "./memory-scope";
 export { AccountHostedTools } from "./account-hosted-tools";
@@ -7198,10 +7199,12 @@ export class DurableAgentSession extends DurableComputerSession {
           ? configuration.multi_agent.max_concurrent_subagents ?? 6 : undefined,
         responseControls: {
           outputSchema: configuration.output_schema,
-          // Retain growing conversation caching and explicitly cache the static
-          // prefix before this session's retrieved startup context.
-          promptCache: configuration.prompt_cache
-            ?? (this.#settings().model === "gpt-6-astra" ? "implicit" : undefined),
+          promptCache: configuration.prompt_cache,
+          // The hosted Codex endpoint rejects prompt_cache_options. Its existing
+          // automatic caching can reuse stable prefixes across an owner's agents
+          // when they share a key, rather than getting a fresh key per session.
+          promptCacheKey: this.#settings().model === "gpt-6-astra"
+            ? managedPromptCacheKey(session) : undefined,
         },
       } });
       Object.defineProperty(agentOptions, internalConfiguration, { value: this.#settings() });

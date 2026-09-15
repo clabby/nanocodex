@@ -1,5 +1,8 @@
 /** Apply stable managed response policy at the provider wire boundary, including replay. */
 export function responseControlsSocket(socket, controls = {}) {
+  if (controls.promptCacheKey !== undefined && (typeof controls.promptCacheKey !== "string" || controls.promptCacheKey.length === 0 || controls.promptCacheKey.length > 64)) {
+    throw new TypeError("invalid prompt cache key");
+  }
   if (controls.promptCache !== undefined && !["implicit", "explicit"].includes(controls.promptCache)) {
     throw new TypeError("invalid prompt cache mode");
   }
@@ -12,26 +15,14 @@ export function responseControlsSocket(socket, controls = {}) {
       if (property === "send") return (data, ...args) => {
         const body = typeof data === "string" ? JSON.parse(data) : undefined;
         if (body?.type === "response.create") {
+          if (controls.promptCacheKey !== undefined) body.prompt_cache_key = controls.promptCacheKey;
           if (controls.outputSchema !== undefined) body.text = {
             ...body.text, format: { type: "json_schema", name: "managed_output", strict: true, schema: controls.outputSchema },
           };
           if (controls.promptCache !== undefined) {
             body.prompt_cache_options = { mode: controls.promptCache, ttl: "30m" };
-            // Cache the static instructions before per-session bootstrap/context
-            // messages. Implicit caching alone writes through the changing suffix
-            // and does not create a reusable endpoint at this shorter prefix.
-            for (const item of Array.isArray(body.input) ? body.input : []) {
-              if (item.type === "additional_tools") continue;
-              if (item.role !== "developer") break;
-              const text = (Array.isArray(item.content) ? item.content : [])
-                .filter(part => part.type === "input_text").at(-1);
-              if (text) {
-                text.prompt_cache_breakpoint = { mode: "explicit" };
-                break;
-              }
-            }
             if (controls.promptCache === "explicit") {
-              // Preserve the configured developer-context write boundary too.
+              // Cache the developer context without marking changing user input.
               // Continuations with no prefix intentionally do not write new cache entries.
               const developers = (Array.isArray(body.input) ? body.input : []).filter(item => item.role === "developer");
               const text = developers.flatMap(item => Array.isArray(item.content) ? item.content : [])

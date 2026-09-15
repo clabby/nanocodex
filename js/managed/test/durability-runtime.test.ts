@@ -4,12 +4,12 @@ import { Agent } from "nanocodex/cloudflare";
 import { Subagents } from "nanocodex/host";
 import { createTools } from "nanocodex/tools";
 
-it("caches static instructions before retrieved context through the Worker transport", async () => {
+it("shares a cache key through the Worker transport without explicit cache options", async () => {
   const namespace = (env as unknown as { NANOCODEX_MEMORY: DurableObjectNamespace }).NANOCODEX_MEMORY;
   await runInDurableObject(namespace.getByName(crypto.randomUUID()), async (_instance, ctx) => {
     const requests: { input: { type: string; role?: string; content?: {
       type: string; text?: string; prompt_cache_breakpoint?: unknown;
-    }[] }[]; prompt_cache_options: unknown }[] = [];
+    }[] }[]; prompt_cache_options?: unknown; prompt_cache_key: string }[] = [];
     class ModelSocket extends EventTarget {
       readyState = 1;
       accept() {}
@@ -30,17 +30,18 @@ it("caches static instructions before retrieved context through the Worker trans
     } } } };
     const options = { instructions: "Stable host instructions", eventPersistence: "caller" as const };
     Object.defineProperty(options, Symbol.for("nanocodex.cloudflare.internalRuntime"), {
-      value: { responseControls: { promptCache: "implicit" } },
+      value: { responseControls: { promptCacheKey: "owner-team-key" } },
     });
     const agent = await Agent.create(owner, options);
     try {
       await agent.session.appendDeveloperMessage("Dynamic retrieved startup context");
       expect((await agent.turn.prompt({ input: "hi hi" }).result()).finalMessage).toBe("Hello");
       const request = requests.at(-1)!;
-      expect(request.prompt_cache_options).toEqual({ mode: "implicit", ttl: "30m" });
+      expect(request.prompt_cache_options).toBeUndefined();
+      expect(request.prompt_cache_key).toBe("owner-team-key");
       const messages = request.input.filter(item => item.role === "developer" && item.content);
       expect(messages.length).toBeGreaterThanOrEqual(2);
-      expect(messages[0]!.content!.at(-1)!.prompt_cache_breakpoint).toEqual({ mode: "explicit" });
+      expect(messages[0]!.content!.at(-1)!.prompt_cache_breakpoint).toBeUndefined();
       const retrieved = messages.find(item => item.content!.some(part => part.text === "Dynamic retrieved startup context"));
       expect(retrieved).toBeDefined();
       expect(retrieved!.content!.every(part => part.prompt_cache_breakpoint === undefined)).toBe(true);

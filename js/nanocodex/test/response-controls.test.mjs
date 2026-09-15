@@ -29,39 +29,20 @@ class Socket extends EventTarget {
   message(body) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(body) })); }
 }
 
-test("implicit caching preserves the static prefix across changing startup context and replay", () => {
+test("shared cache keys preserve session lineage without adding unsupported cache options", () => {
   const socket = new Socket();
-  const controlled = responseControlsSocket(socket, { promptCache: "implicit" });
-  const create = context => ({ type: "response.create", prompt_cache_key: "existing-lineage", input: [
-    { type: "additional_tools", role: "developer", tools: [{ type: "function", name: "accountInfo" }] },
-    { role: "developer", content: [{ type: "input_text", text: "stable instructions" }] },
-    { role: "developer", content: [{ type: "input_text", text: context }] },
-    { role: "user", content: [{ type: "input_text", text: "hi hi" }] },
-  ] });
-  for (const context of ["startup A", "startup B", "startup A"]) controlled.send(JSON.stringify(create(context)));
-  for (const request of socket.sent) {
-    assert.deepEqual(request.prompt_cache_options, { mode: "implicit", ttl: "30m" });
-    assert.equal(request.prompt_cache_key, "existing-lineage");
-    assert.deepEqual(request.input[1].content[0].prompt_cache_breakpoint, { mode: "explicit" });
-    assert.equal(request.input[2].content[0].prompt_cache_breakpoint, undefined);
-    assert.equal(request.input[3].content[0].prompt_cache_breakpoint, undefined);
+  const controlled = responseControlsSocket(socket, { promptCacheKey: "owner-team-key" });
+  for (const session of ["first-session", "second-session"]) {
+    const request = { type: "response.create", prompt_cache_key: session, previous_response_id: `${session}-parent`, input: [
+      { role: "developer", content: [{ type: "input_text", text: "stable instructions" }] },
+      { role: "user", content: "hello" },
+    ] };
+    controlled.send(JSON.stringify(request));
+    assert.deepEqual(socket.sent.at(-1), { ...request, prompt_cache_key: "owner-team-key" });
   }
-  assert.deepEqual(socket.sent[0].input.slice(0, 2), socket.sent[1].input.slice(0, 2));
-  assert.deepEqual(socket.sent[0], socket.sent[2]);
-  assert.equal(create("startup A").input[1].content[0].prompt_cache_breakpoint, undefined);
-});
-
-test("implicit prefix caching leaves delta continuations and unconfigured requests alone", () => {
-  const socket = new Socket();
-  const body = { type: "response.create", previous_response_id: "parent", input: [
-    { role: "user", content: "followup" },
-    { role: "developer", content: [{ type: "input_text", text: "new context" }] },
-  ] };
-  responseControlsSocket(socket, { promptCache: "implicit" }).send(JSON.stringify(body));
-  assert.equal(socket.sent[0].previous_response_id, "parent");
-  assert.deepEqual(socket.sent[0].input, body.input);
-  responseControlsSocket(socket).send(JSON.stringify(body));
-  assert.deepEqual(socket.sent[1], body);
+  for (const promptCacheKey of ["", "x".repeat(65), 42]) {
+    assert.throws(() => responseControlsSocket(socket, { promptCacheKey }), /invalid prompt cache key/);
+  }
 });
 
 test("multiplexed lanes isolate interleaved events, scoped failures, and socket lifetime", () => {
