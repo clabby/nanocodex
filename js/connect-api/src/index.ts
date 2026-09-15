@@ -5687,14 +5687,18 @@ function requireApprovedCapabilities(
   exact = false,
 ) {
   const approvedResources = new Set(resources);
+  // Hosted account approvals never delegate a spending key. Apply that policy
+  // to every hosted app, not just the built-in CLI and Chrome clients.
   const required = [
-    ...(exact || appId === CHROME_EXTENSION_APP_ID || appId === CLI_APP_ID
+    ...(approvedResources.has(HOSTED_AUTHORIZATION_RESOURCE)
+      || exact || appId === CHROME_EXTENSION_APP_ID || appId === CLI_APP_ID
       ? ["urn:nanocodex:agent:run"]
       : BASE_APPROVAL_RESOURCES),
     `urn:nanocodex:app:${encodeURIComponent(appId)}`,
   ];
-  if (required.some((resource) => !approvedResources.has(resource))) {
-    throw new ApiFailure(403, "capability_not_approved", "The app grant was not present in the signed SIWE approval.");
+  const missing = required.filter((resource) => !approvedResources.has(resource));
+  if (missing.length > 0) {
+    throw new ApiFailure(403, "capability_not_approved", `The Connect approval is missing required resources: ${missing.join(", ")}.`);
   }
   const approved = approvedConnectors(resources);
   if (requested.some((connector) => !approved.has(connector))) {
