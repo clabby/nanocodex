@@ -17,8 +17,21 @@ export function responseControlsSocket(socket, controls = {}) {
           };
           if (controls.promptCache !== undefined) {
             body.prompt_cache_options = { mode: controls.promptCache, ttl: "30m" };
+            // Cache the static instructions before per-session bootstrap/context
+            // messages. Implicit caching alone writes through the changing suffix
+            // and does not create a reusable endpoint at this shorter prefix.
+            for (const item of Array.isArray(body.input) ? body.input : []) {
+              if (item.type === "additional_tools") continue;
+              if (item.role !== "developer") break;
+              const text = (Array.isArray(item.content) ? item.content : [])
+                .filter(part => part.type === "input_text").at(-1);
+              if (text) {
+                text.prompt_cache_breakpoint = { mode: "explicit" };
+                break;
+              }
+            }
             if (controls.promptCache === "explicit") {
-              // A stable developer prefix is the only automatic write boundary.
+              // Preserve the configured developer-context write boundary too.
               // Continuations with no prefix intentionally do not write new cache entries.
               const developers = (Array.isArray(body.input) ? body.input : []).filter(item => item.role === "developer");
               const text = developers.flatMap(item => Array.isArray(item.content) ? item.content : [])

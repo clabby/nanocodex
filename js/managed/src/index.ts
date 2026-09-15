@@ -277,7 +277,7 @@ import {
 } from "./durable-memory";
 import { memorySessionTools } from "./memory-session-tools";
 import { ManagedStartupContext } from "./startup-context";
-import { MemoryScope } from "./memory-scope";
+import { MemoryScope, MEMORY_INITIALIZE_ASSERTION } from "./memory-scope";
 export { MemoryScope } from "./memory-scope";
 export { AccountHostedTools } from "./account-hosted-tools";
 export { VmHostPool } from "./vm-host-pool";
@@ -6314,14 +6314,13 @@ export class DurableAgentSession extends DurableComputerSession {
     if (session?.runtime_profile === "managed") {
       await this.#attachmentStore().cleanup();
       const memory = this.env.NANOCODEX_MEMORY.getByName(session.organization_id);
-      const initialized = await initializeMemoryScope(memory, session.organization_id);
-      if (!initialized.ok) throw new Error("memory scope initialization failed during deletion");
       const tombstoned = await memory.fetch(
         `https://memory.internal/threads/${session.session_id}`,
         {
           method: "DELETE",
           headers: {
             [MEMORY_ORGANIZATION_ASSERTION]: session.organization_id,
+            [MEMORY_INITIALIZE_ASSERTION]: "1",
             [MEMORY_TEAM_ASSERTION]: session.team_id,
           },
         },
@@ -7197,7 +7196,13 @@ export class DurableAgentSession extends DurableComputerSession {
         subagentsEnabled: configuration.multi_agent?.enabled,
         subagentMaxConcurrency: configuration.multi_agent?.enabled
           ? configuration.multi_agent.max_concurrent_subagents ?? 6 : undefined,
-        responseControls: { outputSchema: configuration.output_schema, promptCache: configuration.prompt_cache },
+        responseControls: {
+          outputSchema: configuration.output_schema,
+          // Retain growing conversation caching and explicitly cache the static
+          // prefix before this session's retrieved startup context.
+          promptCache: configuration.prompt_cache
+            ?? (this.#settings().model === "gpt-6-astra" ? "implicit" : undefined),
+        },
       } });
       Object.defineProperty(agentOptions, internalConfiguration, { value: this.#settings() });
       phaseStartedAt = performance.now();
@@ -7328,19 +7333,12 @@ export class DurableAgentSession extends DurableComputerSession {
     const session = this.#session();
     if (!session) throw new HistorySearchError(404, "not_found", "session is not initialized");
     const memory = this.env.NANOCODEX_MEMORY.getByName(session.organization_id);
-    const initialized = await initializeMemoryScope(memory, session.organization_id);
-    if (!initialized.ok) {
-      throw new HistorySearchError(
-        initialized.status,
-        "memory_scope_unavailable",
-        "memory scope is unavailable",
-      );
-    }
     const response = await memory.fetch("https://memory.internal/search", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         [MEMORY_ORGANIZATION_ASSERTION]: session.organization_id,
+        [MEMORY_INITIALIZE_ASSERTION]: "1",
         [MEMORY_TEAM_ASSERTION]: session.team_id,
         [MEMORY_SUBJECT_ASSERTION]: `agent:${session.session_id}`,
       },
@@ -7365,19 +7363,12 @@ export class DurableAgentSession extends DurableComputerSession {
     const session = this.#session();
     if (!session) throw new HistorySearchError(404, "not_found", "session is not initialized");
     const memory = this.env.NANOCODEX_MEMORY.getByName(session.organization_id);
-    const initialized = await initializeMemoryScope(memory, session.organization_id);
-    if (!initialized.ok) {
-      throw new HistorySearchError(
-        initialized.status,
-        "memory_scope_unavailable",
-        "memory scope is unavailable",
-      );
-    }
     const response = await memory.fetch("https://memory.internal/read", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         [MEMORY_ORGANIZATION_ASSERTION]: session.organization_id,
+        [MEMORY_INITIALIZE_ASSERTION]: "1",
         [MEMORY_TEAM_ASSERTION]: session.team_id,
         [MEMORY_SUBJECT_ASSERTION]: `agent:${session.session_id}`,
       },
@@ -7392,20 +7383,13 @@ export class DurableAgentSession extends DurableComputerSession {
     if (!session) throw new HistorySearchError(404, "not_found", "session is not initialized");
     const voiceSession = this.#managedRealtimeSession();
     const memory = this.env.NANOCODEX_MEMORY.getByName(session.organization_id);
-    const initialized = await initializeMemoryScope(memory, session.organization_id);
-    if (!initialized.ok) {
-      throw new HistorySearchError(
-        initialized.status,
-        "memory_scope_unavailable",
-        "memory scope is unavailable",
-      );
-    }
     const mutating = operation.operation === "put" || operation.operation === "delete";
     const response = await memory.fetch("https://memory.internal/memory", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         [MEMORY_ORGANIZATION_ASSERTION]: session.organization_id,
+        [MEMORY_INITIALIZE_ASSERTION]: "1",
         [MEMORY_TEAM_ASSERTION]: session.team_id,
         [MEMORY_SUBJECT_ASSERTION]: `agent:${session.session_id}`,
         ...(mutating ? { [MEMORY_MUTATION_ASSERTION]: "1" } : {}),
@@ -8376,8 +8360,6 @@ export class DurableAgentSession extends DurableComputerSession {
     ).toArray();
     if (rows.length === 0) return;
     const memory = this.env.NANOCODEX_MEMORY.getByName(session.organization_id);
-    const initialized = await initializeMemoryScope(memory, session.organization_id);
-    if (!initialized.ok) throw new Error(`memory scope initialization failed with HTTP ${initialized.status}`);
     for (const row of rows) {
       if (this.#deleting) return;
       try {
@@ -8386,6 +8368,7 @@ export class DurableAgentSession extends DurableComputerSession {
           headers: {
             "content-type": "application/json",
             [MEMORY_ORGANIZATION_ASSERTION]: session.organization_id,
+            [MEMORY_INITIALIZE_ASSERTION]: "1",
             [MEMORY_TEAM_ASSERTION]: session.team_id,
           },
           body: readTurnInput(this.ctx.storage, row.turn_id, row.payload_json, "managed_history_projection_chunks"),
@@ -10155,13 +10138,12 @@ async function routeHistoryRequest(
     }
 
     const memoryScope = env.NANOCODEX_MEMORY.getByName(principal.organizationId);
-    const initialized = await initializeMemoryScope(memoryScope, principal.organizationId);
-    if (!initialized.ok) return initialized;
     const response = await memoryScope.fetch(`https://memory.internal${internalPath}`, {
       method: internalPath === "/memories" ? "GET" : "POST",
       headers: {
         ...(input === undefined ? {} : { "content-type": "application/json" }),
         [MEMORY_ORGANIZATION_ASSERTION]: principal.organizationId,
+        [MEMORY_INITIALIZE_ASSERTION]: "1",
         [MEMORY_TEAM_ASSERTION]: principal.teamId,
         [MEMORY_SUBJECT_ASSERTION]: `${principal.subjectId}:${principal.authorizationEpoch}`,
         ...(mutatingMemory ? { [MEMORY_MUTATION_ASSERTION]: "1" } : {}),

@@ -1,5 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { MEMORY_INITIALIZE_ASSERTION } from "../src/memory-scope";
 
 const ORGANIZATION = "organization-a";
 const ORGANIZATION_HEADER = "x-nanocodex-organization-id";
@@ -8,6 +9,46 @@ const SUBJECT_HEADER = "x-nanocodex-subject-id";
 const MUTATION_HEADER = "x-nanocodex-memory-mutation";
 
 describe("MemoryScope team isolation", () => {
+  it("initializes on the operation without allowing another organization to reclaim the scope", async () => {
+    const memory = (env as unknown as {
+      NANOCODEX_MEMORY: DurableObjectNamespace;
+    }).NANOCODEX_MEMORY.getByName(crypto.randomUUID());
+    const scan = (organization: string | undefined, team: string | undefined, initialize = true) => memory.fetch(
+      "https://memory.internal/memory", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(organization === undefined ? {} : { [ORGANIZATION_HEADER]: organization }),
+          ...(team === undefined ? {} : { [TEAM_HEADER]: team }),
+          [SUBJECT_HEADER]: "agent:session-a",
+          ...(initialize ? { [MEMORY_INITIALIZE_ASSERTION]: "1" } : {}),
+        },
+        body: JSON.stringify({ operation: "scan", query: "copper lighthouse" }),
+      },
+    );
+    expect((await scan(ORGANIZATION, "team-a", false)).status).toBe(404);
+    expect((await scan(undefined, "team-a")).status).toBe(404);
+    expect((await scan("unclaimed-organization", undefined)).status).toBe(404);
+    const initialized = await scan(ORGANIZATION, "team-a");
+    expect(initialized.status).toBe(200);
+    expect(await initialized.json()).toMatchObject({ operation: "scan", abstained: true });
+    expect((await scan(ORGANIZATION, "team-a")).status).toBe(200);
+    expect((await scan("other-organization", "team-a")).status).toBe(404);
+    expect((await scan(ORGANIZATION, "team-a", false)).status).toBe(200);
+    const mutation = await memory.fetch("https://memory.internal/memory", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [ORGANIZATION_HEADER]: ORGANIZATION,
+        [TEAM_HEADER]: "team-a",
+        [SUBJECT_HEADER]: "agent:session-a",
+        [MEMORY_INITIALIZE_ASSERTION]: "1",
+      },
+      body: JSON.stringify({ operation: "put", content: "The deployment marker is copper lighthouse." }),
+    });
+    expect(mutation.status).toBe(403);
+  });
+
   it("does not expose one team's memory through another team's scan or keyed read", async () => {
     const memory = (env as unknown as {
       NANOCODEX_MEMORY: DurableObjectNamespace;
@@ -68,6 +109,7 @@ async function operation(
       [ORGANIZATION_HEADER]: ORGANIZATION,
       [TEAM_HEADER]: team,
       [SUBJECT_HEADER]: subject,
+      [MEMORY_INITIALIZE_ASSERTION]: "1",
       ...(mutating ? { [MUTATION_HEADER]: "1" } : {}),
     },
     body: JSON.stringify(body),

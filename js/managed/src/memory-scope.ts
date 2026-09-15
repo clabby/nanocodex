@@ -43,6 +43,7 @@ const ORGANIZATION_ASSERTION = "x-nanocodex-organization-id";
 const TEAM_ASSERTION = "x-nanocodex-team-id";
 const SUBJECT_ASSERTION = "x-nanocodex-subject-id";
 const MEMORY_MUTATION_ASSERTION = "x-nanocodex-memory-mutation";
+export const MEMORY_INITIALIZE_ASSERTION = "x-nanocodex-memory-initialize";
 const MEMORY_SCAN_RECEIPT_MS = 30 * 60 * 1_000;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -184,9 +185,17 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
       if (assertedOrganization === null) return json({ error: "not_found" }, { status: 404 });
       return this.#initialize(assertedOrganization);
     }
-    if (!this.#authorized(assertedOrganization)) return json({ error: "not_found" }, { status: 404 });
     const assertedTeam = request.headers.get(TEAM_ASSERTION);
     if (assertedTeam === null) return json({ error: "not_found" }, { status: 404 });
+    // Internal callers already carry the same organization assertion used by
+    // PUT /initialize. Combine that idempotent step with the operation to avoid
+    // an extra Durable Object round trip on every startup lookup and tool call.
+    if (request.headers.get(MEMORY_INITIALIZE_ASSERTION) === "1") {
+      if (assertedOrganization === null) return json({ error: "not_found" }, { status: 404 });
+      const initialized = this.#initialize(assertedOrganization);
+      if (!initialized.ok) return initialized;
+    }
+    if (!this.#authorized(assertedOrganization)) return json({ error: "not_found" }, { status: 404 });
     try {
       if (request.method === "POST" && url.pathname === "/project") {
         const projection = await parseJsonBody<HistoryProjection>(request);

@@ -28,6 +28,42 @@ class Socket extends EventTarget {
   close() { this.readyState = 3; this.dispatchEvent(new Event("close")); }
   message(body) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(body) })); }
 }
+
+test("implicit caching preserves the static prefix across changing startup context and replay", () => {
+  const socket = new Socket();
+  const controlled = responseControlsSocket(socket, { promptCache: "implicit" });
+  const create = context => ({ type: "response.create", prompt_cache_key: "existing-lineage", input: [
+    { type: "additional_tools", role: "developer", tools: [{ type: "function", name: "accountInfo" }] },
+    { role: "developer", content: [{ type: "input_text", text: "stable instructions" }] },
+    { role: "developer", content: [{ type: "input_text", text: context }] },
+    { role: "user", content: [{ type: "input_text", text: "hi hi" }] },
+  ] });
+  for (const context of ["startup A", "startup B", "startup A"]) controlled.send(JSON.stringify(create(context)));
+  for (const request of socket.sent) {
+    assert.deepEqual(request.prompt_cache_options, { mode: "implicit", ttl: "30m" });
+    assert.equal(request.prompt_cache_key, "existing-lineage");
+    assert.deepEqual(request.input[1].content[0].prompt_cache_breakpoint, { mode: "explicit" });
+    assert.equal(request.input[2].content[0].prompt_cache_breakpoint, undefined);
+    assert.equal(request.input[3].content[0].prompt_cache_breakpoint, undefined);
+  }
+  assert.deepEqual(socket.sent[0].input.slice(0, 2), socket.sent[1].input.slice(0, 2));
+  assert.deepEqual(socket.sent[0], socket.sent[2]);
+  assert.equal(create("startup A").input[1].content[0].prompt_cache_breakpoint, undefined);
+});
+
+test("implicit prefix caching leaves delta continuations and unconfigured requests alone", () => {
+  const socket = new Socket();
+  const body = { type: "response.create", previous_response_id: "parent", input: [
+    { role: "user", content: "followup" },
+    { role: "developer", content: [{ type: "input_text", text: "new context" }] },
+  ] };
+  responseControlsSocket(socket, { promptCache: "implicit" }).send(JSON.stringify(body));
+  assert.equal(socket.sent[0].previous_response_id, "parent");
+  assert.deepEqual(socket.sent[0].input, body.input);
+  responseControlsSocket(socket).send(JSON.stringify(body));
+  assert.deepEqual(socket.sent[1], body);
+});
+
 test("multiplexed lanes isolate interleaved events, scoped failures, and socket lifetime", () => {
   const socket = new Socket(); const pool = multiplex(socket);
   const a = pool.lane("a"), b = pool.lane("b"); const seenA = [], seenB = [];
