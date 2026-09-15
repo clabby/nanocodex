@@ -269,6 +269,7 @@ const CONNECTOR_REQUEST_HEADERS = new Set([
   "x-nanocodex-connector-connection",
 ]);
 const CONNECTOR_RESPONSE_HEADERS = new Set([
+  "link",
   "accept-ranges",
   "content-range",
   "content-type",
@@ -3081,13 +3082,37 @@ async function handleAgentToolRoute(
   store: Kv.Kv,
   url: URL,
 ): Promise<Response | undefined> {
+  const connectorRequest = /^\/v1\/connectors\/([a-z]+)\/request$/.exec(url.pathname);
   const isAccountInfo = request.method === "GET" && url.pathname === "/v1/agent/account-info";
   const isEgress = request.method === "POST" && url.pathname === "/v1/egress";
   const isWeb = request.method === "POST" && url.pathname === "/api/tools/web-search";
   const isImage = request.method === "POST" && url.pathname === "/api/tools/image-generation";
-  if (!isAccountInfo && !isEgress && !isWeb && !isImage) return undefined;
+  if (!connectorRequest && !isAccountInfo && !isEgress && !isWeb && !isImage) return undefined;
   const { grant } = await authenticatedGrant(request, env);
   requireGrantAppOrigin(request, grant);
+  if (connectorRequest) {
+    if (request.method !== "POST") throw new ApiFailure(405, "method_not_allowed", "Use POST for connector requests.");
+    const connector = connectorRequest[1];
+    if (!isConnectorCapability(connector) || connector === "chatgpt") {
+      throw new ApiFailure(404, "connector_not_found", "This service has no connector API.");
+    }
+    const value = await boundedJson(request, 256 * 1024, "connector request");
+    if (Object.keys(value).some(key => !["path", "method", "connection_id", "body"].includes(key))
+      || (value.method !== undefined && typeof value.method !== "string")
+      || (value.body !== undefined && !isRecord(value.body))) {
+      throw new ApiFailure(400, "invalid_connector_request", "Use a provider path, method, optional connection_id, and JSON object body.");
+    }
+    const method = typeof value.method === "string" ? value.method.toUpperCase() : "GET";
+    if (value.body !== undefined && (method === "GET" || method === "HEAD")) {
+      throw new ApiFailure(400, "invalid_connector_request", "GET and HEAD requests cannot have a body.");
+    }
+    const target = connectorTarget(connector, value.path);
+    return grantConnectorRequest(env, grant, connector, {
+      path: value.path, method, connection_id: value.connection_id,
+      headers: { accept: "application/json", ...(value.body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(value.body === undefined ? {} : { body: JSON.stringify(value.body) }),
+    }, target, request.signal);
+  }
   if (isAccountInfo) return Response.json(await connectAccountInfo(env, store, grant));
   if (isEgress) return grantBrowserEgress(request, env, grant);
   if (isWeb) return grantWebSearch(request, env, grant);
@@ -6010,7 +6035,7 @@ function cors(response: Response, request: Request) {
     response.headers.set("access-control-max-age", "86400");
     response.headers.set(
       "access-control-expose-headers",
-      "mcp-session-id, payment-receipt, payment-response, payment-session, payment-session-snapshot, retry-after, www-authenticate, x-nanocodex-realtime-location",
+      "mcp-session-id, payment-receipt, payment-response, payment-session, payment-session-snapshot, retry-after, link, x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset, x-ratelimit-resource, www-authenticate, x-nanocodex-realtime-location",
     );
     response.headers.set("vary", "Origin");
   }

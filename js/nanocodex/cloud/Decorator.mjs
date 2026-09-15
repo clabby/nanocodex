@@ -1,5 +1,6 @@
 import * as account from "./actions/account.mjs";
 import * as agent from "./actions/agent.mjs";
+import * as connector from "./actions/connector.mjs";
 import * as connection from "./actions/connection.mjs";
 import * as grant from "./actions/grant.mjs";
 import * as machineUsd from "./actions/machineUsd.mjs";
@@ -14,6 +15,7 @@ export function connectActions() {
     agent: {
       create: (options) => agent.create(client, options),
     },
+    connector: { request: (options) => connector.request(client, options) },
     connection: {
       connect: (options) => connection.connect(client, options),
       disconnect: (options) => connection.disconnect(client, options),

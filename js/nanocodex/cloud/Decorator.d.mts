@@ -1,5 +1,6 @@
 import type { logout } from "./actions/account.mjs";
 import type { create as createAgent } from "./actions/agent.mjs";
+import type { request as connectorRequest } from "./actions/connector.mjs";
 import type { connect, disconnect, reconnect } from "./actions/connection.mjs";
 import type { revoke } from "./actions/grant.mjs";
 import type { fund, getConfig } from "./actions/machineUsd.mjs";
@@ -11,6 +12,7 @@ import type { Connection, HostConnection } from "./types.mjs";
 export type ConnectActions<connection extends Connection | HostConnection = Connection> = {
   account: { logout(): logout.ReturnType };
   agent: { create(options: createAgent.Options): Promise<createAgent.ReturnType> };
+  connector: { request(options: connectorRequest.Options): connectorRequest.ReturnType };
   connection: {
     connect(options: connect.Options): Promise<connection>;
     disconnect(options?: disconnect.Options | undefined): disconnect.ReturnType;

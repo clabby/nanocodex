@@ -1650,6 +1650,7 @@ function ConnectionWizard({
           title={focusedProvider ? connectorProviderLabel(focusedProvider) : "Connections"}
           titleId="wizard-services-heading"
         >
+          <p>{requester} and its agents can read and make changes through the services you approve here, using only the selected accounts and each service’s permissions.</p>
           <WizardConnectorList connectorAction={connectorAction} connectorStatuses={connectorStatuses} disabled={disabled} onConnectConnector={onConnectConnector} request={request} />
           {deviceCode ? (
             <a className="wizard-device-code" href={deviceCode.url} rel="noreferrer" target="_blank">

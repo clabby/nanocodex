@@ -84,6 +84,48 @@ test("Worker connector execution fences and forwards the exact approved identity
     assert.equal(forwarded.length, count);
   }
 
+  // Apps call the same grant-bound broker without fabricating an agent/thread.
+  for (const [connector, path] of [["spotify", "/v1/me/playlists?limit=1"], ["soundcloud", "/me/playlists?limit=1"]]) {
+    grant = { ...activeGrant({ [connector]: [alpha] }), capabilities: [connector] };
+    reply = () => Response.json({ items: [{ id: "playlist" }] }, { headers: { link: '<https://api.spotify.com/v1/me/playlists?offset=1>; rel="next"' } });
+    const read = await worker.fetch(connectorRequest(connector, { path }), env, context);
+    assert.equal(read.status, 200);
+    assert.match(read.headers.get("link"), /rel="next"/);
+    assert(read.headers.get("access-control-expose-headers").split(", ").includes("link"));
+    assert.deepEqual(await read.json(), { items: [{ id: "playlist" }] });
+    assert.equal(forwarded.at(-1).headers.get("x-nanocodex-connector-connection"), alpha);
+    assert.equal(forwarded.at(-1).method, "GET");
+    const count = forwarded.length;
+    for (const fields of [{ connection_id: bravo }, { path: "//evil.example/steal" },
+      { headers: { authorization: "Bearer stolen" } }, { user_id: "other" },
+      { body: { invalid: "GET body" } }, { method: 123 }]) {
+      const denied = await worker.fetch(connectorRequest(connector, { path, ...fields }), env, context);
+      assert(denied.status >= 400);
+    }
+    for (const headers of [{ origin: "https://evil.example" }, { "x-nanocodex-app-id": "other-app" }, { authorization: "Bearer invalid" }]) {
+      assert((await worker.fetch(connectorRequest(connector, { path }, headers), env, context)).status >= 400);
+    }
+    for (const change of [{ status: "revoked" }, { expiresAt: 1 }, { capabilities: [] }, { connectorConnections: { [connector]: [] } }]) {
+      const prior = grant; grant = { ...grant, ...change };
+      assert((await worker.fetch(connectorRequest(connector, { path }), env, context)).status >= 400);
+      grant = prior;
+    }
+    assert.equal(forwarded.length, count);
+    reply = () => new Response(null, { status: 429, headers: { "retry-after": "5" } });
+    const limited = await worker.fetch(connectorRequest(connector, { path }), env, context);
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get("retry-after"), "5");
+    assert.equal(forwarded.length, count + 1, "does not retry provider failures");
+    reply = () => new Response(null, { status: 204 });
+    const body = { name: "Updated playlist" };
+    const write = await worker.fetch(connectorRequest(connector, {
+      path: connector === "spotify" ? "/v1/playlists/fixture" : "/playlists/fixture",
+      method: "PUT", body,
+    }), env, context);
+    assert.equal(write.status, 204);
+    assert.deepEqual(await forwarded.at(-1).json(), body);
+  }
+
   grant = { ...activeGrant({ github: [alpha] }), capabilities: ["github"] };
   const bytes = Uint8Array.from({ length: 300 * 1024 }, (_, index) => index % 256);
   const largeSize = 17 * 1024 * 1024 + 123;
@@ -174,5 +216,14 @@ function egressRequest(connectionId, fields = {}) {
       ...(connectionId === undefined ? {} : { connection_id: connectionId }),
       ...fields,
     }),
+  });
+}
+
+function connectorRequest(connector, fields, headers = {}) {
+  return new Request(`https://nanocodex-connect-api.gakonst.workers.dev/v1/connectors/${connector}/request`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${grantToken}`, "content-type": "application/json",
+      origin: appOrigin, "x-nanocodex-app-id": "atlas-workspace", ...headers },
+    body: JSON.stringify(fields),
   });
 }

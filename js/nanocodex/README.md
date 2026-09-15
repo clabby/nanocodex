@@ -1183,3 +1183,40 @@ inspect `agent.configuration()`, `environment()`, `usage()`, `requests()`,
 `artifacts`, `webhook`, and `requiredActions`. See the
 [managed configuration and operations guide](../../docs/MANAGED_AGENT_CONFIGURATION.md)
 for examples, authorization, delivery semantics, and runtime limits.
+
+
+## Call connected services from your app
+
+After Nanocodex Connect login, the app and its agents share the same approved
+service capabilities and exact account selections. Request the services during
+login and call them directly without creating an agent or running a turn:
+
+```js
+const connection = await client.connection.connect({
+  capabilities: { cloudAccounts: ["spotify", "soundcloud"] },
+});
+const response = await client.connector.request({
+  connector: "spotify",
+  path: "/v1/me/playlists?limit=20",
+  // Select an approved account when more than one is connected:
+  connectionId: connection.grant.connectorConnections.spotify[0],
+});
+if (!response.ok) throw new Error(`Spotify returned ${response.status}`);
+const playlists = await response.json();
+```
+
+`client` is a `Client.create(...)` instance from `nanocodex/connect`. The standalone
+form is `Actions.connector.request(client, options)`. Requests support a provider
+path, HTTP method, optional `connectionId`, JSON object `body`, and abort `signal`.
+The response preserves provider HTTP status, body, and pagination/rate-limit
+headers. Writes are never automatically retried.
+
+The underlying API is `POST /v1/connectors/:connector/request` at the configured
+Connect API origin, authenticated with the app's Connect grant bearer token and
+`X-Nanocodex-App-Id`. Browser calls must come from the grant's approved app origin.
+Its JSON body uses `path`, `method`, optional `connection_id`, and optional `body`.
+It requires no conversation or thread ID. Both this endpoint and agent egress
+check current grant revocation, expiry, approved service, and exact account IDs.
+Connecting an account alone does not grant it to every app; the user must approve
+that service in the app's Connect flow. Provider tokens remain in the broker.
+ChatGPT is a model connector and has no generic HTTP endpoint here.

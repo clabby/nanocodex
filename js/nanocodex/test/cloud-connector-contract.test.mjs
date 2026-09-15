@@ -132,3 +132,31 @@ function wire({ capabilities, connectorConnections }) {
     },
   };
 }
+
+
+test("app connector requests use the Connect session without an agent turn", async () => {
+  const { Client, Dialog, Transport, Actions } = await import("../cloud/index.mjs");
+  const seen = [];
+  const client = Client.create({ appId: "playlist-app", appOrigin: "https://app.example.com",
+    dialog: Dialog.memory(), session: false,
+    transport: Transport.http("https://api.nanocodex.xyz", { fetch: async (input, init) => {
+      seen.push(new Request(input, init));
+      return Response.json({ items: [] }, { status: 200 });
+    } }),
+  });
+  client._setSessionToken("grant-session");
+  const signal = new AbortController().signal;
+  const result = await client.connector.request({ connector: "spotify", path: "/v1/me/playlists?limit=1", connectionId: A, signal });
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), { items: [] });
+  assert.equal(new URL(seen[0].url).pathname, "/v1/connectors/spotify/request");
+  assert.equal(seen[0].headers.get("authorization"), "Bearer grant-session");
+  assert.equal(seen[0].headers.get("x-nanocodex-app-id"), "playlist-app");
+  assert.equal(seen[0].headers.get("origin"), "https://app.example.com");
+  assert.deepEqual(await seen[0].json(), { method: "GET", path: "/v1/me/playlists?limit=1", connection_id: A });
+  await Actions.connector.request(client, { connector: "soundcloud", path: "/playlists/fixture", method: "PUT", body: { title: "Renamed" } });
+  assert.deepEqual(await seen[1].json(), { method: "PUT", path: "/playlists/fixture", body: { title: "Renamed" } });
+  await assert.rejects(client.connector.request({ connector: "chatgpt", path: "/" }), /Unknown connector/);
+  await assert.rejects(client.connector.request({ connector: "spotify", path: "//evil.example" }), /provider-relative/);
+  assert.equal(seen.length, 2);
+});

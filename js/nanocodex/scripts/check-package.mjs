@@ -34,6 +34,8 @@ const requiredFiles = [
   "cloud/server/HostPrincipal.d.mts",
   "cloud/actions/index.mjs",
   "cloud/actions/index.d.mts",
+  "cloud/actions/connector.mjs",
+  "cloud/actions/connector.d.mts",
   "browser/index.mjs",
   "browser/index.d.mts",
   "browser/InlineAgent.mjs",

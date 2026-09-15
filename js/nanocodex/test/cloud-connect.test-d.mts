@@ -206,3 +206,9 @@ await hostPrincipals.revoke({
 });
 void exchange;
 void sessionRoute;
+
+const playlistResponse = await explicitClient.connector.request({ connector: "spotify", path: "/v1/me/playlists?limit=1" });
+playlistResponse satisfies Response;
+Actions.connector.request(explicitClient, { connector: "soundcloud", path: "/me/playlists", connectionId: "opaque" });
+// @ts-expect-error ChatGPT does not expose a connector HTTP API
+explicitClient.connector.request({ connector: "chatgpt", path: "/" });
