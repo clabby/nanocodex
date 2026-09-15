@@ -235,7 +235,7 @@ async function accountVault(
 ): Promise<readonly VaultEntry[]> {
   signal?.throwIfAborted();
   try {
-    const url = `https://broker.internal/users/${encodedUserId}/credentials`;
+    const url = `https://broker.internal/users/${encodedUserId}/credentials/vault`;
     const response = signal === undefined
       ? await binding.fetch(url)
       : await binding.fetch(url, { signal });

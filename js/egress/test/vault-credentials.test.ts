@@ -95,6 +95,14 @@ describe("manual credential vault control protocol", () => {
         || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
     );
     expect(statusBody.vault).toEqual(expected);
+    const vaultOnly = await SELF.fetch(`https://broker.internal/users/${user}/credentials/vault`);
+    expect(vaultOnly.status).toBe(200);
+    // Startup needs this projection only, without deriving SSH public keys or
+    // returning model credential/account metadata from the full status route.
+    expect(await vaultOnly.json()).toEqual({ vault: expected });
+    expect((await SELF.fetch(`https://broker.internal/users/${user}/credentials/vault`, {
+      method: "POST",
+    })).status).toBe(405);
     const publicJson = JSON.stringify(statusBody);
     expect(publicJson).not.toMatch(
       /api-key-secret|login-secret|4111111111111111|"cvv"|"expiry_month"|"billing_zip"/,

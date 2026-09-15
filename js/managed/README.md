@@ -39,6 +39,8 @@ bootstrap in this order using the existing build/deploy tooling:
 1. Deploy compatible managed code with direct creation disabled using
    `--var MANAGED_AGENT_DIRECT_CREDENTIALS:false --containers-rollout none`.
    This exposes the private `ManagedAgentOwnership` entrypoint.
+   Omit `NANOCODEX_SESSION_MODEL_EGRESS` from this bootstrap configuration if
+   egress does not yet export `SessionModelEgress`; restore it in step 3.
 2. Deploy egress with its `MANAGED_AGENT_OWNERSHIP` service binding to
    `nanocodex-durable-agent`, entrypoint `ManagedAgentOwnership`.
 3. Deploy managed with the checked-in setting enabled. Development uses the
@@ -50,6 +52,14 @@ not changed. Do not deploy an older experiment checkout over newer production
 code. To stop new direct sessions, disable the setting while retaining both
 Workers' direct-subject support: reverting to code predating that support
 would break already-created sessions.
+
+In production, the private `NANOCODEX_SESSION_MODEL_EGRESS` binding targets
+egress's `SessionModelEgress` entrypoint. New-strategy Sessions validate retained
+ownership locally for each model WebSocket connection and reconnect, avoiding
+a broker callback into the originating Session. This binding is not exposed to
+tools. Credential selection remains live in the broker. Without the optional
+binding, the transport retains the usual broker ownership lookup; legacy
+directory subjects retain their existing authority.
 
 The resolver reads retained ownership without constructing the agent runtime.
 Deleted, exported, or pending-import sessions deny resolution; egress never

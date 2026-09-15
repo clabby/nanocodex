@@ -258,7 +258,7 @@ describe("managed accountInfo vault projection", () => {
     expect(projectAccountInfo(result, [])).toMatchObject({ authenticated: [], accounts: {}, vault: result.vault });
     expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
       "https://broker.internal/users/user%2Fid/connectors",
-      "https://broker.internal/users/user%2Fid/credentials",
+      "https://broker.internal/users/user%2Fid/credentials/vault",
     ]);
   });
 

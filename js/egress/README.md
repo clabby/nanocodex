@@ -93,6 +93,18 @@ Legacy managed and browser subjects keep the directory path. See the
 [managed bootstrap and rollback instructions](../managed/README.md#session-owned-credential-subjects)
 before enabling the binding and new-session strategy in production.
 
+Managed Sessions may use the private `SessionModelEgress` entrypoint for the
+fixed Responses WebSocket route after validating their own retained ownership.
+This avoids calling back into the originating Session. Only that dedicated
+service binding accepts the Session owner assertion; the general broker rejects
+it. Model credentials are still resolved live. Tool, connector, voice, and legacy
+directory traffic keep their existing ownership checks. Deploy egress before
+enabling the managed binding.
+
+The internal `GET /users/:user/credentials/vault` control route returns only
+the existing public vault metadata projection. Managed startup uses it instead
+of full credential status, which can also derive legacy SSH public keys.
+
 Model traffic accepts only the fixed internal URLs, methods, headers, and
 credential placeholder. The broker resolves the subject, chooses that user's
 active credential, injects it only for the approved upstream or configured

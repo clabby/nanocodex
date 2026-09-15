@@ -1927,6 +1927,12 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
     });
   }
 
+  const vaultOwner = url.pathname.match(/^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials\/vault$/)?.[1];
+  if (vaultOwner) {
+    if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+    return userBroker(env, vaultOwner).fetch("https://credentials.internal/v1/vault");
+  }
+
   const vaultMatch = url.pathname.match(
     /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials\/vault\/(login|api_key|card|address|phone)(?:\/([A-Za-z0-9_-]{22,64}))?$/,
   );

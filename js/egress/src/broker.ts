@@ -320,9 +320,21 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   }
 
   fetch(request: Request): Promise<Response> {
+    const queuedAt = Date.now();
+    const measureCredential = request.method === "POST"
+      && new URL(request.url).pathname === "/v1/credential";
     return this.#exclusive(async () => {
       await this.#ready;
-      return this.#dispatch(request);
+      const startedAt = Date.now();
+      try {
+        return await this.#dispatch(request);
+      } finally {
+        if (measureCredential) console.info({
+          type: "egress.credential.resolve",
+          queue_ms: startedAt - queuedAt,
+          operation_ms: Date.now() - startedAt,
+        });
+      }
     });
   }
 
@@ -383,6 +395,9 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       }
       if (request.method === "GET" && url.pathname === "/v1/status") {
         return json(await this.#publicStatus(), 200);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/vault") {
+        return json({ vault: this.#publicVault() }, 200);
       }
       if (url.pathname === "/v1/sponsored-prompts") {
         if (request.method === "GET") {
@@ -921,10 +936,14 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         // the broker; a malformed legacy key must not break the entire vault.
         public_key: identity.publicKey ?? await sshPublicKey(identity.privateKey).catch(() => undefined),
       }))),
-      vault: Object.values(this.#credentials.vault ?? {})
-        .map(publicVaultEntry)
-        .sort((left, right) => right.created_at - left.created_at || compareText(left.id, right.id)),
+      vault: this.#publicVault(),
     };
+  }
+
+  #publicVault() {
+    return Object.values(this.#credentials.vault ?? {})
+      .map(publicVaultEntry)
+      .sort((left, right) => right.created_at - left.created_at || compareText(left.id, right.id));
   }
 
   async #sponsoredPromptStatus(): Promise<Readonly<{
