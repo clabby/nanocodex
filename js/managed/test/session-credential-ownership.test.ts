@@ -166,9 +166,21 @@ describe("Session-owned credential authority", () => {
           "x-nanocodex-authorization-epoch": "1", "x-nanocodex-capabilities": "[]",
         } });
         expect(voice.status).toBe(lifecycle === "active" ? 200 : 404);
-        if (voice.ok) expect(await voice.json()).toEqual({
+        const assertions = {
+          "x-nanocodex-owner-id": ownerId,
+          "x-nanocodex-session-organization-id": "22222222-2222-4222-8222-222222222222",
+          "x-nanocodex-session-team-id": "33333333-3333-4333-8333-333333333333",
+          "x-nanocodex-authorization-epoch": "1", "x-nanocodex-capabilities": "[]",
+        };
+        const expected = lifecycle === "active" ? {
           subject: direct ? subject : stub.id.toString(), strategy: direct ? "session_v1" : "directory_v1",
-        });
+        } : undefined;
+        expect(await stub.resolveCredentialSubject(assertions)).toEqual(expected);
+        if (voice.ok) expect(await voice.json()).toEqual(expected);
+        for (const field of ["x-nanocodex-owner-id", "x-nanocodex-session-organization-id", "x-nanocodex-session-team-id", "x-nanocodex-authorization-epoch"]) {
+          expect(await stub.resolveCredentialSubject({ ...assertions, [field]: "invalid" })).toBeUndefined();
+        }
+        expect(await stub.resolveCredentialSubject({})).toBeUndefined();
       });
     }
 

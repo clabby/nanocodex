@@ -43,6 +43,18 @@ async function withKey(run: (key: ApiKeyRecord, f: Awaited<ReturnType<typeof fix
 }
 
 describe("live API key authorization beside the key", () => {
+  it("uses one RPC reply and observes key deletion without a streamed response", async () => {
+    await withKey(async (key, f) => {
+      const rpc = vi.fn(() => key.resolveAuthorizedKey());
+      const fetch = vi.fn(() => { throw new Error("unexpected HTTP fallback"); });
+      const edge = { ...f.bindings, NANOCODEX_API_KEYS: { getByName: () => ({ resolveAuthorizedKey: rpc, fetch }) } } as unknown as AccountAuthEnv;
+      expect(await authenticate(request(), edge)).toMatchObject({ kind: "api_key", capabilities: f.record.capabilities });
+      await key.fetch(new Request("https://key/record", { method: "DELETE" }));
+      expect(await authenticate(request(), edge)).toBeUndefined();
+      expect(rpc).toHaveBeenCalledTimes(2);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  });
   it("validates once remotely and projects only the stored key's scope", async () => {
     await withKey(async (key, f) => {
       const keys = vi.fn((input: RequestInfo | URL) => key.fetch(new Request(input)));
@@ -65,6 +77,7 @@ describe("live API key authorization beside the key", () => {
       await withKey(async (key, f) => {
         const resolve = () => key.fetch(new Request("https://key/resolve?authorize=1"));
         expect((await resolve()).status).toBe(200);
+        expect(await key.resolveAuthorizedKey()).toBeDefined();
         if (change === "organization") f.account.organizationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
         if (change === "membership") f.organizations.mockImplementation(async () => new Response(null, { status: 404 }));
         if (change === "team") f.grant.teamId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -73,6 +86,7 @@ describe("live API key authorization beside the key", () => {
         if (change === "capabilities") f.grant.capabilities = ["agents:read"];
         const denied = await resolve();
         expect(denied.status).toBe(401);
+        expect(await key.resolveAuthorizedKey()).toBeUndefined();
         expect(denied.headers.has("x-nanocodex-api-key-authorized")).toBe(false);
       });
     },

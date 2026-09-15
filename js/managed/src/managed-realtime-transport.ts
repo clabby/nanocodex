@@ -5,8 +5,8 @@ import {
   type AccountAuthEnv,
 } from "./account-auth";
 import { bindAgentCredential } from "./credentials";
-import { readSessionCredentialSubject } from "./session-credential-ownership";
-import { fetchResponseWithDeadline } from "./deadline";
+import { readSessionCredentialSubject, validateSessionCredentialSubject } from "./session-credential-ownership";
+import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
 
 const AGENT_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -23,7 +23,9 @@ type ManagedRealtimeTransportEnv = AccountAuthEnv & {
   NANOCODEX: Fetcher;
   NANOCODEX_REALTIME?: Fetcher;
   NANOCODEX_SESSIONS: {
-    get(id: DurableObjectId): Fetcher;
+    get(id: DurableObjectId): Fetcher & {
+      resolveCredentialSubject?(assertions: Record<string, string>): Promise<unknown>;
+    };
     idFromName(name: string): DurableObjectId;
   };
 };
@@ -43,7 +45,9 @@ export async function routeManagedRealtimeTransport(
 
   const expectedMethod = resource === "calls" ? "POST" : "GET";
   if (request.method !== expectedMethod) return json({ error: "method_not_allowed" }, 405);
+  const began = performance.now();
   const principal = await authenticate(request, env, url);
+  const authenticated = performance.now();
   if (!principal) return json({ error: "unauthorized" }, 401);
   if (resource === "calls") {
     const originFailure = requireSameOriginMutation(request, url, principal);
@@ -71,8 +75,14 @@ export async function routeManagedRealtimeTransport(
   forwardPrincipalAssertions(ownershipHeaders, principal);
   let owned: Awaited<ReturnType<typeof readSessionCredentialSubject>>;
   try {
-    owned = await fetchResponseWithDeadline(
-      env.NANOCODEX_SESSIONS.get(durableId),
+    const stub = env.NANOCODEX_SESSIONS.get(durableId);
+    owned = typeof stub.resolveCredentialSubject === "function"
+      ? await withHardDeadline("managed Realtime ownership assertion", ownershipTimeoutMs,
+        async () => validateSessionCredentialSubject(
+          await stub.resolveCredentialSubject!(Object.fromEntries(ownershipHeaders)), durableId.toString(),
+        ))
+      : await fetchResponseWithDeadline(
+      stub,
       "https://session.internal/credential-subject",
       { headers: ownershipHeaders },
       ownershipTimeoutMs,
@@ -82,6 +92,7 @@ export async function routeManagedRealtimeTransport(
   } catch {
     return json({ error: "agent_ownership_unavailable" }, 503);
   }
+  const authorized = performance.now();
   if (!owned) return json({ error: "not_found" }, 404);
   const { subject, direct } = owned;
   if (!voiceSessionId || !VOICE_SESSION_ID.test(voiceSessionId)) {
@@ -99,7 +110,15 @@ export async function routeManagedRealtimeTransport(
     return json({ error: "credential_broker_unavailable" }, 503);
   }
 
-  if (resource === "calls") return realtimeCall(callBody!, env, agentId, voiceSessionId, subject, voiceRelayRegion(request), principal.userId);
+  if (resource === "calls") {
+    const response = await realtimeCall(callBody!, env, agentId, voiceSessionId, subject, voiceRelayRegion(request), principal.userId);
+    response.headers.append("server-timing", [
+      `voice_auth;dur=${(authenticated - began).toFixed(1)}`,
+      `voice_ownership;dur=${(authorized - authenticated).toFixed(1)}`,
+      `voice_egress;dur=${(performance.now() - authorized).toFixed(1)}`,
+    ].join(", "));
+    return response;
+  }
   return realtimeSideband(callId!, env, agentId, voiceSessionId, subject);
 }
 

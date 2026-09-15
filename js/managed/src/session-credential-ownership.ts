@@ -14,7 +14,13 @@ export async function readSessionCredentialSubject(
     await response.body?.cancel();
     return undefined;
   }
-  const value: unknown = await response.json();
+  return validateSessionCredentialSubject(await response.json(), storageId);
+}
+
+export function validateSessionCredentialSubject(
+  value: unknown,
+  storageId: string,
+): { subject: string; direct: boolean } | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const retained = value as { subject?: unknown; strategy?: unknown };
   if (retained.strategy === "session_v1" && retained.subject === managedCredentialSubject(storageId)) {

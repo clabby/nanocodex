@@ -51,7 +51,7 @@ describe("voice relay geography", () => {
 });
 
 describe("private voice egress admission", () => {
-  async function fixture(owned: boolean, privateBinding = true, direct = true, sideband = false) {
+  async function fixture(owned: boolean, privateBinding = true, direct = true, sideband = false, rpc = false) {
     const owner = "11111111-1111-4111-8111-111111111111";
     const id = "a".repeat(64);
     const token = `ncx_live_${"k".repeat(12)}_${"s".repeat(43)}`;
@@ -63,6 +63,11 @@ describe("private voice egress admission", () => {
     const ownership = vi.fn(async (_url: string, _init: RequestInit) => owned
       ? Response.json({ subject: direct ? `managed-session-v1_${id}` : id, strategy: direct ? "session_v1" : "directory_v1" })
       : new Response(null, { status: 404 }));
+    const resolveCredentialSubject = vi.fn(async (assertions: Record<string, string>) => {
+      expect(assertions["x-nanocodex-owner-id"]).toBe(owner);
+      expect(assertions["x-nanocodex-session-organization-id"]).toBe("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+      return owned ? { subject: direct ? `managed-session-v1_${id}` : id, strategy: direct ? "session_v1" : "directory_v1" } : undefined;
+    });
     const env = {
       NANOCODEX_API_KEYS: { getByName: () => ({ fetch: async () => Response.json({
         id: "k".repeat(12), prefix: `ncx_live_${"k".repeat(12)}`, label: "voice", digest,
@@ -70,7 +75,7 @@ describe("private voice egress admission", () => {
         teamId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", role: "writer",
         authorizationEpoch: 1, capabilities: ["agents:write"],
       }, { headers: { "x-nanocodex-api-key-authorized": "1" } }) }) },
-      NANOCODEX_SESSIONS: { idFromName: () => ({ toString: () => id }), get: () => ({ fetch: ownership }) },
+      NANOCODEX_SESSIONS: { idFromName: () => ({ toString: () => id }), get: () => ({ fetch: ownership, ...(rpc ? { resolveCredentialSubject } : {}) }) },
       NANOCODEX: { fetch: generic },
       ...(privateBinding ? { NANOCODEX_REALTIME: { fetch: relay } } : {}),
     } as unknown as Parameters<typeof routeManagedRealtimeTransport>[1];
@@ -88,8 +93,16 @@ describe("private voice egress admission", () => {
       }, ...(sideband ? {} : { body: JSON.stringify({ sdp: "v=0", session: session() }) }),
     });
     const response = await routeManagedRealtimeTransport(request, env, url, 1000);
-    return { response, relay, generic, ownership, owner };
+    return { response, relay, generic, ownership, owner, resolveCredentialSubject };
   }
+  it.each([true, false])("uses live ownership RPC and never retries a denial through HTTP (owned=%s)", async (owned) => {
+    const f = await fixture(owned, true, true, false, true);
+    expect(f.response?.status).toBe(owned ? 201 : 404);
+    expect(f.resolveCredentialSubject).toHaveBeenCalledTimes(1);
+    expect(f.ownership).not.toHaveBeenCalled();
+    expect(f.relay).toHaveBeenCalledTimes(owned ? 1 : 0);
+    if (owned) expect(f.response?.headers.get("server-timing")).toContain("voice_auth;dur=");
+  });
   it.each([true, false])("checks Session ownership without rebinding or resolving a directory (direct=%s)", async (direct) => {
     const f = await fixture(true, true, direct);
     expect(f.response?.status).toBe(201);

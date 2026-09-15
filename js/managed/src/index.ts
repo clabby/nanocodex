@@ -3103,6 +3103,29 @@ export class DurableAgentSession extends DurableComputerSession {
     });
   }
 
+  /** Private RPC: live ownership without serializing a streamed HTTP body. */
+  resolveCredentialSubject(assertions: Record<string, string>):
+    { subject: string; strategy: "session_v1" | "directory_v1" } | undefined {
+    const asserted = forwardedPrincipal(new Headers(assertions));
+    const session = this.#session();
+    if (!asserted || !session
+      || asserted.ownerId !== session.owner_id
+      || asserted.organizationId !== session.organization_id
+      || asserted.teamId !== session.team_id
+      || asserted.authorizationEpoch !== session.authorization_epoch
+      || this.#deleting || this.#deleted || this.#durabilityExported
+      || this.#durabilityImportState === "pending") return undefined;
+    const direct = this.#credentialBinding?.strategy === "session_v1";
+    const subject = this.#credentialSubject();
+    if (direct && sessionCredentialOwner({
+      subject, storageId: this.ctx.id.toString(), binding: this.#credentialBinding,
+      session, initialization: this.#initializationOwnership(),
+      deleting: this.#deleting, deleted: this.#deleted,
+      exported: this.#durabilityExported, importPending: false,
+    }) === undefined) return undefined;
+    return { subject, strategy: direct ? "session_v1" : "directory_v1" };
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/credential-owner") {
@@ -3164,23 +3187,11 @@ export class DurableAgentSession extends DurableComputerSession {
       // This public-worker-to-Session lookup still requires the caller's full
       // forwarded principal assertions, just as the state route did.
       if (ownerAssertion === null) return json({ error: "not_found" }, { status: 404 });
-      const session = this.#session();
-      if (!session || this.#deleting || this.#deleted || this.#durabilityExported
-        || this.#durabilityImportState === "pending") {
-        return json({ error: "not_found" }, { status: 404 });
-      }
-      const direct = this.#credentialBinding?.strategy === "session_v1";
-      const subject = this.#credentialSubject();
-      if (direct && sessionCredentialOwner({
-        subject, storageId: this.ctx.id.toString(), binding: this.#credentialBinding,
-        session, initialization: this.#initializationOwnership(),
-        deleting: this.#deleting, deleted: this.#deleted,
-        exported: this.#durabilityExported, importPending: false,
-      }) === undefined) return json({ error: "not_found" }, { status: 404 });
-      return json({ subject, strategy: direct ? "session_v1" : "directory_v1" }, {
-        headers: { "cache-control": "no-store" },
-      });
+      const subject = this.resolveCredentialSubject(Object.fromEntries(request.headers));
+      return subject ? json(subject, { headers: { "cache-control": "no-store" } })
+        : json({ error: "not_found" }, { status: 404 });
     }
+
     if (request.method === "GET" && url.pathname === "/vm-host-existence") {
       const session = this.#session();
       return session?.runtime_profile === "managed" && !this.#deleting && !this.#deleted

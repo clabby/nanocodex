@@ -732,18 +732,23 @@ export async function authenticate(
   if (!API_KEY.test(token)) return undefined;
   const digest = await sha256(token);
   const stub = env.NANOCODEX_API_KEYS.getByName(digest);
-  const response = await stub.fetch("https://api-key.internal/resolve?authorize=1");
-  if (!response.ok) {
-    await response.body?.cancel();
-    return undefined;
+  // RPC returns the small record in one reply. A fetch Response transports its
+  // headers and JSON stream separately across Durable Object locations.
+  let record: StoredApiKey | undefined;
+  if (typeof stub.resolveAuthorizedKey === "function") {
+    record = await stub.resolveAuthorizedKey();
+  } else {
+    const response = await stub.fetch("https://api-key.internal/resolve?authorize=1");
+    if (!response.ok) {
+      await response.body?.cancel();
+      return undefined;
+    }
+    record = await response.json<StoredApiKey>();
+    if (!isStoredApiKey(record) || record.digest !== digest) return undefined;
+    if (response.headers.get("x-nanocodex-api-key-authorized") !== "1"
+      && !await apiKeyAuthorized(env, record)) return undefined;
   }
-  const record = await response.json<StoredApiKey>();
   if (!isStoredApiKey(record) || record.digest !== digest) return undefined;
-  // New key objects perform live account/grant checks beside the stored key,
-  // avoiding three serial cross-region trips. Older deployments return the
-  // same record without this marker and retain the original validation path.
-  if (response.headers.get("x-nanocodex-api-key-authorized") !== "1"
-    && !await apiKeyAuthorized(env, record)) return undefined;
   return {
     kind: "api_key",
     userId: record.userId,
@@ -2025,6 +2030,14 @@ export class Organization extends DurableObject<AccountAuthEnv> {
 }
 
 export class ApiKeyRecord extends DurableObject<AccountAuthEnv> {
+  async resolveAuthorizedKey(): Promise<StoredApiKey | undefined> {
+    const record = await this.ctx.storage.get<StoredApiKey>("record");
+    // Read current key, account and membership on every request, including
+    // repeated voice starts. RPC changes transport, not revocation semantics.
+    return isStoredApiKey(record) && await apiKeyAuthorized(this.env, record)
+      ? record : undefined;
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/resolve" && request.method === "GET") {
