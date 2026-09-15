@@ -223,18 +223,28 @@ export function Vault() {
   );
 }
 
-function VaultEntryDialog({
+export function VaultEntryDialog({
   busy,
   kind,
   onClose,
   onSave,
   returnFocusRef,
+  name = "",
+  title,
+  description = "Values are encrypted in your vault.",
+  error,
+  children,
 }: Readonly<{
   busy: boolean;
   kind: VaultEntryKind;
   onClose(): void;
   onSave(kind: VaultEntryKind, values: Record<string, string>): Promise<void>;
   returnFocusRef: RefObject<HTMLElement | null>;
+  name?: string;
+  title?: string;
+  description?: string;
+  error?: string | null;
+  children?: ReactNode;
 }>) {
   const titleId = useId();
   const backdropRef = useRef<HTMLDivElement>(null);
@@ -270,14 +280,16 @@ function VaultEntryDialog({
       <section aria-labelledby={titleId} aria-modal="true" className="vault-dialog" ref={dialogRef} role="dialog">
         <header>
           <div>
-            <h2 id={titleId}>Add {kind === "api_key" ? "API key" : labelForKind(kind).toLowerCase()}</h2>
-            <p>Values are encrypted in your vault.</p>
+            <h2 id={titleId}>{title ?? `Add ${kind === "api_key" ? "API key" : labelForKind(kind).toLowerCase()}`}</h2>
+            <p>{description}</p>
           </div>
           <button aria-label="Close" disabled={busy} onClick={onClose} type="button"><X aria-hidden="true" /></button>
         </header>
-        <form onSubmit={submit}>
+        {children}
+        {error ? <p role="alert">{error}</p> : null}
+        <form autoComplete="off" onSubmit={submit}>
           <div className="vault-dialog-fields">
-            <VaultField autoComplete="off" inputRef={firstInputRef} label="Name" maxLength={120} name="name" placeholder={namePlaceholder(kind)} required />
+            <VaultField autoComplete="off" defaultValue={name} inputRef={firstInputRef} label="Name" maxLength={120} name="name" placeholder={namePlaceholder(kind)} required />
             {fieldsForKind(kind)}
           </div>
           <footer>
@@ -292,9 +304,12 @@ function VaultEntryDialog({
 
 function fieldsForKind(kind: VaultEntryKind): ReactNode {
   if (kind === "api_key") return <VaultField autoCapitalize="none" autoComplete="off" label="API key" maxLength={8192} name="api_key" required spellCheck={false} type="password" secure />;
+  // This edits a third-party credential, rather than signing in to this site.
+  // Explicitly disable autocomplete on both fields: Chromium's address-on-typing
+  // suggestions can otherwise mix with login suggestions and crash Brave 1.95.
   if (kind === "login") return <>
-    <VaultField autoCapitalize="none" autoComplete="username" label="Username" maxLength={512} name="username" required spellCheck={false} />
-    <VaultField autoComplete="new-password" label="Password" maxLength={8192} name="password" required type="password" secure />
+    <VaultField autoCapitalize="none" autoComplete="off" label="Username" maxLength={512} name="username" required spellCheck={false} />
+    <VaultField autoComplete="off" label="Password" maxLength={8192} name="password" required type="password" secure />
   </>;
   if (kind === "card") return <>
     <VaultField autoComplete="cc-number" inputMode="numeric" label="Card number" maxLength={23} name="card_number" required secure />

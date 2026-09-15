@@ -43,7 +43,9 @@ export type ManagedEgressConnectorId =
   | "gslides"
   | "gcontacts"
   | "slack"
-  | "x";
+  | "x"
+  | "spotify"
+  | "soundcloud";
 
 /** True preserves the caller's selector; a connection id injects an authorized default. */
 export type ManagedEgressConnectorAccess = boolean | string;
@@ -94,15 +96,15 @@ const PROVIDERS = new Map<string, readonly ProviderPolicy[]>([
   }]],
   ["docs.googleapis.com", [{
     connector: "gdocs",
-    path: (path) => path.startsWith("/v1/documents/"),
+    path: (path) => /^\/v1\/documents(?:\/|$)/.test(path),
   }]],
   ["sheets.googleapis.com", [{
     connector: "gsheets",
-    path: (path) => path.startsWith("/v4/spreadsheets/"),
+    path: (path) => /^\/v4\/spreadsheets(?:\/|$)/.test(path),
   }]],
   ["slides.googleapis.com", [{
     connector: "gslides",
-    path: (path) => path.startsWith("/v1/presentations/"),
+    path: (path) => /^\/v1\/presentations(?:\/|$)/.test(path),
   }]],
   ["people.googleapis.com", [{
     connector: "gcontacts",
@@ -112,6 +114,8 @@ const PROVIDERS = new Map<string, readonly ProviderPolicy[]>([
     connector: "slack",
     path: (path) => /^\/api\/[A-Za-z0-9._-]+$/.test(path),
   }]],
+  ["api.spotify.com", [{ connector: "spotify", path: (path) => /^\/v1(?:\/|$)/.test(path) }]],
+  ["api.soundcloud.com", [{ connector: "soundcloud", path: (path) => /^\/(?:me|tracks|playlists|users|resolve|likes|reposts)(?:\/|$)/.test(path) }]],
   ["api.x.com", [{
     connector: "x",
     path: (path) => /^\/2\/(?:tweets|users|lists|dm_(?:conversations|events)|media)(?:\/|$)/.test(path),

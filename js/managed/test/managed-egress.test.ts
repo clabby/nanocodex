@@ -195,6 +195,8 @@ describe("Computer egress gateway", () => {
       ["gcontacts", "https://people.googleapis.com/v1/people/me/connections"],
       ["slack", "https://slack.com/api/conversations.list"],
       ["x", "https://api.x.com/2/users/me"],
+      ["spotify", "https://api.spotify.com/v1/me/playlists"],
+      ["soundcloud", "https://api.soundcloud.com/me/playlists"],
     ] as const;
 
     for (const [capability, url] of routes) {

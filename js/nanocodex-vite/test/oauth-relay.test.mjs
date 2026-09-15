@@ -34,8 +34,8 @@ test("local connector and MCP authorizations use the loopback relay", () => {
   assert.equal(localMcpAuthorization(TARGET_ORIGIN, "short", "connect"), undefined);
 });
 
-test("unified Google and Slack provider callbacks stay owned by the local relay", () => {
-  for (const provider of ["google", "slack"]) {
+test("OAuth provider callbacks stay owned by the local relay", () => {
+  for (const provider of ["google", "slack", "spotify", "soundcloud"]) {
     assert.deepEqual(localConnectorAuthorization(TARGET_ORIGIN, provider, "managed"), {
       connector: provider,
       redirectUri: `${LOCAL_OAUTH_RELAY_ORIGIN}/v1/connectors/${provider}/callback`,

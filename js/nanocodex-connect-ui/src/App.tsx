@@ -106,6 +106,8 @@ const connectorIds = [
   ...googleConnectorCapabilities,
   "slack",
   "x",
+  "spotify",
+  "soundcloud",
   "chatgpt",
 ] as const satisfies readonly ConnectorCapability[];
 const connectDialogRoutingHeaders = { "x-nanocodex-connect-client": "onboarding" } as const;
@@ -1948,6 +1950,8 @@ function permissionTitle(id: string, fallback: string) {
   if (id === "github") return "GitHub";
   if (id === "gmail") return "Gmail";
   if (id === "gdrive") return "Google Drive";
+  if (id === "spotify") return "Spotify";
+  if (id === "soundcloud") return "SoundCloud";
   if (id === "x") return "X";
   if (id === "chatgpt" || id === "model") return "ChatGPT";
   return fallback;
@@ -2268,6 +2272,8 @@ function connectorDefinition(id: ConnectorId) {
   if (id === "gslides") return { id, name: "Google Slides", detail: "Read and edit presentations" };
   if (id === "gcontacts") return { id, name: "Google Contacts", detail: "Read and manage contacts" };
   if (id === "slack") return { id, name: "Slack", detail: "Act as you in connected workspaces" };
+  if (id === "spotify") return { id, name: "Spotify", detail: "Playlists, library, follows, and playback" };
+  if (id === "soundcloud") return { id, name: "SoundCloud", detail: "Tracks, playlists, likes, reposts, and follows" };
   if (id === "x") return { id, name: "X", detail: "Posts, follows, likes, lists, and messages" };
   return { id, name: "ChatGPT", detail: "Model access through your account" };
 }
@@ -2360,6 +2366,8 @@ function connectorProviderLabel(provider: ConnectorProvider): string {
   if (provider === "google") return "Google Workspace";
   if (provider === "github") return "GitHub";
   if (provider === "slack") return "Slack";
+  if (provider === "spotify") return "Spotify";
+  if (provider === "soundcloud") return "SoundCloud";
   if (provider === "chatgpt") return "ChatGPT";
   return "X";
 }

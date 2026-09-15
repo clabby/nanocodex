@@ -1,3 +1,4 @@
+import { connectorToolMetadata } from "./connector-tools";
 import type { X_API } from "nanocodex-tools/x";
 import type { HostedMachine } from "./hosted-tools-protocol";
 
@@ -74,6 +75,8 @@ export type AccountInfo = Readonly<{
   connectorAccounts: Readonly<
     Partial<Record<ConnectorCapabilityId, readonly ConnectorConnection[]>>
   >;
+  /** Discoverable first-party tools for currently connected, permitted services. */
+  connectorTools: ReturnType<typeof connectorToolMetadata>;
   /** Known hands, including retained user hands whose attachment is offline. */
   machines: readonly AccountMachine[];
   identity: Readonly<Record<string, never>>;
@@ -151,6 +154,7 @@ export async function accountInfo(
       authenticated,
       accounts,
       connectorAccounts,
+      connectorTools: connectorToolMetadata(authenticated),
       machines,
       identity: {},
       stablecoins: [],
@@ -174,6 +178,7 @@ export function projectAccountInfo(
       ...info,
       apis: info.apis ?? [],
       connectorAccounts: info.connectorAccounts ?? {},
+      connectorTools: connectorToolMetadata(info.authenticated),
       machines: info.machines ?? [],
       vault,
     };
@@ -211,6 +216,7 @@ export function projectAccountInfo(
     authenticated,
     accounts,
     connectorAccounts,
+    connectorTools: connectorToolMetadata(authenticated),
     vault,
     machines: info.machines ?? [],
   };
@@ -227,6 +233,7 @@ function emptyInfo(
     authenticated: [],
     accounts: {},
     connectorAccounts: {},
+    connectorTools: {},
     machines,
     identity: {},
     stablecoins: [],

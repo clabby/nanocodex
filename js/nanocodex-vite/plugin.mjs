@@ -339,6 +339,9 @@ async function localOAuthBindings() {
 }
 
 export function oauthBindingsFromEnvironment(environment) {
+  const spotifyClientId = firstEnvironmentValue(environment, [
+    "NANOCODEX_SPOTIFY_OAUTH_CLIENT_ID", "SPOTIFY_OAUTH_CLIENT_ID", "SPOTIFY_CLIENT_ID",
+  ]);
   return {
     ...oauthCredentialPair(environment, {
       label: "GitHub",
@@ -360,6 +363,14 @@ export function oauthBindingsFromEnvironment(environment) {
       secrets: ["NANOCODEX_SLACK_OAUTH_CLIENT_SECRET", "SLACK_OAUTH_CLIENT_SECRET", "SLACK_CLIENT_SECRET"],
       targetId: "SLACK_OAUTH_CLIENT_ID",
       targetSecret: "SLACK_OAUTH_CLIENT_SECRET",
+    }),
+    ...(spotifyClientId ? { SPOTIFY_OAUTH_CLIENT_ID: spotifyClientId } : {}),
+    ...oauthCredentialPair(environment, {
+      label: "SoundCloud",
+      ids: ["NANOCODEX_SOUNDCLOUD_OAUTH_CLIENT_ID", "SOUNDCLOUD_OAUTH_CLIENT_ID", "SOUNDCLOUD_CLIENT_ID"],
+      secrets: ["NANOCODEX_SOUNDCLOUD_OAUTH_CLIENT_SECRET", "SOUNDCLOUD_OAUTH_CLIENT_SECRET", "SOUNDCLOUD_CLIENT_SECRET"],
+      targetId: "SOUNDCLOUD_OAUTH_CLIENT_ID",
+      targetSecret: "SOUNDCLOUD_OAUTH_CLIENT_SECRET",
     }),
     ...oauthCredentialPair(environment, {
       label: "X",

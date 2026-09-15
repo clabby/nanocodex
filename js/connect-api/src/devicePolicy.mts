@@ -71,7 +71,7 @@ const optionalResources = new Set([
 ]);
 const connectors = new Set([
   "github", "gmail", "gdrive", "gcalendar", "gtasks", "gdocs",
-  "gsheets", "gslides", "gcontacts", "slack", "x", "chatgpt",
+  "gsheets", "gslides", "gcontacts", "slack", "x", "spotify", "soundcloud", "chatgpt",
 ]);
 const connectorFocusPrefix = "urn:nanocodex:connector-focus:";
 const visibility = new Set(["reply", "actions", "history", "traces"]);

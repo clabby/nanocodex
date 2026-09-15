@@ -7,12 +7,32 @@ struct NanocodexInboxApp: App {
     @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
         WindowGroup("Nanocodex", id: "inbox") {
-            InboxView(model: model)
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--spotify-loopback-smoke") {
+                SpotifyLoopbackSmokeView()
+            } else {
+                content
+            }
+            #else
+            content
+            #endif
+        }
+        .backgroundTask(.appRefresh(InboxModel.handRefreshIdentifier)) {
+            await model.refreshHandInBackground()
+        }
+    }
+
+    private var content: some View {
+        InboxView(model: model)
                 .onAppear { Task { await model.start() } }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
                     model.releaseInactiveHistory()
                 }
-                .onOpenURL { model.openAgentActivity($0) }
+                .onOpenURL { url in
+                    if url.scheme == "nanocodex", url.host == "connect", url.path == "/spotify", url.query == nil {
+                        model.openSpotifySettings = true
+                    } else { model.openAgentActivity(url) }
+                }
                 .onChange(of: scenePhase, initial: true) { _, phase in
                     if phase == .background {
                         model.voice.stop()
@@ -23,9 +43,5 @@ struct NanocodexInboxApp: App {
                         model.prepareHandForBackground()
                     }
                 }
-        }
-        .backgroundTask(.appRefresh(InboxModel.handRefreshIdentifier)) {
-            await model.refreshHandInBackground()
-        }
     }
 }

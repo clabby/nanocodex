@@ -28,6 +28,7 @@ const environment: StartupEnvironment = {
   runtime: "cloudflare-durable-object", default_cwd: "/brain",
   accountInfo: {
     status: "ready", apis: [X_API], authenticated: ["github"], accounts: { github: "work" },
+    connectorTools: {},
     connectorAccounts: { github: [{ id: "github-work", label: "work" }] },
     identity: {}, stablecoins: [], authorizations: [], vault: [],
     machines: [{ id: "user:hand", name: "laptop", kind: "user", mount: "/hand",

@@ -14,7 +14,9 @@ export type ConnectionLogoId =
   | "mcp"
   | "slack"
   | "tempo"
-  | "x";
+  | "x"
+  | "spotify"
+  | "soundcloud";
 
 export function ConnectionLogo({ id }: Readonly<{ id: ConnectionLogoId }>) {
   if (id === "chatgpt" || id === "openai") {
@@ -74,6 +76,18 @@ export function ConnectionLogo({ id }: Readonly<{ id: ConnectionLogoId }>) {
   }
   if (id === "slack") {
     return <span className="connector-logo connector-logo-slack" aria-hidden="true">S</span>;
+  }
+  if (id === "spotify") {
+    return <span className="connector-logo" aria-hidden="true"><svg viewBox="0 0 24 24" role="presentation">
+      <circle cx="12" cy="12" r="12" fill="#1db954" />
+      <path d="M5 9c5-1.5 9-1 14 1M6 12.5c4-1 8-.5 11.5 1M7 16c3-.8 6-.4 9 1" fill="none" stroke="#000" strokeWidth="1.7" strokeLinecap="round" />
+    </svg></span>;
+  }
+  if (id === "soundcloud") {
+    return <span className="connector-logo" aria-hidden="true"><svg viewBox="0 0 24 24" role="presentation">
+      <path fill="#f50" d="M10 7a6 6 0 0 1 10 4h.5a3.5 3.5 0 0 1 0 7H10V7Z" />
+      <path d="M7 9v9M4 11v7M1 13v4" stroke="#f50" strokeWidth="1.5" strokeLinecap="round" />
+    </svg></span>;
   }
   if (id === "tempo") {
     return <span className="connector-logo connector-logo-tempo" aria-hidden="true">T</span>;

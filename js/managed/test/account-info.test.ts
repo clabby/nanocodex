@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { connectorToolMetadata } from "../src/connector-tools";
 import { accountInfo, projectAccountInfo } from "../src/account-info";
 import { X_API } from "nanocodex-tools/x";
 
@@ -76,6 +77,7 @@ describe("managed account info", () => {
       status: "ready",
       apis: [],
       authenticated: ["gmail", "gdrive", "slack"],
+      connectorTools: connectorToolMetadata(["gmail", "gdrive", "slack"]),
       accounts: { gdrive: "work@example.com", slack: "Acme (U123)" },
       connectorAccounts: {
         gmail: [
@@ -136,6 +138,7 @@ describe("managed account info", () => {
     delete retained.machines;
     expect(projectAccountInfo(retained)).toMatchObject({
       connectorAccounts: {},
+      connectorTools: connectorToolMetadata(["github"]),
       machines: [],
     });
   });
@@ -232,6 +235,7 @@ describe("managed accountInfo vault projection", () => {
       authenticated: ["github"],
       accounts: { github: "octocat" },
       connectorAccounts: {},
+      connectorTools: connectorToolMetadata(["github"]),
       machines: [],
       identity: {},
       stablecoins: [],
@@ -360,6 +364,7 @@ describe("managed accountInfo vault projection", () => {
     expect(projectAccountInfo(legacy)).toEqual({
       ...legacy,
       connectorAccounts: {},
+      connectorTools: connectorToolMetadata(["github"]),
       machines: [],
       vault: [],
     });

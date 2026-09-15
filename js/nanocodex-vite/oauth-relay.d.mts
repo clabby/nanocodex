@@ -1,4 +1,4 @@
-export type LocalOAuthProvider = "github" | "google" | "gmail" | "gdrive" | "slack" | "x";
+export type LocalOAuthProvider = "github" | "google" | "gmail" | "gdrive" | "slack" | "x" | "spotify" | "soundcloud";
 export type LocalOAuthFlow = "connect" | "managed";
 export type LocalConnectorFlow = LocalOAuthFlow;
 export type LocalConnectorAuthorization = Readonly<{

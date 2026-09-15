@@ -24,6 +24,8 @@ test("cloud grants preserve exact service capability connection selections", () 
       "gslides",
       "gcontacts",
       "slack",
+      "spotify",
+      "soundcloud",
     ],
     connectorConnections: {
       gmail: [A, B],
@@ -35,6 +37,8 @@ test("cloud grants preserve exact service capability connection selections", () 
       gslides: [A],
       gcontacts: [A],
       slack: [B],
+      spotify: [A],
+      soundcloud: [B],
     },
   }));
 
@@ -48,6 +52,8 @@ test("cloud grants preserve exact service capability connection selections", () 
     "gslides",
     "gcontacts",
     "slack",
+    "spotify",
+    "soundcloud",
   ]);
   assert.deepEqual(connection.grant.connectorConnections, {
     gmail: [A, B],
@@ -59,6 +65,8 @@ test("cloud grants preserve exact service capability connection selections", () 
     gslides: [A],
     gcontacts: [A],
     slack: [B],
+    spotify: [A],
+    soundcloud: [B],
   });
   assert.equal(Object.isFrozen(connection.grant.connectorConnections), true);
   assert.equal(Object.isFrozen(connection.grant.connectorConnections.gmail), true);

@@ -10,9 +10,11 @@ export type ConnectorCapability =
   | "gcontacts"
   | "slack"
   | "x"
+  | "spotify"
+  | "soundcloud"
   | "chatgpt";
 
-export type ConnectorProvider = "github" | "google" | "slack" | "x" | "chatgpt";
+export type ConnectorProvider = "github" | "google" | "slack" | "x" | "spotify" | "soundcloud" | "chatgpt";
 
 export type ConnectorConnection = Readonly<{
   id: string;

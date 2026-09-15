@@ -229,7 +229,7 @@ test("the account-action browser harness exposes one exact model-visible tool se
   assert.equal(accountConnectionRequest.cache, "no-store");
   assert.deepEqual(
     byName.requestAccountConnection.parameters.properties.connector.enum,
-    ["github", "gmail", "gdrive", "gcalendar", "gtasks", "gdocs", "gsheets", "gslides", "gcontacts", "slack", "x"],
+    ["github", "gmail", "gdrive", "gcalendar", "gtasks", "gdocs", "gsheets", "gslides", "gcontacts", "slack", "x", "spotify", "soundcloud"],
   );
   assert.match(byName.requestAccountConnection.description, /exact authorization_url as a Markdown link/i);
   await assert.rejects(
@@ -631,3 +631,24 @@ function preparedBrowser() {
     },
   };
 }
+
+
+test("browser agents can request both music account connections", async () => {
+  for (const [connector, label, origin] of [
+    ["spotify", "Spotify", "https://accounts.spotify.com"],
+    ["soundcloud", "SoundCloud", "https://secure.soundcloud.com"],
+  ]) {
+    const url = new URL(`${origin}/authorize`);
+    url.search = new URLSearchParams({
+      client_id: "id", state: "state", redirect_uri: `https://demo.test/v1/connectors/${connector}/callback`,
+      response_type: "code", code_challenge: "A".repeat(43), code_challenge_method: "S256",
+      ...(connector === "spotify" ? { scope: "playlist-modify-private" } : {}),
+    }).toString();
+    const runtime = bindBrowser({ ...preparedBrowser(), fetch: async () => Response.json({ authorization_url: url.href }) }, { accountConnectionRequests: true });
+    const tool = runtime.tools.find(({ name }) => name === "requestAccountConnection");
+    const result = await tool.handler({ connector }, context);
+    assert.equal(result.authorization_url, url.href);
+    assert.equal(result.label, label);
+    assert.equal(result.status, "authorization_required");
+  }
+});

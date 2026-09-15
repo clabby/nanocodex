@@ -12,6 +12,8 @@ const CLOUD_ACCOUNT_PROVIDERS = Object.freeze([
   "gcontacts",
   "slack",
   "x",
+  "spotify",
+  "soundcloud",
   "chatgpt",
 ]);
 const MCP_CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;

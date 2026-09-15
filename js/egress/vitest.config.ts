@@ -1,8 +1,10 @@
+import { SPOTIFY_SCOPES, SPOTIFY_LOOPBACK_CLIENT_ID } from "./src/connectors/music";
 import { gitProvider } from "../test-fixtures/git-provider.mjs";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
 
 const transientGoogleRevocations = new Set<string>();
+const transientSpotifyIdentities = new Set<string>();
 
 const TEST_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY";
 const TEST_CHATGPT_EGRESS = `
@@ -91,6 +93,9 @@ export default defineConfig({
           GITHUB_OAUTH_CLIENT_SECRET: "github-client-secret",
           GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
           GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
+          SPOTIFY_OAUTH_CLIENT_ID: "spotify-client-id",
+          SOUNDCLOUD_OAUTH_CLIENT_ID: "soundcloud-client-id",
+          SOUNDCLOUD_OAUTH_CLIENT_SECRET: "soundcloud-client-secret",
           X_OAUTH_CLIENT_ID: "x-client-id",
           X_OAUTH_CLIENT_SECRET: "x-client-secret",
           SLACK_OAUTH_CLIENT_ID: "slack-client-id",
@@ -106,6 +111,55 @@ export default defineConfig({
           const gitResponse = await gitProvider(request);
           if (gitResponse) return gitResponse;
           const url = new URL(request.url);
+          const music = url.hostname === "accounts.spotify.com" ? "spotify"
+            : url.hostname === "secure.soundcloud.com" ? "soundcloud" : undefined;
+          if (music && request.method === "POST" && (url.pathname === "/api/token" || url.pathname === "/oauth/token")) {
+            const body = new URLSearchParams(await request.text());
+            if ((body.get("client_id") !== `${music}-client-id`
+              && !(music === "spotify" && body.get("client_id") === SPOTIFY_LOOPBACK_CLIENT_ID))
+              || (music === "soundcloud" && body.get("client_secret") !== "soundcloud-client-secret")) {
+              return Response.json({ error: "invalid_client" }, { status: 401 });
+            }
+            const refresh = body.get("grant_type") === "refresh_token";
+            if (music === "spotify" && body.get("code") === "loopback-account"
+              && body.get("redirect_uri") !== "http://127.0.0.1:8989/login") return new Response(null, { status: 400 });
+            if (music === "spotify" && body.get("refresh_token") === "music-refresh-loopback-account"
+              && body.get("client_id") !== SPOTIFY_LOOPBACK_CLIENT_ID) return new Response(null, { status: 401 });
+            const identity = refresh ? body.get("refresh_token")?.replace("music-refresh-", "") : body.get("code");
+            if (!refresh && (!/^[A-Za-z0-9._~-]{43,128}$/.test(body.get("code_verifier") ?? "") || !body.get("redirect_uri"))) {
+              return Response.json({ error: "invalid_grant" }, { status: 400 });
+            }
+            if (refresh && identity?.endsWith("denied")) return Response.json({ error: "invalid_grant" }, { status: 400 });
+            if (refresh && identity?.endsWith("unavailable")) return Response.json({ error: "unavailable" }, { status: 503 });
+            return Response.json({
+              access_token: `music-secret-${identity}${refresh ? "-refreshed" : ""}`,
+              // Spotify is allowed to omit the refresh token and scope on refresh.
+              ...(!refresh || music === "soundcloud" ? { refresh_token: `music-refresh-${identity}${refresh ? "-rotated" : ""}` } : {}),
+              expires_in: refresh ? 3600 : 1, token_type: "Bearer",
+              ...(!refresh ? { scope: music === "spotify" ? SPOTIFY_SCOPES.join(" ") : "" } : {}),
+            });
+          }
+          if (music === "soundcloud" && url.pathname === "/sign-out") {
+            const body = await request.json() as { access_token?: string };
+            return new Response(null, { status: body.access_token?.startsWith("music-secret-") ? 204 : 401 });
+          }
+          if (url.hostname === "api.spotify.com" || url.hostname === "api.soundcloud.com") {
+            const provider = url.hostname === "api.spotify.com" ? "spotify" : "soundcloud";
+            const auth = request.headers.get("authorization") ?? "";
+            const prefix = `${provider === "spotify" ? "Bearer" : "OAuth"} music-secret-`;
+            if (!auth.startsWith(prefix)) return Response.json({ error: "unauthorized" }, { status: 401 });
+            const account = auth.slice(prefix.length).replace(/-refreshed$/, "");
+            if (url.pathname === "/v1/me" || url.pathname === "/me") {
+              if (account === "loopback-account" && !transientSpotifyIdentities.has(account)) {
+                transientSpotifyIdentities.add(account);
+                return new Response(null, { status: 429, headers: { "retry-after": "0" } });
+              }
+              return Response.json(provider === "spotify" ? { id: account, display_name: account }
+                : { urn: `soundcloud:users:${account}`, username: account });
+            }
+            if (url.pathname.endsWith("/redirect")) return Response.redirect("https://evil.test/", 302);
+            return Response.json({ account, refreshed: auth.endsWith("-refreshed"), method: request.method, body: await request.text() });
+          }
           if (request.method === "POST" && url.hostname === "slack.com"
             && url.pathname === "/api/oauth.v2.access") {
             const body = await request.clone().formData();
@@ -401,48 +455,6 @@ export default defineConfig({
               },
             });
           }
-          if (url.hostname === "mercator.sh" && request.method === "POST"
-            && url.pathname === "/mcp") {
-            const body = await request.json() as { id?: unknown; method?: unknown };
-            if (request.headers.has("authorization")) {
-              return Response.json({ error: "unexpected_authorization" }, { status: 400 });
-            }
-            if (body.method === "initialize") {
-              return Response.json({
-                jsonrpc: "2.0",
-                id: body.id,
-                result: {
-                  protocolVersion: "2025-06-18",
-                  capabilities: { tools: { listChanged: true } },
-                  serverInfo: { name: "mercator", title: "Mercator", version: "0.5.0" },
-                },
-              });
-            }
-            if (body.method === "tools/list") {
-              return Response.json({
-                jsonrpc: "2.0",
-                id: body.id,
-                result: {
-                  tools: [{
-                    name: "search_services",
-                    description: "Discover services through Mercator.",
-                    inputSchema: { type: "object", properties: { query: { type: "string" } } },
-                  }],
-                },
-              });
-            }
-            if (body.method === "tools/call") {
-              return Response.json({
-                jsonrpc: "2.0",
-                id: body.id,
-                result: {
-                  content: [{ type: "text", text: "Mercator is connected." }],
-                  structuredContent: { connected: true },
-                },
-              });
-            }
-            return Response.json({ jsonrpc: "2.0", id: body.id, result: {} });
-          }
           if (["mcp-fixture.nanocodex.dev", "mcp.linear.app", "mcp-standard.nanocodex.dev"].includes(url.hostname)
             && request.method === "GET" && url.pathname === "/mcp") {
             const authorization = request.headers.get("authorization");
@@ -505,16 +517,6 @@ export default defineConfig({
           if (["mcp-fixture.nanocodex.dev", "mcp.linear.app", "mcp-standard.nanocodex.dev"].includes(url.hostname)
             && request.method === "POST" && url.pathname === "/mcp") {
             const authorization = request.headers.get("authorization");
-            if (!authorization) {
-              return new Response(null, {
-                status: 401,
-                headers: url.hostname === "mcp-standard.nanocodex.dev"
-                  ? {}
-                  : {
-                      "www-authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource/mcp"`,
-                    },
-              });
-            }
             if (authorization === "Bearer mcp-stale-access") {
               return Response.json({ error: "expired" }, { status: 401 });
             }

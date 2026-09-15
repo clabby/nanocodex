@@ -691,3 +691,19 @@ WebRTC retains its adaptive jitter buffering and echo/noise/gain processing.
 Timing diagnostics and the opt-in receive-only voice integration test report
 startup and request-to-first-observed-audio time. These checks do not measure
 microphone-to-audible-response latency or establish identical latency to Codex.
+
+
+## Spotify connection
+
+Open **Settings → Connected accounts → Connect Spotify**. Spotify opens in an
+in-app Safari view; ncspot is the application name on its consent screen. The
+phone receives Spotify's loopback callback and forwards the authorization code
+to the encrypted Nanocodex broker. Agents use the resulting account connection
+without access to credentials. Disconnect is available beside each linked account.
+No desktop helper or pasted callback URL is required. The listener binds only
+127.0.0.1:8989 and is short-lived; if another connection attempt occupies that
+port, close it and retry. Keep Nanocodex open until authorization completes.
+
+The focused `SpotifyLoopbackTests` exercise the actual socket and callback
+validation. `SpotifyLoopbackUITests` exercises Safari returning to that listener
+on iOS with a nonsecret fixture; real Spotify authorization is a separate live gate.

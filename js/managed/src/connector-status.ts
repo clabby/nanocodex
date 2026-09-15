@@ -10,9 +10,11 @@ export const CONNECTOR_CAPABILITY_IDS = [
   "gcontacts",
   "slack",
   "x",
+  "spotify",
+  "soundcloud",
 ] as const;
 
-export const CONNECTOR_PROVIDER_IDS = ["github", "google", "slack", "x"] as const;
+export const CONNECTOR_PROVIDER_IDS = ["github", "google", "slack", "x", "spotify", "soundcloud"] as const;
 
 export const CONNECTOR_PROVIDER_CATALOG = Object.freeze([
   {
@@ -47,6 +49,18 @@ export const CONNECTOR_PROVIDER_CATALOG = Object.freeze([
     name: "X",
     description: "Posts, messages, follows, likes, bookmarks, and lists",
     capabilities: Object.freeze([{ id: "x", name: "X" }]),
+  },
+  {
+    id: "spotify",
+    name: "Spotify",
+    description: "Playlists, music library, listening history, and playback",
+    capabilities: Object.freeze([{ id: "spotify", name: "Spotify" }]),
+  },
+  {
+    id: "soundcloud",
+    name: "SoundCloud",
+    description: "Tracks, playlists, likes, and reposts",
+    capabilities: Object.freeze([{ id: "soundcloud", name: "SoundCloud" }]),
   },
 ] as const satisfies ReadonlyArray<Readonly<{
   id: ConnectorProviderId;

@@ -86,12 +86,16 @@ const accountConnectorCapabilities = [
   ...googleConnectorCapabilities,
   "slack",
   "x",
+  "spotify",
+  "soundcloud",
 ] as const satisfies readonly AccountConnectorCapability[];
 
 const connectorDefinitions = [
   { provider: "github", capabilities: ["github"], label: "GitHub", description: "Clone, push, and manage repositories and workflows" },
   { provider: "google", capabilities: googleConnectorCapabilities, label: "Google Workspace", description: "Mail, Drive, Calendar, Tasks, Docs, Sheets, Slides, and Contacts" },
   { provider: "slack", capabilities: ["slack"], label: "Slack", description: "Read and send messages as you in connected workspaces" },
+  { provider: "spotify", capabilities: ["spotify"], label: "Spotify", description: "Read and manage playlists, library, follows, and playback" },
+  { provider: "soundcloud", capabilities: ["soundcloud"], label: "SoundCloud", description: "Read and manage tracks, playlists, likes, reposts, and follows" },
   { provider: "x", capabilities: ["x"], label: "X", description: "Read and publish posts; manage follows, likes, bookmarks, lists, and messages" },
 ] as const satisfies ReadonlyArray<{
   provider: AccountConnectorProvider;
@@ -336,6 +340,11 @@ export function ProfileConnectors({
     capabilities: readonly AccountConnectorCapability[],
   ) => {
     if (operation || activeConnector.current || !connectors) return;
+    if (provider === "spotify") {
+      window.location.href = "nanocodex://connect/spotify";
+      setError("Finish connecting Spotify in the Nanocodex iPhone app, under Settings → Connected accounts.");
+      return;
+    }
     const popup = window.open(
       "about:blank",
       "nanocodex-account-connector",

@@ -6,7 +6,7 @@ import { isConnectApiRequest } from "./connectApiProxy.ts";
 const state = `connect.${"s".repeat(43)}`;
 
 test("production callback routing accepts unified Google and Slack providers", () => {
-  for (const provider of ["github", "google", "gmail", "gdrive", "slack", "x"]) {
+  for (const provider of ["github", "google", "gmail", "gdrive", "slack", "x", "spotify", "soundcloud"]) {
     const url = new URL(`https://nanocodex.test/v1/connectors/${provider}/callback?state=${state}`);
     assert.equal(isConnectApiRequest(new Request(url), url.pathname), true, provider);
   }

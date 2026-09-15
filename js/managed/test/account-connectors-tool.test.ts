@@ -95,6 +95,8 @@ describe("managed account connector tool", () => {
         { id: "google", name: "Google Workspace", capabilities: ["gmail", "gdrive", "gcalendar", "gtasks", "gdocs", "gsheets", "gslides", "gcontacts"] },
         { id: "slack", name: "Slack", capabilities: ["slack"] },
         { id: "x", name: "X", capabilities: ["x"] },
+        { id: "spotify", name: "Spotify", capabilities: ["spotify"] },
+        { id: "soundcloud", name: "SoundCloud", capabilities: ["soundcloud"] },
       ],
     });
     expect(JSON.stringify(result)).not.toMatch(/access_token|secret/);
@@ -282,3 +284,28 @@ function providerAuthorizationUrl(provider: "github" | "google" | "slack" | "x")
   url.search = new URLSearchParams(query).toString();
   return url.href;
 }
+
+
+it.each(["spotify", "soundcloud"] as const)("managed agents can connect %s", async (provider) => {
+  const url = new URL(provider === "spotify" ? "https://accounts.spotify.com/authorize" : "https://secure.soundcloud.com/authorize");
+  url.search = new URLSearchParams({
+    client_id: "id", state: "state", redirect_uri: `${base.publicOrigin}/v1/connectors/${provider}/callback`,
+    response_type: "code", code_challenge: "A".repeat(43), code_challenge_method: "S256",
+    ...(provider === "spotify" ? { scope: "playlist-modify-private" } : {}),
+  }).toString();
+  const result = await manageAccountConnectors({
+    ...base, broker: { fetch: async () => Response.json({ authorization_url: url.href }) } as unknown as Fetcher,
+  }, { operation: "connect", connector: provider });
+  expect(result).toMatchObject({ ok: true, status: "authorization_required", connector: provider, authorization_url: provider === "spotify" ? "nanocodex://connect/spotify" : url.href });
+});
+
+
+it("Spotify connect returns the phone flow without starting hosted OAuth and keeps owner controls", async () => {
+  const fetch = vi.fn();
+  const options = { ...base, broker: { fetch } as unknown as Fetcher };
+  expect(await manageAccountConnectors(options, { operation: "connect", connector: "spotify" }))
+    .toMatchObject({ authorization_url: "nanocodex://connect/spotify" });
+  expect(await manageAccountConnectors({ ...options, canManage: () => false }, { operation: "connect", connector: "spotify" }))
+    .toMatchObject({ status: "forbidden" });
+  expect(fetch).not.toHaveBeenCalled();
+});

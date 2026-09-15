@@ -376,6 +376,8 @@ function requestedConnectors(value) {
     "gcontacts",
     "slack",
     "x",
+    "spotify",
+    "soundcloud",
     "chatgpt",
   ];
   if (value.some((provider) => !supported.includes(provider))) {
@@ -413,6 +415,8 @@ function connectorName(provider) {
     gcontacts: "Google Contacts",
     slack: "Slack",
     x: "X",
+    spotify: "Spotify",
+    soundcloud: "SoundCloud",
     chatgpt: "ChatGPT",
   })[provider];
 }

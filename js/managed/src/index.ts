@@ -103,6 +103,7 @@ import {
 } from "./browser-runtime";
 import {
   exactConnectorAccess,
+  handleManagedEgress,
   type ManagedEgressConnectorId,
 } from "./managed-egress";
 import {
@@ -213,6 +214,7 @@ import {
   type AccountMachine,
 } from "./account-info";
 import { accountCatalog } from "./account-catalog";
+import { connectorToolsProvider } from "./connector-tools";
 import { accountConnectorsTool } from "./account-connectors-tool";
 import {
   MANAGED_CLOUDFLARE_PROVIDER,
@@ -7029,6 +7031,17 @@ export class DurableAgentSession extends DurableComputerSession {
     const internalRuntime = Symbol.for("nanocodex.cloudflare.internalRuntime");
     const internalConfiguration = Symbol.for("nanocodex.cloudflare.internalConfiguration");
     const hostedProviders = multiplayer || !accountToolsEnabled(configuration) ? [] : [
+      connectorToolsProvider({
+        available: capability => {
+          if (restrictedEnvironment) return false;
+          const authorization = this.#activeTurnAuthorization();
+          return authorization !== undefined && (authorization.connectGrant === undefined
+            || authorization.connectGrant.connectors.includes(capability));
+        },
+        fetch: (request, context, expectedCapability) => handleManagedEgress(request, this.env.NANOCODEX,
+          this.#credentialSubject(), (capability, connectionId) =>
+            capability === expectedCapability && this.#toolConnectorAllowed(capability, connectionId, context)),
+      }),
       this.#hostedTools.provider(),
       ...(this.#accountHostedTools === undefined ? [] : [this.#accountHostedTools]),
     ];
@@ -7293,6 +7306,7 @@ export class DurableAgentSession extends DurableComputerSession {
             "A Code Mode cell captures its mount mapping. Commands in Promise.all may run concurrently on different cwd roots, and subagents use the same cwd rule independently. A disconnect or reconnect never retargets an admitted command or session.",
             "Cloudflare sandbox hands are separate retained workspaces mounted into each other's native filesystem namespaces. A process may write its executing hand through /workspace or that hand's logical mount path, read peer hand paths without mutating them, and read or write /brain using ordinary filesystem syscalls. The trees are mounted, never copied or synchronized. Connected user hands and future providers remain placement-only until their provider advertises a conforming native namespace adapter, so native_cross_mounts remains false globally while runtimeInfo.cloudflare_native_cross_mounts is true.",
             "The browser_execute tool is the managed remote browser. Reuse its retained session when continuity matters. Never inspect, return, or persist cookies, authorization material, CDP connection URLs, provider URLs, or Live View URLs. If a login, MFA, CAPTCHA, or other human-only gate appears, stop and ask the user to complete it outside the model-visible browser tool; do not bypass or evade the gate.",
+            "Connected services expose first-party deferred tools alongside MCPs in tool_search. Search by service and operation (for example Spotify playlists); accountInfo.connectorTools lists the tool names for connected services. Use the discovered service_request tool for authenticated JSON reads and writes, selecting the exact connectorAccounts id when multiple accounts exist. Provider scopes and live grants still apply. Never automatically retry a write after an ambiguous failure.",
             "For ordinary account operations, accountInfo is not a prerequisite to an explicit gh, git, curl, or other shell command. Those commands use transparent authenticated egress when the current grant permits it. accountInfo is a tool, not a shell command.",
             "For a Nanocodex iPhone self-update requested from the phone, prefer the repository's apple/scripts/request-self-update.sh helper from a Cloudflare sandbox Hand. It dispatches the supported signed macOS Xcode delivery workflow, waits for the exact run, and writes its provider receipt to durable /brain/ios-deployments. Do not attempt to install Xcode in Linux or request Apple signing credentials; signing stays in GitHub Actions and Apple TestFlight performs supported distribution.",
             "When accountInfo lists multiple connectorAccounts for a service, choose the appropriate connection by label and pass its exact id as X-Nanocodex-Connector-Connection on that provider request. Never invent a connection id. The egress proxy validates it against the active grant.",

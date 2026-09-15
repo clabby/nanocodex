@@ -12,6 +12,8 @@ export type CloudAccount =
   | "gcontacts"
   | "slack"
   | "x"
+  | "spotify"
+  | "soundcloud"
   | "chatgpt";
 
 /** Secret-free account identity returned by a connector status reader. */

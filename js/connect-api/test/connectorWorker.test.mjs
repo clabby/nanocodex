@@ -63,6 +63,27 @@ test("Worker connector execution fences and forwards the exact approved identity
   assert.equal(legacyExpansion.status, 403);
   assert.equal((await legacyExpansion.json()).error.code, "connector_connection_not_granted");
 
+  for (const [provider, url] of [
+    ["spotify", "https://api.spotify.com/v1/me/playlists"],
+    ["soundcloud", "https://api.soundcloud.com/playlists"],
+  ]) {
+    grant = { ...activeGrant({ [provider]: [alpha] }), capabilities: [provider] };
+    const body = JSON.stringify({ title: "Music playlist" });
+    const response = await worker.fetch(egressRequest(alpha, {
+      url, method: "POST", headers: { "content-type": "application/json" },
+      body_base64: Buffer.from(body).toString("base64"),
+    }), env, context);
+    assert.equal(response.status, 200);
+    assert.equal(forwarded.at(-1).url, url);
+    assert.equal(forwarded.at(-1).headers.get("x-nanocodex-connector-connection"), alpha);
+    assert.equal(await forwarded.at(-1).text(), body);
+    const count = forwarded.length;
+    assert.equal((await worker.fetch(egressRequest(bravo, { url }), env, context)).status, 403);
+    grant = { ...grant, capabilities: [] };
+    assert.equal((await worker.fetch(egressRequest(alpha, { url }), env, context)).status, 403);
+    assert.equal(forwarded.length, count);
+  }
+
   grant = { ...activeGrant({ github: [alpha] }), capabilities: ["github"] };
   const bytes = Uint8Array.from({ length: 300 * 1024 }, (_, index) => index % 256);
   const largeSize = 17 * 1024 * 1024 + 123;

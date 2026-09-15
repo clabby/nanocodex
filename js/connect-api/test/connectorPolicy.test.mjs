@@ -23,7 +23,7 @@ const charlie = "c".repeat(43);
 test("capabilities stay provider-neutral while Google shares one OAuth control provider", () => {
   assert.deepEqual(connectorCapabilities, [
     "github", "gmail", "gdrive", "gcalendar", "gtasks", "gdocs",
-    "gsheets", "gslides", "gcontacts", "slack", "x", "chatgpt",
+    "gsheets", "gslides", "gcontacts", "slack", "x", "spotify", "soundcloud", "chatgpt",
   ]);
   for (const capability of [
     "gmail", "gdrive", "gcalendar", "gtasks", "gdocs", "gsheets", "gslides", "gcontacts",
@@ -309,4 +309,22 @@ test("provider URL routing covers unified Google capabilities and Slack narrowly
     () => connectorRequestTarget("gcontacts", "/v1/peopleAdmin:searchContacts"),
     (error) => error.code === "connector_destination_denied",
   );
+});
+
+
+test("music connectors route reads and writes only to their own resource APIs", () => {
+  for (const [provider, origin, paths] of [
+    ["spotify", "https://api.spotify.com", ["/v1/me", "/v1/me/playlists", "/v1/playlists/id/items", "/v1/me/player/play"]],
+    ["soundcloud", "https://api.soundcloud.com", ["/me", "/tracks", "/playlists/id", "/likes/tracks/soundcloud:tracks:1", "/reposts/tracks/1"]],
+  ]) {
+    assert.equal(connectorProvider(provider), provider);
+    for (const path of paths) {
+      const target = connectorRequestTarget(provider, path);
+      assert.equal(target.href, origin + path);
+      assert.equal(connectorCapabilityForUrl(target), provider);
+    }
+    for (const path of ["//evil.test/me", "/oauth/token", "/sign-out", "/disconnect", "/me?access_token=secret", "/v1/%252e%252e/oauth/token"]) {
+      assert.throws(() => connectorRequestTarget(provider, path), ConnectorPolicyFailure);
+    }
+  }
 });

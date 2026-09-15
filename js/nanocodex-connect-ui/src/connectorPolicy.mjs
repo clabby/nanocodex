@@ -14,10 +14,12 @@ export const connectorCapabilityIds = Object.freeze([
   ...googleConnectorCapabilities,
   "slack",
   "x",
+  "spotify",
+  "soundcloud",
   "chatgpt",
 ]);
 
-export const connectorProviderIds = Object.freeze(["github", "google", "slack", "x", "chatgpt"]);
+export const connectorProviderIds = Object.freeze(["github", "google", "slack", "x", "spotify", "soundcloud", "chatgpt"]);
 export const connectorConnectionHeader = "X-Nanocodex-Connector-Connection";
 
 const capabilityIds = new Set(connectorCapabilityIds);
@@ -42,6 +44,8 @@ export function connectorCapabilityLabel(capability) {
   if (capability === "gslides") return "Slides";
   if (capability === "gcontacts") return "Contacts";
   if (capability === "slack") return "Slack";
+  if (capability === "spotify") return "Spotify";
+  if (capability === "soundcloud") return "SoundCloud";
   if (capability === "x") return "X";
   if (capability === "chatgpt") return "ChatGPT";
   return undefined;

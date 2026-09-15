@@ -290,6 +290,29 @@ cookie-bearing CDP fields are redacted at the tool adapter boundary; human
 handoff remains disabled until there is an account-authenticated first-party
 handoff route that can resolve provider URLs without crossing model results.
 
+### Spotify on iPhone
+
+**Connect Spotify** uses browser OAuth with PKCE. The native app binds only
+`127.0.0.1:8989`, opens Spotify in `SFSafariViewController`, and accepts one
+state-matching `/login` callback. It forwards only code/state to the authenticated
+`POST /v1/connectors/spotify/loopback/callback` route. The encrypted broker owns
+PKCE, token exchange, refresh and API authorization; no tokens enter agent tools.
+The listener stops on completion, cancellation, leaving settings, or timeout.
+
+`GET /v1/connectors/spotify/loopback` returns connection metadata; `POST` starts
+an authorization and `DELETE` disconnects the specified `connection_id`. These
+routes require a persistent owner session or owner API key with account-management
+and tool authority. Delegated Connect grants cannot start or complete the flow.
+The web Connect Spotify card opens `nanocodex://connect/spotify` on the phone.
+
+This flow uses the public ncspot client registration also used by
+[spotify-player](https://github.com/aome510/spotify-player/blob/master/spotify_player/src/auth.rs).
+Its client ID and exact loopback redirect are fixed in the broker, and the client
+ID is retained with each grant for refresh. Spotify consent identifies ncspot;
+its availability and shared API quotas remain outside Nanocodex's control.
+The separately configured hosted Spotify OAuth flow remains supported by the
+broker. Vault password logins are separate from OAuth connector status.
+
 ### Host-principal project registry
 
 Applications that exchange an existing Privy, Better Auth, Auth0, or other
@@ -391,3 +414,16 @@ The Debian server Hand image separately provides `chromium`.
 Reusable definitions, environment templates, signed lifecycle webhooks, usage
 inspection, immutable turn artifacts and HTTP tool results are documented in
 [Managed agent configuration and operations](../../docs/MANAGED_AGENT_CONFIGURATION.md).
+
+
+### Connected-account tool discovery
+
+Managed agents discover first-party `github_request`, Google Workspace capability
+`*_request`, `slack_request`, `x_request`, `spotify_request`, and
+`soundcloud_request` tools through the same `tool_search` used by connected MCPs.
+`accountInfo.connectorTools` advertises tools for connected, grant-visible services;
+`connectorAccounts` supplies exact account selectors. Each call uses authenticated
+egress with live grant and connection checks, broker-owned token refresh, fixed
+provider origins, bounded JSON bodies/responses, and no automatic write retries.
+Provider scopes and endpoint availability still apply. Spotify connection links
+open `nanocodex://connect/spotify` to complete OAuth on the phone.

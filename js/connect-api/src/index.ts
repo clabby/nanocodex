@@ -629,7 +629,7 @@ export default {
       }
 
       const connectorCallback = url.pathname.match(
-        /^\/v1\/connectors\/(github|google|gmail|gdrive|gcalendar|gtasks|gdocs|gsheets|gslides|gcontacts|slack|x)\/callback$/,
+        /^\/v1\/connectors\/(github|google|gmail|gdrive|gcalendar|gtasks|gdocs|gsheets|gslides|gcontacts|slack|x|spotify|soundcloud)\/callback$/,
       );
       if (connectorCallback) {
         if (request.method !== "GET") {
@@ -786,7 +786,7 @@ export default {
       }
 
       const connectorRoute = url.pathname.match(
-        /^\/v1\/connectors\/(github|google|gmail|gdrive|gcalendar|gtasks|gdocs|gsheets|gslides|gcontacts|slack|x|chatgpt)(?:\/connections\/([A-Za-z0-9_-]{43})|\/([A-Za-z0-9_-]{43}))?$/,
+        /^\/v1\/connectors\/(github|google|gmail|gdrive|gcalendar|gtasks|gdocs|gsheets|gslides|gcontacts|slack|x|spotify|soundcloud|chatgpt)(?:\/connections\/([A-Za-z0-9_-]{43})|\/([A-Za-z0-9_-]{43}))?$/,
       );
       if (connectorRoute) {
         const connector = connectorRoute[1]!;
@@ -4574,6 +4574,8 @@ function connectorAuthorizationUrl(value: unknown, provider: OAuthConnectorProvi
   }
   const expected = provider === "github"
     ? ["https://github.com", "/login/oauth/authorize"]
+    : provider === "spotify" ? ["https://accounts.spotify.com", "/authorize"]
+    : provider === "soundcloud" ? ["https://secure.soundcloud.com", "/authorize"]
     : provider === "x"
       ? ["https://x.com", "/i/oauth2/authorize"]
       : provider === "slack"

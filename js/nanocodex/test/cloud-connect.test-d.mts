@@ -134,7 +134,7 @@ void decorated;
 declare const connection: Connection;
 connection.accountAddress satisfies `0x${string}`;
 const connector = connection.grant.connectors[0];
-connector satisfies "github" | "gmail" | "gdrive" | "gcalendar" | "gtasks" | "gdocs" | "gsheets" | "gslides" | "gcontacts" | "slack" | "x" | "chatgpt" | undefined;
+connector satisfies "github" | "gmail" | "gdrive" | "gcalendar" | "gtasks" | "gdocs" | "gsheets" | "gslides" | "gcontacts" | "slack" | "x" | "spotify" | "soundcloud" | "chatgpt" | undefined;
 const connectorConnections: ConnectorConnectionSelection | undefined = connection.grant.connectorConnections;
 const connectorStatus: ConnectorStatus = {
   connected: true,

@@ -390,3 +390,15 @@ function mockMiddlewareCall(middleware, request) {
     get nextCalled() { return nextCalled; },
   };
 }
+
+
+test("music OAuth bindings use Spotify PKCE and confidential SoundCloud credentials", () => {
+  assert.deepEqual(oauthBindingsFromEnvironment({
+    SPOTIFY_CLIENT_ID: " spotify-id ", SOUNDCLOUD_CLIENT_ID: " soundcloud-id ",
+    SOUNDCLOUD_CLIENT_SECRET: " soundcloud-secret ",
+  }), {
+    SPOTIFY_OAUTH_CLIENT_ID: "spotify-id", SOUNDCLOUD_OAUTH_CLIENT_ID: "soundcloud-id",
+    SOUNDCLOUD_OAUTH_CLIENT_SECRET: "soundcloud-secret",
+  });
+  assert.throws(() => oauthBindingsFromEnvironment({ SOUNDCLOUD_CLIENT_ID: "orphan" }), /SoundCloud OAuth/);
+});

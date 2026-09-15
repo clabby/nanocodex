@@ -8,6 +8,7 @@ struct ConnectorsView: View {
     @StateObject private var center = ConnectorCenter()
     @State private var query = ""
     @State private var showingAddMcp = false
+    @State private var showingSpotify = false
 
     private var providers: [ConnectorProviderDefinition] {
         guard let overview = center.overview else { return [] }
@@ -55,7 +56,13 @@ struct ConnectorsView: View {
                 Section("Connected") {
                     ForEach(connected) { provider in
                         NavigationLink {
-                            ConnectorProviderView(model: model, center: center, provider: provider)
+                            if provider.id == "spotify" {
+                                Form { SpotifyConnectionView(model: model) }
+                                    .navigationTitle("Spotify")
+                                    .onDisappear { Task { await center.load(using: model) } }
+                            } else {
+                                ConnectorProviderView(model: model, center: center, provider: provider)
+                            }
                         } label: {
                             ConnectorRow(
                                 provider: provider,
@@ -84,7 +91,8 @@ struct ConnectorsView: View {
                 Section("Available") {
                     ForEach(available) { provider in
                         Button {
-                            Task { await center.connect(provider, using: model) }
+                            if provider.id == "spotify" { showingSpotify = true }
+                            else { Task { await center.connect(provider, using: model) } }
                         } label: {
                             ConnectorRow(
                                 provider: provider,
@@ -148,6 +156,15 @@ struct ConnectorsView: View {
         .task { if center.overview == nil { await center.load(using: model) } }
         .sheet(isPresented: $showingAddMcp) {
             AddMcpView(model: model, center: center)
+        }
+        .sheet(isPresented: $showingSpotify, onDismiss: { Task { await center.load(using: model) } }) {
+            NavigationStack {
+                Form { SpotifyConnectionView(model: model) }
+                    .navigationTitle("Spotify")
+                    .toolbar { ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showingSpotify = false }
+                    } }
+            }
         }
         .accessibilityIdentifier("connectors-list")
     }

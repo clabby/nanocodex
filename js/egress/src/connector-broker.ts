@@ -6,6 +6,12 @@ import {
   type EncryptedEnvelope,
 } from "./credential-vault";
 import {
+  SPOTIFY_LOOPBACK_CLIENT_ID, SPOTIFY_LOOPBACK_REDIRECT_URI,
+  buildMusicAuthorizationUrl, buildMusicTokenRequest, buildMusicRefreshRequest,
+  buildMusicIdentityRequest, decodeMusicTokenResponse, decodeMusicIdentity,
+  buildSoundCloudRevocationRequest, type MusicProviderId,
+} from "./connectors/music";
+import {
   buildGitHubAuthorizationUrl,
   buildGitHubIdentityRequest,
   buildGitHubTokenRefreshRequest,
@@ -57,7 +63,7 @@ const REVOCATION_RETRY_BASE_MS = 30_000;
 const REVOCATION_RETRY_MAX_MS = 60 * 60_000;
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
-const PROVIDER = /^(github|google|slack|x)$/;
+const PROVIDER = /^(github|google|slack|x|spotify|soundcloud)$/;
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 
 type ProviderRule = Readonly<{
@@ -135,6 +141,18 @@ const PROVIDER_RULES: readonly ProviderRule[] = [
     paths: [/^\/v1\/(?:people|contactGroups|otherContacts)(?:\/|:|$)/],
   },
   {
+    id: "spotify",
+    provider: "spotify",
+    origin: "https://api.spotify.com",
+    paths: [/^\/v1(?:\/|$)/],
+  },
+  {
+    id: "soundcloud",
+    provider: "soundcloud",
+    origin: "https://api.soundcloud.com",
+    paths: [/^\/(?:me|tracks|playlists|users|resolve|likes|reposts)(?:\/|$)/],
+  },
+  {
     id: "x",
     provider: "x",
     origin: "https://api.x.com",
@@ -154,14 +172,17 @@ const PROVIDER_RULES: readonly ProviderRule[] = [
   },
 ];
 
-export type ConnectorId = "github" | GoogleCapabilityId | "slack" | "x";
-export type OAuthProviderId = "github" | "google" | "slack" | "x";
+export type ConnectorId = "github" | GoogleCapabilityId | "slack" | "x" | MusicProviderId;
+export type OAuthProviderId = "github" | "google" | "slack" | "x" | MusicProviderId;
 
 export interface ConnectorBrokerEnv extends McpConnectionBrokerEnv {
   GITHUB_OAUTH_CLIENT_ID?: string;
   GITHUB_OAUTH_CLIENT_SECRET?: string;
   GOOGLE_OAUTH_CLIENT_ID?: string;
   GOOGLE_OAUTH_CLIENT_SECRET?: string;
+  SPOTIFY_OAUTH_CLIENT_ID?: string;
+  SOUNDCLOUD_OAUTH_CLIENT_ID?: string;
+  SOUNDCLOUD_OAUTH_CLIENT_SECRET?: string;
   X_OAUTH_CLIENT_ID?: string;
   X_OAUTH_CLIENT_SECRET?: string;
   SLACK_OAUTH_CLIENT_ID?: string;
@@ -169,6 +190,7 @@ export interface ConnectorBrokerEnv extends McpConnectionBrokerEnv {
 }
 
 type StoredConnector = {
+  oauthClientId?: string;
   accessToken: string;
   refreshToken?: string;
   expiresAt?: number;
@@ -183,6 +205,7 @@ type StoredConnector = {
 };
 
 type PendingAuthorization = {
+  oauthClientId?: string;
   state: string;
   verifier: string;
   redirectUri: string;
@@ -303,7 +326,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
         return json({ connectors: this.#publicStatus(), ...this.#mcpConnections.publicMetadata() }, 200);
       }
       const match = url.pathname.match(
-        /^\/v1\/(github|google|gmail|gdrive|slack|x)(?:\/(start|callback)|\/connections\/([A-Za-z0-9_-]{43}))?$/,
+        /^\/v1\/(github|google|gmail|gdrive|slack|x|spotify|soundcloud)(?:\/(start|callback)|\/connections\/([A-Za-z0-9_-]{43}))?$/,
       );
       const controlId = match?.[1];
       const id = oauthProviderId(controlId);
@@ -523,13 +546,15 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       await this.#persist();
       throw new ConnectorFailure(409, "connector_reauthentication_required");
     }
-    const refreshed = rule.provider === "github"
-      ? await this.#refreshGitHubConnector(selectedId, connector)
-      : rule.provider === "x"
-        ? await this.#refreshXConnector(selectedId, connector)
-        : rule.provider === "slack"
-          ? await this.#refreshSlackConnector(selectedId, connector)
-          : await this.#refreshGoogleConnector(selectedId, connector);
+    const refreshed = rule.provider === "spotify" || rule.provider === "soundcloud"
+      ? await this.#refreshMusicConnector(rule.provider, selectedId, connector)
+      : rule.provider === "github"
+        ? await this.#refreshGitHubConnector(selectedId, connector)
+        : rule.provider === "x"
+          ? await this.#refreshXConnector(selectedId, connector)
+          : rule.provider === "slack"
+            ? await this.#refreshSlackConnector(selectedId, connector)
+            : await this.#refreshGoogleConnector(selectedId, connector);
     if (!capabilitiesFor(rule.provider, refreshed.scopes).includes(rule.id)) {
       throw new ConnectorFailure(409, "connector_capability_not_granted");
     }
@@ -592,6 +617,29 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       code: "connector_reauthentication_required",
     });
     throw new ConnectorFailure(409, "connector_reauthentication_required");
+  }
+
+  async #refreshMusicConnector(id: MusicProviderId, connectionId: string, connector: StoredConnector): Promise<StoredConnector> {
+    const response = await providerFetch(buildMusicRefreshRequest(id, {
+      ...providerCredentials(id, this.#env, connector.oauthClientId), refreshToken: connector.refreshToken!,
+    }));
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (response.status === 400 || response.status === 401) return this.#rejectRefresh(id, connectionId, connector);
+      throw new ConnectorFailure(503, "connector_provider_unavailable");
+    }
+    let refreshed;
+    try { refreshed = decodeMusicTokenResponse(id, await providerJson(response), connector.scopes); }
+    catch { return this.#rejectRefresh(id, connectionId, connector); }
+    const next: StoredConnector = {
+      ...connector, accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken ?? connector.refreshToken!,
+      expiresAt: Date.now() + refreshed.expiresIn * 1_000, scopes: [...refreshed.scopes],
+    };
+    this.#connections(id)[connectionId] = next;
+    await this.#persist();
+    connectorAudit("refresh", "allow", id, { status: 200, connection_id: connectionId });
+    return next;
   }
 
   async #refreshXConnector(connectionId: string, connector: StoredConnector): Promise<StoredConnector> {
@@ -711,6 +759,15 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   }
 
   async #revoke(id: OAuthProviderId, connector: StoredConnector): Promise<boolean> {
+    // Spotify has no public token revocation endpoint. Disconnect deletes the local grant.
+    if (id === "spotify") return false;
+    if (id === "soundcloud") {
+      const response = await providerFetch(buildSoundCloudRevocationRequest(connector.accessToken));
+      await response.body?.cancel();
+      if (!response.ok && response.status !== 401) throw new ConnectorFailure(503, "connector_revocation_failed");
+      connectorAudit("revoke", response.ok ? "allow" : "deny", id, { status: response.status });
+      return response.ok;
+    }
     if (id === "x") {
       const credentials = providerCredentials(id, this.#env);
       const tokens = [...new Set([connector.refreshToken, connector.accessToken]
@@ -796,15 +853,23 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       gcontacts: status("gcontacts"),
       slack: status("slack"),
       x: status("x"),
+      spotify: status("spotify"),
+      soundcloud: status("soundcloud"),
     };
   }
 
   async #start(id: OAuthProviderId, request: Request): Promise<Record<string, unknown>> {
     const body = await readJson(request, MAX_BODY_BYTES);
-    const redirectUri = stringField(body, "redirect_uri");
+    const flow = stringField(body, "flow");
+    if (flow && (id !== "spotify" || flow !== "ncspot_loopback")) {
+      throw new ConnectorFailure(400, "invalid_request");
+    }
+    const loopback = flow === "ncspot_loopback";
+    const oauthClientId = loopback ? SPOTIFY_LOOPBACK_CLIENT_ID : undefined;
+    const redirectUri = loopback ? SPOTIFY_LOOPBACK_REDIRECT_URI : stringField(body, "redirect_uri");
     const returnTo = stringField(body, "return_to");
     const accountHint = optionalAccountHint(body, id);
-    if (!redirectUri || !validRedirectUri(redirectUri, this.#env)
+    if (!redirectUri || (!loopback && !validRedirectUri(redirectUri, this.#env))
       || !returnTo || !validReturnTo(returnTo)
       || accountHint === null) {
       throw new ConnectorFailure(400, "invalid_request");
@@ -815,6 +880,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
     ));
     this.#connectors.pending[id] = {
+      ...(oauthClientId ? { oauthClientId } : {}),
       state,
       verifier,
       redirectUri,
@@ -825,6 +891,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     await this.#persist();
     return {
       authorization_url: authorizationUrl(id, this.#env, {
+        ...(oauthClientId ? { oauthClientId } : {}),
         redirectUri,
         state,
         codeChallenge: challenge,
@@ -837,7 +904,8 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     const body = await readJson(request, MAX_BODY_BYTES);
     const state = stringField(body, "state");
     const pending = this.#connectors.pending[id];
-    if (!pending || pending.expiresAt <= Date.now() || !state || state !== pending.state) {
+    if (!pending || pending.expiresAt <= Date.now() || !state || state !== pending.state
+      || (pending.oauthClientId === SPOTIFY_LOOPBACK_CLIENT_ID) !== (stringField(body, "flow") === "ncspot_loopback")) {
       throw new ConnectorFailure(400, "invalid_oauth_state");
     }
     delete this.#connectors.pending[id];
@@ -852,6 +920,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     try {
       const tokenRequest = tokenExchangeRequest(id, this.#env, {
         code,
+        ...(pending.oauthClientId ? { oauthClientId: pending.oauthClientId } : {}),
         codeVerifier: pending.verifier,
         redirectUri: pending.redirectUri,
       });
@@ -891,8 +960,13 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
         if (error instanceof ConnectorFailure) throw error;
         throw new ConnectorFailure(502, "connector_token_response_invalid");
       }
-      const identityResponse = await providerFetch(identityRequest(id, token.accessToken));
-      if (!identityResponse.ok) throw new ConnectorFailure(502, "connector_identity_failed");
+      const identityResponse = await providerIdentityFetch(id, identityRequest(id, token.accessToken));
+      if (!identityResponse.ok) {
+        const status = identityResponse.status;
+        await identityResponse.body?.cancel();
+        connectorAudit("authorize_callback", "deny", id, { status, code: "connector_identity_failed" });
+        throw new ConnectorFailure(status === 429 ? 503 : 502, status === 429 ? "connector_provider_rate_limited" : "connector_identity_failed");
+      }
       let identity: { accountId: string; displayLabel: string };
       try {
         identity = decodeIdentity(id, await providerJson(identityResponse));
@@ -903,6 +977,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       const connectionId = this.#connectionIdForIdentity(id, identity.accountId);
       const previous = this.#connections(id)[connectionId];
       const connected: StoredConnector = {
+        ...(pending.oauthClientId ? { oauthClientId: pending.oauthClientId } : {}),
         accessToken: token.accessToken,
         ...(token.refreshToken ?? previous?.refreshToken
           ? { refreshToken: token.refreshToken ?? previous!.refreshToken }
@@ -1012,12 +1087,13 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
 }
 
 type AuthorizationFields = {
+  oauthClientId?: string;
   redirectUri: string;
   state: string;
   codeChallenge: string;
   loginHint?: string;
 };
-type ExchangeFields = { redirectUri: string; code: string; codeVerifier: string };
+type ExchangeFields = { oauthClientId?: string; redirectUri: string; code: string; codeVerifier: string };
 type DecodedToken = {
   accessToken: string;
   refreshToken?: string;
@@ -1031,11 +1107,12 @@ function authorizationUrl(
   env: ConnectorBrokerEnv,
   fields: AuthorizationFields,
 ): URL {
-  const clientId = providerCredentials(id, env).clientId;
+  const clientId = providerCredentials(id, env, fields.oauthClientId).clientId;
   if (id === "slack") return buildSlackAuthorizationUrl({
     clientId, redirectUri: fields.redirectUri, state: fields.state,
   });
   if (id === "github") return buildGitHubAuthorizationUrl({ clientId, ...fields });
+  if (id === "spotify" || id === "soundcloud") return buildMusicAuthorizationUrl(id, { clientId, ...fields });
   if (id === "x") return buildXAuthorizationUrl({ clientId, ...fields });
   return buildGoogleAuthorizationUrl({ clientId, ...fields });
 }
@@ -1056,7 +1133,8 @@ function tokenExchangeRequest(
   env: ConnectorBrokerEnv,
   fields: ExchangeFields,
 ): Request {
-  const credentials = providerCredentials(id, env);
+  const credentials = providerCredentials(id, env, fields.oauthClientId);
+  if (id === "spotify" || id === "soundcloud") return buildMusicTokenRequest(id, { ...credentials, ...fields });
   if (id === "slack") return buildSlackTokenRequest({
     ...credentials, code: fields.code, redirectUri: fields.redirectUri,
   });
@@ -1074,6 +1152,7 @@ function tokenExchangeRequest(
 }
 
 function decodeToken(id: Exclude<OAuthProviderId, "slack">, value: unknown): DecodedToken {
+  if (id === "spotify" || id === "soundcloud") return decodeMusicTokenResponse(id, value);
   if (id === "github") {
     const token = decodeGitHubTokenResponse(value);
     return {
@@ -1109,12 +1188,13 @@ function decodeToken(id: Exclude<OAuthProviderId, "slack">, value: unknown): Dec
 
 function identityRequest(id: Exclude<OAuthProviderId, "slack">, accessToken: string): Request {
   if (id === "github") return buildGitHubIdentityRequest(accessToken);
+  if (id === "spotify" || id === "soundcloud") return buildMusicIdentityRequest(id, accessToken);
   if (id === "x") return buildXIdentityRequest(accessToken);
   return buildGoogleIdentityRequest(accessToken);
 }
 
 function revocationRequest(
-  id: Exclude<OAuthProviderId, "slack" | "x">,
+  id: Exclude<OAuthProviderId, "slack" | "x" | MusicProviderId>,
   connector: StoredConnector,
   env: ConnectorBrokerEnv,
 ): Request {
@@ -1154,6 +1234,7 @@ function decodeIdentity(
   value: unknown,
 ): { accountId: string; displayLabel: string } {
   if (id === "github") return decodeGitHubIdentity(value);
+  if (id === "spotify" || id === "soundcloud") return decodeMusicIdentity(id, value);
   if (id === "x") return decodeXIdentity(value);
   return decodeGoogleIdentity(value);
 }
@@ -1161,18 +1242,42 @@ function decodeIdentity(
 function providerCredentials(
   id: OAuthProviderId,
   env: ConnectorBrokerEnv,
+  oauthClientId?: string,
 ): { clientId: string; clientSecret: string } {
+  if (oauthClientId !== undefined) {
+    if (id !== "spotify" || oauthClientId !== SPOTIFY_LOOPBACK_CLIENT_ID) {
+      throw new ConnectorFailure(503, "connector_not_configured");
+    }
+    return { clientId: oauthClientId, clientSecret: "" };
+  }
   const clientId = (id === "github" ? env.GITHUB_OAUTH_CLIENT_ID
+    : id === "spotify" ? env.SPOTIFY_OAUTH_CLIENT_ID
+    : id === "soundcloud" ? env.SOUNDCLOUD_OAUTH_CLIENT_ID
     : id === "x" ? env.X_OAUTH_CLIENT_ID
     : id === "slack" ? env.SLACK_OAUTH_CLIENT_ID
     : env.GOOGLE_OAUTH_CLIENT_ID)?.trim();
   const clientSecret = (id === "github"
     ? env.GITHUB_OAUTH_CLIENT_SECRET
+    : id === "spotify" ? undefined
+    : id === "soundcloud" ? env.SOUNDCLOUD_OAUTH_CLIENT_SECRET
     : id === "x" ? env.X_OAUTH_CLIENT_SECRET
     : id === "slack" ? env.SLACK_OAUTH_CLIENT_SECRET
     : env.GOOGLE_OAUTH_CLIENT_SECRET)?.trim();
-  if (!clientId || !clientSecret) throw new ConnectorFailure(503, "connector_not_configured");
-  return { clientId, clientSecret };
+  if (!clientId || (id !== "spotify" && !clientSecret)) throw new ConnectorFailure(503, "connector_not_configured");
+  return { clientId, clientSecret: id === "spotify" ? "" : clientSecret! };
+}
+
+// Retry only the idempotent identity read, never authorization-code exchange.
+// Shared registrations can briefly exhaust their rolling quota during consent.
+async function providerIdentityFetch(id: OAuthProviderId, request: Request): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const response = await providerFetch(request.clone());
+    const retryAfter = Number(response.headers.get("retry-after") ?? "1");
+    if (id !== "spotify" || response.status !== 429 || attempt >= 2
+      || !Number.isFinite(retryAfter) || retryAfter < 0 || retryAfter > 30) return response;
+    await response.body?.cancel();
+    await new Promise((resolve) => setTimeout(resolve, Math.ceil(retryAfter * 1000)));
+  }
 }
 
 async function providerFetch(request: Request): Promise<Response> {
@@ -1334,7 +1439,7 @@ function connectorRequestHeaders(
   const headers = new Headers({
     accept: boundedCallerHeader(caller, "accept") ?? "application/json",
   });
-  if (accessToken !== undefined) headers.set("authorization", `Bearer ${accessToken}`);
+  if (accessToken !== undefined) headers.set("authorization", `${id === "soundcloud" ? "OAuth" : "Bearer"} ${accessToken}`);
   for (const name of [
     "content-range",
     "content-type",

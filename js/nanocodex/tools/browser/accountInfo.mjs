@@ -13,6 +13,8 @@ const CONNECTOR_IDS = [
   "gcontacts",
   "slack",
   "x",
+  "spotify",
+  "soundcloud",
   "chatgpt",
 ];
 const ACCOUNT_CONNECTION_IDS = Object.freeze(CONNECTOR_IDS.filter((id) => id !== "chatgpt"));
@@ -28,6 +30,8 @@ const ACCOUNT_CONNECTION_LABELS = Object.freeze({
   gcontacts: "Google Contacts",
   slack: "Slack",
   x: "X",
+  spotify: "Spotify",
+  soundcloud: "SoundCloud",
 });
 const GOOGLE_CONNECTION_IDS = new Set([
   "gmail",
@@ -43,6 +47,8 @@ const ACCOUNT_AUTHORIZATION_ENDPOINTS = Object.freeze({
   github: { origin: "https://github.com", pathname: "/login/oauth/authorize" },
   google: { origin: "https://accounts.google.com", pathname: "/o/oauth2/v2/auth" },
   slack: { origin: "https://slack.com", pathname: "/oauth/v2/authorize" },
+  spotify: { origin: "https://accounts.spotify.com", pathname: "/authorize" },
+  soundcloud: { origin: "https://secure.soundcloud.com", pathname: "/authorize" },
   x: { origin: "https://x.com", pathname: "/i/oauth2/authorize" },
 });
 const ACCOUNT_AUTHORIZATION_QUERY_KEYS = new Set([
@@ -402,7 +408,7 @@ function safeAccountAuthorizationUrl(value, provider, publicOrigin) {
     || authorization.hash
     || !authorization.searchParams.get("client_id")
     || !authorization.searchParams.get("state")
-    || !authorization.searchParams.get(provider === "slack" ? "user_scope" : "scope")
+    || (provider !== "soundcloud" && !authorization.searchParams.get(provider === "slack" ? "user_scope" : "scope"))
     || !safeAccountRedirectUri(authorization.searchParams.get("redirect_uri"), provider, publicOrigin)) {
     return undefined;
   }

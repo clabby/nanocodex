@@ -172,3 +172,11 @@ For a brokered request, supply the entry ID in `x-nanocodex-vault-id` and use
 `x-api-key: {{NANOCODEX_VAULT_API_KEY}}`. The broker substitutes the key only at
 the final fetch. Existing destination policy and status-only responses apply;
 API-key entries cannot satisfy login/password placeholders.
+
+The native iPhone Spotify flow uses ncspot's public PKCE registration and its
+fixed `http://127.0.0.1:8989/login` redirect. It does not require
+`SPOTIFY_OAUTH_CLIENT_ID`; the broker stores the registration with each connection
+so refresh cannot accidentally use a different client. The phone relays only the
+one-time code and matching state through an owner-authenticated managed route.
+It never accepts arbitrary client IDs or callback URLs. Shared-client quotas and
+Spotify endpoint restrictions still apply.

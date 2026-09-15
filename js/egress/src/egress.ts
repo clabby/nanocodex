@@ -88,7 +88,7 @@ const PRIVATE_HOST_SUFFIXES = [
   ".internal", ".invalid", ".local", ".localhost", ".test", ".home.arpa",
 ];
 const VAULT_PROVIDER_HOSTS = new Set([
-  "api.github.com", "api.openai.com", "api.x.com", "chatgpt.com",
+  "api.github.com", "api.openai.com", "api.x.com", "api.spotify.com", "api.soundcloud.com", "chatgpt.com",
   "calendar.googleapis.com", "docs.googleapis.com", "gmail.googleapis.com",
   "people.googleapis.com", "sheets.googleapis.com", "slack.com",
   "slides.googleapis.com", "tasks.googleapis.com", "www.googleapis.com",
@@ -105,7 +105,7 @@ const RELAY_HTTP_ROUTES: Readonly<Record<ModelOperation["id"], string | undefine
 
 type ConnectorOperation = Readonly<{
   id: "github" | "gmail" | "gdrive" | "gcalendar" | "gtasks" | "gdocs"
-    | "gsheets" | "gslides" | "gcontacts" | "slack" | "x";
+    | "gsheets" | "gslides" | "gcontacts" | "slack" | "x" | "spotify" | "soundcloud";
   origin: `https://${string}`;
   paths: readonly RegExp[];
 }>;
@@ -177,6 +177,16 @@ const CONNECTOR_OPERATIONS: readonly ConnectorOperation[] = [
     id: "gcontacts",
     origin: "https://people.googleapis.com",
     paths: [/^\/v1\/(?:people|contactGroups|otherContacts)(?:\/|:|$)/],
+  },
+  {
+    id: "spotify",
+    origin: "https://api.spotify.com",
+    paths: [/^\/v1(?:\/|$)/],
+  },
+  {
+    id: "soundcloud",
+    origin: "https://api.soundcloud.com",
+    paths: [/^\/(?:me|tracks|playlists|users|resolve|likes|reposts)(?:\/|$)/],
   },
   {
     id: "x",
@@ -1955,7 +1965,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   }
 
   const connectorMatch = url.pathname.match(
-    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/connectors(?:\/(github|google|gmail|gdrive|slack|x)(?:\/(callback)|\/connections\/([A-Za-z0-9_-]{43}))?)?$/,
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/connectors(?:\/(github|google|gmail|gdrive|slack|x|spotify|soundcloud)(?:\/(callback)|\/connections\/([A-Za-z0-9_-]{43}))?)?$/,
   );
   if (connectorMatch) {
     const userId = connectorMatch[1]!;
@@ -2702,7 +2712,7 @@ function auditControl(
   const subject = url.pathname.startsWith("/subjects/");
   const tail = user?.[3];
   const connector = user?.[2] === "connectors"
-    ? tail?.match(/^(github|google|gmail|gdrive|slack|x)/)?.[1]
+    ? tail?.match(/^(github|google|gmail|gdrive|slack|x|spotify|soundcloud)/)?.[1]
     : undefined;
   const log = status >= 500 ? console.error : status >= 400 ? console.warn : console.info;
   log({
@@ -2728,7 +2738,7 @@ function audit(
   const connector = rule === "github" || rule === "gmail" || rule === "gdrive"
     || rule === "gcalendar" || rule === "gtasks" || rule === "gdocs"
     || rule === "gsheets" || rule === "gslides" || rule === "gcontacts"
-    || rule === "slack" || rule === "x" || rule === "mcp";
+    || rule === "slack" || rule === "x" || rule === "spotify" || rule === "soundcloud" || rule === "mcp";
   const log = action === "error" ? console.error : action === "deny" ? console.warn : console.info;
   const safeDetail = {
     ...(detail.credential_kind === "chatgpt" || detail.credential_kind === "openai"

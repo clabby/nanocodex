@@ -1,5 +1,7 @@
 import {
   authenticatePersistentAccount,
+  authenticate,
+  type Principal,
   requireSameOriginMutation,
   type AccountAuthEnv,
 } from "./account-auth";
@@ -93,6 +95,39 @@ export async function routeConnectorRequest(
   if (url.pathname === "/v1/connectors/mcp-mobile-complete") {
     if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
     return mcpMobileCompletion(url);
+  }
+
+  // A native client receives Spotify's loopback callback and forwards only
+  // code + state with its account credential. No tokens enter the client API.
+  if (/^\/v1\/connectors\/spotify\/loopback(?:\/callback)?$/.test(url.pathname)) {
+    const callback = url.pathname.endsWith("/callback");
+    if (url.search || (request.method !== "POST" && (callback || !["GET", "DELETE"].includes(request.method)))) {
+      return json({ error: "method_not_allowed" }, 405);
+    }
+    const authenticated = await authenticate(request, env, url);
+    const principal = authenticated?.kind === "account_session"
+      ? await authenticatePersistentAccount(request, env, url) : authenticated;
+    if (!canManageNativeConnectors(principal)) return json({ error: "unauthorized" }, 401);
+    if (request.method === "GET") {
+      const response = await env.NANOCODEX.fetch(`https://broker.internal/users/${encodeURIComponent(principal!.userId)}/connectors`);
+      if (!response.ok) return json({ error: "connector_broker_failed" }, 502);
+      const value = await response.json() as { connectors?: { spotify?: unknown } };
+      return json({ spotify: value.connectors?.spotify }, 200);
+    }
+    const originFailure = requireSameOriginMutation(request, url, principal!);
+    if (originFailure) return originFailure;
+    const body = await readSpotifyLoopbackBody(request, callback, request.method === "DELETE");
+    if (!body) return json({ error: "invalid_request" }, 400);
+    if (request.method === "DELETE") {
+      return env.NANOCODEX.fetch(`https://broker.internal/users/${encodeURIComponent(principal!.userId)}/connectors/spotify/connections/${body.connection_id}`, { method: "DELETE" });
+    }
+    return env.NANOCODEX.fetch(
+      `https://broker.internal/users/${encodeURIComponent(principal!.userId)}/connectors/spotify${callback ? "/callback" : ""}`,
+      {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...body, flow: "ncspot_loopback", ...(!callback ? { return_to: "/profile" } : {}) }),
+      },
+    );
   }
 
   if (url.pathname === "/v1/connectors/mcp-connections") {
@@ -728,4 +763,44 @@ function json(body: unknown, status: number): Response {
     status,
     headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
   });
+}
+// Bounded independently of Content-Length (native callers may use chunked bodies).
+export async function readSpotifyLoopbackBody(request: Request, callback: boolean, disconnect = false): Promise<Record<string, string> | undefined> {
+  if (request.headers.get("content-type")?.split(";", 1)[0]?.trim() !== "application/json") return;
+  const reader = request.body?.getReader();
+  if (!reader) return;
+  let bytes = 0;
+  const chunks: Uint8Array[] = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > 8192) { await reader.cancel(); return; }
+      chunks.push(value);
+    }
+    const data = new Uint8Array(bytes);
+    let offset = 0;
+    for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
+    const value: unknown = JSON.parse(new TextDecoder().decode(data));
+    if (!isRecord(value)) return;
+    if (disconnect) return Object.keys(value).length === 1 && typeof value.connection_id === "string"
+      && /^[A-Za-z0-9_-]{43}$/.test(value.connection_id) ? { connection_id: value.connection_id } : undefined;
+    if (!callback) return Object.keys(value).length === 0 ? {} : undefined;
+    if (Object.keys(value).some((key) => !["code", "state", "error"].includes(key))
+      || typeof value.state !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.state)) return;
+    const field = value.code !== undefined ? "code" : "error";
+    const result = value[field];
+    if ((value.code !== undefined && value.error !== undefined)
+      || typeof result !== "string" || result.length === 0 || result.length > 4096
+      || /[\u0000-\u001f\u007f]/.test(result)) return;
+    return { state: value.state, [field]: result };
+  } catch { return; } finally { reader.releaseLock(); }
+}
+
+export function canManageNativeConnectors(principal: Principal | undefined): boolean {
+  return !!principal && !principal.connectGrant
+    && (principal.kind === "account_session" || principal.kind === "api_key")
+    && principal.role === "owner" && principal.capabilities.includes("api_keys:write")
+    && principal.capabilities.includes("tools:use");
 }

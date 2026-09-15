@@ -28,12 +28,16 @@ const PROVIDER_CAPABILITIES: Readonly<Record<ConnectorProviderId, readonly Conne
   google: GOOGLE_CAPABILITIES,
   slack: ["slack"],
   x: ["x"],
+  spotify: ["spotify"],
+  soundcloud: ["soundcloud"],
 };
 const CONNECTOR_NAMES: Readonly<Record<ConnectorProviderId, string>> = Object.freeze({
   github: "GitHub",
   google: "Google Workspace",
   slack: "Slack",
   x: "X",
+  spotify: "Spotify",
+  soundcloud: "SoundCloud",
 });
 const AUTHORIZATION_ENDPOINTS: Readonly<Record<ConnectorProviderId, {
   origin: string;
@@ -43,6 +47,8 @@ const AUTHORIZATION_ENDPOINTS: Readonly<Record<ConnectorProviderId, {
   github: { origin: "https://github.com", pathname: "/login/oauth/authorize", pkce: true },
   google: { origin: "https://accounts.google.com", pathname: "/o/oauth2/v2/auth", pkce: true },
   slack: { origin: "https://slack.com", pathname: "/oauth/v2/authorize", pkce: false },
+  spotify: { origin: "https://accounts.spotify.com", pathname: "/authorize", pkce: true },
+  soundcloud: { origin: "https://secure.soundcloud.com", pathname: "/authorize", pkce: true },
   x: { origin: "https://x.com", pathname: "/i/oauth2/authorize", pkce: true },
 };
 const AUTHORIZATION_QUERY_KEYS = new Set([
@@ -85,6 +91,7 @@ export function accountConnectorsTool(
     description: [
       "List, connect, reconnect, or disconnect account connectors without exposing credentials.",
       "Google Workspace is one authorization identity whose connections list the exact Gmail, Drive, Calendar, Tasks, Docs, Sheets, Slides, and Contacts capabilities granted.",
+      "Supports GitHub, Google Workspace, Slack, X, Spotify and SoundCloud. Use tool_search for each service’s read and write API tools. Spotify connect opens the native Nanocodex app; other providers return authorization URLs.",
       "Connect returns a provider authorization URL. Give that exact URL to the user as a link; the provider may still require consent.",
       "Disconnect revokes one exact listed connection_id and is allowed only when the user explicitly asks to remove or replace it.",
     ].join(" "),
@@ -165,6 +172,14 @@ export async function manageAccountConnectors(
     };
   }
 
+  if (operation.provider === "spotify") {
+    return {
+      ok: true, status: "authorization_required", connector: "spotify", name: "Spotify",
+      authorization_url: "nanocodex://connect/spotify",
+      message: "Open Nanocodex on your iPhone, then tap Connect Spotify in Settings. The app handles the phone-local callback. Verify connected=true with list afterwards.",
+    };
+  }
+
   const callback = new URL(
     `/v1/connectors/${operation.provider}/callback`,
     options.publicOrigin,
@@ -218,7 +233,7 @@ function safeAuthorizationUrl(
     || authorization.searchParams.get("redirect_uri") !== callback
     || !(authorization.searchParams.get("client_id") ?? "")
     || !(authorization.searchParams.get("state") ?? "")
-    || !(authorization.searchParams.get(provider === "slack" ? "user_scope" : "scope") ?? "")) {
+    || (provider !== "soundcloud" && !(authorization.searchParams.get(provider === "slack" ? "user_scope" : "scope") ?? ""))) {
     return false;
   }
   if (endpoint.pkce && (
