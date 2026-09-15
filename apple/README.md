@@ -679,7 +679,9 @@ Media negotiation, durable admission, and event subscription run concurrently.
 The apps pass their known conversation cursor, avoiding a state GET before event
 subscription. Microphone activation waits for the secure peer, data channel, and
 backend readiness; provider handoffs queue until admission and event consumption
-are ready. Startup sends no workspace/history context. Completed speech frames go
+are ready. The Connecting spinner ends at the media boundary, while the startup
+deadline remains active until task setup completes. A denied admission closes
+the call. Startup sends no workspace/history context. Completed speech frames go
 directly to the ordered RTC data channel without a Swift task or flush delay.
 A media connection timeout gets one fresh call after cleanup and preserves mute.
 

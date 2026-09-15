@@ -34,6 +34,7 @@ export type Snapshot = Readonly<{
   microphoneLevel: number;
   speakerLevel: number;
   error: Error | undefined;
+  /** Active means media and live control are ready; task admission may still be pending. */
   status: "idle" | "connecting" | "active" | "error";
   statusText: string | undefined;
   /** Latest 200 rows, retained across stop/start. Subscribe to events for longer history. */
@@ -78,6 +79,7 @@ export type Voice = Readonly<{
   destroy(): Promise<void>;
   getSnapshot(): Snapshot;
   onEvent(listener: (event: Event) => void): () => void;
+  /** Resolves after media and task admission are ready. The active snapshot may arrive first. */
   start(options?: Settings): Promise<void>;
   stop(): Promise<void>;
   subscribe(listener: () => void): () => void;

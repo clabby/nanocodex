@@ -21,6 +21,7 @@ const REALTIME_VOICES = new Set([
 
 type ManagedRealtimeTransportEnv = AccountAuthEnv & {
   NANOCODEX: Fetcher;
+  NANOCODEX_REALTIME?: Fetcher;
   NANOCODEX_SESSIONS: {
     get(id: DurableObjectId): Fetcher;
     idFromName(name: string): DurableObjectId;
@@ -95,7 +96,7 @@ export async function routeManagedRealtimeTransport(
     return json({ error: "credential_broker_unavailable" }, 503);
   }
 
-  if (resource === "calls") return realtimeCall(callBody!, env, agentId, voiceSessionId, subject);
+  if (resource === "calls") return realtimeCall(callBody!, env, agentId, voiceSessionId, subject, voiceRelayRegion(request), direct ? principal.userId : undefined);
   return realtimeSideband(callId!, env, agentId, voiceSessionId, subject);
 }
 
@@ -125,26 +126,32 @@ async function realtimeCall(
   agentId: string,
   voiceSessionId: string,
   subject: string,
+  region: string | undefined,
+  verifiedOwner: string | undefined,
 ): Promise<Response> {
-  const response = await env.NANOCODEX.fetch(new Request(
+  const headers = internalHeaders(agentId, voiceSessionId, subject, false);
+  if (region) headers.set("x-nanocodex-voice-region", region);
+  const binding = verifiedOwner && env.NANOCODEX_REALTIME ? env.NANOCODEX_REALTIME : env.NANOCODEX;
+  if (binding === env.NANOCODEX_REALTIME) headers.set("x-nanocodex-realtime-owner", verifiedOwner!);
+  const response = await binding.fetch(new Request(
     "https://nanocodex.internal/v1/realtime/calls",
     {
       method: "POST",
-      headers: internalHeaders(agentId, voiceSessionId, subject, false),
+      headers,
       body,
     },
   ));
-  const headers = sanitizedHeaders(response.headers);
-  const location = headers.get("location");
+  const responseHeaders = sanitizedHeaders(response.headers);
+  const location = responseHeaders.get("location");
   if (location) {
-    headers.set("x-nanocodex-realtime-location", location);
-    headers.delete("location");
+    responseHeaders.set("x-nanocodex-realtime-location", location);
+    responseHeaders.delete("location");
   }
-  headers.set("cache-control", "no-store");
+  responseHeaders.set("cache-control", "no-store");
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
-    headers,
+    headers: responseHeaders,
   });
 }
 
@@ -259,4 +266,19 @@ function json(body: unknown, status: number): Response {
     status,
     headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
   });
+}
+
+/** Derive placement only from Cloudflare metadata, never caller headers. */
+export function voiceRelayRegion(request: Request): string | undefined {
+  const cf = request.cf;
+  const longitude = typeof cf?.longitude === "string" && cf.longitude.trim()
+    ? Number(cf.longitude) : NaN;
+  switch (cf?.continent) {
+    case "NA": return Number.isFinite(longitude) ? (longitude < -100 ? "wnam" : "enam") : undefined;
+    case "SA": return "sam";
+    case "EU": return Number.isFinite(longitude) ? (longitude < 20 ? "weur" : "eeur") : undefined;
+    case "AS": return "apac";
+    case "OC": return "oc";
+    default: return undefined;
+  }
 }

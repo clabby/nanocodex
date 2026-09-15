@@ -732,29 +732,18 @@ export async function authenticate(
   if (!API_KEY.test(token)) return undefined;
   const digest = await sha256(token);
   const stub = env.NANOCODEX_API_KEYS.getByName(digest);
-  const response = await stub.fetch("https://api-key.internal/resolve");
+  const response = await stub.fetch("https://api-key.internal/resolve?authorize=1");
   if (!response.ok) {
     await response.body?.cancel();
     return undefined;
   }
   const record = await response.json<StoredApiKey>();
-  if (record.digest !== digest || !isStoredApiKey(record)) return undefined;
-  // The key already supplies both lookup coordinates. Check the current
-  // account and membership concurrently; neither authorization is cached.
-  const [account, grant] = await Promise.all([
-    readAccount(env, record.userId),
-    resolveOrganizationGrant(env, { id: record.userId, organizationId: record.organizationId }),
-  ]);
-  if (!account || account.organizationId !== record.organizationId) {
-    return undefined;
-  }
-  if (!grant
-    || grant.teamId !== record.teamId
-    || grant.authorizationEpoch !== record.authorizationEpoch
-    || organizationRoleRank(record.role) > organizationRoleRank(grant.role)
-    || record.capabilities.some((capability) => !grant.capabilities.includes(capability))) {
-    return undefined;
-  }
+  if (!isStoredApiKey(record) || record.digest !== digest) return undefined;
+  // New key objects perform live account/grant checks beside the stored key,
+  // avoiding three serial cross-region trips. Older deployments return the
+  // same record without this marker and retain the original validation path.
+  if (response.headers.get("x-nanocodex-api-key-authorized") !== "1"
+    && !await apiKeyAuthorized(env, record)) return undefined;
   return {
     kind: "api_key",
     userId: record.userId,
@@ -766,6 +755,22 @@ export async function authenticate(
     authorizationEpoch: record.authorizationEpoch,
     capabilities: record.capabilities,
   };
+}
+
+async function apiKeyAuthorized(env: AccountAuthEnv, record: StoredApiKey): Promise<boolean> {
+  const [account, grant] = await Promise.all([
+    readAccount(env, record.userId),
+    resolveOrganizationGrant(env, { id: record.userId, organizationId: record.organizationId }),
+  ]);
+  if (!account || account.organizationId !== record.organizationId) return false;
+  if (!grant
+    || grant.teamId !== record.teamId
+    || grant.authorizationEpoch !== record.authorizationEpoch
+    || organizationRoleRank(record.role) > organizationRoleRank(grant.role)
+    || record.capabilities.some((capability) => !grant.capabilities.includes(capability))) {
+    return false;
+  }
+  return true;
 }
 
 async function resolveUserPrincipal(
@@ -2024,7 +2029,14 @@ export class ApiKeyRecord extends DurableObject<AccountAuthEnv> {
     const url = new URL(request.url);
     if (url.pathname === "/resolve" && request.method === "GET") {
       const record = await this.ctx.storage.get<StoredApiKey>("record");
-      return isStoredApiKey(record) ? json(record) : json({ error: "not_found" }, { status: 404 });
+      if (!isStoredApiKey(record)) return json({ error: "not_found" }, { status: 404 });
+      if (url.searchParams.get("authorize") !== "1") return json(record);
+      // Never cache authorization: membership, scope changes and key deletion
+      // must take effect on the next request, including a warm voice restart.
+      if (!await apiKeyAuthorized(this.env, record)) {
+        return json({ error: "unauthorized" }, { status: 401 });
+      }
+      return json(record, { headers: { "x-nanocodex-api-key-authorized": "1" } });
     }
     if (url.pathname === "/record" && request.method === "PUT") {
       if (await this.ctx.storage.get("record")) return json({ error: "conflict" }, { status: 409 });

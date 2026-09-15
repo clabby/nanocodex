@@ -348,6 +348,7 @@ export interface Env extends
   NANOCODEX_MEMORY: DurableObjectNamespace<MemoryScope>;
   NANOCODEX_SANDBOXES: DurableObjectNamespace<Sandbox>;
   NANOCODEX: Fetcher;
+  NANOCODEX_REALTIME?: Fetcher;
   NANOCODEX_SESSION_MODEL_EGRESS?: Fetcher;
   NANOCODEX_X?: Fetcher;
   NANOCODEX_HISTORY: R2Bucket;

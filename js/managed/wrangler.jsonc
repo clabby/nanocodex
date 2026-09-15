@@ -25,6 +25,7 @@
     }
   },
   "services": [
+    { "binding": "NANOCODEX_REALTIME", "service": "nanocodex-egress", "entrypoint": "ManagedRealtimeEgress" },
     { "binding": "NANOCODEX_X", "service": "nanocodex-x" },
     {
       "binding": "NANOCODEX",

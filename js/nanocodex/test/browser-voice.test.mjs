@@ -199,7 +199,151 @@ test("a sideband lost during admission cannot publish a ready session", async ()
   }
 });
 
-test("the public managed voice forwards memory updates and durable admission failures", async () => {
+test("direct voice streams captions during admission and retains accepted work on close", async () => {
+  const fixture = installBrowserVoiceFixture();
+  const calls = [];
+  const transcripts = [];
+  let admit;
+  const admission = new Promise((resolve) => { admit = resolve; });
+  let fences = 0;
+  const core = fakeVoiceCore(calls, { parallelStartup: true, dataChannelControl: true });
+  const session = new BrowserVoiceSession({
+    core, voice: "cove", captureMicrophone: async () => fakeMicrophone(calls),
+    async beforeAgentTurn() { if (++fences === 1) await admission; },
+    onStatus() {}, onTranscript: (...entry) => transcripts.push(entry), onTerminated() {},
+  });
+  const starting = session.start();
+  try {
+    await waitFor(() => calls.some(([kind]) => kind === "sidebandOpened"));
+    assert.equal(calls.some(([kind]) => kind === "start"), false);
+    assert.equal(fixture.sidebandUrls.length, 0);
+    fixture.channel.message({ type: "delegation.created" });
+    fixture.channel.message({ type: "input_transcript.added" });
+    await waitFor(() => transcripts.length === 1);
+    assert.equal(calls.some(([kind, payload]) => kind === "realtimeMessage" && JSON.parse(payload).type === "delegation.created"), false);
+    assert.ok(fixture.channel.sent.includes('{"type":"rust.frame"}'));
+    const channel = fixture.channel;
+    const closing = session.close();
+    assert.equal(channel.readyState, "closed");
+    assert.ok(channel.sent.includes('{"type":"session.close"}'));
+    assert.ok(calls.some(([kind]) => kind === "track.stop"));
+    admit();
+    await starting;
+    await closing;
+    const routed = calls.findIndex(([kind, payload]) => kind === "realtimeMessage" && JSON.parse(payload).type === "delegation.created");
+    assert.ok(routed > calls.findIndex(([kind]) => kind === "start"));
+    assert.ok(routed < calls.findIndex(([kind]) => kind === "stop"));
+    assert.equal(calls.some(([kind]) => kind === "cancel"), false);
+  } finally { admit(); await session.close(); fixture.restore(); }
+});
+
+test("public direct voice becomes active before admission and handles later acceptance or denial", async () => {
+  for (const outcome of ["accept", "deny"]) {
+    const fixture = installBrowserVoiceFixture({ backendReady: false });
+    const calls = [];
+    let admit, deny;
+    const admission = new Promise((resolve, reject) => { admit = resolve; deny = reject; });
+    const { agent } = await testAgent(fakeVoiceCore(calls, {
+      parallelStartup: true, dataChannelControl: true, start: () => admission,
+    }), calls);
+    const voice = Voice.create(agent, { captureMicrophone: async () => fakeMicrophone(calls) });
+    const events = [];
+    voice.onEvent((event) => events.push(event.type));
+    let settled = false;
+    const starting = voice.start();
+    starting.then(() => { settled = true; }, () => { settled = true; });
+    const completion = outcome === "deny" ? assert.rejects(starting, /admission denied/) : starting;
+    try {
+      await waitFor(() => calls.some(([kind]) => kind === "sidebandOpened"));
+      assert.equal(voice.getSnapshot().status, "connecting");
+      fixture.channel.message({ type: "session.started" });
+      await waitFor(() => voice.getSnapshot().status === "active");
+      assert.equal(settled, false, "task admission is still pending after media becomes active");
+      assert.equal(events.filter((type) => type === "started").length, 1);
+      if (outcome === "deny") deny(new Error("admission denied"));
+      else admit();
+      await completion;
+      assert.equal(events.filter((type) => type === "started").length, 1);
+      if (outcome === "deny") {
+        assert.equal(voice.getSnapshot().status, "error");
+        assert.equal(fixture.peer.signalingState, "closed");
+        assert.equal(fixture.channel.readyState, "closed");
+      } else assert.equal(voice.getSnapshot().status, "active");
+    } finally { admit(); await completion; await voice.destroy(); agent.dispose(); fixture.restore(); }
+  }
+});
+
+test("failed direct voice admission stops media without executing a queued delegation", async () => {
+  const fixture = installBrowserVoiceFixture();
+  const calls = [];
+  let deny;
+  const admission = new Promise((_, reject) => { deny = reject; });
+  const session = new BrowserVoiceSession({
+    core: fakeVoiceCore(calls, { parallelStartup: true, dataChannelControl: true, start: () => admission }),
+    voice: "cove", captureMicrophone: async () => fakeMicrophone(calls),
+    onStatus() {}, onTranscript() {}, onTerminated() {},
+  });
+  const rejected = assert.rejects(session.start(), /admission denied/);
+  try {
+    await waitFor(() => calls.some(([kind]) => kind === "sidebandOpened"));
+    fixture.channel.message({ type: "delegation.created" });
+    await waitFor(() => calls.some(([kind, payload]) => kind === "requiresAgentAdmission" && JSON.parse(payload).type === "delegation.created"));
+    deny(new Error("admission denied"));
+    await rejected;
+    assert.equal(fixture.peer.signalingState, "closed");
+    assert.equal(fixture.channel.readyState, "closed");
+    assert.equal(calls.some(([kind]) => kind === "realtimeMessage"), false);
+    assert.equal(fixture.sidebandUrls.length, 0);
+  } finally { await session.close(); fixture.restore(); }
+});
+
+test("an explicit public sideband override preserves the selected transport", async () => {
+  const fixture = installBrowserVoiceFixture();
+  const calls = [];
+  const { agent } = await testAgent(fakeVoiceCore(calls, { parallelStartup: true, dataChannelControl: true }), calls);
+  const voice = Voice.create(agent, {
+    captureMicrophone: async () => fakeMicrophone(calls),
+    sidebandUrl: (callID) => `wss://example.test/custom-control?call_id=${callID}`,
+  });
+  try {
+    await voice.start();
+    assert.deepEqual(fixture.sidebandUrls, ['wss://example.test/custom-control?call_id=rtc_test']);
+    fixture.sideband.message({ type: "input_transcript.added" });
+    await waitFor(() => fixture.sideband.sent.includes('{"type":"rust.frame"}'));
+    assert.deepEqual(fixture.channel.sent, []);
+  } finally { await voice.destroy(); agent.dispose(); fixture.restore(); }
+});
+
+test("direct voice times out a stalled data channel and ignores late events", async (t) => {
+  const fixture = installBrowserVoiceFixture({ boundary: "data-channel" });
+  const calls = [];
+  const timers = new Map();
+  let sequence = 0;
+  t.mock.method(window, "setTimeout", (callback, delay) => {
+    const id = ++sequence; timers.set(id, { callback, delay }); return id;
+  });
+  t.mock.method(window, "clearTimeout", (id) => timers.delete(id));
+  const session = new BrowserVoiceSession({
+    core: fakeVoiceCore(calls, { parallelStartup: true, dataChannelControl: true }),
+    voice: "cove", captureMicrophone: async () => fakeMicrophone(calls),
+    onStatus() {}, onTranscript() {}, onTerminated() {},
+  });
+  const rejected = assert.rejects(session.start(), (error) => error.code === "data_channel_open_timeout");
+  try {
+    await waitFor(() => fixture.channel && timers.size === 1);
+    const [id, timer] = [...timers][0];
+    assert.equal(timer.delay, SIDEBAND_OPEN_TIMEOUT_MS);
+    timers.delete(id); timer.callback();
+    await rejected;
+    assert.equal(fixture.channel.readyState, "closed");
+    fixture.channel.message({ type: "delegation.created" });
+    await session.close();
+    assert.equal(calls.some(([kind]) => kind === "realtimeMessage"), false);
+    assert.equal(timers.size, 0);
+  } finally { await session.close(); fixture.restore(); }
+});
+
+test("the public managed voice forwards memory updates and durable admission failures over WebRTC", async () => {
   await initializeBrowserEngine({ module: await WebAssembly.compile(
     await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url)),
   ) });
@@ -239,7 +383,7 @@ test("the public managed voice forwards memory updates and durable admission fai
     await voice.speak("Read this aloud.");
     await voice.appendText("Selected README.md", { role: "developer" });
     await voice.appendContext("The editor selection changed.");
-    const frames = fixture.sideband.sent.map((frame) => JSON.parse(frame));
+    const frames = fixture.channel.sent.map((frame) => JSON.parse(frame));
     assert.ok(frames.some((frame) => frame.channel === "speakable" && frame.content[0].text === "Read this aloud."));
     assert.ok(frames.some((frame) => frame.type === "session.context.append" && frame.content[0].text === "Selected README.md" && !("channel" in frame)));
     await assert.rejects(voice.speak(" "), /voice text/);
@@ -252,15 +396,15 @@ test("the public managed voice forwards memory updates and durable admission fai
       },
     } };
     events.enqueue(new TextEncoder().encode(`id: ${cursor}\nevent: event\ndata: ${JSON.stringify(event)}\n\n`));
-    await waitFor(() => fixture.sideband.sent.some((frame) => frame.includes("delete")));
-    assert.equal(fixture.sidebandUrls.length, 1);
-    fixture.sideband.message({ type: "delegation.created", item: {
+    await waitFor(() => fixture.channel.sent.some((frame) => frame.includes("delete")));
+    assert.equal(fixture.sidebandUrls.length, 0);
+    fixture.channel.message({ type: "delegation.created", item: {
       type: "delegation", target: "client", id: "failed-handoff", content: [{ type: "input_text", text: "Look up the saved note" }],
     } });
     await waitFor(() => delegated);
     events.enqueue(new TextEncoder().encode('id: 9007199254740994\nevent: turn_failed\ndata: {"type":"turn_failed","id":"failed-voice-turn","turn_id":"failed-voice-turn","error":"private backend error","cursor":"9007199254740994","created_at":2}\n\n'));
     await waitFor(() => voice.getSnapshot().transcripts.some((entry) => entry.recovered && entry.text === "The coding agent could not complete the request."));
-    assert.ok(!fixture.sideband.sent.some((frame) => frame.includes("private backend error")));
+    assert.ok(!fixture.channel.sent.some((frame) => frame.includes("private backend error")));
   } finally {
     await voice.destroy();
     fixture.restore();
@@ -1167,10 +1311,30 @@ function installBrowserVoiceFixture({ boundary, backendReady = true } = {}) {
     emit(type, event) { for (const listener of this.listeners.get(type) ?? []) listener(event); }
     addTrack() {}
     close() { this.signalingState = "closed"; this.connectionState = "closed"; this.emit("connectionstatechange", {}); }
-    createDataChannel() { return { close() {} }; }
+    createDataChannel() {
+      fixture.channel = new FakeDataChannel();
+      return fixture.channel;
+    }
     async createOffer() { return { type: "offer", sdp: "v=offer" }; }
     async setLocalDescription(description) { this.localDescription = description; }
-    async setRemoteDescription() {}
+    async setRemoteDescription() {
+      if (boundary !== "data-channel") fixture.channel.open();
+    }
+  }
+  class FakeDataChannel extends EventTarget {
+    readyState = "connecting";
+    sent = [];
+    open() {
+      this.readyState = "open";
+      this.dispatchEvent(new Event("open"));
+      if (backendReady) queueMicrotask(() => this.message({ type: "session.started" }));
+    }
+    message(value) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(value) })); }
+    send(value) {
+      assert.equal(this.readyState, "open");
+      this.sent.push(value);
+    }
+    close() { this.readyState = "closed"; this.dispatchEvent(new Event("close")); }
   }
   class FakeWebSocket {
     static CONNECTING = 0;
@@ -1221,6 +1385,7 @@ function installBrowserVoiceFixture({ boundary, backendReady = true } = {}) {
     get request() { return fixture.request; },
     get requestSignal() { return fixture.requestSignal; },
     get peer() { return fixture.peer; },
+    get channel() { return fixture.channel; },
     get sideband() { return fixture.sideband; },
     get sidebandUrls() { return fixture.sidebandUrls; },
     restore() { Object.assign(globalThis, previous); },

@@ -142,6 +142,20 @@ storage ownership.
   or `Last-Event-ID`; same-origin browser WebSockets carry the typed
   prompt/steer/cancel protocol. Realtime calls and sideband transport have
   separate agent-scoped WebSocket routes.
+- API key resolution validates live account membership, scope, and authorization
+  epoch inside the key object. This avoids serial edge-to-account round trips;
+  no authorization decision is cached. A response marker allows rolling
+  deployments to fall back to the original checks against older key objects.
+- Voice call creation derives a coarse relay region from trusted Cloudflare
+  request metadata. A separate `voice-v1:<region>:<user>` relay prevents an old
+  text relay from anchoring media in a distant region. Unknown geography uses
+  the existing relay. Placement is a hint, and a sleeping relay still incurs
+  container startup time; provider credentials remain server-side.
+  After live Session ownership validation, managed calls use the private
+  `ManagedRealtimeEgress` binding so the broker does not repeat that lookup.
+  Generic agent egress cannot use the owner assertion. Deploy egress before
+  managed to install the entrypoint; without the binding, calls retain the
+  generic broker path and its ownership check.
 - Voice admission does not wait for the independent Responses preconnection.
   The shared Rust protocol delegates the first spoken question and gates reply
   playback until durable output is delivered. Its WASM plan searches memory and

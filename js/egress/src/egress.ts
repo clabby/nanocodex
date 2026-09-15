@@ -209,6 +209,34 @@ export interface EgressEnv extends BrokerEnv, ConnectorBrokerEnv {
   DEPLOYMENT_SHA?: string;
 }
 
+/** Bound only to the managed ingress Worker, which has just verified ownership. */
+export class ManagedRealtimeEgress extends WorkerEntrypoint<EgressEnv> {
+  fetch(request: Request): Promise<Response> {
+    return handleManagedRealtimeCall(request, this.env, this.ctx);
+  }
+}
+
+/** This private capability is never dispatched by the default/public handler. */
+export function handleManagedRealtimeCall(
+  request: Request,
+  env: EgressEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const subject = request.headers.get(SUBJECT_HEADER);
+  const userId = request.headers.get("x-nanocodex-realtime-owner");
+  if (request.method !== "POST" || url.origin !== "https://nanocodex.internal"
+    || url.pathname !== "/v1/realtime/calls" || url.search
+    || !subject || !MANAGED_SESSION_SUBJECT.test(subject)
+    || !userId || !CHIEF_USER_ID.test(userId)) {
+    return Promise.resolve(Response.json({ error: "invalid_managed_realtime_call" }, { status: 403 }));
+  }
+  // The authenticated ingress already checked the Session's current owner,
+  // organization, team, epoch, and deletion/export state. Only this private
+  // entrypoint may carry that result past the generic agent egress boundary.
+  return handleEgressWithOwner(request, env, ctx, fetch, undefined, undefined, { subject, userId });
+}
+
 export class ChiefOfStaffEgress extends WorkerEntrypoint<EgressEnv> {
   async ensureCredential(userIdValue: unknown): Promise<void> {
     if (typeof userIdValue !== "string" || !CHIEF_USER_ID.test(userIdValue)) {
@@ -316,13 +344,25 @@ export default {
   },
 } satisfies ExportedHandler<EgressEnv>;
 
-export async function handleEgress(
+export function handleEgress(
   request: Request,
   env: EgressEnv,
   ctx?: Pick<ExecutionContext, "waitUntil">,
   upstreamFetch: typeof fetch = fetch,
   diagnostics?: Readonly<{ upstreamException(error: Readonly<{ name: string }>): void }>,
   sessionModelAuthority?: Readonly<{ subject: string; owner: string }>,
+): Promise<Response> {
+  return handleEgressWithOwner(request, env, ctx, upstreamFetch, diagnostics, sessionModelAuthority);
+}
+
+async function handleEgressWithOwner(
+  request: Request,
+  env: EgressEnv,
+  ctx?: Pick<ExecutionContext, "waitUntil">,
+  upstreamFetch: typeof fetch = fetch,
+  diagnostics?: Readonly<{ upstreamException(error: Readonly<{ name: string }>): void }>,
+  sessionModelAuthority?: Readonly<{ subject: string; owner: string }>,
+  verifiedVoiceOwner?: Readonly<{ subject: string; userId: string }>,
 ): Promise<Response> {
   const started = Date.now();
   // Headers on the general broker are never an ownership assertion. Only the
@@ -400,7 +440,8 @@ export async function handleEgress(
     if (sessionModelAuthority && (operation.id !== "responses" || sessionModelAuthority.subject !== subject)) {
       return jsonError(403, "invalid_session_model_authority");
     }
-    userId = sessionModelAuthority?.owner ?? await resolveSubject(env, subject);
+    userId = sessionModelAuthority?.owner ?? (operation.id === "realtime-call" && verifiedVoiceOwner?.subject === subject
+      ? verifiedVoiceOwner.userId : await resolveSubject(env, subject));
     const subjectResolvedAt = Date.now();
     const sponsoredDemo = EPHEMERAL_BROWSER_MODEL_SUBJECT.test(subject)
       && operation.id === "responses";
@@ -425,6 +466,7 @@ export async function handleEgress(
         operation,
         buildUpstreamRequest(request, env, operation, credential, body),
         upstreamFetch,
+        request.headers.get("x-nanocodex-voice-region"),
       );
       let recovered = false;
       if (upstream.status === 401 && credential.kind === "chatgpt") {
@@ -449,6 +491,7 @@ export async function handleEgress(
           operation,
           buildUpstreamRequest(request, env, operation, credential, body),
           upstreamFetch,
+          request.headers.get("x-nanocodex-voice-region"),
         );
         recovered = true;
       }
@@ -2273,6 +2316,7 @@ async function fetchUpstream(
   operation: ModelOperation,
   request: Request,
   upstreamFetch: typeof fetch,
+  voiceRegion: string | null,
 ): Promise<Response> {
   if (credential.kind !== "chatgpt" || env.CODEX_RELAY_URL || operation.directChatGpt) {
     return upstreamFetch(request);
@@ -2280,8 +2324,14 @@ async function fetchUpstream(
   if (env.CHATGPT_EGRESS) {
     const target = new URL(request.url);
     const internal = new URL(`${target.pathname}${target.search}`, "https://chatgpt-egress.internal");
-    const id = env.CHATGPT_EGRESS.idFromName(`user-v1:${userId}`);
-    return env.CHATGPT_EGRESS.get(id).fetch(new Request(internal, {
+    // Voice media placement follows the call-creation relay. Keep a separate
+    // regional relay so a user's older text relay cannot anchor calls overseas.
+    const region = operation.id === "realtime-call" && voiceRegion
+      && ["wnam", "enam", "sam", "weur", "eeur", "apac", "oc"].includes(voiceRegion)
+      ? voiceRegion as DurableObjectLocationHint : undefined;
+    const id = env.CHATGPT_EGRESS.idFromName(region
+      ? `voice-v1:${region}:${userId}` : `user-v1:${userId}`);
+    return env.CHATGPT_EGRESS.get(id, region ? { locationHint: region } : undefined).fetch(new Request(internal, {
       method: request.method,
       headers: request.headers,
       body: request.body,

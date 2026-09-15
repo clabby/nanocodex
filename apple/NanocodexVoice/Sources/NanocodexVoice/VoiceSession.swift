@@ -217,7 +217,7 @@ public struct VoiceTranscript: Identifiable, Equatable, Sendable {
         // neither of which is guaranteed to respond to task cancellation.
         startupDeadline = Task { [weak self] in
             do { try await Task.sleep(for: timeout) } catch { return }
-            guard let self, self.generation == token, self.phase == .connecting else { return }
+            guard let self, self.generation == token, self.isEngaged else { return }
             voiceTiming("startup.timeout")
             self.fail(ManagedError(code: "voice_startup_timeout", message: "Voice is taking too long to connect. Please try again."))
         }
@@ -403,13 +403,16 @@ public struct VoiceTranscript: Identifiable, Equatable, Sendable {
 
     private func becomeActiveIfReady() {
         guard isEngaged, peerConnected && controlConnected && backendReady else { return }
-        // Capture can begin while durable admission catches up. Handoffs remain
-        // queued until admission and the resumable agent event stream are ready.
+        // Listening and its UI share the media boundary. Durable work can still
+        // be preparing; startRouting keeps handoffs behind admission and events.
         peer?.activateMicrophone()
-        guard conversationReady && agentEventsReady else { return }
+        if phase != .active { voiceTiming("voice.ready") }
         phase = .active; isReconnecting = false
+        // Keep the whole-startup deadline alive until task setup also finishes.
+        // Otherwise a listening call could queue requests indefinitely.
+        guard conversationReady && agentEventsReady else { return }
+        if startupDeadline != nil { voiceTiming("voice.tasks.ready") }
         startupDeadline?.cancel(); startupDeadline = nil
-        voiceTiming("voice.ready")
         startRouting(token: generation)
     }
 

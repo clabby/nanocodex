@@ -28,6 +28,92 @@ final class VoiceStartupTests: XCTestCase {
         voice.stop()
     }
 
+    @MainActor func testListeningDoesNotWaitForTaskSetupButDelegationDoes() async throws {
+        for slowAdmission in [true, false] {
+            let preparing = expectation(description: "Task setup started")
+            let delegated = expectation(description: "Queued handoff admitted")
+            var routeCount = 0
+            let began = ContinuousClock.now
+            let fixture = try HTTPFixture { request in
+                if request.path.hasSuffix("/calls") {
+                    return .init(status: 201, headers: ["Content-Type": "application/sdp"], body: "pending", delay: 3)
+                }
+                if request.path.hasSuffix("/start") {
+                    preparing.fulfill()
+                    return self.receipt(request, delay: slowAdmission ? 0.5 : 0)
+                }
+                if request.path.hasSuffix("/delegate") {
+                    routeCount += 1
+                    XCTAssertGreaterThanOrEqual(began.duration(to: .now), .milliseconds(500))
+                    delegated.fulfill()
+                    return .init(body: String(data: try! JSONSerialization.data(withJSONObject: [
+                        "voice_session_id": request.json["voice_session_id"]!, "operation_id": request.json["operation_id"]!,
+                        "route": "started", "turn_id": "ready-turn"
+                    ]), encoding: .utf8)!)
+                }
+                if request.path.hasSuffix("/stop") { return self.receipt(request) }
+                if request.path.hasSuffix("/events") {
+                    return .init(headers: ["Content-Type": "text/event-stream"], body: ": keepalive\n\n", delay: 3)
+                }
+                return .init(body: #"{"latest_event_cursor":"0"}"#, delay: slowAdmission ? 0 : 0.5)
+            }
+            defer { fixture.close() }
+            let transport = try ManagedVoiceTransport(credential: .init(origin: fixture.origin, apiKey: fixtureKey), agentID: agent, configuration: fixture.configuration)
+            let voice = VoiceSession()
+            voice.startPreparingForTesting(timeout: .seconds(2), transport: transport) { self.configuration(fixture.origin) }
+            await fulfillment(of: [preparing], timeout: 1)
+            // Inject only the media signals; actual admission and cursor work
+            // use delayed HTTP, in both possible completion orders.
+            voice.receivePeerSignalForTesting(.connected)
+            voice.receivePeerSignalForTesting(.controlReady)
+            try voice.receiveRealtimeForTesting(.object(["type": .string("session.started")]))
+            XCTAssertEqual(voice.phase, .active)
+            XCTAssertEqual(voice.status, "Listening")
+            try voice.receiveRealtimeForTesting(.object(["type": .string("delegation.created"), "item": .object([
+                "type": .string("delegation"), "target": .string("client"), "id": .string("early-request"),
+                "content": .array([.object(["type": .string("input_text"), "text": .string("Inspect the project")])])])]))
+            XCTAssertEqual(routeCount, 0)
+            await fulfillment(of: [delegated], timeout: 1)
+            await voice.finishRoutingForTesting()
+            XCTAssertEqual(routeCount, 1)
+            XCTAssertEqual(voice.phase, .active)
+            voice.stop(); await voice.finishStopping()
+        }
+    }
+
+    @MainActor func testTaskSetupDeadlineAndDenialStillCloseAnAlreadyListeningCall() async throws {
+        for denied in [false, true] {
+            let preparing = expectation(description: "Admission started")
+            let fixture = try HTTPFixture { request in
+                if request.path.hasSuffix("/start") {
+                    preparing.fulfill()
+                    return denied ? .init(status: 403, body: #"{"error":"forbidden","message":"Admission denied."}"#, delay: 0.3) : self.receipt(request, delay: 3)
+                }
+                if request.path.hasSuffix("/stop") { return self.receipt(request) }
+                if request.path.hasSuffix("/calls") { return .init(body: "pending", delay: 3) }
+                if request.path.hasSuffix("/events") {
+                    return .init(headers: ["Content-Type": "text/event-stream"], body: ": keepalive\n\n", delay: 3)
+                }
+                return .init(body: #"{"latest_event_cursor":"0"}"#)
+            }
+            defer { fixture.close() }
+            let transport = try ManagedVoiceTransport(credential: .init(origin: fixture.origin, apiKey: fixtureKey), agentID: agent, configuration: fixture.configuration)
+            let voice = VoiceSession()
+            voice.startPreparingForTesting(timeout: denied ? .seconds(2) : .milliseconds(300), transport: transport) { self.configuration(fixture.origin) }
+            await fulfillment(of: [preparing], timeout: 1)
+            voice.receivePeerSignalForTesting(.connected)
+            voice.receivePeerSignalForTesting(.controlReady)
+            try voice.receiveRealtimeForTesting(.object(["type": .string("session.started")]))
+            XCTAssertEqual(voice.phase, .active)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+            while voice.isEngaged, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+            XCTAssertEqual(voice.phase, .failed)
+            XCTAssertFalse(voice.hasNativePeerForTesting)
+            XCTAssertTrue(voice.errorMessage?.contains(denied ? "Admission denied" : "too long") == true)
+            await voice.finishStopping()
+        }
+    }
+
     @MainActor func testTypedInputIsScopedAndSupersededEffectsCannotPublishCaptions() {
         let voice = VoiceSession()
         voice.startTranscriptPreview(agentID: agent)
@@ -104,6 +190,13 @@ final class VoiceStartupTests: XCTestCase {
     }
 
     @MainActor func testAdmissionAndEventFailuresSurfaceWhileMediaHTTPIsStillPending() async throws {
+        // Exercise cancellation of pending HTTP after native setup. Cold macOS
+        // audio-device discovery can outlast the fixture's admission rejection,
+        // in which case no media request should be sent at all.
+        let preparedPeer = VoicePeer(captureMicrophone: false) { _ in }
+        do { _ = try await preparedPeer.offer() }
+        catch { preparedPeer.close(); throw error }
+        preparedPeer.close()
         for failAdmission in [true, false] {
         let callStarted = expectation(description: "Media HTTP started")
         let stopped = expectation(description: "Failed session cleaned up")

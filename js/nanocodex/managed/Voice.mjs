@@ -50,6 +50,7 @@ export async function createManagedBrowserVoice(agent, voice, options = {}) {
     appendText: (role, text) => raw.appendText(role, text),
     appendContext: (text) => raw.appendContext(text),
     parallelStartup: true,
+    dataChannelControl: true,
     async start() {
       const started = await startManagedRealtime(agent, voiceSessionId, startOperationId);
       raw.start(JSON.stringify(started.context));

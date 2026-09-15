@@ -114,6 +114,13 @@ export function create(agent, options = {}) {
       : createBrowserVoice(agent, selectedVoice));
     const transport = managedTransport;
     let transcriptSequence = 0;
+    let publishedReady = false;
+    const publishReady = () => {
+      if (publishedReady || destroyed || session !== next || generation !== current) return;
+      publishedReady = true;
+      publish({ ...snapshot, error: undefined, status: "active", statusText: `Voice active (${selectedVoice})` });
+      emit(Object.freeze({ type: "started", voice: selectedVoice }));
+    };
     const next = new BrowserVoiceSession({
       core,
       sessionId,
@@ -122,9 +129,10 @@ export function create(agent, options = {}) {
       ...(transport?.call === undefined ? {} : { call: transport.call }),
       ...(transport?.sidebandUrl === undefined ? {} : { sidebandUrl: transport.sidebandUrl }),
       ...(options.callUrl === undefined ? {} : { callUrl: options.callUrl }),
-      ...(options.sidebandUrl === undefined ? {} : { sidebandUrl: options.sidebandUrl }),
+      ...(options.sidebandUrl === undefined ? {} : { sidebandUrl: options.sidebandUrl, dataChannelControl: false }),
       ...(options.captureMicrophone === undefined ? {} : { captureMicrophone: options.captureMicrophone }),
       ...(options.beforeAgentTurn === undefined ? {} : { beforeAgentTurn: options.beforeAgentTurn }),
+      onReady: publishReady,
       onStatus(text) {
         if (session === next && generation === current && snapshot.status !== "idle" && snapshot.status !== "error") {
           publish({ ...snapshot, statusText: text });
@@ -175,11 +183,9 @@ export function create(agent, options = {}) {
     session = next;
     next.setMuted(snapshot.muted);
     observeAgentEvents(next);
-    startPromise = next.start().then(() => {
-      if (destroyed || session !== next || generation !== current) return;
-      publish({ ...snapshot, error: undefined, status: "active", statusText: `Voice active (${selectedVoice})` });
-      emit(Object.freeze({ type: "started", voice: selectedVoice }));
-    }).catch(async (cause) => {
+    // Media readiness updates the UI independently; start still waits for task
+    // admission, and a later rejection closes media through the same error path.
+    startPromise = next.start().then(publishReady).catch(async (cause) => {
       if (session === next) session = undefined;
       if (activeResources.get(agent) === resource) activeResources.delete(agent);
       cleanupWatcher();

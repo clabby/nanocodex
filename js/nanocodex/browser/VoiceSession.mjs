@@ -76,6 +76,7 @@ export class BrowserVoiceSession {
   #admission;
   #peer;
   #channel;
+  #directControl = false;
   #sideband;
   #sidebandUrl;
   #sidebandCallId;
@@ -129,14 +130,16 @@ export class BrowserVoiceSession {
     const coreReady = Promise.resolve(this.#options.core).then(async (core) => {
       if (this.#closed || this.#closing.signal.aborted) { core.free(); return; }
       this.#core = core;
+      this.#directControl = core.dataChannelControl === true && this.#options.dataChannelControl !== false;
       if (this.#options.settings) await core.configure(JSON.stringify(this.#options.settings));
-      await this.#options.beforeAgentTurn?.();
+      if (!this.#directControl) await this.#options.beforeAgentTurn?.();
       if (this.#closed || this.#closing.signal.aborted) return;
       return core;
     });
-    // Managed Rust can deliver authoritative context after SDP negotiation.
-    // Start both immediately, but fence incoming control events on admission.
+    // Media and live conversation do not depend on durable task admission.
+    // Only delegated work waits for admission on the direct control path.
     const coreStartup = coreReady.then(async (core) => {
+      if (this.#directControl) await this.#options.beforeAgentTurn?.();
       await core?.start();
       return core;
     });
@@ -203,7 +206,7 @@ export class BrowserVoiceSession {
     const completed = JSON.parse(await core.completeCall(callResponse.body, callResponse.location));
     if (this.#closed || peer.signalingState === "closed") return;
     this.#sidebandCallId = completed.call_id;
-    this.#sidebandUrl = this.#options.sidebandUrl
+    this.#sidebandUrl = this.#directControl || this.#options.sidebandUrl
       ? undefined
       : String(await core.sidebandUrl(completed.call_id));
     if (this.#closed) return;
@@ -215,7 +218,7 @@ export class BrowserVoiceSession {
         }, { signal: this.#closing.signal, timeoutMs: PEER_CONNECTION_TIMEOUT_MS,
           timeoutError: new VoiceError("peer_connection_timeout", "Voice media did not connect in time."),
           onTimeout: () => { peer.close(); } }),
-        this.#openSideband().then(() => withStartupDeadline(() => this.#backendReady, { signal: this.#closing.signal,
+        (this.#directControl ? this.#openDataChannel() : this.#openSideband()).then(() => withStartupDeadline(() => this.#backendReady, { signal: this.#closing.signal,
           timeoutMs: SIDEBAND_OPEN_TIMEOUT_MS,
           timeoutError: new VoiceError("session_ready_timeout", "The Realtime session did not become ready in time.") })),
       ]);
@@ -227,6 +230,7 @@ export class BrowserVoiceSession {
     if (this.#closed) return;
     this.#sampleLevels();
     this.#status(`Voice active (${this.#options.voice})`);
+    this.#options.onReady?.();
   }
 
   async #prepareMedia(capture) {
@@ -249,6 +253,17 @@ export class BrowserVoiceSession {
     this.#peer = peer;
     for (const track of microphone.getAudioTracks()) peer.addTrack(track, microphone);
     this.#channel = peer.createDataChannel("oai-events");
+    const channel = this.#channel;
+    channel.addEventListener("message", (event) => {
+      if (this.#directControl && !this.#closed && this.#channel === channel) {
+        this.#receiveControl(event.data, () => this.#channel === channel);
+      }
+    });
+    channel.addEventListener("close", () => {
+      if (this.#directControl && !this.#closed && !this.#closing.signal.aborted && this.#channel === channel) {
+        this.#options.onTerminated("Voice control connection closed — tap Voice to reconnect");
+      }
+    });
     peer.addEventListener("track", (event) => {
       if (this.#closed || this.#closing.signal.aborted || this.#peer !== peer) {
         event.track.stop();
@@ -410,7 +425,10 @@ export class BrowserVoiceSession {
     }
     let sent = 0;
     for (const frame of effects.frames ?? []) {
-      if (this.#sideband?.readyState === WebSocket.OPEN) {
+      if (this.#directControl && this.#channel?.readyState === "open") {
+        this.#channel.send(frame);
+        sent += 1;
+      } else if (!this.#directControl && this.#sideband?.readyState === WebSocket.OPEN) {
         this.#sideband.send(frame);
         sent += 1;
       }
@@ -457,20 +475,7 @@ export class BrowserVoiceSession {
     let opened = false;
     sideband.addEventListener("message", (event) => {
       if (!this.#closed && generation === this.#sidebandGeneration) {
-        this.#applyLive(async () => {
-          await this.#admission;
-          if (this.#closed || generation !== this.#sidebandGeneration) return;
-          if (await this.#core.requiresAgentAdmission(event.data)) {
-            // Only delegations wait for durable admission. Speech deltas and
-            // agent output must continue while that independent request waits.
-            void this.#enqueue(async () => {
-              await this.#options.beforeAgentTurn?.();
-              return this.#core.realtimeMessage(event.data);
-            }, true).catch(() => {});
-            return;
-          }
-          return this.#core.realtimeMessage(event.data);
-        });
+        this.#receiveControl(event.data, () => generation === this.#sidebandGeneration);
       }
     });
     sideband.addEventListener("close", () => {
@@ -490,6 +495,46 @@ export class BrowserVoiceSession {
     if (!this.#closed && generation === this.#sidebandGeneration) {
       this.#status(`Voice active (${this.#options.voice})`);
     }
+  }
+
+  #receiveControl(payload, isCurrent) {
+    this.#applyLive(async () => {
+      if (!this.#directControl) await this.#admission;
+      if (this.#closed || !isCurrent()) return;
+      if (await this.#core.requiresAgentAdmission(payload)) {
+        // Retain accepted requests on close, but keep captions and interruptions
+        // independent of the durable route and its ordered task queue.
+        void this.#enqueue(async () => {
+          await this.#admission;
+          await this.#options.beforeAgentTurn?.();
+          return this.#core.realtimeMessage(payload);
+        }, true).catch(() => {});
+        return;
+      }
+      return this.#core.realtimeMessage(payload);
+    });
+  }
+
+  async #openDataChannel() {
+    const channel = this.#channel;
+    await withStartupDeadline(() => new Promise((resolve, reject) => {
+      const cleanup = () => {
+        channel.removeEventListener("open", opened);
+        channel.removeEventListener("close", closed);
+        this.#closing.signal.removeEventListener("abort", closed);
+      };
+      const opened = () => { cleanup(); resolve(); };
+      const closed = () => { cleanup(); reject(new Error("voice data channel closed before opening")); };
+      channel.addEventListener("open", opened);
+      channel.addEventListener("close", closed);
+      this.#closing.signal.addEventListener("abort", closed, { once: true });
+      if (channel.readyState === "open") opened();
+      else if (channel.readyState === "closed" || this.#closing.signal.aborted) closed();
+    }), {
+      signal: this.#closing.signal, timeoutMs: SIDEBAND_OPEN_TIMEOUT_MS,
+      timeoutError: new VoiceError("data_channel_open_timeout", "The Realtime voice data channel did not open in time."),
+    });
+    if (!this.#closed && this.#channel === channel) await this.#applyLive(() => this.#core.sidebandOpened());
   }
 
   #status(message) {
@@ -512,8 +557,13 @@ export class BrowserVoiceSession {
     this.#flushTimer = undefined;
     if (this.#reconnectTimer !== undefined) window.clearTimeout(this.#reconnectTimer);
     this.#reconnectTimer = undefined;
-    this.#channel?.close();
+    // Match native close: release provider media before durable tail cleanup.
+    if (this.#directControl && this.#channel?.readyState === "open") {
+      try { this.#channel.send('{"type":"session.close"}'); } catch {}
+    }
+    const channel = this.#channel;
     this.#channel = undefined;
+    channel?.close();
     this.#peer?.close();
     this.#peer = undefined;
     stopStream(this.#microphone);
