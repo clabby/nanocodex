@@ -296,16 +296,16 @@ it.each(["spotify", "soundcloud"] as const)("managed agents can connect %s", asy
   const result = await manageAccountConnectors({
     ...base, broker: { fetch: async () => Response.json({ authorization_url: url.href }) } as unknown as Fetcher,
   }, { operation: "connect", connector: provider });
-  expect(result).toMatchObject({ ok: true, status: "authorization_required", connector: provider, authorization_url: provider === "spotify" ? "nanocodex://connect/spotify" : url.href });
+  expect(result).toMatchObject({ ok: true, status: "authorization_required", connector: provider, authorization_url: `nanocodex://connect/${provider}` });
 });
 
 
-it("Spotify connect returns the phone flow without starting hosted OAuth and keeps owner controls", async () => {
+it.each(["spotify", "soundcloud"] as const)("%s connect returns the phone flow without starting hosted OAuth and keeps owner controls", async (provider) => {
   const fetch = vi.fn();
   const options = { ...base, broker: { fetch } as unknown as Fetcher };
-  expect(await manageAccountConnectors(options, { operation: "connect", connector: "spotify" }))
-    .toMatchObject({ authorization_url: "nanocodex://connect/spotify" });
-  expect(await manageAccountConnectors({ ...options, canManage: () => false }, { operation: "connect", connector: "spotify" }))
+  expect(await manageAccountConnectors(options, { operation: "connect", connector: provider }))
+    .toMatchObject({ authorization_url: `nanocodex://connect/${provider}` });
+  expect(await manageAccountConnectors({ ...options, canManage: () => false }, { operation: "connect", connector: provider }))
     .toMatchObject({ status: "forbidden" });
   expect(fetch).not.toHaveBeenCalled();
 });

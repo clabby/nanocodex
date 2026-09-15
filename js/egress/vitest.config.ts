@@ -123,6 +123,8 @@ export default defineConfig({
             const refresh = body.get("grant_type") === "refresh_token";
             if (music === "spotify" && body.get("code") === "loopback-account"
               && body.get("redirect_uri") !== "http://127.0.0.1:8989/login") return new Response(null, { status: 400 });
+            if (music === "soundcloud" && body.get("code") === "soundcloud-loopback-account"
+              && body.get("redirect_uri") !== "http://127.0.0.1:8788/callback") return new Response(null, { status: 400 });
             if (music === "spotify" && body.get("refresh_token") === "music-refresh-loopback-account"
               && body.get("client_id") !== SPOTIFY_LOOPBACK_CLIENT_ID) return new Response(null, { status: 401 });
             const identity = refresh ? body.get("refresh_token")?.replace("music-refresh-", "") : body.get("code");

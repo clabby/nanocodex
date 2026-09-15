@@ -6,7 +6,7 @@ import {
   type EncryptedEnvelope,
 } from "./credential-vault";
 import {
-  SPOTIFY_LOOPBACK_CLIENT_ID, SPOTIFY_LOOPBACK_REDIRECT_URI,
+  SPOTIFY_LOOPBACK_CLIENT_ID, SPOTIFY_LOOPBACK_REDIRECT_URI, SOUNDCLOUD_LOOPBACK_REDIRECT_URI,
   buildMusicAuthorizationUrl, buildMusicTokenRequest, buildMusicRefreshRequest,
   buildMusicIdentityRequest, decodeMusicTokenResponse, decodeMusicIdentity,
   buildSoundCloudRevocationRequest, type MusicProviderId,
@@ -205,6 +205,7 @@ type StoredConnector = {
 };
 
 type PendingAuthorization = {
+  loopbackFlow?: "ncspot_loopback" | "soundcloud_loopback";
   oauthClientId?: string;
   state: string;
   verifier: string;
@@ -861,12 +862,15 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   async #start(id: OAuthProviderId, request: Request): Promise<Record<string, unknown>> {
     const body = await readJson(request, MAX_BODY_BYTES);
     const flow = stringField(body, "flow");
-    if (flow && (id !== "spotify" || flow !== "ncspot_loopback")) {
+    if (flow && !((id === "spotify" && flow === "ncspot_loopback")
+      || (id === "soundcloud" && flow === "soundcloud_loopback"))) {
       throw new ConnectorFailure(400, "invalid_request");
     }
-    const loopback = flow === "ncspot_loopback";
-    const oauthClientId = loopback ? SPOTIFY_LOOPBACK_CLIENT_ID : undefined;
-    const redirectUri = loopback ? SPOTIFY_LOOPBACK_REDIRECT_URI : stringField(body, "redirect_uri");
+    const loopbackFlow = flow === "ncspot_loopback" || flow === "soundcloud_loopback" ? flow : undefined;
+    const loopback = loopbackFlow !== undefined;
+    const oauthClientId = flow === "ncspot_loopback" ? SPOTIFY_LOOPBACK_CLIENT_ID : undefined;
+    const redirectUri = flow === "ncspot_loopback" ? SPOTIFY_LOOPBACK_REDIRECT_URI
+      : flow === "soundcloud_loopback" ? SOUNDCLOUD_LOOPBACK_REDIRECT_URI : stringField(body, "redirect_uri");
     const returnTo = stringField(body, "return_to");
     const accountHint = optionalAccountHint(body, id);
     if (!redirectUri || (!loopback && !validRedirectUri(redirectUri, this.#env))
@@ -880,6 +884,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
     ));
     this.#connectors.pending[id] = {
+      ...(loopbackFlow ? { loopbackFlow } : {}),
       ...(oauthClientId ? { oauthClientId } : {}),
       state,
       verifier,
@@ -904,8 +909,10 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     const body = await readJson(request, MAX_BODY_BYTES);
     const state = stringField(body, "state");
     const pending = this.#connectors.pending[id];
+    const pendingFlow = pending?.loopbackFlow
+      ?? (pending?.oauthClientId === SPOTIFY_LOOPBACK_CLIENT_ID ? "ncspot_loopback" : undefined);
     if (!pending || pending.expiresAt <= Date.now() || !state || state !== pending.state
-      || (pending.oauthClientId === SPOTIFY_LOOPBACK_CLIENT_ID) !== (stringField(body, "flow") === "ncspot_loopback")) {
+      || pendingFlow !== (stringField(body, "flow") || undefined)) {
       throw new ConnectorFailure(400, "invalid_oauth_state");
     }
     delete this.#connectors.pending[id];

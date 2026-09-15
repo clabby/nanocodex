@@ -4,6 +4,7 @@ export type MusicProviderId = "spotify" | "soundcloud";
 // loopback redirect is fixed; callers cannot supply another client or destination.
 export const SPOTIFY_LOOPBACK_CLIENT_ID = "d420a117a32841c2b3474932e49fb54b";
 export const SPOTIFY_LOOPBACK_REDIRECT_URI = "http://127.0.0.1:8989/login";
+export const SOUNDCLOUD_LOOPBACK_REDIRECT_URI = "http://127.0.0.1:8788/callback";
 
 // Spotify Web API scopes; playback itself remains subject to Spotify's account restrictions.
 export const SPOTIFY_SCOPES = Object.freeze([

@@ -195,8 +195,11 @@ Spotify endpoint restrictions still apply.
 SoundCloud uses Authorization Code + PKCE with a confidential app registration.
 Configure `SOUNDCLOUD_OAUTH_CLIENT_ID` and `SOUNDCLOUD_OAUTH_CLIENT_SECRET` as
 broker secrets. Keep the secret in the broker; neither the phone nor the agent
-receives it. Configure the registration's redirect URI for the deployed callback,
-for example `https://nanocodex.gakonst.workers.dev/v1/connectors/soundcloud/callback`.
+receives it. The phone flow uses the registration's fixed
+`http://127.0.0.1:8788/callback` redirect. The foreground iPhone listens there and
+forwards only the one-time code and state to the owner-authenticated broker route.
+A separately configured hosted flow can use
+`https://nanocodex.gakonst.workers.dev/v1/connectors/soundcloud/callback`.
 
 The [official registration CLI](https://developers.soundcloud.com/docs/api/register-app)
 supports `--remote` phone pairing and returns an existing registration when one
@@ -205,8 +208,8 @@ client is scoped to app registration; it is not a general SoundCloud connector.
 The Rust [soundcloud-tui](https://github.com/7ito/soundcloud-tui) likewise requires
 an app's own credentials.
 
-After registration, **Connect SoundCloud** opens the provider consent page using
-its mobile `display=popup` layout. The broker exchanges the code with PKCE, stores
+After registration, **Connect SoundCloud** opens Nanocodex on the phone and
+presents the provider consent page using its mobile `display=popup` layout. The broker exchanges the code with PKCE, stores
 encrypted user tokens, and rotates the single-use refresh token. Verify the
 connection with `soundcloud_request` reads of `/me` and `/me/playlists` before
 reporting it connected. OAuth transport tests use fixtures and do not replace

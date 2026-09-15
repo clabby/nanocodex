@@ -427,3 +427,11 @@ egress with live grant and connection checks, broker-owned token refresh, fixed
 provider origins, bounded JSON bodies/responses, and no automatic write retries.
 Provider scopes and endpoint availability still apply. Spotify connection links
 open `nanocodex://connect/spotify` to complete OAuth on the phone.
+
+
+SoundCloud also supports phone-local OAuth through
+`/v1/connectors/soundcloud/loopback` and its `/callback` route, using the same
+owner-only authorization and bounded payload policy as Spotify. The broker uses
+its configured SoundCloud app and the fixed `http://127.0.0.1:8788/callback`
+redirect. Both music providers' connection tools return native app links; no
+credentials or renewable tokens pass through the agent or phone API.

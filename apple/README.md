@@ -707,3 +707,11 @@ port, close it and retry. Keep Nanocodex open until authorization completes.
 The focused `SpotifyLoopbackTests` exercise the actual socket and callback
 validation. `SpotifyLoopbackUITests` exercises Safari returning to that listener
 on iOS with a nonsecret fixture; real Spotify authorization is a separate live gate.
+
+
+SoundCloud uses the same foreground phone flow with its own fixed listener at
+`http://127.0.0.1:8788/callback`. **Connect SoundCloud** is available under
+Settings → Connected accounts and Connectors; `nanocodex://connect/soundcloud`
+opens these settings. The app receives only the code and state. App credentials,
+PKCE, tokens, and refresh remain in the broker. SoundCloud app registration is a
+one-time deployment setup; ordinary users authorize their own accounts on the phone.

@@ -208,6 +208,32 @@ describe("Connect grant assertions", () => {
 });
 
 describe("connector route compatibility", () => {
+  it.each(["spotify", "soundcloud"])("keeps %s phone callbacks owner-bound and stamps the provider flow", async (provider) => {
+    const local = portableEnv();
+    const cookie = persistentAccountCookie(local, USER_ID, "d");
+    const requests: Request[] = [];
+    const env = { ...local.env, NANOCODEX: {
+      async fetch(input: RequestInfo | URL, init?: RequestInit) {
+        requests.push(new Request(input, init));
+        return Response.json({ connected: true });
+      },
+    } as Fetcher };
+    const origin = "https://nanocodex.example";
+    const url = new URL(`/v1/connectors/${provider}/loopback/callback`, origin);
+    const body = JSON.stringify({ state: "s".repeat(43), code: "one-time-code" });
+    const call = (headers: Record<string, string>, payload = body) => routeConnectorRequest(new Request(url, {
+      method: "POST", headers: { "content-type": "application/json", ...headers }, body: payload,
+    }), env, url);
+    expect((await call({ origin }))?.status).toBe(401);
+    expect((await call({ cookie, origin: "https://evil.test" }))?.status).toBe(403);
+    expect((await call({ cookie, origin }, JSON.stringify({ ...JSON.parse(body), client_secret: "secret" })))?.status).toBe(400);
+    expect(requests).toHaveLength(0);
+    expect((await call({ cookie, origin }))?.status).toBe(200);
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0]!.url).pathname).toBe(`/users/${USER_ID}/connectors/${provider}/callback`);
+    expect(await requests[0]!.json()).toEqual({ ...JSON.parse(body), flow: provider === "spotify" ? "ncspot_loopback" : "soundcloud_loopback" });
+  });
+
   it("serves one authenticated provider catalog for every account client", async () => {
     const local = portableEnv();
     const sessionToken = "c".repeat(64);

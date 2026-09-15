@@ -91,7 +91,7 @@ export function accountConnectorsTool(
     description: [
       "List, connect, reconnect, or disconnect account connectors without exposing credentials.",
       "Google Workspace is one authorization identity whose connections list the exact Gmail, Drive, Calendar, Tasks, Docs, Sheets, Slides, and Contacts capabilities granted.",
-      "Supports GitHub, Google Workspace, Slack, X, Spotify and SoundCloud. Use tool_search for each service’s read and write API tools. Spotify connect opens the native Nanocodex app; other providers return authorization URLs.",
+      "Supports GitHub, Google Workspace, Slack, X, Spotify and SoundCloud. Use tool_search for each service’s read and write API tools. Spotify and SoundCloud connect open the native Nanocodex app; other providers return authorization URLs.",
       "Connect returns a provider authorization URL. Give that exact URL to the user as a link; the provider may still require consent.",
       "Disconnect revokes one exact listed connection_id and is allowed only when the user explicitly asks to remove or replace it.",
     ].join(" "),
@@ -172,11 +172,12 @@ export async function manageAccountConnectors(
     };
   }
 
-  if (operation.provider === "spotify") {
+  if (operation.provider === "spotify" || operation.provider === "soundcloud") {
+    const name = CONNECTOR_NAMES[operation.provider];
     return {
-      ok: true, status: "authorization_required", connector: "spotify", name: "Spotify",
-      authorization_url: "nanocodex://connect/spotify",
-      message: "Open Nanocodex on your iPhone, then tap Connect Spotify in Settings. The app handles the phone-local callback. Verify connected=true with list afterwards.",
+      ok: true, status: "authorization_required", connector: operation.provider, name,
+      authorization_url: `nanocodex://connect/${operation.provider}`,
+      message: `Open Nanocodex on your iPhone, then tap Connect ${name} in Settings. The app handles the phone-local callback. Verify connected=true with list afterwards.`,
     };
   }
 

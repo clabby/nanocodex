@@ -923,8 +923,8 @@ export function ConnectOnboarding({
     if (activeConnector.current
       || capabilities.every((capability) => statuses[capability]?.connected)
       || (id === "chatgpt" && approval.deferredChatGptImport)) return;
-    if (provider === "spotify") {
-      await connectSpotify(approval);
+    if (provider === "spotify" || provider === "soundcloud") {
+      await connectMusic(approval, provider);
       return;
     }
     setFailure(undefined);
@@ -1050,8 +1050,8 @@ export function ConnectOnboarding({
       || capabilities.every((capability) => connectorStatuses[capability]?.connected)
       || (id === "chatgpt" && pendingApproval.deferredChatGptImport)
     ) return;
-    if (provider === "spotify") {
-      await connectSpotify(pendingApproval);
+    if (provider === "spotify" || provider === "soundcloud") {
+      await connectMusic(pendingApproval, provider);
       return;
     }
     if (wizard) {
@@ -1071,23 +1071,24 @@ export function ConnectOnboarding({
     await startConnector(pendingApproval, connectorStatuses, id, popup);
   }
 
-  async function connectSpotify(approval: PendingApproval) {
+  async function connectMusic(approval: PendingApproval, provider: "spotify" | "soundcloud") {
+    const name = connectorProviderLabel(provider);
     if (activeConnector.current) return;
     const attempt: ConnectorAttempt = {
-      abort: new AbortController(), provider: "spotify",
-      capabilities: ["spotify"], missingCapabilities: ["spotify"],
+      abort: new AbortController(), provider,
+      capabilities: [provider], missingCapabilities: [provider],
       requestId: approval.requestId, token: crypto.randomUUID(),
     };
     activeConnector.current = attempt;
     setFailure(undefined);
-    setConnectorAction("spotify");
+    setConnectorAction(provider);
     attempt.expiryTimer = window.setTimeout(() => {
       if (finishConnectorAttempt(attempt)) {
-        setFailure({ id: approval.requestId, message: "Spotify connection timed out. Finish connecting in the Nanocodex iPhone app, then try again." });
+        setFailure({ id: approval.requestId, message: `${name} connection timed out. Finish connecting in the Nanocodex iPhone app, then try again.` });
       }
     }, 10 * 60_000);
     try {
-      window.location.assign("nanocodex://connect/spotify");
+      window.location.assign(`nanocodex://connect/${provider}`);
       while (isActiveConnector(activeConnector.current, attempt, currentRequestId.current)) {
         await abortableDelay(2_000, attempt.abort.signal);
         const response = await fetch(`${approval.apiUrl}/v1/connectors`, {
@@ -1101,7 +1102,7 @@ export function ConnectOnboarding({
         if (!isActiveConnector(activeConnector.current, attempt, currentRequestId.current)) return;
         if (!response.ok || !body.connectors) throw new Error(apiError(body, "Unable to read connected accounts."));
         const connectors = decodeConnectorStatuses(body.connectors);
-        if (connectors.spotify?.connected) {
+        if (connectors[provider]?.connected) {
           setConnectorStatuses(connectors);
           return;
         }
@@ -1623,8 +1624,8 @@ function ConnectionWizard({
                   : focusedControl?.connected
                   ? `${connectorProviderLabel(focusedControl.provider)} is connected. You can return to ${requester}.`
                   : connectorAction === focusedProvider
-                  ? focusedProvider === "spotify"
-                    ? "Finish connecting Spotify in the Nanocodex iPhone app, then return here."
+                  ? (focusedProvider === "spotify" || focusedProvider === "soundcloud")
+                    ? `Finish connecting ${connectorProviderLabel(focusedProvider)} in the Nanocodex iPhone app, then return here.`
                     : `Continue in ${connectorProviderLabel(requiredConnectorProvider(focused.id))}. You’ll return here when the requested access is connected.`
                   : request.hostPrincipalExchange ? "Approve with your host identity." : "Continue with SMS verification."
                 : focusedMcp

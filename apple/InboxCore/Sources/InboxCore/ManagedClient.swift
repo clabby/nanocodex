@@ -94,7 +94,7 @@ public final class ManagedClient: @unchecked Sendable {
         var request = URLRequest(url: url, timeoutInterval: 20)
         // Spotify's shared registration may ask the broker to wait for quota
         // before its identity read. Tokens remain inside that broker exchange.
-        if path == "/v1/connectors/spotify/loopback/callback" { request.timeoutInterval = 90 }
+        if path == "/v1/connectors/spotify/loopback/callback" || path == "/v1/connectors/soundcloud/loopback/callback" { request.timeoutInterval = 90 }
         request.httpMethod = method
         request.setValue("Bearer " + credential.apiKey, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")

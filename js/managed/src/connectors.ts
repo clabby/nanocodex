@@ -97,9 +97,11 @@ export async function routeConnectorRequest(
     return mcpMobileCompletion(url);
   }
 
-  // A native client receives Spotify's loopback callback and forwards only
+  // A native client receives the music provider's loopback callback and forwards only
   // code + state with its account credential. No tokens enter the client API.
-  if (/^\/v1\/connectors\/spotify\/loopback(?:\/callback)?$/.test(url.pathname)) {
+  const musicLoopback = /^\/v1\/connectors\/(spotify|soundcloud)\/loopback(?:\/callback)?$/.exec(url.pathname);
+  if (musicLoopback) {
+    const provider = musicLoopback[1]!;
     const callback = url.pathname.endsWith("/callback");
     if (url.search || (request.method !== "POST" && (callback || !["GET", "DELETE"].includes(request.method)))) {
       return json({ error: "method_not_allowed" }, 405);
@@ -111,21 +113,21 @@ export async function routeConnectorRequest(
     if (request.method === "GET") {
       const response = await env.NANOCODEX.fetch(`https://broker.internal/users/${encodeURIComponent(principal!.userId)}/connectors`);
       if (!response.ok) return json({ error: "connector_broker_failed" }, 502);
-      const value = await response.json() as { connectors?: { spotify?: unknown } };
-      return json({ spotify: value.connectors?.spotify }, 200);
+      const value = await response.json() as { connectors?: Record<string, unknown> };
+      return json({ [provider]: value.connectors?.[provider] }, 200);
     }
     const originFailure = requireSameOriginMutation(request, url, principal!);
     if (originFailure) return originFailure;
     const body = await readSpotifyLoopbackBody(request, callback, request.method === "DELETE");
     if (!body) return json({ error: "invalid_request" }, 400);
     if (request.method === "DELETE") {
-      return env.NANOCODEX.fetch(`https://broker.internal/users/${encodeURIComponent(principal!.userId)}/connectors/spotify/connections/${body.connection_id}`, { method: "DELETE" });
+      return env.NANOCODEX.fetch(`https://broker.internal/users/${encodeURIComponent(principal!.userId)}/connectors/${provider}/connections/${body.connection_id}`, { method: "DELETE" });
     }
     return env.NANOCODEX.fetch(
-      `https://broker.internal/users/${encodeURIComponent(principal!.userId)}/connectors/spotify${callback ? "/callback" : ""}`,
+      `https://broker.internal/users/${encodeURIComponent(principal!.userId)}/connectors/${provider}${callback ? "/callback" : ""}`,
       {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...body, flow: "ncspot_loopback", ...(!callback ? { return_to: "/profile" } : {}) }),
+        body: JSON.stringify({ ...body, flow: provider === "spotify" ? "ncspot_loopback" : "soundcloud_loopback", ...(!callback ? { return_to: "/profile" } : {}) }),
       },
     );
   }

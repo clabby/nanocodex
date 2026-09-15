@@ -128,3 +128,27 @@ it("binds native loopback OAuth to the owner, fixed registration, one-time state
   expect(await read.json()).toMatchObject({ account: "loopback-account", refreshed: true });
   expect((await control("/users/phone-owner/connectors/soundcloud", "POST", { flow: "ncspot_loopback", return_to: "/profile" })).status).toBe(400);
 });
+
+
+it("binds SoundCloud phone OAuth to its registered loopback and keeps the app secret in the broker", async () => {
+  const route = "/users/soundcloud-phone-owner/connectors/soundcloud";
+  const start = await control(route, "POST", { flow: "soundcloud_loopback", return_to: "/profile", redirect_uri: "https://attacker.test" });
+  expect(start.status).toBe(200);
+  const value = await start.json<{ authorization_url: string }>();
+  const url = new URL(value.authorization_url);
+  expect(url.origin).toBe("https://secure.soundcloud.com");
+  expect(url.searchParams.get("client_id")).toBe("soundcloud-client-id");
+  expect(url.searchParams.get("redirect_uri")).toBe("http://127.0.0.1:8788/callback");
+  expect(url.searchParams.get("display")).toBe("popup");
+  expect(JSON.stringify(value)).not.toMatch(/client_secret|code_verifier/);
+  const body = { flow: "soundcloud_loopback", state: url.searchParams.get("state"), code: "soundcloud-loopback-account" };
+  expect((await control("/users/other-phone/connectors/soundcloud/callback", "POST", body)).status).toBe(400);
+  expect((await control(route + "/callback", "POST", { ...body, flow: undefined })).status).toBe(400);
+  expect((await control(route + "/callback", "POST", { ...body, flow: "ncspot_loopback" })).status).toBe(400);
+  expect((await control(route + "/callback", "POST", body)).status).toBe(200);
+  expect((await control(route + "/callback", "POST", body)).status).toBe(400);
+  const read = await workerEnv.USER_CONNECTORS.getByName("soundcloud-phone-owner").fetch("https://api.soundcloud.com/me/playlists");
+  expect(read.status).toBe(200);
+  expect(await read.json()).toMatchObject({ account: "soundcloud-loopback-account", refreshed: true });
+  expect((await control("/users/soundcloud-phone-owner/connectors/spotify", "POST", { flow: "soundcloud_loopback", return_to: "/profile" })).status).toBe(400);
+});

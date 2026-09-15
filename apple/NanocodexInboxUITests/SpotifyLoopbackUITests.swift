@@ -1,9 +1,12 @@
 import XCTest
 
 final class SpotifyLoopbackUITests: XCTestCase {
-    func testSafariReturnsCodeToPhoneLoopback() {
+    func testSafariReturnsCodeToPhoneLoopback() { checkSafari("spotify") }
+    func testSoundCloudSafariReturnsCodeToPhoneLoopback() { checkSafari("soundcloud") }
+
+    private func checkSafari(_ provider: String) {
         let app = XCUIApplication()
-        app.launchArguments = ["--spotify-loopback-smoke"]
+        app.launchArguments = ["--\(provider)-loopback-smoke"]
         app.launch()
         let button = app.buttons["spotify-loopback-open"]
         XCTAssertTrue(button.waitForExistence(timeout: 10))

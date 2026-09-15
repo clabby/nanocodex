@@ -340,9 +340,9 @@ export function ProfileConnectors({
     capabilities: readonly AccountConnectorCapability[],
   ) => {
     if (operation || activeConnector.current || !connectors) return;
-    if (provider === "spotify") {
-      window.location.href = "nanocodex://connect/spotify";
-      setError("Finish connecting Spotify in the Nanocodex iPhone app, under Settings → Connected accounts.");
+    if (provider === "spotify" || provider === "soundcloud") {
+      window.location.href = `nanocodex://connect/${provider}`;
+      setError(`Finish connecting ${provider === "spotify" ? "Spotify" : "SoundCloud"} in the Nanocodex iPhone app, under Settings → Connected accounts.`);
       return;
     }
     const popup = window.open(

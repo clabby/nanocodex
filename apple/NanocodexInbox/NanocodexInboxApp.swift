@@ -8,7 +8,9 @@ struct NanocodexInboxApp: App {
     var body: some Scene {
         WindowGroup("Nanocodex", id: "inbox") {
             #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("--spotify-loopback-smoke") {
+            if ProcessInfo.processInfo.arguments.contains("--soundcloud-loopback-smoke") {
+                SpotifyLoopbackSmokeView(provider: .soundcloud)
+            } else if ProcessInfo.processInfo.arguments.contains("--spotify-loopback-smoke") {
                 SpotifyLoopbackSmokeView()
             } else {
                 content
@@ -29,8 +31,8 @@ struct NanocodexInboxApp: App {
                     model.releaseInactiveHistory()
                 }
                 .onOpenURL { url in
-                    if url.scheme == "nanocodex", url.host == "connect", url.path == "/spotify", url.query == nil {
-                        model.openSpotifySettings = true
+                    if url.scheme == "nanocodex", url.host == "connect", ["/spotify", "/soundcloud"].contains(url.path), url.query == nil, url.fragment == nil {
+                        model.openMusicSettings = true
                     } else { model.openAgentActivity(url) }
                 }
                 .onChange(of: scenePhase, initial: true) { _, phase in

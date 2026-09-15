@@ -1,6 +1,16 @@
 import Foundation
 import Network
 
+public enum MusicLoopbackProvider: String, Sendable, CaseIterable, Identifiable {
+    case spotify, soundcloud
+    public var id: String { rawValue }
+    public var name: String { self == .spotify ? "Spotify" : "SoundCloud" }
+    public var port: UInt16 { self == .spotify ? 8989 : 8788 }
+    public var path: String { self == .spotify ? "/login" : "/callback" }
+    public var redirectURI: String { "http://127.0.0.1:\(port)\(path)" }
+    public var authorizationHost: String { self == .spotify ? "accounts.spotify.com" : "secure.soundcloud.com" }
+}
+
 /// Only the authorization code crosses this boundary. The broker owns PKCE
 /// and the renewable tokens. Never log a callback URL or its query.
 public struct SpotifyLoopbackCallback: Sendable, Equatable {
@@ -12,18 +22,18 @@ public struct SpotifyLoopbackCallback: Sendable, Equatable {
         .object(["state": .string(state), code == nil ? "error" : "code": .string(code ?? error ?? "access_denied")])
     }
 
-    public static func parse(_ request: String, expectedState: String) -> Self? {
+    public static func parse(_ request: String, expectedState: String, provider: MusicLoopbackProvider = .spotify) -> Self? {
         guard request.utf8.count <= 16_384, request.hasSuffix("\r\n\r\n") else { return nil }
         let lines = request.components(separatedBy: "\r\n")
         let first = (lines.first ?? "").split(separator: " ", omittingEmptySubsequences: false)
         guard first.count == 3, first[0] == "GET", first[2] == "HTTP/1.1",
-              first[1].hasPrefix("/login?"),
-              let url = URLComponents(string: "http://127.0.0.1:8989" + first[1]),
-              url.path == "/login", url.fragment == nil else { return nil }
+              first[1].hasPrefix(provider.path + "?"),
+              let url = URLComponents(string: "http://127.0.0.1:\(provider.port)" + first[1]),
+              url.path == provider.path, url.fragment == nil else { return nil }
         let headers = lines.dropFirst().filter { !$0.isEmpty }.map { $0.split(separator: ":", maxSplits: 1) }
         guard headers.allSatisfy({ $0.count == 2 }),
               headers.filter({ $0[0].lowercased() == "host" }).count == 1,
-              headers.first(where: { $0[0].lowercased() == "host" })?[1].trimmingCharacters(in: .whitespaces) == "127.0.0.1:8989",
+              headers.first(where: { $0[0].lowercased() == "host" })?[1].trimmingCharacters(in: .whitespaces) == "127.0.0.1:\(provider.port)",
               !headers.contains(where: { ["transfer-encoding", "content-length"].contains($0[0].lowercased()) }) else { return nil }
         let items = url.queryItems ?? []
         guard Set(items.map(\.name)).count == items.count,
@@ -50,27 +60,33 @@ public final class SpotifyLoopbackReceiver {
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var timeout: Task<Void, Never>?
 
-    public init() {}
+    private let provider: MusicLoopbackProvider
+    public init(provider: MusicLoopbackProvider = .spotify) { self.provider = provider }
 
     public func start() async throws {
         stop()
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: 8989)
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: provider.port)!)
         parameters.allowLocalEndpointReuse = true
         let listener = try NWListener(using: parameters)
         self.listener = listener
-        listener.newConnectionHandler = { [weak self] connection in
-            MainActor.assumeIsolated { self?.accept(connection) }
-        }
-        listener.stateUpdateHandler = { [weak self] state in
+        listener.newConnectionHandler = { [weak self, weak listener] connection in
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, let listener, self.listener === listener else { connection.cancel(); return }
+                self.accept(connection)
+            }
+        }
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            MainActor.assumeIsolated {
+                guard let self, let listener, self.listener === listener else { return }
                 switch state {
                 case .ready: self.ready?.resume(); self.ready = nil
-                case .failed:
-                    let wasStarting = self.ready != nil
+                case .failed(let error):
+                    let starting = self.ready
+                    self.ready = nil
                     self.stop()
-                    if !wasStarting { self.onFailure?() }
+                    starting?.resume(throwing: error)
+                    if starting == nil { self.onFailure?() }
                 default: break
                 }
             }
@@ -118,7 +134,7 @@ public final class SpotifyLoopbackReceiver {
                 guard error == nil, buffer.count <= 16_384 else { self.finish(connection, callback: nil); return }
                 if buffer.range(of: Data("\r\n\r\n".utf8)) != nil {
                     let callback = self.expectedState.flatMap { state in
-                        String(data: buffer, encoding: .utf8).flatMap { SpotifyLoopbackCallback.parse($0, expectedState: state) }
+                        String(data: buffer, encoding: .utf8).flatMap { SpotifyLoopbackCallback.parse($0, expectedState: state, provider: self.provider) }
                     }
                     self.finish(connection, callback: callback)
                 } else if complete { self.finish(connection, callback: nil) }

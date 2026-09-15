@@ -101,11 +101,11 @@ struct InboxView: View {
             composerFocused = false
             if model.focused != nil { model.openThread() }
         }
-        .onChange(of: model.openSpotifySettings) { _, open in
-            if open && model.connected { showSettings = true; model.openSpotifySettings = false }
+        .onChange(of: model.openMusicSettings) { _, open in
+            if open && model.connected { showSettings = true; model.openMusicSettings = false }
         }
         .onChange(of: model.connected) { _, connected in
-            if connected && model.openSpotifySettings { showSettings = true; model.openSpotifySettings = false }
+            if connected && model.openMusicSettings { showSettings = true; model.openMusicSettings = false }
             if !connected { showScreens = false; showScheduledJobs = false; showConnectors = false; showSettings = false; showOverview = false; readingPositions.values.removeAll() }
         }
         .onChange(of: draggingTabs) { _, dragging in
@@ -390,7 +390,11 @@ struct InboxView: View {
                 }
             }
             if !model.isDemo {
-                Section("Connected accounts") { SpotifyConnectionView(model: model) }
+                Section("Connected accounts") {
+                    ForEach(MusicLoopbackProvider.allCases) { provider in
+                        MusicConnectionView(model: model, provider: provider)
+                    }
+                }
                 Section("This device") {
                     Toggle("Make this device available as a Hand", isOn: $model.deviceHandEnabled)
                         .accessibilityIdentifier("device-hand-enabled")

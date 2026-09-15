@@ -633,31 +633,18 @@ function preparedBrowser() {
 }
 
 
-test("browser agents can request both music account connections", async () => {
-  const spotifyRuntime = bindBrowser({
+test("browser agents request music account connections through the phone", async () => {
+  const runtime = bindBrowser({
     ...preparedBrowser(),
-    fetch: async () => { throw new Error("Spotify must use the phone OAuth flow"); },
+    fetch: async () => { throw new Error("Music connections must use the phone OAuth flow"); },
   }, { accountConnectionRequests: true });
-  const spotifyTool = spotifyRuntime.tools.find(({ name }) => name === "requestAccountConnection");
-  const spotify = await spotifyTool.handler({ connector: "spotify" }, context);
-  assert.equal(spotify.authorization_url, "nanocodex://connect/spotify");
-  assert.equal(spotify.status, "authorization_required");
-  assert.equal(spotify.label, "Spotify");
-  assert.equal(spotify.expires_in_seconds, undefined, "the app link has no OAuth expiry before consent starts");
-  assert(!spotifyTool.outputSchema.required.includes("expires_in_seconds"));
-  for (const [connector, label, origin] of [
-    ["soundcloud", "SoundCloud", "https://secure.soundcloud.com"],
-  ]) {
-    const url = new URL(`${origin}/authorize`);
-    url.search = new URLSearchParams({
-      client_id: "id", state: "state", redirect_uri: `https://demo.test/v1/connectors/${connector}/callback`,
-      response_type: "code", code_challenge: "A".repeat(43), code_challenge_method: "S256",
-    }).toString();
-    const runtime = bindBrowser({ ...preparedBrowser(), fetch: async () => Response.json({ authorization_url: url.href }) }, { accountConnectionRequests: true });
-    const tool = runtime.tools.find(({ name }) => name === "requestAccountConnection");
+  const tool = runtime.tools.find(({ name }) => name === "requestAccountConnection");
+  for (const [connector, label] of [["spotify", "Spotify"], ["soundcloud", "SoundCloud"]]) {
     const result = await tool.handler({ connector }, context);
-    assert.equal(result.authorization_url, url.href);
-    assert.equal(result.label, label);
+    assert.equal(result.authorization_url, `nanocodex://connect/${connector}`);
     assert.equal(result.status, "authorization_required");
+    assert.equal(result.label, label);
+    assert.equal(result.expires_in_seconds, undefined, "the app link has no OAuth expiry before consent starts");
   }
+  assert(!tool.outputSchema.required.includes("expires_in_seconds"));
 });

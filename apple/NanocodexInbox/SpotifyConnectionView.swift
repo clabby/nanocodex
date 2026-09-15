@@ -2,9 +2,16 @@ import SwiftUI
 import SafariServices
 import InboxCore
 
-struct SpotifyConnectionView: View {
+struct MusicConnectionView: View {
     @ObservedObject var model: InboxModel
-    @StateObject private var connection = SpotifyConnectionModel()
+    @StateObject private var connection: MusicConnectionModel
+    private let provider: MusicLoopbackProvider
+
+    init(model: InboxModel, provider: MusicLoopbackProvider = .spotify) {
+        self.model = model
+        self.provider = provider
+        _connection = StateObject(wrappedValue: MusicConnectionModel(provider: provider))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -16,17 +23,19 @@ struct SpotifyConnectionView: View {
                         .disabled(connection.busy)
                 }
             }
-            Button(connection.labels.isEmpty ? "Connect Spotify" : "Connect another Spotify account") {
+            Button(connection.labels.isEmpty ? "Connect \(provider.name)" : "Connect another \(provider.name) account") {
                 connection.connect()
             }
             .disabled(connection.busy)
-            .accessibilityIdentifier("connect-spotify")
-            if connection.busy { ProgressView("Connecting Spotify…") }
+            .accessibilityIdentifier("connect-\(provider.rawValue)")
+            if connection.busy { ProgressView("Connecting \(provider.name)…") }
             if let error = connection.error { Text(error).font(.caption).foregroundStyle(.secondary) }
-            Text("Let your agents read and manage your playlists and library. Spotify shows ncspot on the consent screen.")
+            Text(provider == .spotify
+                ? "Let your agents read and manage your playlists and library. Spotify shows ncspot on the consent screen."
+                : "Let your agents read and manage your SoundCloud playlists, likes, and follows.")
                 .font(.caption).foregroundStyle(.secondary)
         }
-        .task { await connection.load(client: model.spotifyConnectorClient()) }
+        .task { await connection.load(client: model.musicConnectorClient()) }
         .onDisappear { connection.close() }
         .sheet(item: $connection.browser, onDismiss: { connection.cancelAuthorization() }) { browser in
             SpotifyAuthorizationBrowser(url: browser.url, cancel: { connection.cancelAuthorization() })
@@ -37,7 +46,7 @@ struct SpotifyConnectionView: View {
 }
 
 @MainActor
-private final class SpotifyConnectionModel: ObservableObject {
+private final class MusicConnectionModel: ObservableObject {
     struct Browser: Identifiable { let id = UUID(); let url: URL }
     @Published var browser: Browser?
     struct Connection: Identifiable { let id: String; let label: String }
@@ -45,6 +54,8 @@ private final class SpotifyConnectionModel: ObservableObject {
     var labels: [String] { connections.map(\.label) }
     @Published var busy = false
     @Published var error: String?
+    private let provider: MusicLoopbackProvider
+    init(provider: MusicLoopbackProvider) { self.provider = provider }
     private var client: ManagedClient?
     private var receiver: SpotifyLoopbackReceiver?
     private var task: Task<Void, Never>?
@@ -54,34 +65,35 @@ private final class SpotifyConnectionModel: ObservableObject {
         self.client?.close(); self.client = client
         guard let client else { return }
         do {
-            let result = try await client.json(path: "/v1/connectors/spotify/loopback")
-            connections = result["spotify"]["connections"].array.map { Connection(id: $0["id"].string, label: $0["label"].string) }
-        } catch { self.error = "Could not load Spotify connections. Try connecting again." }
+            let result = try await client.json(path: "/v1/connectors/\(provider.rawValue)/loopback")
+            connections = result[provider.rawValue]["connections"].array.map { Connection(id: $0["id"].string, label: $0["label"].string) }
+        } catch { self.error = "Could not load \(provider.name) connections. Try connecting again." }
     }
 
     func connect() {
         guard !busy, let client else { return }
         busy = true; error = nil
         let id = UUID(); attempt = id
-        let receiver = SpotifyLoopbackReceiver(); self.receiver = receiver
+        let receiver = SpotifyLoopbackReceiver(provider: provider); self.receiver = receiver
         receiver.onFailure = { [weak self] in
             guard let self, self.attempt == id else { return }
-            self.cancelAuthorization(); self.error = "Spotify sign-in timed out or the local callback became unavailable. Try again."
+            self.cancelAuthorization(); self.error = "\(self.provider.name) sign-in timed out or the local callback became unavailable. Try again."
         }
         receiver.onCallback = { [weak self] callback in self?.complete(callback, attempt: id) }
         task = Task {
             do {
                 try await receiver.start()
-                let result = try await client.json(path: "/v1/connectors/spotify/loopback", method: "POST", body: .object([:]))
+                let result = try await client.json(path: "/v1/connectors/\(provider.rawValue)/loopback", method: "POST", body: .object([:]))
                 guard attempt == id, !Task.isCancelled else { return }
                 guard let url = URL(string: result["authorization_url"].string),
-                      url.scheme == "https", url.host == "accounts.spotify.com", url.port == nil,
-                      url.path == "/authorize", url.user == nil, url.password == nil,
+                      url.scheme == "https", url.host == provider.authorizationHost, url.port == nil,
+                      url.path == "/authorize", url.user == nil, url.password == nil, url.fragment == nil,
                       let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
                       let items = parts.queryItems,
                       Set(items.map(\.name)).count == items.count,
-                      items.first(where: { $0.name == "client_id" })?.value == "d420a117a32841c2b3474932e49fb54b",
-                      items.first(where: { $0.name == "redirect_uri" })?.value == "http://127.0.0.1:8989/login",
+                      let clientID = items.first(where: { $0.name == "client_id" })?.value, !clientID.isEmpty,
+                      (provider != .spotify || clientID == "d420a117a32841c2b3474932e49fb54b"),
+                      items.first(where: { $0.name == "redirect_uri" })?.value == provider.redirectURI,
                       items.first(where: { $0.name == "code_challenge_method" })?.value == "S256",
                       let state = items.first(where: { $0.name == "state" })?.value,
                       state.range(of: "^[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil else { throw APIError.invalidResponse }
@@ -90,7 +102,7 @@ private final class SpotifyConnectionModel: ObservableObject {
             } catch {
                 guard attempt == id else { return }
                 cancelAuthorization()
-                self.error = "Could not start Spotify sign-in. Close any other Spotify connection attempt and try again."
+                self.error = "Could not start \(provider.name) sign-in. Close any other \(provider.name) connection attempt and try again."
             }
         }
     }
@@ -101,18 +113,18 @@ private final class SpotifyConnectionModel: ObservableObject {
         browser = nil
         task = Task {
             do {
-                let result = try await client.json(path: "/v1/connectors/spotify/loopback/callback", method: "POST", body: callback.body)
+                let result = try await client.json(path: "/v1/connectors/\(provider.rawValue)/loopback/callback", method: "POST", body: callback.body)
                 guard attempt == id else { return }
                 guard result["connected"].bool else {
-                    busy = false; error = "Spotify connection was cancelled."; return
+                    busy = false; error = "\(provider.name) connection was cancelled."; return
                 }
-                let status = try await client.json(path: "/v1/connectors/spotify/loopback")
+                let status = try await client.json(path: "/v1/connectors/\(provider.rawValue)/loopback")
                 guard attempt == id else { return }
-                connections = status["spotify"]["connections"].array.map { Connection(id: $0["id"].string, label: $0["label"].string) }
+                connections = status[provider.rawValue]["connections"].array.map { Connection(id: $0["id"].string, label: $0["label"].string) }
                 busy = false
             } catch {
                 guard attempt == id else { return }
-                busy = false; self.error = "Could not finish connecting Spotify. Try again."
+                busy = false; self.error = "Could not finish connecting \(provider.name). Try again."
             }
         }
     }
@@ -123,12 +135,12 @@ private final class SpotifyConnectionModel: ObservableObject {
         let id = UUID(); attempt = id
         task = Task {
             do {
-                _ = try await client.json(path: "/v1/connectors/spotify/loopback", method: "DELETE", body: .object(["connection_id": .string(account.id)]))
+                _ = try await client.json(path: "/v1/connectors/\(provider.rawValue)/loopback", method: "DELETE", body: .object(["connection_id": .string(account.id)]))
                 guard attempt == id else { return }
                 connections.removeAll { $0.id == account.id }; busy = false
             } catch {
                 guard attempt == id else { return }
-                busy = false; self.error = "Could not disconnect Spotify. Try again."
+                busy = false; self.error = "Could not disconnect \(provider.name). Try again."
             }
         }
     }
@@ -167,7 +179,12 @@ private struct SpotifyAuthorizationBrowser: UIViewControllerRepresentable {
 #if DEBUG
 /// Exercises Safari's real HTTP redirect handling on iOS without real credentials.
 struct SpotifyLoopbackSmokeView: View {
-    @State private var receiver = SpotifyLoopbackReceiver()
+    private let provider: MusicLoopbackProvider
+    @State private var receiver: SpotifyLoopbackReceiver
+    init(provider: MusicLoopbackProvider = .spotify) {
+        self.provider = provider
+        _receiver = State(initialValue: SpotifyLoopbackReceiver(provider: provider))
+    }
     @State private var ready = false
     @State private var browser = false
     @State private var result = "Starting listener"
@@ -190,7 +207,7 @@ struct SpotifyLoopbackSmokeView: View {
             } catch { result = "Listener failed" }
         }
         .sheet(isPresented: $browser) {
-            SpotifyAuthorizationBrowser(url: URL(string: "http://127.0.0.1:8989/login?code=fixture-code&state=\(state)")!, cancel: { browser = false })
+            SpotifyAuthorizationBrowser(url: URL(string: "\(provider.redirectURI)?code=fixture-code&state=\(state)")!, cancel: { browser = false })
                 .ignoresSafeArea()
         }
         .onDisappear { receiver.stop() }

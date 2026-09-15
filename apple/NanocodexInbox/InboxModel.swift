@@ -63,7 +63,7 @@ final class InboxModel: ObservableObject {
     @Published var connection = "Disconnected" { didSet { scheduleAgentNotifications() } }
     @Published var error: String?
     @Published var notice: String?
-    @Published var openSpotifySettings = false
+    @Published var openMusicSettings = false
     @Published var connected = false
     @Published private(set) var restoringAccount = true
     @Published private(set) var restorationError: String?
@@ -698,7 +698,7 @@ final class InboxModel: ObservableObject {
         connected = true; connection = "Connecting"; reconcile(); resume(initialListing: initial)
         updateDeviceHand(); scheduleHandRefresh()
     }
-    func spotifyConnectorClient() -> ManagedClient? {
+    func musicConnectorClient() -> ManagedClient? {
         guard connected, !isDemo, let accountCredential else { return nil }
         return ManagedClient(credential: accountCredential)
     }
