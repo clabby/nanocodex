@@ -2,6 +2,34 @@ import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { connect as connectTls } from "node:tls";
 import { pathToFileURL } from "node:url";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { channel } from "node:diagnostics_channel";
+
+// Observe the existing transport without changing pooling, uploads, or retries.
+// Never retain request/response headers, bodies, or credentials in telemetry.
+const callTiming = new AsyncLocalStorage();
+const requestTimings = new WeakMap();
+const usedSockets = new WeakSet();
+channel("undici:request:create").subscribe(({ request }) => {
+  const timing = callTiming.getStore();
+  if (timing) requestTimings.set(request, timing);
+});
+channel("undici:client:sendHeaders").subscribe(({ request, socket }) => {
+  const timing = requestTimings.get(request);
+  if (timing) {
+    timing.sent = performance.now();
+    timing.socket_reused = usedSockets.has(socket);
+  }
+  usedSockets.add(socket);
+});
+channel("undici:request:bodySent").subscribe(({ request }) => {
+  const timing = requestTimings.get(request);
+  if (timing) timing.uploaded = performance.now();
+});
+channel("undici:request:headers").subscribe(({ request }) => {
+  const timing = requestTimings.get(request);
+  if (timing) timing.headers = performance.now();
+});
 
 const DEFAULT_UPSTREAM_ORIGIN = "https://chatgpt.com";
 const MAX_UPSTREAM_HEADER_BYTES = 64 * 1024;
@@ -96,15 +124,32 @@ async function proxyHttp(request, response, upstreamOrigin) {
   response.once("close", () => {
     if (!response.writableFinished) controller.abort();
   });
-  const upstream = await fetch(target, {
+  const timing = incoming.pathname === "/backend-api/codex/realtime/calls"
+    ? { began: performance.now() } : undefined;
+  const upstream = await callTiming.run(timing, () => fetch(target, {
     method: "POST",
     headers,
     body: request,
     duplex: "half",
     redirect: "manual",
     signal: controller.signal,
-  });
+  }));
   const returned = { "cache-control": "no-store" };
+  if (timing) {
+    const durations = {
+      process_age_ms: process.uptime() * 1_000,
+      fetch_ms: performance.now() - timing.began,
+      socket_wait_ms: timing.sent - timing.began,
+      upload_ms: timing.uploaded - timing.sent,
+      response_wait_ms: timing.headers - timing.uploaded,
+    };
+    returned["x-nanocodex-relay-timing"] = JSON.stringify({
+      ...Object.fromEntries(Object.entries(durations)
+        .filter(([, value]) => Number.isFinite(value) && value >= 0)
+        .map(([key, value]) => [key, Math.round(value * 100) / 100])),
+      ...(typeof timing.socket_reused === "boolean" ? { socket_reused: timing.socket_reused } : {}),
+    });
+  }
   for (const name of RETURNED_HEADERS) {
     const value = upstream.headers.get(name);
     if (value !== null) returned[name] = value;

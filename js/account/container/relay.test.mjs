@@ -82,4 +82,10 @@ test("completed call preserves SDP, location, and the fully uploaded body", { ti
   assert.equal(response.statusCode, 201);
   assert.equal(response.headers.location, "/calls/rtc_fixture");
   assert.equal(body, "answer SDP");
+  const timing = JSON.parse(response.headers["x-nanocodex-relay-timing"]);
+  for (const key of ["process_age_ms", "fetch_ms", "socket_wait_ms", "upload_ms", "response_wait_ms"]) {
+    assert.ok(Number.isFinite(timing[key]) && timing[key] >= 0, `${key} must measure the request`);
+  }
+  assert.equal(timing.socket_reused, false);
+  assert.deepEqual(Object.keys(timing).sort(), ["process_age_ms", "fetch_ms", "socket_wait_ms", "upload_ms", "response_wait_ms", "socket_reused"].sort());
 });
