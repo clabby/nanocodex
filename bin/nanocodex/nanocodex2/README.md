@@ -34,7 +34,8 @@ manage Connect installation grants; `nanocodex auth` manages ChatGPT provider
 credentials. Those credentials are independent of the managed account key.
 
 Connect accepts `chatgpt`, `github`, `gmail`, `gdrive`, `gcalendar`, `gtasks`,
-`gdocs`, `gsheets`, `gslides`, `gcontacts`, `slack`, `x`, and public `mcp.*` hosts.
+`gdocs`, `gsheets`, `gslides`, `gcontacts`, `slack`, `x`, `spotify`, `soundcloud`,
+and public `mcp.*` hosts.
 For example, `nanocodex connect slack gcalendar` authorizes those services for
 the local installation through the existing browser approval flow.
 

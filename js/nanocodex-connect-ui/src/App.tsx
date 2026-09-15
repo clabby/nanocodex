@@ -923,6 +923,10 @@ export function ConnectOnboarding({
     if (activeConnector.current
       || capabilities.every((capability) => statuses[capability]?.connected)
       || (id === "chatgpt" && approval.deferredChatGptImport)) return;
+    if (provider === "spotify") {
+      await connectSpotify(approval);
+      return;
+    }
     setFailure(undefined);
     setConnectorAction(provider);
     try {
@@ -1046,6 +1050,10 @@ export function ConnectOnboarding({
       || capabilities.every((capability) => connectorStatuses[capability]?.connected)
       || (id === "chatgpt" && pendingApproval.deferredChatGptImport)
     ) return;
+    if (provider === "spotify") {
+      await connectSpotify(pendingApproval);
+      return;
+    }
     if (wizard) {
       await connectDeviceConnector(pendingApproval, connectorStatuses, id);
       return;
@@ -1061,6 +1069,50 @@ export function ConnectOnboarding({
       return;
     }
     await startConnector(pendingApproval, connectorStatuses, id, popup);
+  }
+
+  async function connectSpotify(approval: PendingApproval) {
+    if (activeConnector.current) return;
+    const attempt: ConnectorAttempt = {
+      abort: new AbortController(), provider: "spotify",
+      capabilities: ["spotify"], missingCapabilities: ["spotify"],
+      requestId: approval.requestId, token: crypto.randomUUID(),
+    };
+    activeConnector.current = attempt;
+    setFailure(undefined);
+    setConnectorAction("spotify");
+    attempt.expiryTimer = window.setTimeout(() => {
+      if (finishConnectorAttempt(attempt)) {
+        setFailure({ id: approval.requestId, message: "Spotify connection timed out. Finish connecting in the Nanocodex iPhone app, then try again." });
+      }
+    }, 10 * 60_000);
+    try {
+      window.location.assign("nanocodex://connect/spotify");
+      while (isActiveConnector(activeConnector.current, attempt, currentRequestId.current)) {
+        await abortableDelay(2_000, attempt.abort.signal);
+        const response = await fetch(`${approval.apiUrl}/v1/connectors`, {
+          headers: {
+            authorization: `Bearer ${approval.token}`,
+            ...(wizard ? connectDeviceRoutingHeaders : connectRoutingHeaders),
+          },
+          signal: attempt.abort.signal,
+        });
+        const body = await response.json() as Record<string, unknown>;
+        if (!isActiveConnector(activeConnector.current, attempt, currentRequestId.current)) return;
+        if (!response.ok || !body.connectors) throw new Error(apiError(body, "Unable to read connected accounts."));
+        const connectors = decodeConnectorStatuses(body.connectors);
+        if (connectors.spotify?.connected) {
+          setConnectorStatuses(connectors);
+          return;
+        }
+      }
+    } catch (error) {
+      if (!isAbortError(error) && activeConnector.current === attempt) {
+        setFailure({ id: approval.requestId, message: errorMessage(error) });
+      }
+    } finally {
+      finishConnectorAttempt(attempt);
+    }
   }
 
   async function connectRequestedMcp(id: string) {
@@ -1571,7 +1623,9 @@ function ConnectionWizard({
                   : focusedControl?.connected
                   ? `${connectorProviderLabel(focusedControl.provider)} is connected. You can return to ${requester}.`
                   : connectorAction === focusedProvider
-                  ? `Continue in ${connectorProviderLabel(requiredConnectorProvider(focused.id))}. You’ll return here when the requested access is connected.`
+                  ? focusedProvider === "spotify"
+                    ? "Finish connecting Spotify in the Nanocodex iPhone app, then return here."
+                    : `Continue in ${connectorProviderLabel(requiredConnectorProvider(focused.id))}. You’ll return here when the requested access is connected.`
                   : request.hostPrincipalExchange ? "Approve with your host identity." : "Continue with SMS verification."
                 : focusedMcp
                   ? mcpConnections?.find(({ id }) => id === focusedMcp.id)?.status === "connected"

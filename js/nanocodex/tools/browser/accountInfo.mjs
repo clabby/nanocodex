@@ -319,7 +319,6 @@ const ACCOUNT_CONNECTION_REQUEST_SCHEMA = Object.freeze({
     "connector",
     "label",
     "authorization_url",
-    "expires_in_seconds",
     "message",
   ],
   additionalProperties: false,
@@ -336,7 +335,7 @@ export function browserAccountInfoTool(options) {
 
 export function browserAccountConnectionTool(options) {
   return namedTool("requestAccountConnection", {
-    description: "Request an account authorization link for GitHub, Gmail or another Google Workspace app, Slack, or X. Call this when the user asks to connect or authenticate one of these services. Return the exact authorization_url as a Markdown link in your response; do not claim the account is connected until accountInfo confirms it.",
+    description: "Request an account authorization link for GitHub, Gmail or another Google Workspace app, Slack, X, Spotify, or SoundCloud. Spotify opens the native Nanocodex app to complete OAuth on the phone. Call this when the user asks to connect or authenticate one of these services. Return the exact authorization_url as a Markdown link in your response; do not claim the account is connected until accountInfo confirms it.",
     parameters: {
       type: "object",
       properties: {
@@ -353,6 +352,15 @@ export function browserAccountConnectionTool(options) {
       }
       const label = ACCOUNT_CONNECTION_LABELS[connector];
       if (!label) throw new TypeError("account connection connector is invalid");
+      if (connector === "spotify") {
+        return {
+          status: "authorization_required",
+          connector,
+          label,
+          authorization_url: "nanocodex://connect/spotify",
+          message: "Open Nanocodex on your iPhone and tap Connect Spotify. Verify the connection with accountInfo after completing OAuth.",
+        };
+      }
       if (typeof options?.fetch !== "function") {
         throw new TypeError("browser account connection requires fetch");
       }

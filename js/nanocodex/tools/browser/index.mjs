@@ -12,7 +12,7 @@ import {
 } from "./accountInfo.mjs";
 
 const preparedBrowsers = new Map();
-const ACCOUNT_CONNECTION_INSTRUCTIONS = "Use requestAccountConnection when the user asks to connect or authenticate GitHub, a Google Workspace service, Slack, or X. For authorization_required results, return the exact authorization_url as a Markdown link. Never claim the account is connected until a later accountInfo call reports it as authenticated.";
+const ACCOUNT_CONNECTION_INSTRUCTIONS = "Use requestAccountConnection when the user asks to connect or authenticate GitHub, a Google Workspace service, Slack, X, Spotify, or SoundCloud. For authorization_required results, return the exact authorization_url as a Markdown link. Never claim the account is connected until a later accountInfo call reports it as authenticated.";
 
 export {
   createOpfsGitFs,

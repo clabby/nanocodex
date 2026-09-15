@@ -85,6 +85,8 @@ const CONNECTOR_NAMES: &[&str] = &[
     "gcontacts",
     "slack",
     "x",
+    "spotify",
+    "soundcloud",
 ];
 
 #[derive(Args, Clone)]
@@ -114,7 +116,8 @@ pub(crate) struct Login {
 #[derive(Args, Clone)]
 pub(crate) struct Connect {
     /// Services: chatgpt, github, gmail, gdrive, gcalendar, gtasks, gdocs, gsheets,
-    /// gslides, gcontacts, slack, x; or a public remote MCP host (mcp.example.com).
+    /// gslides, gcontacts, slack, x, spotify, soundcloud; or a public remote MCP host
+    /// (mcp.example.com).
     #[arg(required = true, num_args = 1.., value_name = "SERVICE")]
     services: Vec<ConnectTarget>,
     /// Override the Codex `auth.json` imported by an explicit ChatGPT connection.
@@ -146,6 +149,8 @@ enum Connector {
     Gcontacts,
     Slack,
     X,
+    Spotify,
+    Soundcloud,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -171,6 +176,8 @@ impl FromStr for ConnectTarget {
             "gcontacts" => Some(Connector::Gcontacts),
             "slack" => Some(Connector::Slack),
             "x" => Some(Connector::X),
+            "spotify" => Some(Connector::Spotify),
+            "soundcloud" => Some(Connector::Soundcloud),
             _ => None,
         };
         connector.map_or_else(
@@ -248,6 +255,8 @@ impl Connector {
             Self::Gcontacts => "gcontacts",
             Self::Slack => "slack",
             Self::X => "x",
+            Self::Spotify => "spotify",
+            Self::Soundcloud => "soundcloud",
         }
     }
 }
@@ -2749,6 +2758,8 @@ fn connector_label(name: &str) -> &str {
         "gcontacts" => "Google Contacts",
         "slack" => "Slack",
         "x" => "X",
+        "spotify" => "Spotify",
+        "soundcloud" => "SoundCloud",
         _ => name,
     }
 }
@@ -3213,6 +3224,8 @@ mod tests {
             "gslides",
             "gcontacts",
             "slack",
+            "spotify",
+            "soundcloud",
         ] {
             let target = ConnectTarget::from_str(name).unwrap();
             let request = RequestedCapabilities::connect(&[target]);
