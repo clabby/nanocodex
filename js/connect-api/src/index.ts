@@ -258,6 +258,8 @@ const MAX_BROWSER_COOKIES_PER_JAR = 300;
 const EGRESS_SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const CONNECTOR_REQUEST_HEADERS = new Set([
+  "accept-language",
+  "range",
   "accept",
   "content-range",
   "content-type",
@@ -269,6 +271,7 @@ const CONNECTOR_REQUEST_HEADERS = new Set([
   "x-nanocodex-connector-connection",
 ]);
 const CONNECTOR_RESPONSE_HEADERS = new Set([
+  "location",
   "link",
   "accept-ranges",
   "content-range",
@@ -3082,14 +3085,30 @@ async function handleAgentToolRoute(
   store: Kv.Kv,
   url: URL,
 ): Promise<Response | undefined> {
+  const connectorProxy = /^\/connectors\/([a-z]+)(\/.*)?$/.exec(url.pathname);
   const connectorRequest = /^\/v1\/connectors\/([a-z]+)\/request$/.exec(url.pathname);
   const isAccountInfo = request.method === "GET" && url.pathname === "/v1/agent/account-info";
   const isEgress = request.method === "POST" && url.pathname === "/v1/egress";
   const isWeb = request.method === "POST" && url.pathname === "/api/tools/web-search";
   const isImage = request.method === "POST" && url.pathname === "/api/tools/image-generation";
-  if (!connectorRequest && !isAccountInfo && !isEgress && !isWeb && !isImage) return undefined;
-  const { grant } = await authenticatedGrant(request, env);
-  requireGrantAppOrigin(request, grant);
+  if (!connectorProxy && !connectorRequest && !isAccountInfo && !isEgress && !isWeb && !isImage) return undefined;
+  const { grant } = await authenticatedGrant(request, env, undefined, connectorProxy !== null);
+  // Native SDKs send only a bearer token; browser Origins must still match.
+  if (!connectorProxy || request.headers.has("origin")) requireGrantAppOrigin(request, grant);
+  if (connectorProxy) {
+    const connector = connectorProxy[1];
+    if (!isConnectorCapability(connector) || connector === "chatgpt") {
+      throw new ApiFailure(404, "connector_not_found", "This service has no connector API.");
+    }
+    const path = `${connectorProxy[2] ?? "/"}${url.search}`;
+    const target = connectorTarget(connector, path);
+    const response = await grantConnectorRequest(env, grant, connector, {
+      path, method: request.method,
+      headers: Object.fromEntries([...request.headers].filter(([name]) => CONNECTOR_REQUEST_HEADERS.has(name))),
+      connection_id: request.headers.get("x-nanocodex-connector-connection") ?? undefined,
+    }, target, request.signal, request.body);
+    return connectorProxyResponse(response, target, new URL(`/connectors/${connector}`, url));
+  }
   if (connectorRequest) {
     if (request.method !== "POST") throw new ApiFailure(405, "method_not_allowed", "Use POST for connector requests.");
     const connector = connectorRequest[1];
@@ -4092,8 +4111,9 @@ async function authenticatedGrant(
   request: Request,
   env: Env,
   requestedGrantId?: `0x${string}`,
+  connectorSdk = false,
 ): Promise<{ grant: GrantRecord; principal: GrantPrincipal; token: string }> {
-  const token = grantBearerToken(request);
+  const token = grantBearerToken(request, connectorSdk);
   const namespace = env.CONNECT_STATE;
   const stub = namespace.get(namespace.idFromName("default"));
   const resolved = await stub.fetch(
@@ -4105,7 +4125,17 @@ async function authenticatedGrant(
   }
   const value = await resolved.json() as { principal?: unknown; grant?: unknown };
   const principal = value.principal;
-  const app = requireCallerApp(request);
+  if (connectorSdk && !isGrantPrincipal(principal)) {
+    throw new ApiFailure(401, "invalid_grant_token", "The grant session is invalid.");
+  }
+  // Only SDK resource requests may infer identity from their opaque grant token.
+  // Explicit app IDs and browser Origins are validated against the same binding.
+  const app = connectorSdk && isGrantPrincipal(principal)
+    ? validateCallerApp(
+      request.headers.get("x-nanocodex-app-id") ?? principal.appId,
+      request.headers.get("origin") ?? principal.appOrigin,
+    )
+    : requireCallerApp(request);
   if (!isGrantPrincipal(principal)
     || principal.appId !== app.appId
     || principal.appOrigin !== app.origin
@@ -4126,9 +4156,12 @@ async function authenticatedGrant(
   return { grant, principal, token };
 }
 
-function grantBearerToken(request: Request): string {
+function grantBearerToken(request: Request, connectorSdk = false): string {
   const authorization = request.headers.get("authorization");
-  const match = authorization?.match(/^Bearer ([A-Za-z0-9_-]{43})$/i);
+  // Provider SDKs vary the scheme; all still resolve the same opaque Connect grant.
+  const match = authorization?.match(connectorSdk
+    ? /^(?:Bearer|OAuth|token) ([A-Za-z0-9_-]{43})$/i
+    : /^Bearer ([A-Za-z0-9_-]{43})$/i);
   if (!match) throw new ApiFailure(401, "grant_token_required", "A grant-scoped bearer token is required.");
   return match[1]!;
 }
@@ -5132,6 +5165,7 @@ async function grantConnectorRequest(
   value: Record<string, unknown>,
   browserTarget: URL,
   signal: AbortSignal,
+  rawBody?: ReadableStream<Uint8Array> | null,
 ): Promise<Response> {
   if (grant.status !== "active") {
     throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
@@ -5174,22 +5208,63 @@ async function grantConnectorRequest(
   }
   headers.set("authorization", PROVIDER_CREDENTIAL_PLACEHOLDER);
   headers.set("x-nanocodex-subject", grant.egressSubject);
-  const body = browserEgressBody(value, method);
+  const body = rawBody ?? browserEgressBody(value, method);
 
   const response = await env.EGRESS.fetch(new Request(target, {
     method,
     headers,
     ...(body === undefined ? {} : { body }),
+    ...(rawBody ? { duplex: "half" } : {}),
     redirect: "manual",
     signal,
   }));
   const responseHeaders = new Headers();
   for (const [name, headerValue] of response.headers) {
+    if (name === "location" && rawBody === undefined) continue;
     if (CONNECTOR_RESPONSE_HEADERS.has(name.toLowerCase()) && headerValue.length <= 4_096) {
       responseHeaders.set(name, headerValue);
     }
   }
   return new Response(response.body, { status: response.status, headers: responseHeaders });
+}
+
+// SDKs follow absolute pagination/resource URLs, so keep those on this proxy.
+// Non-API URLs (artwork, public share URLs, etc.) remain untouched.
+async function connectorProxyResponse(response: Response, target: URL, proxy: URL): Promise<Response> {
+  const rewrite = (value: string, relative = false): string => {
+    if (!relative && !/^https?:\/\//i.test(value)) return value;
+    let url: URL;
+    try { url = new URL(value, target); } catch { return value; }
+    if (url.origin !== target.origin || url.username || url.password) return value;
+    return `${proxy.origin}${proxy.pathname}${url.pathname}${url.search}${url.hash}`;
+  };
+  const headers = new Headers(response.headers);
+  const link = headers.get("link");
+  if (link) headers.set("link", link.replace(/<([^>]+)>/g, (_, value: string) => `<${rewrite(value, true)}>`));
+  const location = headers.get("location");
+  if (location) {
+    const redirected = new URL(location, target);
+    // Do not let an SDK redirect its Nanocodex bearer token to another origin.
+    if (redirected.origin !== target.origin || redirected.username || redirected.password) {
+      await response.body?.cancel();
+      throw new ApiFailure(502, "connector_redirect_denied", "The provider redirected outside its connector API.");
+    }
+    headers.set("location", rewrite(location, true));
+  }
+  if (!response.body || !/\bapplication\/(?:[a-z0-9.-]+\+)?json\b/i.test(headers.get("content-type") ?? "")) {
+    return new Response(response.body, { status: response.status, headers });
+  }
+  const text = await boundedResponseText(response, 16 * 1024 * 1024);
+  // Replace JSON string tokens only. Parsing/re-serializing the whole document
+  // would round provider IDs larger than JavaScript's safe integer range.
+  const body = text.replace(/"(?:[^"\\]|\\.)*"/g, encoded => {
+    try {
+      const value = JSON.parse(encoded) as string;
+      const rewritten = rewrite(value);
+      return rewritten === value ? encoded : JSON.stringify(rewritten);
+    } catch { return encoded; }
+  });
+  return new Response(body, { status: response.status, headers });
 }
 
 async function grantMcpRequest(
@@ -6035,7 +6110,7 @@ function cors(response: Response, request: Request) {
       "access-control-allow-headers",
       "accept-payment, authorization, content-type, git-protocol, idempotency-key, last-event-id, mcp-protocol-version, mcp-session-id, payment-session, payment-session-snapshot, payment-signature, x-nanocodex-app-id, x-nanocodex-connect-client, x-nanocodex-connector-connection",
     );
-    response.headers.set("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
+    response.headers.set("access-control-allow-methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS");
     response.headers.set("access-control-max-age", "86400");
     response.headers.set(
       "access-control-expose-headers",

@@ -52,7 +52,7 @@ export function isConnectApiRequest(
   request: Request,
   pathname: string,
 ): boolean {
-  if (isConnectApiBrowserRoutePath(pathname)) return true;
+  if (isConnectApiBrowserRoutePath(pathname) || /^\/connectors\/[a-z]+(?:\/.*)?$/.test(pathname)) return true;
   if (CONNECTOR_ROUTE.test(pathname)
     && CONNECT_BROWSER_CLIENTS.has(request.headers.get("x-nanocodex-connect-client") ?? "")) return true;
   if (CONNECTOR_CALLBACK.test(pathname)

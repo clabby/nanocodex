@@ -1220,3 +1220,90 @@ check current grant revocation, expiry, approved service, and exact account IDs.
 Connecting an account alone does not grant it to every app; the user must approve
 that service in the app's Connect flow. Provider tokens remain in the broker.
 ChatGPT is a model connector and has no generic HTTP endpoint here.
+
+
+### Use a provider SDK with a custom base URL
+
+Native SDKs can use normal HTTP through
+`https://nanocodex.gakonst.workers.dev/connectors/<service>/<provider-path>`.
+All 13 API capabilities share this route. Append the provider's existing path:
+
+| Connector | Example route |
+| --- | --- |
+| Spotify | `/connectors/spotify/v1/me/playlists` |
+| SoundCloud | `/connectors/soundcloud/me/playlists` |
+| Gmail | `/connectors/gmail/gmail/v1/users/me/messages` |
+| Google Drive | `/connectors/gdrive/drive/v3/files` |
+| Google Calendar | `/connectors/gcalendar/calendar/v3/calendars/primary/events` |
+| Google Tasks | `/connectors/gtasks/tasks/v1/users/@me/lists` |
+| Google Docs | `/connectors/gdocs/v1/documents/{id}` |
+| Google Sheets | `/connectors/gsheets/v4/spreadsheets/{id}` |
+| Google Slides | `/connectors/gslides/v1/presentations/{id}` |
+| Google Contacts | `/connectors/gcontacts/v1/people/me/connections?personFields=names` |
+| GitHub | `/connectors/github/user` |
+| Slack | `/connectors/slack/api/auth.test` |
+| X | `/connectors/x/2/users/me` |
+
+Provider path restrictions and upstream OAuth permissions still apply. Google
+services are individually opted in even though they share a Google login.
+ChatGPT and remote MCP connections use their existing separate protocols.
+The same routes are available on the configured Connect API origin.
+
+Send the app's **Nanocodex Connect grant token** as the bearer token. Native
+requests need no extra app identity headers: the token identifies its approved
+app and user. SDK routes also accept `Authorization: OAuth <grant-token>`
+(SoundCloud) and `Authorization: token <grant-token>` (GitHub). Tokens must stay in
+headers, not query parameters. Browser Origins and any explicit app ID must match that grant.
+The grant must already include the requested service; this route cannot connect
+accounts or enlarge the grant. If multiple accounts were approved, set
+`X-Nanocodex-Connector-Connection` to the selected approved connection ID.
+
+For example, with [Spotipy](https://github.com/spotipy-dev/spotipy):
+
+```python
+import spotipy
+
+spotify = spotipy.Spotify(auth=nanocodex_grant_token, retries=0, status_retries=0)
+spotify.prefix = "https://nanocodex.gakonst.workers.dev/connectors/spotify/v1/"
+page = spotify.current_user_playlists(limit=20)
+next_page = spotify.next(page)
+```
+
+For Gmail with Google's [Python API client](https://github.com/googleapis/google-api-python-client):
+
+```python
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+
+gmail = build(
+    "gmail", "v1",
+    credentials=Credentials(token=nanocodex_grant_token),
+    client_options={
+        "api_endpoint": "https://nanocodex.gakonst.workers.dev/connectors/gmail/",
+    },
+    cache_discovery=False,
+)
+messages = gmail.users().messages().list(userId="me").execute(num_retries=0)
+```
+
+Use `userId="me"`; Gmail routes are restricted to the connected user. These
+credentials hold only the Connect grant; renew an expired grant through Nanocodex
+Connect instead of asking the provider SDK to refresh it with Google or Spotify.
+SoundCloud clients use `/connectors/soundcloud/` as their base URL and the same
+Connect grant, using [SoundCloud's OAuth header format](https://developers.soundcloud.com/docs).
+
+The proxy preserves request methods, query parameters, and body bytes. Provider
+status codes, JSON errors, rate-limit headers, and non-JSON bodies are preserved.
+API links in JSON, pagination Link headers, and same-provider redirects are
+rewritten through the proxy; artwork and public share URLs stay unchanged.
+Cross-provider redirects are rejected. JSON link rewriting is bounded to 16 MiB
+per response; use provider pagination for larger collections. The proxy does not
+retry requests. Disable SDK write retries to avoid repeating a successful write
+after an ambiguous network failure.
+
+See the runnable [Python example](../../examples/python/spotify_proxy.py).
+The integration test uses real Spotipy 2.26.0 and google-api-python-client 2.192.0
+against the Connect Worker with fixture provider responses, covering reads,
+writes, pagination, rate limits, and revoked grants. Worker tests cover routing
+and service denial for all 13 API connectors. SDKs that hardcode their API host need a custom transport instead of only
+a base URL setting.

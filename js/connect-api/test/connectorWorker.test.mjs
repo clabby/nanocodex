@@ -30,10 +30,10 @@ test("Worker connector execution fences and forwards the exact approved identity
   const env = {
     CONNECT_STATE: {
       idFromName: (name) => name,
-      get: () => ({ fetch: async () => Response.json({
+      get: () => ({ fetch: async input => Response.json(new URL(input).searchParams.get("token") === grantToken ? {
         principal: { accountAddress, appId: "atlas-workspace", appOrigin, grantId },
         grant,
-      }) }),
+      } : {}) }),
     },
     EGRESS: { fetch: async (request) => {
       forwarded.push(request);
@@ -124,6 +124,94 @@ test("Worker connector execution fences and forwards the exact approved identity
     }), env, context);
     assert.equal(write.status, 204);
     assert.deepEqual(await forwarded.at(-1).json(), body);
+  }
+
+  // Every API capability uses the same grant boundary, including Google services.
+  for (const [connector, path, upstream, scheme = "Bearer"] of [
+    ["github", "/user", "https://api.github.com", "token"],
+    ["gmail", "/gmail/v1/users/me/messages", "https://gmail.googleapis.com"],
+    ["gdrive", "/drive/v3/files", "https://www.googleapis.com"],
+    ["gcalendar", "/calendar/v3/calendars/primary/events", "https://www.googleapis.com"],
+    ["gtasks", "/tasks/v1/users/@me/lists", "https://tasks.googleapis.com"],
+    ["gdocs", "/v1/documents/fixture", "https://docs.googleapis.com"],
+    ["gsheets", "/v4/spreadsheets/fixture", "https://sheets.googleapis.com"],
+    ["gslides", "/v1/presentations/fixture", "https://slides.googleapis.com"],
+    ["gcontacts", "/v1/people/me/connections", "https://people.googleapis.com"],
+    ["slack", "/api/auth.test", "https://slack.com"],
+    ["x", "/2/users/me", "https://api.x.com"],
+    ["spotify", "/v1/me/playlists", "https://api.spotify.com"],
+    ["soundcloud", "/me/playlists", "https://api.soundcloud.com", "OAuth"],
+  ]) {
+    grant = { ...activeGrant({ [connector]: [alpha] }), capabilities: [connector] };
+    const request = () => new Request(`https://nanocodex.gakonst.workers.dev/connectors/${connector}${path}`, {
+      headers: { authorization: `${scheme} ${grantToken}` },
+    });
+    reply = () => Response.json({ fixture: true });
+    const response = await worker.fetch(request(), env, context);
+    assert.equal(response.status, 200, `${connector}: ${await response.text()}`);
+    assert.equal(forwarded.at(-1).url, upstream + path);
+    assert.equal(forwarded.at(-1).headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
+    assert.equal(forwarded.at(-1).headers.get("x-nanocodex-connector-connection"), alpha);
+    const count = forwarded.length;
+    grant = { ...grant, capabilities: [] };
+    assert.equal((await worker.fetch(request(), env, context)).status, 403, connector);
+    assert.equal(forwarded.length, count);
+    if (scheme !== "Bearer") {
+      assert.equal((await worker.fetch(connectorRequest(connector, { path }, {
+        authorization: `${scheme} ${grantToken}`,
+      }), env, context)).status, 401, "scheme aliases apply only to SDK routes");
+    }
+  }
+
+  for (const [connector, path, upstream] of [
+    ["spotify", "/v1/me/playlists", "https://api.spotify.com"],
+    ["soundcloud", "/me/playlists", "https://api.soundcloud.com"],
+  ]) {
+    grant = { ...activeGrant({ [connector]: [alpha] }), capabilities: [connector] };
+    const base = `https://nanocodex.gakonst.workers.dev/connectors/${connector}`;
+    const native = (suffix = "?limit=1", init = {}) => new Request(base + path + suffix, {
+      ...init, headers: { authorization: `Bearer ${grantToken}`, ...init.headers },
+    });
+    reply = () => Response.json({ next: upstream + path + "?offset=1", items: [
+      { href: upstream + "/tracks/1", artwork_url: "https://images.example/art.jpg" },
+    ] }, { headers: { link: `<${upstream}${path}?offset=1>; rel="next"` } });
+    const read = await worker.fetch(native(), env, context);
+    assert.equal(read.status, 200, await read.clone().text());
+    assert.equal(forwarded.at(-1).url, upstream + path + "?limit=1");
+    assert.equal(forwarded.at(-1).headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
+    assert.equal(forwarded.at(-1).headers.get("x-nanocodex-connector-connection"), alpha);
+    assert.equal(forwarded.at(-1).headers.get("origin"), null);
+    assert.equal(read.headers.get("link"), `<${base}${path}?offset=1>; rel="next"`);
+    const page = await read.json();
+    assert.equal(page.next, base + path + "?offset=1");
+    assert.equal(page.items[0].href, base + "/tracks/1");
+    assert.equal(page.items[0].artwork_url, "https://images.example/art.jpg");
+    assert.equal((await worker.fetch(new Request(page.next, { headers: { authorization: `Bearer ${grantToken}` } }), env, context)).status, 200);
+    assert.equal(forwarded.at(-1).url, upstream + path + "?offset=1");
+    const before = forwarded.length;
+    assert.equal((await worker.fetch(native("", { headers: { authorization: `Bearer ${"z".repeat(43)}` } }), env, context)).status, 401);
+    for (const headers of [{ "x-nanocodex-connector-connection": bravo }, { origin: "https://evil.example" }, { "x-nanocodex-app-id": "wrong-app" }, { authorization: "Bearer invalid" }]) {
+      assert((await worker.fetch(native("", { headers }), env, context)).status >= 400);
+    }
+    for (const change of [{ status: "revoked" }, { expiresAt: 1 }, { capabilities: [] }]) {
+      const prior = grant; grant = { ...grant, ...change };
+      assert((await worker.fetch(native(), env, context)).status >= 400);
+      grant = prior;
+    }
+    assert.equal(forwarded.length, before);
+    reply = () => new Response(null, { status: 204 });
+    const payload = '{"name":"SDK write","nested":[1,2]}';
+    assert.equal((await worker.fetch(native("", { method: "PUT", headers: { "content-type": "application/json" }, body: payload }), env, context)).status, 204);
+    assert.equal(await forwarded.at(-1).text(), payload);
+    assert.equal(forwarded.at(-1).headers.get("content-type"), "application/json");
+    reply = () => new Response(`{"id":9007199254740993123,"next":"${upstream}${path}?offset=1"}`, { headers: { "content-type": "application/json" } });
+    const exact = await (await worker.fetch(native(), env, context)).text();
+    assert.match(exact, /9007199254740993123/, "large provider IDs retain their exact digits");
+    assert.equal(JSON.parse(exact).next, base + path + "?offset=1");
+    reply = () => new Response(null, { status: 302, headers: { location: upstream + path + "?offset=1" } });
+    assert.equal((await worker.fetch(native(), env, context)).headers.get("location"), base + path + "?offset=1");
+    reply = () => new Response(null, { status: 302, headers: { location: "https://evil.example/steal" } });
+    assert.equal((await worker.fetch(native(), env, context)).status, 502);
   }
 
   grant = { ...activeGrant({ github: [alpha] }), capabilities: ["github"] };
