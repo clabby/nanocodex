@@ -92,6 +92,7 @@ async function connect(user: string, provider: MusicProviderId, code: string): P
   expect(url.searchParams.get("code_challenge_method")).toBe("S256");
   expect(url.searchParams.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
   if (provider === "spotify") expect(url.searchParams.get("scope")?.split(" ")).toEqual(SPOTIFY_SCOPES);
+  else expect(url.searchParams.get("display")).toBe("popup");
   const state = url.searchParams.get("state");
   expect((await control(route + "/callback", "POST", { code, state: "wrong" })).status).toBe(400);
   const callback = await control(route + "/callback", "POST", { code, state });

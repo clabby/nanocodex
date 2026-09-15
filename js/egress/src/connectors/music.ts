@@ -35,7 +35,7 @@ export function buildMusicAuthorizationUrl(id: MusicProviderId, input: {
   url.search = new URLSearchParams({
     response_type: "code", client_id: input.clientId, redirect_uri: input.redirectUri,
     state: input.state, code_challenge: input.codeChallenge, code_challenge_method: "S256",
-    ...(id === "spotify" ? { scope: SPOTIFY_SCOPES.join(" ") } : {}),
+    ...(id === "spotify" ? { scope: SPOTIFY_SCOPES.join(" ") } : { display: "popup" }),
   }).toString();
   return url;
 }

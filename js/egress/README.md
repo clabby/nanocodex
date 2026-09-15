@@ -185,3 +185,26 @@ so refresh cannot accidentally use a different client. The phone relays only the
 one-time code and matching state through an owner-authenticated managed route.
 It never accepts arbitrary client IDs or callback URLs. Shared-client quotas and
 Spotify endpoint restrictions still apply.
+
+
+### SoundCloud app registration
+
+SoundCloud uses Authorization Code + PKCE with a confidential app registration.
+Configure `SOUNDCLOUD_OAUTH_CLIENT_ID` and `SOUNDCLOUD_OAUTH_CLIENT_SECRET` as
+broker secrets. Keep the secret in the broker; neither the phone nor the agent
+receives it. Configure the registration's redirect URI for the deployed callback,
+for example `https://nanocodex.gakonst.workers.dev/v1/connectors/soundcloud/callback`.
+
+The [official registration CLI](https://developers.soundcloud.com/docs/api/register-app)
+supports `--remote` phone pairing and returns an existing registration when one
+already exists. Registration currently requires Artist Pro. Its bundled public
+client is scoped to app registration; it is not a general SoundCloud connector.
+The Rust [soundcloud-tui](https://github.com/7ito/soundcloud-tui) likewise requires
+an app's own credentials.
+
+After registration, **Connect SoundCloud** opens the provider consent page using
+its mobile `display=popup` layout. The broker exchanges the code with PKCE, stores
+encrypted user tokens, and rotates the single-use refresh token. Verify the
+connection with `soundcloud_request` reads of `/me` and `/me/playlists` before
+reporting it connected. OAuth transport tests use fixtures and do not replace
+this authenticated production check.
