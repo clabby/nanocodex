@@ -210,6 +210,11 @@ const signedAppVisibility = Object.freeze([
 ] satisfies readonly Readonly<VisibilityPermission & { name: string }>[]);
 
 const productionApps = new Map<string, RegisteredApp>([
+  ["https://djbooth-library.gakonst.workers.dev", Object.freeze({
+    id: "djbooth",
+    name: "DJ Booth",
+    origin: "https://djbooth-library.gakonst.workers.dev",
+  })],
   ["https://nanocodex-astra-mpp-trial.gakonst.workers.dev", Object.freeze({
     id: "astra-one-shot",
     name: "Astra One-Shot",
