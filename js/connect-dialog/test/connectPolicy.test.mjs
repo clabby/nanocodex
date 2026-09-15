@@ -205,8 +205,8 @@ test("an exact signed browser tool catalog is visible without implying broad too
   const resource = `urn:nanocodex:app-tool-catalog:sha256:${"c".repeat(64)}`;
   assert.deepEqual(appVisibilityPermissions([resource]), [{
     resource,
-    label: "Browser tab tool",
-    detail: "Use only the exact local browser tool catalog approved here",
+    label: "App tools",
+    detail: "Use only the exact app tool catalog approved here",
   }]);
   assert.deepEqual(appVisibilityPermissions([
     "urn:nanocodex:app-tool-catalog:sha256:not-a-digest",

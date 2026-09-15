@@ -96,7 +96,7 @@ export type VisibilityPermission = Readonly<{
     | "Memory read"
     | "Memory write"
     | "Conversation"
-    | "Browser tab tool"
+    | "App tools"
     | "Browser cookie sync";
   detail: string;
 }>;
@@ -510,8 +510,8 @@ export function appVisibilityPermissions(resources: unknown): readonly Visibilit
   if (appToolCatalogs.length === 1) {
     visibility.push(Object.freeze({
       resource: appToolCatalogs[0],
-      label: "Browser tab tool",
-      detail: "Use only the exact local browser tool catalog approved here",
+      label: "App tools",
+      detail: "Use only the exact app tool catalog approved here",
     }));
   }
   if (requested.has(browserCookieSyncResource)) {
