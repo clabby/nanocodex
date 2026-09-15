@@ -246,6 +246,47 @@ test("caller cancellation and the runtime deadline stop execution", async () => 
   assert.ok(timedResult.wall_time_seconds < 1);
 });
 
+test("shared workspace startup defers listing and each command sees external changes", async () => {
+  let scans = 0;
+  const source = memoryWorkspace({ onList() { scans++; } });
+  await source.writeFile("/workspace/existing", new TextEncoder().encode("before"));
+  const runtime = await justBash({ filesystem: source, refreshFilesystemBeforeExec: true });
+  assert.equal(scans, 0);
+  assert.equal(new TextDecoder().decode(await runtime.filesystem.readFile("existing")), "before");
+  const first = await runtime.tool.handler({ cmd: "cat existing" }, context());
+  assert.equal(first.output, "before");
+  assert.equal(first.exit_code, 0);
+  assert.equal(scans, 1);
+  await source.writeFile("/workspace/external", new TextEncoder().encode("after"));
+  const second = await runtime.tool.handler({ cmd: "cat external" }, context());
+  assert.equal(second.output, "after");
+  assert.equal(second.exit_code, 0);
+  assert.equal(scans, 2);
+});
+
+test("deferred workspace mutations load existing entries before enforcing capacity", async () => {
+  let scans = 0;
+  const source = memoryWorkspace({ onList() { scans++; } });
+  await source.writeFile("/workspace/existing", new Uint8Array());
+  const runtime = await justBash({ filesystem: source, refreshFilesystemBeforeExec: true, maxEntries: 1 });
+  assert.equal(scans, 0);
+  await assert.rejects(runtime.filesystem.writeFile("new", new Uint8Array()), /workspace exceeds 1 entries/);
+  assert.equal(scans, 1);
+  await runtime.filesystem.remove("existing");
+  await runtime.filesystem.writeFile("new", new TextEncoder().encode("ok"));
+  assert.equal((await runtime.tool.handler({ cmd: "cat new" }, context())).output, "ok");
+});
+
+test("deferred workspace listing failures retry without executing the command", async () => {
+  let fail = true;
+  const source = memoryWorkspace({ onList() { if (fail) throw new Error("storage unavailable"); } });
+  const runtime = await justBash({ filesystem: source, refreshFilesystemBeforeExec: true });
+  await assert.rejects(runtime.tool.handler({ cmd: "echo unsafe > created" }, context()), /storage unavailable/);
+  await assert.rejects(source.readFile("/workspace/created"), { code: "ENOENT" });
+  fail = false;
+  assert.equal((await runtime.tool.handler({ cmd: "echo safe" }, context())).output, "safe\n");
+});
+
 test("initial metadata, mutations, and returned output stay within configured bounds", async () => {
   let defaultScan;
   await justBash({

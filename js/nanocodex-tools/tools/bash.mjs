@@ -80,7 +80,9 @@ export async function justBash(options) {
     positiveInteger(options.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, "maxOutputTokens"),
   );
   const shellFilesystem = new WorkspaceShellFileSystem(options.filesystem, maxEntries);
-  await shellFilesystem.open();
+  // Shared workspaces refresh before every command. Opening here duplicates
+  // the first refresh and puts a remote storage listing on chat-only startup.
+  if (!options.refreshFilesystemBeforeExec) await shellFilesystem.open();
   const filesystem = shellFilesystem.workspace();
   const runtime = await createJustBashRuntime({
     filesystem: shellFilesystem,
@@ -336,14 +338,32 @@ class WorkspaceShellFileSystem {
   #entries = new Map();
   #children = new Map();
   #sortedPaths;
+  #opened = false;
+  #opening;
 
   constructor(workspace, maxEntries) {
     this.#source = workspace;
     this.#root = normalizeRoot(workspace.root);
     this.#maxEntries = maxEntries;
+    this.#set(this.#root, directoryEntry());
   }
 
   async open() {
+    if (this.#opening) return this.#opening;
+    const opening = this.#refresh();
+    this.#opening = opening;
+    try {
+      await opening;
+    } finally {
+      if (this.#opening === opening) this.#opening = undefined;
+    }
+  }
+
+  async #ensureOpen() {
+    if (!this.#opened || this.#opening) await this.open();
+  }
+
+  async #refresh() {
     const entries = await this.#source.list(".", { recursive: true, ...(this.#maxEntries === undefined ? {} : { maxEntries: this.#maxEntries }) });
     this.#entries.clear();
     this.#children.clear();
@@ -356,6 +376,7 @@ class WorkspaceShellFileSystem {
         ? directoryEntry(entry.modifiedAt)
         : fileEntry(entry.size, entry.modifiedAt));
     }
+    this.#opened = true;
   }
 
   workspace() {
@@ -367,6 +388,7 @@ class WorkspaceShellFileSystem {
       ),
       readFile: (path) => this.#source.readFile(resolvePath(this.#root, this.#root, path)),
       writeFile: async (path, contents) => {
+        await this.#ensureOpen();
         const absolute = resolvePath(this.#root, this.#root, path);
         const bytes = bytesFrom(contents);
         this.#assertCapacity(absolute);
@@ -375,11 +397,13 @@ class WorkspaceShellFileSystem {
         this.#set(absolute, fileEntry(bytes.byteLength));
       },
       remove: async (path, options) => {
+        await this.#ensureOpen();
         const absolute = resolvePath(this.#root, this.#root, path);
         await this.#source.remove(absolute, options);
         this.#remove(absolute);
       },
       mkdir: async (path) => {
+        await this.#ensureOpen();
         const absolute = resolvePath(this.#root, this.#root, path);
         this.#assertCapacity(absolute);
         await this.#source.mkdir(absolute);

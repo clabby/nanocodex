@@ -75,7 +75,7 @@ export type JustBashDescriptor = Readonly<{
 export function justBash(options: {
   /** Caller-owned durable workspace. See `JustBashRuntime.filesystem` for mutation ownership. */
   filesystem: Workspace;
-  /** Refresh metadata before each serialized command when another writer shares the storage. */
+  /** Refresh metadata before each serialized command; defer the initial scan until a command or filesystem mutation. */
   refreshFilesystemBeforeExec?: boolean | undefined;
   executionTimeoutMs?: number | undefined;
   maxEntries?: number | undefined;
