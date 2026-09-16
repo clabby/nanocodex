@@ -40,7 +40,7 @@ describe("regional subscription voice relay", () => {
   it("transfers the complete SDP exchange through the private relay RPC when enabled", async () => {
     const f = fixture("wnam");
     f.env.CHATGPT_VOICE_RELAY_RPC = "true";
-    const createRealtimeCall = vi.fn(async (_body: string, _headers: Record<string, string>) => ({
+    const createRealtimeCall = vi.fn(async (_body: string, _headers: Record<string, string>, _search: string) => ({
       status: 201, headers: { "content-type": "application/sdp", location: "/calls/fixture" }, body: "answer SDP",
     }));
     f.get.mockReturnValue({ fetch: f.relay, createRealtimeCall } as ReturnType<typeof f.get>);
@@ -52,6 +52,7 @@ describe("regional subscription voice relay", () => {
     expect(createRealtimeCall.mock.calls[0]![0]).toBe('{"sdp":"v=0"}');
     expect(createRealtimeCall.mock.calls[0]![1].authorization).toBe("Bearer private-test-token");
     expect(createRealtimeCall.mock.calls[0]![1]["x-nanocodex-voice-region"]).toBeUndefined();
+    expect(createRealtimeCall.mock.calls[0]![2]).toBe("?intent=quicksilver&architecture=avas");
     expect(f.relay).not.toHaveBeenCalled();
   });
   it("does not create a second provider call after a relay RPC failure", async () => {

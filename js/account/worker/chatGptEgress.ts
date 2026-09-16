@@ -6,10 +6,12 @@ export class ChatGptEgress extends Container {
   sleepAfter = "1h";
 
   /** Private egress binding: transfer the small SDP exchange in one RPC reply. */
-  async createRealtimeCall(body: string, headers: Record<string, string>): Promise<{
+  async createRealtimeCall(body: string, headers: Record<string, string>, search: string): Promise<{
     status: number; headers: Record<string, string>; body: string;
   }> {
-    const response = await this.fetch(new Request("https://chatgpt-egress.internal/backend-api/codex/realtime/calls", {
+    const target = new URL("https://chatgpt-egress.internal/backend-api/codex/realtime/calls");
+    target.search = search;
+    const response = await this.fetch(new Request(target, {
       method: "POST", headers, body,
     }));
     const began = performance.now();

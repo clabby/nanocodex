@@ -2381,11 +2381,11 @@ async function fetchUpstream(
     const relay = env.CHATGPT_EGRESS.get(id, region ? { locationHint: region } : undefined);
     if (operation.id === "realtime-call" && realtimeRelayRpc(env, request)) {
       const rpc = relay as typeof relay & {
-        createRealtimeCall(body: string, headers: Record<string, string>): Promise<{
+        createRealtimeCall(body: string, headers: Record<string, string>, search: string): Promise<{
           status: number; headers: Record<string, string>; body: string;
         }>;
       };
-      const response = await rpc.createRealtimeCall(await request.text(), Object.fromEntries(request.headers));
+      const response = await rpc.createRealtimeCall(await request.text(), Object.fromEntries(request.headers), internal.search);
       // Do not retry through fetch: an RPC failure can occur after call creation.
       return new Response(response.body, { status: response.status, headers: response.headers });
     }
