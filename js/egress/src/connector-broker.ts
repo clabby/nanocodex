@@ -485,7 +485,8 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
         && request.headers.get("x-nanocodex-resolve-stream") === "1"
         && /^\/tracks\/(?:soundcloud(?::|%3A)tracks(?::|%3A))?\d+\/streams\/[A-Za-z0-9-]+\/(hls|http)$/i.test(url.pathname);
       if (resolveSoundCloud) {
-        if (!target || target.protocol !== "https:" || !target.hostname.endsWith(".sndcdn.com")
+        // AAC HLS uses the modern playback host; legacy streams use sndcdn.com.
+        if (!target || target.protocol !== "https:" || !(target.hostname.endsWith(".sndcdn.com") || target.hostname === "playback.media-streaming.soundcloud.cloud")
           || target.port || target.username || target.password || target.hash || target.href.length > MAX_CONNECTOR_URL_BYTES
           || [...target.searchParams.keys()].some(name => /^(oauth_token|access_token|refresh_token|client_secret)$/i.test(name))) {
           throw new ConnectorFailure(502, "connector_redirect_blocked");

@@ -175,7 +175,7 @@ export default defineConfig({
             }
             if (provider === "soundcloud" && url.pathname.includes("/streams/")) {
               const id = url.pathname.split("/")[4];
-              const target = id === "evil" ? "https://evil.test/audio.m3u8" : id === "credential"
+              const target = id === "evil" ? "https://evil.test/audio.m3u8" : id === "modern" ? "https://playback.media-streaming.soundcloud.cloud/track/aac_160k/uuid/playlist.m3u8?Policy=signed" : id === "lookalike" ? "https://playback.media-streaming.soundcloud.cloud.evil.test/audio.m3u8" : id === "credential"
                 ? `https://media.sndcdn.com/audio.m3u8?access_token=${auth.slice(6)}` : "https://media.sndcdn.com/audio.m3u8?Policy=signed";
               return Response.redirect(target, 302);
             }

@@ -162,8 +162,11 @@ it("binds SoundCloud phone OAuth to its registered loopback and keeps the app se
   const response = await broker.fetch(url, { headers });
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ url: "https://media.sndcdn.com/audio.m3u8?Policy=signed" });
+  const modern = await broker.fetch(url.replace("/safe/", "/modern/"), { headers });
+  expect(modern.status).toBe(200);
+  expect(await modern.json()).toEqual({ url: "https://playback.media-streaming.soundcloud.cloud/track/aac_160k/uuid/playlist.m3u8?Policy=signed" });
   expect((await broker.fetch(url, { headers: { "x-nanocodex-connector-connection": connection } })).status).toBe(502);
-  for (const variant of [url.replace("/safe/", "/evil/"), url.replace("/safe/", "/credential/"), url.replace("/hls", "/http-preview")]) {
+  for (const variant of [url.replace("/safe/", "/lookalike/"), url.replace("/safe/", "/evil/"), url.replace("/safe/", "/credential/"), url.replace("/hls", "/http-preview")]) {
     expect((await broker.fetch(variant, { headers })).status).toBe(502);
   }
  });
