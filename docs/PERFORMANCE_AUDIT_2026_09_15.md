@@ -102,7 +102,7 @@ read-reuse candidate, not a measured milliseconds saving or complete caller
 attribution. Other repeated reads include root-agent identity (627), session ID
 (522), hosted-tool routes (476), and full session state (466).
 
-Each browser voice ownership check made exactly two SELECTs, read two rows,
+Each browser voice ownership check made exactly two SELECT statements, read two rows,
 and wrote none. Receiver time was below resolution; RPC time was 14–270 ms.
 
 All per-SQL timing fields were zero because the Workers clock does not advance
