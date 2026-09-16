@@ -44,6 +44,10 @@
         "class_name": "AgentSubjectDirectory"
       },
       {
+        "name": "SPOTIFY_RATE_LIMITS",
+        "class_name": "SpotifyRateLimit"
+      },
+      {
         "name": "USER_CONNECTORS",
         "class_name": "UserConnectorBroker"
       },
@@ -78,6 +82,10 @@
     {
       "tag": "v5",
       "new_sqlite_classes": ["McpConnectionDirectory"]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": ["SpotifyRateLimit"]
     }
   ],
   "env": {
@@ -99,6 +107,7 @@
         "bindings": [
           { "name": "USER_CREDENTIALS", "class_name": "UserCredentialBroker" },
           { "name": "AGENT_SUBJECTS", "class_name": "AgentSubjectDirectory" },
+          { "name": "SPOTIFY_RATE_LIMITS", "class_name": "SpotifyRateLimit" },
           { "name": "USER_CONNECTORS", "class_name": "UserConnectorBroker" },
           { "name": "MCP_CONNECTIONS", "class_name": "McpConnectionDirectory" },
           { "name": "CHATGPT_EGRESS", "class_name": "ChatGptEgress", "script_name": "nanocodex" }

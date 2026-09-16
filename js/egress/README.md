@@ -189,6 +189,24 @@ one-time code and matching state through an owner-authenticated managed route.
 It never accepts arbitrary client IDs or callback URLs. Shared-client quotas and
 Spotify endpoint restrictions still apply.
 
+Spotify reads from agents, direct Connect API calls, and provider SDKs pass through
+one user broker. Identical successful JSON reads for the same connection and
+request headers reuse a result for one second (at most eight entries of 1 MiB
+per user). Writes and credential changes clear these reads; account selection and
+credential validity are checked before reuse. Large responses still stream in full.
+
+A `SpotifyRateLimit` Durable Object per OAuth client ID remembers `Retry-After`
+plus a one-second margin across every Nanocodex user of that registration. The
+shared object stores timing only. Cooldowns survive eviction and deployment;
+accounts and response bodies remain isolated in their user brokers. Reads retry
+at most twice with a ten-second cooldown-wait budget. Longer cooldowns return 429
+and the remaining `Retry-After` without contacting Spotify. Writes are never
+queued or retried, and are rejected locally during an active cooldown. A 429
+without valid timing uses a conservative 30-second cooldown plus the margin.
+OAuth identity reads share the same policy; code exchanges are never retried.
+This coordinates our own traffic, but cannot manage other apps using ncspot's
+registration or increase Spotify's quota.
+
 
 ### SoundCloud app registration
 

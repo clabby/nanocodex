@@ -5,6 +5,7 @@ import { defineConfig } from "vitest/config";
 
 const transientGoogleRevocations = new Set<string>();
 const transientSpotifyIdentities = new Set<string>();
+const spotifyRateTestCalls = new Map<string, number>();
 
 const TEST_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY";
 const TEST_CHATGPT_EGRESS = `
@@ -158,6 +159,19 @@ export default defineConfig({
               }
               return Response.json(provider === "spotify" ? { id: account, display_name: account }
                 : { urn: `soundcloud:users:${account}`, username: account });
+            }
+            if (provider === "spotify" && account.startsWith("rate-test-")) {
+              const key = `${account}:${url.pathname}:${url.searchParams.get("case") ?? "default"}`;
+              const calls = (spotifyRateTestCalls.get(key) ?? 0) + 1;
+              spotifyRateTestCalls.set(key, calls);
+              const mode = url.searchParams.get("rate_limit");
+              if (mode === "long" || mode === "always" || mode === "missing" || (mode === "once" && calls === 1)) {
+                return Response.json({ error: { status: 429, message: "fixture limit" }, calls }, {
+                  status: 429,
+                  headers: mode === "missing" ? {} : { "retry-after": mode === "long" ? "120" : "0" },
+                });
+              }
+              return Response.json({ account, calls, method: request.method, body: await request.text() });
             }
             if (url.pathname.endsWith("/redirect")) return Response.redirect("https://evil.test/", 302);
             return Response.json({ account, refreshed: auth.endsWith("-refreshed"), method: request.method, body: await request.text() });

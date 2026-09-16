@@ -38,6 +38,7 @@ import {
 
 export { AgentSubjectDirectory, UserCredentialBroker } from "./broker";
 export { UserConnectorBroker } from "./connector-broker";
+export { SpotifyRateLimit } from "./spotify-rate-limit";
 export { McpConnectionDirectory } from "./mcp-connection-owner";
 
 const SUBJECT_DIRECTORY_PREFIX = "agent-subject-v1:";

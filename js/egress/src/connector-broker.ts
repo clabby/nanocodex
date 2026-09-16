@@ -1,5 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { credentialFilteringBody } from "./credential-stream";
+import { SpotifyRateLimit, spotifyFetch } from "./spotify-rate-limit";
+import { SpotifyReadCache } from "./spotify-read-cache";
 
 import {
   CredentialVault,
@@ -176,6 +178,7 @@ export type ConnectorId = "github" | GoogleCapabilityId | "slack" | "x" | MusicP
 export type OAuthProviderId = "github" | "google" | "slack" | "x" | MusicProviderId;
 
 export interface ConnectorBrokerEnv extends McpConnectionBrokerEnv {
+  SPOTIFY_RATE_LIMITS: DurableObjectNamespace<SpotifyRateLimit>;
   GITHUB_OAUTH_CLIENT_ID?: string;
   GITHUB_OAUTH_CLIENT_SECRET?: string;
   GOOGLE_OAUTH_CLIENT_ID?: string;
@@ -252,6 +255,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   readonly #ready: Promise<void>;
   #connectors: ConnectorState = { version: 2, connections: {}, pending: {} };
   #tail: Promise<void> = Promise.resolve();
+  readonly #spotifyReads = new SpotifyReadCache();
 
   constructor(state: DurableObjectState, env: ConnectorBrokerEnv) {
     super(state, env);
@@ -435,23 +439,32 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     if (provider.origin === "https://github.com" && connector) {
       headers.set("authorization", `Basic ${btoa(`x-access-token:${connector.accessToken}`)}`);
     }
+    // Selection and credential validity are checked even when a read is cached.
+    const spotifyReadKey = provider.id === "spotify" && request.method === "GET" && selected
+      ? this.#spotifyReads.key(selected.connectionId, url, headers) : undefined;
+    if (provider.id === "spotify" && request.method !== "GET" && request.method !== "HEAD") this.#spotifyReads.clear();
+    if (spotifyReadKey) {
+      const cached = this.#spotifyReads.get(spotifyReadKey);
+      if (cached) return cached;
+    }
     const requestBody = provider.provider === "slack"
       ? await slackRequestBody(request)
       : request.body;
     let upstream: Response;
     const archiveCredentials: string[] = [];
     try {
-      upstream = await fetch(new Request(url, {
+      const outbound = new Request(url, {
         method: request.method,
         headers,
         ...(request.method === "GET" || request.method === "HEAD" || !requestBody
           ? {}
           : { body: requestBody }),
         redirect: "manual",
-      }), {
-        redirect: "manual",
         signal: request.signal,
       });
+      upstream = provider.id === "spotify"
+        ? await spotifyFetch(outbound, this.#spotifyCoordinator(connector?.oauthClientId))
+        : await fetch(outbound, { redirect: "manual", signal: request.signal });
     } catch {
       throw new ConnectorFailure(503, "connector_provider_unavailable");
     }
@@ -507,10 +520,16 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
         throw new ConnectorFailure(502, "credential_projection_blocked");
       }
     }
-    return new Response(body && credentials.length ? credentialFilteringBody(body, credentials) : body, {
+    const response = new Response(body && credentials.length ? credentialFilteringBody(body, credentials) : body, {
       status: upstream.status,
       headers: responseHeaders,
     });
+    return spotifyReadKey ? this.#spotifyReads.store(spotifyReadKey, response) : response;
+  }
+
+  #spotifyCoordinator(oauthClientId?: string): DurableObjectStub<SpotifyRateLimit> {
+    const { clientId } = providerCredentials("spotify", this.#env, oauthClientId);
+    return this.#env.SPOTIFY_RATE_LIMITS.getByName(clientId);
   }
 
   async #usableConnector(
@@ -967,7 +986,10 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
         if (error instanceof ConnectorFailure) throw error;
         throw new ConnectorFailure(502, "connector_token_response_invalid");
       }
-      const identityResponse = await providerIdentityFetch(id, identityRequest(id, token.accessToken));
+      const identityHttpRequest = new Request(identityRequest(id, token.accessToken), { signal: AbortSignal.timeout(30_000) });
+      const identityResponse = id === "spotify"
+        ? await spotifyFetch(identityHttpRequest, this.#spotifyCoordinator(pending.oauthClientId))
+        : await providerFetch(identityHttpRequest);
       if (!identityResponse.ok) {
         const status = identityResponse.status;
         await identityResponse.body?.cancel();
@@ -1041,6 +1063,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   }
 
   async #persist(): Promise<void> {
+    this.#spotifyReads.clear();
     await this.#state.storage.put(STATE_KEY, {
       envelope: await this.#vault.seal(this.#connectors),
     } satisfies StoredRow);
@@ -1272,19 +1295,6 @@ function providerCredentials(
     : env.GOOGLE_OAUTH_CLIENT_SECRET)?.trim();
   if (!clientId || (id !== "spotify" && !clientSecret)) throw new ConnectorFailure(503, "connector_not_configured");
   return { clientId, clientSecret: id === "spotify" ? "" : clientSecret! };
-}
-
-// Retry only the idempotent identity read, never authorization-code exchange.
-// Shared registrations can briefly exhaust their rolling quota during consent.
-async function providerIdentityFetch(id: OAuthProviderId, request: Request): Promise<Response> {
-  for (let attempt = 0; ; attempt++) {
-    const response = await providerFetch(request.clone());
-    const retryAfter = Number(response.headers.get("retry-after") ?? "1");
-    if (id !== "spotify" || response.status !== 429 || attempt >= 2
-      || !Number.isFinite(retryAfter) || retryAfter < 0 || retryAfter > 30) return response;
-    await response.body?.cancel();
-    await new Promise((resolve) => setTimeout(resolve, Math.ceil(retryAfter * 1000)));
-  }
 }
 
 async function providerFetch(request: Request): Promise<Response> {

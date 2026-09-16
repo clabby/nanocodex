@@ -1300,9 +1300,12 @@ status codes, JSON errors, rate-limit headers, and non-JSON bodies are preserved
 API links in JSON, pagination Link headers, and same-provider redirects are
 rewritten through the proxy; artwork and public share URLs stay unchanged.
 Cross-provider redirects are rejected. JSON link rewriting is bounded to 16 MiB
-per response; use provider pagination for larger collections. The proxy does not
-retry requests. Disable SDK write retries to avoid repeating a successful write
-after an ambiguous network failure.
+per response; use provider pagination for larger collections. Spotify GETs share
+one-second read results and the broker's registration-wide rate-limit cooldown.
+The broker retries a rate-limited Spotify GET at most twice within a ten-second
+cooldown-wait budget; longer limits return 429 with the remaining `Retry-After`.
+No writes are automatically retried. Disable SDK write retries to avoid repeating
+a successful write after an ambiguous network failure.
 
 See the runnable [Python example](../../examples/python/spotify_proxy.py).
 The integration test uses real Spotipy 2.26.0 and google-api-python-client 2.192.0
