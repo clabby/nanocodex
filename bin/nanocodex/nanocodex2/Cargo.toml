@@ -41,6 +41,7 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shlex.workspace = true
+sha2.workspace = true
 syntect.workspace = true
 nanocodex-subagents = { path = "../../../crates/nanocodex-subagents", version = "0.6.1" }
 tempfile.workspace = true

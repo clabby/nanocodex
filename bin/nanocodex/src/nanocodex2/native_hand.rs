@@ -7,7 +7,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use clap::Args;
 use nanocodex_browser::{Browser, BrowserExecuteTool};
 use nanocodex_managed::{ManagedClient, ManagedError};
 use nanocodex_tools::{
@@ -18,34 +17,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{hand_observability::HandObservabilityArgs, host};
 
-#[derive(Args)]
-pub(crate) struct NativeHand {
-    #[command(flatten)]
+struct NativeHand {
     observability: HandObservabilityArgs,
-
-    /// Existing workspace whose native files and programs this Hand exposes.
-    #[arg(long, value_name = "PATH")]
     workspace: PathBuf,
-
-    /// Private identity directory; defaults to the account config's native-hand directory.
-    #[arg(long, value_name = "PATH")]
     state_dir: Option<PathBuf>,
-
-    /// Human-readable machine name; defaults to this device's name.
-    #[arg(long, value_name = "NAME")]
     machine_name: Option<String>,
-
-    /// Route managed browser work through this machine's network connection.
-    #[arg(long)]
     browser: bool,
-
-    /// Exact Chrome or Chromium executable used by this Hand's private browser.
-    #[arg(
-        long,
-        value_name = "PATH",
-        env = "NANOCODEX_BROWSER_EXECUTABLE",
-        requires = "browser"
-    )]
     browser_executable: Option<PathBuf>,
 }
 
@@ -56,8 +33,8 @@ struct Identity {
     workspace: PathBuf,
 }
 
-struct NativeState {
-    machine: AttachmentMachine,
+pub(super) struct NativeState {
+    pub(super) machine: AttachmentMachine,
     directory: PathBuf,
     _lock: NativeStateLock,
 }
@@ -78,7 +55,7 @@ impl NativeState {
         Self::open_with_browser(workspace, directory, name, false)
     }
 
-    fn open_with_browser(
+    pub(super) fn open_with_browser(
         workspace: &Path,
         directory: &Path,
         name: String,
@@ -199,7 +176,38 @@ fn require_regular(path: &Path, directory: bool) -> Result<(), ManagedError> {
     }
 }
 
-pub(crate) async fn serve(client: &ManagedClient, command: NativeHand) -> Result<(), ManagedError> {
+pub(super) async fn serve_hand(command: super::Hand) -> Result<(), ManagedError> {
+    if command.machine_id.is_some() {
+        return Err(configuration(
+            "Native Hand identities are retained automatically; use --state-dir for another workspace",
+        ));
+    }
+    if command.vm_workspace.is_none()
+        && command.state_dir.is_none()
+        && command.machine_name.is_none()
+        && !command.browser
+    {
+        return super::device_hand::serve(super::device_hand::DeviceHand::default()).await;
+    }
+    let client = super::client_from_environment(None)?;
+    serve(
+        &client,
+        NativeHand {
+            observability: command.observability,
+            workspace: match command.vm_workspace {
+                Some(path) => path.into(),
+                None => std::env::current_dir().map_err(configuration)?,
+            },
+            state_dir: command.state_dir,
+            machine_name: command.machine_name,
+            browser: command.browser,
+            browser_executable: command.browser_executable,
+        },
+    )
+    .await
+}
+
+async fn serve(client: &ManagedClient, command: NativeHand) -> Result<(), ManagedError> {
     let _observability = command.observability.install().map_err(configuration)?;
     let directory = match command.state_dir {
         Some(directory) => directory,
@@ -263,11 +271,21 @@ async fn run(
     run_with_browser(target, state, None, shutdown).await
 }
 
-async fn run_with_browser(
+pub(super) async fn run_with_browser(
     target: AttachmentTarget,
     state: NativeState,
     browser: Option<Browser>,
     shutdown: impl Future<Output = Result<(), ManagedError>>,
+) -> Result<(), ManagedError> {
+    run_observed(target, &state, browser, shutdown, |_| {}).await
+}
+
+pub(super) async fn run_observed(
+    target: AttachmentTarget,
+    state: &NativeState,
+    browser: Option<Browser>,
+    shutdown: impl Future<Output = Result<(), ManagedError>>,
+    mut observe: impl FnMut(&AttachmentEvent),
 ) -> Result<(), ManagedError> {
     // WorkspaceTools uses the existing sanitized subprocess environment. Do not
     // forward the account credential or ambient sensitive variables to programs.
@@ -299,7 +317,9 @@ async fn run_with_browser(
                 return attachment.detach().await.map_err(configuration);
             }
             result = closed.closed() => return result.map_err(configuration),
-            Some(event) = events.recv() => match event {
+            Some(event) = events.recv() => {
+              observe(&event);
+              match event {
                 AttachmentEvent::Connecting => tracing::info!(target: "nanocodex2",
                     stage = "native.hand.connecting", "Connecting native Hand"),
                 AttachmentEvent::CatalogPublished { .. } => {
@@ -309,6 +329,7 @@ async fn run_with_browser(
                     "Native Hand is ready; press Ctrl-C to detach");
                 },
                 _ => {}
+              }
             }
         }
     }
@@ -354,22 +375,60 @@ mod tests {
     }
 
     #[test]
-    fn native_hand_requires_an_explicit_workspace() {
+    fn hand_defaults_to_the_computer_and_keeps_explicit_workspace_and_vm_modes() {
+        for args in [
+            vec!["nanocodex2", "hand"],
+            vec!["nanocodex2", "hand", "--workspace", "/app"],
+            vec![
+                "nanocodex2",
+                "hand",
+                "--workspace",
+                "/tmp",
+                "--state-dir",
+                "/tmp/identity",
+            ],
+        ] {
+            let cli = crate::Cli::try_parse_from(args).unwrap();
+            let Some(crate::Command::Hand(hand)) = cli.command else {
+                panic!("expected unified Hand");
+            };
+            assert!(hand.rootfs.is_none() && hand.docker.is_none());
+        }
+        assert!(
+            crate::Cli::try_parse_from([
+                "nanocodex2",
+                "hand",
+                "--vm",
+                "root.ext4",
+                "--docker",
+                "image",
+                "--volume",
+                "volume"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn hand_supports_native_browser_options_and_rejects_removed_command() {
         assert!(crate::Cli::try_parse_from(["nanocodex2", "native-hand"]).is_err());
+        assert!(
+            crate::Cli::try_parse_from(["nanocodex2", "native-hand", "--workspace", "."]).is_err()
+        );
         let cli = crate::Cli::try_parse_from([
             "nanocodex2",
-            "native-hand",
+            "hand",
             "--workspace",
             ".",
             "--machine-name",
             "Linux server",
         ])
         .unwrap();
-        assert!(matches!(cli.command, Some(crate::Command::NativeHand(_))));
+        assert!(matches!(cli.command, Some(crate::Command::Hand(_))));
         assert!(
             crate::Cli::try_parse_from([
                 "nanocodex2",
-                "native-hand",
+                "hand",
                 "--workspace",
                 ".",
                 "--browser-executable",
@@ -379,7 +438,7 @@ mod tests {
         );
         let cli = crate::Cli::try_parse_from([
             "nanocodex2",
-            "native-hand",
+            "hand",
             "--workspace",
             ".",
             "--browser",
@@ -387,7 +446,7 @@ mod tests {
             "/opt/chrome",
         ])
         .unwrap();
-        let Some(crate::Command::NativeHand(command)) = cli.command else {
+        let Some(crate::Command::Hand(command)) = cli.command else {
             panic!("expected native Hand");
         };
         assert!(command.browser);

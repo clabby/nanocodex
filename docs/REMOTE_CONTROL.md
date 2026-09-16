@@ -26,7 +26,7 @@ provide both. VM allocations keep their own workspaces and identities.
 | Mac host | Automatic account-wide shell Hand and screen sharing while Nanocodex runs | File/process roundtrip, video/input, relaunch, window close |
 | Mac-hosted VM | Factory-managed Linux VM with its own workspace and desktop | Retained files, video/input, generation change and viewer recovery after restart |
 | Cloudflare Hand | Retained sandbox workspace and `frames-v1` desktop | Workspace roundtrip, rendered frames/input, sleep/resume |
-| Native Linux Hand | `native-hand` publishes an explicit workspace and native tools over an outbound account connection | File/process roundtrip, socket reconnect, process restart with retained identity |
+| Native Linux Hand | `hand --workspace PATH` publishes an explicit workspace and native tools over an outbound account connection | File/process roundtrip, socket reconnect, process restart with retained identity |
 | SSH Linux server | Vault-bound SSH for native commands; `server_hand` installs a dedicated desktop container | Reachable SSH target, Docker access, enrollment, video/input, reconnect |
 | Browser viewer | Screens in Connect and agent terminals | Discovery, video/input, tab background/resume, host restart |
 | iPhone viewer/host | Shared native viewer; hosting uses a paired Mac bridge | Physical-device journey; currently paused |
@@ -288,10 +288,10 @@ For native access without inbound SSH or a VM, configure the CLI with the same
 account credential, then run on the machine itself:
 
 ```sh
-nanocodex2 native-hand --workspace /path/to/workspace
+nanocodex2 hand --workspace /path/to/workspace
 ```
 
-`native-hand` uses the CLI's account authentication and publishes the selected
+`hand --workspace PATH` uses the CLI's account authentication and publishes the selected
 workspace and its native execution tools over the
 account's outbound connection. It persists the machine identity, reconnects
 after socket loss, and handles Ctrl-C/SIGTERM. A single-instance state lock

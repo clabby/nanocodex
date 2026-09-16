@@ -315,7 +315,7 @@ VM-specific environment defaults are ignored when selecting Docker.
 On Linux, `--vm` checks access to `/dev/kvm`, the KVM API, and VM creation
 before account setup. If KVM is unavailable, the error explains how to enable
 it and shows `hand --docker IMAGE --volume NAME` as the explicit alternative.
-No backend is selected automatically.
+Run `hand` without a backend flag to connect the native computer.
 
 ## Browser egress through a connected Hand
 
@@ -323,7 +323,7 @@ Add `--browser` to a native, VM, or Docker Hand to publish a private Chromium
 session whose public requests leave through that machine's network connection:
 
 ```bash
-nanocodex2 native-hand --workspace /path/to/workspace --browser
+nanocodex2 hand --workspace /path/to/workspace --browser
 
 nanocodex2 hand \
   --docker nanocodex-hand:local \
@@ -407,3 +407,31 @@ are omitted. Use `--log-format json`, `--log-file PATH`, or
 `--otel-endpoint URL` for standard JSON, retained-file, or OTLP output;
 `--log-filter` and
 `RUST_LOG` accept normal tracing filter directives.
+
+### This computer and its VMs
+
+Opening `nanocodex2`, attaching a conversation, or using `run` automatically
+connects this computer as an account-wide Hand in `~/Nanocodex`. The Mac app and
+terminal share one computer identity and local publisher, including across
+separate login keys for the same account. Closing one client leaves the host and
+its VMs running while another client is connected. The last client disconnects
+the host after a short grace period; retained VM disks remain on disk.
+
+Use `nanocodex2 hand` to keep the computer connected without opening a
+conversation. Use `hand --workspace /path/to/repo --state-dir /private/identity`
+for an additional explicit workspace, or `hand --vm ...` / `hand --docker ...`
+for an isolated Hand. Set `NANOCODEX_DISABLE_HAND=1` to disable automatic
+account-wide sharing in the CLI; the selected conversation's folder tools remain
+available.
+
+A configured desktop VM recipe (`desktopRootfs`, `guestRuntime`, `binary`, and
+optional `firmware` in the app's `vm.json`) starts an on-demand VM provider in the
+background. Execution VMs are created on demand; GPU preflight may boot a
+temporary guest. Native host readiness does not wait for VM registration or
+screen permissions. The app reports VM readiness
+separately. The GPU Hand build script writes the desktop recipe explicitly.
+
+`accountInfo().machines` advertises `vm_provider` on the online Mac. The agent
+uses the existing Mac mount for native work, or calls `mount` with that provider
+to create a private VM. Each VM has its own workspace and screen. A configured
+provider may still be connecting; mount verifies current readiness and capacity.

@@ -261,6 +261,11 @@ struct WorkspaceUpdate {
         return !checked || running || cursorIsNewer(cursor, than: tab.seenCursor)
     }
 }
+struct HandFactory: Codable, Equatable, Sendable {
+    var name: String?
+    var status: String
+    var error: String?
+}
 struct Hand: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var name: String
@@ -279,6 +284,7 @@ struct Hand: Codable, Identifiable, Equatable, Sendable {
     var calls: Int?
     var activeCalls: Int?
     var logs: [String]?
+    var factory: HandFactory?
     var isRunning: Bool { status == "connected" || status == "connecting" }
 }
 struct DesktopState: Decodable, Equatable, Sendable {

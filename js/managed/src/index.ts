@@ -212,6 +212,7 @@ import {
 import { routeBrowserEgress } from "./browser-egress";
 import {
   accountInfo,
+  projectHandProviders,
   type AccountMachine,
 } from "./account-info";
 import { accountCatalog } from "./account-catalog";
@@ -7353,7 +7354,7 @@ export class DurableAgentSession extends DurableComputerSession {
           : [
             "You are the durable Nanocodex brain running on Cloudflare Workers. Use Code Mode, tools, and Just Bash in /brain first. /brain is durable shared scratch mounted read-write in every Cloudflare hand; it never contains credentials or control-plane authority.",
             computer.instructions,
-            "The agent starts without a sandbox hand. File work, text processing, HTTP, supported Git/GitHub commands, and JavaScript computation in Code Mode need no hand. When the task needs native binaries, package installation, builds, tests, a server, or a process session, reuse a suitable attached hand from accountInfo or mount output; otherwise call mount with provider cf_sandbox and a useful stable name. A known native command such as cargo test should go directly to a suitable hand. If a brain command reveals an unsupported binary or runtime capability, select or mount a hand and continue there, checking for partial effects before retrying. A compiler error or failing test on a hand should be investigated there. Use another provider only when the user supplied its exact connected VM factory name. Do not ask the user to request a routine sandbox mount. mount provisions and attaches the hand before it returns.",
+            "The agent starts without a sandbox hand. File work, text processing, HTTP, supported Git/GitHub commands, and JavaScript computation in Code Mode need no hand. When the task needs native binaries, package installation, builds, tests, a server, or a process session, reuse a suitable attached hand from accountInfo or mount output; otherwise call mount with provider cf_sandbox and a useful stable name. A known native command such as cargo test should go directly to a suitable hand. If a brain command reveals an unsupported binary or runtime capability, select or mount a hand and continue there, checking for partial effects before retrying. A compiler error or failing test on a hand should be investigated there. When the user requests a VM on a particular computer, discover that online computer in accountInfo().machines and use its exact vm_provider as mount.provider. The computer itself is already a native hand; creating a VM gives it a separate isolated workspace and screen. Do not ask the user for an internal factory name. Offline historical registrations do not override an online computer's current capabilities. Do not ask the user to request a routine sandbox mount. mount provisions and attaches the hand before it returns.",
             "Subagents share your tools and permissions. Delegate independent work when it advances the task.",
             "Hands appear as logical top-level paths returned by mount or listed in accountInfo().machines. exec_command defaults to /brain; omit workdir or use /brain for Just Bash. For native execution, select the hand whose advertised workspace matches the user's project, and set workdir to its exact mount or a path beneath it. The mount already maps to that workspace: if /laptop maps to /Users/me/repo, use /laptop for the project root or /laptop/src for its src directory; do not append the host's absolute workspace path. The root of that cwd selects where the process runs. write_stdin remains pinned to the hand that created its session. There is no environment or host argument.",
             "A Code Mode cell captures its mount mapping. Commands in Promise.all may run concurrently on different cwd roots, and subagents use the same cwd rule independently. A disconnect or reconnect never retargets an admitted command or session.",
@@ -8250,7 +8251,7 @@ export class DurableAgentSession extends DurableComputerSession {
     context?: Pick<ToolContext, "sessionId" | "subagent">,
   ): readonly AccountMachine[] {
     if (!this.#canUseExecutionNamespace(authorization)) return [];
-    return Object.freeze([
+    return Object.freeze(projectHandProviders([
       ...this.#availableManagedMounts().map((mount) => {
         const hostMachine = mount.provider === "host" ? this.#hostMachineForMount(mount) : undefined;
         return Object.freeze({
@@ -8278,7 +8279,7 @@ export class DurableAgentSession extends DurableComputerSession {
             capabilities: machine.capabilities,
           });
         }),
-    ]);
+    ]));
   }
 
   #canUseExecutionNamespace(

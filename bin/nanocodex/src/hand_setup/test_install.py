@@ -54,7 +54,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), b"synthetic-secret")
 
     def test_service_waits_for_application_readiness_and_keeps_credentials_out_of_argv(self):
-        service = installer.unit("native-hand --workspace /srv/nanocodex/workspace").decode()
+        service = installer.unit("hand --workspace /srv/nanocodex/workspace").decode()
         self.assertIn("Type=notify\n", service)
         self.assertIn("NotifyAccess=main\n", service)
         self.assertIn("EnvironmentFile=/opt/nanocodex/account.env\n", service)

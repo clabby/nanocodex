@@ -65,9 +65,9 @@ async fn hand_help_exposes_the_vm_and_machine_contract() {
 }
 
 #[tokio::test]
-async fn hand_requires_an_explicit_backend_and_rejects_mixed_options() {
+async fn hand_rejects_mixed_options_and_removed_native_command() {
     for args in [
-        vec!["hand"],
+        vec!["native-hand", "--workspace", "."],
         vec!["hand", "--docker", "image"],
         vec!["hand", "--volume", "work"],
         vec!["hand", "--docker", "image", "--volume", "work", "--gpu"],

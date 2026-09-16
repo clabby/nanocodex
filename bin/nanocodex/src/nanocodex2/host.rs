@@ -75,7 +75,12 @@ impl HostConfig {
         let id = MACHINE_ID
             .get_or_init(|| uuid::Uuid::new_v4().to_string())
             .clone();
-        let name = bounded_display_name(whoami::devicename());
+        let folder = self
+            .workspace
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let name = bounded_display_name(format!("{} / {folder}", whoami::devicename()));
         let workspace = self.workspace.to_string_lossy().into_owned();
         AttachmentMachine::new(id, name, workspace, MACHINE_CAPABILITIES)
             .map(AttachmentMetadata::machine)

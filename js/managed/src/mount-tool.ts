@@ -30,7 +30,7 @@ export const MANAGED_MOUNT_PARAMETERS = Object.freeze({
     provider: {
       type: "string",
       pattern: MOUNT_NAME.source,
-      description: "Execution provider to mount: cf_sandbox or the exact name of a connected VM factory.",
+      description: "Execution provider to mount: cf_sandbox or the exact vm_provider advertised by the requested computer in accountInfo().machines.",
     },
     name: {
       type: "string",
@@ -65,7 +65,7 @@ export function managedMountTool(
       "Provision and attach a sandbox provider as an execution hand when the task needs native tools.",
       "The agent begins without a sandbox; infer when one is needed instead of asking the user to request it.",
       "The operation is idempotent by name and returns a logical mount path to use as exec_command.workdir in a later Code Mode cell.",
-      "A later provider may be user-supplied; never assume that all mounts are Cloudflare sandboxes.",
+      "For a VM on a named Mac, find that online computer in accountInfo().machines and use its vm_provider. Native work on the Mac itself uses its existing mount without provisioning a VM. Do not ask the user to supply an internal provider name. A configured provider may still be starting; allocation checks current readiness and capacity.",
     ].join(" "),
     parameters: MANAGED_MOUNT_PARAMETERS,
     outputSchema: MANAGED_MOUNT_OUTPUT_SCHEMA,

@@ -1,3 +1,4 @@
+import { isVmFactoryName } from "./vm-factory-name";
 import { connectorToolMetadata } from "./connector-tools";
 import { performanceStage } from "./performance";
 import type { X_API } from "nanocodex-tools/x";
@@ -59,6 +60,8 @@ export type AccountMachine = Readonly<HostedMachine & {
   mount: string;
   /** Current attachment presence for user hands; absent when not known. */
   online?: boolean;
+  /** Exact mount provider advertised by this computer; allocation checks live capacity. */
+  vm_provider?: string;
 } & (
   | { kind: "sandbox"; provider: string }
   | { kind: "user"; provider?: never }
@@ -110,6 +113,7 @@ export async function accountInfo(
     catalog,
   }: AccountInfoOptions,
 ): Promise<AccountInfo> {
+  machines = projectHandProviders(machines);
   if (!enabled) return emptyInfo("disabled", machines, apis);
   signal?.throwIfAborted();
   try {
@@ -168,6 +172,18 @@ export async function accountInfo(
   }
 }
 
+/** A display name never grants placement authority. Select the exact provider
+ * from the current machine catalog, and never promote a retained offline row. */
+export function projectHandProviders(machines: readonly AccountMachine[]): readonly AccountMachine[] {
+  return machines.map(machine => {
+    const { vm_provider: _, ...base } = machine;
+    const providers = machine.capabilities.filter(value => value.startsWith("vm_factory:"))
+      .map(value => value.slice("vm_factory:".length)).filter(isVmFactoryName);
+    return machine.online === true && providers.length === 1
+      ? { ...base, vm_provider: providers[0] } : base;
+  });
+}
+
 export function projectAccountInfo(
   info: AccountInfo,
   allowedConnectors?: readonly ConnectorCapabilityId[],
@@ -180,7 +196,7 @@ export function projectAccountInfo(
       apis: info.apis ?? [],
       connectorAccounts: info.connectorAccounts ?? {},
       connectorTools: connectorToolMetadata(info.authenticated),
-      machines: info.machines ?? [],
+      machines: projectHandProviders(info.machines ?? []),
       vault,
     };
   }
@@ -219,7 +235,7 @@ export function projectAccountInfo(
     connectorAccounts,
     connectorTools: connectorToolMetadata(authenticated),
     vault,
-    machines: info.machines ?? [],
+    machines: projectHandProviders(info.machines ?? []),
   };
 }
 
