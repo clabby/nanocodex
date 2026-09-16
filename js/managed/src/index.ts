@@ -79,6 +79,7 @@ import {
   AccountHostedToolsProvider,
 } from "./account-hosted-tools";
 import { VmHostPool } from "./vm-host-pool";
+import { initializeEmptyVmHostScope, initializeVmHostScopeSchema, markVmHostScopeRegistration, shouldProbeAgentVmHostScope } from "./vm-host-scope";
 import { isVmFactoryName } from "./vm-factory-name";
 import {
   VM_HOST_ATTACHMENT_ROUTE,
@@ -3036,6 +3037,7 @@ export class DurableAgentSession extends DurableComputerSession {
       );
     `);
     initializeManagedAgentSettingsSchema(this.ctx.storage);
+    initializeVmHostScopeSchema(this.ctx.storage);
     this.#operations = new SessionOperations(this.ctx.storage);
     initializeManagedSubagentDigests(this.ctx.storage);
     // A pending realtime mutation belonged to the previous in-memory owner.
@@ -3226,9 +3228,14 @@ export class DurableAgentSession extends DurableComputerSession {
 
     if (request.method === "GET" && url.pathname === "/vm-host-existence") {
       const session = this.#session();
-      return session?.runtime_profile === "managed" && !this.#deleting && !this.#deleted
-        ? new Response(null, { status: 204 })
-        : json({ error: "not_found" }, { status: 404 });
+      if (session?.runtime_profile !== "managed" || this.#deleting || this.#deleted) {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      // The authenticated public route calls this before upgrading the agent's
+      // factory. Persist the fence first so concurrent/future mounts preserve
+      // agent-scope precedence, including when the eventual upgrade fails.
+      markVmHostScopeRegistration(this.ctx.storage);
+      return new Response(null, { status: 204 });
     }
     if (request.method === "POST" && url.pathname === "/create") {
       return this.#createHttp(request);
@@ -4233,6 +4240,7 @@ export class DurableAgentSession extends DurableComputerSession {
           runtimeProfile,
           Date.now(),
         );
+        initializeEmptyVmHostScope(this.ctx.storage);
         this.#storeSettings(settings);
         this.ctx.storage.sql.exec("INSERT INTO managed_configuration VALUES (1, ?)", JSON.stringify(configuration));
         event = this.#eventLog.append({
@@ -7972,6 +7980,10 @@ export class DurableAgentSession extends DurableComputerSession {
         throw new Error("retained VM host mount pool selection is outside its visible scopes");
       }
       for (const { scope, locator } of located.slice(selectedIndex)) {
+        if (scope === "agent" && !shouldProbeAgentVmHostScope(this.ctx.storage, selection)) {
+          stage("agent_scope_known_empty");
+          continue;
+        }
         const acquireStarted = Date.now();
         if (configuration.vm_pool_locator !== locator) {
           persistConfiguration({ ...configuration, vm_pool_locator: locator });
