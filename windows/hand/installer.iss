@@ -48,7 +48,7 @@ Source: "setup-hand.ps1"; DestDir: "{app}"; Flags: ignoreversion replacesamevers
 [Icons]
 Name: "{group}\Start or repair Nanocodex Hand"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Repair -InstallDir ""{app}"""; WorkingDir: "{app}"
 Name: "{group}\Stop Nanocodex Hand"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Stop -InstallDir ""{app}"""; WorkingDir: "{app}"
-Name: "{group}\Nanocodex Hand logs"; Filename: "{localappdata}\Nanocodex\Hand"; Flags: foldershortcut
+Name: "{group}\Nanocodex Hand logs"; Filename: "{localappdata}\Nanocodex\Hand"
 Name: "{group}\Uninstall Nanocodex Hand"; Filename: "{uninstallexe}"
 
 [Run]
