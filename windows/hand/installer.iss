@@ -38,7 +38,6 @@ RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "greek"; MessagesFile: "compiler:Languages\Greek.isl"
 
 [Files]
 Source: "payload\nanocodex2.exe"; DestDir: "{app}"; Flags: ignoreversion replacesameversion
