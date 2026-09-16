@@ -20,8 +20,11 @@ reuse, decoded WAN frames, and request-ID-correlated account proxy spans.
 These are separate, nested measurements, not additive intervals or percentile
 estimates. Same-Mac WebRTC did not improve under heavy concurrent build load.
 See each report for exact deployment versions, trace IDs, timer limitations,
-validation, and unresolved intervals. No real Windows latency or physical
-phone first-frame result is claimed.
+validation, and unresolved intervals. [Installed Apple app verification](installed-apps.md)
+records the real Mac host/VM journey and signed iPhone build.
+[Nightly publication and updater checks](nightly-publication.md) record the
+released artifact hashes and installed CLI bundle. No real Windows
+latency or physical phone first-frame result is claimed.
 
 See the [native screen startup follow-up](screen-startup.md) for ICE prefetch,
 initial frame delivery and bitrate controls. The subsequent
