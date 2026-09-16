@@ -97,3 +97,19 @@ again.
 
 [Curated tool results, stage events, and artifact hashes](vm-overlay-measurements.json)
 retain both cohorts. Raw logs are under `output/vm-perf/` in the VM worktree.
+
+## Post-Worker comparison
+
+The same factory and guest binaries were measured after managed Worker
+`dd307c9e-d2aa-4752-af53-ea1559716905` deployed. Tools attachment took
+**1,232 / 1,203 ms**, including **979 / 983 ms** to connect the WebSocket.
+Full managed mounts took **3,979 / 3,096 ms**; these observations do not show a
+consistent end-to-end mount improvement. Approximately **1,893 ms** remained
+outside the factory attachment interval in the second sample. New spare
+preparation stayed below one second in the first post-deployment cohort.
+
+[Post-Worker tool results, client stage events, and exact artifact identities](vm-overlay-post-worker-measurements.json)
+include shared request IDs for the matching Worker traces. Both agents were
+deleted. The first VM also served three successful read-only screen viewer
+measurements before deletion. The [Hand call report](hand-call-latency.md)
+contains the matching server timings and remaining overhead ranking.
