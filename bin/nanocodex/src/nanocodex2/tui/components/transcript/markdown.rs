@@ -1806,9 +1806,10 @@ mod tests {
         let scratchpad = tempfile::tempdir().unwrap();
         let path = scratchpad.path().join("sample.png");
         write_png(&path);
+        let destination = path.to_string_lossy().replace('\\', "/");
 
         let layout = render_inline_image_in(
-            &format!("![sample]({})", path.display()),
+            &format!("![sample]({destination})"),
             80,
             workspace.path(),
         );
