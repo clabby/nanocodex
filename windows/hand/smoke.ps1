@@ -41,8 +41,17 @@ nodeRepl.write(JSON.stringify({target:cua.computer.target, window:window.id, scr
         throw "Windows computer-control smoke test failed"
     }
     $receipt = Get-Content -LiteralPath $receiptPath -Raw
-    if ($receipt -notlike '*"target":"windows"*' -or $receipt -notlike '*"typed":true*' -or $receipt -notlike '*"accessibility":true*') {
-        throw "Windows computer-control smoke receipt is incomplete: $receipt"
+    try {
+        $envelope = $receipt | ConvertFrom-Json
+        $write = $envelope.outputs |
+            Where-Object { $_.kind -eq "write" } |
+            Select-Object -Last 1
+        $proof = $write.value | ConvertFrom-Json
+    } catch {
+        throw "Windows computer-control smoke test returned an invalid receipt."
+    }
+    if ($proof.target -ne "windows" -or $proof.typed -ne $true -or $proof.accessibility -ne $true) {
+        throw "Windows computer-control smoke receipt is incomplete."
     }
     Write-Host "Windows Hand controlled and observed a real Notepad window through WGC and UIA."
 } finally {
