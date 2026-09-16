@@ -32,7 +32,7 @@ VersionInfoVersion={#NumericVersion}
 VersionInfoCompany={#AppPublisher}
 VersionInfoDescription=Nanocodex Windows Hand installer
 VersionInfoProductName={#AppName}
-VersionInfoProductVersion={#AppVersion}
+VersionInfoProductVersion={#NumericVersion}
 CloseApplications=yes
 RestartApplications=no
 
