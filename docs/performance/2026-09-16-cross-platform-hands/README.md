@@ -2,6 +2,9 @@
 
 ## Latest component measurements
 
+The subsequent [VM mount path investigation](vm-mount-path.md) removes a measured
+1.3–1.7-second empty agent-pool lookup; complete after mounts were 2.94/1.83/1.60 s.
+
 The [Hand call and attachment report](hand-call-latency.md) records the deployed
 SQL/read reduction, router reuse, and the remaining transport/durability waits.
 The [screen admission report](screen-admission.md) records short-lived authority
