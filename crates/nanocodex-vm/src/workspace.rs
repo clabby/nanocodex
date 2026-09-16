@@ -40,6 +40,7 @@ pub struct VmWorkspaceBuilder {
     vmm_executable: PathBuf,
     vmm_arguments: Vec<OsString>,
     guest_runtime_disk: Option<PathBuf>,
+    overlay_lower: Option<PathBuf>,
     firmware_directory: Option<PathBuf>,
     workspace: String,
     shell: String,
@@ -179,6 +180,7 @@ impl VmWorkspaceBuilder {
             vmm_executable: vmm_executable.into(),
             vmm_arguments: Vec::new(),
             guest_runtime_disk: None,
+            overlay_lower: None,
             firmware_directory: None,
             workspace: DEFAULT_WORKSPACE.to_owned(),
             shell: DEFAULT_SHELL.to_owned(),
@@ -232,6 +234,14 @@ impl VmWorkspaceBuilder {
     #[must_use]
     pub fn vmm_argument(mut self, argument: impl Into<OsString>) -> Self {
         self.vmm_arguments.push(argument.into());
+        self
+    }
+
+    /// Uses the private root as an OverlayFS upper over this immutable ext4 image.
+    /// The caller must retain the lower image unchanged for this workspace's lifetime.
+    #[must_use]
+    pub fn overlay_lower(mut self, lower: impl Into<PathBuf>) -> Self {
+        self.overlay_lower = Some(lower.into());
         self
     }
 
@@ -350,6 +360,9 @@ impl VmWorkspaceBuilder {
         }
 
         let ext4 = self.rootfs.is_file();
+        if !ext4 && self.overlay_lower.is_some() {
+            return Err(VmWorkspaceError::PrivateRootSource(self.rootfs));
+        }
         let resolver = if ext4 && matches!(self.egress.network(), Network::Internet) {
             Some(host_resolver_configuration()?)
         } else {
@@ -365,14 +378,32 @@ impl VmWorkspaceBuilder {
                     reason: "guest runtime disk is not a file",
                 });
             }
-            let config = VmConfig::ext4(&self.rootfs)
-                .cpus(self.cpus)
-                .memory_mib(self.memory_mib)
-                .block_device(BlockDevice::read_only(RUNTIME_BLOCK_ID, runtime));
-            let guest = GuestCommand::new("/bin/sh")
-                .arg("-c")
-                .arg(ext4_bootstrap(&self.workspace, resolver.as_deref()));
-            (config, guest)
+            if let Some(lower) = self.overlay_lower {
+                if !lower.is_file() {
+                    return Err(VmWorkspaceError::InvalidPath {
+                        path: lower,
+                        reason: "immutable overlay lower is not a file",
+                    });
+                }
+                (
+                    VmConfig::overlay_ext4(runtime, lower, &self.rootfs)
+                        .cpus(self.cpus)
+                        .memory_mib(self.memory_mib),
+                    crate::overlay::overlay_guest_command(
+                        &self.workspace,
+                        resolver.as_deref().unwrap_or_default(),
+                    ),
+                )
+            } else {
+                let config = VmConfig::ext4(&self.rootfs)
+                    .cpus(self.cpus)
+                    .memory_mib(self.memory_mib)
+                    .block_device(BlockDevice::read_only(RUNTIME_BLOCK_ID, runtime));
+                let guest = GuestCommand::new("/bin/sh")
+                    .arg("-c")
+                    .arg(ext4_bootstrap(&self.workspace, resolver.as_deref()));
+                (config, guest)
+            }
         } else if self.rootfs.is_dir() {
             let runtime = self.rootfs.join("usr/local/bin/nanocodex-vm-guest");
             if !runtime.is_file() {

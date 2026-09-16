@@ -52,6 +52,7 @@ pub(crate) struct VmHand {
     machine: AttachmentMachine,
     browser: Option<Browser>,
     _root_lock: Option<File>,
+    _lower_lock: Option<File>,
     desktop: Option<VmDesktop>,
 }
 
@@ -92,6 +93,17 @@ impl VmHand {
     pub(crate) async fn start_config(config: &VmHandConfig) -> Result<Self, ManagedError> {
         validate_common_config(config)?;
         let machine = attachment_machine(config)?;
+        let started = Instant::now();
+        let lower_lock = config
+            .overlay_lower
+            .as_ref()
+            .map(|path| {
+                let file = File::open(path).map_err(|error| configuration(error.to_string()))?;
+                fs2::FileExt::try_lock_shared(&file)
+                    .map_err(|error| configuration(error.to_string()))?;
+                Ok::<_, ManagedError>(file)
+            })
+            .transpose()?;
         let (workspace, root_lock) = if let Some(docker) = &config.docker {
             let mut builder = DockerWorkspace::builder(&docker.image, &docker.volume)
                 .guest_workspace(&config.vm_workspace)
@@ -142,6 +154,10 @@ impl VmHand {
             if ext4 {
                 let runtime = prepare_guest_runtime(config)?;
                 builder = builder.guest_runtime_disk(runtime.path().to_path_buf());
+                if let Some(lower) = &config.overlay_lower {
+                    builder = builder.overlay_lower(lower);
+                }
+                tracing::info!(target: "nanocodex2", stage = "vm.start.runtime", elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
             } else if config.vm_guest_runtime.is_some() {
                 return Err(configuration(
                     "--vm-guest-runtime is only used with raw ext4 roots; directory roots must contain /usr/local/bin/nanocodex-vm-guest",
@@ -160,6 +176,7 @@ impl VmHand {
             })?;
             (HandWorkspace::Vm(workspace), root_lock)
         };
+        tracing::info!(target: "nanocodex2", stage = "vm.start.guest_ready", elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
         let browser = if config.browser {
             let mut builder = Browser::builder();
             if let Some(executable) = &config.browser_executable {
@@ -205,6 +222,7 @@ impl VmHand {
             machine,
             browser,
             _root_lock: root_lock,
+            _lower_lock: lower_lock,
             desktop: None,
         })
     }
@@ -651,6 +669,7 @@ mod tests {
     fn docker_hand_skips_kvm_and_advertises_container_isolation() {
         let config = VmHandConfig {
             rootfs: PathBuf::new(),
+            overlay_lower: None,
             docker: Some(super::super::vm_hand_config::DockerHandConfig {
                 image: "image".into(),
                 volume: "workspace".into(),
