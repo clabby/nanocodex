@@ -1,4 +1,4 @@
-import { PreparedPersonalizationCache, personalizationText, type PersonalizationScope, type PersonalizationSnapshot } from "./personalization";
+import { PreparedPersonalizationCache, personalizedVoiceContext, type PersonalizationScope, type PersonalizationSnapshot } from "./personalization";
 import { prepareEnvironment } from "./environment-setup";
 import { SessionOperations } from "./session-operations";
 import { accountToolsEnabled, parseConfiguration, type AgentConfiguration } from "./agent-configuration";
@@ -5192,9 +5192,6 @@ export class DurableAgentSession extends DurableComputerSession {
             }
             const context = await agent.session.realtime.start();
             assertRealtimeContext(context);
-            this.#warmPersonalization();
-            const profile = this.#preparedPersonalization(authorization);
-            const voiceContext = profile ? { ...context, prepared_personalization: personalizationText(profile) } : context;
             this.ctx.storage.sql.exec(
               `INSERT INTO managed_realtime_session (
                  singleton, voice_session_id, authorization_json, updated_at
@@ -5208,7 +5205,7 @@ export class DurableAgentSession extends DurableComputerSession {
               Date.now(),
             );
             return {
-              context: voiceContext,
+              context,
               operation_id: parsed.operationId,
               voice_session_id: parsed.voiceSessionId,
             };
@@ -5253,6 +5250,13 @@ export class DurableAgentSession extends DurableComputerSession {
         voice_session_id: parsed.voiceSessionId,
         outcome: "success",
       });
+      // Replayable lifecycle receipts must not retain an expired or forgotten
+      // profile. Project only the currently eligible copy after every replay.
+      if (kind === "start" && "context" in result && isRecord(result.context)) {
+        this.#warmPersonalization();
+        return json({ ...result, context: personalizedVoiceContext(result.context,
+          this.#preparedPersonalization(authorization)) });
+      }
       return json(result, { status: kind === "delegate" ? 202 : 200 });
     } catch (error) {
       const failure = managedHttpError(error, `realtime_${kind}_failed`);

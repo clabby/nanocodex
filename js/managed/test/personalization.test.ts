@@ -4,7 +4,7 @@ import type { DurableAgentSession } from "../src/index";
 import { ManagedStartupContext } from "../src/startup-context";
 import type { MemoryScope } from "../src/memory-scope";
 import { storeMemoryContent } from "../src/durable-memory-storage";
-import { PreparedPersonalizationCache, PreparedPersonalizationStore, PERSONALIZATION_REFRESH_MS,
+import { PreparedPersonalizationCache, PreparedPersonalizationStore, PERSONALIZATION_REFRESH_MS, personalizedVoiceContext,
   type PersonalizationSnapshot } from "../src/personalization";
 
 const scope = { organization_id: "org", team_id: "team", user_id: "user" };
@@ -160,4 +160,13 @@ describe("MemoryScope to Session invalidation", () => {
         "SELECT profile_json FROM managed_prepared_personalization WHERE turn_id='pending'").one().profile_json).toBeNull();
     });
   });
+});
+
+
+it("reprojects voice replay context so a durable receipt cannot resurrect a forgotten profile", () => {
+  const receipt = { history: [], prepared_personalization: "forgotten canary" };
+  expect(personalizedVoiceContext(receipt)).toEqual({ history: [] });
+  const refreshed = personalizedVoiceContext(receipt, profile(2));
+  expect(refreshed.prepared_personalization).toContain("concise answers");
+  expect(refreshed.prepared_personalization).not.toContain("forgotten canary");
 });

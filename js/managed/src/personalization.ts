@@ -172,3 +172,10 @@ export function personalizationText(snapshot: PersonalizationSnapshot): string {
     + "Use memory read or find_session/read_session when this question needs more detail or verification.\n"
     + JSON.stringify({ version: snapshot.version, team_facts: snapshot.team_facts });
 }
+
+
+/** Also strips copies retained by older lifecycle receipts on replay. */
+export function personalizedVoiceContext(context: Record<string, unknown>, snapshot?: PersonalizationSnapshot): Record<string, unknown> {
+  const { prepared_personalization: _retained, ...current } = context;
+  return snapshot ? { ...current, prepared_personalization: personalizationText(snapshot) } : current;
+}
