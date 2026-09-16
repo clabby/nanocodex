@@ -48,6 +48,7 @@ fn platform_windows_lowering_prioritizes_elements_and_validates_boundaries() {
     let (_, args) = lower("click", &json!({"window":w,"x":-1.5,"y":2.5})).unwrap();
     assert_eq!(args["x"], -1.0);
     assert_eq!(args["y"], 3.0);
+    assert_eq!(args["click_count"], 1);
     assert!(
         lower(
             "get_window_state",
