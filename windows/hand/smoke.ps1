@@ -26,6 +26,9 @@ const window = windows.find(row => row.id === $($notepad.MainWindowHandle.ToInt6
 if (!window) throw new Error("Notepad window was not discovered through Win32");
 const before = await cua.computer.get_window_state({window, include_screenshot:true, include_text:true});
 if (!before.screenshots?.length) throw new Error("Windows Graphics Capture returned no screenshot");
+const editor = before.accessibility?.tree?.match(/^\s*(\d+) text (?:entry area|field)\b/m);
+if (!editor) throw new Error("UI Automation did not discover the Notepad editor");
+await cua.computer.click({window, element_index:Number(editor[1])});
 await cua.computer.type_text({window, text:"$marker"});
 const after = await cua.computer.get_window_state({window, include_screenshot:false, include_text:true});
 if (!after.accessibility?.tree?.includes("$marker")) throw new Error("UI Automation did not observe typed input");
