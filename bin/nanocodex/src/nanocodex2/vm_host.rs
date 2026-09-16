@@ -2094,9 +2094,6 @@ mod supported {
                     template_root.display()
                 ))
             })?;
-            #[cfg(target_os = "linux")]
-            let template_lock = cache_overlay_template(template_lock, &state.directory)?;
-            let locked_template_root = locked_file_path(&template_lock);
             let hand_template = vm_hand::VmHandConfig {
                 rootfs: config.vm_template.clone(),
                 overlay_lower: None,
@@ -2117,6 +2114,9 @@ mod supported {
             };
             vm_hand::VmHand::preflight_host_config(&hand_template)
                 .map_err(|error| VmHostError::Configuration(error.to_string()))?;
+            #[cfg(target_os = "linux")]
+            let template_lock = cache_overlay_template(template_lock, &state.directory)?;
+            let locked_template_root = locked_file_path(&template_lock);
             let factory = VmAllocationFactory {
                 // Clone through the descriptor which owns the shared lock.
                 // Replacing the configured pathname cannot redirect a later
