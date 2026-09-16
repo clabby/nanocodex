@@ -160,9 +160,9 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
     @MainActor
     func testPublishedVMFirstDecodedFrames() throws {
         let environment = ProcessInfo.processInfo.environment
-        guard let machine = environment["NANOCODEX_TEST_REMOTE_MACHINE_ID"], machine.hasPrefix("vm:"),
-              environment["NANOCODEX_TEST_REMOTE_SURFACE_ID"] == "desktop" else {
-            throw XCTSkip("Requires a saved account and an explicitly selected VM screen")
+        guard let machine = environment["NANOCODEX_TEST_REMOTE_MACHINE_ID"], !machine.isEmpty,
+              let surface = environment["NANOCODEX_TEST_REMOTE_SURFACE_ID"], !surface.isEmpty else {
+            throw XCTSkip("Requires a saved account and an explicitly selected published screen")
         }
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -170,7 +170,7 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         app.launch()
         let screens = app.buttons["conversation-remote-screens"]
         XCTAssertTrue(screens.waitForExistence(timeout: 20)); screens.tap()
-        let desktop = app.buttons["remote-screen:\(machine):desktop"]
+        let desktop = app.buttons["remote-screen:\(machine):\(surface)"]
         for sample in 1...3 {
             XCTAssertTrue(desktop.waitForExistence(timeout: 20)); desktop.tap()
             _ = try requireDecodedFrame(app, status: app.staticTexts["remote-status"], label: "sample-\(sample)")
@@ -186,8 +186,16 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 10))
         var conditions = [
             NSPredicate(format: "label == %@", "Watching"),
-            NSPredicate(format: "value CONTAINS %@", "\"width\":1600"),
-            NSPredicate(format: "value CONTAINS %@", "\"height\":900"),
+            NSPredicate { element, _ in
+                guard let value = (element as? XCUIElement)?.value as? String,
+                      let record = try? JSONSerialization.jsonObject(with: Data(value.utf8)) as? [String: Any],
+                      let frame = record["first_frame"] as? [String: Int],
+                      let width = frame["width"], let height = frame["height"], width > 0, height > 0 else { return false }
+                let env = ProcessInfo.processInfo.environment
+                if let expected = env["NANOCODEX_TEST_REMOTE_WIDTH"].flatMap(Int.init), width != expected { return false }
+                if let expected = env["NANOCODEX_TEST_REMOTE_HEIGHT"].flatMap(Int.init), height != expected { return false }
+                return true
+            },
         ]
         if let previous { conditions.append(NSPredicate(format: "NOT (value CONTAINS %@)", previous)) }
         let decoded = XCTNSPredicateExpectation(predicate: NSCompoundPredicate(andPredicateWithSubpredicates: conditions), object: status)
