@@ -135,6 +135,44 @@ keys are separate from `nanocodex auth` (ChatGPT provider credentials) and
 [CLI account sign-in guide](bin/nanocodex/nanocodex2/README.md#account-sign-in)
 for environment overrides, storage, and key revocation.
 
+To connect multiple ChatGPT subscriptions to the same Nanocodex account, import
+one Codex login at a time and approve each connection:
+
+```sh
+nanocodex connect chatgpt --auth-file /path/to/account-one/auth.json
+nanocodex connect chatgpt --auth-file /path/to/account-two/auth.json
+```
+
+Without `--auth-file`, the command uses the current Codex login. Each distinct
+ChatGPT account is retained (up to 20); reconnecting the same account does not
+create a duplicate. The most recently connected account is preferred. Hosted
+model requests automatically switch to another connected account when ChatGPT
+reports subscription exhaustion. Exhausted accounts become eligible again at
+the provider's reset time, or after one minute if no reset time is supplied.
+Ordinary request-rate limits do not switch accounts. Existing Nanocodex sessions
+reconnect with their full conversation history when switching before output
+begins; a failure after output begins is surfaced to avoid replaying partial
+work. Disconnecting ChatGPT removes all connected ChatGPT accounts.
+
+To test a specific connected account, pin a new session using its `account_id`
+from the connector status (`chatgpt.accounts`):
+
+```sh
+nanocodex2 new --chatgpt-account <account-id>
+nanocodex2 run --chatgpt-account <account-id> "Reply with hello"
+```
+
+The pin stays with the session across reconnects and resumes. Pinned sessions
+surface that account's subscription limit instead of switching accounts, and do
+not change the preferred account for other sessions. Unknown or disconnected
+account IDs fail without falling back to another account or provider. New
+sessions without a pin keep automatic failover.
+
+Managed API callers can set `configuration.chatgpt_account_id` when creating an
+agent (including `Agent.create` / `Agent.createAndPrompt` in JavaScript). Rust
+callers can use `ManagedClient::create_with_chatgpt_account(settings, account_id)`.
+
+
 ### Linux Hands and VM factories
 
 From a host already signed in to your Nanocodex account:
@@ -173,6 +211,22 @@ accepts matching locally built Linux `nanocodex2`, `nanocodex-vm-guest`, and
 `nanocodex-computer` executables for development. The CLI bundles the computer
 runtime source needed to build the VM image; no local checkout is required.
 Image reuse includes that source in its cache key.
+
+### Windows Hand
+
+Download `nanocodex-hand-setup-x86_64.exe` from the latest release and
+double-click it on an x86-64 Windows 10 or 11 computer. Keep **Sign in and
+connect this computer now** selected, then enter the account phone number and
+the six-digit SMS code. No terminal setup or administrator access is required.
+
+The installer bundles the account Hand and native Windows computer-control
+runtime. It verifies both before enrollment, uses a dedicated per-user account
+credential, and registers a hidden interactive startup task with failure
+recovery. Running in the signed-in session is deliberate: Windows Graphics
+Capture, UI Automation, and input cannot control that desktop from a Session 0
+service. Start-menu shortcuts stop, repair, inspect, or uninstall the Hand.
+See [`windows/hand`](windows/hand) for behavior, security boundaries, build
+instructions, and the real Notepad control smoke test.
 
 ## Rust: start here
 

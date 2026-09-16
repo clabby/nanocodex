@@ -343,12 +343,15 @@ pub fn lower(method: &str, params: &Value) -> Result<(String, Value)> {
                     }
                 }
                 "click" => {
-                    let count =
-                        finite(params.get("click_count").or(Some(&json!(1))), "click_count")?;
-                    if count.as_f64().unwrap() < 1.0 {
+                    let count = params
+                        .get("click_count")
+                        .map(|value| int(value, "click_count"))
+                        .transpose()?
+                        .unwrap_or(1);
+                    if count < 1 {
                         return Err(Error::invalid("click_count must be >= 1"));
                     }
-                    output["click_count"] = count;
+                    output["click_count"] = json!(count);
                     let button = params
                         .get("mouse_button")
                         .and_then(Value::as_str)

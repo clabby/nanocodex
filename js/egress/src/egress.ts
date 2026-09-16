@@ -1,3 +1,4 @@
+import { chatGptFailoverSocket, chatGptLimitReset } from "./chatgpt-failover";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import {
   AgentSubjectDirectory,
@@ -466,9 +467,13 @@ async function handleEgressWithOwner(
     userId = sessionModelAuthority?.owner ?? (operation.id === "realtime-call" && verifiedVoiceOwner?.subject === subject
       ? verifiedVoiceOwner.userId : await resolveSubject(env, subject));
     const subjectResolvedAt = Date.now();
-    const sponsoredDemo = EPHEMERAL_BROWSER_MODEL_SUBJECT.test(subject)
+    const accountId = request.headers.get("x-nanocodex-chatgpt-account-id") ?? undefined;
+    if (accountId !== undefined && !/^[\x21-\x7e]{1,256}$/.test(accountId)) {
+      return jsonError(400, "invalid_chatgpt_account");
+    }
+    const sponsoredDemo = !accountId && EPHEMERAL_BROWSER_MODEL_SUBJECT.test(subject)
       && operation.id === "responses";
-    let credential = await resolveCredential(env, userId, false, undefined, sponsoredDemo);
+    let credential = await resolveCredential(env, userId, false, undefined, sponsoredDemo, accountId);
     const credentialResolvedAt = Date.now();
     const credentialBrokerMs = credential.broker_ms;
     const credentialBrokerActivationMs = credential.broker_activation_ms;
@@ -504,6 +509,7 @@ async function handleEgressWithOwner(
           true,
           credential.revision,
           sponsoredDemo,
+          accountId,
         );
         if (operation.chatGptOnly && credential.kind !== "chatgpt") {
           return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started, {
@@ -520,6 +526,30 @@ async function handleEgressWithOwner(
           upstreamFetch,
           request.headers.get("x-nanocodex-voice-region"),
         );
+        recovered = true;
+      }
+      const attemptedAccounts = new Set<string>();
+      while (upstream.status === 429 && credential.kind === "chatgpt"
+        && credential.source === "user" && credential.accountId
+        && !attemptedAccounts.has(credential.accountId)) {
+        attemptedAccounts.add(credential.accountId);
+        let resetAt: number | undefined;
+        try {
+          resetAt = chatGptLimitReset(JSON.parse(await readBoundedText(upstream, 64 * 1024)),
+            upstream.headers.get("retry-after"));
+        } catch { /* An unrecognized rejection must not switch accounts. */ }
+        if (!resetAt) break;
+        if (!await reportChatGptLimit(env, userId, credential, resetAt, !accountId)) {
+          return auditedError(429, accountId ? "chatgpt_account_exhausted" : "chatgpt_accounts_exhausted", request, url, operation.id, started, {
+            user_id: userId, deployment_sha: env.DEPLOYMENT_SHA,
+          });
+        }
+        credential = await resolveCredential(env, userId, false);
+        if (credential.kind !== "chatgpt" || !credential.accountId
+          || attemptedAccounts.has(credential.accountId)) break;
+        upstream = await fetchUpstream(env, userId, credential, operation,
+          buildUpstreamRequest(request, env, operation, credential, body), upstreamFetch,
+          request.headers.get("x-nanocodex-voice-region"));
         recovered = true;
       }
       if (REDIRECT_STATUS.has(upstream.status)) {
@@ -578,6 +608,12 @@ async function handleEgressWithOwner(
         );
         sponsoredConnectionId = undefined;
         return response;
+      }
+      if (credential.kind === "chatgpt" && credential.source === "user"
+        && operation.id === "responses" && upstream.status === 101) {
+        const socketCredential = credential;
+        return chatGptFailoverSocket(upstream, sanitizedUpstreamHeaders(upstream.headers),
+          (resetAt) => reportChatGptLimit(env, userId!, socketCredential, resetAt, !accountId), ctx);
       }
       return sanitizeUpstreamResponse(upstream);
     } finally {
@@ -2489,20 +2525,38 @@ async function subjectUser(response: Response): Promise<string> {
   return userId!;
 }
 
+async function reportChatGptLimit(
+  env: EgressEnv,
+  userId: string,
+  credential: UserCredentialSnapshot,
+  resetAt: number,
+  select = true,
+): Promise<boolean> {
+  const response = await userBroker(env, userId).fetch("https://credentials.internal/v1/chatgpt/limit", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ account_id: credential.accountId, revision: credential.revision, reset_at: resetAt, select }),
+  });
+  if (!response.ok) { await cancelResponseBody(response); return false; }
+  const value = await response.json<{ available?: boolean }>();
+  return value.available === true;
+}
+
 async function resolveCredential(
   env: EgressEnv,
   userId: string,
   recover: boolean,
   revision?: number,
   allowSponsored = false,
+  accountId?: string,
 ): Promise<ResolvedModelCredential> {
   try {
-    const credential = await resolveUserCredential(env, userId, recover, revision);
+    const credential = await resolveUserCredential(env, userId, recover, revision, accountId);
     if (!isLegacyLocalBootstrapCredential(env, userId, credential)) {
       return { ...credential, source: "user" };
     }
   } catch (error) {
-    if (!(error instanceof EgressFailure) || error.status !== 409) throw error;
+    if (accountId || !(error instanceof EgressFailure) || error.status !== 409) throw error;
   }
   if (!allowSponsored) throw new EgressFailure(409, "user_credential_unavailable");
   return { ...await resolveSponsoredChatGptCredential(env, recover, revision), source: "sponsored" };
@@ -2574,10 +2628,12 @@ async function resolveUserCredential(
   userId: string,
   recover: boolean,
   revision?: number,
+  accountId?: string,
 ): Promise<UserCredentialSnapshot & Pick<ResolvedModelCredential, "broker_ms" | "broker_activation_ms" | "broker_age_ms" | "broker_resolve_id">> {
-  const result = await userBroker(env, userId).resolveModelCredential(recover, revision);
+  const result = await userBroker(env, userId).resolveModelCredential(recover, revision, accountId);
   if (result.status < 200 || result.status >= 300) {
-    throw new EgressFailure(result.status === 404 ? 409 : 503, "user_credential_unavailable");
+    if (result.status === 429) throw new EgressFailure(429, accountId ? "chatgpt_account_exhausted" : "chatgpt_accounts_exhausted");
+    throw new EgressFailure(result.status === 404 ? 409 : 503, accountId ? "chatgpt_account_unavailable" : "user_credential_unavailable");
   }
   const value = result.credential;
   if (!value || (value.kind !== "openai" && value.kind !== "chatgpt") || !value.secret

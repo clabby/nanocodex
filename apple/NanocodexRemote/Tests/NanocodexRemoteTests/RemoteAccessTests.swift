@@ -19,6 +19,49 @@ private final class RejectedScreenSnapshot: URLProtocol {
 }
 
 final class RemoteAccessTests: XCTestCase {
+    /// A selected remote host supplies actual WAN video; no control is acquired.
+    @MainActor func testLivePublishedScreenLatency() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["NANOCODEX_TEST_REMOTE_ACCESS"] == "1", let machine = env["NANOCODEX_TEST_REMOTE_MACHINE_ID"],
+              let address = env["NANOCODEX_MANAGED_URL"], let origin = URL(string: address), origin.scheme == "https",
+              let key = env["NANOCODEX_API_KEY"], let output = env["NANOCODEX_TEST_REMOTE_LATENCY_OUTPUT"],
+              env["NANOCODEX_REMOTE_DIAGNOSTICS"] == "1" else {
+            throw XCTSkip("Requires an explicitly selected live screen latency fixture")
+        }
+        let service = try RemoteService(origin: origin) { $0.setValue("Bearer " + key, forHTTPHeaderField: "Authorization") }
+        let viewer = RemoteViewer()
+        defer { viewer.close(); service.close() }
+        let began = ProcessInfo.processInfo.systemUptime
+        let hands = try await service.list()
+        let hand = try XCTUnwrap(hands.first { $0.machineID == machine })
+        let catalogMs = (ProcessInfo.processInfo.systemUptime - began) * 1000
+        print("REMOTE_WAN_TRANSPORT \(hand.transport?.rawValue ?? "webrtc") \(hand.width)x\(hand.height)")
+        var samples: [[String: Any]] = []
+        for _ in 0..<3 {
+            await viewer.connect(service: service, hand: hand)
+            let deadline = ContinuousClock.now + .seconds(30)
+            var sample: [String: Any]?
+            while ContinuousClock.now < deadline {
+                if let data = viewer.diagnosticPresentation.data(using: .utf8),
+                   let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let frame = value["first_frame"] as? [String: Int],
+                   frame["width", default: 0] > 0, frame["height", default: 0] > 0 {
+                    sample = value; break
+                }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            XCTAssertFalse(viewer.controlling)
+            if sample == nil {
+                print("REMOTE_WAN_FAILURE " + viewer.diagnosticPresentation)
+                print("REMOTE_WAN_ICE " + (await viewer.diagnosticICE(includeAddresses: false)))
+            }
+            samples.append(try XCTUnwrap(sample, "The selected remote host must deliver a decoded frame"))
+            viewer.close()
+        }
+        try JSONSerialization.data(withJSONObject: ["catalog_ms": catalogMs, "samples": samples], options: [.prettyPrinted, .sortedKeys])
+            .write(to: URL(fileURLWithPath: output), options: .atomic)
+    }
+
     // Inject only an invalid cached snapshot; the actual viewer socket connects
     // to the selected live account and must recover before screen admission.
     // This checks URLSession's real HTTP rejection metadata and sends no input.

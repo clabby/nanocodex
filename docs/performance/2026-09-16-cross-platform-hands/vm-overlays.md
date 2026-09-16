@@ -51,13 +51,22 @@ Earlier complete spare preparation took **10,288–10,902 ms**. The new range is
 roughly a tenfold improvement after the base is cached. It is not a claim that a
 new image's first uncached startup takes one second.
 
-Warm managed mounts still took **2,955 / 3,254 ms**. In the first cohort, its tools catalog preparation was
-0.133 ms, WebSocket connection 1,681.9 ms, and catalog acknowledgement 194.5 ms.
+Warm managed mounts still took **2,955 / 3,254 ms**. In the first cohort,
+tools catalog preparation was 0.133 ms, WebSocket connection 1,681.9 ms, and catalog acknowledgement 194.5 ms.
 The full attachment completed at 1,877.7 ms; desktop publication completed at
 1,022.3 ms in parallel. Disk preparation does not explain or eliminate this
-network/managed overhead. VM shell execution took 217 / 228 ms managed. The first cohort spent 4.115 ms inside the guest.
+network/managed overhead. VM shell execution took 217 / 228 ms managed; the
+first cohort spent 4.115 ms inside the guest.
 The second attachment took 1,528.2 ms (WebSocket 1,304.6 ms, acknowledgement
 222.3 ms); this small uncontrolled difference is not credited to the disk change.
+
+A third baseline split the client connection further: TLS trust lookup took
+0.026 ms, DNS completed at 0.505 ms, and TCP connected at 21.716 ms from connection
+start. The WebSocket upgrade finished at 1,367.657 ms, followed by 239.814 ms
+waiting for catalog acknowledgement. Thus about 1,346 ms remained after TCP;
+DNS, TCP, and certificate-store loading were not the dominant waits. This span
+still combines TLS and the HTTP upgrade/backend path. Fourteen attachment
+protocol tests passed with that transport instrumentation.
 
 ## Verification and applicability
 
@@ -88,3 +97,19 @@ again.
 
 [Curated tool results, stage events, and artifact hashes](vm-overlay-measurements.json)
 retain both cohorts. Raw logs are under `output/vm-perf/` in the VM worktree.
+
+## Post-Worker comparison
+
+The same factory and guest binaries were measured after managed Worker
+`dd307c9e-d2aa-4752-af53-ea1559716905` deployed. Tools attachment took
+**1,232 / 1,203 ms**, including **979 / 983 ms** to connect the WebSocket.
+Full managed mounts took **3,979 / 3,096 ms**; these observations do not show a
+consistent end-to-end mount improvement. Approximately **1,893 ms** remained
+outside the factory attachment interval in the second sample. New spare
+preparation stayed below one second in the first post-deployment cohort.
+
+[Post-Worker tool results, client stage events, and exact artifact identities](vm-overlay-post-worker-measurements.json)
+include shared request IDs for the matching Worker traces. Both agents were
+deleted. The first VM also served three successful read-only screen viewer
+measurements before deletion. The [Hand call report](hand-call-latency.md)
+contains the matching server timings and remaining overhead ranking.

@@ -1972,5 +1972,470 @@
     "Managed warm mount spans include network and backend work that local disk optimization does not remove",
     "Initial base cache miss measured separately, still costs a full copy",
     "No Windows hardware timing; macOS retains APFS clone path"
-  ]
+  ],
+  "handshake_cohort": {
+    "create_tools": [
+      {
+        "protocol_version": 1,
+        "request_id": "01a0ac35-57b1-7087-b17c-95807237187c",
+        "seq": 25,
+        "type": "tool.result",
+        "payload": {
+          "call_id": "call_Wgs4Lyt29ypWNlUo9A67JrlO/code-1",
+          "tool": "mount",
+          "status": "completed",
+          "duration_ns": 3039000000,
+          "started_after_ns": 0,
+          "result": "{\"id\":\"01a0ac35-7282-7416-98b1-de74cf4f3b02\",\"name\":\"overlay-perf-probe\",\"provider\":\"linux-paradigm\",\"mount\":\"/mnt-overlay-perf-probe-cf4f3b02\",\"status\":\"mounted\",\"created\":true}",
+          "structured_result": {
+            "created": true,
+            "id": "01a0ac35-7282-7416-98b1-de74cf4f3b02",
+            "mount": "/mnt-overlay-perf-probe-cf4f3b02",
+            "name": "overlay-perf-probe",
+            "provider": "linux-paradigm",
+            "status": "mounted"
+          }
+        }
+      },
+      {
+        "protocol_version": 1,
+        "request_id": "01a0ac35-57b1-7087-b17c-95807237187c",
+        "seq": 26,
+        "type": "tool.result",
+        "payload": {
+          "call_id": "call_Wgs4Lyt29ypWNlUo9A67JrlO",
+          "tool": "exec",
+          "status": "completed",
+          "duration_ns": 3039000000,
+          "result": [
+            {
+              "type": "input_text",
+              "text": "Script completed\nWall time 3.0 seconds\nOutput:\n"
+            },
+            {
+              "type": "input_text",
+              "text": "{\"id\":\"01a0ac35-7282-7416-98b1-de74cf4f3b02\",\"name\":\"overlay-perf-probe\",\"provider\":\"linux-paradigm\",\"mount\":\"/mnt-overlay-perf-probe-cf4f3b02\",\"status\":\"mounted\",\"created\":true}"
+            }
+          ],
+          "structured_result": [
+            {
+              "text": "Script completed\nWall time 3.0 seconds\nOutput:\n",
+              "type": "input_text"
+            },
+            {
+              "text": "{\"id\":\"01a0ac35-7282-7416-98b1-de74cf4f3b02\",\"name\":\"overlay-perf-probe\",\"provider\":\"linux-paradigm\",\"mount\":\"/mnt-overlay-perf-probe-cf4f3b02\",\"status\":\"mounted\",\"created\":true}",
+              "type": "input_text"
+            }
+          ]
+        }
+      },
+      {
+        "protocol_version": 1,
+        "request_id": "01a0ac35-57b1-7087-b17c-95807237187c",
+        "seq": 31,
+        "type": "tool.result",
+        "payload": {
+          "call_id": "call_wFtbLtGWxgwz8tyxYvopSPRB/code-2",
+          "tool": "exec_command",
+          "status": "completed",
+          "duration_ns": 278000000,
+          "started_after_ns": 0,
+          "result": "Chunk ID: f21ffd\nWall time: 0.0036 seconds\nProcess exited with code 0\nOriginal token count: 8\nOutput:\nLinux\noverlay_persistence_probe",
+          "structured_result": {
+            "chunk_id": "f21ffd",
+            "exit_code": 0,
+            "original_token_count": 8,
+            "output": "Linux\noverlay_persistence_probe",
+            "wall_time_seconds": 0.00356745
+          },
+          "metadata": {
+            "machine_id": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+            "machine_name": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+            "tool_name": "exec_command"
+          }
+        }
+      },
+      {
+        "protocol_version": 1,
+        "request_id": "01a0ac35-57b1-7087-b17c-95807237187c",
+        "seq": 32,
+        "type": "tool.result",
+        "payload": {
+          "call_id": "call_wFtbLtGWxgwz8tyxYvopSPRB",
+          "tool": "exec",
+          "status": "completed",
+          "duration_ns": 278000000,
+          "result": [
+            {
+              "type": "input_text",
+              "text": "Script completed\nWall time 0.3 seconds\nOutput:\n"
+            },
+            {
+              "type": "input_text",
+              "text": "{\"chunk_id\":\"f21ffd\",\"exit_code\":0,\"original_token_count\":8,\"output\":\"Linux\\noverlay_persistence_probe\",\"wall_time_seconds\":0.00356745}"
+            }
+          ],
+          "structured_result": [
+            {
+              "text": "Script completed\nWall time 0.3 seconds\nOutput:\n",
+              "type": "input_text"
+            },
+            {
+              "text": "{\"chunk_id\":\"f21ffd\",\"exit_code\":0,\"original_token_count\":8,\"output\":\"Linux\\noverlay_persistence_probe\",\"wall_time_seconds\":0.00356745}",
+              "type": "input_text"
+            }
+          ]
+        }
+      }
+    ],
+    "events": [
+      {
+        "timestamp": "2026-09-16T21:53:00.318433Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.provision.start",
+          "allocation_id": "6657b879-1515-4d96-aa21-d525ee7b88fe"
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.318993Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.provision.spare_claimed",
+          "allocation_id": "6657b879-1515-4d96-aa21-d525ee7b88fe",
+          "elapsed_ms": 0.565821
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.319034Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.provision.guest",
+          "allocation_id": "6657b879-1515-4d96-aa21-d525ee7b88fe",
+          "warm": true,
+          "elapsed_ms": 0.6069479999999999
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.319358Z",
+        "level": "INFO",
+        "fields": {
+          "message": "attachment catalog prepared",
+          "stage": "attachment.catalog_prepared",
+          "duration_ms": 0.12998400000000002
+        },
+        "target": "nanocodex_tools::attachment"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.319372Z",
+        "level": "INFO",
+        "fields": {
+          "message": "connecting attachment",
+          "stage": "attachment.connecting"
+        },
+        "target": "nanocodex_tools::attachment"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.319423Z",
+        "level": "INFO",
+        "fields": {
+          "message": "attachment TLS trust ready",
+          "stage": "attachment.socket.trust",
+          "elapsed_ms": 0.026029
+        },
+        "target": "nanocodex_tools::attachment"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.319902Z",
+        "level": "INFO",
+        "fields": {
+          "message": "attachment address resolved",
+          "stage": "attachment.socket.resolved",
+          "elapsed_ms": 0.505067
+        },
+        "target": "nanocodex_tools::attachment"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.341113Z",
+        "level": "INFO",
+        "fields": {
+          "message": "attachment TCP connected",
+          "stage": "attachment.socket.tcp",
+          "elapsed_ms": 21.716141
+        },
+        "target": "nanocodex_tools::attachment"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.376714Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "screen.capture.initial",
+          "machine_id": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+          "elapsed_ms": 57.654216
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.377133Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "screen.socket.resolved",
+          "machine_id": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+          "elapsed_ms": 0.392986
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.397657Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "screen.socket.tcp",
+          "machine_id": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+          "elapsed_ms": 20.917202
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:00.397665Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "screen.socket.trust",
+          "machine_id": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+          "elapsed_ms": 20.925638
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.179126Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "screen.socket.connected",
+          "machine_id": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+          "elapsed_ms": 802.386528
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.184509Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "screen.socket.ready",
+          "machine_id": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+          "elapsed_ms": 807.769427
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.303506Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "screen.published",
+          "machine_id": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+          "elapsed_ms": 926.76609
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.303539Z",
+        "level": "INFO",
+        "fields": {
+          "message": "Rust VM screen is published",
+          "stage": "vm.screen.ready"
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.303546Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.provision.desktop",
+          "allocation_id": "6657b879-1515-4d96-aa21-d525ee7b88fe",
+          "elapsed_ms": 985.118916,
+          "success": true
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.687055Z",
+        "level": "INFO",
+        "fields": {
+          "message": "attachment WebSocket connected",
+          "stage": "attachment.websocket_connected",
+          "duration_ms": 1367.6572170000002,
+          "request_id": ""
+        },
+        "target": "nanocodex_tools::attachment"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.926951Z",
+        "level": "INFO",
+        "fields": {
+          "message": "attachment catalog acknowledged",
+          "stage": "attachment.catalog_ready",
+          "send_ms": 0.06509200000000001,
+          "acknowledge_ms": 239.81414900000001
+        },
+        "target": "nanocodex_tools::attachment"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.926960Z",
+        "level": "INFO",
+        "fields": {
+          "message": "attachment accepted",
+          "stage": "attachment.attached"
+        },
+        "target": "nanocodex_tools::attachment"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.926964Z",
+        "level": "INFO",
+        "fields": {
+          "message": "attachment catalog published",
+          "stage": "attachment.catalog_published",
+          "tool.count": 4
+        },
+        "target": "nanocodex_tools::attachment"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.926974Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.provision.attached",
+          "allocation_id": "6657b879-1515-4d96-aa21-d525ee7b88fe",
+          "elapsed_ms": 1608.547322,
+          "success": true
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.935494Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.spare.root",
+          "elapsed_ms": 8.050338
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:01.936107Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.start.runtime",
+          "elapsed_ms": 0.106309
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:02.182834Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.start.guest_ready",
+          "elapsed_ms": 246.83306299999998
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:02.182882Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.spare.guest",
+          "elapsed_ms": 255.438061
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:02.186004Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.desktop.inspected",
+          "machine_id": "unprovisioned",
+          "elapsed_ms": 3.1167320000000003
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:02.186623Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.desktop.runtime",
+          "machine_id": "unprovisioned",
+          "elapsed_ms": 3.737024
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:02.795424Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.desktop.stages",
+          "machine_id": "unprovisioned",
+          "startup_ms": "{\"capture\":598.470805,\"openbox\":505.84685799999994,\"x_server\":110.58098399999999,\"xterm\":572.0225839999999}"
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:02.795438Z",
+        "level": "INFO",
+        "fields": {
+          "stage": "vm.desktop.local_ready",
+          "machine_id": "unprovisioned",
+          "elapsed_ms": 612.5514909999999
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:02.795441Z",
+        "level": "INFO",
+        "fields": {
+          "message": "Fresh VM spare ready without account or allocation credentials",
+          "stage": "vm.spare.ready",
+          "elapsed_ms": 867.997296
+        },
+        "target": "nanocodex2"
+      },
+      {
+        "timestamp": "2026-09-16T21:53:05.297133Z",
+        "level": "INFO",
+        "fields": {
+          "message": "attachment call started",
+          "stage": "attachment.call.started"
+        },
+        "target": "nanocodex_tools::attachment",
+        "spans": [
+          {
+            "attachment.id": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+            "otel.kind": "server",
+            "tool.call_id": "ad163b2b-ad4a-49ff-8d98-4b3aadd44c1b",
+            "tool.name": "exec_command",
+            "name": "attachment.call"
+          }
+        ]
+      },
+      {
+        "timestamp": "2026-09-16T21:53:05.301389Z",
+        "level": "INFO",
+        "fields": {
+          "message": "attachment call completed",
+          "stage": "attachment.call.completed"
+        },
+        "target": "nanocodex_tools::attachment",
+        "spans": [
+          {
+            "attachment.id": "vm:01a0ac35-7282-7416-98b1-de74cf4f3b02",
+            "duration_ns": 4233585,
+            "otel.kind": "server",
+            "otel.status_code": "OK",
+            "status": "completed",
+            "tool.call_id": "ad163b2b-ad4a-49ff-8d98-4b3aadd44c1b",
+            "tool.name": "exec_command",
+            "name": "attachment.call"
+          }
+        ]
+      }
+    ],
+    "worker_version_note": "before redundant discovery optimization; transport tracing only"
+  }
 }

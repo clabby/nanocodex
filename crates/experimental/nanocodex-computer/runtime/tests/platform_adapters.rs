@@ -5,6 +5,20 @@ use std::{
     time::{Duration, Instant},
 };
 fn python() -> String {
+    if let Ok(path) = std::env::var("PYTHON")
+        && !path.trim().is_empty()
+    {
+        return path;
+    }
+    #[cfg(windows)]
+    for directory in
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+    {
+        let candidate = directory.join("python.exe");
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
     for p in ["/usr/bin/python3", "/opt/homebrew/bin/python3"] {
         if std::path::Path::new(p).exists() {
             return p.into();
@@ -34,6 +48,7 @@ fn platform_windows_lowering_prioritizes_elements_and_validates_boundaries() {
     let (_, args) = lower("click", &json!({"window":w,"x":-1.5,"y":2.5})).unwrap();
     assert_eq!(args["x"], -1.0);
     assert_eq!(args["y"], 3.0);
+    assert_eq!(args["click_count"], 1);
     assert!(
         lower(
             "get_window_state",
