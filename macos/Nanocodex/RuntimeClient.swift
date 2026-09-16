@@ -137,7 +137,7 @@ final class RuntimeClient {
         }
         let child = Process()
         child.executableURL = node; child.arguments = [host.path]
-        var env = ProcessInfo.processInfo.environment.filter { ["HOME", "PATH", "TMPDIR", "LANG", "USER", "NC_API_KEY", "NANOCODEX_API_KEY", "NANOCODEX_MANAGED_URL", "NANOCODEX_HAND_BINARY", "NANOCODEX_VM_ROOTFS", "NANOCODEX_VM_GUEST_RUNTIME", "NANOCODEX_KRUNFW_DIR"].contains($0.key) }
+        var env = ProcessInfo.processInfo.environment.filter { ["HOME", "PATH", "TMPDIR", "LANG", "USER", "NC_API_KEY", "NANOCODEX_API_KEY", "NANOCODEX_MANAGED_URL", "NANOCODEX_HAND_BINARY", "NANOCODEX_VM_ROOTFS", "NANOCODEX_VM_DESKTOP_ROOTFS", "NANOCODEX_VM_FACTORY_NAME", "NANOCODEX_VM_GUEST_RUNTIME", "NANOCODEX_KRUNFW_DIR"].contains($0.key) }
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Nanocodex/Native")
         env["NANOCODEX_DESKTOP_DATA"] = dataDirectory ?? ProcessInfo.processInfo.environment["NANOCODEX_DESKTOP_DATA"] ?? support.path
         #if DEBUG

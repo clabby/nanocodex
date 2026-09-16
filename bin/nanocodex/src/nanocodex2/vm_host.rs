@@ -2152,6 +2152,7 @@ mod supported {
                 Err(error) => {
                     tracing::warn!(
                         target: "nanocodex2",
+                        stage = "vm.host.reconnecting",
                         error = %error,
                         "VM host control connection failed; retrying"
                     );
@@ -2168,6 +2169,7 @@ mod supported {
                 ConnectionOutcome::Reconnect { made_progress } => {
                     tracing::warn!(
                         target: "nanocodex2",
+                        stage = "vm.host.reconnecting",
                         "VM host control connection closed; reconciling on reconnect"
                     );
                     let healthy =
@@ -2204,6 +2206,7 @@ mod supported {
         }
 
         super::super::service::ready();
+        tracing::info!(target: "nanocodex2", stage = "vm.host.ready", "VM host registration reconciled");
         let first_heartbeat = tokio::time::Instant::now() + Duration::from_secs(20);
         let mut heartbeat = tokio::time::interval_at(first_heartbeat, Duration::from_secs(20));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

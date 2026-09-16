@@ -80,8 +80,8 @@ Optional VM defaults are `NANOCODEX_HAND_BINARY`, `NANOCODEX_VM_ROOTFS`, and
 and guest ELF beside `NANOCODEX_ENV_FILE`. Cloud provisioning remains an ordinary
 managed agent tool call through the canonical service.
 
-A configured account-wide local Hand exposes `list_vms`, `start_vm`, and
-`stop_vm` to the account's agents, including conversations started on a phone.
+A configured account-wide local Hand exposes `list_vms`, `start_vm`, `restart_vm`,
+`stop_vm`, and `stop_all_vms` to the account's agents, including conversations started on a phone.
 For example, ask: **On my Mac Hand, start a VM named phone-demo, then run uname
 inside that VM.** The caller supplies a stable name; the host owns the executable,
 image, firmware, and credentials. `start_vm` returns the connected machine ID.
@@ -90,6 +90,20 @@ stopping the parent Hand or quitting the app stops its VMs while preserving thei
 files. A failed launch returns its error, with a 90-second readiness deadline.
 These VM Hands expose shell/files/processes; a graphical desktop requires a
 desktop-enabled image and publisher.
+
+`restart_vm` restarts an existing named VM and preserves its private disk.
+`stop_all_vms` stops only the VMs owned by that local Hand. Lifecycle calls are
+serialized so a stop cannot race a VM launch. Saved VMs remain manageable when
+the default recipe is removed; creating another VM still requires a recipe.
+
+An optional `NANOCODEX_VM_DESKTOP_ROOTFS` (or `desktopRootfs` in `vm.json`)
+enables a managed VM factory alongside the local Hand. It requires an explicit
+desktop image, `binary`, and `guestRuntime`; the shell-only `rootfs` is not used
+as a desktop image. `NANOCODEX_VM_FACTORY_NAME` or `factoryName` can set its stable
+provider name. Agents use that provider with the managed `mount` tool. Factory
+state is account-scoped. Registration and reconnects run in the background;
+the local shell remains available while the factory connects. Stopping the
+parent Hand or signing out also stops the factory and its guest processes.
 
 Installed apps can retain a prepared recipe in `vm.json` under
 `NANOCODEX_DESKTOP_DATA` (the Mac app uses

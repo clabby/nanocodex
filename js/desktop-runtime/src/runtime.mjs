@@ -14,6 +14,7 @@ import { createComputerTools, discoverComputer } from "nanocodex-computer";
 import WebSocket from "ws";
 import { mergeAccountHands, restoredAccountHands } from "./account-hands.mjs";
 import { createVmTools, supportsLocalVms } from "./vm-tools.mjs";
+import { desktopFactoryRecipe, superviseVmFactory } from "./vm-factory.mjs";
 
 export const DEFAULT_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 export const DEFAULT_SETTINGS = Object.freeze({ model: "gpt-5.6-sol", thinking: "high", reasoning_mode: "standard", fast_mode: false });
@@ -261,7 +262,7 @@ export class DesktopRuntime extends EventEmitter {
     this.#accountTransition = operation;
     return operation;
   }
-  async #save() { await this.#persist({ defaultHandEnabled: this.#state.defaultHandEnabled, accountHands: restoredAccountHands(this.#state.accountHands), layout: this.#state.layout, hands: this.#state.hands.map(({ status, calls, activeCalls, error, logs, ...config }) => config) }); }
+  async #save() { await this.#persist({ defaultHandEnabled: this.#state.defaultHandEnabled, accountHands: restoredAccountHands(this.#state.accountHands), layout: this.#state.layout, hands: this.#state.hands.map(({ status, calls, activeCalls, error, logs, factory, ...config }) => config) }); }
 
   async saveLayout(value) {
     // A UI may deliver a debounced message after the account has changed. The
@@ -786,6 +787,35 @@ export class DesktopRuntime extends EventEmitter {
       hand.status = "error"; hand.error = this.#safeError(error); this.#emit();
       void resource.close().finally(() => { if (this.#resources.get(hand.id) === resource) this.#resources.delete(hand.id); });
     });
+    // Shell/filesystem readiness does not depend on the optional VM factory.
+    void this.#startFactory(hand, resource);
+  }
+  async #startFactory(host, resource) {
+    if (host.agentId || !supportsLocalVms()) return;
+    try {
+      const scope = createHash("sha256").update(`${this.#options.baseUrl}\0${this.#options.apiKey}`).digest("hex");
+      const recipe = desktopFactoryRecipe(this.#state.defaults, host, join(this.#dataDirectory, "accounts", scope));
+      if (!recipe) return;
+      for (const field of ["binary", "desktopRootfs", "guestRuntime"]) await stat(this.#state.defaults[field]);
+      const binary = await this.#prepareVmHelper(recipe.binary);
+      resource.abort.signal.throwIfAborted();
+      const env = Object.fromEntries(["PATH", "HOME", "TMPDIR", "LANG", "NANOCODEX_KRUNFW_DIR"].filter(key => process.env[key]).map(key => [key, process.env[key]]));
+      Object.assign(env, { NANOCODEX_API_KEY: this.#options.apiKey, NANOCODEX_MANAGED_URL: this.#options.baseUrl });
+      const factory = superviseVmFactory({ binary, args: recipe.args, env, signal: resource.abort.signal,
+        sanitize: error => this.#safeError(error), onState: state => {
+          host.factory = { name: recipe.factoryName, ...state };
+          if (state.error) host.error = `Desktop factory: ${state.error}`;
+          else if (host.error?.startsWith("Desktop factory: ")) delete host.error;
+          this.#log(host, `Desktop factory ${recipe.factoryName}: ${state.status}${state.error ? ` · ${state.error}` : ""}`);
+        } });
+      resource.add(() => factory.close());
+      await factory.ready;
+    } catch (error) {
+      if (resource.abort.signal.aborted) return;
+      host.factory = { status: "error", error: this.#safeError(error) };
+      host.error = `Desktop factory: ${host.factory.error}`;
+      this.#log(host, host.error);
+    }
   }
   #nativeScreenDirectory(hand) {
     const scope = createHash("sha256").update(`${this.#options.baseUrl}\0${this.#options.apiKey}`).digest("hex");
@@ -833,7 +863,9 @@ export class DesktopRuntime extends EventEmitter {
 
   #localVmTools(host, resource) {
     const recipe = this.#state.defaults;
-    if (host.agentId || !supportsLocalVms() || !["binary", "rootfs", "guestRuntime"].every(key => recipe[key])) return [];
+    if (host.agentId || !supportsLocalVms()) return [];
+    const canCreate = ["binary", "rootfs", "guestRuntime"].every(key => recipe[key]);
+    if (!canCreate && !this.#state.hands.some(hand => hand.kind === "vm" && hand.vmHost === host.id)) return [];
     const generation = this.#generation;
     const check = () => { this.#sameAccount(generation); resource.abort.signal.throwIfAborted(); };
     const owned = () => this.#state.hands.filter(hand => hand.kind === "vm" && hand.vmHost === host.id);
@@ -841,13 +873,18 @@ export class DesktopRuntime extends EventEmitter {
     resource.add(() => Promise.all(owned().map(hand => this.#stopHand(hand.id))));
     return createVmTools({ hostName: host.name,
       list: () => { check(); return { vms: owned().map(summary) }; },
-      start: (name, signal) => {
+      start: (name, signal, restart = false) => {
         const operation = this.#vmLaunchQueue.catch(() => {}).then(async () => {
           check(); signal?.throwIfAborted();
           let hand = owned().find(hand => hand.vmName === name);
+          if (restart) {
+            if (!hand) throw new Error("No VM with that name belongs to this Hand.");
+            await this.#stopHand(hand.id); check(); signal?.throwIfAborted();
+          }
           if (hand?.status === "connected") return summary(hand);
           if (this.#state.hands.filter(hand => hand.kind === "vm" && ["connecting", "connected"].includes(hand.status)).length >= 4) throw new Error("Four VMs are already running on this computer. Stop one before starting another.");
           if (!hand) {
+            if (!canCreate) throw new Error("Configure the legacy rootfs, guestRuntime, and binary to create a VM.");
             const id = `vm-${createHash("sha256").update(`${host.id}\0${name}`).digest("hex").slice(0, 20)}`;
             await this.saveHand({ ...recipe, id, kind: "vm", name: `${name} on ${host.name}`, vmHost: host.id, vmName: name, workspace: "/app", cpus: 2, memoryMiB: 2048 });
             check(); signal?.throwIfAborted();
@@ -864,7 +901,25 @@ export class DesktopRuntime extends EventEmitter {
         this.#vmLaunchQueue = operation;
         return operation;
       },
-      stop: async name => { check(); const hand = owned().find(hand => hand.vmName === name); if (!hand) throw new Error("No VM with that name belongs to this Hand."); await this.#stopHand(hand.id); check(); return summary(hand); },
+      stopAll: signal => {
+        const operation = this.#vmLaunchQueue.catch(() => {}).then(async () => {
+          check(); signal?.throwIfAborted();
+          await Promise.all(owned().map(hand => this.#stopHand(hand.id))); check();
+          return { vms: owned().map(summary) };
+        });
+        this.#vmLaunchQueue = operation;
+        return operation;
+      },
+      stop: (name, signal) => {
+        const operation = this.#vmLaunchQueue.catch(() => {}).then(async () => {
+          check(); signal?.throwIfAborted();
+          const hand = owned().find(hand => hand.vmName === name);
+          if (!hand) throw new Error("No VM with that name belongs to this Hand.");
+          await this.#stopHand(hand.id); check(); return summary(hand);
+        });
+        this.#vmLaunchQueue = operation;
+        return operation;
+      },
     });
   }
 
@@ -988,7 +1043,7 @@ export class DesktopRuntime extends EventEmitter {
       if (this.#resources.get(id) === resource) this.#resources.delete(id);
     }
     const hand = this.#state.hands.find(hand => hand.id === id);
-    if (hand) { hand.status = "stopped"; hand.activeCalls = 0; this.#log(hand, "Stopped. Compute is no longer available to agents."); }
+    if (hand) { hand.status = "stopped"; if (hand.factory) hand.factory = { ...hand.factory, status: "stopped" }; hand.activeCalls = 0; this.#log(hand, "Stopped. Compute is no longer available to agents."); }
     return this.state();
   }
   async removeHand(id) {

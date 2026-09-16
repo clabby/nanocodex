@@ -24,6 +24,7 @@ export async function desktopDefaults(environment = process.env) {
   const candidates = {
     binary: [environment.NANOCODEX_HAND_BINARY, recipe.binary, environment.NANOCODEX_ENV_FILE && join(dirname(environment.NANOCODEX_ENV_FILE), "target", "debug", "nanocodex2")],
     rootfs: [environment.NANOCODEX_VM_ROOTFS, recipe.rootfs],
+    desktopRootfs: [environment.NANOCODEX_VM_DESKTOP_ROOTFS, recipe.desktopRootfs],
     guestRuntime: [environment.NANOCODEX_VM_GUEST_RUNTIME, recipe.guestRuntime, environment.NANOCODEX_ENV_FILE && join(dirname(environment.NANOCODEX_ENV_FILE), "target", "aarch64-unknown-linux-musl", "debug", "nanocodex-vm-guest")],
     firmware: [environment.NANOCODEX_KRUNFW_DIR, recipe.firmware],
   };
@@ -33,6 +34,8 @@ export async function desktopDefaults(environment = process.env) {
       try { const info = await stat(path); if (name === "firmware" ? info.isDirectory() : info.isFile()) { defaults[name] = path; break; } } catch { /* Unavailable defaults stay unset. */ }
     }
   }));
+  const factoryName = environment.NANOCODEX_VM_FACTORY_NAME ?? recipe.factoryName;
+  if (typeof factoryName === "string") defaults.factoryName = factoryName;
   return defaults;
 }
 

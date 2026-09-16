@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { WebSocketServer } from "ws";
 import { DesktopRuntime } from "../src/runtime.mjs";
 import { createVmTools, supportsLocalVms } from "../src/vm-tools.mjs";
@@ -18,16 +19,23 @@ test("VM callers cannot supply paths or override a host recipe; unsupported plat
   assert.equal(supportsLocalVms("win32", "x64"), false);
   assert.equal(supportsLocalVms("darwin", "x64"), false);
   assert.equal(supportsLocalVms("darwin", "arm64"), true);
+  const stopAll = tools.find(tool => tool.name === "stop_all_vms");
+  for (const input of [null, [], { name: "other" }, { host: "another-mac" }]) {
+    assert.throws(() => stopAll.handler(input));
+  }
 });
 
 test("remote Hand calls create, reuse, stop and restart a retained private VM", { timeout: 20_000, skip: !supportsLocalVms() }, async t => {
   const path = await mkdtemp(join(tmpdir(), "nanocodex-vm-tools-"));
+  const desktopRootfs = join(path, "desktop.ext4");
+  await writeFile(desktopRootfs, "desktop-template");
   const rootfs = join(path, "template.ext4"), guestRuntime = join(path, "guest"), binary = join(path, "helper");
   await writeFile(rootfs, "immutable-template"); await writeFile(guestRuntime, "guest");
-  await writeFile(binary, `#!${process.execPath}\nif(process.argv[2]==='__vm-clone-image'){require('node:fs').copyFileSync(process.argv[3],process.argv[4],require('node:fs').constants.COPYFILE_EXCL);process.exit(0); }\nif(process.argv.includes('__hand-screen')) console.error('Hand screen is ready'); else { if(!process.argv.includes('--vm-gpu')) process.exit(7); console.log(JSON.stringify({fields:{stage:'vm.hand.ready'}})); } setInterval(() => {},1000);\n`, { mode: 0o700 });
-  await writeFile(join(path, "vm.json"), JSON.stringify({ rootfs, guestRuntime, binary, gpu: true }));
+  await writeFile(binary, `#!${process.execPath}\nif(process.argv[2]==='__vm-clone-image'){require('node:fs').copyFileSync(process.argv[3],process.argv[4],require('node:fs').constants.COPYFILE_EXCL);process.exit(0); }\nif(process.argv[2]==='host'){ const fs=require('node:fs'), image=process.argv[process.argv.indexOf('--vm-template')+1]; fs.writeFileSync(image+'.args',JSON.stringify(process.argv)); const gate=setInterval(()=>{if(fs.existsSync(image+'.ready')){clearInterval(gate);console.log(JSON.stringify({fields:{stage:'vm.host.ready'}}));}},10); } else if(process.argv.includes('__hand-screen')) console.error('Hand screen is ready'); else { if(!process.argv.includes('--vm-gpu')) process.exit(7); console.log(JSON.stringify({fields:{stage:'vm.hand.ready'}})); } setInterval(() => {},1000);\n`, { mode: 0o700 });
+  await writeFile(join(path, "vm.json"), JSON.stringify({ rootfs, desktopRootfs, guestRuntime, binary, gpu: true }));
   const defaults = await desktopDefaults({ NANOCODEX_DESKTOP_DATA: path });
   assert.equal(defaults.gpu, true);
+  assert.equal(defaults.desktopRootfs, desktopRootfs);
   const server = createServer((_req, response) => { response.setHeader("content-type", "application/json"); response.end('{"data":[]}'); });
   const sockets = new WebSocketServer({ server });
   const results = new Map(); let socket, catalog;
@@ -46,6 +54,15 @@ test("remote Hand calls create, reuse, stop and restart a retained private VM", 
   const runtime = new DesktopRuntime({ baseUrl: `http://127.0.0.1:${server.address().port}`, apiKey: `ncx_live_${"a".repeat(12)}_${"b".repeat(43)}`, dataDirectory: path, defaults: { ...defaults, workspace: path, name: "Test Mac" }, persist: async value => { saved = value; } });
   t.after(async () => { await runtime.close(); for (const client of sockets.clients) client.terminate(); sockets.close(); await new Promise(resolve => server.close(resolve)); await rm(path, { recursive: true, force: true }); });
   await runtime.refresh(); const host = await runtime.prepareDefaultHand();
+  assert.equal(host.status, "connected", "The shell is ready while factory registration is blocked");
+  assert.notEqual(host.factory?.status, "connected");
+  await writeFile(desktopRootfs + ".ready", "release registration");
+  const deadline = Date.now() + 5_000;
+  while (runtime.state().hands.find(hand => hand.id === host.id).factory?.status !== "connected" && Date.now() < deadline) await delay(10);
+  assert.equal(runtime.state().hands.find(hand => hand.id === host.id).factory.status, "connected");
+  const factoryArgs = JSON.parse(await readFile(desktopRootfs + ".args", "utf8"));
+  assert.match(factoryArgs[factoryArgs.indexOf("--state-dir") + 1], /accounts\/[a-f0-9]{64}\/vm-factories\//);
+  assert(!JSON.stringify(saved).includes('"factory"'), "Ephemeral factory status is not persisted");
   assert(catalog.machines[0].capabilities.includes("vm_host"));
   assert(catalog.tools.some(tool => tool.remote_name === "start_vm"));
   let sequence = 0;
@@ -71,8 +88,20 @@ test("remote Hand calls create, reuse, stop and restart a retained private VM", 
   assert.equal(saved.hands.find(hand => hand.id === vm.id).vmName, vmName);
   assert.equal((await call("start_vm", { name: "phone-demo" })).machine_id, first.machine_id);
   assert.equal(await readFile(vm.rootfs, "utf8"), "retained-guest-data");
+  const restarted = await call("restart_vm", { name: "phone-demo" });
+  assert.equal(restarted.machine_id, first.machine_id);
+  assert.equal(restarted.status, "connected");
+  assert.equal(await readFile(vm.rootfs, "utf8"), "retained-guest-data", "Restart preserves the private disk");
   assert.equal(await readFile(rootfs, "utf8"), "immutable-template");
   assert.equal((await call("list_vms")).vms.length, 1);
+  const second = await call("start_vm", { name: "another-vm" });
+  assert.notEqual(second.machine_id, first.machine_id);
+  const stopped = await call("stop_all_vms");
+  assert.equal(stopped.vms.length, 2);
+  assert(stopped.vms.every(vm => vm.status === "stopped"));
+  assert.equal(runtime.state().hands.find(hand => hand.id === host.id).status, "connected", "Stopping VMs leaves the parent available");
+  assert.equal((await call("start_vm", { name: "phone-demo" })).machine_id, first.machine_id);
   await runtime.stopHand(host.id);
   assert.equal(runtime.state().hands.find(hand => hand.id === first.machine_id).status, "stopped");
+  assert.equal(runtime.state().hands.find(hand => hand.id === host.id).factory.status, "stopped");
 });
