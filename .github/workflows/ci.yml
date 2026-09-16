@@ -108,7 +108,7 @@ jobs:
         run: |
           cargo test --locked `
             --manifest-path crates/experimental/nanocodex-computer/runtime/Cargo.toml `
-            --test parity windows_
+            --test parity windows_ -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release `
             --manifest-path crates/experimental/nanocodex-computer/runtime/Cargo.toml `
