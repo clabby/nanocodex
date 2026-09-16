@@ -2,13 +2,19 @@
 
 ## Outcome
 
+This report records the first two rejected experiments. A subsequent bounded
+[local-verification change](screen-local-authority.md) demonstrated a real win:
+cached viewer readiness fell from 1,058 ms to 366 ms in fresh matched cohorts.
+That final change is deployed; the experiments below remain reverted.
+
 Two deployed routing experiments failed to demonstrate a screen-startup win and
 were reverted. The earlier roughly 555 ms residual is **not proven to be
 service-binding overhead**. Unauthenticated health requests carrying WebSocket Upgrade headers show similar
 delay using both Apple's URLSession and Node, but that health route itself makes
 a managed service call. A separate finite 409 route with no application I/O is
-faster. Rewriting the native client or adding local account authentication is not
-supported by these measurements.
+faster. These controls did not support rewriting the native client. They motivated a
+separate bounded local-verification test, whose successful measurements are
+reported in the final comparison linked above.
 
 The retained changes add safe request-ID-correlated timing fields. Existing
 short-lived screen authority caching remains enabled; it previously removed
@@ -147,7 +153,7 @@ No physical-phone latency measurement succeeded in this investigation.
   They exclude credentials, query strings, SDP and captured media. Cross-isolate
   epochs remain diagnostic metadata only; no derived stage attribution uses them.
 
-The next useful investigation compares a finite local response and a finite
-service-call response under identical Upgrade headers, protocol and edge
-location, while accounting for the Worker timer behavior. Another auth or broker rewrite
-should wait for evidence that it can remove the measured delay.
+The subsequent local-verification experiment removed the managed service call
+for already-authorized viewers and was retained only after the matched client
+cohort demonstrated the improvement. It does not establish which Cloudflare
+internal mechanism caused the earlier residual.
