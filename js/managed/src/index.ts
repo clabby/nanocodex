@@ -254,6 +254,7 @@ import {
   type HostPrincipalEnv,
 } from "./host-principals";
 import { routeManagedRealtimeTransport } from "./managed-realtime-transport";
+import { managedAccessResponse } from "./managed-access";
 import {
   HistorySearchError,
   MAX_HISTORY_SEARCH_LIMIT,
@@ -1279,6 +1280,15 @@ function observeManagedPrincipal(
 }
 
 async function managedFetch(
+  request: Request,
+  env: Env,
+  ctx: Pick<ExecutionContext, "waitUntil">,
+  trustedAgentPrincipal?: Principal,
+): Promise<Response> {
+  return managedAccessResponse(request, await managedFetchRoute(request, env, ctx, trustedAgentPrincipal), env);
+}
+
+async function managedFetchRoute(
   request: Request,
   env: Env,
   ctx: Pick<ExecutionContext, "waitUntil">,

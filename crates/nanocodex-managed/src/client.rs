@@ -1,4 +1,8 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use reqwest::{
     Method, Response,
@@ -77,6 +81,12 @@ pub struct ManagedClient {
     pub(crate) http: reqwest::Client,
     pub(crate) base_url: Url,
     pub(crate) bearer: Arc<str>,
+    access: Arc<Mutex<Option<ManagedAccess>>>,
+}
+
+struct ManagedAccess {
+    token: HeaderValue,
+    until: Instant,
 }
 
 impl fmt::Debug for ManagedClient {
@@ -142,6 +152,7 @@ impl ManagedClient {
             http,
             base_url: builder.origin,
             bearer: api_bearer,
+            access: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -845,10 +856,7 @@ impl ManagedClient {
     async fn read_json<T: DeserializeOwned>(&self, url: Url) -> Result<T, ManagedError> {
         for attempt in 0..READ_ATTEMPTS {
             let result = match self
-                .http
-                .get(url.clone())
-                .timeout(REQUEST_TIMEOUT)
-                .send()
+                .send_with_access(self.http.get(url.clone()).timeout(REQUEST_TIMEOUT), &url)
                 .await
             {
                 Ok(response) => decode_response(response).await,
@@ -876,9 +884,10 @@ impl ManagedClient {
         body: Option<&[u8]>,
         idempotency_key: Option<&str>,
     ) -> Result<Response, ManagedError> {
+        let url = self.url(path)?;
         let mut request = self
             .http
-            .request(method, self.url(path)?)
+            .request(method, url.clone())
             .timeout(REQUEST_TIMEOUT);
         if let Some(body) = body {
             request = request
@@ -888,7 +897,86 @@ impl ManagedClient {
         if let Some(key) = idempotency_key {
             request = request.header("idempotency-key", key);
         }
-        request.send().await.map_err(ManagedError::Transport)
+        self.send_with_access(request, &url)
+            .await
+            .map_err(ManagedError::Transport)
+    }
+
+    async fn send_with_access(
+        &self,
+        request: reqwest::RequestBuilder,
+        url: &Url,
+    ) -> Result<Response, reqwest::Error> {
+        let eligible = (url.path() == "/v1/agents" || url.path().starts_with("/v1/agents/"))
+            && !["ws", "events", "tool-host", "device-host", "sideband"]
+                .contains(&url.path().rsplit('/').next().unwrap_or_default());
+        let began = Instant::now();
+        let token = if eligible {
+            self.access
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .filter(|entry| entry.until > began + Duration::from_secs(5))
+                .map(|entry| entry.token.clone())
+        } else {
+            None
+        };
+        let retry = request.try_clone();
+        let mut response = match &token {
+            Some(token) => {
+                request
+                    .header("x-nanocodex-access", token.clone())
+                    .send()
+                    .await?
+            }
+            None => request.send().await?,
+        };
+        if let Some(token) = &token {
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                && response
+                    .headers()
+                    .get("x-nanocodex-access-rejected")
+                    .is_some_and(|value| value == "1")
+            {
+                {
+                    let mut cache = self
+                        .access
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if cache.as_ref().is_some_and(|entry| entry.token == *token) {
+                        *cache = None;
+                    }
+                }
+                if let Some(retry) = retry {
+                    response = retry.send().await?;
+                }
+            }
+        }
+        if eligible && response.status().is_success() {
+            let token = response.headers().get("x-nanocodex-access");
+            let ttl = response
+                .headers()
+                .get("x-nanocodex-access-ttl-ms")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            if let (Some(token), Some(ttl @ 1..=120_000)) = (token, ttl) {
+                if token.as_bytes().starts_with(b"ncx_access_v1.")
+                    && token.as_bytes().len() <= 16_384
+                {
+                    let until = began + Duration::from_millis(ttl);
+                    let mut cache = self
+                        .access
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if cache.as_ref().is_none_or(|entry| entry.until < until) {
+                        let mut token = token.clone();
+                        token.set_sensitive(true);
+                        *cache = Some(ManagedAccess { token, until });
+                    }
+                }
+            }
+        }
+        Ok(response)
     }
 
     pub(crate) fn url(&self, path: &str) -> Result<Url, ManagedError> {
@@ -1049,6 +1137,76 @@ mod tests {
 
     fn key() -> String {
         format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43))
+    }
+
+    #[tokio::test]
+    async fn access_reuse_preserves_operation_and_recovers_rejection_once() {
+        use axum::http::HeaderMap;
+        use std::sync::{Arc, Mutex};
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&observations);
+        let app = Router::new().route(
+            "/v1/agents",
+            axum::routing::post(move |headers: HeaderMap, body: String| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    let mut seen = seen.lock().unwrap();
+                    seen.push((headers, body));
+                    match seen.len() {
+                        1 => Response::builder()
+                            .header("content-type", "application/json")
+                            .header("x-nanocodex-access", "ncx_access_v1.fixture.signature")
+                            .header("x-nanocodex-access-ttl-ms", "120000")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                        2 => Response::builder()
+                            .status(401)
+                            .header("x-nanocodex-access-rejected", "1")
+                            .body(Body::empty())
+                            .unwrap(),
+                        _ => Response::builder()
+                            .header("content-type", "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = ManagedClient::new(
+            format!("http://{address}"),
+            ManagedApiKey::parse(key()).unwrap(),
+        )
+        .unwrap();
+        client
+            .request(reqwest::Method::POST, "v1/agents", Some(b"{}"), None)
+            .await
+            .unwrap();
+        client
+            .clone()
+            .request(
+                reqwest::Method::POST,
+                "v1/agents",
+                Some(b"{\"input\":\"hello\"}"),
+                Some("same-operation"),
+            )
+            .await
+            .unwrap();
+        server.abort();
+        let seen = observations.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(
+            seen[1].0["x-nanocodex-access"],
+            "ncx_access_v1.fixture.signature"
+        );
+        assert!(!seen[2].0.contains_key("x-nanocodex-access"));
+        assert_eq!(seen[1].0["idempotency-key"], seen[2].0["idempotency-key"]);
+        assert_eq!(seen[1].1, seen[2].1);
+        assert_eq!(seen[1].0["authorization"], seen[2].0["authorization"]);
     }
 
     #[tokio::test]

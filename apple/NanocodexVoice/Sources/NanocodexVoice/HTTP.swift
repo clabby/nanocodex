@@ -75,7 +75,7 @@ final class HTTPTransport: @unchecked Sendable {
         voiceTiming("http.begin \(timingOperation)")
         do {
             let (data, response) = try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
-                group.addTask { try await self.session.data(for: request) }
+                group.addTask { try await ManagedAccess.data(for: request, using: self.session) }
                 group.addTask { try await Task.sleep(for: .seconds(20)); throw URLError(.timedOut) }
                 defer { group.cancelAll() }
                 return try await group.next()!
@@ -117,7 +117,7 @@ func responseError(_ data: Data, response: HTTPURLResponse) -> ManagedError {
         default: message = "Nanocodex could not complete that request. Please try again."
         }
     }
-    for pattern in ["ncx_live_[A-Za-z0-9_-]+", "nanocodex_account=[A-Za-z0-9_-]+"] {
+    for pattern in ["ncx_live_[A-Za-z0-9_-]+", "ncx_access_v1\\.[A-Za-z0-9._-]+", "nanocodex_account=[A-Za-z0-9_-]+"] {
         message = message.replacingOccurrences(of: pattern, with: "[redacted]", options: .regularExpression)
     }
     return ManagedError(code: code, message: String(message.prefix(500)), status: response.statusCode,

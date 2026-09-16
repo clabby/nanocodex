@@ -1,4 +1,5 @@
 import { configurationCatalog } from "./agent-configuration";
+import { MANAGED_ACCESS_HEADER, managedAccessRequest, readManagedAccess, observeManagedAccess } from "./managed-access";
 import { DurableObject } from "cloudflare:workers";
 import { fetchResponseWithDeadline } from "./deadline";
 import { Handler, Kv } from "accounts/server";
@@ -64,6 +65,7 @@ export function isUserId(value: unknown): value is string {
 export const NonceStorage = Kv.NonceStorage;
 
 export interface AccountAuthEnv {
+  NANOCODEX_ACCESS_SECRET?: string;
   ENVIRONMENT?: string;
   NANOCODEX_MOCK_TWILIO_VERIFY_CODE?: string;
   NANOCODEX_AUTH: DurableObjectNamespace;
@@ -686,6 +688,14 @@ export async function authenticate(
   env: AccountAuthEnv,
   url = new URL(request.url),
 ): Promise<Principal | undefined> {
+  const started = performance.now();
+  const reuse = managedAccessRequest(request) && request.headers.has(MANAGED_ACCESS_HEADER);
+  const principal = reuse ? await readManagedAccess(request, env) : await authenticateLive(request, env, url);
+  await observeManagedAccess(request, env, principal, reuse ? "access" : "live", performance.now() - started);
+  return principal;
+}
+
+async function authenticateLive(request: Request, env: AccountAuthEnv, url: URL): Promise<Principal | undefined> {
   const connectUser = request.headers.get(CONNECT_USER_HEADER);
   if (url.origin === CONNECT_SERVICE_ORIGIN && isUserId(connectUser)) {
     const grant = parseConnectGrantAssertions(request.headers);

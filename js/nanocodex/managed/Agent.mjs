@@ -1,5 +1,6 @@
 import { ManagedError } from "./ManagedError.mjs";
 import { registerManagedAgent } from "./internal.mjs";
+import { managedAccessFetch } from "./Access.mjs";
 
 const API_KEY = /^ncx_live_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/;
 const CURSOR = /^(?:0|[1-9][0-9]*)$/;
@@ -1524,6 +1525,7 @@ function managedClient(options) {
   }
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable in this runtime");
+  const authorizedFetch = managedAccessFetch(fetchImpl, new URL(baseUrl).origin, apiKey);
   const toolsTransport = options.toolsTransport;
   if (toolsTransport !== undefined
       && typeof toolsTransport !== "function"
@@ -1539,7 +1541,7 @@ function managedClient(options) {
     if (init.voiceSessionId) headers.set("x-nanocodex-voice-session-id", init.voiceSessionId);
     if (apiKey) headers.set("authorization", `Bearer ${apiKey}`);
     try {
-      return await fetchImpl(new URL(path, baseUrl), {
+      return await authorizedFetch(new URL(path, baseUrl), {
         method: init.method ?? "GET",
         headers,
         credentials: apiKey ? "omit" : "include",

@@ -87,7 +87,7 @@ public final class ManagedClient: @unchecked Sendable {
     }
     public func close() { session.invalidateAndCancel() }
     /// Call on explicit sign-out, not when suspending an observer.
-    public func clearCachedResponses() { responseCache?.removeAllCachedResponses() }
+    public func clearCachedResponses() { responseCache?.removeAllCachedResponses(); ManagedAccess.clear() }
     public func request(path: String, method: String = "GET", body: JSON? = nil, idempotencyKey: String? = nil) throws -> URLRequest {
         guard path.hasPrefix("/v1/"), !path.contains(".."), !path.contains("#"),
               let url = URL(string: credential.origin + path) else { throw APIError.invalidResponse }
@@ -107,7 +107,7 @@ public final class ManagedClient: @unchecked Sendable {
         return request
     }
     public func json(path: String, method: String = "GET", body: JSON? = nil, idempotencyKey: String? = nil) async throws -> JSON {
-        let (data, response) = try await session.data(for: request(path: path, method: method, body: body, idempotencyKey: idempotencyKey))
+        let (data, response) = try await ManagedAccess.data(for: request(path: path, method: method, body: body, idempotencyKey: idempotencyKey), using: session)
         guard let response = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard (200..<300).contains(response.statusCode) else {
             if response.statusCode == 409, data.count <= 64 * 1024,

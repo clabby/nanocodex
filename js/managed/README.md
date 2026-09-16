@@ -14,8 +14,35 @@ through `NANOCODEX_X`; deploy it with `pnpm deploy:x` before `pnpm deploy:manage
 `DurableAgentSession` exclusively owns an agent's mutable runtime: retained
 history, turn admission and completion, ordered events, client sockets, tools,
 and recovery. The edge Worker owns routing and authorization; an agent ID is a
-routing identifier, never authority. Each agent route reauthenticates the
-account or grant and forwards only its permitted slice.
+routing identifier, never authority. Each agent route authenticates the account
+or grant and forwards only its permitted slice.
+
+### Short-lived request access
+
+With `NANOCODEX_ACCESS_SECRET` configured (at least 32 random bytes), successful
+live-authenticated agent HTTP responses issue a signed `x-nanocodex-access`
+permission snapshot, valid for at most two minutes. The token is bound to the
+origin and original login/key; Connect snapshots additionally bind all forwarded
+grant restrictions. Clients retain the original credential for renewal. They
+retry a 401 once only when ingress explicitly marks the snapshot as rejected
+before admission, preserving the credential, body and operation identity.
+
+Finite `/v1/agents` requests verify the signature locally. Their owning Session
+still checks local owner, organization, team, epoch, lifecycle and operation
+permissions. Streams, socket handshakes and account administration retain live
+authentication. Existing accepted work retains its established execution policy.
+
+Account/key/membership changes prevent new snapshots immediately; an existing
+snapshot may authorize requests until expiry. Rotating `NANOCODEX_ACCESS_SECRET`
+invalidates all snapshots once the new deployment is active. No per-user instant
+revocation of issued snapshots is implied. Local Session fencing remains in
+force. Tokens are never accepted for token renewal or as provider credentials.
+
+Issuance piggybacks on an ordinary response, so there is no added cold-start HTTP
+round trip. SDK caches are in memory; they renew via ordinary live authentication
+near expiry. `managed.auth` logs and `managed_auth` Server-Timing distinguish live
+and snapshot verification. Those timings measure authentication, not full request
+or model latency. Missing configuration preserves the live-only path.
 
 Connector credentials never enter this Worker, browser state, durable agent
 state, or tool configuration. Model and connector access crosses the private
@@ -150,7 +177,8 @@ storage ownership.
   separate agent-scoped WebSocket routes.
 - API key resolution validates live account membership, scope, and authorization
   epoch inside the key object. This avoids serial edge-to-account round trips;
-  no authorization decision is cached. A response marker allows rolling
+  raw-key resolution never caches authority. Short-lived signed snapshots above
+  avoid repeating that resolution on every finite agent request. A response marker allows rolling
   deployments to fall back to the original checks against older key objects.
 - Voice call creation derives a coarse relay region from trusted Cloudflare
   request metadata. A separate `voice-v1:<region>:<user>` relay prevents an old

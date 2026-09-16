@@ -15,7 +15,8 @@
     "nanocodex-connect-protocol": "workspace:*",
     "nanocodex-vite": "workspace:*",
     "ox": "0.14.36",
-    "viem": "2.55.19"
+    "viem": "2.55.19",
+    "nanocodex": "workspace:*"
   },
   "devDependencies": {
     "typescript": "5.9.3",

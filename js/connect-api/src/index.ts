@@ -1,4 +1,5 @@
 import { Handler, Kv } from "accounts/server";
+import { withManagedAccess } from "nanocodex/managed";
 import { custom } from "viem";
 import { KeyAuthorization } from "ox/tempo";
 
@@ -2820,8 +2821,18 @@ function isConnectSubjectRecord(
     && EGRESS_SUBJECT.test(value.subject);
 }
 
+const managedAccountTransports = new WeakMap<object, typeof fetch>();
+function managedAccountsFetch(env: Env, request: Request): Promise<Response> {
+  let transport = managedAccountTransports.get(env.ACCOUNTS);
+  if (!transport) {
+    transport = withManagedAccess((input, init) => env.ACCOUNTS.fetch(new Request(input, init)));
+    managedAccountTransports.set(env.ACCOUNTS, transport);
+  }
+  return transport(request);
+}
+
 async function createManagedAgent(env: Env, assertion: ManagedGrantAssertion): Promise<string> {
-  const response = await env.ACCOUNTS.fetch(new Request("https://nanocodex.internal/v1/agents", {
+  const response = await managedAccountsFetch(env, new Request("https://nanocodex.internal/v1/agents", {
     method: "POST",
     headers: managedGrantHeaders(assertion),
   }));
@@ -2837,7 +2848,7 @@ async function managedAgentExists(
   assertion: ManagedGrantAssertion,
   agentId: string,
 ): Promise<boolean> {
-  const response = await env.ACCOUNTS.fetch(new Request(
+  const response = await managedAccountsFetch(env, new Request(
     `https://nanocodex.internal/v1/agents/${encodeURIComponent(agentId)}/_connect-existence`,
     {
       method: "GET",
@@ -2856,7 +2867,7 @@ async function deleteManagedAgent(
   assertion: ManagedGrantAssertion,
   agentId: string,
 ): Promise<void> {
-  const response = await env.ACCOUNTS.fetch(new Request(
+  const response = await managedAccountsFetch(env, new Request(
     `https://nanocodex.internal/v1/agents/${encodeURIComponent(agentId)}`,
     {
       method: "DELETE",
@@ -2908,7 +2919,7 @@ async function proxyManagedAgent(
     if (value) headers.set(name, value);
   }
   const upstreamMethod = managedGrantUpstreamMethod(request.method, suffix);
-  const upstream = await env.ACCOUNTS.fetch(new Request(target, {
+  const upstream = await managedAccountsFetch(env, new Request(target, {
     method: upstreamMethod,
     headers,
     body: upstreamMethod === "GET" || upstreamMethod === "HEAD" ? undefined : request.body,
