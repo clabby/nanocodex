@@ -5,6 +5,21 @@ export class ChatGptEgress extends Container {
   enableInternet = true;
   sleepAfter = "1h";
 
+  /** Private egress binding: transfer the small SDP exchange in one RPC reply. */
+  async createRealtimeCall(body: string, headers: Record<string, string>): Promise<{
+    status: number; headers: Record<string, string>; body: string;
+  }> {
+    const response = await this.fetch(new Request("https://chatgpt-egress.internal/backend-api/codex/realtime/calls", {
+      method: "POST", headers, body,
+    }));
+    const began = performance.now();
+    const answer = await response.text();
+    const sessionId = headers["x-session-id"];
+    console.info({ type: "voice.relay.body", transport: "rpc", duration_ms: performance.now() - began,
+      ...(sessionId && /^[0-9a-f-]{36}$/.test(sessionId) ? { voice_session_id: sessionId } : {}) });
+    return { status: response.status, headers: Object.fromEntries(response.headers), body: answer };
+  }
+
   override async fetch(request: Request): Promise<Response> {
     if (new URL(request.url).pathname !== "/backend-api/codex/realtime/calls") {
       return super.fetch(request);

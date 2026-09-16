@@ -19,6 +19,17 @@ The package scripts expose broker and example-agent dry runs and deployments
 (`dry-run:broker`, `deploy:broker`, `dry-run:agent`, and `deploy:agent`). Use
 the repository operator interface in `../../AGENTS.md` for actual operation.
 
+Subscription voice can use `CHATGPT_VOICE_RELAY_RPC=true` to transfer the small
+SDP request and answer through the private `ChatGptEgress.createRealtimeCall`
+RPC. Deploy the account Worker's compatible relay method before enabling this
+flag. Without the flag, egress uses the existing HTTP transport. Credential
+resolution, regional placement, and provider rejection handling are shared;
+an interrupted RPC is never retried through HTTP because the provider may have
+already created the call. Other model traffic keeps its existing transport.
+For a bounded comparison on one deployed version, `sample` selects RPC for
+even-ending voice session UUIDs and HTTP for odd-ending UUIDs. Egress timing logs
+include the voice session ID and selected transport so samples can be matched.
+
 ## Credential boundary
 
 The broker owns per-user provider credentials, connector OAuth state, MCP

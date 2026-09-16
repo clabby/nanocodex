@@ -214,6 +214,7 @@ export interface EgressEnv extends BrokerEnv, ConnectorBrokerEnv {
   MANAGED_AGENT_OWNERSHIP?: Fetcher;
   MCP_CONNECTIONS: DurableObjectNamespace<McpConnectionDirectory>;
   CHATGPT_EGRESS?: DurableObjectNamespace;
+  CHATGPT_VOICE_RELAY_RPC?: string;
   CODEX_RELAY_URL?: string;
   ALLOW_INSECURE_LOOPBACK_RELAY?: string;
   NANOCODEX_BROKER_PROBE_TOKEN?: string;
@@ -559,6 +560,10 @@ async function handleEgressWithOwner(
         credential_broker_age_ms: credentialBrokerAgeMs,
         credential_broker_resolve_id: credentialBrokerResolveId,
         upstream_ms: Date.now() - upstreamStartedAt,
+        ...(operation.id === "realtime-call" ? {
+          voice_session_id: request.headers.get("x-session-id"),
+          relay_transport: realtimeRelayRpc(env, request) ? "rpc" : "fetch",
+        } : {}),
       });
       if (credential.source === "sponsored" && operation.id === "responses") {
         if (!sponsoredConnectionId) {
@@ -2345,6 +2350,12 @@ function upstreamUrl(
   return relay;
 }
 
+function realtimeRelayRpc(env: EgressEnv, request: Request): boolean {
+  const sessionId = request.headers.get("x-session-id") ?? "";
+  return env.CHATGPT_VOICE_RELAY_RPC === "true"
+    || (env.CHATGPT_VOICE_RELAY_RPC === "sample" && /^[0-9a-f-]{35}[02468ace]$/.test(sessionId));
+}
+
 async function fetchUpstream(
   env: EgressEnv,
   userId: string,
@@ -2367,7 +2378,18 @@ async function fetchUpstream(
       ? voiceRegion as DurableObjectLocationHint : undefined;
     const id = env.CHATGPT_EGRESS.idFromName(region
       ? `voice-v1:${region}:${userId}` : `user-v1:${userId}`);
-    return env.CHATGPT_EGRESS.get(id, region ? { locationHint: region } : undefined).fetch(new Request(internal, {
+    const relay = env.CHATGPT_EGRESS.get(id, region ? { locationHint: region } : undefined);
+    if (operation.id === "realtime-call" && realtimeRelayRpc(env, request)) {
+      const rpc = relay as typeof relay & {
+        createRealtimeCall(body: string, headers: Record<string, string>): Promise<{
+          status: number; headers: Record<string, string>; body: string;
+        }>;
+      };
+      const response = await rpc.createRealtimeCall(await request.text(), Object.fromEntries(request.headers));
+      // Do not retry through fetch: an RPC failure can occur after call creation.
+      return new Response(response.body, { status: response.status, headers: response.headers });
+    }
+    return relay.fetch(new Request(internal, {
       method: request.method,
       headers: request.headers,
       body: request.body,
@@ -2757,6 +2779,10 @@ function audit(
     || rule === "slack" || rule === "x" || rule === "spotify" || rule === "soundcloud" || rule === "mcp";
   const log = action === "error" ? console.error : action === "deny" ? console.warn : console.info;
   const safeDetail = {
+    ...(typeof detail.voice_session_id === "string" && /^[0-9a-f-]{36}$/.test(detail.voice_session_id)
+      ? { voice_session_id: detail.voice_session_id } : {}),
+    ...(detail.relay_transport === "rpc" || detail.relay_transport === "fetch"
+      ? { relay_transport: detail.relay_transport } : {}),
     ...(detail.credential_kind === "chatgpt" || detail.credential_kind === "openai"
       ? { credential_kind: detail.credential_kind } : {}),
     ...(typeof detail.credential_broker_resolve_id === "string"
