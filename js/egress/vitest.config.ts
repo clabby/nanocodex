@@ -173,6 +173,12 @@ export default defineConfig({
               }
               return Response.json({ account, calls, method: request.method, body: await request.text() });
             }
+            if (provider === "soundcloud" && url.pathname.includes("/streams/")) {
+              const id = url.pathname.split("/")[4];
+              const target = id === "evil" ? "https://evil.test/audio.m3u8" : id === "credential"
+                ? `https://media.sndcdn.com/audio.m3u8?access_token=${auth.slice(6)}` : "https://media.sndcdn.com/audio.m3u8?Policy=signed";
+              return Response.redirect(target, 302);
+            }
             if (url.pathname.endsWith("/redirect")) return Response.redirect("https://evil.test/", 302);
             return Response.json({ account, refreshed: auth.endsWith("-refreshed"), method: request.method, body: await request.text() });
           }

@@ -126,6 +126,27 @@ test("Worker connector execution fences and forwards the exact approved identity
     assert.deepEqual(await forwarded.at(-1).json(), body);
   }
 
+  // SoundCloud's full-stream redirect can only be resolved for the approved account.
+  grant = { ...activeGrant({ soundcloud: [alpha] }), capabilities: ["soundcloud"] };
+  reply = () => Response.json({ url: "https://media.sndcdn.com/audio.m3u8?Policy=signed" });
+  const streamPath = "/tracks/soundcloud:tracks:123/streams/abc-123/hls";
+  const streamRequest = (fields = {}) => {
+    const original = connectorRequest("soundcloud", { path: streamPath, ...fields });
+    return new Request(original.url.replace(/request$/, "stream"), original);
+  };
+  assert.equal((await worker.fetch(streamRequest(), env, context)).status, 200);
+  assert.equal(forwarded.at(-1).headers.get("x-nanocodex-resolve-stream"), "1");
+  assert.equal(forwarded.at(-1).headers.get("x-nanocodex-connector-connection"), alpha);
+  const streamCount = forwarded.length;
+  for (const fields of [{ connection_id: bravo }, { path: streamPath.replace("/hls", "/http-preview") },
+    { path: "https://evil.test/" }, { method: "POST" }]) {
+    assert((await worker.fetch(streamRequest(fields), env, context)).status >= 400);
+  }
+  assert.equal(forwarded.length, streamCount);
+  assert.equal((await worker.fetch(connectorRequest("soundcloud", {
+    path: streamPath, resolveStream: true,
+  }), env, context)).status, 400);
+
   // Every API capability uses the same grant boundary, including Google services.
   for (const [connector, path, upstream, scheme = "Bearer"] of [
     ["github", "/user", "https://api.github.com", "token"],

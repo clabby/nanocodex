@@ -152,3 +152,18 @@ it("binds SoundCloud phone OAuth to its registered loopback and keeps the app se
   expect(await read.json()).toMatchObject({ account: "soundcloud-loopback-account", refreshed: true });
   expect((await control("/users/soundcloud-phone-owner/connectors/spotify", "POST", { flow: "soundcloud_loopback", return_to: "/profile" })).status).toBe(400);
 });
+
+ it("resolves full SoundCloud streams only on the explicit metadata route", async () => {
+  const user = "soundcloud-stream-resolution";
+  const connection = await connect(user, "soundcloud", "soundcloud-alpha");
+  const broker = workerEnv.USER_CONNECTORS.getByName(user);
+  const url = "https://api.soundcloud.com/tracks/soundcloud:tracks:123/streams/safe/hls";
+  const headers = { "x-nanocodex-connector-connection": connection, "x-nanocodex-resolve-stream": "1" };
+  const response = await broker.fetch(url, { headers });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ url: "https://media.sndcdn.com/audio.m3u8?Policy=signed" });
+  expect((await broker.fetch(url, { headers: { "x-nanocodex-connector-connection": connection } })).status).toBe(502);
+  for (const variant of [url.replace("/safe/", "/evil/"), url.replace("/safe/", "/credential/"), url.replace("/hls", "/http-preview")]) {
+    expect((await broker.fetch(variant, { headers })).status).toBe(502);
+  }
+ });

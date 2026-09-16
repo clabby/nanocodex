@@ -481,26 +481,38 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       await upstream.body?.cancel();
       let target: URL | undefined;
       try { if (location) target = new URL(location); } catch { /* Fail closed below. */ }
-      if (!archiveRepository || !target || target.origin !== "https://codeload.github.com"
-        || target.username || target.password || target.hash || target.href.length > MAX_CONNECTOR_URL_BYTES
-        || !target.pathname.startsWith(`/${archiveRepository}/legacy.tar.gz/`)) {
-        throw new ConnectorFailure(502, "connector_redirect_blocked");
-      }
-      for (const name of ["token", "access_token"]) {
-        const value = target.searchParams.get(name);
-        if (value) archiveCredentials.push(value);
-      }
-      try {
-        upstream = await fetch(target, {
-          method: "GET", redirect: "manual", signal: request.signal,
-          headers: { "user-agent": "nanocodex-connector-broker", accept: "application/gzip" },
-        });
-      } catch {
-        throw new ConnectorFailure(503, "connector_provider_unavailable");
-      }
-      if (REDIRECT_STATUS.has(upstream.status)) {
-        await upstream.body?.cancel();
-        throw new ConnectorFailure(502, "connector_redirect_blocked");
+      const resolveSoundCloud = provider.id === "soundcloud" && request.method === "GET"
+        && request.headers.get("x-nanocodex-resolve-stream") === "1"
+        && /^\/tracks\/(?:soundcloud(?::|%3A)tracks(?::|%3A))?\d+\/streams\/[A-Za-z0-9-]+\/(hls|http)$/i.test(url.pathname);
+      if (resolveSoundCloud) {
+        if (!target || target.protocol !== "https:" || !target.hostname.endsWith(".sndcdn.com")
+          || target.port || target.username || target.password || target.hash || target.href.length > MAX_CONNECTOR_URL_BYTES
+          || [...target.searchParams.keys()].some(name => /^(oauth_token|access_token|refresh_token|client_secret)$/i.test(name))) {
+          throw new ConnectorFailure(502, "connector_redirect_blocked");
+        }
+        upstream = Response.json({ url: target.href });
+      } else {
+        if (!archiveRepository || !target || target.origin !== "https://codeload.github.com"
+          || target.username || target.password || target.hash || target.href.length > MAX_CONNECTOR_URL_BYTES
+          || !target.pathname.startsWith(`/${archiveRepository}/legacy.tar.gz/`)) {
+          throw new ConnectorFailure(502, "connector_redirect_blocked");
+        }
+        for (const name of ["token", "access_token"]) {
+          const value = target.searchParams.get(name);
+          if (value) archiveCredentials.push(value);
+        }
+        try {
+          upstream = await fetch(target, {
+            method: "GET", redirect: "manual", signal: request.signal,
+            headers: { "user-agent": "nanocodex-connector-broker", accept: "application/gzip" },
+          });
+        } catch {
+          throw new ConnectorFailure(503, "connector_provider_unavailable");
+        }
+        if (REDIRECT_STATUS.has(upstream.status)) {
+          await upstream.body?.cancel();
+          throw new ConnectorFailure(502, "connector_redirect_blocked");
+        }
       }
     }
     let body: ReadableStream<Uint8Array> | null;

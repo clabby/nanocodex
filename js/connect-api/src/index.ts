@@ -3098,14 +3098,25 @@ async function handleAgentToolRoute(
 ): Promise<Response | undefined> {
   const connectorProxy = /^\/connectors\/([a-z]+)(\/.*)?$/.exec(url.pathname);
   const connectorRequest = /^\/v1\/connectors\/([a-z]+)\/request$/.exec(url.pathname);
+  const isSoundCloudStream = url.pathname === "/v1/connectors/soundcloud/stream";
   const isAccountInfo = request.method === "GET" && url.pathname === "/v1/agent/account-info";
   const isEgress = request.method === "POST" && url.pathname === "/v1/egress";
   const isWeb = request.method === "POST" && url.pathname === "/api/tools/web-search";
   const isImage = request.method === "POST" && url.pathname === "/api/tools/image-generation";
-  if (!connectorProxy && !connectorRequest && !isAccountInfo && !isEgress && !isWeb && !isImage) return undefined;
+  if (!connectorProxy && !connectorRequest && !isSoundCloudStream && !isAccountInfo && !isEgress && !isWeb && !isImage) return undefined;
   const { grant } = await authenticatedGrant(request, env, undefined, connectorProxy !== null);
   // Native SDKs send only a bearer token; browser Origins must still match.
   if (!connectorProxy || request.headers.has("origin")) requireGrantAppOrigin(request, grant);
+  if (isSoundCloudStream) {
+    if (request.method !== "POST") throw new ApiFailure(405, "method_not_allowed", "Use POST to resolve a stream.");
+    const value = await boundedJson(request, 8192, "stream request");
+    if (Object.keys(value).some(key => !["path", "connection_id"].includes(key)) || typeof value.path !== "string"
+      || !/^\/tracks\/(?:soundcloud(?::|%3A)tracks(?::|%3A))?\d+\/streams\/[A-Za-z0-9-]+\/(hls|http)$/i.test(value.path)) {
+      throw new ApiFailure(400, "invalid_stream_request", "Use a full SoundCloud stream path returned by /tracks/:id/streams.");
+    }
+    return grantConnectorRequest(env, grant, "soundcloud", { ...value, method: "GET", resolveStream: true },
+      connectorTarget("soundcloud", value.path), request.signal);
+  }
   if (connectorProxy) {
     const connector = connectorProxy[1];
     if (!isConnectorCapability(connector) || connector === "chatgpt") {
@@ -5205,6 +5216,7 @@ async function grantConnectorRequest(
     target = browserTarget;
   }
   const headers = connectorHeaders(value.headers);
+  if (connector === "soundcloud" && value.resolveStream === true) headers.set("x-nanocodex-resolve-stream", "1");
   try {
     applyConnectorConnectionSelector(
       headers,
