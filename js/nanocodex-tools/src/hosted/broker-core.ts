@@ -107,6 +107,8 @@ type HostedToolsSocketAttachment = {
 };
 
 type PendingCall = {
+  receivedAt: number;
+  dispatchedAt: number;
   leaseId: string;
   generation: number;
   deadlineAt: number;
@@ -237,6 +239,8 @@ export type HostedToolsBrokerCoreOptions = Readonly<{
   persistence: HostedToolsBrokerPersistence;
   /** Resume exact live hibernated sockets instead of forcing every route to reconnect. */
   resumeRetainedSockets?: boolean;
+  /** Correlated call boundaries only; inputs, outputs, and credentials are omitted. */
+  onCallTiming?: (timing: Readonly<{ session_id: string; source_call_id: string; transport_call_id: string; admission_ms: number; roundtrip_ms: number; settlement_ms: number }>) => void;
   onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
   entryAllowed?: (
     entry: HostedToolCatalogEntry,
@@ -267,6 +271,7 @@ export class HostedToolsBrokerCore {
   readonly #provider: HostedToolsDynamicProvider;
   readonly #pending = new Map<string, PendingCall>();
   readonly #now: () => number;
+  readonly #onCallTiming: HostedToolsBrokerCoreOptions["onCallTiming"];
   readonly #randomUUID: () => string;
   readonly #maxInFlight: number;
   readonly #maxCallsPerGeneration: number;
@@ -289,6 +294,7 @@ export class HostedToolsBrokerCore {
     options: HostedToolsBrokerCoreOptions,
   ) {
     this.#now = options.now ?? Date.now;
+    this.#onCallTiming = options.onCallTiming;
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
     this.#maxInFlight = options.maxInFlight ?? Number.MAX_SAFE_INTEGER;
     if (!Number.isSafeInteger(this.#maxInFlight) || this.#maxInFlight < 1) {
@@ -902,6 +908,7 @@ export class HostedToolsBrokerCore {
     socket: HostedToolsSocket,
     frame: Extract<HostedToolsHostFrame, { type: "result" }>,
   ): void {
+    const resultAt = performance.now();
     const attachment = this.#activeAttachment(socket);
     const row = this.#persistence.call(frame.call_id);
     const stored = JSON.stringify(frame.outcome);
@@ -956,6 +963,13 @@ export class HostedToolsBrokerCore {
     const pending = this.#takePending(row.call_id);
     this.#ackResult(socket, frame);
     pending?.resolve(frame.outcome);
+    if (pending && this.#onCallTiming) {
+      try {
+        this.#onCallTiming({ session_id: row.session_id, source_call_id: row.source_call_id,
+          transport_call_id: row.call_id, admission_ms: pending.dispatchedAt - pending.receivedAt,
+          roundtrip_ms: resultAt - pending.dispatchedAt, settlement_ms: performance.now() - resultAt });
+      } catch { /* Diagnostics must never change a durable call outcome. */ }
+    }
   }
 
   #ackResult(socket: HostedToolsSocket, frame: Extract<HostedToolsHostFrame, { type: "result" }>): void {
@@ -1054,6 +1068,7 @@ export class HostedToolsBrokerCore {
     binding: HostedToolsCatalogBinding,
     request: HostedToolsInvokeRequest,
   ): Promise<HostedToolsInvocationOutcome> {
+    const receivedAt = performance.now();
     const retained = this.#persistence.callBySource(request.sessionId, request.callId);
     if (!retained && !this.#routingSocketForState(this.#persistence.state(binding.routeId))) {
       return Promise.resolve(preAdmissionUnavailable("Hosted machine is reconnecting"));
@@ -1177,6 +1192,8 @@ export class HostedToolsBrokerCore {
     let resolve!: (outcome: HostedToolCallOutcome) => void;
     const promise = new Promise<HostedToolCallOutcome>((completed) => { resolve = completed; });
     const pending: PendingCall = {
+      receivedAt,
+      dispatchedAt: performance.now(),
       leaseId,
       generation: binding.generation,
       deadlineAt,

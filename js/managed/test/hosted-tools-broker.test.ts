@@ -13,6 +13,7 @@ import {
   HOSTED_TOOLS_PRE_ADMISSION_UNAVAILABLE,
   type HostedToolsAuthorizationContext,
   type HostedToolsBrokerContext,
+  type HostedToolsBrokerOptions,
   type HostedToolsBrokerPersistence,
 } from "../src/hosted-tools-broker";
 import {
@@ -759,7 +760,8 @@ describe("HostedToolsBroker socket-owned protocol", () => {
   });
 
   it("durably dispatches an exact call and ACKs both the result and duplicate receipt", async () => {
-    const fixture = createFixture();
+    const onCallTiming = vi.fn(() => { throw new Error("diagnostic sink failed"); });
+    const fixture = createFixture(undefined, { onCallTiming });
     const host = fixture.socket();
     await catalog(fixture.broker, host);
     const tool = fixture.broker.provider().resolve("fixture__lookup")!;
@@ -786,6 +788,10 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     await fixture.broker.message(host.webSocket, result(IDS[1]!, "done"));
     expect(host.sent.filter((frame) => frame.type === "ack")).toHaveLength(2);
     expect(fixture.persistence.call(IDS[1]!)?.state).toBe("completed");
+    expect(onCallTiming).toHaveBeenCalledExactlyOnceWith({
+      session_id: "session:1", source_call_id: "source:1", transport_call_id: IDS[1],
+      admission_ms: expect.any(Number), roundtrip_ms: expect.any(Number), settlement_ms: expect.any(Number),
+    });
   });
 
   it("removes routing before acknowledging graceful drain while dispatched calls can finish", async () => {
@@ -1121,6 +1127,7 @@ function createFixture(
   ) => boolean,
   options?: Readonly<{
     now?: () => number;
+    onCallTiming?: HostedToolsBrokerOptions["onCallTiming"];
     renewLeasedAttachment?: (renewal: {
       expectedAttachmentId: string;
       fixedRouteId: string;
@@ -1139,6 +1146,7 @@ function createFixture(
   const broker = new HostedToolsBroker(context, {
     persistence,
     now: options?.now ?? (() => NOW),
+    onCallTiming: options?.onCallTiming,
     ...(options?.renewLeasedAttachment === undefined ? {} : {
       renewLeasedAttachment: options.renewLeasedAttachment,
     }),
