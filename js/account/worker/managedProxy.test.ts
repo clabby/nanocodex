@@ -125,3 +125,29 @@ test("server Hand enrollment and scoped publishers retain their managed boundary
     assert.equal(forwarded, request);
   }
 });
+
+
+test("screen proxy timing preserves authentication headers, response identity and private query data", async () => {
+  const request = new Request("https://nanocodex.localhost/v1/account/hands/view?generation=private-generation", {
+    headers: { upgrade: "websocket", authorization: "Bearer private-key", "x-nanocodex-access": "private-snapshot" },
+  });
+  const response = new Response(null, { status: 204, headers: { "x-nanocodex-request-id": "correlation-id",
+    "x-nanocodex-access-rejected": "1", "server-timing": 'managed_auth;dur=0.2;desc="access"' } });
+  let forwarded: Request | undefined;
+  const logs: unknown[] = [];
+  const original = console.info;
+  console.info = message => { logs.push(message); };
+  try {
+    const result = await routeManaged(request, { NANOCODEX_BACKEND: {
+      async fetch(candidate: Request) { forwarded = candidate; return response; },
+      connect() { throw new Error("unused"); },
+    } }, new URL(request.url));
+    assert.equal(forwarded, request);
+    assert.equal(result, response, "An upgraded response must retain its exact socket and headers");
+    assert.equal(result.headers.get("x-nanocodex-access-rejected"), "1");
+    assert.equal(logs.length, 1);
+    assert.equal((logs[0] as { request_id: string }).request_id, "correlation-id");
+    assert.equal(typeof (logs[0] as { backend_ms: number }).backend_ms, "number");
+    assert.equal(JSON.stringify(logs).includes("private-"), false);
+  } finally { console.info = original; }
+});
