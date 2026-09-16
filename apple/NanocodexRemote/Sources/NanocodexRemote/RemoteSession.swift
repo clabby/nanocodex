@@ -399,10 +399,17 @@ public final class RemoteViewer: ObservableObject {
             guard let self, epoch == attempt else { return }
             do {
                 switch message.type {
-                case "ready": armFrameDeadline(attempt: attempt); requestFrame(attempt: attempt)
+                case "ready":
+                    recordConnectionEvent("signaling ready")
+                    armFrameDeadline(attempt: attempt); requestFrame(attempt: attempt)
                 case "frame":
                     guard framePending > 0 else { throw RemoteError.invalidMessage }
                     frame = try RemoteFrame.decode(message); framePending -= 1
+                    if diagnosticsEnabled, diagnosticFirstFrame == nil, let frame {
+                        diagnosticFirstFrame = ["elapsed_ms": Int((ProcessInfo.processInfo.systemUptime - diagnosticStarted) * 1000),
+                            "width": frame.width, "height": frame.height]
+                        recordConnectionEvent("first frame decoded")
+                    }
                     frameDeadline?.cancel(); frameDeadline = nil
                     transportReady = true; channelsReady = true; updateReady()
                     if frameWindow > 1 { requestFrame(attempt: attempt) }
