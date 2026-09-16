@@ -1,6 +1,6 @@
 import { initializeMemoryContent, memoryIdentityDigest, readMemoryContent, storeMemoryContent } from "./durable-memory-storage";
 import { DurableObject } from "cloudflare:workers";
-import { performanceState } from "./performance";
+import { performanceScope, performanceStage, performanceState, performanceSyncScope } from "./performance";
 import {
   initializeHistoryStorage, storeHistorySegments, deleteHistorySegments, readHistoryText,
   type HistorySegment,
@@ -182,6 +182,13 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
   }
 
   async fetch(request: Request): Promise<Response> {
+    const subject = request.headers.get(SUBJECT_ASSERTION);
+    const traceId = subject?.match(/^agent:([0-9a-f-]{36})$/)?.[1] ?? this.ctx.id.toString();
+    return performanceScope(traceId, `memory.${request.method} ${new URL(request.url).pathname}`,
+      () => this.#measuredFetch(request));
+  }
+
+  async #measuredFetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const assertedOrganization = request.headers.get(ORGANIZATION_ASSERTION);
     if (request.method === "PUT" && url.pathname === "/initialize") {
@@ -375,11 +382,13 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
     input: HistoryFindSessionsInput,
     teamId: string,
   ): Promise<HistoryFindSessionsResponse> {
-    const local = this.#localSearch(input.query, input.limit, teamId);
+    const local = performanceSyncScope(this.ctx.id.toString(), "memory.local_search",
+      () => this.#localSearch(input.query, input.limit, teamId));
     let rows = local;
     if (this.env.HISTORY_AI_SEARCH !== undefined && !isExactHistoryIdentifierQuery(input.query)) {
       try {
-        const vector = await this.#sharedVectorSearch(input.query, input.limit, teamId);
+        const vector = await performanceStage("memory.vector_search",
+          () => this.#sharedVectorSearch(input.query, input.limit, teamId));
         // Prose queries are routed here for semantic retrieval; exact
         // identifiers already take the FTS-only path above. Keep the semantic
         // winner first and use lexical rows to broaden the remainder.
