@@ -1,5 +1,5 @@
 /** Request-local timings; never retain credentials or capability-bearing paths. */
-const timings = new WeakMap<Request, { id: string; path: string; start: number; stages: Record<string, number> }>();
+const timings = new WeakMap<Request, { id: string; path: string; start: number; epoch: number; stages: Record<string, number> }>();
 
 export function beginHandTiming(request: Request): void {
   const path = new URL(request.url).pathname;
@@ -8,7 +8,7 @@ export function beginHandTiming(request: Request): void {
   const endpoint = vm ? path.match(/^\/v1\/vm-host-attachments\/[^/]+\/[^/]+\/(tool-host|hands\/(?:host|ice|renew))$/)?.[1] : undefined;
   timings.set(request, { id: crypto.randomUUID(),
     path: vm ? `/v1/vm-host-attachments/:pool/:allocation/${endpoint ?? ":invalid"}` : path,
-    start: performance.now(), stages: {} });
+    start: performance.now(), epoch: Date.now(), stages: {} });
 }
 
 export function recordHandTiming(request: Request, name: string, duration: number): void {
@@ -27,7 +27,9 @@ export function finishHandTiming(request: Request, response: Response): Response
   timings.delete(request);
   timing.stages.total = performance.now() - timing.start;
   console.info({ type: "hand.request", request_id: timing.id, method: request.method,
-    path: timing.path, status: response.status, timings_ms: timing.stages });
+    path: timing.path, status: response.status, timings_ms: timing.stages,
+    started_at_ms: timing.epoch, finished_at_ms: Date.now(),
+    request_colo: typeof request.cf?.colo === "string" ? request.cf.colo : undefined });
   // Keep the upgraded socket while exposing the same correlation ID to native clients.
   const headers = new Headers(response.headers);
   headers.set("x-nanocodex-request-id", timing.id);

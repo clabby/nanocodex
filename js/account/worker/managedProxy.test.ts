@@ -148,6 +148,9 @@ test("screen proxy timing preserves authentication headers, response identity an
     assert.equal(logs.length, 1);
     assert.equal((logs[0] as { request_id: string }).request_id, "correlation-id");
     assert.equal(typeof (logs[0] as { backend_ms: number }).backend_ms, "number");
+    const span = logs[0] as { started_at_ms: number; finished_at_ms: number };
+    assert.ok(span.started_at_ms > 0);
+    assert.ok(span.finished_at_ms >= span.started_at_ms);
     assert.equal(JSON.stringify(logs).includes("private-"), false);
   } finally { console.info = original; }
 });

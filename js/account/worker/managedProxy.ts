@@ -27,11 +27,13 @@ export async function routeManaged(
   }
   try {
     const started = performance.now();
+    const startedAt = Date.now();
     const response = await env.NANOCODEX_BACKEND.fetch(request);
     if (/^\/v1\/account\/hands\/(?:screens|host|view|ice|renew)$/.test(url.pathname)) {
       console.info({ type: "hand.proxy", request_id: response.headers.get("x-nanocodex-request-id"),
         method: request.method, path: url.pathname, status: response.status,
-        backend_ms: performance.now() - started });
+        backend_ms: performance.now() - started, started_at_ms: startedAt, finished_at_ms: Date.now(),
+        request_colo: typeof request.cf?.colo === "string" ? request.cf.colo : undefined });
     }
     return response;
   } catch (error) {

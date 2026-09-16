@@ -15,6 +15,10 @@ it("redacts capability paths, queries, and credentials from Hand timing logs", (
       expect(response.headers.get("x-nanocodex-request-id")).toBeTruthy();
     }
     expect(log).toHaveBeenCalledTimes(3);
+    for (const [span] of log.mock.calls) {
+      expect(span.started_at_ms).toBeGreaterThan(0);
+      expect(span.finished_at_ms).toBeGreaterThanOrEqual(span.started_at_ms);
+    }
     expect(JSON.stringify(log.mock.calls)).not.toContain("secret-");
   } finally { log.mockRestore(); }
 });
