@@ -52,6 +52,8 @@ const requiredFiles = [
   "browser/agent.worker.mjs",
   "browser/workspace.mjs",
   "browser/workspace.d.mts",
+  "cloudflare/hand-admission.mjs",
+  "cloudflare/hand-admission.d.mts",
   "cloudflare/egress.mjs",
   "cloudflare/egress.d.mts",
   "cloudflare/egress-subject.mjs",
@@ -123,6 +125,8 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./browser/voice"]?.import, "./browser/Voice.mjs");
   assert.equal(packageJson.exports?.["./host"]?.import, "./host/index.mjs");
   assert.equal(packageJson.exports?.["./cloudflare"]?.import, "./cloudflare/index.mjs");
+  assert.equal(packageJson.exports?.["./cloudflare/hand-admission"]?.import, "./cloudflare/hand-admission.mjs");
+  assert.equal(packageJson.exports?.["./cloudflare/hand-admission"]?.types, "./cloudflare/hand-admission.d.mts");
   assert.equal(packageJson.exports?.["./managed"]?.import, "./managed/index.mjs");
   assert.equal(packageJson.exports?.["./connect"]?.import, "./cloud/index.mjs");
   assert.equal(packageJson.exports?.["./connect"]?.types, "./cloud/index.d.mts");
