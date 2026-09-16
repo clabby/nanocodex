@@ -8,9 +8,17 @@ const encoder = new TextEncoder();
 const observations = new WeakMap<Request, { requestId: string; mode: "live" | "access"; authenticated: boolean; duration: number; claims?: Claims }>();
 let cachedKey: { secret: string; promise: Promise<CryptoKey> } | undefined;
 
-/** Finite agent HTTP operations. Streams and sockets retain live handshake auth. */
+/** Finite agent operations and screen viewer admission. Publishers, renewal and
+ * agent streams retain live authentication; a viewer renews live every 10 s. */
 export function managedAccessRequest(request: Request): boolean {
   const path = new URL(request.url).pathname;
+  if (path === "/v1/account/hands/view") {
+    return request.method === "GET" && request.headers.get("upgrade")?.toLowerCase() === "websocket";
+  }
+  if (path === "/v1/account/hands/screens" || path === "/v1/account/hands/ice") {
+    return request.method === (path.endsWith("/screens") ? "GET" : "POST")
+      && !request.headers.has("upgrade");
+  }
   return /^\/v1\/agents(?:\/|$)/.test(path)
     && !request.headers.has("upgrade")
     && !request.headers.get("accept")?.includes("text/event-stream")
@@ -89,7 +97,7 @@ export async function observeManagedAccess(request: Request, env: ManagedAccessE
 /** Piggyback issuance on live-authenticated responses: no extra cold-path round trip. */
 export async function managedAccessResponse(request: Request, response: Response, env: ManagedAccessEnv): Promise<Response> {
   const observed = observations.get(request);
-  if (!observed || response.status === 101) return response;
+  if (!observed) return response;
   observations.delete(request);
   const headers = new Headers(response.headers);
   headers.set("x-nanocodex-request-id", observed.requestId);
@@ -106,5 +114,7 @@ export async function managedAccessResponse(request: Request, response: Response
     headers.set("x-nanocodex-access-ttl-ms", String(Math.max(0, observed.claims.expiresAt - Date.now())));
     headers.set("cache-control", "no-store");
   }
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers,
+    ...(response.status === 101 ? { webSocket: response.webSocket } : {}),
+  });
 }
