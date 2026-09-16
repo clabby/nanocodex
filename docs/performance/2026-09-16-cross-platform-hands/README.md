@@ -4,6 +4,10 @@
 
 The subsequent [VM mount path investigation](vm-mount-path.md) removes a measured
 1.3–1.7-second empty agent-pool lookup; complete after mounts were 2.94/1.83/1.60 s.
+The [screen boundary investigation](screen-upgrade-boundary.md) reduces cached
+viewer readiness from 1,058 ms to 366 ms median by verifying existing bounded
+authority locally before the broker upgrade. Two earlier routing variants were
+measured and reverted because they did not improve startup.
 
 The [Hand call and attachment report](hand-call-latency.md) records the deployed
 SQL/read reduction, router reuse, and the remaining transport/durability waits.
@@ -15,8 +19,9 @@ reuse, decoded WAN frames, and request-ID-correlated account proxy spans.
 | Linux spare replenishment | 10.3–10.9 s | 0.87–1.04 s | Cached immutable base plus private overlay; first base copy is still 7.2 s |
 | Native Hand call median | 407 ms | 446 ms | Two fewer SELECTs; no demonstrated end-to-end speedup |
 | Warm VM WebSocket connection | 1,305–1,368 ms | 979–983 ms | Repeated catalog discovery removed from attachment |
-| Complete warm VM mount | 2,955 ms | 3,096 ms repeat | No demonstrated overall speedup; 1,893 ms remains outside factory attachment |
+| Fresh-agent mount of a prepared VM, median | 3,178 ms | 1,832 ms | Three samples each; removes a traced 1.3–1.7 s empty-pool lookup; first after sample remained 2,937 ms |
 | Screen authentication | 189–196 ms live | No observed I/O wait with snapshot | Reuses credential-bound, 120-second authority; live renewal remains |
+| Cached screen viewer ready, median | 1,058 ms | 366 ms | Four interleaved samples each; local verification removes the managed call before the existing broker upgrade |
 | Linux native first decoded frame, median | 1,423 ms | 1,253 ms | Three-sample WAN cohorts, affected by host/network variation |
 | Linux VM first decoded frame, median | 1,530 ms | 1,182 ms | Three-sample WAN cohorts, affected by host/network variation |
 

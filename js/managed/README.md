@@ -29,12 +29,22 @@ before admission, preserving the credential, body and operation identity.
 
 Finite `/v1/agents` requests verify the signature locally. Their owning Session
 still checks local owner, organization, team, epoch, lifecycle and operation
-permissions. Streams, socket handshakes and account administration retain live
+permissions. Account screen viewers can also reuse a snapshot; publishers,
+ten-second viewer renewal, agent streams and account administration retain live
 authentication. Existing accepted work retains its established execution policy.
+
+The account Worker can verify viewer snapshots through the shared
+`nanocodex/cloudflare/managed-access` module and reach its existing screen broker
+directly. Configure the same `NANOCODEX_ACCESS_SECRET` in both the managed and
+account Workers. Missing configuration or an invalid snapshot preserves the
+original managed route and rejection protocol. This does not introduce a new
+principal cache or extend the snapshot lifetime.
 
 Account/key/membership changes prevent new snapshots immediately; an existing
 snapshot may authorize requests until expiry. Rotating `NANOCODEX_ACCESS_SECRET`
-invalidates all snapshots once the new deployment is active. No per-user instant
+in **both Workers** invalidates all snapshots once both updates are active. A
+one-sided update does not invalidate the other verifier's accepted snapshots.
+No per-user instant
 revocation of issued snapshots is implied. Local Session fencing remains in
 force. Tokens are never accepted for token renewal or as provider credentials.
 
