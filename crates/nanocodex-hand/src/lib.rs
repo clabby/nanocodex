@@ -5,4 +5,4 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::request;
+pub use macos::{main_display_index, request};

@@ -136,10 +136,22 @@ func snapshotDesktop(parent context.Context, width, height int) agentResult {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 	scale := math.Min(1, 1280/float64(max(width, height)))
+	// Use grim's JPEG encoder when available: avoid PNG compression, a full
+	// decode, and a second encode on every relay/agent observation.
+	direct := &boundedSnapshot{}
+	command := exec.CommandContext(ctx, "grim", "-t", "jpeg", "-q", "65", "-s", fmt.Sprintf("%.6f", scale), "-")
+	command.Stdout = direct
+	command.WaitDelay = time.Second
+	if command.Run() == nil {
+		config, err := jpeg.DecodeConfig(bytes.NewReader(direct.buffer.Bytes()))
+		if err == nil && ctx.Err() == nil && config.Width > 0 && config.Height > 0 && config.Width <= 1280 && config.Height <= 1280 {
+			return agentResult{Status: "ok", JPEG: base64.StdEncoding.EncodeToString(direct.buffer.Bytes()), Width: config.Width, Height: config.Height}
+		}
+	}
 	// Distribution builds of grim may advertise JPEG while disabling it at
 	// compile time. PNG is its baseline format; encode a bounded JPEG here only
 	// when the agent asks for an observation. The live H.264 path is unaffected.
-	command := exec.CommandContext(ctx, "grim", "-t", "png", "-l", "1", "-s", fmt.Sprintf("%.6f", scale), "-")
+	command = exec.CommandContext(ctx, "grim", "-t", "png", "-l", "1", "-s", fmt.Sprintf("%.6f", scale), "-")
 	captured := &boundedSnapshot{limit: 8_000_000}
 	command.Stdout = captured
 	command.WaitDelay = time.Second

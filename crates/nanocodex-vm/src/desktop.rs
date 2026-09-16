@@ -191,6 +191,7 @@ struct Runtime {
     socket: bool,
     auth: bool,
     wm_ready: bool,
+    display: bool,
     ready: bool,
 }
 impl Runtime {
@@ -231,6 +232,7 @@ impl Runtime {
             socket: false,
             auth: false,
             wm_ready: false,
+            display: false,
             ready: false,
         })
     }
@@ -248,6 +250,7 @@ impl Drop for Runtime {
     fn drop(&mut self) {
         for (owned, name) in [
             (self.ready, "ready"),
+            (self.display, "display"),
             (self.socket, "hand.sock"),
             (self.auth, "Xauthority"),
             (self.wm_ready, "wm-ready"),
@@ -449,6 +452,8 @@ fn serve_blocking(workspace: &Path, runtime_path: &Path, stop: Arc<AtomicBool>) 
     listener.set_nonblocking(true)?;
     let mut children = Children::new()?;
     let (connection, display) = start_x(&mut runtime, &mut children, &stop)?;
+    runtime.write_private("display", display.as_bytes())?;
+    runtime.display = true;
     let mut desktop = Desktop::new(connection, stop.clone())?;
     startup_ms.insert(
         "x_server".into(),
@@ -1150,6 +1155,20 @@ mod tests {
         assert!(UnixStream::connect(&socket).is_ok());
     }
     #[test]
+    fn failed_start_preserves_unowned_display_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let display = directory.path().join("display");
+        fs::write(&display, b":99").unwrap();
+        let mut runtime = Runtime::claim(directory.path()).unwrap();
+        runtime.write_private("Xauthority", b"owned").unwrap();
+        runtime.auth = true;
+        assert!(runtime.write_private("display", b":0").is_err());
+        drop(runtime);
+        assert_eq!(fs::read(display).unwrap(), b":99");
+        assert!(!directory.path().join("Xauthority").exists());
+    }
+    #[test]
     fn runtime_rejects_symlinks_and_public_directories() {
         let directory = tempfile::tempdir().unwrap();
         let alias = directory.path().join("alias");
@@ -1355,4 +1374,64 @@ mod tests {
         assert!(!runtime.join("Xauthority").exists());
         assert!(!Path::new(&socket).exists());
     }
+}
+
+/// Continuous X11 capture runs separately from the serialized input owner.
+/// The encoder has no account credentials, no audio input, and no frame queue.
+pub fn video_command(runtime: &Path) -> Result<Command> {
+    let display = fs::read_to_string(runtime.join("display"))?;
+    if !display.starts_with(':')
+        || display.len() > 6
+        || !display[1..].bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(invalid("invalid desktop display"));
+    }
+    let mut command = Command::new("ffmpeg");
+    command.env("XAUTHORITY", runtime.join("Xauthority")).args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-f",
+        "x11grab",
+        "-framerate",
+        "60",
+        "-video_size",
+        "1280x800",
+        "-draw_mouse",
+        "1",
+        "-i",
+        &display,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "zerolatency",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "baseline",
+        "-level",
+        "3.2",
+        "-b:v",
+        "6M",
+        "-maxrate",
+        "6M",
+        "-bufsize",
+        "100k",
+        "-g",
+        "30",
+        "-bf",
+        "0",
+        "-x264-params",
+        "aud=1:repeat-headers=1:scenecut=0",
+        "-flush_packets",
+        "1",
+        "-f",
+        "h264",
+        "pipe:1",
+    ]);
+    Ok(command)
 }

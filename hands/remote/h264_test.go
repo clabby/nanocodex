@@ -5,6 +5,7 @@ import (
 	"io"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
@@ -15,7 +16,8 @@ func TestWaymotePipeBecomesBrowserSizedRTP(t *testing.T) {
 	second := []byte{0, 0, 1, 9, 0xf0, 0, 0, 0, 1, 0x41, 0x35}
 	stream := append(append([]byte{}, first...), second...)
 	for _, reader := range []io.Reader{bytes.NewReader(stream), iotest.HalfReader(bytes.NewReader(stream))} {
-		forwarder := h264Forwarder{}
+		clock := time.Unix(0, 0)
+		forwarder := h264Forwarder{now: func() time.Time { value := clock; clock = clock.Add(20 * time.Millisecond); return value }}
 		decoder := codecs.H264Packet{}
 		var decoded []byte
 		count, markers := 0, 0
@@ -24,7 +26,7 @@ func TestWaymotePipeBecomesBrowserSizedRTP(t *testing.T) {
 			if packet.MarshalSize() > 1200 {
 				t.Fatal("oversized WebRTC packet")
 			}
-			if packet.Timestamp != uint32((markers+1)*1500) || packet.SequenceNumber != uint16(count) {
+			if packet.Timestamp != uint32((markers+1)*1800) || packet.SequenceNumber != uint16(count) {
 				t.Fatal("invalid video clock or packet sequence")
 			}
 			if packet.Marker {
@@ -62,5 +64,33 @@ func TestWaymotePipeBoundsAndSplitDelimiters(t *testing.T) {
 		if err := (&h264Forwarder{}).read(bytes.NewReader(data), func(*rtp.Packet) error { t.Fatal("invalid frame emitted"); return nil }); err == nil {
 			t.Fatal("invalid stream accepted")
 		}
+	}
+}
+
+func TestVideoClockIncludesSkippedCaptureTime(t *testing.T) {
+	unit := []byte{0, 0, 0, 1, 9, 0xf0, 0, 0, 1, 0x65, 0x35}
+	times := []time.Duration{0, 20 * time.Millisecond, 220 * time.Millisecond}
+	forwarder := h264Forwarder{now: func() time.Time { next := times[0]; times = times[1:]; return time.Unix(0, int64(next)) }}
+	var stamps []uint32
+	err := forwarder.read(bytes.NewReader(append(append([]byte{}, unit...), unit...)), func(packet *rtp.Packet) error {
+		if packet.Marker {
+			stamps = append(stamps, packet.Timestamp)
+		}
+		return nil
+	})
+	if err != nil || len(stamps) != 2 || stamps[1]-stamps[0] != 18000 {
+		t.Fatalf("encoder stall was hidden from receiver clock: %v, %v", stamps, err)
+	}
+}
+
+func TestVideoClockSurvivesLongRunningPublisherAndRTPWrap(t *testing.T) {
+	unit := []byte{0, 0, 0, 1, 9, 0xf0, 0, 0, 1, 0x65, 0x35}
+	times := []time.Duration{0, 36 * time.Hour}
+	forwarder := h264Forwarder{now: func() time.Time { next := times[0]; times = times[1:]; return time.Unix(0, int64(next)) }}
+	var stamp uint32
+	err := forwarder.read(bytes.NewReader(unit), func(packet *rtp.Packet) error { stamp = packet.Timestamp; return nil })
+	ticks := uint64(36*60*60) * 90000
+	if err != nil || stamp != uint32(ticks) {
+		t.Fatalf("long-running clock overflow: %d, %v", stamp, err)
 	}
 }

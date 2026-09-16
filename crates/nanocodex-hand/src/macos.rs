@@ -28,6 +28,23 @@ fn error(message: &str) -> Error {
 const CAPTURE_PERMISSION: &str = "macOS screen capture unavailable: enable Screen & System Audio Recording for this application in System Settings > Privacy & Security, then relaunch it if macOS requests it";
 const INPUT_PERMISSION: &str = "macOS input unavailable: enable Accessibility for this application in System Settings > Privacy & Security";
 
+/// AVFoundation enumerates capture screens in CoreGraphics active-display order.
+/// Resolve the same main display used by screenshots and normalized input.
+pub fn main_display_index() -> Result<usize> {
+    let mut displays = [0; 32];
+    let mut count = 0;
+    // SAFETY: the array and count remain writable for this synchronous call.
+    let status =
+        unsafe { CGGetActiveDisplayList(displays.len() as u32, displays.as_mut_ptr(), &mut count) };
+    if status != CGError::Success || count as usize > displays.len() {
+        return Err(error("active displays unavailable"));
+    }
+    displays[..count as usize]
+        .iter()
+        .position(|id| *id == CGMainDisplayID())
+        .ok_or_else(|| error("main display unavailable"))
+}
+
 #[derive(Default)]
 struct Held {
     keys: BTreeSet<u16>,
@@ -36,9 +53,21 @@ struct Held {
 }
 static HELD: OnceLock<Mutex<Held>> = OnceLock::new();
 
-/// All requests, including validation failures and release, share one input lock.
+/// Input, validation failures, and release share one input lock. Pure screen
+/// observations do not hold it while ScreenCaptureKit captures or JPEG encodes.
 /// No permission prompts are opened here; preflight checks return diagnostics.
 pub fn request(input: Value) -> Result<Value> {
+    // Live viewers must not make key-up or pointer events wait behind a screen
+    // capture. Only the exact read-only request can take this path; malformed
+    // actions and compound agent operations retain serialized validation/input.
+    let observation_error = if input == json!({"action":"observe"}) {
+        match autoreleasepool(|_| capture()) {
+            Ok(frame) => return Ok(frame),
+            Err(error) => Some(error),
+        }
+    } else {
+        None
+    };
     let lock = HELD.get_or_init(|| Mutex::new(Held::default()));
     let mut held = match lock.lock() {
         Ok(held) => held,
@@ -51,6 +80,11 @@ pub fn request(input: Value) -> Result<Value> {
             ));
         }
     };
+    if let Some(error) = observation_error {
+        // Preserve the existing failure cleanup, including permission changes.
+        let _ = held.release();
+        return Err(error);
+    }
     let result = autoreleasepool(|_| {
         let request: Request =
             serde_json::from_value(input).map_err(|_| error("invalid macOS screen request"))?;

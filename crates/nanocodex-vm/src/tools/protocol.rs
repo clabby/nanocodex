@@ -63,6 +63,7 @@ pub(crate) enum SessionResponse {
     ReadFile(ReadFileResponse),
     Memory(MemoryResponse),
     Execute(ExecuteResponse),
+    Output(OutputChunk),
     Cancel(ControlResponse),
     TerminateToolProcesses(ControlResponse),
     Shutdown(ControlResponse),
@@ -81,6 +82,7 @@ impl SessionResponse {
             Self::ReadFile(response) => response.id,
             Self::Memory(response) => response.id,
             Self::Execute(response) => response.id,
+            Self::Output(response) => response.id,
         }
     }
 }
@@ -150,6 +152,8 @@ pub(crate) struct ExecuteRequest {
     pub max_output_bytes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout_mirror: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream_stdout: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_mirror: Option<String>,
 }
@@ -199,6 +203,14 @@ pub(crate) struct ExecuteResponse {
     pub error: Option<String>,
     pub timed_out: bool,
     pub output_limit_exceeded: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutputChunk {
+    pub id: u64,
+    #[serde(with = "wire_bytes")]
+    pub data: Vec<u8>,
 }
 
 mod wire_bytes {
@@ -466,6 +478,7 @@ mod tests {
             timeout_millis: 60_000,
             max_output_bytes: 8_388_608,
             stdout_mirror: None,
+            stream_stdout: false,
             stderr_mirror: None,
         });
         assert_eq!(

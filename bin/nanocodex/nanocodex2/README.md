@@ -267,6 +267,26 @@ Docker Hands default to **offline**. `--network internet` explicitly enables
 ordinary Docker bridge networking, including any destinations that network can
 reach. This mode does not enforce broker-only egress. Account signaling and
 screen publication remain in the host process and work with an offline guest.
+
+Rust native and VM/Docker screens default to continuous H.264/WebRTC at 60 Hz.
+Install FFmpeg on native hosts; desktop guest images already include it. macOS
+uses AVFoundation capture of the main display and VideoToolbox encoding; Linux
+uses X11 capture and low-latency x264. Keyboard/control use a reliable WebRTC
+channel, and pointer motion keeps only the latest event. Capture runs separately
+from input and agent observations. Agent screenshots retain their bounded JPEG
+contract. Actual decoded frame rate depends on capture, CPU/GPU, and network.
+
+Upgrade the CLI and guest runtime together to enable video in VMs and Docker
+Hands. The host recognizes older desktops and retains `frames-v1` compatibility;
+missing or unavailable encoders also fall back to screenshots. Encoded guest
+stdout travels over the existing private control channel, with bounded queues,
+backpressure cancellation, and no need to enable guest networking. Account and
+WebRTC credentials stay on the host.
+
+Optional host settings `NANOCODEX_VIDEO_INTERFACE`, `NANOCODEX_VIDEO_IPV4_ONLY=1`,
+and `NANOCODEX_VIDEO_UDP_PORTS=50032-50127` constrain ICE candidates and firewall
+ports. Defaults use all interfaces, both address families, and ephemeral ports.
+These settings are host configuration; do not put host interface names in images.
 A future broker-only mode must enforce its network boundary, not rely on proxy
 environment variables. `--runtime runsc` selects an installed Docker
 runtime without fallback; gVisor/desktop compatibility must be checked on that
