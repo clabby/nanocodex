@@ -154,3 +154,54 @@ test("screen proxy timing preserves authentication headers, response identity an
     assert.equal(JSON.stringify(logs).includes("private-"), false);
   } finally { console.info = original; }
 });
+
+
+test("configured viewers use one authorized broker upgrade without the managed fetch bridge", async () => {
+  const request = new Request("https://nanocodex.localhost/v1/account/hands/view?generation=private-generation", {
+    headers: { upgrade: "websocket", "x-nanocodex-owner-id": "forged-owner" },
+  });
+  const internal = new Request("https://account-tools.internal/hands/view?generation=private-generation", {
+    headers: { upgrade: "websocket", "x-nanocodex-owner-id": "authorized-owner" },
+  });
+  let admissions = 0; let brokerFetches = 0;
+  const response = await routeManaged(request, {
+    NANOCODEX_BACKEND: { fetch() { throw new Error("must not bridge a viewer"); }, connect() { throw new Error("unused"); } },
+    NANOCODEX_HAND_ADMISSION: { async prepare(candidate) {
+      assert.equal(candidate, request); admissions++;
+      return { ownerId: "authorized-owner", request: internal, headers: [["x-nanocodex-request-id", "direct-id"]] };
+    } },
+    NANOCODEX_HAND_BROKER: { getByName(owner) {
+      assert.equal(owner, "authorized-owner");
+      return { async fetch(candidate) { assert.equal(candidate, internal); brokerFetches++; return new Response(null, { status: 204 }); } };
+    } },
+  }, new URL(request.url));
+  assert.equal(response?.status, 204);
+  assert.ok(response);
+  assert.equal(response.headers.get("x-nanocodex-request-id"), "direct-id");
+  assert.equal(admissions, 1); assert.equal(brokerFetches, 1);
+});
+
+test("a failed broker upgrade never falls back to a second admission", async () => {
+  const request = new Request("https://nanocodex.localhost/v1/account/hands/view", { headers: { upgrade: "websocket" } });
+  let fallback = 0; let brokerFetches = 0;
+  const response = await routeManaged(request, {
+    NANOCODEX_BACKEND: { async fetch() { fallback++; return new Response(null); }, connect() { throw new Error("unused"); } },
+    NANOCODEX_HAND_ADMISSION: { async prepare() { return { ownerId: "account", request, headers: [] }; } },
+    NANOCODEX_HAND_BROKER: { getByName() { return { async fetch() { brokerFetches++; throw new Error("connection lost"); } }; } },
+  }, new URL(request.url));
+  assert.equal(response?.status, 503);
+  assert.equal(fallback, 0); assert.equal(brokerFetches, 1);
+});
+
+test("publisher and incomplete deployment bindings retain the original managed route", async () => {
+  for (const endpoint of ["view", "host"]) {
+    const request = new Request(`https://nanocodex.localhost/v1/account/hands/${endpoint}`, { headers: { upgrade: "websocket" } });
+    let fallback = 0;
+    const response = await routeManaged(request, {
+      NANOCODEX_BACKEND: { async fetch(candidate: Request) { assert.equal(candidate, request); fallback++; return new Response(null, { status: 204 }); }, connect() { throw new Error("unused"); } },
+      NANOCODEX_HAND_ADMISSION: { async prepare() { throw new Error("must not admit"); } },
+      ...(endpoint === "host" ? { NANOCODEX_HAND_BROKER: { getByName() { throw new Error("must not admit"); } } } : {}),
+    }, new URL(request.url));
+    assert.equal(response?.status, 204); assert.equal(fallback, 1);
+  }
+});
