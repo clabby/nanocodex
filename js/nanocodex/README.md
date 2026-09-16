@@ -1193,7 +1193,7 @@ login and call them directly without creating an agent or running a turn:
 
 ```js
 const connection = await client.connection.connect({
-  capabilities: { cloudAccounts: ["spotify", "soundcloud"] },
+  capabilities: { cloudAccounts: { spotify: true, soundcloud: true } },
 });
 const response = await client.connectors.spotify.request({
   path: "/v1/me/playlists?limit=20",
