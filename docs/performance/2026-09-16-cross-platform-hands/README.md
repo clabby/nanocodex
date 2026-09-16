@@ -4,8 +4,8 @@
 
 The subsequent [VM mount path investigation](vm-mount-path.md) removes a measured
 1.3–1.7-second empty agent-pool lookup; complete after mounts were 2.94/1.83/1.60 s.
-The [screen boundary investigation](screen-upgrade-boundary.md) reduces cached
-viewer readiness from 1,058 ms to 366 ms median by verifying existing bounded
+The [local viewer authority report](screen-local-authority.md) records cached
+viewer readiness falling from 1,058 ms to 366 ms median by verifying existing bounded
 authority locally before the broker upgrade. Two earlier routing variants were
 measured and reverted because they did not improve startup.
 
