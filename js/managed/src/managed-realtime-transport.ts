@@ -28,7 +28,7 @@ type ManagedRealtimeTransportEnv = AccountAuthEnv & {
   };
   NANOCODEX_SESSIONS: {
     get(id: DurableObjectId): Fetcher & {
-      resolveCredentialSubject?(assertions: Record<string, string>): Promise<unknown>;
+      resolveCredentialSubject?(assertions: Record<string, string>, traceId?: string): Promise<unknown>;
     };
     idFromName(name: string): DurableObjectId;
   };
@@ -84,7 +84,7 @@ export async function routeManagedRealtimeTransport(
     owned = typeof stub.resolveCredentialSubject === "function"
       ? await withHardDeadline("managed Realtime ownership assertion", ownershipTimeoutMs,
         async () => validateSessionCredentialSubject(
-          await stub.resolveCredentialSubject!(Object.fromEntries(ownershipHeaders)), durableId.toString(),
+          await stub.resolveCredentialSubject!(Object.fromEntries(ownershipHeaders), voiceSessionId), durableId.toString(),
         ))
       : await fetchResponseWithDeadline(
         stub,

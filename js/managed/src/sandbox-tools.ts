@@ -1,4 +1,5 @@
 import { getSandbox, type ProcessOptions } from "@cloudflare/sandbox";
+import { performanceScope, performanceStage } from "./performance";
 import type { ToolMap } from "nanocodex";
 import {
   EXEC_COMMAND_PARAMETERS,
@@ -200,7 +201,11 @@ export async function prepareCloudflareSandbox(
  * read-only logical mount roots. The trees remain separate R2 prefixes and are
  * mounted rather than copied or synchronized.
  */
-export async function prepareCloudflareSandboxHand(
+export function prepareCloudflareSandboxHand(...args: Parameters<typeof prepareMeasuredCloudflareSandboxHand>): ReturnType<typeof prepareMeasuredCloudflareSandboxHand> {
+  return performanceScope(args[1], "sandbox.prepare", () => prepareMeasuredCloudflareSandboxHand(...args));
+}
+
+async function prepareMeasuredCloudflareSandboxHand(
   namespace: DurableObjectNamespace<Sandbox>,
   resourceId: string,
   mounts: readonly CloudflareSandboxNamespaceMount[],
@@ -209,7 +214,7 @@ export async function prepareCloudflareSandboxHand(
   accountSubject?: string,
   desktop?: { owner: string; name: string },
 ): Promise<void> {
-  if (accountSubject !== undefined) await sandboxHandle(namespace, resourceId).bindAccountEgress(accountSubject);
+  if (accountSubject !== undefined) await performanceStage("sandbox.bind_egress", () => sandboxHandle(namespace, resourceId).bindAccountEgress(accountSubject));
   const normalized = validateNamespaceMounts(mounts);
   if (brainWorkspace === undefined) {
     throw new Error("Cloudflare namespace requires a shared brain workspace");
@@ -222,7 +227,7 @@ export async function prepareCloudflareSandboxHand(
     normalized,
     brain,
   );
-  if (desktop) await configureDesktop(namespace, resourceId, desktop);
+  if (desktop) await performanceStage("sandbox.desktop", () => configureDesktop(namespace, resourceId, desktop));
 }
 
 async function configureDesktop(namespace: DurableObjectNamespace<Sandbox>, resourceId: string, desktop: { owner: string; name: string }) {
@@ -672,7 +677,7 @@ async function prepareSandboxNamespace(
   mounts: readonly CloudflareSandboxNamespaceMount[],
   brainWorkspace?: CloudflareBrainWorkspace,
 ): Promise<Sandbox> {
-  const sandbox = await prepareSandbox(namespace, sessionId, localBucket);
+  const sandbox = await performanceStage("sandbox.workspace_ready", () => prepareSandbox(namespace, sessionId, localBucket));
   const localMounts = localBucket
     ? localSandboxMountRegistry(namespace, sessionId)
     : undefined;
@@ -681,16 +686,16 @@ async function prepareSandboxNamespace(
   if (local === undefined) {
     throw new Error("Cloudflare namespace does not contain its executing hand");
   }
-  await ensureWorkspaceAlias(sandbox, local.root);
+  await performanceStage("sandbox.workspace_alias", () => ensureWorkspaceAlias(sandbox, local.root));
   if (brainWorkspace === undefined) {
     throw new Error("Cloudflare namespace requires a shared brain workspace");
   }
-  await ensureBrainWorkspaceMount(
+  await performanceStage("sandbox.brain_mount", () => ensureBrainWorkspaceMount(
     sandbox,
     validateBrainWorkspace(brainWorkspace),
     localBucket,
     localMounts,
-  );
+  ));
   for (const peer of normalized) {
     if (peer.resourceId === sessionId) continue;
     await ensurePeerWorkspaceMount(sandbox, peer, localBucket, localMounts);

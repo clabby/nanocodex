@@ -1,8 +1,9 @@
 import { fetchResponseWithDeadline } from "./deadline";
+import { performanceStage } from "./performance";
 
 /** One live read shared by runtime discovery and first-turn environment context. */
 export function accountCatalog(broker: Fetcher, userId: string): Promise<unknown> {
-  return fetchResponseWithDeadline(
+  return performanceStage("account.catalog", () => fetchResponseWithDeadline(
     broker,
     `https://broker.internal/users/${encodeURIComponent(userId)}/catalog`,
     {},
@@ -19,5 +20,5 @@ export function accountCatalog(broker: Fetcher, userId: string): Promise<unknown
       }
       return value;
     },
-  );
+  ));
 }

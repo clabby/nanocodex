@@ -281,6 +281,7 @@ import {
 } from "./durable-memory";
 import { memorySessionTools } from "./memory-session-tools";
 import { ManagedStartupContext } from "./startup-context";
+import { performanceScope, performanceSyncScope, performanceStage, performanceRead, performanceState } from "./performance";
 import { managedPromptCacheKey } from "./prompt-cache-key";
 import { MemoryScope, MEMORY_INITIALIZE_ASSERTION } from "./memory-scope";
 export { MemoryScope } from "./memory-scope";
@@ -340,6 +341,7 @@ export interface Env extends
   AccountAuthEnv,
   ChiefOfStaffPrincipalEnv,
   HostPrincipalEnv {
+  NANOCODEX_PERFORMANCE_TRACE?: string;
   NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
   NANOCODEX_ACCOUNT_TOOLS: DurableObjectNamespace<AccountHostedTools>;
   NANOCODEX_TURN_KEY_ID?: string;
@@ -1285,7 +1287,13 @@ async function managedFetch(
   ctx: Pick<ExecutionContext, "waitUntil">,
   trustedAgentPrincipal?: Principal,
 ): Promise<Response> {
-  return managedAccessResponse(request, await managedFetchRoute(request, env, ctx, trustedAgentPrincipal), env);
+  const began = performance.now();
+  const response = await managedAccessResponse(request, await managedFetchRoute(request, env, ctx, trustedAgentPrincipal), env);
+  const path = new URL(request.url).pathname;
+  if (path.startsWith("/v1/agents")) console.info({ type: "managed.request",
+    request_id: response.headers.get("x-nanocodex-request-id"), method: request.method,
+    path, status: response.status, duration_ms: performance.now() - began });
+  return response;
 }
 
 async function managedFetchRoute(
@@ -2878,6 +2886,7 @@ export class DurableAgentSession extends DurableComputerSession {
   #runtimeOwnershipGeneration = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
+    if (env.NANOCODEX_PERFORMANCE_TRACE === "true") ctx = performanceState(ctx);
     super(ctx, env);
     initializeTurnInputs(ctx.storage, "managed_history_projection_chunks");
     this.#cronTriggers = new CronTriggers(ctx.storage);
@@ -3114,8 +3123,9 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   /** Private RPC: live ownership without serializing a streamed HTTP body. */
-  resolveCredentialSubject(assertions: Record<string, string>):
+  resolveCredentialSubject(assertions: Record<string, string>, traceId?: string):
     { subject: string; strategy: "session_v1" | "directory_v1" } | undefined {
+    return performanceSyncScope(traceId && /^[0-9a-f-]{36}$/.test(traceId) ? traceId : this.ctx.id.toString(), "voice.ownership", () => {
     const asserted = forwardedPrincipal(new Headers(assertions));
     const session = this.#session();
     if (!asserted || !session
@@ -3134,6 +3144,7 @@ export class DurableAgentSession extends DurableComputerSession {
       exported: this.#durabilityExported, importPending: false,
     }) === undefined) return undefined;
     return { subject, strategy: direct ? "session_v1" : "directory_v1" };
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -6053,6 +6064,10 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   async #startManagedTurn(row: ManagedTurnRow, replayed: boolean): Promise<ManagedTurnRow> {
+    return performanceScope(row.id, "turn.admission", () => this.#startMeasuredManagedTurn(row, replayed));
+  }
+
+  async #startMeasuredManagedTurn(row: ManagedTurnRow, replayed: boolean): Promise<ManagedTurnRow> {
     const admissionStartedAt = performance.now();
     await this.#settingsMutationTail;
     const latest = this.#managedTurn(row.id);
@@ -6744,7 +6759,7 @@ export class DurableAgentSession extends DurableComputerSession {
     if (session?.runtime_profile === "managed" && accountToolsEnabled(this.#configuration())) {
       const refreshStartedAt = performance.now();
       await Promise.all([
-        this.#refreshAccountMcpConnections(session, catalog),
+        performanceStage("account.mcp_discovery", () => this.#refreshAccountMcpConnections(session, catalog)),
         this.#refreshAccountHostedTools(session),
       ]);
       accountMcpRefreshMs = roundMilliseconds(performance.now() - refreshStartedAt);
@@ -6945,7 +6960,7 @@ export class DurableAgentSession extends DurableComputerSession {
           : this.#authorizationForToolContext(context),
       ),
     );
-    await this.#accountHostedTools.refresh();
+    await performanceStage("account.hosted_tools", () => this.#accountHostedTools!.refresh());
   }
 
   #managedBrowserRuntime(session: SessionRow): Promise<ManagedBrowserRuntime> {
@@ -9020,12 +9035,12 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   #session(): SessionRow | undefined {
-    return this.ctx.storage.sql.exec<SessionRow>(
+    return performanceRead("session_state", () => this.ctx.storage.sql.exec<SessionRow>(
       `SELECT session_id, owner_id, organization_id, team_id, authorization_epoch, public_origin,
               runtime_profile, accepted_turns, completed_turns, last_active, stream_error
        FROM session_state WHERE singleton = 1`,
       )
-      .toArray()[0];
+      .toArray()[0]);
   }
 
   #settings(): ManagedAgentSettings {
@@ -9179,12 +9194,12 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   #initializationOwnership(): SessionInitializationOwnership | undefined {
-    return this.ctx.storage.sql
+    return performanceRead("session_initialization_ownership", () => this.ctx.storage.sql
       .exec<SessionInitializationOwnership>(
         `SELECT session_id, owner_id, runtime_profile, state
        FROM session_initialization_ownership WHERE singleton = 1`,
       )
-      .toArray()[0];
+      .toArray()[0]);
   }
 
   #sessionId(): string | undefined {

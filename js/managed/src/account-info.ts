@@ -1,4 +1,5 @@
 import { connectorToolMetadata } from "./connector-tools";
+import { performanceStage } from "./performance";
 import type { X_API } from "nanocodex-tools/x";
 import type { HostedMachine } from "./hosted-tools-protocol";
 
@@ -124,7 +125,7 @@ export async function accountInfo(
         }
         return response.json();
       })(),
-      accountVault(binding, encodedUserId, signal),
+      performanceStage("account.vault", () => accountVault(binding, encodedUserId, signal)),
     ]);
     signal?.throwIfAborted();
     const statuses = connectorStatuses(connectorMetadata);

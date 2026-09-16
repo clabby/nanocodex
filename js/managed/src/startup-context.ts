@@ -1,6 +1,7 @@
 import type { AgentSessionContext, PromptInput } from "nanocodex";
 import type { Agent } from "nanocodex/cloudflare";
 import { withHardDeadline } from "./deadline";
+import { performanceStage } from "./performance";
 import type { AccountInfo } from "./account-info";
 
 type StartupToolName = "find_session" | "memory";
@@ -97,13 +98,13 @@ export class ManagedStartupContext {
   ): Promise<void> {
     const calls = this.calls(turnId);
     if (calls.length === 0 || this.context(turnId)) return;
-    const [resolvedEnvironment] = await Promise.all([environment(), Promise.all(calls.map(async (call) => {
+    const [resolvedEnvironment] = await Promise.all([performanceStage("startup.environment", environment), Promise.all(calls.map(async (call) => {
       if (call.result_json !== null) return;
       assertActive();
       const cached = this.prefetchKey === `${call.scope}\n${authorizationKey}`
         ? this.prefetched.get(`${call.name}:${call.input_json}`) : undefined;
       const prepared = cached && cached.expiresAt > Date.now() ? await cached.pending.catch(() => undefined) : undefined;
-      const { result, success, durationNS } = prepared?.success ? prepared : await lookup(call.name, call.input_json, execute);
+      const { result, success, durationNS } = prepared?.success ? prepared : await performanceStage(`startup.${call.name}`, () => lookup(call.name, call.input_json, execute));
       assertActive();
       if (prepared?.success) adopt?.(call.name, result);
       this.storage.sql.exec(`UPDATE managed_prompt_startup_tools

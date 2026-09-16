@@ -356,8 +356,10 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   }> {
     const startedAt = Date.now();
     const resolveId = crypto.randomUUID();
+    let operationAt = startedAt;
     const result = await this.#exclusive(async () => {
       await this.#ready;
+      operationAt = Date.now();
       try {
         return { status: 200, credential: await this.#credential(
           recover === true, Number.isSafeInteger(revision) ? revision : undefined,
@@ -367,7 +369,9 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         return { status: problem.status, credential: null };
       }
     });
-    console.info({ type: "egress.credential.rpc", resolve_id: resolveId, status: result.status });
+    console.info({ type: "egress.credential.rpc", resolve_id: resolveId, status: result.status,
+      queue_ms: operationAt - startedAt, operation_ms: Date.now() - operationAt,
+      activation_ms: this.#activationMs, activation_age_ms: Date.now() - this.#activatedAt });
     return {
       resolve_id: resolveId,
       ...result,
