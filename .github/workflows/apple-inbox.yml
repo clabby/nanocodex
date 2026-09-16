@@ -46,6 +46,8 @@ jobs:
         run: swift test --package-path apple/NanocodexRemote
       - name: Build shared desktop runtime and dependencies
         run: pnpm exec turbo run build --filter=@nanocodex/desktop-runtime
+      - name: Build shared computer Hand helper
+        run: cargo build --release --locked -p nanocodex2-bin --bin nanocodex2
       - name: Build native computer companion
         run: pnpm build:computer
       - name: Prepare bundled Mac runtime
