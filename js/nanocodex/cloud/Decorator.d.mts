@@ -13,6 +13,13 @@ export type ConnectActions<connection extends Connection | HostConnection = Conn
   account: { logout(): logout.ReturnType };
   agent: { create(options: createAgent.Options): Promise<createAgent.ReturnType> };
   connector: { request(options: connectorRequest.Options): connectorRequest.ReturnType };
+  connectors: {
+    request(options: connectorRequest.Options): connectorRequest.ReturnType;
+  } & {
+    readonly [service in connectorRequest.Options["connector"]]: {
+      request(options: Omit<connectorRequest.Options, "connector">): connectorRequest.ReturnType;
+    };
+  };
   connection: {
     connect(options: connect.Options): Promise<connection>;
     disconnect(options?: disconnect.Options | undefined): disconnect.ReturnType;

@@ -16,6 +16,8 @@ const CLOUD_ACCOUNT_PROVIDERS = Object.freeze([
   "soundcloud",
   "chatgpt",
 ]);
+export const API_CONNECTORS = Object.freeze(CLOUD_ACCOUNT_PROVIDERS.filter(provider => provider !== "chatgpt"));
+
 const MCP_CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
 const AGENT_CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CATALOG_DIGEST = /^0x[0-9a-f]{64}$/;

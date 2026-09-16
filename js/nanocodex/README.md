@@ -1195,8 +1195,7 @@ login and call them directly without creating an agent or running a turn:
 const connection = await client.connection.connect({
   capabilities: { cloudAccounts: ["spotify", "soundcloud"] },
 });
-const response = await client.connector.request({
-  connector: "spotify",
+const response = await client.connectors.spotify.request({
   path: "/v1/me/playlists?limit=20",
   // Select an approved account when more than one is connected:
   connectionId: connection.grant.connectorConnections.spotify[0],
@@ -1205,8 +1204,12 @@ if (!response.ok) throw new Error(`Spotify returned ${response.status}`);
 const playlists = await response.json();
 ```
 
-`client` is a `Client.create(...)` instance from `nanocodex/connect`. The standalone
-form is `Actions.connector.request(client, options)`. Requests support a provider
+`client` is a `Client.create(...)` instance from `nanocodex/connect`. For a dynamic service, use
+`client.connectors.request({ connector: "spotify", path: "/v1/me/playlists" })`.
+The standalone form is `Actions.connectors.request(client, options)`.
+Every API service has a scoped entry point, including `client.connectors.gmail`
+and `client.connectors.soundcloud`. The original singular `client.connector.request`
+and `Actions.connector.request` remain supported. Requests support a provider
 path, HTTP method, optional `connectionId`, JSON object `body`, and abort `signal`.
 The response preserves provider HTTP status, body, and pagination/rate-limit
 headers. Writes are never automatically retried.

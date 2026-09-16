@@ -212,3 +212,14 @@ playlistResponse satisfies Response;
 Actions.connector.request(explicitClient, { connector: "soundcloud", path: "/me/playlists", connectionId: "opaque" });
 // @ts-expect-error ChatGPT does not expose a connector HTTP API
 explicitClient.connector.request({ connector: "chatgpt", path: "/" });
+
+const scopedPlaylistResponse: Response = await explicitClient.connectors.spotify.request({ path: "/v1/me/playlists", connectionId: "opaque" });
+explicitClient.connectors.gmail.request({ path: "/gmail/v1/users/me/messages" });
+explicitClient.connectors.request({ connector: "soundcloud", path: "/me/playlists" });
+Actions.connectors.request(explicitClient, { connector: "spotify", path: "/v1/me" });
+// @ts-expect-error ChatGPT is not a resource API connector.
+explicitClient.connectors.chatgpt.request({ path: "/" });
+// @ts-expect-error A scoped request cannot override the selected provider.
+explicitClient.connectors.spotify.request({ connector: "gmail", path: "/v1/me" });
+// @ts-expect-error A provider-relative path is required.
+explicitClient.connectors.spotify.request({ method: "GET" });

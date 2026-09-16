@@ -1,7 +1,6 @@
-const SERVICES = new Set([
-  "github", "gmail", "gdrive", "gcalendar", "gtasks", "gdocs", "gsheets",
-  "gslides", "gcontacts", "slack", "x", "spotify", "soundcloud",
-]);
+import { API_CONNECTORS } from "../internal.mjs";
+
+const SERVICES = new Set(API_CONNECTORS);
 
 /** Calls an opted-in service using the current app grant, without an agent turn. */
 export async function request(client, options) {

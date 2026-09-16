@@ -160,3 +160,38 @@ test("app connector requests use the Connect session without an agent turn", asy
   await assert.rejects(client.connector.request({ connector: "spotify", path: "//evil.example" }), /provider-relative/);
   assert.equal(seen.length, 2);
 });
+
+
+test("plural and provider-scoped connector APIs keep the current grant and exact account", async () => {
+  const { Client, Dialog, Transport, Actions } = await import("../cloud/index.mjs");
+  const seen = [];
+  const client = Client.create({ appId: "playlist-app", appOrigin: "https://app.example.com",
+    dialog: Dialog.memory(), session: false,
+    transport: Transport.http("https://api.nanocodex.xyz", { fetch: async (input, init) => {
+      seen.push(new Request(input, init));
+      return Response.json({ error: "rate limited" }, { status: 429, headers: { "retry-after": "5" } });
+    } }),
+  });
+  const services = ["github", "gmail", "gdrive", "gcalendar", "gtasks", "gdocs", "gsheets",
+    "gslides", "gcontacts", "slack", "x", "spotify", "soundcloud"];
+  assert.deepEqual(Object.keys(client.connectors).filter(key => key !== "request"), services);
+  for (const service of services) {
+    client._setSessionToken(`grant-${service}`);
+    const response = await client.connectors[service].request({
+      path: "/fixture", method: "POST", body: { name: "Updated" }, connectionId: A,
+      // JS callers cannot accidentally override a provider-scoped client.
+      connector: "other-provider",
+    });
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("retry-after"), "5");
+    const request = seen.at(-1);
+    assert.equal(new URL(request.url).pathname, `/v1/connectors/${service}/request`);
+    assert.equal(request.headers.get("authorization"), `Bearer grant-${service}`);
+    assert.deepEqual(await request.json(), { path: "/fixture", method: "POST", body: { name: "Updated" }, connection_id: A });
+  }
+  await client.connectors.request({ connector: "spotify", path: "/v1/me/playlists" });
+  await Actions.connectors.request(client, { connector: "soundcloud", path: "/me/playlists" });
+  assert.equal(new URL(seen.at(-2).url).pathname, "/v1/connectors/spotify/request");
+  assert.equal(new URL(seen.at(-1).url).pathname, "/v1/connectors/soundcloud/request");
+  assert.equal(seen.length, services.length + 2, "write failures are not automatically retried");
+});
