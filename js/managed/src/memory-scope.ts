@@ -1,5 +1,6 @@
 import { initializeMemoryContent, memoryIdentityDigest, readMemoryContent, storeMemoryContent } from "./durable-memory-storage";
 import { DurableObject } from "cloudflare:workers";
+import { performanceState } from "./performance";
 import {
   initializeHistoryStorage, storeHistorySegments, deleteHistorySegments, readHistoryText,
   type HistorySegment,
@@ -52,6 +53,7 @@ const VECTOR_SEARCH_CACHE_MS = 30_000;
 const EMPTY_VECTOR_SEARCH_CACHE_MS = 1_000;
 
 export interface MemoryScopeEnv {
+  NANOCODEX_PERFORMANCE_TRACE?: string;
   HISTORY_AI_SEARCH?: AiSearchInstance;
 }
 
@@ -149,6 +151,7 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
 
   constructor(ctx: DurableObjectState, env: MemoryScopeEnv) {
     super(ctx, env);
+    if (env.NANOCODEX_PERFORMANCE_TRACE === "true") this.ctx = performanceState(this.ctx);
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS memory_scope_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

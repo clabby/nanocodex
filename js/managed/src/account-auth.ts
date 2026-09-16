@@ -1,4 +1,5 @@
 import { configurationCatalog } from "./agent-configuration";
+import { performanceState } from "./performance";
 import { MANAGED_ACCESS_HEADER, managedAccessRequest, readManagedAccess, observeManagedAccess } from "./managed-access";
 import { DurableObject } from "cloudflare:workers";
 import { fetchResponseWithDeadline } from "./deadline";
@@ -65,6 +66,7 @@ export function isUserId(value: unknown): value is string {
 export const NonceStorage = Kv.NonceStorage;
 
 export interface AccountAuthEnv {
+  NANOCODEX_PERFORMANCE_TRACE?: string;
   NANOCODEX_ACCESS_SECRET?: string;
   ENVIRONMENT?: string;
   NANOCODEX_MOCK_TWILIO_VERIFY_CODE?: string;
@@ -1702,6 +1704,8 @@ export async function revokeApiKey(
 export class UserAccount extends DurableObject<AccountAuthEnv> {
   constructor(ctx: DurableObjectState, env: AccountAuthEnv) {
     super(ctx, env);
+    if (env.NANOCODEX_PERFORMANCE_TRACE === "true") this.ctx = performanceState(this.ctx);
+    ctx = this.ctx;
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS agent_registry (
         id TEXT PRIMARY KEY,

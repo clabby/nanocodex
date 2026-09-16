@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-type Context = { trace_id: string; scope: string; reads: Record<string, { count: number; duration_ms: number }> };
+type Context = { trace_id: string; scope: string; closed?: boolean; reads: Record<string, { count: number; duration_ms: number }> };
 const contexts = new AsyncLocalStorage<Context>();
 
 export function performanceSyncScope<T>(traceId: string, scope: string, run: () => T): T {
@@ -8,7 +8,7 @@ export function performanceSyncScope<T>(traceId: string, scope: string, run: () 
   return contexts.run(context, () => {
     const began = performance.now();
     try { return run(); }
-    finally { console.info({ type: "managed.performance", trace_id: traceId, stage: scope,
+    finally { context.closed = true; console.info({ type: "managed.performance", trace_id: traceId, stage: scope,
       duration_ms: performance.now() - began, reads: context.reads }); }
   });
 }
@@ -20,6 +20,7 @@ export async function performanceScope<T>(traceId: string, scope: string, run: (
     const began = performance.now();
     try { return await run(); }
     finally {
+      context.closed = true;
       console.info({ type: "managed.performance", trace_id: traceId, stage: scope,
         duration_ms: performance.now() - began, reads: context.reads });
     }
@@ -49,7 +50,7 @@ export function performanceRead<T>(table: string, run: () => T): T {
 }
 
 /** Opt-in SQL audit. Preserve native receivers and cursors, including transactions. */
-export function performanceState(state: DurableObjectState): DurableObjectState {
+export function performanceState<Props>(state: DurableObjectState<Props>): DurableObjectState<Props> {
   const sql = new Proxy(state.storage.sql, {
     get(target, property) {
       if (property !== "exec") {
@@ -58,11 +59,12 @@ export function performanceState(state: DurableObjectState): DurableObjectState 
       }
       return (query: string, ...bindings: unknown[]) => {
         const began = performance.now();
-        const context = contexts.getStore();
+        const inherited = contexts.getStore();
+        const context = inherited?.closed ? undefined : inherited;
         const normalized = query.replace(/'(?:''|[^'])*'/g, "?").replace(/\b\d+\b/g, "?").replace(/\s+/g, " ").trim();
         let hash = 2166136261;
         for (let i = 0; i < normalized.length; i++) hash = Math.imul(hash ^ normalized.charCodeAt(i), 16777619);
-        const tables = [...new Set([...normalized.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE(?: IF NOT EXISTS)?)\s+([a-z_][a-z_0-9]*)/gi)].map(match => match[1]!.toLowerCase()))];
+        const tables = [...new Set([...normalized.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE(?: IF NOT EXISTS)?)\s+([a-z_][a-z_0-9]*)/gi)].map(match => match[1]!.toLowerCase()))].filter(table => table !== "set");
         let cursor: SqlStorageCursor<Record<string, SqlStorageValue>> | undefined;
         let execMs = 0;
         let consumeMs = 0;

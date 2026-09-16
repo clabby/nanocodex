@@ -2816,7 +2816,7 @@ export default {
 class DurableComputerObject extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    if (env.NANOCODEX_PERFORMANCE_TRACE === "true") this.ctx = performanceState(ctx);
+    if (env.NANOCODEX_PERFORMANCE_TRACE === "true") this.ctx = performanceState(this.ctx);
   }
   get computerContext(): DurableObjectState { return this.ctx; }
 }
