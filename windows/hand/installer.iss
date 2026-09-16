@@ -40,10 +40,10 @@ RestartApplications=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "payload\nanocodex2.exe"; DestDir: "{app}"; Flags: ignoreversion replacesameversion
-Source: "payload\nanocodex-computer.exe"; DestDir: "{app}"; Flags: ignoreversion replacesameversion
-Source: "run-hand.ps1"; DestDir: "{app}"; Flags: ignoreversion replacesameversion
-Source: "setup-hand.ps1"; DestDir: "{app}"; Flags: ignoreversion replacesameversion
+Source: "payload\nanocodex2.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "payload\nanocodex-computer.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "run-hand.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "setup-hand.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Start or repair Nanocodex Hand"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Repair -InstallDir ""{app}"""; WorkingDir: "{app}"
