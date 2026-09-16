@@ -28,11 +28,12 @@ export function finishHandTiming(request: Request, response: Response): Response
   timing.stages.total = performance.now() - timing.start;
   console.info({ type: "hand.request", request_id: timing.id, method: request.method,
     path: timing.path, status: response.status, timings_ms: timing.stages });
-  // Preserve the original upgraded socket. HTTP timings also reach the client.
-  if (response.status === 101) return response;
+  // Keep the upgraded socket while exposing the same correlation ID to native clients.
   const headers = new Headers(response.headers);
   headers.set("x-nanocodex-request-id", timing.id);
   headers.append("server-timing", Object.entries(timing.stages)
     .map(([name, duration]) => `hand_${name};dur=${duration.toFixed(1)}`).join(", "));
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers,
+    ...(response.status === 101 ? { webSocket: response.webSocket } : {}),
+  });
 }

@@ -3452,7 +3452,9 @@ export class DurableAgentSession extends DurableComputerSession {
       // Catalog acknowledgement must follow installation of the owning router's
       // exact attached/cloud contract validator.
       try {
-        await this.#ensureAgent();
+        // A live router already owns the dynamic attachment catalog validator.
+        // Re-discovering unrelated account tools delays every VM attachment.
+        await performanceStage("attachment.router_ready", () => this.#ensureAgent(undefined, { reuseReady: true }));
       } catch (error) {
         console.error({ type: "managed.tool_router_startup_failed", error_kind: errorKind(error) });
         return json({ error: "tool_router_unavailable" }, { status: 503 });
@@ -6760,9 +6762,13 @@ export class DurableAgentSession extends DurableComputerSession {
     await this.#scheduleNextAlarm();
   }
 
-  async #ensureAgent(catalog?: Promise<unknown>): Promise<CloudflareAgent.Agent> {
+  async #ensureAgent(
+    catalog?: Promise<unknown>,
+    options: { reuseReady?: boolean } = {},
+  ): Promise<CloudflareAgent.Agent> {
     if (this.#durabilityExported) throw new Error("durability state was exported");
     if (this.#deleting || this.#deleted) throw retryableError("agent is being deleted");
+    if (options.reuseReady && this.#agent && !this.#agentShutdownPromise) return this.#agent;
     const session = this.#session();
     let accountMcpRefreshMs = 0;
     if (session?.runtime_profile === "managed" && accountToolsEnabled(this.#configuration())) {

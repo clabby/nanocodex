@@ -18,3 +18,16 @@ it("redacts capability paths, queries, and credentials from Hand timing logs", (
     expect(JSON.stringify(log.mock.calls)).not.toContain("secret-");
   } finally { log.mockRestore(); }
 });
+
+
+it("preserves upgraded sockets and returns the timing correlation ID", () => {
+  const request = new Request("https://example.com/v1/account/tool-host", { headers: { upgrade: "websocket" } });
+  const [client] = Object.values(new WebSocketPair());
+  beginHandTiming(request);
+  recordHandTiming(request, "auth", 12);
+  const response = finishHandTiming(request, new Response(null, { status: 101, webSocket: client }));
+  expect(response.status).toBe(101);
+  expect(response.webSocket).toBe(client);
+  expect(response.headers.get("x-nanocodex-request-id")).toBeTruthy();
+  expect(response.headers.get("server-timing")).toContain("hand_auth;dur=12.0");
+});
