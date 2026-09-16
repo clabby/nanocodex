@@ -1439,7 +1439,11 @@ mod supported {
                 };
                 // Recovery must boot the retained upper. Keep the unrelated fresh
                 // spare available instead of shutting it down on this hot path.
-                let spare = if fresh { self.take_spare() } else { None };
+                let unstarted = fresh
+                    && inspect_overlay_lower(&overlay_lower_path(&private_root))
+                        .map_err(ProvisionFailure::stopped)?
+                        .is_none();
+                let spare = if unstarted { self.take_spare() } else { None };
                 let mut prepared = None;
                 if let Some(spare) = spare {
                     match spare.ready().await {
