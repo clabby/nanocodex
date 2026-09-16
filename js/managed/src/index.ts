@@ -3122,7 +3122,7 @@ export class DurableAgentSession extends DurableComputerSession {
 
   /** Private RPC: live ownership without serializing a streamed HTTP body. */
   resolveCredentialSubject(assertions: Record<string, string>, traceId?: string):
-    { subject: string; strategy: "session_v1" | "directory_v1" } | undefined {
+    { subject: string; strategy: "session_v1" | "directory_v1"; chatgpt_account_id?: string } | undefined {
     return performanceSyncScope(traceId && /^[0-9a-f-]{36}$/.test(traceId) ? traceId : this.ctx.id.toString(), "voice.ownership", () => {
     const asserted = forwardedPrincipal(new Headers(assertions));
     const session = this.#session();
@@ -3141,7 +3141,9 @@ export class DurableAgentSession extends DurableComputerSession {
       deleting: this.#deleting, deleted: this.#deleted,
       exported: this.#durabilityExported, importPending: false,
     }) === undefined) return undefined;
-    return { subject, strategy: direct ? "session_v1" : "directory_v1" };
+    const accountId = this.#configuration().chatgpt_account_id;
+    return { subject, strategy: direct ? "session_v1" : "directory_v1",
+      ...(accountId ? { chatgpt_account_id: accountId } : {}) };
     });
   }
 
@@ -7248,11 +7250,11 @@ export class DurableAgentSession extends DurableComputerSession {
       })] : []),
       web({
         url: "https://managed-tools.internal/web-search",
-        fetch: managedWebFetch(this.env, this.#credentialSubject()),
+        fetch: managedWebFetch(this.env, this.#credentialSubject(), configuration.chatgpt_account_id),
       }),
       imageGeneration({
         url: "https://managed-tools.internal/image-generation",
-        fetch: managedImageFetch(this.env, this.#credentialSubject()),
+        fetch: managedImageFetch(this.env, this.#credentialSubject(), configuration.chatgpt_account_id),
         workspace: sharedBrainWorkspace,
       }),
       viewImage({ workspace: sharedBrainWorkspace }),
@@ -7394,12 +7396,12 @@ export class DurableAgentSession extends DurableComputerSession {
       } });
       Object.defineProperty(agentOptions, internalConfiguration, { value: this.#settings() });
       phaseStartedAt = performance.now();
-      const owner = this.#credentialBinding?.strategy === "session_v1" ? {
+      const owner = this.#credentialBinding?.strategy === "session_v1" || configuration.chatgpt_account_id ? {
         // Adapter lifecycle ownership is keyed by the exact context object.
         ctx: this.ctx,
         env: { NANOCODEX: scopedManagedModelEgress(
           this.env.NANOCODEX, this.ctx.id.toString(), this.#credentialSubject(),
-          this.env.NANOCODEX_SESSION_MODEL_EGRESS === undefined ? undefined : {
+          this.#credentialBinding?.strategy !== "session_v1" || this.env.NANOCODEX_SESSION_MODEL_EGRESS === undefined ? undefined : {
             binding: this.env.NANOCODEX_SESSION_MODEL_EGRESS,
             owner: () => sessionCredentialOwner({
               subject: this.#credentialSubject(), storageId: this.ctx.id.toString(),
@@ -7409,6 +7411,7 @@ export class DurableAgentSession extends DurableComputerSession {
               exported: this.#durabilityExported, importPending: this.#durabilityImportState === "pending",
             }),
           },
+          configuration.chatgpt_account_id,
         ) },
       } : this;
       agent = await CloudflareAgent.create(owner, agentOptions);
@@ -10474,7 +10477,7 @@ function canonicalJson(value: unknown): string {
   )).join(",")}}`;
 }
 
-function managedWebFetch(env: Env, subject: string): typeof fetch {
+function managedWebFetch(env: Env, subject: string, accountId?: string): typeof fetch {
   return async (input, init) => {
     const incoming = new Request(input, init);
     const value = await incoming.json<{
@@ -10493,11 +10496,11 @@ function managedWebFetch(env: Env, subject: string): typeof fetch {
       commands: value.commands,
       settings: { allowed_callers: ["direct"], external_web_access: true },
       max_output_tokens: 10_000,
-    });
+    }, accountId);
   };
 }
 
-function managedImageFetch(env: Env, subject: string): typeof fetch {
+function managedImageFetch(env: Env, subject: string, accountId?: string): typeof fetch {
   return async (input, init) => {
     const incoming = new Request(input, init);
     const value = await incoming.json<{
@@ -10523,6 +10526,7 @@ function managedImageFetch(env: Env, subject: string): typeof fetch {
         quality: "auto",
         size: "auto",
       },
+      accountId,
     );
     const payload = await upstream.json<{
       data?: Array<{ b64_json?: unknown }>;
@@ -10548,6 +10552,7 @@ function fetchManagedTool(
   subject: string,
   path: "/v1/search" | "/v1/images/generations" | "/v1/images/edits",
   body: unknown,
+  accountId?: string,
 ): Promise<Response> {
   return env.NANOCODEX.fetch(new Request(`https://nanocodex.internal${path}`, {
     method: "POST",
@@ -10556,6 +10561,7 @@ function fetchManagedTool(
       "content-type": "application/json",
       "user-agent": "nanocodex-managed/0.1.0",
       "x-nanocodex-subject": subject,
+      ...(accountId ? { "x-nanocodex-chatgpt-account-id": accountId } : {}),
     },
     body: JSON.stringify(body),
   }));
