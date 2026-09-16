@@ -43,14 +43,25 @@ impl NativeScreen {
         machine: &AttachmentMachine,
         directory: &Path,
     ) -> Result<Self, ManagedError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let _ = directory;
+            #[cfg(target_os = "windows")]
+            nanocodex_hand::ensure_interactive_session().map_err(configuration)?;
             let backend: ScreenBackend = std::sync::Arc::new(|input| {
                 Box::pin(async move {
-                    tokio::task::spawn_blocking(move || super::screen_macos::request(input))
-                        .await
-                        .map_err(configuration)?
+                    tokio::task::spawn_blocking(move || {
+                        #[cfg(target_os = "macos")]
+                        {
+                            super::screen_macos::request(input)
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            nanocodex_hand::request(input).map_err(configuration)
+                        }
+                    })
+                    .await
+                    .map_err(configuration)?
                 })
             });
             let publisher = ScreenPublisher::start(target, machine, backend).await?;
@@ -122,10 +133,12 @@ impl NativeScreen {
             }
             Ok(screen)
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             let _ = (target, machine, directory);
-            Err(configuration("native screens require macOS or Linux"))
+            Err(configuration(
+                "native screens require macOS, Windows, or Linux",
+            ))
         }
     }
     pub(crate) async fn shutdown(mut self) -> Result<(), ManagedError> {

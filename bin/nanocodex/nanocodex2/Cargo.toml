@@ -60,7 +60,7 @@ whoami.workspace = true
 fs2.workspace = true
 nanocodex-vm.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 nanocodex-hand = { version = "0.6.1", path = "../../../crates/nanocodex-hand" }
 
 [target.'cfg(target_os = "linux")'.dependencies]

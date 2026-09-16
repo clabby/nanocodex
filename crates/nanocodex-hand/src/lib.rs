@@ -6,3 +6,8 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::request;
+
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::{ensure_interactive_session, request, video_command};
