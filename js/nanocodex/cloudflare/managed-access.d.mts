@@ -1,4 +1,4 @@
-/** Credential-bound authority reused for at most120 seconds; live renewal is separate. */
+/** Credential-bound authority reused for at most 120 seconds; live renewal is separate. */
 export type ManagedAccessPrincipal = Readonly<{
   kind: "account_session" | "api_key" | "connect_grant" | "service";
   userId: string;

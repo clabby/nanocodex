@@ -125,6 +125,8 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./browser/voice"]?.import, "./browser/Voice.mjs");
   assert.equal(packageJson.exports?.["./host"]?.import, "./host/index.mjs");
   assert.equal(packageJson.exports?.["./cloudflare"]?.import, "./cloudflare/index.mjs");
+  assert.equal(packageJson.exports?.["./cloudflare/managed-access"]?.import, "./cloudflare/managed-access.mjs");
+  assert.equal(packageJson.exports?.["./cloudflare/managed-access"]?.types, "./cloudflare/managed-access.d.mts");
   assert.equal(packageJson.exports?.["./managed"]?.import, "./managed/index.mjs");
   assert.equal(packageJson.exports?.["./connect"]?.import, "./cloud/index.mjs");
   assert.equal(packageJson.exports?.["./connect"]?.types, "./cloud/index.d.mts");
