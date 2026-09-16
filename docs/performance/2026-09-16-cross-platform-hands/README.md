@@ -1,5 +1,28 @@
 # Computer Hands and VM startup — 2026-09-16
 
+## Latest component measurements
+
+The [Hand call and attachment report](hand-call-latency.md) records the deployed
+SQL/read reduction, router reuse, and the remaining transport/durability waits.
+The [screen admission report](screen-admission.md) records short-lived authority
+reuse, decoded WAN frames, and request-ID-correlated account proxy spans.
+
+| Component | Before | After | What the evidence supports |
+| --- | ---: | ---: | --- |
+| Linux spare replenishment | 10.3–10.9 s | 0.87–1.04 s | Cached immutable base plus private overlay; first base copy is still 7.2 s |
+| Native Hand call median | 407 ms | 446 ms | Two fewer SELECTs; no demonstrated end-to-end speedup |
+| Warm VM WebSocket connection | 1,305–1,368 ms | 979–983 ms | Repeated catalog discovery removed from attachment |
+| Complete warm VM mount | 2,955 ms | 3,096 ms repeat | No demonstrated overall speedup; 1,893 ms remains outside factory attachment |
+| Screen authentication | 189–196 ms live | No observed I/O wait with snapshot | Reuses credential-bound, 120-second authority; live renewal remains |
+| Linux native first decoded frame, median | 1,423 ms | 1,253 ms | Three-sample WAN cohorts, affected by host/network variation |
+| Linux VM first decoded frame, median | 1,530 ms | 1,182 ms | Three-sample WAN cohorts, affected by host/network variation |
+
+These are separate, nested measurements, not additive intervals or percentile
+estimates. Same-Mac WebRTC did not improve under heavy concurrent build load.
+See each report for exact deployment versions, trace IDs, timer limitations,
+validation, and unresolved intervals. No real Windows latency or physical
+phone first-frame result is claimed.
+
 See the [native screen startup follow-up](screen-startup.md) for ICE prefetch,
 initial frame delivery and bitrate controls. The subsequent
 [Linux recovery](linux-recovery.md) resolves the stale publisher call rejection.

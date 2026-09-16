@@ -151,5 +151,5 @@ service: HTTP rejection headers reached the native client, and an initial
 WebSocket rejection recovered with one live admission attempt. The final Mac
 fixture passed three decoded frames and control acquire/release; WAN fixtures
 sent no input. Physical iPhone performance remains unmeasured because UI
-automation could not start while the device was locked; installation and launch
+automation timed out while enabling automation mode; installation and launch
 of the signed Release app are tracked by the release owner.
