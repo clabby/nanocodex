@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import { DesktopRuntime, DEFAULT_ORIGIN, managedOrigin } from "./runtime.mjs";
 import { desktopDefaults, desktopEnvironment, desktopPreferences } from "./configuration.mjs";
 import { SmsSignIn } from "./auth.mjs";
+import { NativeThreadEvents } from "./native-events.mjs";
 
 // stdout is exclusively the versioned-by-package JSONL protocol. Incidental
 // dependency diagnostics must never corrupt a native client's message stream.
@@ -61,7 +62,8 @@ const authActions = {
 };
 let closing = false;
 const inFlight = new Set();
-runtime.on("event", event => { if (!closing) send({ event }); });
+const nativeEvents = new NativeThreadEvents();
+runtime.on("event", event => { if (!closing) send({ event: nativeEvents.encode(event) }); });
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
 input.on("line", line => {
@@ -81,7 +83,18 @@ input.on("line", line => {
     authQueue = pending.catch(() => {});
     return pending;
   })
-    .then(result => { if (!closing) send({ id: request.id, result: result ?? null }); })
+    .then(result => {
+      if (request.method === "closeThread") nativeEvents.forget(request.args[0]);
+      if (!closing) {
+        // Recovery sends a full event in stdout order before any suffix frames.
+        // A response alone must not reseed a decoder after newer events arrived.
+        if (request.method === "openThread" && result) {
+          nativeEvents.forget(result.id);
+          send({ event: nativeEvents.encode({ type: "thread", thread: result }) });
+        }
+        send({ id: request.id, result: result ?? null });
+      }
+    })
     .catch(error => { if (!closing) send({ id: request.id, error: safeError(error) }); })
     .finally(() => inFlight.delete(request.id));
 });
@@ -102,5 +115,5 @@ input.on("close", () => { void close(); });
 process.on("SIGTERM", () => { void close(); });
 process.on("SIGINT", () => { void close(); });
 process.stdout.on("error", () => { void close(); });
-send({ event: { type: "state", state: runtime.state() } });
+send({ event: nativeEvents.encode({ type: "state", state: runtime.state() }) });
 void runtime.refresh();

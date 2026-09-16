@@ -23,6 +23,25 @@ private struct RuntimeFrame: Decodable, Sendable {
     var event: RuntimeEvent?
     var result: JSONValue?
     var error: String?
+    var eventOffset: Int?
+    var eventGeneration: Int?
+    var resyncThreadID: String?
+    private enum CodingKeys: String, CodingKey { case id, event, result, error }
+    private enum EventKeys: String, CodingKey { case type, thread, eventOffset, eventGeneration }
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        id = try fields.decodeIfPresent(JSONValue.self, forKey: .id)
+        result = try fields.decodeIfPresent(JSONValue.self, forKey: .result)
+        error = try fields.decodeIfPresent(String.self, forKey: .error)
+        if fields.contains(.event), !(try fields.decodeNil(forKey: .event)) {
+            let wire = try fields.nestedContainer(keyedBy: EventKeys.self, forKey: .event)
+            eventGeneration = try wire.decodeIfPresent(Int.self, forKey: .eventGeneration)
+            if try wire.decode(String.self, forKey: .type) == "threadPatch" {
+                event = .thread(try wire.decode(ThreadSnapshot.self, forKey: .thread))
+                eventOffset = try wire.decode(Int.self, forKey: .eventOffset)
+            } else { event = try fields.decode(RuntimeEvent.self, forKey: .event) }
+        }
+    }
 }
 
 /// Keep JSON decoding and fragmented-frame assembly off the main actor. One
@@ -33,9 +52,17 @@ private final class RuntimeFrameDecoder: @unchecked Sendable {
     private let decoder = JSONDecoder()
     private var presentations = ThreadPresentationCache()
     private var accountScope: String?
+    private struct History { var events: [ManagedEvent]; var generation: Int? }
+    private var histories: [String: History] = [:]
+    private var resyncRequested = Set<String>()
     private func updateScope(_ state: DesktopState) {
-        if accountScope != state.accountScope { presentations = ThreadPresentationCache(); accountScope = state.accountScope }
+        if accountScope != state.accountScope {
+            presentations = ThreadPresentationCache(); histories.removeAll(); resyncRequested.removeAll()
+            accountScope = state.accountScope
+        }
     }
+    func forget(_ id: String) { queue.async { self.histories.removeValue(forKey: id); self.resyncRequested.remove(id) } }
+    func retryResync(_ id: String) { queue.async { self.resyncRequested.remove(id) } }
     func decodeResult<T: Decodable & Sendable>(_ value: JSONValue, as type: T.Type) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
@@ -65,7 +92,22 @@ private final class RuntimeFrameDecoder: @unchecked Sendable {
         while let newline = buffer[consumed...].firstIndex(of: 0x0a) {
             if var value = try? decoder.decode(RuntimeFrame.self, from: buffer[consumed..<newline]) {
                 if case .state(let state) = value.event { updateScope(state) }
-                if case .thread(let snapshot) = value.event { value.event = .thread(presentations.prepare(snapshot)) }
+                if case .thread(var snapshot) = value.event {
+                    if let offset = value.eventOffset {
+                        if let previous = histories[snapshot.id], offset == previous.events.count,
+                           value.eventGeneration != nil, value.eventGeneration == previous.generation,
+                           !resyncRequested.contains(snapshot.id) {
+                            snapshot.events = previous.events + snapshot.events
+                        } else {
+                            value.event = nil
+                            if resyncRequested.insert(snapshot.id).inserted { value.resyncThreadID = snapshot.id }
+                        }
+                    } else { resyncRequested.remove(snapshot.id) }
+                    if value.event != nil {
+                        histories[snapshot.id] = History(events: snapshot.events, generation: value.eventGeneration)
+                        value.event = .thread(presentations.prepare(snapshot))
+                    }
+                }
                 frames.append(value)
             }
             consumed = buffer.index(after: newline)
@@ -108,6 +150,8 @@ final class RuntimeClient {
     private var processExited = false
     private var outputEnded = false
     private var nextID = 0
+    private var accountScope: String?
+    private var closedThreads = Set<String>()
     private let dataDirectory: String?
     #if DEBUG
     var requestOverride: ((String, [JSONValue]) async throws -> JSONValue)?
@@ -188,6 +232,10 @@ final class RuntimeClient {
     }
     @discardableResult
     func request(_ method: String, _ args: [JSONValue] = []) async throws -> JSONValue {
+        if let id = args.first?.string {
+            if method == "closeThread" { closedThreads.insert(id); decoder.forget(id) }
+            if method == "openThread" { closedThreads.remove(id) }
+        }
         #if DEBUG
         if let requestOverride { return try await requestOverride(method, args) }
         #endif
@@ -214,7 +262,25 @@ final class RuntimeClient {
     private func receive(_ frames: [RuntimeFrame]) {
         guard !stopped else { return }
         for value in frames {
-            if let event = value.event { onEvent?(event); continue }
+            if let id = value.resyncThreadID {
+                let scope = accountScope
+                Task { [weak self] in
+                    guard let self, !self.stopped, self.accountScope == scope, !self.closedThreads.contains(id) else { return }
+                    do { try await self.request("openThread", [.string(id)]) }
+                    catch {
+                        guard !self.stopped, self.accountScope == scope, !self.closedThreads.contains(id) else { return }
+                        self.decoder.retryResync(id); self.onFailure?("Could not refresh the conversation. Choose Refresh to retry.")
+                    }
+                }
+                continue
+            }
+            if let event = value.event {
+                if case .thread(let snapshot) = event, closedThreads.contains(snapshot.id) { continue }
+                if case .state(let state) = event, accountScope != state.accountScope {
+                    accountScope = state.accountScope; closedThreads.removeAll()
+                }
+                onEvent?(event); continue
+            }
             let id = value.id?.string ?? ""
             guard let continuation = pending.removeValue(forKey: id) else { continue }
             deadlines.removeValue(forKey: id)?.cancel()

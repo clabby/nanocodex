@@ -1297,6 +1297,55 @@ final class ProtocolTests: XCTestCase {
     }
 
     @MainActor
+    func testCompactThreadFramesResumeOnlyFromTheMatchingAccountPrefix() async throws {
+        let runtime = RuntimeClient(dataDirectory: "/tmp/nanocodex-isolated-compact-wire")
+        var delivered: [[String]] = [], resyncs = 0
+        runtime.onEvent = { event in if case .thread(let thread) = event { delivered.append(thread.events.map(\.cursor)) } }
+        runtime.requestOverride = { method, _ in if method == "openThread" { resyncs += 1 }; return .null }
+        func wire(_ type: String, _ cursors: [String], offset: Int? = nil, generation: Int = 1) throws -> Data {
+            let events = cursors.map { ManagedEvent(cursor: $0, turnId: "turn", data: .object(["type": .string("event")])) }
+            let thread: JSONValue = .object(["id": .string("thread"), "events": try .encoded(events), "hasMore": .bool(false), "connected": .bool(true), "activeTurns": .array([]), "settings": try .encoded(AgentSettings())])
+            var event: [String: JSONValue] = ["type": .string(type), "thread": thread, "eventGeneration": .number(Double(generation))]
+            if let offset { event["eventOffset"] = .number(Double(offset)) }
+            var data = try JSONEncoder().encode(JSONValue.object(["event": .object(event)])); data.append(10); return data
+        }
+        let full = try wire("thread", ["1", "2"])
+        runtime.receiveForTesting(full.prefix(19)); XCTAssertTrue(delivered.isEmpty)
+        runtime.receiveForTesting(full.dropFirst(19))
+        var batch = try wire("threadPatch", ["3"], offset: 2)
+        batch.append(try wire("threadPatch", [], offset: 3))
+        runtime.receiveForTesting(batch)
+        XCTAssertEqual(delivered, [["1", "2"], ["1", "2", "3"], ["1", "2", "3"]])
+        runtime.receiveForTesting(try wire("threadPatch", ["4"], offset: 1))
+        runtime.receiveForTesting(try wire("threadPatch", ["5"], offset: 1))
+        await Task.yield()
+        XCTAssertEqual(resyncs, 1); XCTAssertEqual(delivered.count, 3)
+        runtime.receiveForTesting(try wire("thread", ["0", "1", "2", "3", "4"]))
+        runtime.receiveForTesting(try wire("threadPatch", ["5"], offset: 5))
+        XCTAssertEqual(delivered.last, ["0", "1", "2", "3", "4", "5"])
+        var state = Self.connectedState
+        if case .object(var object) = state { object["accountScope"] = .string("another-account"); state = .object(object) }
+        var stateWire = try JSONEncoder().encode(JSONValue.object(["event": .object(["type": .string("state"), "state": state])]))
+        stateWire.append(10); runtime.receiveForTesting(stateWire)
+        runtime.receiveForTesting(try wire("threadPatch", ["6"], offset: 6))
+        await Task.yield()
+        XCTAssertEqual(resyncs, 2); XCTAssertEqual(delivered.last, ["0", "1", "2", "3", "4", "5"])
+        runtime.receiveForTesting(try wire("thread", ["10"]))
+        runtime.receiveForTesting(try wire("threadPatch", ["11"], offset: 1))
+        XCTAssertEqual(delivered.last, ["10", "11"])
+        runtime.receiveForTesting(try wire("threadPatch", ["12"], offset: 2, generation: 2))
+        await Task.yield()
+        XCTAssertEqual(resyncs, 3, "A missed replacement with the same event count cannot reuse the old prefix")
+        XCTAssertEqual(delivered.last, ["10", "11"])
+        runtime.receiveForTesting(try wire("thread", ["20", "21"], generation: 2))
+        runtime.receiveForTesting(try wire("threadPatch", ["22"], offset: 2, generation: 2))
+        XCTAssertEqual(delivered.last, ["20", "21", "22"])
+        try await runtime.request("closeThread", [.string("thread")])
+        runtime.receiveForTesting(try wire("threadPatch", ["23"], offset: 3, generation: 2))
+        await Task.yield()
+        XCTAssertEqual(resyncs, 3, "Late patches cannot reopen a thread the user closed")
+    }
+    @MainActor
     func testTypedRuntimeEventsHandleFragmentedFramesAndIgnoreUnknownEvents() throws {
         let runtime = RuntimeClient(dataDirectory: "/tmp/nanocodex-isolated-wire")
         var connected = false

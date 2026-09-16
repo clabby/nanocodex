@@ -26,6 +26,15 @@ and event streams to proceed concurrently. Undefined results are JSON `null`.
 An unknown action, duplicate pending ID, malformed arguments, or oversized
 request receives an error. Stdout is reserved for this protocol.
 
+After a full thread event, `threadPatch` events carry only the appended events,
+plus the current thread metadata. `eventOffset` is the length of the prior
+event array; `eventGeneration` identifies the full snapshot it extends. Replaced,
+reordered, or older history sends a new full event and generation. The native
+decoder reconstructs snapshots on its worker queue and requests `openThread`
+to recover a missing or mismatched prefix. Account changes and `closeThread`
+discard the prefix. In-process consumers and request responses still receive
+full snapshots.
+
 The allowlist is `state`, `connect`, `disconnect`, `refresh`, `openThread`,
 `closeThread`, `older`, `createThread`, `prompt`, `queuePrompt`, `steer`, `cancel`, `settings`,
 `saveLayout`, `saveHand`, `prepareDefaultHand`, `prepareFolderHand`, `startHand`, `stopHand`, and
