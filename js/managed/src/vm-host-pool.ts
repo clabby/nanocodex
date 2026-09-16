@@ -567,6 +567,9 @@ export class VmHostPool extends DurableObject<VmHostPoolEnv> {
     const allocation = this.#allocation(identity.allocation_id);
     if (!allocation || !sameIdentity(allocation, identity)) return notFound();
     const routeId = this.#currentRouteId(allocation);
+    console.info({ type: "vm.pool.stage", stage: "readiness_response", mount_id: allocation.mount_id,
+      allocation_id: allocation.allocation_id, timestamp: Date.now(),
+      ready: allocation.state === "ready" && routeId !== undefined });
     return Response.json({
       ...publicAllocation(allocation, routeId),
       ready: allocation.state === "ready" && routeId !== undefined,
