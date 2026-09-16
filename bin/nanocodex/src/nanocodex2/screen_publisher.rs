@@ -37,6 +37,13 @@ impl ScreenPublisher {
         backend: ScreenBackend,
         video: Option<VideoSource>,
     ) -> Result<Self, ManagedError> {
+        // Explicit deployment fallback for networks where ICE cannot connect
+        // (for example, nested NAT without an authenticated TURN relay).
+        let video = if std::env::var("NANOCODEX_SCREEN_TRANSPORT").as_deref() == Ok("frames-v1") {
+            None
+        } else {
+            video
+        };
         endpoint(target)?;
         let started = Instant::now();
         let first =
