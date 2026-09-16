@@ -33,6 +33,7 @@ export class PreparedPersonalizationStore {
         expires_at INTEGER NOT NULL, acknowledged_generation INTEGER NOT NULL DEFAULT -1
       );
       CREATE INDEX IF NOT EXISTS personalization_subscribers_team ON personalization_subscribers(team_id, expires_at);
+      CREATE INDEX IF NOT EXISTS personalization_subscribers_expiry ON personalization_subscribers(expires_at);
       CREATE TRIGGER IF NOT EXISTS personalization_memory_insert AFTER INSERT ON durable_memories BEGIN
         INSERT INTO prepared_personalization(team_id, generation, dirty) VALUES (new.owner_team_id, 1, 1)
         ON CONFLICT(team_id) DO UPDATE SET generation = generation + 1, dirty = 1;

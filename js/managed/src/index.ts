@@ -3680,7 +3680,6 @@ export class DurableAgentSession extends DurableComputerSession {
       if (this.#deleting) return json({ error: "agent_deleting" }, { status: 409 });
       const session = this.#sessionStatus();
       if (!session) return json({ error: "not_found" }, { status: 404 });
-      this.#warmPersonalization();
       return json({
         agent_id: session.session_id,
         session_id: session.session_id,
@@ -4358,7 +4357,6 @@ export class DurableAgentSession extends DurableComputerSession {
     }
     const session = this.#sessionStatus();
     if (!session) return new Response("Unknown session", { status: 404 });
-    this.#warmPersonalization();
     if (this.#session()?.runtime_profile !== "managed") {
       return new Response("Device hosting is unavailable for multiplayer agents", { status: 409 });
     }
