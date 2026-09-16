@@ -60,7 +60,7 @@ export class HostedToolsBroker extends HostedToolsBrokerCore {
   }
 }
 
-class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
+export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
   constructor(readonly storage: DurableObjectStorage) {}
 
   initialize(now: number): readonly HostedToolsStateRow[] {
@@ -248,16 +248,21 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
   ): HostedToolsCallRow | undefined {
     if (from.length === 0) return this.call(callId);
     const placeholders = from.map(() => "?").join(", ");
-    this.storage.sql.exec(
+    const updated = this.storage.sql.exec<HostedToolsCallRow>(
       `UPDATE hosted_tool_calls SET state = ?, result_json = ?, updated_at = ?
-       WHERE call_id = ? AND state IN (${placeholders})`,
+       WHERE call_id = ? AND state IN (${placeholders})
+       RETURNING call_id, session_id, source_call_id, host_id, lease_id, generation,
+                 model, name, input_json, output_token_budget, output_byte_budget,
+                 deadline_at, cancel_requested, state, result_json, receipt_json`,
       state,
       resultJson || null,
       now,
       callId,
       ...from,
-    );
-    return this.call(callId);
+    ).toArray()[0];
+    // The ordinary dispatch/result path already has its updated row. A failed
+    // compare-and-set still reads the retained row for replay/conflict handling.
+    return updated ?? this.call(callId);
   }
 
   recordLateReceipt(callId: string, receiptJson: string, now: number): HostedToolsCallRow | undefined {
