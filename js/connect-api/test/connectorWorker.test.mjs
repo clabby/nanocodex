@@ -42,6 +42,64 @@ test("Worker connector execution fences and forwards the exact approved identity
   };
   const context = { waitUntil() {} };
 
+  await t.test("lightweight connector status validates a fresh grant and live selections without account RPCs", async (t) => {
+    const prior = grant;
+    t.after(() => { grant = prior; });
+    t.mock.method(globalThis, "fetch", async () => assert.fail("Status must not fetch balances or public APIs"));
+    grant = { ...activeGrant({ spotify: [alpha], soundcloud: [bravo] }), capabilities: ["spotify", "soundcloud"] };
+    let resolutions = 0;
+    const calls = [];
+    let connected = true;
+    const fastEnv = { ...env,
+      CONNECT_STATE: { idFromName: name => name, get: () => ({ fetch: async input => {
+        resolutions++;
+        assert.equal(new URL(input).pathname, "/resolve-grant", "No authorization index reads");
+        return env.CONNECT_STATE.get().fetch(input);
+      } }) },
+      EGRESS: { fetch: async request => {
+        calls.push(new URL(request.url).pathname);
+        assert.equal(new URL(request.url).pathname, `/users/${accountAddress}/connectors`, "No Vault or credential requests");
+        return Response.json({ connectors: {
+          spotify: { connected, connections: connected ? [
+            { id: alpha, account_id: "alice", label: "Alice" },
+            { id: later, account_id: "not-approved", label: "Private account" },
+          ] : [] },
+          soundcloud: { connected: true, connections: [{ id: bravo, account_id: "123", label: "SC" }] },
+        } });
+      } },
+    };
+    const statusRequest = (providers = "spotify,soundcloud", headers = {}) => new Request(
+      `https://nanocodex-connect-api.gakonst.workers.dev/v1/grants/${grantId}/connectors?providers=${providers}`,
+      { headers: { authorization: `Bearer ${grantToken}`, origin: appOrigin, "x-nanocodex-app-id": "atlas-workspace", ...headers } },
+    );
+    const response = await worker.fetch(statusRequest(), fastEnv, context);
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const body = await response.json();
+    assert.equal(body.account_id, accountAddress); assert.equal(body.grant.id, grantId);
+    assert.deepEqual(body.connectors.spotify.connections.map(c => c.id), [alpha]);
+    assert.deepEqual(Object.keys(body.connectors), ["spotify", "soundcloud"]);
+    assert(!JSON.stringify(body).includes("not-approved")); assert(!("grant_token" in body));
+    assert.equal(resolutions, 1); assert.equal(calls.length, 1);
+    connected = false;
+    assert.deepEqual((await (await worker.fetch(statusRequest(), fastEnv, context)).json()).connectors.spotify.connections, []);
+    grant = { ...grant, capabilities: ["spotify"] };
+    assert.deepEqual((await (await worker.fetch(statusRequest(), fastEnv, context)).json()).connectors.soundcloud.connections, []);
+    const count = calls.length;
+    for (const providers of ["", "chatgpt", "spotify,spotify", "unknown", "spotify&extra=true"]) {
+      assert.equal((await worker.fetch(statusRequest(providers), fastEnv, context)).status, 400);
+    }
+    for (const headers of [{ origin: "https://evil.example" }, { "x-nanocodex-app-id": "other" }, { authorization: "Bearer invalid" }]) {
+      assert((await worker.fetch(statusRequest("spotify", headers), fastEnv, context)).status >= 400);
+    }
+    for (const changed of [{ status: "revoked" }, { expiresAt: 1 }]) {
+      const before = grant; grant = { ...grant, ...changed };
+      assert.equal((await worker.fetch(statusRequest(), fastEnv, context)).status, 401);
+      grant = before;
+    }
+    assert.equal(calls.length, count, "Invalid grants and inputs never reach broker");
+  });
+
   const accepted = await worker.fetch(egressRequest(bravo), env, context);
   assert.equal(accepted.status, 200, await accepted.clone().text());
   assert.equal(forwarded.length, 1);

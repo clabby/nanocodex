@@ -2513,6 +2513,29 @@ async function handleGrantRoute(
   if (action === undefined && request.method === "GET") {
     return Response.json(connectionWire(grant, token));
   }
+  if (action === "connectors" && request.method === "GET") {
+    requireGrantAppOrigin(request, grant);
+    if (grant.status !== "active" || grant.expiresAt <= Math.floor(Date.now() / 1000)) {
+      throw new ApiFailure(401, "grant_inactive", "This connection has expired or was revoked.");
+    }
+    const providers = url.searchParams.get("providers")?.split(",") ?? [];
+    if (url.searchParams.size !== 1 || !providers.length || providers.length > CONNECTOR_IDS.length
+      || new Set(providers).size !== providers.length
+      || providers.some(provider => !isConnectorCapability(provider) || provider === "chatgpt")) {
+      throw new ApiFailure(400, "invalid_connector_providers", "Select API connector providers with the providers query parameter.");
+    }
+    // Playback authorization needs live connector identities, not Vault metadata,
+    // balance RPCs, or the account's complete authorization index.
+    const live = await brokerJson(env, `/users/${encodeURIComponent(grant.brokerUserId)}/connectors`);
+    const projected = projectGrantConnectorStatuses(connectorStatusProjection(live, {}), grant);
+    return Response.json({
+      account_id: grant.brokerUserId,
+      agent_id: grant.agentId,
+      grant: grantWire(grant),
+      connectors: Object.fromEntries(providers.map(provider => [provider,
+        projected.connectors[provider as ConnectorCapability]])),
+    }, { headers: { "cache-control": "private, no-store" } });
+  }
   if (action === "reconnect" && request.method === "POST") {
     if (grant.hostPrincipal) {
       const body = await boundedJson(request, 4 * 1024, "host principal reconnect");
