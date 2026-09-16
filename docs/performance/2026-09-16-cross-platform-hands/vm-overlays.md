@@ -51,13 +51,22 @@ Earlier complete spare preparation took **10,288–10,902 ms**. The new range is
 roughly a tenfold improvement after the base is cached. It is not a claim that a
 new image's first uncached startup takes one second.
 
-Warm managed mounts still took **2,955 / 3,254 ms**. In the first cohort, its tools catalog preparation was
-0.133 ms, WebSocket connection 1,681.9 ms, and catalog acknowledgement 194.5 ms.
+Warm managed mounts still took **2,955 / 3,254 ms**. In the first cohort,
+tools catalog preparation was 0.133 ms, WebSocket connection 1,681.9 ms, and catalog acknowledgement 194.5 ms.
 The full attachment completed at 1,877.7 ms; desktop publication completed at
 1,022.3 ms in parallel. Disk preparation does not explain or eliminate this
-network/managed overhead. VM shell execution took 217 / 228 ms managed. The first cohort spent 4.115 ms inside the guest.
+network/managed overhead. VM shell execution took 217 / 228 ms managed; the
+first cohort spent 4.115 ms inside the guest.
 The second attachment took 1,528.2 ms (WebSocket 1,304.6 ms, acknowledgement
 222.3 ms); this small uncontrolled difference is not credited to the disk change.
+
+A third baseline split the client connection further: TLS trust lookup took
+0.026 ms, DNS completed at 0.505 ms, and TCP connected at 21.716 ms from connection
+start. The WebSocket upgrade finished at 1,367.657 ms, followed by 239.814 ms
+waiting for catalog acknowledgement. Thus about 1,346 ms remained after TCP;
+DNS, TCP, and certificate-store loading were not the dominant waits. This span
+still combines TLS and the HTTP upgrade/backend path. Fourteen attachment
+protocol tests passed with that transport instrumentation.
 
 ## Verification and applicability
 
