@@ -404,7 +404,7 @@ test("frames-v1 establishes readiness only after rendering and paces a single ou
   assert.deepEqual([f.canvas.width, f.canvas.height], [640, 360]);
   await f.tick(0); assert.equal(f.sockets[0]!.sent.length, 2);
   f.sockets[0]!.message(frame()); await flush(); finish({ width: 640, height: 360, close() {} }); await flush();
-  await f.tick(99); assert.equal(f.sockets[0]!.sent.length, 2);
+  await f.tick(33); assert.equal(f.sockets[0]!.sent.length, 2);
   await f.tick(1); assert.equal(f.sockets[0]!.sent.length, 3);
   assert.equal(f.requests.length, 0);
 });

@@ -358,6 +358,8 @@ struct PendingState {
 struct PendingResponse {
     span: Span,
     response: oneshot::Sender<Result<(SessionResponse, usize), String>>,
+    stdout: Option<mpsc::Sender<Vec<u8>>>,
+    stream_failed: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Default)]
@@ -1241,24 +1243,44 @@ impl VmToolSessionHandle {
     /// Returns an error when the session is closed, the command fails to
     /// start, exceeds its deadline, or returns an invalid response.
     pub async fn command(&self, command: VmCommand) -> Result<VmCommandOutput, VmToolSessionError> {
+        self.command_inner(command, None).await
+    }
+
+    /// Stream stdout in bounded chunks over the existing private guest channel.
+    /// Dropping this future cancels the guest process; a slow receiver fails the
+    /// stream rather than buffering indefinitely or blocking unrelated input.
+    pub async fn stream_command(
+        &self,
+        command: VmCommand,
+        stdout: mpsc::Sender<Vec<u8>>,
+    ) -> Result<VmCommandOutput, VmToolSessionError> {
+        self.command_inner(command, Some(stdout)).await
+    }
+
+    async fn command_inner(
+        &self,
+        command: VmCommand,
+        stdout: Option<mpsc::Sender<Vec<u8>>>,
+    ) -> Result<VmCommandOutput, VmToolSessionError> {
         let command_timeout = command.timeout;
         let max_output_bytes = command.max_output_bytes;
         let timeout_millis = u64::try_from(command_timeout.as_millis()).unwrap_or(u64::MAX);
+        let request = SessionRequest::Execute(ExecuteRequest {
+            id: 0,
+            stream_stdout: stdout.is_some(),
+            program: command.program,
+            arguments: command.arguments,
+            current_directory: command.current_directory,
+            environment: command.environment,
+            timeout_millis,
+            max_output_bytes,
+            stdout_mirror: command.stdout_mirror,
+            stderr_mirror: command.stderr_mirror,
+        });
         let response = self
-            .control_request(|id| {
-                SessionRequest::Execute(ExecuteRequest {
-                    id,
-                    program: command.program,
-                    arguments: command.arguments,
-                    current_directory: command.current_directory,
-                    environment: command.environment,
-                    timeout_millis,
-                    max_output_bytes,
-                    stdout_mirror: command.stdout_mirror,
-                    stderr_mirror: command.stderr_mirror,
-                })
-            })
-            .await?;
+            .send_request_stream(request, &Span::current(), false, stdout)
+            .await?
+            .0;
         let SessionResponse::Execute(ExecuteResponse {
             exit_code,
             stdout,
@@ -1323,9 +1345,20 @@ impl VmToolSessionHandle {
 
     async fn send_request(
         &self,
+        request: SessionRequest,
+        span: &Span,
+        allow_closing: bool,
+    ) -> Result<(SessionResponse, usize), VmToolSessionError> {
+        self.send_request_stream(request, span, allow_closing, None)
+            .await
+    }
+
+    async fn send_request_stream(
+        &self,
         mut request: SessionRequest,
         span: &Span,
         allow_closing: bool,
+        stdout: Option<mpsc::Sender<Vec<u8>>>,
     ) -> Result<(SessionResponse, usize), VmToolSessionError> {
         if self.inner.closing.load(Ordering::Acquire) && !allow_closing {
             return Err(self.closed_error());
@@ -1374,6 +1407,7 @@ impl VmToolSessionHandle {
         record_vm_content(span, "tool.request", &encoded);
 
         let (sender, receiver) = oneshot::channel();
+        let (stream_failed, failure) = oneshot::channel();
         {
             let mut pending = lock_unpoisoned(&self.inner.pending);
             if let Some(error) = &pending.closed {
@@ -1384,6 +1418,8 @@ impl VmToolSessionHandle {
                 PendingResponse {
                     span: span.clone(),
                     response: sender,
+                    stdout,
+                    stream_failed: Some(stream_failed),
                 },
             );
         }
@@ -1406,7 +1442,12 @@ impl VmToolSessionHandle {
             .map_err(|_| self.closed_error())?;
         guard.queued = true;
         span.record("rpc.queue.duration_ns", elapsed_ns(queued_at));
-        let response = receiver.await.map_err(|_| self.closed_error())?;
+        let response = tokio::select! {
+            response = receiver => response.map_err(|_| self.closed_error())?,
+            _ = async { if failure.await.is_err() { std::future::pending::<()>().await; } } => {
+                return Err(VmToolSessionError::Protocol("guest stdout stream overflow or unexpected data"));
+            }
+        };
         guard.armed = false;
         response.map_err(VmToolSessionError::Router)
     }
@@ -1725,6 +1766,23 @@ async fn route_responses(output: ChildStdout, inner: Weak<VmToolSessionInner>) {
             return;
         };
         let id = response.id();
+        if let SessionResponse::Output(chunk) = response {
+            let mut pending = lock_unpoisoned(&inner.pending);
+            if let Some(request) = pending.requests.get_mut(&id) {
+                let accepted = chunk.data.len() <= 16 * 1024
+                    && request
+                        .stdout
+                        .as_ref()
+                        .is_some_and(|sink| sink.try_send(chunk.data).is_ok());
+                if !accepted {
+                    request.stdout = None;
+                    if let Some(failed) = request.stream_failed.take() {
+                        let _ = failed.send(());
+                    }
+                }
+            }
+            continue;
+        }
         let pending = lock_unpoisoned(&inner.pending).requests.remove(&id);
         if let Some(pending) = pending {
             record_vm_content(

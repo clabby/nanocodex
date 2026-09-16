@@ -6340,6 +6340,7 @@ dependencies = [
  "url",
  "uuid",
  "vt100",
+ "webrtc",
  "whoami 1.6.1",
 ]
 

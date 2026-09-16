@@ -358,6 +358,18 @@ Concrete examples:
 {"kind":"shutdown","payload":{"id":9,"error":null}}
 ```
 
+Trusted hosts can opt into `stream_stdout: true` through
+`VmToolSessionHandle::stream_command`. The guest then emits bounded
+`{"kind":"output","payload":{"id":5,"data":"...base64..."}}` chunks before
+the terminal `execute` response; streamed bytes are not accumulated in its
+`stdout` field. Stderr retains the command output limit. Slow receivers cancel
+the command instead of blocking unrelated requests or growing an unbounded
+queue. Dropping the command future uses the existing targeted cancellation path.
+This supports continuous desktop video even when guest networking is disabled.
+Older guests do not accept the opt-in field; the screen publisher checks for a
+stream-capable desktop before using it. Ordinary execute requests omit it.
+
+
 `write_file` creates parents and publishes through a sibling temporary file
 plus rename. `read_file` accepts only regular files and caps contents at
 32 MiB. `execute` clears the inherited environment, uses only the supplied

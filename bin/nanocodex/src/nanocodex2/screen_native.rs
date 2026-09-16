@@ -53,7 +53,8 @@ impl NativeScreen {
                         .map_err(configuration)?
                 })
             });
-            let publisher = ScreenPublisher::start(target, machine, backend).await?;
+            let publisher =
+                ScreenPublisher::start(target, machine, backend, Some(native_video())).await?;
             Ok(Self {
                 publisher: Some(publisher),
             })
@@ -108,11 +109,20 @@ impl NativeScreen {
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
+                let video_runtime = runtime.clone();
                 let backend: ScreenBackend = std::sync::Arc::new(move |input| {
                     let runtime = runtime.clone();
                     Box::pin(async move { desktop_request(runtime, input).await })
                 });
-                screen.publisher = Some(ScreenPublisher::start(target, machine, backend).await?);
+                screen.publisher = Some(
+                    ScreenPublisher::start(
+                        target,
+                        machine,
+                        backend,
+                        Some(native_video(video_runtime)),
+                    )
+                    .await?,
+                );
                 Ok(())
             }
             .await;
@@ -191,4 +201,115 @@ async fn desktop_request(
     })
     .await
     .map_err(configuration)?
+}
+
+#[cfg(target_os = "linux")]
+fn native_video(runtime: PathBuf) -> super::screen_video::VideoSource {
+    std::sync::Arc::new(move || {
+        let runtime = runtime.clone();
+        Box::pin(async move {
+            let command = nanocodex_vm::desktop::video_command(&runtime)?;
+            let child = tokio::process::Command::from(command)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()?;
+            super::screen_video::Capture::child(child)
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn native_video() -> super::screen_video::VideoSource {
+    std::sync::Arc::new(|| {
+        Box::pin(async {
+            use std::process::Stdio;
+            // Resolve AVFoundation's screen device explicitly; camera indices vary
+            // with attached cameras. Never fall back to a camera or microphone.
+            let devices = tokio::process::Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-f",
+                    "avfoundation",
+                    "-list_devices",
+                    "true",
+                    "-i",
+                    "",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .output()
+                .await?;
+            let listing = String::from_utf8_lossy(&devices.stderr);
+            let screen_name = format!("Capture screen {}", nanocodex_hand::main_display_index()?);
+            let screen = listing
+                .lines()
+                .find_map(|line| {
+                    let (prefix, _) = line.split_once(&screen_name)?;
+                    let (_, index) = prefix.rsplit_once('[')?;
+                    index
+                        .trim()
+                        .strip_suffix(']')
+                        .and_then(|s| s.parse::<u16>().ok())
+                })
+                .ok_or("AVFoundation screen capture unavailable")?;
+            let input = format!("{screen}:none");
+            let child = tokio::process::Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-f",
+                    "avfoundation",
+                    "-framerate",
+                    "60",
+                    "-capture_cursor",
+                    "1",
+                    "-pixel_format",
+                    "uyvy422",
+                    "-i",
+                    &input,
+                    "-an",
+                    "-r",
+                    "60",
+                    "-level",
+                    "3.2",
+                    "-vf",
+                    "scale=1280:1280:force_original_aspect_ratio=decrease:force_divisible_by=2",
+                    "-c:v",
+                    "h264_videotoolbox",
+                    "-realtime",
+                    "1",
+                    "-profile:v",
+                    "baseline",
+                    "-b:v",
+                    "6M",
+                    "-maxrate",
+                    "6M",
+                    "-bufsize",
+                    "100k",
+                    "-g",
+                    "30",
+                    "-bf",
+                    "0",
+                    "-bsf:v",
+                    "h264_metadata=aud=insert",
+                    "-flush_packets",
+                    "1",
+                    "-f",
+                    "h264",
+                    "pipe:1",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()?;
+            super::screen_video::Capture::child(child)
+        })
+    })
 }

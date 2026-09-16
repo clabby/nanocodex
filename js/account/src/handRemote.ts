@@ -368,7 +368,7 @@ export class RemoteBrowserSession {
       clearTimeout(this.frameDeadline); this.frameDeadline = undefined; this.framePending--;
       this.ready(true);
       if (this.frameWindow > 1) this.requestFrame(epoch);
-      else this.frameTimer = setTimeout(() => this.requestFrame(epoch), Math.ceil(Math.max(0, 100 - (performance.now() - this.frameRequestedAt))));
+      else this.frameTimer = setTimeout(() => this.requestFrame(epoch), Math.ceil(Math.max(0, 1000 / 30 - (performance.now() - this.frameRequestedAt))));
     } catch (error) {
       throw error instanceof RemoteError ? error : new RemoteError("Invalid remote frame.", true);
     } finally { bitmap?.close(); if (this.current(epoch)) this.frameQueued--; }

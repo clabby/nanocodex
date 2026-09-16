@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -46,7 +47,13 @@ func startWaymoteWithDiagnostics(ctx context.Context, executable string, diagnos
 	ctx, cancel := context.WithCancel(ctx)
 	// libkrun TSI cannot listen on guest UDP sockets. Waymote's native Annex-B
 	// stdout also avoids packet loss and a network hop between local processes.
-	command := exec.CommandContext(ctx, executable, "--frame-rate", "60", "--bitrate", "6000", "--xkb-layout", "us")
+	helper, err := os.Executable()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, executable, "--frame-rate", "60", "--bitrate", "6000", "--xkb-layout", "us", "--ffmpeg", helper)
+	command.Env = append(os.Environ(), encoderHelperEnv+"=1")
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
 		if command.Process == nil {
@@ -157,6 +164,15 @@ func (capture *waymoteCapture) apply(event remoteInput) error {
 	case "releaseAll":
 		return capture.record(5, 0, 0, 0, 0)
 	case "text":
+		// Compositors with an existing input-method owner may reject Waymote's
+		// IME commits. Opt into the virtual-keyboard path on those hosts.
+		if os.Getenv("NANOCODEX_WAYLAND_TEXT_WTYPE") == "1" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, "wtype", "-")
+			command.Stdin = strings.NewReader(*event.Text)
+			return command.Run()
+		}
 		// Waymote limits each UTF-8 composition commit to 4000 bytes.
 		remaining := []byte(*event.Text)
 		for len(remaining) > 0 {

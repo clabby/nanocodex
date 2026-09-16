@@ -1,4 +1,5 @@
 //! Rust Hand screen publication. Credentials and signaling remain on the host.
+use super::screen_video::{Video, VideoSource, ice_servers};
 use futures_util::{SinkExt, StreamExt, future::BoxFuture};
 use nanocodex_managed::ManagedError;
 use nanocodex_tools::attachment::{AttachmentMachine, AttachmentTarget};
@@ -34,6 +35,7 @@ impl ScreenPublisher {
         target: &AttachmentTarget,
         machine: &AttachmentMachine,
         backend: ScreenBackend,
+        video: Option<VideoSource>,
     ) -> Result<Self, ManagedError> {
         endpoint(target)?;
         let started = Instant::now();
@@ -62,7 +64,7 @@ impl ScreenPublisher {
                 let result = tokio::select! {
                     _ = &mut stopped => break,
                     changed = targets.changed() => { if changed.is_err() { break; } continue; },
-                    result = session(&target, &machine, &backend, dimensions, &mut ready) => result,
+                    result = session(&target, &machine, &backend, video.as_ref(), dimensions, &mut ready) => result,
                 };
                 let _ = tokio::time::timeout(
                     Duration::from_secs(3),
@@ -146,9 +148,59 @@ enum SessionError {
     Closed,
     Replaced,
 }
-type Socket =
+type Wire =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+struct Socket {
+    wire: Wire,
+    video: Option<Video>,
+}
+impl Socket {
+    async fn send(
+        &mut self,
+        message: Message,
+    ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+        self.wire.send(message).await
+    }
+    async fn next(&mut self) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
+        loop {
+            tokio::select! {
+                message = self.wire.next() => {
+                    // WebRTC input must arrive over its DTLS data channels.
+                    if self.video.is_some() && let Some(Ok(Message::Text(text))) = &message
+                        && let Ok(value) = serde_json::from_str::<Value>(text)
+                        && matches!(value["type"].as_str(), Some("input" | "control" | "frame_request")) { continue; }
+                    return message;
+                }
+                event = async { match &mut self.video { Some(video) => video.next().await, None => std::future::pending().await } } => {
+                    let event = event?;
+                    if event.outgoing {
+                        if send(self, event.value).await.is_err() { return None; }
+                    } else {
+                        // A delayed key-up cannot be silently dropped. Revoke
+                        // its whole lease instead of replaying stale input.
+                        let value = if event.created.elapsed() > Duration::from_millis(250) && event.value["type"] == "input" {
+                            if event.value["data"]["kind"] == "move" { continue; }
+                            json!({"type":"viewer_left","viewer_id":event.value["viewer_id"]})
+                        } else { event.value };
+                        return Some(Ok(Message::Text(value.to_string().into())));
+                    }
+                }
+            }
+        }
+    }
+}
 async fn send(socket: &mut Socket, value: Value) -> Result<(), SessionError> {
+    if let Some(video) = &mut socket.video {
+        if value["type"] == "control" {
+            return video
+                .control(value["viewer_id"].as_str().unwrap_or(""), &value["data"])
+                .await
+                .map_err(|_| SessionError::Closed);
+        }
+        if value["type"] == "close_viewer" {
+            video.remove(value["viewer_id"].as_str().unwrap_or(""));
+        }
+    }
     tokio::time::timeout(
         Duration::from_secs(3),
         socket.send(Message::Text(value.to_string().into())),
@@ -241,6 +293,7 @@ async fn session(
     target: &AttachmentTarget,
     machine: &AttachmentMachine,
     backend: &ScreenBackend,
+    video: Option<&VideoSource>,
     dimensions: (u64, u64),
     ready: &mut Option<oneshot::Sender<()>>,
 ) -> Result<(), SessionError> {
@@ -266,7 +319,7 @@ async fn session(
     let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(750_000))
         .max_frame_size(Some(750_000));
-    let (mut socket, _) = tokio::time::timeout(
+    let (wire, _) = tokio::time::timeout(
         Duration::from_secs(10),
         async {
             // Keep DNS/TCP separate from TLS + HTTP upgrade in startup traces.
@@ -287,6 +340,17 @@ async fn session(
     .map_err(|_| SessionError::Closed)?
     .map_err(|_| SessionError::Closed)?;
     tracing::info!(target: "nanocodex2", stage = "screen.socket.connected", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
+    let video = match video {
+        Some(source) => match Video::start(source).await {
+            Ok(video) => Some(video),
+            Err(_) => {
+                tracing::warn!("Continuous screen encoder unavailable; using screenshot fallback");
+                None
+            }
+        },
+        None => None,
+    };
+    let mut socket = Socket { wire, video };
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
@@ -302,7 +366,7 @@ async fn session(
     let mut generation = String::new();
     let mut viewers = HashSet::<String>::new();
     let mut pending_frames = HashMap::<String, u64>::new();
-    let mut frame_tick = tokio::time::interval(Duration::from_millis(100));
+    let mut frame_tick = tokio::time::interval(Duration::from_nanos(33_333_333));
     frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut lease = Lease::default();
     let mut job = None;
@@ -311,6 +375,12 @@ async fn session(
     loop {
         tokio::select! {
             _ = tick.tick() => {
+                if socket.video.as_ref().is_some_and(Video::failed) { return Err(SessionError::Closed); }
+                for viewer in socket.video.as_ref().map(Video::expired).unwrap_or_default() {
+                    if lease.owner == viewer { release(&mut lease, backend, &mut socket).await?; }
+                    viewers.remove(&viewer);
+                    send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?;
+                }
                 if lease.expired() { release(&mut lease,backend,&mut socket).await?; }
                 if last_authorized.elapsed()>Duration::from_secs(25) { return Err(SessionError::Closed); }
                 if !connection.is_empty() && last_renewal.elapsed()>=Duration::from_secs(10) && renewal.is_none() {
@@ -360,16 +430,42 @@ async fn session(
                         tracing::info!(target: "nanocodex2", stage = "screen.socket.ready", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
                         if !connection.is_empty(){return Err(SessionError::Closed);}
                         connection=value["connection_id"].as_str().filter(|s|!s.is_empty()).ok_or(SessionError::Closed)?.into();
-                        send(&mut socket,json!({"type":"catalog","machine_id":machine.id(),"machine_name":machine.name(),"surfaces":[{"id":"desktop","name":"Desktop","kind":if base.path().starts_with("/v1/vm-host-attachments/"){"vm"}else{"desktop"},"width":dimensions.0,"height":dimensions.1,"controllable":true,"agent_tools":true,"transport":"frames-v1","frame_window":6}]})).await?;
+                        let mut surface=json!({"id":"desktop","name":"Desktop","kind":if base.path().starts_with("/v1/vm-host-attachments/"){"vm"}else{"desktop"},"width":dimensions.0,"height":dimensions.1,"controllable":true,"agent_tools":true});
+                        if socket.video.is_none(){surface["transport"]=json!("frames-v1");surface["frame_window"]=json!(6);}
+                        send(&mut socket,json!({"type":"catalog","machine_id":machine.id(),"machine_name":machine.name(),"surfaces":[surface]})).await?;
                     },
                     "published"=>{tracing::info!(target: "nanocodex2", stage = "screen.published", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);generation=value["generation"].as_str().ok_or(SessionError::Closed)?.into();if let Some(ready)=ready.take(){let _=ready.send(());}},
                     "renewed"=>last_authorized=Instant::now(),
                     "pong"=>{},
                     "viewer"=>{
                         if viewer.is_empty() || value["surface_id"]!="desktop" {return Err(SessionError::Closed);}
-                        if viewers.len()>=4 {send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?;}else{viewers.insert(viewer.into());}
+                        if viewers.len()>=4 {send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?;}else{
+                            viewers.insert(viewer.into());
+                            if let Some(video) = &mut socket.video {
+                                let mut url=base.clone();url.set_path(&format!("{}/ice",base.path()));
+                                let offer = tokio::time::timeout(Duration::from_secs(8), async {
+                                    let response=http.post(url).bearer_auth(target.bearer()).send().await?.error_for_status()?.json::<Value>().await?;
+                                    video.add(viewer, ice_servers(&response)?).await
+                                }).await;
+                                match offer {
+                                    Ok(Ok(offer))=>send(&mut socket,offer).await?,
+                                    failure=>{
+                                        match failure { Ok(Err(error)) => eprintln!("Hand video negotiation failed: {error}"), _ => eprintln!("Hand video negotiation timed out") }
+                                        send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?;viewers.remove(viewer);
+                                    }
+                                }
+                            }
+                        }
                     },
-                    "viewer_left"=>{viewers.remove(viewer);pending_frames.remove(viewer);if lease.owner==viewer{release(&mut lease,backend,&mut socket).await?;}},
+                    "viewer_left"=>{viewers.remove(viewer);pending_frames.remove(viewer);if lease.owner==viewer{release(&mut lease,backend,&mut socket).await?;}if let Some(video)=&mut socket.video{video.remove(viewer);}},
+                    "signal" if viewers.contains(viewer)=>{
+                        if let Some(video)=&mut socket.video {
+                            if !matches!(tokio::time::timeout(Duration::from_secs(3),video.signal(viewer,&value["signal"])).await,Ok(Ok(()))) {
+                                if lease.owner==viewer{release(&mut lease,backend,&mut socket).await?;}
+                                send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?;viewers.remove(viewer);
+                            }
+                        }
+                    },
                     "frame_request" if viewers.contains(viewer)=>{
                         let count = value["count"].as_u64().unwrap_or(1);
                         if pending_frames.is_empty() && frame.is_none() { frame_tick.reset_immediately(); }
@@ -622,7 +718,7 @@ mod tests {
             );
             socket.close(None).await.unwrap();
         });
-        let publisher = ScreenPublisher::start(&target, &machine, backend)
+        let publisher = ScreenPublisher::start(&target, &machine, backend, None)
             .await
             .unwrap();
         peer.await.unwrap();
