@@ -72,6 +72,21 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+      - name: Validate the one-click installer definition
+        shell: pwsh
+        run: |
+          $placeholder = Join-Path $env:RUNNER_TEMP "nanocodex-installer-placeholder.exe"
+          [IO.File]::WriteAllBytes($placeholder, [byte[]]@(0))
+          try {
+            ./windows/hand/build.ps1 `
+              -Nanocodex2 $placeholder `
+              -Computer $placeholder `
+              -Version 0.0.0-ci `
+              -NumericVersion 0.0.0.0
+          } finally {
+            Remove-Item -LiteralPath $placeholder -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath ./dist/windows-hand -Recurse -Force -ErrorAction SilentlyContinue
+          }
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
           toolchain: "1.97"
