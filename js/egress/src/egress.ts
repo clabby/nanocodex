@@ -2801,6 +2801,8 @@ function audit(
   };
   log({
     type: "egress.request",
+    ...(SUBJECT.test(request.headers.get(SUBJECT_HEADER) ?? "")
+      ? { agent_subject: request.headers.get(SUBJECT_HEADER) } : {}),
     action,
     rule,
     method: request.method,
