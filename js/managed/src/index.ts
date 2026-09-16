@@ -2814,6 +2814,10 @@ export default {
 };
 
 class DurableComputerObject extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    if (env.NANOCODEX_PERFORMANCE_TRACE === "true") this.ctx = performanceState(ctx);
+  }
   get computerContext(): DurableObjectState { return this.ctx; }
 }
 
@@ -2886,8 +2890,8 @@ export class DurableAgentSession extends DurableComputerSession {
   #runtimeOwnershipGeneration = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
-    if (env.NANOCODEX_PERFORMANCE_TRACE === "true") ctx = performanceState(ctx);
     super(ctx, env);
+    ctx = this.ctx;
     initializeTurnInputs(ctx.storage, "managed_history_projection_chunks");
     this.#cronTriggers = new CronTriggers(ctx.storage);
     this.#startupContext = new ManagedStartupContext(ctx.storage);
