@@ -30,7 +30,7 @@ import {
   type PublicSecurityEnv,
 } from "./publicSecurity.ts";
 import { routeLinkPreview } from "./linkPreview.ts";
-import { routeManaged, type ManagedProxyEnv } from "./managedProxy.ts";
+import { routeManaged } from "./managedProxy.ts";
 import { routeAccountFunding, type AccountFundingProxyEnv } from "./accountFundingProxy.ts";
 import {
   routeChiefOfStaff,
@@ -102,7 +102,6 @@ const LOCAL_SPONSORED_TRIAL_RESET = typeof __NANOCODEX_LOCAL_SPONSORED_TRIAL_RES
   && __NANOCODEX_LOCAL_SPONSORED_TRIAL_RESET__;
 
 type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptEgressEnv
-  & ManagedProxyEnv
   & XProxyEnv
   & AccountFundingProxyEnv
   & ConnectDialogProxyEnv

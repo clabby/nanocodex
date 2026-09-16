@@ -95,7 +95,7 @@ export async function observeManagedAccess(request: Request, env: ManagedAccessE
 }
 
 /** Piggyback issuance on live-authenticated responses: no extra cold-path round trip. */
-export async function managedAccessResponse(request: Request, response: Response, env: ManagedAccessEnv, issue = true): Promise<Response> {
+export async function managedAccessResponse(request: Request, response: Response, env: ManagedAccessEnv): Promise<Response> {
   const observed = observations.get(request);
   if (!observed) return response;
   observations.delete(request);
@@ -107,7 +107,7 @@ export async function managedAccessResponse(request: Request, response: Response
   headers.append("server-timing", `managed_auth;dur=${observed.duration.toFixed(1)};desc="${observed.mode}"`);
   console.info({ type: "managed.auth", request_id: observed.requestId, mode: observed.mode, auth_ms: observed.duration,
     method: request.method, path: new URL(request.url).pathname, status: response.status, deployment_sha: env.DEPLOYMENT_SHA });
-  if (issue && observed.claims && response.ok && !/max-age|public/.test(headers.get("cache-control") ?? "")) {
+  if (observed.claims && response.ok && !/max-age|public/.test(headers.get("cache-control") ?? "")) {
     const payload = `ncx_access_v1.${encode(encoder.encode(JSON.stringify(observed.claims)))}`;
     const signature = await crypto.subtle.sign("HMAC", await key(env.NANOCODEX_ACCESS_SECRET!), encoder.encode(payload));
     headers.set(MANAGED_ACCESS_HEADER, `${payload}.${encode(new Uint8Array(signature))}`);

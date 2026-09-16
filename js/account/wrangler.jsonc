@@ -51,7 +51,6 @@
     ]
   },
   "services": [
-    { "binding": "NANOCODEX_HAND_ADMISSION", "service": "nanocodex-durable-agent", "entrypoint": "ManagedHandAdmission" },
     { "binding": "NANOCODEX_X", "service": "nanocodex-x" },
     {
       "binding": "NANOCODEX_BACKEND",
@@ -72,7 +71,6 @@
   ],
   "durable_objects": {
     "bindings": [
-      { "name": "NANOCODEX_HAND_BROKER", "class_name": "AccountHostedTools", "script_name": "nanocodex-durable-agent" },
       {
         "name": "BYOK_SESSIONS",
         "class_name": "ByokSession"

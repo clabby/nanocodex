@@ -51,10 +51,6 @@
       "types": "./cloudflare/index.d.mts",
       "import": "./cloudflare/index.mjs"
     },
-    "./cloudflare/hand-admission": {
-      "types": "./cloudflare/hand-admission.d.mts",
-      "import": "./cloudflare/hand-admission.mjs"
-    },
     "./cloudflare/egress": {
       "types": "./cloudflare/egress.d.mts",
       "import": "./cloudflare/egress.mjs"
