@@ -417,8 +417,8 @@ mod tests {
             assert!(output.windows(8).any(|window| window == b"\x1b[?1004l"));
             assert!(output.windows(8).any(|window| window == b"\x1b[?1000l"));
             assert!(output.windows(8).any(|window| window == b"\x1b[?2004l"));
+            assert!(output.ends_with(b"\x1b[?1049l"));
         }
-        assert!(output.ends_with(b"\x1b[?1049l"));
     }
 
     #[test]
