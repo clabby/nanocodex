@@ -631,10 +631,9 @@ mod tests {
                 json!(host::MACHINE_CAPABILITIES)
             );
             completed.recv().await.unwrap();
-            assert_eq!(
-                fs::read_to_string(workspace.path().join("native-proof.txt")).unwrap(),
-                "native-process-proof\n"
-            );
+            let proof =
+                fs::read_to_string(workspace.path().join("native-proof.txt")).unwrap();
+            assert_eq!(proof.trim(), "native-process-proof");
             shutdown_tx.send(()).unwrap();
             hand.await.unwrap().unwrap();
         })

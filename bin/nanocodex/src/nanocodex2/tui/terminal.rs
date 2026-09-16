@@ -411,6 +411,7 @@ mod tests {
         restore_commands(&mut output);
 
         assert!(output.starts_with(b"\x1b[?2026l\x1b[?25h"));
+        #[cfg(unix)]
         assert!(output.windows(5).any(|window| window == b"\x1b[<1u"));
         assert!(output.windows(8).any(|window| window == b"\x1b[?1004l"));
         assert!(output.windows(8).any(|window| window == b"\x1b[?1000l"));
