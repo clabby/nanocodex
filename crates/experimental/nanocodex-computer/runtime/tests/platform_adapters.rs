@@ -5,6 +5,14 @@ use std::{
     time::{Duration, Instant},
 };
 fn python() -> String {
+    if let Ok(path) = std::env::var("PYTHON")
+        && !path.trim().is_empty()
+    {
+        return path;
+    }
+    if cfg!(windows) {
+        return "python".into();
+    }
     for p in ["/usr/bin/python3", "/opt/homebrew/bin/python3"] {
         if std::path::Path::new(p).exists() {
             return p.into();

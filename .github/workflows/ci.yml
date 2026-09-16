@@ -62,6 +62,66 @@ jobs:
         env:
           NANOCODEX_TEST_VOICE_RUNTIME: ${{ github.workspace }}/target/debug/nanocodex-resources/voice
 
+  windows-hand:
+    name: Windows Hand and installer
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: "1.97"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          cache-on-failure: true
+      - name: Build and test the account Hand
+        shell: pwsh
+        run: |
+          cargo test --locked --package nanocodex2-bin --bin nanocodex2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --package nanocodex2-bin --bin nanocodex2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test and build native Windows computer control
+        shell: pwsh
+        run: |
+          cargo test --locked `
+            --manifest-path crates/experimental/nanocodex-computer/runtime/Cargo.toml `
+            --test parity windows_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release `
+            --manifest-path crates/experimental/nanocodex-computer/runtime/Cargo.toml `
+            --bin nanocodex-computer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise real Windows capture, accessibility, and input
+        shell: pwsh
+        run: >-
+          ./windows/hand/smoke.ps1
+          -Computer ./crates/experimental/nanocodex-computer/runtime/target/release/nanocodex-computer.exe
+      - name: Validate the per-user startup plan
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "nanocodex-hand"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/debug/nanocodex2.exe $stage/
+          Copy-Item crates/experimental/nanocodex-computer/runtime/target/release/nanocodex-computer.exe $stage/
+          Copy-Item windows/hand/run-hand.ps1 $stage/
+          ./windows/hand/test-setup.ps1 -InstallDir $stage
+      - name: Build the one-click installer
+        shell: pwsh
+        run: >-
+          ./windows/hand/build.ps1
+          -Nanocodex2 ./target/debug/nanocodex2.exe
+          -Computer ./crates/experimental/nanocodex-computer/runtime/target/release/nanocodex-computer.exe
+          -Version 0.0.0-ci
+          -NumericVersion 0.0.0.0
+
   quality:
     name: rustfmt, clippy, and docs
     runs-on: ubuntu-latest

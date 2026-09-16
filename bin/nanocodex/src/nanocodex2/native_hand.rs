@@ -551,10 +551,15 @@ mod tests {
             socket.send(Message::Close(None)).await.unwrap();
             return;
         }
+        let command = if cfg!(windows) {
+            "echo native-process-proof> native-proof.txt && type native-proof.txt"
+        } else {
+            "printf 'native-process-proof\\n' > native-proof.txt && cat native-proof.txt"
+        };
         socket.send(Message::Text(json!({
             "type":"call", "session_id":"native-test-agent", "call_id":"native-file-process",
             "model":"gpt-6-astra", "name":"exec_command",
-            "input":{"cmd":"printf 'native-process-proof\\n' > native-proof.txt && cat native-proof.txt"},
+            "input":{"cmd":command},
             "output_token_budget":1024, "output_byte_budget":131072,
             "deadline_at":9_000_000_000_000_u64,
         }).to_string().into())).await.unwrap();
@@ -590,7 +595,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let directory = private_state_directory();
         let state =
-            NativeState::open(workspace.path(), directory.path(), "Test Linux".into()).unwrap();
+            NativeState::open(workspace.path(), directory.path(), "Test host".into()).unwrap();
         let machine_id = state.machine.id().to_owned();
         let (catalogs_tx, mut catalogs) = mpsc::unbounded_channel();
         let (completed_tx, mut completed) = mpsc::unbounded_channel();
@@ -637,7 +642,7 @@ mod tests {
         .expect("native Hand lifecycle timed out");
         server.abort();
         let restarted =
-            NativeState::open(workspace.path(), directory.path(), "Test Linux".into()).unwrap();
+            NativeState::open(workspace.path(), directory.path(), "Test host".into()).unwrap();
         assert_eq!(restarted.machine.id(), machine_id);
     }
 }

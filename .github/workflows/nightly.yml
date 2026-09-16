@@ -154,6 +154,82 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ inputs.pr && 7 || 1 }}
 
+  build-windows-hand:
+    if: github.repository == 'gakonst/nanocodex'
+    name: build Windows Hand installer
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+      WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.pr && format('refs/pull/{0}/head', inputs.pr) || github.sha }}
+          persist-credentials: false
+      - name: Record exact source revision
+        shell: pwsh
+        run: |
+          "BUILD_SHA=$(git rev-parse HEAD)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_GIT_COMMIT=$(git rev-parse HEAD)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          cache-on-failure: true
+      - name: Build Windows Hand payload
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ inputs.pr && format('pr-{0}', inputs.pr) || 'nightly' }}
+        run: |
+          cargo build --locked --profile nightly --package nanocodex2-bin --bin nanocodex2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release `
+            --manifest-path crates/experimental/nanocodex-computer/runtime/Cargo.toml `
+            --bin nanocodex-computer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Sign payload when Authenticode is configured
+        shell: pwsh
+        run: >-
+          ./windows/hand/sign.ps1 -Path
+          ./target/nightly/nanocodex2.exe,
+          ./crates/experimental/nanocodex-computer/runtime/target/release/nanocodex-computer.exe
+      - name: Build and sign one-click installer
+        shell: pwsh
+        run: |
+          $displayVersion = "nightly-$($env:BUILD_SHA.Substring(0, 10))"
+          ./windows/hand/build.ps1 `
+            -Nanocodex2 ./target/nightly/nanocodex2.exe `
+            -Computer ./crates/experimental/nanocodex-computer/runtime/target/release/nanocodex-computer.exe `
+            -Version $displayVersion `
+            -NumericVersion 0.0.0.0
+          ./windows/hand/sign.ps1 -Path ./dist/windows-hand/nanocodex-hand-setup-x86_64.exe
+      - name: Stage artifacts and provenance
+        shell: pwsh
+        env:
+          PR_NUMBER: ${{ inputs.pr }}
+        run: |
+          Copy-Item target/nightly/nanocodex2.exe dist/windows-hand/nanocodex2-x86_64-pc-windows-msvc.exe
+          Copy-Item crates/experimental/nanocodex-computer/runtime/target/release/nanocodex-computer.exe dist/windows-hand/nanocodex-computer-x86_64-pc-windows-msvc.exe
+          if (-not [string]::IsNullOrWhiteSpace($env:PR_NUMBER)) {
+            [pscustomobject]@{
+              repository = $env:GITHUB_REPOSITORY
+              pr = [int]$env:PR_NUMBER
+              sha = $env:BUILD_SHA
+              artifact = "nanocodex-hand-setup-x86_64.exe"
+              run_id = [long]$env:GITHUB_RUN_ID
+            } | ConvertTo-Json -Compress | Set-Content dist/windows-hand/PR_BUILD.json
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nanocodex-hand-x86_64-pc-windows-msvc
+          path: dist/windows-hand/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.pr && 7 || 1 }}
+
   build-vm-guest:
     if: >-
       github.repository == 'gakonst/nanocodex' &&
@@ -222,7 +298,7 @@ jobs:
       github.repository == 'gakonst/nanocodex' &&
       (github.event_name != 'workflow_dispatch' || inputs.pr == '')
     name: publish immutable and rolling nightlies
-    needs: [build, build-vm-guest]
+    needs: [build, build-windows-hand, build-vm-guest]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
@@ -236,7 +312,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum nanocodex-*.gz nanocodex2-*.gz > SHA256SUMS
+          sha256sum nanocodex-*.gz nanocodex2-*.gz nanocodex-*.exe nanocodex2-*.exe > SHA256SUMS
       - name: Publish immutable and rolling releases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -259,7 +335,7 @@ jobs:
               --target "$GITHUB_SHA" --title "$release_name" \
               --notes-file "$notes_file" --prerelease
           fi
-          gh release upload "$immutable_tag" dist/*.gz dist/SHA256SUMS \
+          gh release upload "$immutable_tag" dist/*.gz dist/*.exe dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --clobber
 
           # Rolling releases retain raw binaries for updaters shipped before
@@ -287,6 +363,8 @@ jobs:
                 nanocodex2-x86_64-unknown-linux-gnu|nanocodex2-x86_64-unknown-linux-gnu.gz|\
                 nanocodex-computer-aarch64-apple-darwin|nanocodex-computer-aarch64-apple-darwin.gz|\
                 nanocodex-computer-x86_64-unknown-linux-gnu|nanocodex-computer-x86_64-unknown-linux-gnu.gz|\
+                nanocodex-computer-x86_64-pc-windows-msvc.exe|\
+                nanocodex2-x86_64-pc-windows-msvc.exe|nanocodex-hand-setup-x86_64.exe|\
                 nanocodex-voice-aarch64-apple-darwin.tar.gz|nanocodex-voice-x86_64-unknown-linux-gnu.tar.gz|\
                 nanocodex-vm-guest-x86_64-unknown-linux-musl|nanocodex-vm-guest-x86_64-unknown-linux-musl.gz)
                   ;;
