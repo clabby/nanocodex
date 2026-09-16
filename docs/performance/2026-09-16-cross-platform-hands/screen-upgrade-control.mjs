@@ -1,5 +1,4 @@
-// Fresh no-auth controls: ordinary HTTP, ws client, and manual Upgrade headers.
-// Reuses no sockets; preserves all samples, including outliers.
+// Credential-free fresh socket controls. Default route returns409 without application I/O.
 import https from 'node:https';
 import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -7,7 +6,7 @@ import { performance } from 'node:perf_hooks';
 import os from 'node:os';
 const require=createRequire(new URL('../../../js/account/package.json', import.meta.url));
 const WebSocket=require('ws');
-const base='https://nanocodex.gakonst.workers.dev/api/health';
+const base=process.argv[2] ?? 'https://nanocodex.gakonst.workers.dev/api/auth/chatgpt';
 console.log(JSON.stringify({started_at:new Date().toISOString(),load_average:os.loadavg(),node:process.version}));
 async function probe(kind,index){
  return await new Promise(resolve=>{

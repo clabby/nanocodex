@@ -3913,6 +3913,350 @@
         "http_version": "1.1",
         "reused": false
       }
-    ]
+    ],
+    "node-finite-no-io": [
+      {
+        "started_at": "2026-09-16T23:06:42.076Z",
+        "load_average": [
+          43.27001953125,
+          46.04248046875,
+          83.6845703125
+        ],
+        "node": "v24.19.0"
+      },
+      {
+        "kind": "https",
+        "index": 0,
+        "socket_ms": 8.876292,
+        "dns_end_ms": 12.837167,
+        "connect_end_ms": 33.120791999999994,
+        "tls_end_ms": 59.338042,
+        "request_end_ms": 59.513374999999996,
+        "response_ms": 97.06675,
+        "elapsed_ms": 97.098875,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "ws",
+        "index": 0,
+        "socket_ms": 1.273165999999975,
+        "dns_end_ms": 2.7098749999999825,
+        "connect_end_ms": 20.70399999999998,
+        "tls_end_ms": 58.790249999999986,
+        "request_end_ms": 58.90549999999999,
+        "response_ms": 169.18475,
+        "elapsed_ms": 169.185333,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "upgrade",
+        "index": 0,
+        "socket_ms": 0.7255409999999642,
+        "dns_end_ms": 2.9196249999999964,
+        "connect_end_ms": 23.594625000000008,
+        "tls_end_ms": 127.179375,
+        "request_end_ms": 127.51333299999999,
+        "response_ms": 222.93449999999996,
+        "elapsed_ms": 222.93591600000002,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "https",
+        "index": 1,
+        "socket_ms": 0.5043749999999818,
+        "dns_end_ms": 2.062708999999927,
+        "connect_end_ms": 23.178874999999948,
+        "tls_end_ms": 54.27441699999997,
+        "request_end_ms": 54.34695899999997,
+        "response_ms": 102.31958399999996,
+        "elapsed_ms": 102.32104199999992,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "ws",
+        "index": 1,
+        "socket_ms": 3.4966249999999945,
+        "dns_end_ms": 6.465208000000075,
+        "connect_end_ms": 26.80362500000001,
+        "tls_end_ms": 93.68525,
+        "request_end_ms": 93.87170800000001,
+        "response_ms": 217.73195800000008,
+        "elapsed_ms": 217.733291,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "upgrade",
+        "index": 1,
+        "socket_ms": 1.6749169999999367,
+        "dns_end_ms": 8.234417000000008,
+        "connect_end_ms": 101.44849999999997,
+        "tls_end_ms": 129.568667,
+        "request_end_ms": 129.72254199999998,
+        "response_ms": 245.83199999999988,
+        "elapsed_ms": 245.832584,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "https",
+        "index": 2,
+        "socket_ms": 0.6134999999999309,
+        "dns_end_ms": 2.163041999999905,
+        "connect_end_ms": 22.59720799999991,
+        "tls_end_ms": 74.23454199999992,
+        "request_end_ms": 74.32316700000001,
+        "response_ms": 108.53320799999983,
+        "elapsed_ms": 108.5346669999999,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "ws",
+        "index": 2,
+        "socket_ms": 1.5579159999999774,
+        "dns_end_ms": 3.94787499999984,
+        "connect_end_ms": 25.743540999999823,
+        "tls_end_ms": 57.49604099999988,
+        "request_end_ms": 57.66020800000001,
+        "response_ms": 176.46962499999995,
+        "elapsed_ms": 176.47020799999996,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "upgrade",
+        "index": 2,
+        "socket_ms": 0.5829170000001795,
+        "dns_end_ms": 2.8963750000000346,
+        "connect_end_ms": 112.07791700000007,
+        "tls_end_ms": 141.69229200000018,
+        "request_end_ms": 141.7722080000001,
+        "response_ms": 248.096,
+        "elapsed_ms": 248.096542,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "https",
+        "index": 3,
+        "socket_ms": 0.5447920000001432,
+        "dns_end_ms": 2.223750000000109,
+        "connect_end_ms": 24.06775000000016,
+        "tls_end_ms": 50.41045900000017,
+        "request_end_ms": 50.51950000000011,
+        "response_ms": 92.55037500000003,
+        "elapsed_ms": 92.55112499999996,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "ws",
+        "index": 3,
+        "socket_ms": 0.5616250000000491,
+        "dns_end_ms": 2.5032920000001013,
+        "connect_end_ms": 21.007125000000087,
+        "tls_end_ms": 48.308042000000114,
+        "request_end_ms": 48.39604200000008,
+        "response_ms": 149.830375,
+        "elapsed_ms": 149.8307920000002,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      },
+      {
+        "kind": "upgrade",
+        "index": 3,
+        "socket_ms": 2.1764169999999012,
+        "dns_end_ms": 3.450749999999971,
+        "connect_end_ms": 23.29758300000003,
+        "tls_end_ms": 129.19512499999996,
+        "request_end_ms": 129.24637499999994,
+        "response_ms": 241.436917,
+        "elapsed_ms": 241.43766700000015,
+        "status": 409,
+        "cf_colo": "SJC",
+        "http_version": "1.1",
+        "reused": false
+      }
+    ],
+    "native-finite-no-io": {
+      "started_at": "2026-09-16T23:06:40Z",
+      "metrics": [
+        {
+          "server_timing": "cfExtPri",
+          "sample": "probe-0-https",
+          "reuse": false,
+          "protocol": "h3",
+          "dns_ms": 1.000046730041504,
+          "request_id": "",
+          "status": 409,
+          "tls_ms": 38.99991512298584,
+          "total_ms": 80.56998252868652,
+          "fetch_to_request_ms": 47.92201519012451,
+          "request_ms": 0.1590251922607422,
+          "connect_ms": 39.999961853027344,
+          "wait_ms": 30.261993408203125
+        },
+        {
+          "total_ms": 267.6990032196045,
+          "dns_ms": 0,
+          "request_ms": 0.041961669921875,
+          "protocol": "http/1.1",
+          "status": 409,
+          "tls_ms": 34.00003910064697,
+          "fetch_to_request_ms": 67.15202331542969,
+          "request_id": "",
+          "server_timing": "",
+          "connect_ms": 65.00005722045898,
+          "reuse": false,
+          "sample": "probe-0-ws",
+          "wait_ms": 197.8360414505005
+        },
+        {
+          "total_ms": 85.4640007019043,
+          "dns_ms": 1.000046730041504,
+          "request_ms": 0.06306171417236328,
+          "protocol": "h3",
+          "status": 409,
+          "tls_ms": 32.99999237060547,
+          "fetch_to_request_ms": 37.04798221588135,
+          "request_id": "",
+          "server_timing": "cfExtPri",
+          "connect_ms": 34.00003910064697,
+          "reuse": false,
+          "sample": "probe-1-https",
+          "wait_ms": 45.53794860839844
+        },
+        {
+          "total_ms": 164.436936378479,
+          "dns_ms": 1.000046730041504,
+          "request_ms": 0.15401840209960938,
+          "protocol": "http/1.1",
+          "status": 409,
+          "tls_ms": 34.999966621398926,
+          "fetch_to_request_ms": 56.0380220413208,
+          "request_id": "",
+          "server_timing": "",
+          "connect_ms": 52.99997329711914,
+          "reuse": false,
+          "sample": "probe-1-ws",
+          "wait_ms": 102.15699672698975
+        },
+        {
+          "sample": "probe-2-https",
+          "fetch_to_request_ms": 59.68892574310303,
+          "reuse": false,
+          "tls_ms": 49.99995231628418,
+          "request_ms": 0.0749826431274414,
+          "server_timing": "cfExtPri",
+          "dns_ms": 1.000046730041504,
+          "wait_ms": 46.208977699279785,
+          "status": 409,
+          "request_id": "",
+          "total_ms": 111.72592639923096,
+          "protocol": "h3",
+          "connect_ms": 50.999999046325684
+        },
+        {
+          "sample": "probe-2-ws",
+          "fetch_to_request_ms": 58.15696716308594,
+          "reuse": false,
+          "tls_ms": 31.00001811981201,
+          "request_ms": 0.033020973205566406,
+          "server_timing": "",
+          "dns_ms": 1.999974250793457,
+          "wait_ms": 111.37700080871582,
+          "status": 409,
+          "request_id": "",
+          "total_ms": 173.92194271087646,
+          "protocol": "http/1.1",
+          "connect_ms": 54.000020027160645
+        },
+        {
+          "sample": "probe-3-https",
+          "fetch_to_request_ms": 46.55301570892334,
+          "reuse": false,
+          "tls_ms": 39.00003433227539,
+          "request_ms": 0.14507770538330078,
+          "server_timing": "cfExtPri",
+          "dns_ms": 1.000046730041504,
+          "wait_ms": 41.83399677276611,
+          "status": 409,
+          "request_id": "",
+          "total_ms": 95.69907188415527,
+          "protocol": "h3",
+          "connect_ms": 41.00000858306885
+        }
+      ],
+      "results": [
+        {
+          "sample": "probe-0-https",
+          "elapsed_ms": 84.48004722595215,
+          "outcome": "finite"
+        },
+        {
+          "sample": "probe-0-ws",
+          "elapsed_ms": 269.631028175354,
+          "outcome": "rejected"
+        },
+        {
+          "sample": "probe-1-https",
+          "elapsed_ms": 85.92498302459717,
+          "outcome": "finite"
+        },
+        {
+          "sample": "probe-1-ws",
+          "elapsed_ms": 164.8350954055786,
+          "outcome": "rejected"
+        },
+        {
+          "sample": "probe-2-https",
+          "elapsed_ms": 112.57600784301758,
+          "outcome": "finite"
+        },
+        {
+          "sample": "probe-2-ws",
+          "elapsed_ms": 174.32498931884766,
+          "outcome": "rejected"
+        },
+        {
+          "sample": "probe-3-https",
+          "elapsed_ms": 96.53604030609131,
+          "outcome": "finite"
+        },
+        {
+          "sample": "probe-3-ws",
+          "elapsed_ms": 230.27300834655762,
+          "outcome": "rejected"
+        }
+      ],
+      "note": "Last websocket task metric callback not delivered before process exit; completion timer retained."
+    }
   }
 }

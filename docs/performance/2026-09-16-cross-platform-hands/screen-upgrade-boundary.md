@@ -4,9 +4,10 @@
 
 Two deployed routing experiments failed to demonstrate a screen-startup win and
 were reverted. The earlier roughly 555 ms residual is **not proven to be
-service-binding overhead**. Similar delay occurs on unauthenticated health
-requests carrying WebSocket Upgrade headers, using both Apple's URLSession and
-Node. Rewriting the native client or adding local account authentication is not
+service-binding overhead**. Unauthenticated health requests carrying WebSocket Upgrade headers show similar
+delay using both Apple's URLSession and Node, but that health route itself makes
+a managed service call. A separate finite 409 route with no application I/O is
+faster. Rewriting the native client or adding local account authentication is not
 supported by these measurements.
 
 The retained changes add safe request-ID-correlated timing fields. Existing
@@ -52,9 +53,11 @@ Use client monotonic timing and same-context durations, and do not add overlappi
 spans. See Cloudflare's [performance and timer documentation](https://developers.cloudflare.com/workers/runtime-apis/performance/)
 and [security model](https://developers.cloudflare.com/workers/reference/security-model/).
 
-## Controls: no Hand authentication or broker
+## Controls: distinguish service calls from a finite local response
 
-Fresh URLSession sessions at 23:00:45 produced:
+The `/api/health` route calls `managedModelStatus` through a service binding
+even without credentials. It is not a no-managed-call control. Fresh URLSession
+sessions at 23:00:45 produced:
 
 | `/api/health` request | Samples |
 | --- | --- |
@@ -76,17 +79,40 @@ Fresh Node 24.19 HTTP/1.1 connections at 23:04:46, all reaching SJC, produced:
 
 Each request created a new socket; the large ordinary-HTTP outlier is retained.
 The corresponding delay in Node and manual-header requests rules out an
-Apple-only explanation. The precise edge/network cause remains unresolved;
-this is evidence against the proposed application-routing explanation, not a
-proof of a particular Cloudflare internal mechanism.
+Apple-only explanation. This control alone cannot distinguish the service-call path from edge dispatch.
+
+A second control used `GET /api/auth/chatgpt`, whose configured managed-mode path
+returns a finite 409 without awaited application I/O. At 23:06:40–23:06:45:
+
+| Finite409 request | Samples |
+| --- | --- |
+| Fresh URLSession HTTP (HTTP/3) | 84 / 86 / 113 / 97 ms |
+| Fresh URLSession WSS (HTTP/1.1) | 270 / 165 / 174 / 230 ms |
+| Fresh Node HTTP/1.1 GET | 97 / 102 / 109 / 93 ms |
+| Fresh Node `ws`, HTTP/1.1 | 169 / 218 / 176 / 150 ms |
+| Fresh Node manual Upgrade, HTTP/1.1 | 223 / 246 / 248 / 241 ms |
+
+All returned 409. The extra delay is substantially smaller than on health or
+successful viewer requests. Native plainHTTP negotiates a different protocol;
+Node holds HTTP/1.1 constant across all three variants. The remaining cause is
+unresolved: these results do not establish a universal 600 ms edge-upgrade cost,
+and the failed routing experiments do not eliminate every possible service-call
+effect.
 
 Run the credential-free control using normal account development dependencies:
 
 ```sh
-node docs/performance/2026-09-16-cross-platform-hands/screen-health-control.mjs
+node docs/performance/2026-09-16-cross-platform-hands/screen-upgrade-control.mjs
 ```
 
 It records monotonic DNS/TCP/TLS/request/response boundaries and keeps all samples.
+An optional URL argument repeats the same test on `/api/health`. The companion
+[Swift control](screen-upgrade-control.swift) uses fresh URLSession sessions:
+
+```sh
+swiftc -parse-as-library docs/performance/2026-09-16-cross-platform-hands/screen-upgrade-control.swift -o /tmp/nanocodex-screen-control
+/tmp/nanocodex-screen-control
+```
 
 ## Runtime correctness and decoded frames
 
@@ -121,6 +147,7 @@ No physical-phone latency measurement succeeded in this investigation.
   They exclude credentials, query strings, SDP and captured media. Cross-isolate
   epochs remain diagnostic metadata only; no derived stage attribution uses them.
 
-The next useful investigation is a controlled public-edge upgrade comparison
-with location/connection reuse held constant. Another auth or broker rewrite
+The next useful investigation compares a finite local response and a finite
+service-call response under identical Upgrade headers, protocol and edge
+location, while accounting for the Worker timer behavior. Another auth or broker rewrite
 should wait for evidence that it can remove the measured delay.
