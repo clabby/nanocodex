@@ -8,7 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{
-    connect_async_tls_with_config,
+    client_async_tls_with_config,
     tungstenite::{
         Message,
         client::IntoClientRequest,
@@ -71,7 +71,27 @@ pub(crate) async fn run(
                 let connector = if request.uri().scheme_str() == Some("wss") {
                     Some(tokio_tungstenite::Connector::Rustls(nanocodex_oai_api::tls::native_client_config().await?))
                 } else { None };
-                connect_async_tls_with_config(request, None, true, connector).await
+                tracing::info!(target: "nanocodex_tools::attachment",
+                    stage = "attachment.socket.trust",
+                    elapsed_ms = connect_started.elapsed().as_secs_f64() * 1000.0,
+                    "attachment TLS trust ready");
+                let host = request.uri().host().ok_or(tokio_tungstenite::tungstenite::Error::Url(
+                    tokio_tungstenite::tungstenite::error::UrlError::NoHostName,
+                ))?;
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                let port = request.uri().port_u16().unwrap_or(if connector.is_some() { 443 } else { 80 });
+                let addresses: Vec<_> = tokio::net::lookup_host((host, port)).await?.collect();
+                tracing::info!(target: "nanocodex_tools::attachment",
+                    stage = "attachment.socket.resolved",
+                    elapsed_ms = connect_started.elapsed().as_secs_f64() * 1000.0,
+                    "attachment address resolved");
+                let stream = tokio::net::TcpStream::connect(addresses.as_slice()).await?;
+                stream.set_nodelay(true)?;
+                tracing::info!(target: "nanocodex_tools::attachment",
+                    stage = "attachment.socket.tcp",
+                    elapsed_ms = connect_started.elapsed().as_secs_f64() * 1000.0,
+                    "attachment TCP connected");
+                client_async_tls_with_config(request, stream, None, connector).await
             } => connected,
         };
         let socket = match connected {
