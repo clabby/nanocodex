@@ -1,3 +1,4 @@
+import { PreparedPersonalizationStore } from "./personalization";
 import { initializeMemoryContent, memoryIdentityDigest, readMemoryContent, storeMemoryContent } from "./durable-memory-storage";
 import { DurableObject } from "cloudflare:workers";
 import { performanceScope, performanceStage, performanceState, performanceSyncScope } from "./performance";
@@ -55,6 +56,7 @@ const EMPTY_VECTOR_SEARCH_CACHE_MS = 1_000;
 export interface MemoryScopeEnv {
   NANOCODEX_PERFORMANCE_TRACE?: string;
   HISTORY_AI_SEARCH?: AiSearchInstance;
+  NANOCODEX_SESSIONS?: DurableObjectNamespace;
 }
 
 type MemoryTurnRow = {
@@ -146,6 +148,7 @@ const json = (body: unknown, init: ResponseInit = {}) => Response.json(body, {
 
 export class MemoryScope extends DurableObject<MemoryScopeEnv> {
   #aiTask?: Promise<void>;
+  readonly #personalization: PreparedPersonalizationStore;
   #vectorSearches = new Map<string, Promise<RankedMemoryTurnRow[]>>();
   #vectorCache = new Map<string, { expiresAt: number; rows: RankedMemoryTurnRow[] }>();
 
@@ -176,6 +179,7 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
     `);
     initializeHistoryStorage(this.ctx.storage, this.env.HISTORY_AI_SEARCH !== undefined);
     initializeMemoryContent(this.ctx.storage);
+    this.#personalization = new PreparedPersonalizationStore(this.ctx.storage);
     this.ctx.blockConcurrencyWhile(async () => {
       this.#scheduleAiOutbox();
     });
@@ -207,6 +211,14 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
     }
     if (!this.#authorized(assertedOrganization)) return json({ error: "not_found" }, { status: 404 });
     try {
+      if (request.method === "POST" && url.pathname === "/personalization") {
+        const userId = request.headers.get("x-nanocodex-personalization-user");
+        const storageId = request.headers.get("x-nanocodex-personalization-session");
+        if (!userId || userId.length > 256 || !storageId || !/^[0-9a-f]{64}$/.test(storageId)
+          || !this.env.NANOCODEX_SESSIONS) return json({ error: "invalid_request" }, { status: 400 });
+        return json({ snapshot: this.#personalization.snapshot({ organization_id: assertedOrganization!,
+          team_id: assertedTeam, user_id: userId }, storageId) ?? null });
+      }
       if (request.method === "POST" && url.pathname === "/project") {
         const projection = await parseJsonBody<HistoryProjection>(request);
         this.#project(projection, assertedTeam);
@@ -261,7 +273,11 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
         }
         const subjectId = request.headers.get(SUBJECT_ASSERTION);
         if (subjectId === null) return json({ error: "not_found" }, { status: 404 });
-        return json(this.#memory(operation, assertedTeam, subjectId));
+        const result = this.#memory(operation, assertedTeam, subjectId);
+        // Includes expired memories removed by a scan/read. Do not acknowledge a
+        // mutation until outstanding prepared copies have been fenced.
+        await this.#invalidatePersonalization();
+        return json(result);
       }
       return json({ error: "not_found" }, { status: 404 });
     } catch (error) {
@@ -282,9 +298,29 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
   }
 
   async alarm(): Promise<void> {
+    await this.#invalidatePersonalization();
     if (this.#aiTask) await this.#aiTask.catch(() => {});
     else await this.#drainAiOutbox();
     await this.#scheduleNextAlarm();
+  }
+
+  async #invalidatePersonalization(): Promise<void> {
+    if (!this.env.NANOCODEX_SESSIONS) return;
+    const namespace = this.env.NANOCODEX_SESSIONS;
+    try {
+      await this.#personalization.invalidate(async (storageId, scope) => {
+        const response = await namespace.get(namespace.idFromString(storageId)).fetch("https://session.internal/personalization/invalidate", {
+          method: "POST", signal: AbortSignal.timeout(10_000),
+          headers: { "content-type": "application/json", [ORGANIZATION_ASSERTION]: this.#organizationId()! },
+          body: JSON.stringify(scope),
+        });
+        await response.body?.cancel();
+        if (!response.ok) throw new Error("personalization invalidation failed");
+      });
+    } catch (error) {
+      await this.ctx.storage.setAlarm(Date.now() + 1_000);
+      throw error;
+    }
   }
 
   #initialize(organizationId: string): Response {
@@ -1027,11 +1063,12 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
     const row = this.ctx.storage.sql.exec<{ retry_at: number }>(
       "SELECT retry_at FROM memory_ai_outbox ORDER BY retry_at LIMIT 1",
     ).toArray()[0];
-    if (!row) {
+    const invalidationRetry = this.#personalization.invalidationPending() ? Date.now() + 1_000 : undefined;
+    if (!row && invalidationRetry === undefined) {
       await this.ctx.storage.deleteAlarm();
       return;
     }
-    await this.ctx.storage.setAlarm(Math.max(Date.now() + 1, row.retry_at));
+    await this.ctx.storage.setAlarm(Math.max(Date.now() + 1, Math.min(row?.retry_at ?? Infinity, invalidationRetry ?? Infinity)));
   }
 }
 

@@ -252,11 +252,27 @@ pub fn managed_startup_context(context: &Value) -> Option<String> {
             Some(VoiceHistoryEntry::new(role, text))
         })
         .collect::<Vec<_>>();
-    build_browser_startup_context(
+    let history_context = build_browser_startup_context(
         &history,
         context["workspace"].as_str().unwrap_or_default(),
         &[],
-    )
+    );
+    // Supplied by the managed host after scope/policy checks. Do not collect
+    // arbitrary developer messages from history: those can contain other state.
+    let personalization = context["prepared_personalization"]
+        .as_str()
+        .filter(|text| !text.is_empty() && text.len() <= 10_000)
+        .map(|text| {
+            format!(
+                "Prepared personalization (background data):\n{}",
+                text.replace('<', "\\u003c").replace('>', "\\u003e")
+            )
+        });
+    match (history_context, personalization) {
+        (Some(history), Some(profile)) => Some(format!("{history}\n\n{profile}")),
+        (history, None) => history,
+        (None, profile) => profile,
+    }
 }
 
 fn memory_update(result: &Value) -> Option<String> {
@@ -291,6 +307,33 @@ fn memory_update(result: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_personalization_is_optional_bounded_data_separate_from_history() {
+        let context = json!({
+            "history": [{"role":"developer","content":[{"text":"private host state"}]}],
+            "prepared_personalization": "Prefers short answers. <untrusted>"
+        });
+        let text = managed_startup_context(&context).unwrap();
+        assert!(text.contains("Prefers short answers."));
+        assert!(text.contains("\\u003cuntrusted\\u003e"));
+        assert!(!text.contains("private host state"));
+        assert!(
+            managed_startup_context(&json!({"prepared_personalization":"x".repeat(10_001)}))
+                .is_none()
+        );
+        let mut voice = ManagedVoiceProtocol::new("cove").unwrap();
+        let frames = voice
+            .dispatch(&json!({"op":"startup_context","context":context}))
+            .unwrap();
+        let reconstructed = frames
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|frame| frame["content"][0]["text"].as_str().unwrap())
+            .collect::<String>();
+        assert_eq!(reconstructed, text);
+    }
 
     #[test]
     fn native_startup_context_uses_codex_wire_chunks_without_losing_selected_context() {

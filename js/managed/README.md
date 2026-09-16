@@ -103,6 +103,34 @@ Reusable Hosted Tools protocol, broker-state, and durable-memory policy live in
 adapters and retains account scope, Connect authorization, bindings, and
 storage ownership.
 
+## Prepared personalization
+
+Managed admission no longer runs prompt-derived history search or memory scan.
+The MemoryScope prepares a deterministic snapshot of saved team memories; Sessions
+warm a disposable copy on create, open, or activity without awaiting it. Each turn
+pins the eligible local copy or a cache miss. A miss proceeds without retrieval.
+Explicit `find_session`, `read_session`, and memory tools remain available.
+
+Snapshots carry organization/team/user scope, source versions, and a five-minute
+lease. New memories coalesce until refresh; replacements and deletions invalidate
+issued copies before the mutation succeeds. Failed invalidations retain durable
+retry debt. Expiry is checked again before model injection. Previously delivered
+conversation history cannot be erased; later prepared blocks replace or withdraw
+prior prepared context. Source facts remain shared team data, not private user
+facts. No conversation summarizer or inferred personal profile is added here.
+
+The source selection is indexed, limited to 32 facts and 8 KB of fact content,
+and does not write scan/use counters. A team snapshot serves multiple agents;
+active subscriber leases are bounded to 256 per organization. Additional agents
+proceed with a cache miss. Refresh is activity-driven, so idle users incur no
+periodic job. Identical content is not appended again on later turns, and pinned
+context is pruned when the associated turn receipts are archived.
+
+Voice startup receives optional prepared context in the existing context response.
+Updated Rust/WASM and Apple voice clients accept it as bounded background data;
+older clients ignore the optional field. Media readiness never awaits preparation.
+Account/environment discovery remains a separate first-turn dependency.
+
 ## Public journeys and protocol boundaries
 
 - SMS OTP/account and API-key routes establish the account identity that owns

@@ -363,3 +363,110 @@ describe("managed first-prompt bootstrap boundary", () => {
     });
   });
 });
+
+describe("prepared personalization admission", () => {
+  const snapshot = () => ({ organization_id: "org", team_id: "team", user_id: "owner", generation: 1,
+    version: "1:1", expires_at: Date.now() + 60_000, team_facts: [{ id: 1, version: 1, content: "Prefers concise answers." }] });
+
+  it("pins a cold-cache miss and does not execute prompt-derived retrieval", async () => {
+    await withStartup(async (startup, state) => {
+      startup.reservePrepared("first", undefined, false);
+      startup.reservePrepared("first", snapshot(), false); // refresh arrived too late
+      const execute = vi.fn(() => new Promise<never>(() => {}));
+      const environment = vi.fn(() => new Promise<never>(() => {}));
+      await startup.prepare("first", execute, environment, assertActive);
+      const runtime = developerSession();
+      await startup.inject("first", runtime, assertActive);
+      expect(execute).not.toHaveBeenCalled(); expect(environment).not.toHaveBeenCalled();
+      expect(runtime.appendDeveloperMessage).not.toHaveBeenCalled();
+      expect(contextText(state)).toBe("");
+    });
+  });
+
+  it("reuses unchanged personalization without appending it on every turn", async () => {
+    await withStartup(async startup => {
+      const runtime = developerSession();
+      const execute = vi.fn(async () => { throw new Error("must not search"); });
+      for (const turn of ["first", "second", "third"]) {
+        startup.reservePrepared(turn, snapshot(), false);
+        await startup.prepare(turn, execute, async () => undefined, assertActive);
+        await startup.inject(turn, runtime, assertActive);
+      }
+      expect(execute).not.toHaveBeenCalled();
+      expect(runtime.appendDeveloperMessage).toHaveBeenCalledTimes(1);
+      expect(runtime.appendDeveloperMessage.mock.calls[0]?.[0]).toContain("Prefers concise answers");
+    });
+  });
+
+  it("invalidates a pinned fact while environment preparation is in flight", async () => {
+    await withStartup(async (startup, state) => {
+      let release!: () => void;
+      const pending = new Promise<void>(resolve => { release = resolve; });
+      startup.reservePrepared("first", snapshot(), true);
+      const preparing = startup.prepare("first", vi.fn(), async () => { await pending; return environment; }, assertActive);
+      startup.invalidatePrepared(2); release(); await preparing;
+      expect(contextText(state)).not.toContain("concise answers");
+      expect(contextText(state)).toContain("accountInfo");
+    });
+  });
+
+  it("marks loss of eligible context at a later turn boundary", async () => {
+    await withStartup(async startup => {
+      const runtime = developerSession();
+      startup.reservePrepared("first", snapshot(), false);
+      await startup.prepare("first", vi.fn(), async () => undefined, assertActive);
+      await startup.inject("first", runtime, assertActive);
+      startup.reservePrepared("second", undefined, false);
+      await startup.prepare("second", vi.fn(), async () => undefined, assertActive);
+      await startup.inject("second", runtime, assertActive);
+      expect(runtime.appendDeveloperMessage.mock.calls[1]?.[0]).toContain("Disregard prior prepared-memory blocks");
+    });
+  });
+});
+
+
+describe("prepared context invalidation delivery", () => {
+  it("fences pending context through the actual Session endpoint and rejects another scope", async () => {
+    await withStartup(async (startup, state, session) => {
+      const profile = { organization_id: "org", team_id: "team", user_id: "owner", generation: 1,
+        version: "1:1", expires_at: Date.now() + 60_000,
+        team_facts: [{ id: 1, version: 1, content: "forgotten canary" }] };
+      startup.reservePrepared("first", profile, false);
+      await startup.prepare("first", async () => { throw new Error("lookup"); }, async () => undefined, assertActive);
+      const invalidate = (team: string) => session.fetch(new Request("https://session.internal/personalization/invalidate", {
+        method: "POST", headers: { "x-nanocodex-organization-id": "org" },
+        body: JSON.stringify({ team_id: team, user_id: "owner", generation: 2 }),
+      }));
+      expect((await invalidate("another-team")).status).toBe(403);
+      expect(contextText(state)).toContain("forgotten canary");
+      expect((await invalidate("team")).status).toBe(204);
+      await startup.prepare("first", async () => { throw new Error("lookup"); }, async () => undefined, assertActive);
+      expect(contextText(state)).not.toContain("forgotten canary");
+    });
+  });
+
+  it("does not fetch an account environment on subsequent prepared turns", async () => {
+    await withStartup(async startup => {
+      startup.reservePrepared("first", undefined, true);
+      startup.reservePrepared("next", undefined, false);
+      expect(startup.needsEnvironment("first")).toBe(true);
+      expect(startup.needsEnvironment("next")).toBe(false);
+    });
+  });
+});
+
+
+it("drops a prepared snapshot whose lease expires while queued before injection", async () => {
+  await withStartup(async (startup, state) => {
+    startup.reservePrepared("first", { organization_id: "org", team_id: "team", user_id: "owner",
+      generation: 1, version: "1:1", expires_at: Date.now() + 60_000,
+      team_facts: [{ id: 1, version: 1, content: "expired canary" }] }, false);
+    await startup.prepare("first", async () => ({}), async () => undefined, assertActive);
+    state.storage.sql.exec(`UPDATE managed_prepared_personalization
+      SET profile_json = json_set(profile_json, '$.expires_at', 0) WHERE turn_id = 'first'`);
+    const runtime = developerSession();
+    await startup.inject("first", runtime, assertActive);
+    expect(runtime.appendDeveloperMessage).not.toHaveBeenCalled();
+    expect(contextText(state)).not.toContain("expired canary");
+  });
+});
