@@ -117,7 +117,9 @@ public final class RemoteViewer: ObservableObject {
     private var channelsReady = false
     private var frameTask: Task<Void, Never>?
     private var frameDeadline: Task<Void, Never>?
-    private var framePending = false
+    private var framePending = 0
+    private var frameRequestedAt: TimeInterval = 0
+    private var frameWindow: Int { min(6, max(1, hand?.frameWindow ?? 1)) }
     private let diagnosticsEnabled = ProcessInfo.processInfo.environment["NANOCODEX_REMOTE_DIAGNOSTICS"] == "1"
     private var diagnosticStarted: TimeInterval = 0
     private var diagnosticEvents: [[String: String]] = []
@@ -340,7 +342,7 @@ public final class RemoteViewer: ObservableObject {
         connectionSetup?.cancel(); connectionSetup = nil
         signalQueue?.cancel(); signalQueue = nil
         connectionDeadline?.cancel(); connectionDeadline = nil
-        frameTask?.cancel(); frameTask = nil; frameDeadline?.cancel(); frameDeadline = nil; framePending = false; frame = nil
+        frameTask?.cancel(); frameTask = nil; frameDeadline?.cancel(); frameDeadline = nil; framePending = 0; frame = nil
         let peer = self.peer, signaling = self.signaling
         if let frameProbe { track?.remove(frameProbe) }
         frameProbe = nil; diagnosticFirstFrame = nil
@@ -392,19 +394,24 @@ public final class RemoteViewer: ObservableObject {
 
     private func startFrames(service: RemoteService, attempt: UUID) throws {
         let signaling = makeSignaling(service); self.signaling = signaling
+        if frameWindow > 1 { framePending = frameWindow }
         signaling.onMessage = { [weak self] message in
             guard let self, epoch == attempt else { return }
             do {
                 switch message.type {
-                case "ready": requestFrame(attempt: attempt)
+                case "ready": armFrameDeadline(attempt: attempt); requestFrame(attempt: attempt)
                 case "frame":
-                    guard framePending else { throw RemoteError.invalidMessage }
-                    frame = try RemoteFrame.decode(message); framePending = false
+                    guard framePending > 0 else { throw RemoteError.invalidMessage }
+                    frame = try RemoteFrame.decode(message); framePending -= 1
                     frameDeadline?.cancel(); frameDeadline = nil
                     transportReady = true; channelsReady = true; updateReady()
-                    frameTask = Task { [weak self] in
-                        do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
-                        guard let self, epoch == attempt else { return }; requestFrame(attempt: attempt)
+                    if frameWindow > 1 { requestFrame(attempt: attempt) }
+                    else {
+                        let delay = max(0, 0.1 - (ProcessInfo.processInfo.systemUptime - frameRequestedAt))
+                        frameTask = Task { [weak self] in
+                            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                            guard let self, epoch == attempt else { return }; requestFrame(attempt: attempt)
+                        }
                     }
                 case "control":
                     guard case .control(let control) = message.data else { throw RemoteError.invalidMessage }
@@ -421,12 +428,19 @@ public final class RemoteViewer: ObservableObject {
     }
 
     private func requestFrame(attempt: UUID) {
-        guard epoch == attempt, !framePending else { return }
-        framePending = true
-        signaling?.send(.init(type: "frame_request"))
+        guard epoch == attempt, framePending < frameWindow else { return }
+        let count = frameWindow - framePending
+        framePending += count; frameRequestedAt = ProcessInfo.processInfo.systemUptime
+        var request = RemoteMessage(type: "frame_request")
+        if frameWindow > 1 { request.count = count }
+        signaling?.send(request)
+        armFrameDeadline(attempt: attempt)
+    }
+    private func armFrameDeadline(attempt: UUID) {
+        frameDeadline?.cancel()
         frameDeadline = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(5)) } catch { return }
-            guard let self, epoch == attempt, framePending else { return }; fail(RemoteError.unavailable)
+            guard let self, epoch == attempt, framePending > 0 else { return }; fail(RemoteError.unavailable)
         }
     }
     private func receiveControl(_ data: Data) {

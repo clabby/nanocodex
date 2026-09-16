@@ -33,6 +33,43 @@ jobs:
           cache-on-failure: true
       - run: cargo test --workspace --locked
 
+  shared-hands:
+    name: shared computer Hand (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15]
+    env:
+      NANOCODEX_COMPUTER: "off"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          cache-on-failure: true
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Check native identity, IPC leases, reconnect, and factory discovery
+        run: cargo test --locked -p nanocodex2-bin --bin nanocodex2 hand -- --test-threads=1
+      - run: cargo build --locked -p nanocodex2-bin --bin nanocodex2
+      - name: Run real CLI/app sharing against a local account server
+        shell: bash
+        run: |
+          export NANOCODEX_DEVICE_TEST_BINARY="$(node -p 'require("node:path").resolve("target/debug/nanocodex2" + (process.platform === "win32" ? ".exe" : ""))')"
+          node --test js/desktop-runtime/test/device-hand.integration.test.mjs
+
   voice-native:
     name: native voice and relocated runtime
     runs-on: macos-15

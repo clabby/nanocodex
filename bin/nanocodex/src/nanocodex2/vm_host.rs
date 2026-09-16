@@ -23,7 +23,7 @@ mod supported {
             Arc,
             atomic::{AtomicBool, Ordering},
         },
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use fs2::FileExt as _;
@@ -796,6 +796,15 @@ mod supported {
             })
         }
 
+        fn reserved_capacity(&self) -> usize {
+            self.active.len()
+                + self
+                    .retired
+                    .values()
+                    .filter(|allocation| allocation.release_pending)
+                    .count()
+        }
+
         fn persist(&self, record: &AllocationRecord) -> Result<(), VmHostError> {
             self.store
                 .as_ref()
@@ -879,12 +888,7 @@ mod supported {
                     allocation_id: spec.identity.allocation_id,
                 });
             }
-            let reserved = self.active.len()
-                + self
-                    .retired
-                    .values()
-                    .filter(|allocation| allocation.release_pending)
-                    .count();
+            let reserved = self.reserved_capacity();
             if spec.slot >= self.capacity
                 || (!self.active.contains_key(&spec.identity.allocation_id)
                     && reserved >= usize::from(self.capacity))
@@ -1251,6 +1255,133 @@ mod supported {
         template_root: PathBuf,
         allocation_directory: PathBuf,
         hand_template: vm_hand::VmHandConfig,
+        spare_directory: PathBuf,
+        spare: std::sync::Mutex<Option<WarmSpare>>,
+    }
+
+    /// A private VM that has never received an allocation credential or user work.
+    struct PreparedVm {
+        hand: vm_hand::VmHand,
+        directory: tempfile::TempDir,
+    }
+
+    struct PreparingSpare(tokio::task::JoinHandle<Result<PreparedVm, ProvisionFailure>>);
+    impl Drop for PreparingSpare {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    enum WarmSpare {
+        Preparing(PreparingSpare),
+        Ready(Box<PreparedVm>),
+    }
+    impl WarmSpare {
+        async fn ready(self) -> Result<PreparedVm, ProvisionFailure> {
+            match self {
+                Self::Ready(vm) => Ok(*vm),
+                Self::Preparing(mut task) => (&mut task.0).await.map_err(|error| {
+                    ProvisionFailure::unproven(VmHostError::Resource(format!(
+                        "VM spare preparation failed: {error}"
+                    )))
+                })?,
+            }
+        }
+    }
+
+    impl VmAllocationFactory {
+        fn fill_spare(&self) {
+            let mut spare = self.spare.lock().unwrap();
+            if spare.is_some() {
+                return;
+            }
+            let template = self.template_root.clone();
+            let directory = self.spare_directory.clone();
+            let mut config = self.hand_template.clone();
+            *spare = Some(WarmSpare::Preparing(PreparingSpare(tokio::spawn(
+                async move {
+                    let started = Instant::now();
+                    let directory = tempfile::Builder::new()
+                        .prefix("vm-")
+                        .tempdir_in(directory)
+                        .map_err(|error| {
+                            ProvisionFailure::stopped(VmHostError::Resource(error.to_string()))
+                        })?;
+                    let root = directory.path().join("root.ext4");
+                    clone_private_root(template, root.clone())
+                        .await
+                        .map_err(ProvisionFailure::stopped)?;
+                    config.rootfs = root;
+                    let mut hand = vm_hand::VmHand::start_config(&config)
+                        .await
+                        .map_err(vm_hand_start_failure)?;
+                    if let Err(error) = hand.prepare_desktop().await {
+                        let stopped = hand
+                            .shutdown()
+                            .await
+                            .map_err(|error| VmHostError::Resource(error.to_string()));
+                        let cleanup_safe = stopped.is_ok();
+                        return Err(ProvisionFailure {
+                            error: combine_pair(
+                                Err(VmHostError::Resource(error.to_string())),
+                                stopped,
+                            )
+                            .expect_err("desktop preparation failed"),
+                            cleanup_safe,
+                        });
+                    }
+                    tracing::info!(target: "nanocodex2", stage = "vm.spare.ready", elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    "Fresh VM spare ready without account or allocation credentials");
+                    Ok(PreparedVm { hand, directory })
+                },
+            ))));
+        }
+
+        fn take_spare(&self) -> Option<WarmSpare> {
+            self.spare.lock().unwrap().take()
+        }
+
+        async fn discard_spare(&self) -> Result<(), VmHostError> {
+            let Some(spare) = self.take_spare() else {
+                return Ok(());
+            };
+            let ready = match spare {
+                WarmSpare::Ready(vm) => Some(*vm),
+                WarmSpare::Preparing(mut task) => {
+                    task.0.abort();
+                    match (&mut task.0).await {
+                        Ok(Ok(vm)) => Some(vm),
+                        Ok(Err(failure)) => return Err(failure.error),
+                        Err(error) if error.is_cancelled() => None,
+                        Err(error) => return Err(VmHostError::Resource(error.to_string())),
+                    }
+                }
+            };
+            if let Some(PreparedVm { hand, directory }) = ready {
+                let result = hand
+                    .shutdown()
+                    .await
+                    .map_err(|error| VmHostError::Resource(error.to_string()));
+                drop(directory);
+                result?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Atomically refuse any existing durable root, including symlinks. A spare
+    /// is consumed once; recovered allocations always boot their retained disk.
+    fn adopt_spare_root(source: &Path, destination: &Path) -> Result<(), VmHostError> {
+        fs::hard_link(source, destination).map_err(|error| {
+            VmHostError::State(format!("failed to claim VM spare root: {error}"))
+        })?;
+        if let Err(error) = fs::remove_file(source) {
+            let _ = fs::remove_file(destination);
+            return Err(VmHostError::State(format!(
+                "failed to retire spare root name: {error}"
+            )));
+        }
+        sync_directory(destination.parent().expect("allocation directory"))?;
+        sync_directory(source.parent().expect("spare directory"))
     }
 
     impl AllocationFactory for VmAllocationFactory {
@@ -1262,20 +1393,90 @@ mod supported {
             cancellation: OperationCancellation,
         ) -> BoxFuture<'a, Result<Self::Allocation, ProvisionFailure>> {
             Box::pin(async move {
+                let started = Instant::now();
+                let allocation_id = spec.identity.allocation_id;
+                tracing::info!(target: "nanocodex2", stage = "vm.provision.start", %allocation_id);
                 let private_root = self
                     .allocation_directory
                     .join(format!("{}.ext4", spec.identity.allocation_id));
-                clone_private_root(self.template_root.clone(), private_root.clone())
-                    .await
-                    .map_err(ProvisionFailure::stopped)?;
-                cancellation.check().map_err(ProvisionFailure::stopped)?;
                 let mut config = self.hand_template.clone();
                 config.rootfs = private_root.clone();
                 config.machine_id = spec.identity.machine_id.clone();
                 config.machine_name = spec.identity.machine_id;
-                let mut hand = vm_hand::VmHand::start_config(&config)
-                    .await
-                    .map_err(vm_hand_start_failure)?;
+                cancellation.check().map_err(ProvisionFailure::stopped)?;
+                let fresh = match fs::symlink_metadata(&private_root) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                    Ok(_) => false,
+                    Err(error) => {
+                        return Err(ProvisionFailure::stopped(VmHostError::State(
+                            error.to_string(),
+                        )));
+                    }
+                };
+                let spare = self.take_spare();
+                let mut prepared = None;
+                if let Some(spare) = spare {
+                    match spare.ready().await {
+                        Ok(mut vm) if fresh => {
+                            match vm
+                                .hand
+                                .assign_machine(&config.machine_id, &config.machine_name)
+                                .await
+                            {
+                                Ok(()) => {
+                                    if let Err(error) = adopt_spare_root(
+                                        &vm.directory.path().join("root.ext4"),
+                                        &private_root,
+                                    ) {
+                                        let shutdown = vm.hand.shutdown().await;
+                                        return Err(match shutdown {
+                                            Ok(()) => ProvisionFailure::stopped(error),
+                                            Err(shutdown) => {
+                                                ProvisionFailure::unproven(VmHostError::Resource(
+                                                    format!("{error}; {shutdown}"),
+                                                ))
+                                            }
+                                        });
+                                    }
+                                    prepared = Some(vm.hand);
+                                    tracing::info!(target: "nanocodex2", stage = "vm.provision.spare_claimed", %allocation_id,
+                                        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(target: "nanocodex2", %error, "Discarding unhealthy VM spare");
+                                    vm.hand.shutdown().await.map_err(|error| {
+                                        ProvisionFailure::unproven(VmHostError::Resource(
+                                            error.to_string(),
+                                        ))
+                                    })?;
+                                }
+                            }
+                        }
+                        Ok(vm) => {
+                            vm.hand.shutdown().await.map_err(|error| {
+                                ProvisionFailure::unproven(VmHostError::Resource(error.to_string()))
+                            })?;
+                        }
+                        Err(failure) if failure.cleanup_safe => {
+                            tracing::warn!(target: "nanocodex2", error = %failure.error, "VM spare unavailable; using cold startup");
+                        }
+                        Err(failure) => return Err(failure),
+                    }
+                }
+                let warm = prepared.is_some();
+                let mut hand = if let Some(hand) = prepared {
+                    hand
+                } else {
+                    clone_private_root(self.template_root.clone(), private_root.clone())
+                        .await
+                        .map_err(ProvisionFailure::stopped)?;
+                    tracing::info!(target: "nanocodex2", stage = "vm.provision.root", %allocation_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
+                    cancellation.check().map_err(ProvisionFailure::stopped)?;
+                    vm_hand::VmHand::start_config(&config)
+                        .await
+                        .map_err(vm_hand_start_failure)?
+                };
+                tracing::info!(target: "nanocodex2", stage = "vm.provision.guest", %allocation_id, warm, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
                 if cancellation.is_cancelled() {
                     let shutdown = hand
                         .shutdown()
@@ -1290,13 +1491,35 @@ mod supported {
                         ProvisionFailure::unproven(error)
                     });
                 }
-                let attached = async {
-                    hand.start_desktop(&spec.attachment_target)
+                // Desktop startup and the tools WebSocket have independent
+                // readiness. Start both now, but publish the allocation only
+                // when both succeeded. A failed screen still tears down any
+                // tools route that connected in the meantime.
+                let tools = hand.tools();
+                let machine = hand.machine().clone();
+                let desktop = async {
+                    let result = hand
+                        .start_desktop(&spec.attachment_target)
                         .await
-                        .map_err(|error| VmHostError::Resource(error.to_string()))?;
-                    connect_vm_attachment(&hand, spec.attachment_target).await
-                }
-                .await;
+                        .map_err(|error| VmHostError::Resource(error.to_string()));
+                    tracing::info!(target: "nanocodex2", stage = "vm.provision.desktop", %allocation_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, success = result.is_ok());
+                    result
+                };
+                let attachment = async {
+                    let result =
+                        connect_vm_tools(tools, machine, spec.attachment_target.clone()).await;
+                    tracing::info!(target: "nanocodex2", stage = "vm.provision.attached", %allocation_id, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, success = result.is_ok());
+                    result
+                };
+                let attached = match tokio::join!(desktop, attachment) {
+                    (Ok(()), result) => result,
+                    (Err(error), attachment) => {
+                        if let Ok(attachment) = attachment {
+                            let _ = attachment.detach().await;
+                        }
+                        Err(error)
+                    }
+                };
                 match attached {
                     Ok(attachment) => {
                         if cancellation.is_cancelled() {
@@ -1436,10 +1659,17 @@ mod supported {
         hand: &vm_hand::VmHand,
         target: AttachmentTarget,
     ) -> Result<Attachment, VmHostError> {
-        let connector = hand
-            .tools()
+        connect_vm_tools(hand.tools(), hand.machine().clone(), target).await
+    }
+
+    async fn connect_vm_tools(
+        tools: nanocodex_tools::Tools,
+        machine: nanocodex_tools::attachment::AttachmentMachine,
+        target: AttachmentTarget,
+    ) -> Result<Attachment, VmHostError> {
+        let connector = tools
             .attach(target)
-            .metadata(AttachmentMetadata::machine(hand.machine().clone()));
+            .metadata(AttachmentMetadata::machine(machine));
         match tokio::time::timeout(ATTACHMENT_CONNECT_TIMEOUT, connector.connect()).await {
             Ok(Ok((attachment, _events))) => Ok(attachment),
             Ok(Err(error)) => Err(VmHostError::Resource(format!(
@@ -1613,6 +1843,7 @@ mod supported {
         state: VmHostState,
         _template_lock: File,
         supervisor: AllocationSupervisor<VmAllocationFactory>,
+        warm_spare: bool,
     }
 
     impl VmHost {
@@ -1679,7 +1910,36 @@ mod supported {
                 template_root: locked_template_root,
                 allocation_directory: state.directory.join("allocations"),
                 hand_template,
+                spare_directory: state.directory.join("spares"),
+                spare: std::sync::Mutex::new(None),
             };
+            fs::create_dir_all(&factory.spare_directory)
+                .map_err(|error| VmHostError::State(error.to_string()))?;
+            let metadata = fs::symlink_metadata(&factory.spare_directory)
+                .map_err(|error| VmHostError::State(error.to_string()))?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(VmHostError::State(
+                    "VM spares must use a real private directory".into(),
+                ));
+            }
+            fs::set_permissions(&factory.spare_directory, fs::Permissions::from_mode(0o700))
+                .map_err(|error| VmHostError::State(error.to_string()))?;
+            // The host lock fences the predecessor; these directories contain
+            // only unassigned temporary disks, never durable allocation roots.
+            for entry in fs::read_dir(&factory.spare_directory)
+                .map_err(|error| VmHostError::State(error.to_string()))?
+            {
+                let entry = entry.map_err(|error| VmHostError::State(error.to_string()))?;
+                if entry.file_name().to_string_lossy().starts_with("vm-")
+                    && entry
+                        .file_type()
+                        .map_err(|error| VmHostError::State(error.to_string()))?
+                        .is_dir()
+                {
+                    fs::remove_dir_all(entry.path())
+                        .map_err(|error| VmHostError::State(error.to_string()))?;
+                }
+            }
             let store = AllocationStore::new(state.directory.join("allocations"));
             let supervisor =
                 AllocationSupervisor::with_store(config.max_vms, factory, store, &state)?;
@@ -1687,6 +1947,7 @@ mod supported {
                 state,
                 _template_lock: template_lock,
                 supervisor,
+                warm_spare: config.warm_spare,
             })
         }
 
@@ -1694,6 +1955,17 @@ mod supported {
         // permanently broken driver must not enter the managed redrive loop.
         async fn preflight_gpu(&self) -> Result<(), ManagedError> {
             let factory = &self.supervisor.factory;
+            if self.warm_spare && self.spare_capacity() {
+                factory.fill_spare();
+                let vm = factory
+                    .take_spare()
+                    .expect("started spare")
+                    .ready()
+                    .await
+                    .map_err(|failure| failure.error)?;
+                *factory.spare.lock().unwrap() = Some(WarmSpare::Ready(Box::new(vm)));
+                return Ok(());
+            }
             if !factory.hand_template.vm_gpu {
                 return Ok(());
             }
@@ -1723,16 +1995,31 @@ mod supported {
             spec: VmAllocationSpec,
             cancellation: OperationCancellation,
         ) -> Result<VmAllocationChange, VmHostError> {
-            self.supervisor
+            let result = self
+                .supervisor
                 .provision_controlled(spec, cancellation)
-                .await
+                .await;
+            self.refill_spare();
+            result
+        }
+
+        fn spare_capacity(&self) -> bool {
+            self.supervisor.reserved_capacity() < usize::from(self.capacity())
+        }
+
+        fn refill_spare(&self) {
+            if self.warm_spare && self.spare_capacity() {
+                self.supervisor.factory.fill_spare();
+            }
         }
 
         pub(crate) async fn release(
             &mut self,
             identity: &VmAllocationIdentity,
         ) -> Result<VmAllocationChange, VmHostError> {
-            self.supervisor.release(identity).await
+            let result = self.supervisor.release(identity).await;
+            self.refill_spare();
+            result
         }
 
         async fn complete_startup_releases(&mut self) -> Result<(), VmHostError> {
@@ -1751,7 +2038,8 @@ mod supported {
         }
 
         pub(crate) async fn shutdown(&mut self) -> Result<(), VmHostError> {
-            self.supervisor.shutdown().await
+            let spare = self.supervisor.factory.discard_spare().await;
+            combine_pair(self.supervisor.shutdown().await, spare)
         }
     }
 
@@ -2845,6 +3133,83 @@ mod supported {
                 explicit
             );
             assert!(VmHostState::open(directory.path(), Some(Uuid::new_v4())).is_err());
+        }
+
+        #[test]
+        fn spare_root_claim_preserves_the_open_disk_and_never_overwrites_retained_state() {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("spare.ext4");
+            let target = directory.path().join("allocation.ext4");
+            fs::write(&source, b"fresh guest").unwrap();
+            let open_disk = File::open(&source).unwrap();
+            adopt_spare_root(&source, &target).unwrap();
+            assert!(!source.exists());
+            assert_eq!(
+                open_disk.metadata().unwrap().ino(),
+                fs::metadata(&target).unwrap().ino()
+            );
+            assert_eq!(fs::metadata(&target).unwrap().nlink(), 1);
+            fs::write(&target, b"user work").unwrap();
+            fs::write(&source, b"another spare").unwrap();
+            assert!(adopt_spare_root(&source, &target).is_err());
+            assert_eq!(fs::read(&target).unwrap(), b"user work");
+            assert_eq!(fs::read(&source).unwrap(), b"another spare");
+            let alias = directory.path().join("alias.ext4");
+            std::os::unix::fs::symlink(&target, &alias).unwrap();
+            assert!(adopt_spare_root(&source, &alias).is_err());
+            assert_eq!(fs::read(&target).unwrap(), b"user work");
+        }
+
+        #[tokio::test]
+        async fn dropping_spare_preparation_cancels_its_owner_task() {
+            struct Owner(Option<tokio::sync::oneshot::Sender<()>>);
+            impl Drop for Owner {
+                fn drop(&mut self) {
+                    let _ = self.0.take().unwrap().send(());
+                }
+            }
+            let (started, running) = tokio::sync::oneshot::channel();
+            let (stopped, closed) = tokio::sync::oneshot::channel();
+            let task = PreparingSpare(tokio::spawn(async move {
+                let _owner = Owner(Some(stopped));
+                let _ = started.send(());
+                pending::<Result<PreparedVm, ProvisionFailure>>().await
+            }));
+            running.await.unwrap();
+            drop(task);
+            tokio::time::timeout(Duration::from_secs(1), closed)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn spare_capacity_includes_durable_allocations_and_pending_releases() {
+            let mut supervisor = AllocationSupervisor::new(
+                1,
+                FakeFactory {
+                    events: Arc::new(Mutex::new(Vec::new())),
+                },
+            )
+            .unwrap();
+            assert_eq!(supervisor.reserved_capacity(), 0);
+            let request = spec(Uuid::new_v4(), 0, "machine-0");
+            supervisor.provision(request.clone()).await.unwrap();
+            assert_eq!(supervisor.reserved_capacity(), 1);
+            supervisor.shutdown().await.unwrap();
+            assert_eq!(
+                supervisor.reserved_capacity(),
+                1,
+                "stopped retained roots still reserve their slots"
+            );
+            supervisor.release(&request.identity).await.unwrap();
+            assert_eq!(supervisor.reserved_capacity(), 0);
+            supervisor
+                .retired
+                .get_mut(&request.identity.allocation_id)
+                .unwrap()
+                .release_pending = true;
+            assert_eq!(supervisor.reserved_capacity(), 1);
         }
 
         #[test]

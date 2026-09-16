@@ -8,7 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_tls_with_config,
     tungstenite::{
         Message,
         client::IntoClientRequest,
@@ -66,7 +66,12 @@ pub(crate) async fn run(
         };
         let connected = tokio::select! {
             command = commands.recv() => match command { Some(Command::Detach) | None => break Ok(()) },
-            connected = connect_async(request) => connected,
+            connected = async {
+                let connector = if request.uri().scheme_str() == Some("wss") {
+                    Some(tokio_tungstenite::Connector::Rustls(nanocodex_oai_api::tls::native_client_config().await?))
+                } else { None };
+                connect_async_tls_with_config(request, None, true, connector).await
+            } => connected,
         };
         let socket = match connected {
             Ok((socket, _)) => socket,

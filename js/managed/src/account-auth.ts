@@ -1,3 +1,4 @@
+import { recordHandTiming } from "./hand-timing";
 import { configurationCatalog } from "./agent-configuration";
 import { performanceState } from "./performance";
 import { MANAGED_ACCESS_HEADER, managedAccessRequest, readManagedAccess, observeManagedAccess } from "./managed-access";
@@ -693,6 +694,7 @@ export async function authenticate(
   const started = performance.now();
   const reuse = managedAccessRequest(request) && request.headers.has(MANAGED_ACCESS_HEADER);
   const principal = reuse ? await readManagedAccess(request, env) : await authenticateLive(request, env, url);
+  recordHandTiming(request, "auth", performance.now() - started);
   await observeManagedAccess(request, env, principal, reuse ? "access" : "live", performance.now() - started);
   return principal;
 }

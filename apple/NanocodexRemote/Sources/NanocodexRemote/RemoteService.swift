@@ -12,10 +12,11 @@ public struct RemoteHand: Decodable, Identifiable, Sendable {
     public let machineName: String
     public let generation: String
     public let transport: Transport?
+    public private(set) var frameWindow: Int? = nil
     public var identity: String { machineID + ":" + id + ":" + generation }
     enum CodingKeys: String, CodingKey {
         case id, name, kind, width, height, controllable, generation, transport
-        case machineID = "machine_id", machineName = "machine_name"
+        case machineID = "machine_id", machineName = "machine_name", frameWindow = "frame_window"
     }
 }
 
@@ -89,6 +90,9 @@ public final class RemoteService: @unchecked Sendable {
             var components = URLComponents()
             components.queryItems = [URLQueryItem(name: "machine_id", value: hand.machineID),
                 URLQueryItem(name: "surface_id", value: hand.id), URLQueryItem(name: "generation", value: hand.generation)]
+            if hand.transport == .frames, let window = hand.frameWindow, window > 1 {
+                components.queryItems?.append(URLQueryItem(name: "frame_window", value: String(min(6, window))))
+            }
             path = "/view?" + components.percentEncodedQuery!
         }
         var request = try makeRequest(path: path)
@@ -112,6 +116,7 @@ public struct RemoteMessage: Codable, Sendable {
     public var signal: RemoteSignal?
     var requestID: String?, agentID: String?, deadlineAt: Double?, input: RemoteAgentInput?
     var agentStatus: String?, jpeg: String?, width: Int?, height: Int?
+    var count: Int?
     var data: RemoteRelayData?
     public init(type: String, viewerID: String? = nil, signal: RemoteSignal? = nil,
                 machineID: String? = nil, machineName: String? = nil, surfaces: [RemoteSurface]? = nil) {
@@ -123,7 +128,7 @@ public struct RemoteMessage: Codable, Sendable {
         case connectionID = "connection_id", viewerID = "viewer_id", surfaceID = "surface_id"
         case machineID = "machine_id", machineName = "machine_name"
         case requestID = "request_id", agentID = "agent_id", deadlineAt = "deadline_at", input
-        case agentStatus = "status", jpeg, width, height
+        case agentStatus = "status", jpeg, width, height, count
     }
 }
 

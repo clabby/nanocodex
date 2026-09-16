@@ -26,6 +26,23 @@ pub(crate) fn ready() {
 }
 
 pub(crate) async fn shutdown_signal() -> Result<(), nanocodex_managed::ManagedError> {
+    tokio::select! {
+        signal = os_shutdown_signal() => signal,
+        () = parent_closed() => Ok(()),
+    }
+}
+
+async fn parent_closed() {
+    if std::env::var_os("NANOCODEX_PARENT_PIPE").is_none_or(|value| value != "1") {
+        std::future::pending::<()>().await;
+    }
+    use tokio::io::AsyncReadExt;
+    let mut stdin = tokio::io::stdin();
+    let mut buffer = [0; 64];
+    while matches!(stdin.read(&mut buffer).await, Ok(n) if n > 0) {}
+}
+
+async fn os_shutdown_signal() -> Result<(), nanocodex_managed::ManagedError> {
     #[cfg(unix)]
     {
         let mut terminate = tokio::signal::unix::signal(

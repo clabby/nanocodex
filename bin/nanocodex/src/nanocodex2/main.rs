@@ -9,10 +9,6 @@
 #[allow(dead_code)]
 mod config;
 mod control;
-#[cfg(unix)]
-mod device_hand;
-#[cfg(not(unix))]
-#[path = "device_hand_unsupported.rs"]
 mod device_hand;
 mod hand_observability;
 #[cfg(any(
@@ -244,6 +240,10 @@ struct Hand {
     #[arg(long, help_heading = "Identity")]
     machine_name: Option<String>,
 
+    /// VM factory hosted by this native computer (managed separately, e.g. systemd).
+    #[arg(long, conflicts_with_all = ["rootfs", "docker"], help_heading = "Identity")]
+    vm_provider: Option<String>,
+
     /// Route managed browser work through this host alongside the VM or container Hand.
     #[arg(long, help_heading = "Browser")]
     browser: bool,
@@ -360,6 +360,10 @@ struct Host {
     /// Maximum number of provisioning, live, or releasing VMs.
     #[arg(long, value_name = "COUNT", default_value_t = 4, value_parser = clap::value_parser!(u16).range(1..=64))]
     max_vms: u16,
+
+    /// Keep one never-assigned VM ready within --max-vms capacity.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    warm_spare: bool,
 
     /// Stable host UUID. Generated and persisted under --state-dir when omitted.
     #[arg(long, value_name = "UUID")]

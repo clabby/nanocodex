@@ -1,5 +1,6 @@
 import XCTest
 import Combine
+import ImageIO
 @testable import NanocodexRemote
 
 private final class RemoteHTTPFixture: URLProtocol {
@@ -30,6 +31,36 @@ private final class RemoteHTTPFixture: URLProtocol {
 }
 
 final class RemoteViewerTests: XCTestCase {
+    @MainActor func testFrameWindowRefillsAfterDecodeAndStopsOnSuspend() async throws {
+        let service = try service { _ in XCTFail("Frame transport must not fetch ICE") }
+        defer { service.close() }
+        var catalog = surface("window")
+        catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
+        let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
+        let socket = ViewerSocket()
+        socket.onConnect = { socket.onMessage(.init(type: "ready")) }
+        let viewer = RemoteViewer()
+        viewer.makeSignaling = { _ in socket }
+        defer { viewer.close() }
+        await viewer.connect(service: service, hand: hand)
+        XCTAssertTrue(socket.messages.isEmpty, "Initial credits are part of the viewer upgrade")
+        let context = try XCTUnwrap(CGContext(data: nil, width: 3, height: 2, bitsPerComponent: 8,
+            bytesPerRow: 12, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        let bytes = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(bytes, "public.jpeg" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        var frame = RemoteMessage(type: "frame")
+        frame.jpeg = (bytes as Data).base64EncodedString(); frame.width = 3; frame.height = 2
+        for _ in 0..<6 { socket.onMessage(frame) }
+        XCTAssertTrue(viewer.connected)
+        XCTAssertEqual(socket.messages.filter { $0.type == "frame_request" }.map(\.count), [1, 1, 1, 1, 1, 1])
+        let lateFrame = socket.onMessage
+        viewer.suspend(); lateFrame(frame)
+        XCTAssertNil(viewer.frame)
+        XCTAssertEqual(socket.messages.filter { $0.type == "frame_request" }.count, 6)
+    }
+
     @MainActor func testNativeZoomKeepsScreenCoordinatesStable() {
         let viewer = RemoteViewer()
         #if os(macOS)

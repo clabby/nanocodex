@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { once } from "node:events";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
@@ -10,7 +11,7 @@ import { describeDeviceHand, connectDeviceHand } from "../src/device-hand.mjs";
 
 const binary = process.env.NANOCODEX_DEVICE_TEST_BINARY;
 test("real CLI and desktop leases share one authenticated host across account keys", { skip: !binary, timeout: 45_000 }, async t => {
-  const home = await mkdtemp("/tmp/ncx-device-");
+  const home = await mkdtemp(join(tmpdir(), "ncx-device-"));
   const server = createServer((request, response) => {
     response.setHeader("content-type", "application/json");
     if (request.url === "/v1/me") response.end(JSON.stringify({ authentication: "api_key", user: { id: "test-owner" } }));
@@ -33,7 +34,7 @@ test("real CLI and desktop leases share one authenticated host across account ke
     });
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
-  const base = { ...process.env, HOME: home, NANOCODEX_MANAGED_URL: `http://127.0.0.1:${server.address().port}`, NANOCODEX_DESKTOP_DATA: home };
+  const base = { ...process.env, HOME: home, USERPROFILE: home, NANOCODEX_COMPUTER: "off", NANOCODEX_MANAGED_URL: `http://127.0.0.1:${server.address().port}`, NANOCODEX_DESKTOP_DATA: home };
   const env = char => ({ ...base, NANOCODEX_API_KEY: `ncx_live_${char.repeat(12)}_${char.repeat(43)}` });
   const connections = [];
   t.after(async () => {
@@ -45,7 +46,7 @@ test("real CLI and desktop leases share one authenticated host across account ke
   });
   const firstId = await describeDeviceHand(binary, env("a"));
   const secondId = await describeDeviceHand(binary, env("b"));
-  assert.equal(firstId.id, secondId.id, "API key rotation must not create another Mac");
+  assert.equal(firstId.id, secondId.id, "API key rotation must not create another computer");
   for (const key of ["a", "b"]) {
     const connection = connectDeviceHand({ binary, env: env(key), signal: new AbortController().signal, onState() {} });
     connections.push(connection); await connection.ready;
@@ -55,7 +56,7 @@ test("real CLI and desktop leases share one authenticated host across account ke
   await delay(2500);
   assert.equal(catalogs, 1, "Closing the first client must preserve the existing publisher");
   current.send(JSON.stringify({ type: "call", session_id: "hand-test", call_id: "host-shell", model: "gpt-6-astra", name: "exec_command",
-    input: { cmd: "printf hand_shared_ok" }, output_token_budget: 1024, output_byte_budget: 131072, deadline_at: Date.now() + 10_000 }));
+    input: { cmd: process.platform === "win32" ? "echo hand_shared_ok" : "printf hand_shared_ok" }, output_token_budget: 1024, output_byte_budget: 131072, deadline_at: Date.now() + 10_000 }));
   const deadline = Date.now() + 10_000;
   while (!result && Date.now() < deadline) await delay(20);
   assert.equal(result?.outcome.status, "completed");

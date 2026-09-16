@@ -242,14 +242,12 @@ impl VmHand {
         self.tools.clone()
     }
 
-    /// The host owns signaling; the Rust guest runtime owns its desktop.
-    /// Account and allocation credentials never enter the guest filesystem.
-    pub(crate) async fn start_desktop(
-        &mut self,
-        target: &AttachmentTarget,
-    ) -> Result<(), ManagedError> {
-        use super::screen_publisher::{ScreenBackend, ScreenPublisher};
-        use std::sync::Arc;
+    /// Prepare local display/input without any account or allocation credential.
+    pub(crate) async fn prepare_desktop(&mut self) -> Result<(), ManagedError> {
+        if self.desktop.is_some() {
+            return Ok(());
+        }
+        let started = Instant::now();
         let control = self.workspace.control();
         let present = control
             .command(
@@ -265,6 +263,7 @@ impl VmHand {
                 "VM image has no desktop; install Xvfb, openbox, xterm, and fonts");
             return Ok(());
         }
+        tracing::info!(target: "nanocodex2", stage = "vm.desktop.inspected", machine_id = self.machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
         let runtime = control.command(VmCommand::new("/bin/sh").arg("-c")
             .arg("for p in /run/nanocodex/nanocodex-vm-guest /nanocodex-vm-guest /usr/local/bin/nanocodex-vm-guest; do if test -x \"$p\"; then printf '%s' \"$p\"; exit 0; fi; done; exit 1")
             .timeout(Duration::from_secs(5))).await.map_err(|_| configuration("failed to resolve Rust guest runtime"))?;
@@ -275,6 +274,7 @@ impl VmHand {
         }
         let executable = String::from_utf8(runtime.stdout)
             .map_err(|_| configuration("invalid guest runtime path"))?;
+        tracing::info!(target: "nanocodex2", stage = "vm.desktop.runtime", machine_id = self.machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
         let runner = self.workspace.control();
         let command = VmCommand::new(&executable)
             .arg("--desktop")
@@ -308,11 +308,10 @@ impl VmHand {
                     "Rust VM desktop exited before readiness: {detail}"
                 )));
             }
-            if control
-                .read_file(format!("{DESKTOP_RUNTIME}/ready"))
-                .await
-                .is_ok()
-            {
+            if let Ok(ready) = control.read_file(format!("{DESKTOP_RUNTIME}/ready")).await {
+                if let Ok(ready) = serde_json::from_slice::<serde_json::Value>(&ready) {
+                    tracing::info!(target: "nanocodex2", stage = "vm.desktop.stages", machine_id = self.machine.id(), startup_ms = %ready["startup_ms"]);
+                }
                 break;
             }
             if Instant::now() >= deadline {
@@ -322,6 +321,22 @@ impl VmHand {
             }
             sleep(Duration::from_millis(100)).await;
         }
+        tracing::info!(target: "nanocodex2", stage = "vm.desktop.local_ready", machine_id = self.machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
+        Ok(())
+    }
+
+    /// Publish an already-prepared desktop, or prepare it on a cold miss.
+    pub(crate) async fn start_desktop(
+        &mut self,
+        target: &AttachmentTarget,
+    ) -> Result<(), ManagedError> {
+        use super::screen_publisher::{ScreenBackend, ScreenPublisher};
+        use std::sync::Arc;
+        self.prepare_desktop().await?;
+        let Some(desktop) = &self.desktop else {
+            return Ok(());
+        };
+        let executable = desktop.executable.clone();
         let runner = self.workspace.control();
         let backend: ScreenBackend = Arc::new(move |input| {
             let control = runner.clone();
@@ -348,6 +363,35 @@ impl VmHand {
         let publisher = ScreenPublisher::start(target, &self.machine, backend).await?;
         self.desktop.as_mut().expect("desktop started").publisher = Some(publisher);
         tracing::info!(target: "nanocodex2", stage = "vm.screen.ready", "Rust VM screen is published");
+        Ok(())
+    }
+
+    /// Only the factory's never-published spare may be assigned a new identity.
+    pub(crate) async fn assign_machine(
+        &mut self,
+        id: &str,
+        name: &str,
+    ) -> Result<(), ManagedError> {
+        if self.desktop.as_ref().is_some_and(|desktop| {
+            desktop.publisher.is_some()
+                || desktop
+                    .task
+                    .as_ref()
+                    .is_none_or(tokio::task::JoinHandle::is_finished)
+        }) {
+            return Err(configuration("prepared VM desktop is no longer assignable"));
+        }
+        tokio::time::timeout(Duration::from_secs(2), self.workspace.control().ready())
+            .await
+            .map_err(|_| configuration("prepared VM health check timed out"))?
+            .map_err(|error| configuration(error.to_string()))?;
+        self.machine = AttachmentMachine::new(
+            id,
+            name,
+            self.machine.workspace(),
+            self.machine.capabilities().to_vec(),
+        )
+        .map_err(|error| configuration(error.to_string()))?;
         Ok(())
     }
 

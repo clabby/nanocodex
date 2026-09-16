@@ -190,6 +190,7 @@ struct Runtime {
     _lock: File,
     socket: bool,
     auth: bool,
+    wm_ready: bool,
     ready: bool,
 }
 impl Runtime {
@@ -229,6 +230,7 @@ impl Runtime {
             _lock: lock,
             socket: false,
             auth: false,
+            wm_ready: false,
             ready: false,
         })
     }
@@ -248,6 +250,7 @@ impl Drop for Runtime {
             (self.ready, "ready"),
             (self.socket, "hand.sock"),
             (self.auth, "Xauthority"),
+            (self.wm_ready, "wm-ready"),
         ] {
             if owned {
                 let _ = fs::remove_file(self.path.join(name));
@@ -428,6 +431,8 @@ fn start_x(
 }
 
 fn serve_blocking(workspace: &Path, runtime_path: &Path, stop: Arc<AtomicBool>) -> Result<()> {
+    let started = Instant::now();
+    let mut startup_ms = serde_json::Map::new();
     let workspace = workspace.canonicalize()?;
     if !workspace.is_dir() {
         return Err(invalid("desktop workspace must be a directory"));
@@ -445,8 +450,21 @@ fn serve_blocking(workspace: &Path, runtime_path: &Path, stop: Arc<AtomicBool>) 
     let mut children = Children::new()?;
     let (connection, display) = start_x(&mut runtime, &mut children, &stop)?;
     let mut desktop = Desktop::new(connection, stop.clone())?;
+    startup_ms.insert(
+        "x_server".into(),
+        json!(started.elapsed().as_secs_f64() * 1000.0),
+    );
+    runtime.write_private("wm-ready", b"")?;
+    runtime.wm_ready = true;
     for (program, args) in [
-        ("openbox", vec!["--sm-disable"]),
+        (
+            "openbox",
+            vec![
+                "--sm-disable",
+                "--startup",
+                "/bin/sh -c 'printf ready > \"$XDG_RUNTIME_DIR/wm-ready\"'",
+            ],
+        ),
         (
             "xterm",
             vec![
@@ -469,8 +487,9 @@ fn serve_blocking(workspace: &Path, runtime_path: &Path, stop: Arc<AtomicBool>) 
                 .current_dir(&workspace)
                 .stdout(Stdio::null()),
         )?;
-        // Start the terminal after the window manager owns the display. Starting
-        // both concurrently can leave a visible terminal without active focus.
+        // Openbox publishes its X11 identity before finishing initialization.
+        // Its startup callback is the readiness barrier: launching xterm sooner
+        // races window management and incurs Xt's five-second geometry timeout.
         let property = if program == "openbox" {
             b"_NET_SUPPORTING_WM_CHECK".as_slice()
         } else {
@@ -487,14 +506,18 @@ fn serve_blocking(workspace: &Path, runtime_path: &Path, stop: Arc<AtomicBool>) 
             children.alive()?;
             desktop.connection.stream().reset(OP_TIMEOUT);
             desktop.check_cancel()?;
+            if program == "openbox" && fs::metadata(runtime.path.join("wm-ready"))?.len() > 0 {
+                break;
+            }
             let reply = desktop
                 .connection
                 .get_property(false, desktop.root, atom, xproto::AtomEnum::WINDOW, 0, 1)?
                 .reply()?;
-            if reply
-                .value32()
-                .and_then(|mut values| values.next())
-                .is_some_and(|window| window != 0)
+            if program == "xterm"
+                && reply
+                    .value32()
+                    .and_then(|mut values| values.next())
+                    .is_some_and(|window| window != 0)
             {
                 break;
             }
@@ -533,20 +556,32 @@ fn serve_blocking(workspace: &Path, runtime_path: &Path, stop: Arc<AtomicBool>) 
                 }
             }
             if Instant::now() >= deadline {
-                return Err(invalid(format!(
-                    "{program} did not publish {}",
-                    String::from_utf8_lossy(property)
-                )));
+                return Err(invalid(if program == "openbox" {
+                    "openbox did not finish startup".to_owned()
+                } else {
+                    format!(
+                        "{program} did not publish {}",
+                        String::from_utf8_lossy(property)
+                    )
+                }));
             }
             thread::sleep(Duration::from_millis(10));
         }
+        startup_ms.insert(
+            program.into(),
+            json!(started.elapsed().as_secs_f64() * 1000.0),
+        );
     }
     desktop.capture()?;
+    startup_ms.insert(
+        "capture".into(),
+        json!(started.elapsed().as_secs_f64() * 1000.0),
+    );
     children.alive()?;
     runtime.write_private(
         "ready",
         &serde_json::to_vec(
-            &json!({"status":"ready", "display":display,"width":WIDTH,"height":HEIGHT}),
+            &json!({"status":"ready", "display":display,"width":WIDTH,"height":HEIGHT,"startup_ms":startup_ms}),
         )?,
     )?;
     runtime.ready = true;

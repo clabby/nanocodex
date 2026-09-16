@@ -4,7 +4,7 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use nanocodex_tools::attachment::AttachmentTarget;
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
     tungstenite::{
         Error as WebSocketError, Message, client::IntoClientRequest as _, protocol::WebSocketConfig,
     },
@@ -789,10 +789,16 @@ async fn connect_vm_host(
     let websocket = WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_MESSAGE_BYTES));
-    let (mut socket, _) = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        connect_async_with_config(request, Some(websocket), false),
-    )
+    let (mut socket, _) = tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let connector = if request.uri().scheme_str() == Some("wss") {
+            Some(tokio_tungstenite::Connector::Rustls(
+                nanocodex_oai_api::tls::native_client_config().await?,
+            ))
+        } else {
+            None
+        };
+        connect_async_tls_with_config(request, Some(websocket), true, connector).await
+    })
     .await
     .map_err(|_| protocol("VM host WebSocket handshake timed out"))?
     .map_err(vm_host_handshake_error)?;

@@ -3,6 +3,7 @@ export type RemoteHand = Readonly<{
   width: number; height: number; controllable: boolean;
   machine_id: string; machine_name: string; generation: string;
   transport?: "webrtc" | "frames-v1";
+  frame_window?: number;
 }>;
 export type RemoteState = Readonly<{ status: string; connected: boolean; controlling: boolean; connecting: boolean }>;
 export type RemoteInput = {
@@ -94,8 +95,12 @@ export class RemoteBrowserSession {
   private controlTimer?: ReturnType<typeof setInterval>;
   private frameTimer?: ReturnType<typeof setTimeout>;
   private frameDeadline?: ReturnType<typeof setTimeout>;
-  private framePending = false;
-  private frameDecoding = false;
+  private framePending = 0;
+  private frameQueued = 0;
+  private get frameWindow(): number {
+    const size = this.hand.frame_window;
+    return Number.isInteger(size) && size! >= 1 && size! <= 6 ? size! : 1;
+  }
   private frameRequestedAt = 0;
   private epoch = 0;
   private retries = 0;
@@ -169,6 +174,10 @@ export class RemoteBrowserSession {
       const url = new URL("/v1/account/hands/view", location.origin);
       url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
       url.search = new URLSearchParams({ machine_id: this.hand.machine_id, surface_id: this.hand.id, generation: this.hand.generation }).toString();
+      if (frames && this.frameWindow > 1) {
+        url.searchParams.set("frame_window", String(this.frameWindow));
+        this.framePending = this.frameWindow;
+      }
       const socket = new WebSocket(url); this.socket = socket;
       socket.onclose = () => { if (this.current(epoch)) this.fail(new RemoteError("Screen disconnected.")); };
       socket.onerror = () => { if (this.current(epoch)) this.fail(new RemoteError("Could not connect to this screen.")); };
@@ -184,8 +193,8 @@ export class RemoteBrowserSession {
           message = JSON.parse(data);
           if (!message || typeof message !== "object") throw new RemoteError("Invalid remote signal.", true);
           if (frames && message.type === "frame") {
-            if (!this.framePending || this.frameDecoding) throw new RemoteError("Unexpected remote frame.", true);
-            this.frameDecoding = true;
+            if (this.frameQueued >= this.framePending) throw new RemoteError("Unexpected remote frame.", true);
+            this.frameQueued++;
           } else if (frames && encoder.encode(data).length > 8192) throw new RemoteError("Invalid remote signal.", true);
         } catch { this.fail(new RemoteError("Invalid remote signal.", true)); return; }
         signalQueue = signalQueue.then(async () => {
@@ -199,7 +208,10 @@ export class RemoteBrowserSession {
                 if (this.current(epoch) && socket.readyState === WebSocket.OPEN) socket.send('{"type":"ping"}');
               }).catch(error => { if (this.current(epoch)) this.fail(error); });
             }, 10_000);
-            if (frames) this.requestFrame(epoch);
+            if (frames) {
+              this.armFrameDeadline(epoch);
+              this.requestFrame(epoch);
+            }
           } else if (message.type === "renewed") this.authorized(epoch);
           else if (message.type === "pong") return; // Liveness is not lease authorization.
           else if (frames && message.type === "frame") await this.renderFrame(message, epoch);
@@ -279,7 +291,7 @@ export class RemoteBrowserSession {
     this.control = "idle"; this.controlRequested = false; this.sequence = 0;
     this.abort.abort();
     clearTimeout(this.watchdog); clearTimeout(this.connectingTimer); clearTimeout(this.retryTimer);
-    clearTimeout(this.frameTimer); clearTimeout(this.frameDeadline); this.framePending = false; this.frameDecoding = false;
+    clearTimeout(this.frameTimer); clearTimeout(this.frameDeadline); this.framePending = 0; this.frameQueued = 0;
     clearInterval(this.renewTimer); clearInterval(this.controlTimer);
     this.watchdog = this.connectingTimer = this.retryTimer = this.renewTimer = this.controlTimer = undefined;
     this.frameTimer = this.frameDeadline = undefined;
@@ -326,14 +338,19 @@ export class RemoteBrowserSession {
     try { channel.send(wire); } catch { this.fail(new RemoteError("Input connection closed.")); }
   }
   private requestFrame(epoch: number): void {
-    if (!this.current(epoch) || this.framePending) return;
+    if (!this.current(epoch) || this.framePending >= this.frameWindow) return;
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN || this.socket.bufferedAmount > 32_768) {
       this.fail(new RemoteError("Screen connection unavailable.")); return;
     }
-    this.framePending = true; this.frameRequestedAt = performance.now();
-    this.frameDeadline = setTimeout(() => { if (this.current(epoch)) this.fail(new RemoteError("This screen stopped sending frames.")); }, 10_000);
-    try { this.socket.send('{"type":"frame_request"}'); }
+    const count = this.frameWindow - this.framePending;
+    this.framePending += count; this.frameRequestedAt = performance.now();
+    this.armFrameDeadline(epoch);
+    try { this.socket.send(JSON.stringify({ type: "frame_request", ...(this.frameWindow > 1 ? { count } : {}) })); }
     catch { this.fail(new RemoteError("Screen connection unavailable.")); }
+  }
+  private armFrameDeadline(epoch: number): void {
+    clearTimeout(this.frameDeadline);
+    this.frameDeadline = setTimeout(() => { if (this.current(epoch)) this.fail(new RemoteError("This screen stopped sending frames.")); }, 10_000);
   }
   private async renderFrame(value: { jpeg?: unknown; width?: unknown; height?: unknown }, epoch: number): Promise<void> {
     if (!this.framePending || !this.canvas) throw new RemoteError("Unexpected remote frame.", true);
@@ -348,12 +365,13 @@ export class RemoteBrowserSession {
       if (this.canvas.width !== bitmap.width) this.canvas.width = bitmap.width;
       if (this.canvas.height !== bitmap.height) this.canvas.height = bitmap.height;
       context.drawImage(bitmap, 0, 0);
-      clearTimeout(this.frameDeadline); this.frameDeadline = undefined; this.framePending = false;
+      clearTimeout(this.frameDeadline); this.frameDeadline = undefined; this.framePending--;
       this.ready(true);
-      this.frameTimer = setTimeout(() => this.requestFrame(epoch), Math.ceil(Math.max(0, 100 - (performance.now() - this.frameRequestedAt))));
+      if (this.frameWindow > 1) this.requestFrame(epoch);
+      else this.frameTimer = setTimeout(() => this.requestFrame(epoch), Math.ceil(Math.max(0, 100 - (performance.now() - this.frameRequestedAt))));
     } catch (error) {
       throw error instanceof RemoteError ? error : new RemoteError("Invalid remote frame.", true);
-    } finally { bitmap?.close(); if (this.current(epoch)) this.frameDecoding = false; }
+    } finally { bitmap?.close(); if (this.current(epoch)) this.frameQueued--; }
   }
   private channel(channel: RTCDataChannel, epoch: number): void {
     if (channel.label === "remote-control-v1" && !this.reliable && channel.ordered && channel.maxRetransmits === null && channel.maxPacketLifeTime === null) this.reliable = channel;

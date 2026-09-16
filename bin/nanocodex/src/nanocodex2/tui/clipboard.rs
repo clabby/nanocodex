@@ -187,7 +187,10 @@ fn encode_png(width: usize, height: usize, pixels: &[u8]) -> Result<Vec<u8>, Enc
 mod tests {
     #[cfg(target_os = "macos")]
     use super::copy_with_pbcopy;
-    use super::{copy_with_tmux, encode_png};
+    #[cfg(unix)]
+    use super::copy_with_tmux;
+    use super::encode_png;
+    #[cfg(unix)]
     use std::{fs, os::unix::fs::PermissionsExt};
 
     #[test]
@@ -197,6 +200,7 @@ mod tests {
         assert_eq!(&encoded[..8], b"\x89PNG\r\n\x1a\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn tmux_copy_loads_buffer_from_stdin() {
         let directory = tempfile::tempdir().unwrap();

@@ -15,6 +15,7 @@ import WebSocket from "ws";
 import { mergeAccountHands, restoredAccountHands } from "./account-hands.mjs";
 import { createVmTools, supportsLocalVms } from "./vm-tools.mjs";
 import { describeDeviceHand, connectDeviceHand } from "./device-hand.mjs";
+import { runtimeDataDirectory } from "./data-directory.mjs";
 import { desktopFactoryRecipe, superviseVmFactory } from "./vm-factory.mjs";
 
 export const DEFAULT_ORIGIN = "https://nanocodex.gakonst.workers.dev";
@@ -209,7 +210,7 @@ export class DesktopRuntime extends EventEmitter {
   #eventSnapshots = new WeakMap();
   #vmLaunchQueue = Promise.resolve();
 
-  constructor({ baseUrl = DEFAULT_ORIGIN, apiKey, saved = {}, defaults = {}, dataDirectory = join(homedir(), "Library", "Application Support", "Nanocodex", "Runtime"), persist = async () => {}, saveConnection = async () => {} } = {}) {
+  constructor({ baseUrl = DEFAULT_ORIGIN, apiKey, saved = {}, defaults = {}, dataDirectory = runtimeDataDirectory(), persist = async () => {}, saveConnection = async () => {} } = {}) {
     super();
     if (!saved || typeof saved !== "object" || Array.isArray(saved)) saved = {};
     this.#persist = persist;
@@ -657,7 +658,7 @@ export class DesktopRuntime extends EventEmitter {
       this.#sameAccount(generation);
       if (!this.#state.defaultHandEnabled) return null;
       const connected = this.#state.hands.find(candidate => candidate.id === hand.id);
-      if (connected?.status !== "connected") throw new Error(connected?.error || "This Mac is reconnecting.");
+      if (connected?.status !== "connected") throw new Error(connected?.error || "This computer is reconnecting.");
       return structuredClone(connected);
     })().finally(() => { if (this.#defaultPreparation === pending) this.#defaultPreparation = undefined; });
     this.#defaultPreparation = pending;

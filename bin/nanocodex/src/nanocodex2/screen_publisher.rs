@@ -4,7 +4,7 @@ use nanocodex_managed::ManagedError;
 use nanocodex_tools::attachment::{AttachmentMachine, AttachmentTarget};
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -36,6 +36,7 @@ impl ScreenPublisher {
         backend: ScreenBackend,
     ) -> Result<Self, ManagedError> {
         endpoint(target)?;
+        let started = Instant::now();
         let first =
             tokio::time::timeout(Duration::from_secs(8), backend(json!({"action":"observe"})))
                 .await
@@ -45,6 +46,7 @@ impl ScreenPublisher {
                 "screen capture is unavailable; check display and OS permissions",
             ));
         }
+        tracing::info!(target: "nanocodex2", stage = "screen.capture.initial", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
         let dimensions = (
             first["width"].as_u64().unwrap_or(1280),
             first["height"].as_u64().unwrap_or(720),
@@ -242,6 +244,7 @@ async fn session(
     dimensions: (u64, u64),
     ready: &mut Option<oneshot::Sender<()>>,
 ) -> Result<(), SessionError> {
+    let started = Instant::now();
     let base = endpoint(target).map_err(|_| SessionError::Closed)?;
     let mut host = base.clone();
     host.set_path(&format!("{}/host", base.path()));
@@ -265,11 +268,25 @@ async fn session(
         .max_frame_size(Some(750_000));
     let (mut socket, _) = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_tungstenite::connect_async_with_config(request, Some(config), false),
+        async {
+            // Keep DNS/TCP separate from TLS + HTTP upgrade in startup traces.
+            let address = format!("{}:{}", host.host_str().ok_or(SessionError::Closed)?, host.port_or_known_default().ok_or(SessionError::Closed)?);
+            let addresses: Vec<_> = tokio::net::lookup_host(address).await.map_err(|_| SessionError::Closed)?.collect();
+            tracing::info!(target: "nanocodex2", stage = "screen.socket.resolved", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
+            let stream = tokio::net::TcpStream::connect(addresses.as_slice()).await.map_err(|_| SessionError::Closed)?;
+            stream.set_nodelay(true).map_err(|_| SessionError::Closed)?;
+            tracing::info!(target: "nanocodex2", stage = "screen.socket.tcp", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
+            let connector = if host.scheme() == "wss" {
+                Some(tokio_tungstenite::Connector::Rustls(nanocodex::oai::tls::native_client_config().await.map_err(|_| SessionError::Closed)?))
+            } else { None };
+            tracing::info!(target: "nanocodex2", stage = "screen.socket.trust", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
+            tokio_tungstenite::client_async_tls_with_config(request, stream, Some(config), connector).await.map_err(|_| SessionError::Closed)
+        },
     )
     .await
     .map_err(|_| SessionError::Closed)?
     .map_err(|_| SessionError::Closed)?;
+    tracing::info!(target: "nanocodex2", stage = "screen.socket.connected", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
@@ -284,7 +301,9 @@ async fn session(
     let mut connection = String::new();
     let mut generation = String::new();
     let mut viewers = HashSet::<String>::new();
-    let mut pending_frames = HashSet::<String>::new();
+    let mut pending_frames = HashMap::<String, u64>::new();
+    let mut frame_tick = tokio::time::interval(Duration::from_millis(100));
+    frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut lease = Lease::default();
     let mut job = None;
     let mut frame = None;
@@ -308,14 +327,22 @@ async fn session(
                 let mut result=checked_result(result); result["type"]=json!("agent_result"); result["request_id"]=json!(std::mem::take(&mut request_id));
                 send(&mut socket,result).await?;
             },
+            _ = frame_tick.tick(), if frame.is_none() && !pending_frames.is_empty() => {
+                let backend = backend.clone();
+                frame = Some(OwnedJob(tokio::spawn(async move {
+                    call(&backend, json!({"action":"observe"}), Duration::from_secs(5)).await
+                })));
+            },
             result = completed(&mut frame) => {
                 frame=None;
-                for viewer in pending_frames.drain() {
-                    if !viewers.contains(&viewer) {continue;}
+                for (viewer, credits) in &mut pending_frames {
+                    if !viewers.contains(viewer) { *credits = 0; continue; }
+                    *credits -= 1;
                     if result["status"]=="ok" && valid_frame(&result) {
                         send(&mut socket,json!({"type":"frame","viewer_id":viewer,"jpeg":result["jpeg"],"width":result["width"],"height":result["height"]})).await?;
                     } else { send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?; }
                 }
+                pending_frames.retain(|_, credits| *credits > 0);
             },
             message = socket.next() => {
                 let message=message.ok_or(SessionError::Closed)?.map_err(|_|SessionError::Closed)?;
@@ -330,11 +357,12 @@ async fn session(
                 let viewer=value["viewer_id"].as_str().unwrap_or("");
                 match value["type"].as_str().unwrap_or("") {
                     "ready"=>{
+                        tracing::info!(target: "nanocodex2", stage = "screen.socket.ready", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
                         if !connection.is_empty(){return Err(SessionError::Closed);}
                         connection=value["connection_id"].as_str().filter(|s|!s.is_empty()).ok_or(SessionError::Closed)?.into();
-                        send(&mut socket,json!({"type":"catalog","machine_id":machine.id(),"machine_name":machine.name(),"surfaces":[{"id":"desktop","name":"Desktop","kind":if base.path().starts_with("/v1/vm-host-attachments/"){"vm"}else{"desktop"},"width":dimensions.0,"height":dimensions.1,"controllable":true,"agent_tools":true,"transport":"frames-v1"}]})).await?;
+                        send(&mut socket,json!({"type":"catalog","machine_id":machine.id(),"machine_name":machine.name(),"surfaces":[{"id":"desktop","name":"Desktop","kind":if base.path().starts_with("/v1/vm-host-attachments/"){"vm"}else{"desktop"},"width":dimensions.0,"height":dimensions.1,"controllable":true,"agent_tools":true,"transport":"frames-v1","frame_window":6}]})).await?;
                     },
-                    "published"=>{generation=value["generation"].as_str().ok_or(SessionError::Closed)?.into();if let Some(ready)=ready.take(){let _=ready.send(());}},
+                    "published"=>{tracing::info!(target: "nanocodex2", stage = "screen.published", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);generation=value["generation"].as_str().ok_or(SessionError::Closed)?.into();if let Some(ready)=ready.take(){let _=ready.send(());}},
                     "renewed"=>last_authorized=Instant::now(),
                     "pong"=>{},
                     "viewer"=>{
@@ -343,8 +371,11 @@ async fn session(
                     },
                     "viewer_left"=>{viewers.remove(viewer);pending_frames.remove(viewer);if lease.owner==viewer{release(&mut lease,backend,&mut socket).await?;}},
                     "frame_request" if viewers.contains(viewer)=>{
-                        pending_frames.insert(viewer.into());
-                        if frame.is_none(){let backend=backend.clone();frame=Some(OwnedJob(tokio::spawn(async move{call(&backend,json!({"action":"observe"}),Duration::from_secs(5)).await})));}
+                        let count = value["count"].as_u64().unwrap_or(1);
+                        if pending_frames.is_empty() && frame.is_none() { frame_tick.reset_immediately(); }
+                        let credits = pending_frames.entry(viewer.into()).or_default();
+                        if count == 0 || count > 6 || *credits + count > 6 { return Err(SessionError::Closed); }
+                        *credits += count;
                     },
                     "control" if viewers.contains(viewer)=>{
                         let data=&value["data"];
@@ -380,11 +411,12 @@ async fn session(
                         if action["action"]=="release" {if lease.owner==owner{release(&mut lease,backend,&mut socket).await?;}send(&mut socket,json!({"type":"agent_result","request_id":id,"status":"ok"})).await?;continue;}
                         let steps=match steps(action){Ok(steps)=>steps,Err(())=>{send(&mut socket,json!({"type":"agent_result","request_id":id,"status":"invalid"})).await?;continue;}};
                         if !steps.is_empty(){release(&mut lease,backend,&mut socket).await?;lease.acquire(&owner);}
+                        let settle = !steps.is_empty();
                         let backend=backend.clone();request_id=id.into();
                         job=Some(OwnedJob(tokio::spawn(async move{
                             tokio::time::timeout(Duration::from_millis(deadline.saturating_sub(now_ms())),async{
                                 for (delay,input) in steps {if !delay.is_zero(){tokio::time::sleep(delay).await;}let result=call(&backend,json!({"action":"input","input":input}),Duration::from_secs(2)).await;if result["status"]!="ok"{return result;}}
-                                tokio::time::sleep(Duration::from_millis(80)).await;
+                                if settle { tokio::time::sleep(Duration::from_millis(80)).await; }
                                 call(&backend,json!({"action":"observe"}),Duration::from_secs(4)).await
                             }).await.unwrap_or_else(|_|json!({"status":"cancelled"}))
                         })));
@@ -397,10 +429,15 @@ async fn session(
     }
 }
 async fn call(backend: &ScreenBackend, input: Value, timeout: Duration) -> Value {
-    match tokio::time::timeout(timeout, backend(input)).await {
+    let started = Instant::now();
+    let action = input["action"].as_str().unwrap_or("unknown").to_owned();
+    let result = match tokio::time::timeout(timeout, backend(input)).await {
         Ok(Ok(value)) => value,
         _ => json!({"status":"unavailable"}),
-    }
+    };
+    tracing::debug!(target: "nanocodex2", stage = "screen.backend", %action,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, status = result["status"].as_str().unwrap_or("unknown"));
+    result
 }
 fn valid_id(value: &str) -> bool {
     !value.is_empty()
@@ -511,6 +548,92 @@ fn steps(action: &Value) -> Result<Vec<(Duration, Value)>, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn frame_window_streams_only_credited_frames_and_stops_on_disconnect() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let key = nanocodex_managed::ManagedApiKey::parse(format!(
+            "ncx_live_{}_{}",
+            "a".repeat(12),
+            "b".repeat(43)
+        ))
+        .unwrap();
+        let _client = nanocodex_managed::ManagedClient::new("http://127.0.0.1:9", key).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = AttachmentTarget::new(
+            format!(
+                "ws://{}/v1/account/tool-host",
+                listener.local_addr().unwrap()
+            ),
+            "test-token",
+        )
+        .unwrap();
+        let machine = AttachmentMachine::new("test", "Test", "/", ["shell"]).unwrap();
+        let captures = Arc::new(AtomicUsize::new(0));
+        let observed = captures.clone();
+        let backend: ScreenBackend = Arc::new(move |input| {
+            let captures = observed.clone();
+            Box::pin(async move {
+                if input["action"] == "observe" {
+                    captures.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(json!({"status":"ok","jpeg":"/9j/a","width":1,"height":1}))
+            })
+        });
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"type":"ready","connection_id":"test"})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let catalog: Value =
+                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(catalog["surfaces"][0]["frame_window"], 6);
+            for message in [
+                json!({"type":"published","generation":"g"}),
+                json!({"type":"viewer","viewer_id":"v","surface_id":"desktop"}),
+                json!({"type":"frame_request","viewer_id":"v","count":6}),
+            ] {
+                socket
+                    .send(Message::Text(message.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            for _ in 0..6 {
+                let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let frame: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_eq!(frame["type"], "frame");
+                assert_eq!(frame["viewer_id"], "v");
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(150), socket.next())
+                    .await
+                    .is_err(),
+                "no uncredited seventh frame"
+            );
+            socket.close(None).await.unwrap();
+        });
+        let publisher = ScreenPublisher::start(&target, &machine, backend)
+            .await
+            .unwrap();
+        peer.await.unwrap();
+        publisher.shutdown().await.unwrap();
+        assert_eq!(
+            captures.load(Ordering::SeqCst),
+            7,
+            "initial validation plus six requested frames"
+        );
+    }
+
     #[test]
     fn gestures_bound_duration_and_release_modifiers() {
         assert!(

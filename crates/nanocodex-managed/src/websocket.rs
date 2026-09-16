@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
     tungstenite::{Message, client::IntoClientRequest as _, protocol::WebSocketConfig},
 };
 
@@ -521,10 +521,16 @@ async fn connect_endpoint(
     let config = WebSocketConfig::default()
         .max_message_size(None)
         .max_frame_size(None);
-    let (mut socket, _) = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        connect_async_with_config(request, Some(config), false),
-    )
+    let (mut socket, _) = tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let connector = if request.uri().scheme_str() == Some("wss") {
+            Some(tokio_tungstenite::Connector::Rustls(
+                nanocodex_oai_api::tls::native_client_config().await?,
+            ))
+        } else {
+            None
+        };
+        connect_async_tls_with_config(request, Some(config), true, connector).await
+    })
     .await
     .map_err(|_| live_error("managed WebSocket handshake timed out"))?
     .map_err(|error| live_error(format!("managed WebSocket handshake failed: {error}")))?;

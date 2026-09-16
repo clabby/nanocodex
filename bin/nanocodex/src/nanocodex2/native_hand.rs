@@ -22,6 +22,7 @@ struct NativeHand {
     workspace: PathBuf,
     state_dir: Option<PathBuf>,
     machine_name: Option<String>,
+    vm_provider: Option<String>,
     browser: bool,
     browser_executable: Option<PathBuf>,
 }
@@ -53,6 +54,25 @@ impl NativeState {
     #[cfg(test)]
     fn open(workspace: &Path, directory: &Path, name: String) -> Result<Self, ManagedError> {
         Self::open_with_browser(workspace, directory, name, false)
+    }
+
+    pub(super) fn advertise_vm_provider(&mut self, provider: &str) -> Result<(), ManagedError> {
+        super::validate_vm_factory_name(provider)?;
+        let mut capabilities: Vec<String> = self
+            .machine
+            .capabilities()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        capabilities.push(format!("vm_factory:{provider}"));
+        self.machine = AttachmentMachine::new(
+            self.machine.id(),
+            self.machine.name(),
+            self.machine.workspace(),
+            capabilities,
+        )
+        .map_err(configuration)?;
+        Ok(())
     }
 
     pub(super) fn open_with_browser(
@@ -185,6 +205,7 @@ pub(super) async fn serve_hand(command: super::Hand) -> Result<(), ManagedError>
     if command.vm_workspace.is_none()
         && command.state_dir.is_none()
         && command.machine_name.is_none()
+        && command.vm_provider.is_none()
         && !command.browser
     {
         return super::device_hand::serve(super::device_hand::DeviceHand::default()).await;
@@ -200,6 +221,7 @@ pub(super) async fn serve_hand(command: super::Hand) -> Result<(), ManagedError>
             },
             state_dir: command.state_dir,
             machine_name: command.machine_name,
+            vm_provider: command.vm_provider,
             browser: command.browser,
             browser_executable: command.browser_executable,
         },
@@ -227,8 +249,11 @@ async fn serve(client: &ManagedClient, command: NativeHand) -> Result<(), Manage
     } else {
         None
     };
-    let state =
+    let mut state =
         NativeState::open_with_browser(&command.workspace, &directory, name, browser.is_some())?;
+    if let Some(provider) = command.vm_provider {
+        state.advertise_vm_provider(&provider)?;
+    }
     let target = client.account_attachment_target()?;
     let screen = match super::screen_native::NativeScreen::start(
         &target,
@@ -372,6 +397,37 @@ mod tests {
             fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         }
         directory
+    }
+
+    #[test]
+    fn native_computer_advertises_its_factory_without_changing_identity() {
+        let workspace = tempfile::tempdir().unwrap();
+        let directory = private_state_directory();
+        let mut state =
+            NativeState::open(workspace.path(), directory.path(), "Computer".into()).unwrap();
+        let identity = state.machine.id().to_owned();
+        assert!(state.advertise_vm_provider("cf_sandbox").is_err());
+        assert!(state.advertise_vm_provider("bad provider").is_err());
+        state.advertise_vm_provider("linux-computer").unwrap();
+        assert_eq!(state.machine.id(), identity);
+        assert!(
+            state
+                .machine
+                .capabilities()
+                .iter()
+                .any(|value| value.as_ref() == "vm_factory:linux-computer")
+        );
+        assert!(
+            crate::Cli::try_parse_from([
+                "nanocodex2",
+                "hand",
+                "--vm",
+                "root.ext4",
+                "--vm-provider",
+                "linux-computer"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -610,10 +666,15 @@ mod tests {
             socket.send(Message::Close(None)).await.unwrap();
             return;
         }
+        let command = if cfg!(windows) {
+            "echo native-process-proof> native-proof.txt && type native-proof.txt"
+        } else {
+            "printf 'native-process-proof\\n' > native-proof.txt && cat native-proof.txt"
+        };
         socket.send(Message::Text(json!({
             "type":"call", "session_id":"native-test-agent", "call_id":"native-file-process",
             "model":"gpt-6-astra", "name":"exec_command",
-            "input":{"cmd":"printf 'native-process-proof\\n' > native-proof.txt && cat native-proof.txt"},
+            "input":{"cmd":command},
             "output_token_budget":1024, "output_byte_budget":131072,
             "deadline_at":9_000_000_000_000_u64,
         }).to_string().into())).await.unwrap();
@@ -686,8 +747,10 @@ mod tests {
             );
             completed.recv().await.unwrap();
             assert_eq!(
-                fs::read_to_string(workspace.path().join("native-proof.txt")).unwrap(),
-                "native-process-proof\n"
+                fs::read_to_string(workspace.path().join("native-proof.txt"))
+                    .unwrap()
+                    .trim(),
+                "native-process-proof"
             );
             shutdown_tx.send(()).unwrap();
             hand.await.unwrap().unwrap();

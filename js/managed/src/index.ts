@@ -1,3 +1,4 @@
+import { beginHandTiming, finishHandTiming, timeHandStage } from "./hand-timing";
 import { PreparedPersonalizationCache, personalizedVoiceContext, type PersonalizationScope, type PersonalizationSnapshot } from "./personalization";
 import { prepareEnvironment } from "./environment-setup";
 import { SessionOperations } from "./session-operations";
@@ -1290,12 +1291,13 @@ async function managedFetch(
   trustedAgentPrincipal?: Principal,
 ): Promise<Response> {
   const began = performance.now();
+  beginHandTiming(request);
   const response = await managedAccessResponse(request, await managedFetchRoute(request, env, ctx, trustedAgentPrincipal), env);
   const path = new URL(request.url).pathname;
   if (path.startsWith("/v1/agents")) console.info({ type: "managed.request",
     request_id: response.headers.get("x-nanocodex-request-id"), method: request.method,
     path, status: response.status, duration_ms: performance.now() - began });
-  return response;
+  return finishHandTiming(request, response);
 }
 
 async function managedFetchRoute(
@@ -1441,10 +1443,10 @@ async function managedFetchRoute(
       const headers = new Headers(request.headers);
       headers.delete(REMOTE_VM_ASSERTION);
       forwardPrincipalAssertions(headers, principal);
-      return env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
+      return timeHandStage(request, "route", () => env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
         `https://account-tools.internal${url.pathname.slice("/v1/account".length)}${url.search}`,
         new Request(request, { headers }),
-      );
+      ));
     }
     if (url.pathname === "/v1/account/tool-host") {
       if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
@@ -1477,21 +1479,10 @@ async function managedFetchRoute(
         || !principal.capabilities.includes("tools:use")) {
         return json({ error: "forbidden" }, { status: 403 });
       }
-      const response = await env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
-        "https://account-tools.internal/snapshot", {
-          method: "POST", body: JSON.stringify({ owner_id: principal.userId }),
-        },
-      );
-      if (response.status === 404) return json({ data: [] }, { headers: { "cache-control": "no-store" } });
-      if (!response.ok) return json({ error: "hands_unavailable" }, { status: 503 });
-      const snapshot = await response.json<{ machines: Array<{ online: boolean; machine: {
-        id: string; name: string; capabilities: readonly string[];
-      } }> }>();
-      // Expose only the public machine projection, never routing tokens, tool
-      // credentials, or the host's physical workspace path.
-      return json({ data: snapshot.machines.filter(({ online }) => online).map(({ machine }) => ({
-        id: machine.id, name: machine.name, workspace: machineMountRoot(machine.id),
-        capabilities: machine.capabilities,
+      const machines = await timeHandStage(request, "route", () =>
+        env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).listMachines(principal.userId));
+      return json({ data: machines.map(machine => ({
+        ...machine, workspace: machineMountRoot(machine.id),
       })) }, { headers: { "cache-control": "no-store" } });
     }
     if (/^\/v1\/(agent-definitions|environment-templates)(?:\/|$)/.test(url.pathname)) {
@@ -2420,11 +2411,11 @@ async function routeVmHostToolAttachment(
   const pool = env.NANOCODEX_VM_HOST_POOLS.getByName(poolLocator);
   let validated: Response;
   try {
-    validated = await pool.fetch("https://vm-host-pool.internal/validate-attachment", {
+    validated = await timeHandStage(request, "grant_headers", () => pool.fetch("https://vm-host-pool.internal/validate-attachment", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ allocation_id: allocationId, bearer }),
-    });
+    }));
   } catch {
     return json({ error: "attachment_unavailable" }, { status: 503 });
   }
@@ -2433,7 +2424,7 @@ async function routeVmHostToolAttachment(
     return json({ error: "not_found" }, { status: 404 });
   }
   let grant: VmHostAttachmentGrant;
-  try { grant = await validated.json<VmHostAttachmentGrant>(); }
+  try { grant = await timeHandStage(request, "grant_body", () => validated.json<VmHostAttachmentGrant>()); }
   catch { return json({ error: "attachment_unavailable" }, { status: 503 }); }
   if (!validVmHostAttachmentGrant(grant) || grant.allocation_id !== allocationId) {
     return json({ error: "attachment_unavailable" }, { status: 503 });

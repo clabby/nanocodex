@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -15,7 +16,7 @@ export async function describeDeviceHand(binary, env, { spawnProcess = spawn } =
       child.once("close", code => code === 0 ? resolve() : reject(new Error(error || "The computer Hand could not start. Update nanocodex2.")));
     });
     const value = JSON.parse(output);
-    if (!/^[0-9a-f-]{36}$/.test(value.id) || typeof value.name !== "string" || typeof value.workspace !== "string" || !value.workspace.startsWith("/")) throw new Error("Invalid computer Hand identity.");
+    if (!/^[0-9a-f-]{36}$/.test(value.id) || typeof value.name !== "string" || typeof value.workspace !== "string" || !isAbsolute(value.workspace)) throw new Error("Invalid computer Hand identity.");
     return { id: value.id, name: value.name, workspace: value.workspace, kind: "local" };
   } finally { clearTimeout(timeout); }
 }

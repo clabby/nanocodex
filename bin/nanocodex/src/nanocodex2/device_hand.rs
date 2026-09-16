@@ -1,9 +1,9 @@
 //! One account Hand per computer, shared by the terminal and desktop clients.
-//! Each client holds a Unix-socket lease through a child process. A single
+//! Each client holds a local IPC lease through a child process. A single
 //! publisher survives individual clients and exits after its last lease closes.
 use clap::Args;
 use nanocodex_managed::{ManagedClient, ManagedError};
-use nanocodex_tools::attachment::{AttachmentEvent, AttachmentMachine};
+use nanocodex_tools::attachment::AttachmentEvent;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -21,6 +21,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::native_hand::NativeState;
+
+mod transport;
 
 #[derive(Args, Default)]
 pub(crate) struct DeviceHand {
@@ -52,7 +54,10 @@ impl BackgroundHand {
             })
             .map_err(|()| error("invalid origin"))?;
         origin.set_path("");
-        let child = Command::new(std::env::current_exe().map_err(error)?)
+        let mut command = Command::new(std::env::current_exe().map_err(error)?);
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let child = command
             .args(["__device-hand", "--parent-pipe"])
             .env("NANOCODEX_API_KEY", target.bearer())
             .env("NANOCODEX_MANAGED_URL", origin.as_str())
@@ -81,9 +86,9 @@ fn error(value: impl std::fmt::Display) -> ManagedError {
     ManagedError::Configuration(value.to_string())
 }
 fn home() -> Result<PathBuf, ManagedError> {
-    std::env::var_os("HOME")
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
-        .ok_or_else(|| error("HOME is required for the device Hand"))
+        .ok_or_else(|| error("A user home directory is required for the device Hand"))
 }
 fn digest(value: &str) -> String {
     Sha256::digest(value)
@@ -92,47 +97,75 @@ fn digest(value: &str) -> String {
         .collect()
 }
 fn private_directory(path: &Path) -> Result<(), ManagedError> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-        .map_err(error)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path).map_err(error)?;
     let metadata = fs::symlink_metadata(path).map_err(error)?;
-    if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
-        return Err(error(
-            "The computer Hand state directory must be private (0700)",
-        ));
+    if !metadata.is_dir() {
+        return Err(error("Hand state must be a real directory"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(error(
+                "The computer Hand state directory must be private (0700)",
+            ));
+        }
     }
     Ok(())
 }
 fn log_file(directory: &Path, name: &str) -> Result<fs::File, ManagedError> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-    // The installer already owns a 0755 log directory. Log files are private;
-    // sharing a non-writable directory must not prevent ordinary CLI startup.
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(directory)
-        .map_err(error)?;
-    let metadata = fs::symlink_metadata(directory).map_err(error)?;
-    if !metadata.is_dir() || metadata.permissions().mode() & 0o022 != 0 {
-        return Err(error(
-            "The Hand log directory must not be writable by other users",
-        ));
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(directory.join(name))
-        .map_err(error)?;
+    builder.create(directory).map_err(error)?;
+    let metadata = fs::symlink_metadata(directory).map_err(error)?;
+    if !metadata.is_dir() {
+        return Err(error("Hand logs must use a real directory"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The installer owns a 0755 log directory; its private files can be shared.
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err(error(
+                "The Hand log directory must not be writable by other users",
+            ));
+        }
+    }
+    let path = directory.join(name);
+    if let Ok(metadata) = fs::symlink_metadata(&path)
+        && !metadata.is_file()
+    {
+        return Err(error("Hand logs must be regular files"));
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(error)?;
     if !file.metadata().map_err(error)?.is_file() {
         return Err(error("Hand logs must be regular files"));
     }
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(error)?;
+    }
     Ok(file)
 }
 async fn directory(origin: &str, key: &str) -> Result<PathBuf, ManagedError> {
@@ -284,9 +317,7 @@ async fn share(
     match open(directory) {
         Ok(mut state) => {
             let socket = socket_path(directory)?;
-            let _ = fs::remove_file(&socket);
-            let listener = tokio::net::UnixListener::bind(&socket).map_err(error)?;
-            let _socket_file = SocketFile(socket);
+            let listener = transport::Listener::bind(&socket).map_err(error)?;
             let lease_cancel = cancel.clone();
             let leases = tokio::spawn(async move {
                 watch_clients(listener, lease_cancel).await;
@@ -296,20 +327,7 @@ async fn share(
             let factory_error = recipe.as_ref().err().map(ToString::to_string);
             let recipe = recipe.unwrap_or(None);
             if let Some(recipe) = &recipe {
-                let mut capabilities: Vec<String> = state
-                    .machine
-                    .capabilities()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect();
-                capabilities.push(format!("vm_factory:{}", recipe.name));
-                state.machine = AttachmentMachine::new(
-                    state.machine.id(),
-                    state.machine.name(),
-                    state.machine.workspace(),
-                    capabilities,
-                )
-                .map_err(error)?;
+                state.advertise_vm_provider(&recipe.name)?;
             }
             let status = std::sync::Arc::new(std::sync::Mutex::new(
                 json!({"machine": machine, "status": "connecting"}),
@@ -391,31 +409,57 @@ async fn share(
     }
 }
 
-struct SocketFile(PathBuf);
-impl Drop for SocketFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+fn socket_path(directory: &Path) -> Result<PathBuf, ManagedError> {
+    #[cfg(unix)]
+    {
+        unix_socket_path(home()?.join(".nanocodex/s"), directory)
+    }
+    #[cfg(windows)]
+    {
+        // Profile path prevents different OS users with the same account from
+        // sharing a pipe. The account identity still scopes the state itself.
+        Ok(PathBuf::from(format!(
+            r"\\.\pipe\nanocodex-hand-{}",
+            digest(&directory.to_string_lossy())
+        )))
     }
 }
-fn socket_path(directory: &Path) -> Result<PathBuf, ManagedError> {
-    let base = home()?.join(".nanocodex/s");
-    private_directory(&base)?;
+#[cfg(unix)]
+fn unix_socket_path(base: PathBuf, directory: &Path) -> Result<PathBuf, ManagedError> {
+    use std::os::unix::ffi::OsStrExt;
     let scope = directory.file_name().unwrap().to_string_lossy();
-    Ok(base.join(format!("{}.sock", &scope[..24])))
+    let path = base.join(format!("{}.sock", &scope[..24]));
+    let path = if path.as_os_str().as_bytes().len() < 104 {
+        path
+    } else {
+        // sockaddr_un is only 104 bytes on macOS. Long home directories and
+        // test profiles still need a private, stable per-user IPC endpoint.
+        PathBuf::from(format!("/tmp/nanocodex-{}", nix::unistd::geteuid())).join(format!(
+            "{}.sock",
+            &digest(&directory.to_string_lossy())[..24]
+        ))
+    };
+    private_directory(path.parent().unwrap())?;
+    Ok(path)
 }
+
 async fn connect(directory: &Path, cancel: &CancellationToken) -> Result<(), ManagedError> {
     let socket = socket_path(directory)?;
     let mut stream = None;
     for attempt in 0..100 {
-        match tokio::net::UnixStream::connect(&socket).await {
+        match transport::connect(&socket).await {
             Ok(connection) => {
                 stream = Some(connection);
                 break;
             }
             Err(_) if attempt % 10 == 0 => {
-                let mut daemon = Command::new(std::env::current_exe().map_err(error)?)
+                let mut command = Command::new(std::env::current_exe().map_err(error)?);
+                #[cfg(unix)]
+                command.process_group(0);
+                #[cfg(windows)]
+                command.creation_flags(0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                let mut daemon = command
                     .args(["__device-hand", "--daemon"])
-                    .process_group(0)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(log_file(directory, "daemon.log")?)
@@ -447,7 +491,7 @@ async fn connect(directory: &Path, cancel: &CancellationToken) -> Result<(), Man
         }
     }
 }
-async fn watch_clients(listener: tokio::net::UnixListener, cancel: CancellationToken) {
+async fn watch_clients(mut listener: transport::Listener, cancel: CancellationToken) {
     let mut clients = tokio::task::JoinSet::new();
     let mut idle = tokio::time::Instant::now();
     let mut ever_connected = false;
@@ -455,7 +499,7 @@ async fn watch_clients(listener: tokio::net::UnixListener, cancel: CancellationT
         tokio::select! {
             () = cancel.cancelled() => break,
             accepted = listener.accept() => match accepted {
-                Ok((mut stream, _)) => {
+                Ok(mut stream) => {
                     ever_connected = true;
                     clients.spawn(async move { let mut bytes = [0u8; 1]; let _ = stream.read(&mut bytes).await; });
                 }
@@ -479,9 +523,7 @@ fn factory_recipe(
     directory: &Path,
     machine_id: &str,
 ) -> Result<Option<FactoryRecipe>, ManagedError> {
-    let data = std::env::var_os("NANOCODEX_DESKTOP_DATA")
-        .map(PathBuf::from)
-        .unwrap_or(home()?.join("Library/Application Support/Nanocodex/Native"));
+    let data = desktop_data()?;
     let config: Value = match fs::read(data.join("vm.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(error)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
@@ -501,15 +543,34 @@ fn factory_recipe(
     };
     let binary =
         path("NANOCODEX_HAND_BINARY", "binary").unwrap_or(std::env::current_exe().map_err(error)?);
+    let wsl = config["wslDistribution"].as_str();
+    if cfg!(windows) && wsl.is_none() {
+        return Err(error(
+            "Configure wslDistribution and Linux VM asset paths in vm.json to host VMs on Windows",
+        ));
+    }
     for path in [&root, &guest, &binary] {
-        if !path.is_absolute() || !path.is_file() {
+        let valid = if cfg!(windows) {
+            path.to_str()
+                .is_some_and(|path| path.starts_with('/') && !path.contains('\0'))
+        } else {
+            path.is_absolute() && path.is_file()
+        };
+        if !valid {
             return Err(error(format!(
                 "Hand VM asset unavailable: {}",
                 path.display()
             )));
         }
     }
-    let name = format!("mac-{}", machine_id.replace('-', ""));
+    // Preserve existing Mac provider identities; other platforms own their
+    // native host and VM provider under the same computer identity as well.
+    let platform = if cfg!(target_os = "macos") {
+        "mac"
+    } else {
+        std::env::consts::OS
+    };
+    let name = format!("{platform}-{}", machine_id.replace('-', ""));
     let mut args = vec![
         "host".into(),
         "--factory-name".into(),
@@ -518,10 +579,6 @@ fn factory_recipe(
         root.display().to_string(),
         "--vm-guest-runtime".into(),
         guest.display().to_string(),
-        "--state-dir".into(),
-        directory.join("vms").display().to_string(),
-        "--vm-cache".into(),
-        directory.join("vm-cache").display().to_string(),
         "--vm-workspace".into(),
         "/workspace".into(),
         "--vm-memory-mib".into(),
@@ -535,8 +592,71 @@ fn factory_recipe(
     if config["gpu"] == true {
         args.push("--vm-gpu".into());
     }
+    let binary = if cfg!(windows) {
+        let distro = wsl
+            .filter(|name| !name.is_empty() && !name.starts_with('-') && !name.contains('\0'))
+            .ok_or_else(|| error("wslDistribution must name a configured WSL2 distribution"))?;
+        args = wsl_factory_args(distro, &binary, &name, args);
+        PathBuf::from(
+            std::env::var_os("SystemRoot")
+                .ok_or_else(|| error("SystemRoot is required for WSL"))?,
+        )
+        .join("System32/wsl.exe")
+    } else {
+        args.extend([
+            "--state-dir".into(),
+            directory.join("vms").display().to_string(),
+            "--vm-cache".into(),
+            directory.join("vm-cache").display().to_string(),
+        ]);
+        binary
+    };
     Ok(Some(FactoryRecipe { name, binary, args }))
 }
+fn desktop_data() -> Result<PathBuf, ManagedError> {
+    if let Some(path) = std::env::var_os("NANOCODEX_DESKTOP_DATA") {
+        return Ok(path.into());
+    }
+    let home = home()?;
+    Ok(if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Nanocodex/Native")
+    } else if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .map_or_else(|| home.join("AppData/Local"), PathBuf::from)
+            .join("Nanocodex/Native")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map_or_else(|| home.join(".local/share"), PathBuf::from)
+            .join("nanocodex/native")
+    })
+}
+
+fn wsl_factory_args(
+    distribution: &str,
+    binary: &Path,
+    name: &str,
+    args: Vec<String>,
+) -> Vec<String> {
+    // All configured strings are argv entries, never shell source. Only the
+    // known-safe provider identifier enters this wrapper; HOME is resolved by
+    // the Linux user. Credentials cross via WSLENV, never the command line.
+    let script = format!(
+        "test -r /dev/kvm && test -w /dev/kvm || {{ echo 'WSL2 VM hosting requires accessible /dev/kvm and nested virtualization' >&2; exit 1; }}; exec \"$@\" --state-dir \"$HOME/.nanocodex/hands/{name}/vms\" --vm-cache \"$HOME/.nanocodex/hands/{name}/vm-cache\""
+    );
+    let mut command = vec![
+        "--distribution".into(),
+        distribution.into(),
+        "--exec".into(),
+        "/bin/sh".into(),
+        "-c".into(),
+        script,
+        "nanocodex-vm-host".into(),
+        binary.display().to_string(),
+    ];
+    command.extend(args);
+    command
+}
+
 async fn supervise_factory(
     recipe: FactoryRecipe,
     directory: &Path,
@@ -553,11 +673,23 @@ async fn supervise_factory(
     };
     while !cancel.is_cancelled() {
         update("connecting");
-        let child = Command::new(&recipe.binary)
+        let mut command = Command::new(&recipe.binary);
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        // WSLENV lists names only. Preserve the user's unrelated environment
+        // transfers while making these three variables Linux-visible.
+        let wslenv = [
+            std::env::var("WSLENV").unwrap_or_default(),
+            "NANOCODEX_API_KEY:NANOCODEX_MANAGED_URL:NANOCODEX_PARENT_PIPE".into(),
+        ]
+        .join(":");
+        let child = command
             .args(&recipe.args)
             .env("NANOCODEX_API_KEY", key)
             .env("NANOCODEX_MANAGED_URL", origin)
-            .stdin(Stdio::null())
+            .env("NANOCODEX_PARENT_PIPE", "1")
+            .env("WSLENV", wslenv)
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -586,6 +718,8 @@ async fn supervise_factory(
                     }
                 }
             }
+            // EOF shuts down both native and WSL-hosted factories gracefully.
+            drop(child.stdin.take());
             #[cfg(unix)]
             if let Some(id) = child.id() {
                 let _ = nix::sys::signal::kill(
@@ -613,6 +747,54 @@ async fn supervise_factory(
 mod tests {
     use super::*;
     #[test]
+    #[cfg(unix)]
+    fn long_home_directory_uses_a_private_short_socket_path() {
+        let directory = PathBuf::from("/a/very/long/home").join("a".repeat(64));
+        let path =
+            unix_socket_path(PathBuf::from("/".to_owned() + &"a".repeat(110)), &directory).unwrap();
+        assert!(path.as_os_str().len() < 104);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn wsl_launch_keeps_paths_and_distribution_out_of_shell_source() {
+        let binary = Path::new("/home/user/My Tools/nanocodex2");
+        let root = "/images/desktop; touch /tmp/unwanted";
+        let args = wsl_factory_args(
+            "Ubuntu Test",
+            binary,
+            "windows-1234",
+            vec!["host".into(), "--vm-template".into(), root.into()],
+        );
+        assert_eq!(
+            &args[..5],
+            ["--distribution", "Ubuntu Test", "--exec", "/bin/sh", "-c"]
+        );
+        assert!(!args[5].contains(root));
+        assert!(!args[5].contains("My Tools"));
+        assert!(args[5].contains("/dev/kvm"));
+        assert_eq!(
+            &args[6..],
+            [
+                "nanocodex-vm-host",
+                "/home/user/My Tools/nanocodex2",
+                "host",
+                "--vm-template",
+                root
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn installed_log_directory_can_be_shared_while_log_contents_remain_private() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
@@ -628,13 +810,15 @@ mod tests {
     }
     #[tokio::test]
     async fn publisher_survives_one_client_and_stops_after_last_client() {
-        let temp = tempfile::tempdir_in("/tmp").unwrap();
-        let path = temp.path().join("lease.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        #[cfg(unix)]
+        let path = PathBuf::from(format!("/tmp/ncx-{}.sock", uuid::Uuid::new_v4()));
+        #[cfg(windows)]
+        let path = PathBuf::from(format!(r"\\.\pipe\ncx-test-{}", uuid::Uuid::new_v4()));
+        let listener = transport::Listener::bind(&path).unwrap();
         let cancel = CancellationToken::new();
         let watching = tokio::spawn(watch_clients(listener, cancel.clone()));
-        let first = tokio::net::UnixStream::connect(&path).await.unwrap();
-        let second = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let first = transport::connect(&path).await.unwrap();
+        let second = transport::connect(&path).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(first);
         tokio::time::sleep(Duration::from_millis(2300)).await;
@@ -650,16 +834,18 @@ mod tests {
     }
     #[tokio::test]
     async fn reconnect_during_grace_preserves_publisher() {
-        let temp = tempfile::tempdir_in("/tmp").unwrap();
-        let path = temp.path().join("lease.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        #[cfg(unix)]
+        let path = PathBuf::from(format!("/tmp/ncx-{}.sock", uuid::Uuid::new_v4()));
+        #[cfg(windows)]
+        let path = PathBuf::from(format!(r"\\.\pipe\ncx-test-{}", uuid::Uuid::new_v4()));
+        let listener = transport::Listener::bind(&path).unwrap();
         let cancel = CancellationToken::new();
         let watching = tokio::spawn(watch_clients(listener, cancel.clone()));
-        let first = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let first = transport::connect(&path).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(first);
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let second = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let second = transport::connect(&path).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2300)).await;
         assert!(!cancel.is_cancelled());
         cancel.cancel();

@@ -249,6 +249,8 @@ def main(stage, config):
     replacement.symlink_to(release)
     os.replace(replacement, current)
     native_command = f"hand --workspace /srv/nanocodex/workspace --state-dir /srv/nanocodex/native-state --machine-name {factory} --log-format json"
+    if not config["native_only"]:
+        native_command += f" --vm-provider {factory}"
     units = {"nanocodex-hand.service": unit(native_command)}
     if not config["native_only"]:
         command = f"host --scope user --factory-name {factory} --state-dir /srv/nanocodex/factory-state --vm-template {config['template']} --vm-guest-runtime /opt/nanocodex/current/nanocodex-vm-guest --vm-firmware /opt/nanocodex/firmware --vm-cache /srv/nanocodex/cache --vm-workspace /workspace --max-vms {int(config['max_vms'])} --vm-cpus {int(config['vm_cpus'])} --vm-memory-mib {int(config['vm_memory_mib'])} --log-format json"

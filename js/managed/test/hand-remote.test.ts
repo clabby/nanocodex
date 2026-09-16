@@ -63,6 +63,7 @@ function messages(socket: WebSocket) {
 }
 
 const frameSurface = { ...surface, width: 1280, height: 720, transport: "frames-v1" };
+const windowSurface = { ...frameSurface, frame_window: 6 };
 const frame = { type: "frame", jpeg: "/9j/AAAA", width: 1280, height: 720 };
 const framesHost = (machine = "sandbox", owner = crypto.randomUUID()) => host(machine, owner, [frameSurface]);
 async function requestFrame(publisher: Awaited<ReturnType<typeof host>>, viewer: Awaited<ReturnType<typeof view>>) {
@@ -455,5 +456,64 @@ describe("pull-based hand frames on a real Durable Object", () => {
       successor.socket.send(JSON.stringify({ ...frame, viewer_id: reconnected.state.connection_id }));
       expect(await received).toEqual(frame);
     } finally { reconnected?.socket.close(); successor?.socket.close(); viewer.socket.close(); publisher.socket.close(); }
+  });
+});
+
+describe("bounded frame windows", () => {
+  it("starts the bounded stream during viewer upgrade without another viewer message", async () => {
+    const publisher = await host("initial-window", crypto.randomUUID(), [windowSurface]);
+    const joined = new Promise<any[]>(resolve => {
+      const events: any[] = [];
+      const receive = (event: MessageEvent) => {
+        events.push(JSON.parse(String(event.data)));
+        if (events.length === 2) { publisher.socket.removeEventListener("message", receive); resolve(events); }
+      };
+      publisher.socket.addEventListener("message", receive);
+    });
+    const query = new URLSearchParams({ machine_id: publisher.machine, surface_id: frameSurface.id,
+      generation: publisher.state.generation, frame_window: "6" });
+    const response = await publisher.stub.fetch(`https://account-tools.internal/hands/view?${query}`, {
+      headers: { ...headers(publisher.owner), upgrade: "websocket" },
+    });
+    expect(response.status).toBe(101);
+    const viewer = response.webSocket!, ready = next(viewer); viewer.accept();
+    try {
+      const state = await ready;
+      expect((await joined)[1]).toEqual({ type: "frame_request", viewer_id: state.connection_id, count: 6 });
+      const received = next(viewer);
+      publisher.socket.send(JSON.stringify({ ...frame, viewer_id: state.connection_id }));
+      expect(await received).toEqual(frame);
+    } finally { viewer.close(); publisher.socket.close(); }
+  });
+
+  it("relays six credits once, accounts for every image, and fences over-delivery", async () => {
+    const publisher = await host("window-host", crypto.randomUUID(), [windowSurface]);
+    const viewer = await view(publisher);
+    try {
+      const requested = next(publisher.socket);
+      viewer.socket.send(JSON.stringify({ type: "frame_request", count: 6 }));
+      expect(await requested).toEqual({ type: "frame_request", count: 6, viewer_id: viewer.state.connection_id });
+      for (let i = 0; i < 6; i++) {
+        const received = next(viewer.socket);
+        publisher.socket.send(JSON.stringify({ ...frame, viewer_id: viewer.state.connection_id }));
+        expect(await received).toEqual(frame);
+      }
+      const ended = closed(publisher.socket);
+      publisher.socket.send(JSON.stringify({ ...frame, viewer_id: viewer.state.connection_id }));
+      expect((await ended).code).toBe(1008);
+    } finally { publisher.socket.close(); viewer.socket.close(); }
+  });
+
+  it("does not grant more than the advertised window", async () => {
+    const publisher = await host("window-limit", crypto.randomUUID(), [windowSurface]);
+    const viewer = await view(publisher);
+    try {
+      const requested = next(publisher.socket);
+      viewer.socket.send(JSON.stringify({ type: "frame_request", count: 6 })); await requested;
+      const ended = closed(viewer.socket);
+      viewer.socket.send(JSON.stringify({ type: "frame_request", count: 1 }));
+      expect((await ended).code).toBe(1008);
+      await ping(publisher.socket);
+    } finally { publisher.socket.close(); viewer.socket.close(); }
   });
 });

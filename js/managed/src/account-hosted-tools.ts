@@ -93,6 +93,13 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     this.#handHosts = new HandHosts(ctx.storage, this.#remote);
   }
 
+  /** Discovery returns only its public projection in one RPC reply. */
+  async listMachines(ownerId: string) {
+    if (!isUserId(ownerId) || !await this.#owns(ownerId)) return [];
+    return this.#broker.machines().filter(machine => this.#broker.machineOnline(machine.id))
+      .map(machine => ({ id: machine.id, name: machine.name, capabilities: machine.capabilities }));
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const sandboxHost = url.pathname.match(/^\/sandbox-hand-hosts\/([^/]+)$/);
