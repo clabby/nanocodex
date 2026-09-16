@@ -1888,6 +1888,10 @@ mod docker_hand_live {
             send(&mut socket, json!({"type":"draining"})).await;
         })
     }
+    async fn ice(State(state): State<Service>, headers: HeaderMap) -> axum::Json<Value> {
+        assert_eq!(headers["authorization"], state.authorization);
+        axum::Json(json!({"iceServers": []}))
+    }
     async fn screen(
         State(state): State<Service>,
         headers: HeaderMap,
@@ -1903,6 +1907,10 @@ mod docker_hand_live {
             let catalog = receive(&mut socket).await;
             assert_eq!(catalog["type"], "catalog");
             assert_eq!(catalog["machine_id"], "docker-cli-test");
+            assert!(
+                catalog["surfaces"][0].get("transport").is_none(),
+                "{catalog}"
+            );
             send(
                 &mut socket,
                 json!({"type":"published","generation":"docker-screen-generation"}),
@@ -1913,12 +1921,29 @@ mod docker_hand_live {
                 json!({"type":"viewer","viewer_id":"test-viewer","surface_id":"desktop"}),
             )
             .await;
+            let offer = receive(&mut socket).await;
+            assert_eq!(offer["type"], "signal", "{offer}");
+            assert_eq!(offer["signal"]["type"], "offer", "{offer}");
+            assert!(
+                offer["signal"]["sdp"]
+                    .as_str()
+                    .unwrap()
+                    .contains("H264/90000")
+            );
+            // Agent observations remain available independently of the video stream.
             send(
                 &mut socket,
                 json!({"type":"frame_request","viewer_id":"test-viewer"}),
             )
             .await;
-            let frame = receive(&mut socket).await;
+            let frame = loop {
+                let message = receive(&mut socket).await;
+                if message["type"] == "signal" {
+                    assert!(message["signal"].get("candidate").is_some(), "{message}");
+                    continue;
+                }
+                break message;
+            };
             assert_eq!(frame["type"], "frame");
             assert!(frame["jpeg"].as_str().unwrap().starts_with("/9j/"));
             state.ready.send("screen").unwrap();
@@ -1961,6 +1986,7 @@ mod docker_hand_live {
         let app = Router::new()
             .route("/v1/account/tool-host", get(tools))
             .route("/v1/account/hands/host", get(screen))
+            .route("/v1/account/hands/host/ice", post(ice))
             .with_state(service);
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let config = tempfile::tempdir().unwrap();
