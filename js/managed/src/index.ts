@@ -7705,6 +7705,7 @@ export class DurableAgentSession extends DurableComputerSession {
     context: ToolContext,
     session: SessionRow,
   ): Promise<ManagedMountResult> {
+    const mountStarted = Date.now();
     const storageProvider = managedMountStorageProvider(request.provider);
     const replay = this.ctx.storage.sql.exec<ManagedMountCallRow>(
       `SELECT provider, name, mount_id, created
@@ -7790,6 +7791,8 @@ export class DurableAgentSession extends DurableComputerSession {
         Date.now(),
       );
     }
+    console.info({ type: "vm.mount.stage", stage: "intent", mount_id: mount.id,
+      timestamp: Date.now(), duration_ms: Date.now() - mountStarted, provider: mount.provider });
     if (mount.state !== "mounted"
       || (mount.provider === "host" && this.#hostMachineForMount(mount) === undefined)) {
       if (mount.state === "failed") {
@@ -7817,6 +7820,8 @@ export class DurableAgentSession extends DurableComputerSession {
         throw error;
       }
     }
+    console.info({ type: "vm.mount.stage", stage: "settled", mount_id: mount.id,
+      timestamp: Date.now(), duration_ms: Date.now() - mountStarted, provider: mount.provider });
     return Object.freeze({
       id: mount.id,
       name: mount.name,
@@ -7928,6 +7933,12 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   async #prepareHostMount(mount: ManagedMountRow): Promise<void> {
+    const prepareStarted = Date.now();
+    const stage = (name: string, detail: Record<string, string | number | boolean> = {}): void => {
+      console.info({ type: "vm.mount.stage", stage: name, mount_id: mount.id,
+        timestamp: Date.now(), elapsed_ms: Date.now() - prepareStarted, ...detail });
+    };
+    stage("prepare");
     const session = this.#session();
     if (session === undefined) throw new Error("managed session is not initialized");
     let configuration = managedMountConfiguration(mount.configuration_json);
@@ -7953,6 +7964,7 @@ export class DurableAgentSession extends DurableComputerSession {
         scope,
         locator: await vmHostPoolLocator(scope, identity),
       })));
+      stage("scopes_located");
       const selection = configuration.vm_pool_locator;
       if (selection !== undefined && (typeof selection !== "string"
         || !/^[A-Za-z0-9_-]{43}$/.test(selection))) {
@@ -7964,7 +7976,8 @@ export class DurableAgentSession extends DurableComputerSession {
       if (selectedIndex < 0) {
         throw new Error("retained VM host mount pool selection is outside its visible scopes");
       }
-      for (const { locator } of located.slice(selectedIndex)) {
+      for (const { scope, locator } of located.slice(selectedIndex)) {
+        const acquireStarted = Date.now();
         if (configuration.vm_pool_locator !== locator) {
           persistConfiguration({ ...configuration, vm_pool_locator: locator });
         }
@@ -7985,8 +7998,10 @@ export class DurableAgentSession extends DurableComputerSession {
             }),
           },
         );
+        stage("acquire_headers", { scope, status: response.status, duration_ms: Date.now() - acquireStarted });
         if (!response.ok) {
           const failure = await response.json<{ error?: unknown }>().catch(() => undefined);
+          stage("acquire_failure_body", { scope, status: response.status, duration_ms: Date.now() - acquireStarted });
           if (response.status === 404 && failure?.error === "factory_not_found") continue;
           if (response.status === 409 && failure?.error === "factory_unavailable") {
             throw new ManagedRequestError(
@@ -8010,6 +8025,7 @@ export class DurableAgentSession extends DurableComputerSession {
         };
         const { vm_pool_locator: _selection, ...stableConfiguration } = configuration;
         persistConfiguration({ ...stableConfiguration, vm_host: retained });
+        stage("reserved", { scope, allocation_id: allocation.allocation_id, duration_ms: Date.now() - acquireStarted });
         break;
       }
       if (retained === undefined) {
@@ -8032,7 +8048,10 @@ export class DurableAgentSession extends DurableComputerSession {
     };
     const pool = this.env.NANOCODEX_VM_HOST_POOLS.getByName(retained.pool_locator);
     const deadline = Date.now() + 30_000;
+    let poll = 0;
     while (Date.now() < deadline) {
+      const pollStarted = Date.now();
+      poll += 1;
       const response = await pool.fetch("https://vm-host-pool.internal/ready", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -8044,6 +8063,8 @@ export class DurableAgentSession extends DurableComputerSession {
         throw new Error("VM host pool returned an invalid readiness response");
       }
       const readiness = status as { ready?: unknown; state?: unknown };
+      stage("readiness", { allocation_id: retained.allocation_id, poll,
+        duration_ms: Date.now() - pollStarted, ready: readiness.ready === true });
       if (validVmHostAllocation(status)
         && status.factory_name === factoryName
         && status.allocation_id === retained.allocation_id
@@ -8060,10 +8081,11 @@ export class DurableAgentSession extends DurableComputerSession {
       if (this.#deleting || this.#deleted || current === undefined || current.state === "failed") {
         throw retryableError("retained VM host mount is no longer available");
       }
-      if (readiness.ready === true && current.state === "mounted"
-        && this.#hostMachineForMount(current)) return;
+      const machineReady = readiness.ready === true && this.#hostMachineForMount(current) !== undefined;
+      stage("route_checked", { allocation_id: retained.allocation_id, poll, machine_ready: machineReady });
+      if (readiness.ready === true && current.state === "mounted" && machineReady) return;
       if (readiness.ready === true && mount.state === "mounting"
-        && current.state === "mounting" && this.#hostMachineForMount(current)) return;
+        && current.state === "mounting" && machineReady) return;
       if (readiness.state === "releasing" || readiness.state === "released") {
         throw new Error("VM host allocation was released before becoming ready");
       }
