@@ -5,6 +5,8 @@ initial frame delivery and bitrate controls. The subsequent
 [Linux recovery](linux-recovery.md) resolves the stale publisher call rejection.
 The [installer and release repair](linux-installer-fix.md) fixes fresh-image
 packaging and VM teardown, with live installation and deletion evidence.
+[Linux overlay disks](vm-overlays.md) reduce repeated spare preparation from
+10.3–10.9 seconds to 0.87–1.04 seconds and verify retained writes across restart.
 
 See [further Hand component measurements](hands-components.md) for the inventory
 and Mac capture improvements, native WebRTC startup breakdown, and remaining
