@@ -31,7 +31,9 @@ mod supported {
         ManagedClient, ManagedError, VmHostAllocationState, VmHostCommand, VmHostConnection,
         VmHostScope, VmShape, connect_system_vm_host,
     };
-    use nanocodex_tools::attachment::{Attachment, AttachmentMetadata, AttachmentTarget};
+    use nanocodex_tools::attachment::{
+        Attachment, AttachmentError, AttachmentMetadata, AttachmentTarget,
+    };
     use serde::{Deserialize, Serialize};
     use tempfile::NamedTempFile;
     use uuid::Uuid;
@@ -1628,11 +1630,23 @@ mod supported {
 
         async fn stop(self) -> StopOutcome {
             let Self { hand, attachment } = self;
-            let (attachment, shutdown) = tokio::join!(attachment.detach(), hand.shutdown());
+            let (attachment, shutdown) =
+                tokio::join!(detach_stopping_vm(attachment), hand.shutdown());
             StopOutcome {
-                attachment: attachment.map_err(|error| VmHostError::Resource(error.to_string())),
+                attachment,
                 shutdown: shutdown.map_err(|error| VmHostError::Resource(error.to_string())),
             }
+        }
+    }
+
+    async fn detach_stopping_vm(attachment: Attachment) -> Result<(), VmHostError> {
+        match attachment.detach().await {
+            // An authoritative release already requires this VM to stop. The
+            // broker can fence its attachment first (e.g. agent deletion).
+            // detach still waits for runtime cleanup; a prior fence does not
+            // require reconnecting the factory or retrying a successful release.
+            Ok(()) | Err(AttachmentError::Fenced(_)) => Ok(()),
+            Err(error) => Err(VmHostError::Resource(error.to_string())),
         }
     }
 
@@ -2681,6 +2695,57 @@ mod supported {
         };
 
         use super::*;
+
+        #[tokio::test]
+        async fn stopping_vm_accepts_an_already_fenced_attachment() {
+            use futures_util::{SinkExt as _, StreamExt as _};
+            use tokio_tungstenite::tungstenite::{
+                Message,
+                protocol::{CloseFrame, frame::coding::CloseCode},
+            };
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("ws://{}/tools", listener.local_addr().unwrap());
+            let (fence, ready_to_fence) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let _catalog = socket.next().await.unwrap().unwrap();
+                socket
+                    .send(Message::Text(r#"{"type":"ready"}"#.into()))
+                    .await
+                    .unwrap();
+                ready_to_fence.await.unwrap();
+                socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::Policy,
+                        reason: "managed agent is being deleted".into(),
+                    })))
+                    .await
+                    .unwrap();
+                let _ = socket.next().await;
+            });
+            let tools = nanocodex_tools::Tools::builder()
+                .without_defaults()
+                .build()
+                .unwrap();
+            let (attachment, _) = tools
+                .attach(AttachmentTarget::new(endpoint, "test-bearer").unwrap())
+                .connect()
+                .await
+                .unwrap();
+            fence.send(()).unwrap();
+            // Normal lifecycle observers must still see the terminal failure.
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(2), attachment.closed())
+                    .await
+                    .unwrap(),
+                Err(AttachmentError::Fenced(_))
+            ));
+            // Explicit VM teardown has already decided to destroy this runtime.
+            detach_stopping_vm(attachment).await.unwrap();
+            server.await.unwrap();
+        }
 
         #[derive(Debug, Eq, PartialEq)]
         struct TestPendingCommand {

@@ -169,7 +169,10 @@ arguments, and waits for remote registration and the native desktop catalog.
 reconnect independently of SSH. Re-running setup reuses identities and private
 VM roots under `/srv/nanocodex`; it never replaces a retained workspace. A setup
 already enrolled to another account or origin is rejected. `--artifacts DIR`
-accepts matching locally built Linux host/guest executables for development.
+accepts matching locally built Linux `nanocodex2`, `nanocodex-vm-guest`, and
+`nanocodex-computer` executables for development. The CLI bundles the computer
+runtime source needed to build the VM image; no local checkout is required.
+Image reuse includes that source in its cache key.
 
 ## Rust: start here
 

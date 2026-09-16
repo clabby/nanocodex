@@ -122,6 +122,40 @@ def account_get(config, path):
         return json.load(response)
 
 
+def template_inputs(stage):
+    names = ["Dockerfile", "Dockerfile.ext4", "populate-ext4.sh", "build-root.sh",
+        "toolkit/install-alpine.sh", "toolkit/python.txt", "toolkit/check.py", "toolkit/install-paths.sh"]
+    computer = stage / "computer-source"
+    for name in ["Cargo.toml", "Cargo.lock", "src/main.rs"]:
+        if not (computer / name).is_file():
+            raise RuntimeError(f"Missing bundled computer build source: {name}")
+    if not (computer / "extensions").is_dir():
+        raise RuntimeError("Missing bundled computer extensions")
+    names.extend(path.relative_to(stage).as_posix() for path in computer.rglob("*") if path.is_file())
+    return sorted(names)
+
+
+def template_key(stage):
+    checksum = hashlib.sha256()
+    for name in template_inputs(stage):
+        # Include paths and individual content digests so renames, additions,
+        # and deletions invalidate the immutable image as well as edits.
+        checksum.update(name.encode() + b"\0" + bytes.fromhex(digest(stage / name)))
+    return checksum.hexdigest()[:16]
+
+
+def prepare_template(stage):
+    key = template_key(stage)
+    template = ROOT / "images" / f"desktop-{key}.ext4"
+    if not template.exists():
+        print("Preparing retained VM desktop template…", flush=True)
+        run("docker", "info", stdout=subprocess.DEVNULL)
+        run("docker", "build", "--build-context", f"computer-source={stage / 'computer-source'}",
+            "-t", f"nanocodex-vm:{key}", str(stage))
+        run("bash", str(stage / "build-root.sh"), f"nanocodex-vm:{key}", str(template), "16384")
+    return template
+
+
 def main(stage, config):
     if os.geteuid() != 0 or platform.system() != "Linux" or platform.machine() != "x86_64":
         raise RuntimeError("This setup requires x86_64 Linux and sudo")
@@ -225,14 +259,7 @@ def main(stage, config):
             if not member.isfile():
                 raise RuntimeError("Invalid firmware archive")
             atomic(ROOT / "firmware" / "libkrunfw.so.5", archive.extractfile(member).read())
-        template_key = hashlib.sha256(b"".join((stage / name).read_bytes() for name in ["Dockerfile", "Dockerfile.ext4", "populate-ext4.sh", "build-root.sh", "toolkit/install-alpine.sh", "toolkit/python.txt", "toolkit/check.py", "toolkit/install-paths.sh"])).hexdigest()[:16]
-        template = ROOT / "images" / f"desktop-{template_key}.ext4"
-        if not template.exists():
-            print("Preparing retained VM desktop template…", flush=True)
-            run("docker", "info", stdout=subprocess.DEVNULL)
-            run("docker", "build", "-t", f"nanocodex-vm:{template_key}", str(stage))
-            run("bash", str(stage / "build-root.sh"), f"nanocodex-vm:{template_key}", str(template), "16384")
-        config["template"] = str(template)
+        config["template"] = str(prepare_template(stage))
     # Establish ownership before enrollment. A failed first install must not let
     # a later invocation attach its retained workspace to a different account.
     public = {key: value for key, value in config.items() if key != "credential"}

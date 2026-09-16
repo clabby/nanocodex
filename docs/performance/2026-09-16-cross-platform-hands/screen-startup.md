@@ -64,7 +64,11 @@ fixture was also run explicitly for the controls above.
 These are native source changes tested in the Swift package. They have not yet
 been included in an installed Mac/iPhone release. No Worker changes are required.
 
-## Linux call rejection — still blocked on host access
+## Linux call rejection — initial investigation
+
+**Follow-up:** [Linux recovery](linux-recovery.md) identified the correct host
+through `lsh`, confirmed its old binary, upgraded it, and verified five successful
+managed shell calls. The observations below describe the earlier blocked state.
 
 The existing native Linux publisher rejects calls with `invalid call` and then
 reconnects. Current broker code defaults `output_byte_budget` to

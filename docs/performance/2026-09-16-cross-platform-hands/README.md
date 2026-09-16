@@ -1,7 +1,10 @@
 # Computer Hands and VM startup — 2026-09-16
 
 See the [native screen startup follow-up](screen-startup.md) for ICE prefetch,
-initial frame delivery, bitrate controls, and the outstanding Linux host-access issue.
+initial frame delivery and bitrate controls. The subsequent
+[Linux recovery](linux-recovery.md) resolves the stale publisher call rejection.
+The [installer and release repair](linux-installer-fix.md) fixes fresh-image
+packaging and VM teardown, with live installation and deletion evidence.
 
 See [further Hand component measurements](hands-components.md) for the inventory
 and Mac capture improvements, native WebRTC startup breakdown, and remaining
