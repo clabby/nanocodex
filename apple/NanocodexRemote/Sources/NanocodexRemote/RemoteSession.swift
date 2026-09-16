@@ -414,7 +414,7 @@ public final class RemoteViewer: ObservableObject {
                     transportReady = true; channelsReady = true; updateReady()
                     if frameWindow > 1 { requestFrame(attempt: attempt) }
                     else {
-                        let delay = max(0, 0.1 - (ProcessInfo.processInfo.systemUptime - frameRequestedAt))
+                        let delay = max(0, 1.0 / 30.0 - (ProcessInfo.processInfo.systemUptime - frameRequestedAt))
                         frameTask = Task { [weak self] in
                             do { try await Task.sleep(for: .seconds(delay)) } catch { return }
                             guard let self, epoch == attempt else { return }; requestFrame(attempt: attempt)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"regexp"
 	"strings"
 	"sync"
@@ -20,12 +21,28 @@ type hostConfig struct {
 	Origin, CredentialFile, MachineID, Name, Waymote string
 	IncludeLoopback                                  bool
 	Frames                                           bool
+	Interface                                        string
+	IPv4Only                                         bool
+	UDPPortMin, UDPPortMax                           uint
 	Width, Height                                    int
 	ICERenewalInterval                               time.Duration
 	quiet                                            bool
 	published                                        func()
 	capture                                          *waymoteCapture
 }
+
+func (config hostConfig) validateNetwork() error {
+	if (config.UDPPortMin == 0) != (config.UDPPortMax == 0) || config.UDPPortMax > 65535 || config.UDPPortMin > config.UDPPortMax {
+		return errors.New("invalid WebRTC UDP port range")
+	}
+	if config.Interface != "" {
+		if _, err := net.InterfaceByName(config.Interface); err != nil {
+			return errors.New("WebRTC network interface unavailable")
+		}
+	}
+	return nil
+}
+
 type hostEvent struct {
 	viewer         string
 	input          []byte
@@ -63,6 +80,9 @@ type controlMessage struct {
 // Motion has a replaceable slot per viewer; reliable input cannot queue behind
 // an old stream of mouse movements.
 func serveWayland(parent context.Context, config hostConfig) error {
+	if err := config.validateNetwork(); err != nil {
+		return err
+	}
 	if config.ICERenewalInterval <= 0 {
 		config.ICERenewalInterval = 20 * time.Minute
 	}
@@ -347,6 +367,17 @@ func serveWayland(parent context.Context, config hostConfig) error {
 		}
 		settings := webrtc.SettingEngine{}
 		settings.SetIncludeLoopbackCandidate(config.IncludeLoopback)
+		if config.Interface != "" {
+			settings.SetInterfaceFilter(func(name string) bool { return name == config.Interface })
+		}
+		if config.IPv4Only {
+			settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+		}
+		if config.UDPPortMin != 0 {
+			if err := settings.SetEphemeralUDPPortRange(uint16(config.UDPPortMin), uint16(config.UDPPortMax)); err != nil {
+				return err
+			}
+		}
 		connection, err := webrtc.NewAPI(webrtc.WithSettingEngine(settings)).NewPeerConnection(webrtc.Configuration{ICEServers: ice})
 		if err != nil {
 			return err
@@ -422,7 +453,7 @@ func serveWayland(parent context.Context, config hostConfig) error {
 	defer tick.Stop()
 	agentTick := time.NewTicker(16 * time.Millisecond)
 	defer agentTick.Stop()
-	frameTick := time.NewTicker(100 * time.Millisecond)
+	frameTick := time.NewTicker(time.Second / 30)
 	defer frameTick.Stop()
 	frameInFlight := false
 	lastAuthorization := time.Now()

@@ -355,6 +355,32 @@ impl VmHand {
             return Ok(());
         };
         let executable = desktop.executable.clone();
+        let video_runner = self.workspace.control();
+        let video_executable = executable.clone();
+        let video: super::screen_video::VideoSource = Arc::new(move || {
+            let runner = video_runner.clone();
+            let executable = video_executable.clone();
+            Box::pin(async move {
+                use tokio::io::AsyncWriteExt;
+                let (sink, mut chunks) = tokio::sync::mpsc::channel(8);
+                let (reader, mut writer) = tokio::io::duplex(64 * 1024);
+                let command = VmCommand::new(executable)
+                    .arg("--desktop-video")
+                    .arg(DESKTOP_RUNTIME)
+                    .timeout(Duration::from_secs(365 * 24 * 60 * 60))
+                    .max_output_bytes(64 * 1024);
+                let owner = super::screen_video::Task(tokio::spawn(async move {
+                    tokio::select! {
+                        _ = runner.stream_command(command, sink) => {},
+                        _ = async { while let Some(bytes) = chunks.recv().await { if writer.write_all(&bytes).await.is_err() { break; } } } => {},
+                    }
+                }));
+                Ok(super::screen_video::Capture {
+                    reader: Box::new(reader),
+                    owner,
+                })
+            })
+        });
         let runner = self.workspace.control();
         let backend: ScreenBackend = Arc::new(move |input| {
             let control = runner.clone();
@@ -378,7 +404,16 @@ impl VmHand {
                     .map_err(|_| configuration("invalid VM desktop result"))
             })
         });
-        let publisher = ScreenPublisher::start(target, &self.machine, backend).await?;
+        // Old guest binaries reject unknown Execute fields. The display file
+        // is written only by desktops supporting the streaming protocol.
+        let video = self
+            .workspace
+            .control()
+            .read_file(format!("{DESKTOP_RUNTIME}/display"))
+            .await
+            .ok()
+            .map(|_| video);
+        let publisher = ScreenPublisher::start(target, &self.machine, backend, video).await?;
         self.desktop.as_mut().expect("desktop started").publisher = Some(publisher);
         tracing::info!(target: "nanocodex2", stage = "vm.screen.ready", "Rust VM screen is published");
         Ok(())
