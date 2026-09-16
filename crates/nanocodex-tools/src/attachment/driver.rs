@@ -64,6 +64,7 @@ pub(crate) async fn run(
             Ok(request) => request,
             Err(error) => break Err(error),
         };
+        let connect_started = Instant::now();
         let connected = tokio::select! {
             command = commands.recv() => match command { Some(Command::Detach) | None => break Ok(()) },
             connected = async {
@@ -74,7 +75,14 @@ pub(crate) async fn run(
             } => connected,
         };
         let socket = match connected {
-            Ok((socket, _)) => socket,
+            Ok((socket, response)) => {
+                tracing::info!(target: "nanocodex_tools::attachment",
+                    stage = "attachment.websocket_connected",
+                    duration_ms = connect_started.elapsed().as_secs_f64() * 1000.0,
+                    request_id = response.headers().get("x-nanocodex-request-id").and_then(|v| v.to_str().ok()).unwrap_or(""),
+                    "attachment WebSocket connected");
+                socket
+            }
             Err(tokio_tungstenite::tungstenite::Error::Http(response))
                 if matches!(response.status().as_u16(), 401 | 403) =>
             {
@@ -455,6 +463,7 @@ where
         events,
         status,
     } = context;
+    let catalog_started = Instant::now();
     if let Err(error) = send(
         &mut socket,
         &ExecutorFrame::Catalog {
@@ -474,6 +483,7 @@ where
     {
         return ConnectionEnd::Failed(error);
     }
+    let catalog_sent = Instant::now();
     match next_handshake_frame(&mut socket, commands).await {
         Ok(RemoteFrame::Ready {}) => {}
         Ok(frame) => {
@@ -486,6 +496,11 @@ where
         Err(ConnectionEnd::Rejected(reason)) => return reject(&mut socket, reason).await,
         Err(end) => return end,
     }
+    tracing::info!(target: "nanocodex_tools::attachment",
+        stage = "attachment.catalog_ready",
+        send_ms = catalog_sent.duration_since(catalog_started).as_secs_f64() * 1000.0,
+        acknowledge_ms = catalog_sent.elapsed().as_secs_f64() * 1000.0,
+        "attachment catalog acknowledged");
     emit(events, AttachmentEvent::Attached);
     let _ = status.send(AttachmentStatus::Ready);
     emit(
