@@ -89,11 +89,10 @@ Windows factories running the Linux backend in WSL use this path. No Windows
 hardware timing was collected. macOS keeps its existing APFS reflink path;
 these Linux numbers are not Mac boot claims.
 
-The live factory uses the scoped test executables under `/opt/nanocodex/vm-perf`
-and `/etc/systemd/system/nanocodex-factory.service.d/90-vm-perf.conf`. The native
-Hand service and installed release manifest were preserved. Remove that drop-in
-when activating the consolidated release so normal installation owns the factory
-again.
+The initial measurements used scoped test executables under `/opt/nanocodex/vm-perf`
+and `/etc/systemd/system/nanocodex-factory.service.d/90-vm-perf.conf`, preserving
+the native Hand and installed release manifest. The published nightly rollout
+below replaced those executables and removed the temporary drop-in.
 
 [Curated tool results, stage events, and artifact hashes](vm-overlay-measurements.json)
 retain both cohorts. Raw logs are under `output/vm-perf/` in the VM worktree.
@@ -113,3 +112,50 @@ include shared request IDs for the matching Worker traces. Both agents were
 deleted. The first VM also served three successful read-only screen viewer
 measurements before deletion. The [Hand call report](hand-call-latency.md)
 contains the matching server timings and remaining overhead ranking.
+
+
+## Published Linux nightly rollout
+
+The ordinary published `nanocodex hand add ubuntu@206.223.235.69` installer
+resolved immutable release `nightly-92528e17b4feb63fed238abc2f2b766777fc24ff`
+and completed in **14.61 seconds** on September 16 at 22:33 UTC. This used the
+published Mac installer and remote downloads, without `--artifacts`. Its native
+Hand and desktop catalog readiness checks passed. All compressed downloads were
+independently checked against the release `SHA256SUMS`; installed host, guest,
+and computer hashes matched the decompressed published assets.
+
+The installed revision is **`5bd37aeb25c6a3d2021642ff`**. The native machine ID
+`0dbfda66-12e4-4bcf-b1a9-994a052b3181`, `/srv/nanocodex/workspace`, factory
+identity, desktop template, private base cache, and persistent state were
+preserved. After verifying the candidate, the temporary `90-vm-perf.conf` was
+removed, systemd reloaded, and the factory restarted onto
+`/opt/nanocodex/current/nanocodex2`. The temporary `/opt/nanocodex/vm-perf`
+executables were removed only after the published version passed the live test.
+
+| Published artifact check | Measured result |
+| --- | ---: |
+| Cached base lookup | 0.007 ms |
+| Fresh upper including sync | 9.10 ms |
+| Guest readiness | 270.40 ms |
+| First prepared spare including desktop | 995.78 ms |
+| Warm spare claim | 0.724 ms |
+| Tools attachment, including catalog acknowledgement | 1,333.97 ms |
+| Desktop publication, overlapping attachment | 955.07 ms |
+| Full managed mount | 2,865 ms |
+| Managed guest shell execution | 245 ms |
+| Actual guest shell execution | 3.61 ms |
+
+Spare refill took 884.12 ms. A subsequent deliberate factory restart prepared
+its spare in 1,115.54 ms; these are individual samples, not a latency percentile.
+The same allocated VM recovered its retained root in 0.057 ms and reached guest
+readiness at 233.81 ms from recovery start. Both `/workspace/overlay-proof` and
+`/etc/overlay-proof` survived, and the resumed managed command passed.
+The scratch agent was then deleted; the allocation directory was empty.
+
+Final service PIDs were **1007910** for the native Hand and **1009041** for the
+factory, both active with zero automatic restarts and both resolving to the
+published release directory. Normal installation now owns both services; no
+performance override remains. [Exact manifest, artifact hashes, tool results,
+and timestamped factory stages](vm-nightly-rollout-measurements.json) record the
+rollout. This final release smoke confirms the disk improvements survived
+packaging; one 2,865 ms mount does not establish an end-to-end API speedup.
