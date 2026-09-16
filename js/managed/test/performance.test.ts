@@ -24,8 +24,9 @@ it("preserves native SQL cursors, receivers, bindings and transaction rollback w
       await state.storage.put("audit-key", "value");
       expect(await state.storage.get("audit-key")).toBe("value");
       await Promise.resolve();
-      const records = logs.mock.calls.map(call => call[0]).filter(record => record?.type === "managed.sql" && record.tables.includes("audit_test"));
-      expect(records.length).toBe(8);
+      const records = logs.mock.calls.map(call => call[0]).filter(record => record?.type === "managed.sql_batch")
+        .flatMap(record => record.statements).filter(record => record.tables.includes("audit_test"));
+      expect(records.reduce((sum, record) => sum + record.count, 0)).toBe(8);
       expect(records.some(record => record.rows_read > 0)).toBe(true);
       expect(records.some(record => record.rows_written > 0)).toBe(true);
       expect(JSON.stringify(records)).not.toContain("private-binding");

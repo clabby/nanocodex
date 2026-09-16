@@ -3152,6 +3152,11 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   async fetch(request: Request): Promise<Response> {
+    return performanceScope(this.ctx.id.toString(), `session.${request.method} ${new URL(request.url).pathname}`,
+      () => this.#measuredFetch(request));
+  }
+
+  async #measuredFetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/credential-owner") {
       if (request.method !== "GET" || request.body !== null
@@ -6469,14 +6474,14 @@ export class DurableAgentSession extends DurableComputerSession {
     // from account discovery before external cleanup can stall, while retaining
     // the local ownership and retry alarm until every resource is released.
     if (credentialBinding) {
-      await detachAgent(this.env, credentialBinding.owner_id, credentialBinding.session_id, timeoutMs);
+      await performanceStage("delete.registry_initial", () => detachAgent(this.env, credentialBinding.owner_id, credentialBinding.session_id, timeoutMs));
     }
-    await this.#releaseRuntimeOwnershipForDeletion(timeoutMs);
+    await performanceStage("delete.runtime", () => this.#releaseRuntimeOwnershipForDeletion(timeoutMs));
     if (this.#historyProjectionTask) await this.#historyProjectionTask.catch(() => {});
     if (session?.runtime_profile === "managed") {
-      await this.#attachmentStore().cleanup();
+      await performanceStage("delete.attachments", () => this.#attachmentStore().cleanup());
       const memory = this.env.NANOCODEX_MEMORY.getByName(session.organization_id);
-      const tombstoned = await memory.fetch(
+      const tombstoned = await performanceStage("delete.memory", () => memory.fetch(
         `https://memory.internal/threads/${session.session_id}`,
         {
           method: "DELETE",
@@ -6486,7 +6491,7 @@ export class DurableAgentSession extends DurableComputerSession {
             [MEMORY_TEAM_ASSERTION]: session.team_id,
           },
         },
-      );
+      ));
       if (!tombstoned.ok) throw new Error(`memory tombstone failed with HTTP ${tombstoned.status}`);
       const retainedMounts = this.#managedMounts();
       const unsupportedMount = retainedMounts.find(
@@ -6508,17 +6513,17 @@ export class DurableAgentSession extends DurableComputerSession {
       // Every Cloudflare hand mounts peer prefixes. Stop all possible writers
       // before purging any prefix so a late FUSE flush cannot recreate another
       // hand's deleted workspace.
-      await Promise.all([...cloudflareResources].map((resourceId) => destroyCloudflareSandbox(
+      await performanceStage("delete.containers", () => Promise.all([...cloudflareResources].map((resourceId) => destroyCloudflareSandbox(
         this.env.NANOCODEX_SANDBOXES,
         resourceId,
-      )));
-      await Promise.all([...cloudflareResources].map((resourceId) => (
+      ))));
+      await performanceStage("delete.sandbox_workspaces", () => Promise.all([...cloudflareResources].map((resourceId) => (
         deleteCloudflareSandboxWorkspace(this.env.NANOCODEX_WORKSPACES, resourceId)
-      )));
-      await deleteCloudflareBrainWorkspace(
+      ))));
+      await performanceStage("delete.brain", () => deleteCloudflareBrainWorkspace(
         this.#brainBucket(),
         session.session_id,
-      );
+      ));
     }
     for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
     if (credentialBinding) {
@@ -6529,12 +6534,12 @@ export class DurableAgentSession extends DurableComputerSession {
           credentialBinding.owner_id,
           this.#ownershipIoTimeoutMs(),
         ),
-        detachAgent(
+        performanceStage("delete.registry_final", () => detachAgent(
           this.env,
           credentialBinding.owner_id,
           credentialBinding.session_id,
           this.#ownershipIoTimeoutMs(),
-        ),
+        )),
       ]);
     }
     await withHardDeadline("managed workspace deletion", timeoutMs, async () => {
@@ -6557,11 +6562,11 @@ export class DurableAgentSession extends DurableComputerSession {
       if (this.#realtimeArchiveTask) archiveTasks.push(this.#realtimeArchiveTask);
       await Promise.allSettled(archiveTasks);
     }
-    await Promise.all([
+    await performanceStage("delete.archives", () => Promise.all([
       this.#eventArchive.deleteAll(),
       this.#turnArchive.deleteAll(),
       this.#realtimeArchive.deleteAll(),
-    ]);
+    ]));
     this.#assertDeletionGeneration(generation);
     CloudflareAgent.destroy(this);
     this.ctx.storage.transactionSync(() => {

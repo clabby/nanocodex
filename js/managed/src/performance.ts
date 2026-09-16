@@ -51,6 +51,29 @@ export function performanceRead<T>(table: string, run: () => T): T {
 
 /** Opt-in SQL audit. Preserve native receivers and cursors, including transactions. */
 export function performanceState<Props>(state: DurableObjectState<Props>): DurableObjectState<Props> {
+  type Statement = { statement_id: string; operation?: string; tables: string[]; exec_ms: number; consume_ms: number; rows_read: number; rows_written: number; success: boolean; count: number };
+  const pending: Array<{ trace_id?: string; stage: string; read: () => Statement }> = [];
+  const flush = () => {
+    const groups = new Map<string, { trace_id?: string; stage: string; statements: Map<string, Statement> }>();
+    for (const item of pending.splice(0)) {
+      const key = `${item.trace_id ?? ""}\n${item.stage}`;
+      let group = groups.get(key);
+      if (!group) { group = { trace_id: item.trace_id, stage: item.stage, statements: new Map() }; groups.set(key, group); }
+      const statement = item.read();
+      const current = group.statements.get(statement.statement_id);
+      if (!current) group.statements.set(statement.statement_id, statement);
+      else {
+        current.count += statement.count;
+        current.exec_ms += statement.exec_ms;
+        current.consume_ms += statement.consume_ms;
+        current.rows_read += statement.rows_read;
+        current.rows_written += statement.rows_written;
+        current.success &&= statement.success;
+      }
+    }
+    for (const group of groups.values()) console.info({ type: "managed.sql_batch", object_id: state.id.toString(),
+      trace_id: group.trace_id, stage: group.stage, statements: [...group.statements.values()] });
+  };
   const sql = new Proxy(state.storage.sql, {
     get(target, property) {
       if (property !== "exec") {
@@ -90,11 +113,11 @@ export function performanceState<Props>(state: DurableObjectState<Props>): Durab
           execMs = performance.now() - began;
           // SQL consumers are synchronous. Snapshot rows after toArray/one/iteration
           // in the current stack, without draining or replacing the native cursor.
-          queueMicrotask(() => console.info({ type: "managed.sql", object_id: state.id.toString(),
-            trace_id: context?.trace_id, stage: context?.scope ?? "object.background",
+          if (pending.length === 0) queueMicrotask(flush);
+          pending.push({ trace_id: context?.trace_id, stage: context?.scope ?? "object.background", read: () => ({
             statement_id: (hash >>> 0).toString(16), operation: normalized.match(/^[A-Za-z]+/)?.[0]?.toUpperCase(),
             tables, exec_ms: execMs, consume_ms: consumeMs, rows_read: cursor?.rowsRead ?? 0,
-            rows_written: cursor?.rowsWritten ?? 0, success: cursor !== undefined }));
+            rows_written: cursor?.rowsWritten ?? 0, success: cursor !== undefined, count: 1 }) });
         }
       };
     },
