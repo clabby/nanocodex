@@ -370,3 +370,17 @@ describe("managed accountInfo vault projection", () => {
     });
   });
 });
+
+describe("computer VM placement discovery", () => {
+  it("exposes only the exact provider from an online computer and fences stale metadata", async () => {
+    const { projectHandProviders } = await import("../src/account-info");
+    const base = { id: "mac", name: "gak-9", kind: "user" as const, workspace: "/mac", mount: "/mac", online: true,
+      capabilities: ["native", "vm_factory:mac-1234"] };
+    expect(projectHandProviders([base])[0]).toMatchObject({ vm_provider: "mac-1234" });
+    for (const machine of [
+      { ...base, online: false, vm_provider: "stale" },
+      { ...base, capabilities: ["vm_factory:cf_sandbox"] },
+      { ...base, capabilities: ["vm_factory:a", "vm_factory:b"] },
+    ]) expect(projectHandProviders([machine])[0]).not.toHaveProperty("vm_provider");
+  });
+});

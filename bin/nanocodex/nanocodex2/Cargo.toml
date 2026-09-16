@@ -41,11 +41,12 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shlex.workspace = true
+sha2.workspace = true
 syntect.workspace = true
 nanocodex-subagents = { path = "../../../crates/nanocodex-subagents", version = "0.6.1" }
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true

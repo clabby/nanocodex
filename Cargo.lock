@@ -6025,6 +6025,8 @@ dependencies = [
  "objc2-screen-capture-kit",
  "serde",
  "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6064,6 +6066,7 @@ dependencies = [
  "opusic-c",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6322,6 +6325,7 @@ dependencies = [
  "semver 1.0.28",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "shlex 2.0.1",
  "syntect",
  "tempfile",

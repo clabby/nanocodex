@@ -26,7 +26,14 @@ export async function routeManaged(
     return json({ error: "managed_service_unavailable" }, { status: 503 });
   }
   try {
-    return await env.NANOCODEX_BACKEND.fetch(request);
+    const started = performance.now();
+    const response = await env.NANOCODEX_BACKEND.fetch(request);
+    if (/^\/v1\/account\/hands\/(?:screens|host|view|ice|renew)$/.test(url.pathname)) {
+      console.info({ type: "hand.proxy", request_id: response.headers.get("x-nanocodex-request-id"),
+        method: request.method, path: url.pathname, status: response.status,
+        backend_ms: performance.now() - started });
+    }
+    return response;
   } catch (error) {
     console.error({
       type: "managed.backend_failure",

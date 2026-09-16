@@ -34,6 +34,10 @@ it("lists only the owner's live Hands without private routing metadata", async (
         parameters: { type: "object", properties: {}, required: [], additionalProperties: false } },
     }] }));
     expect(await ready).toEqual({ type: "ready" });
+    expect(await namespace.getByName(owner).listMachines(owner)).toEqual([{
+      id: "ios-phone", name: "iPhone", capabilities: ["native", "background_limited"],
+    }]);
+    expect(await namespace.getByName(owner).listMachines(other)).toEqual([]);
     const response = await call();
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({ data: [{

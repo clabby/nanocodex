@@ -9,6 +9,7 @@
 #[allow(dead_code)]
 mod config;
 mod control;
+mod device_hand;
 mod hand_observability;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
@@ -92,10 +93,10 @@ enum Command {
     Account(nanocodex_cli_auth::Account),
     /// Attach this machine's workspace to an existing managed agent.
     Attach(Attach),
-    /// Register a retained VM or Docker workspace as a compute hand for the account.
+    /// Connect this computer as a Hand; optionally run a VM or Docker Hand.
     Hand(Hand),
-    /// Connect this machine's native workspace to the account over outbound HTTPS.
-    NativeHand(native_hand::NativeHand),
+    #[command(name = "__device-hand", hide = true)]
+    DeviceHand(device_hand::DeviceHand),
     /// Publish this Hand's native screen; owned by the desktop runtime.
     #[command(name = "__hand-screen", hide = true)]
     HandScreen(screen_native::ScreenCommand),
@@ -160,10 +161,13 @@ enum HandNetwork {
 
 #[derive(Args)]
 #[command(
-    group(clap::ArgGroup::new("backend").required(true).args(["rootfs", "docker"])),
-    after_help = "Choose exactly one backend; startup never falls back to another backend.\n\nExamples:\n  nanocodex2 hand --docker nanocodex-hand:local --volume my-workspace\n  nanocodex2 hand --vm root.ext4 --guest-runtime /path/to/nanocodex-vm-guest\n\nUse --network internet to give a Docker Hand internet access."
+    group(clap::ArgGroup::new("backend").args(["rootfs", "docker"])),
+    after_help = "Without a backend, connect this computer. Use --vm or --docker for an isolated Hand.\n\nExamples:\n  nanocodex2 hand --docker nanocodex-hand:local --volume my-workspace\n  nanocodex2 hand --vm root.ext4 --guest-runtime /path/to/nanocodex-vm-guest\n\nUse --network internet to give a Docker Hand internet access."
 )]
 struct Hand {
+    /// Private identity directory for an explicitly selected native workspace.
+    #[arg(long, conflicts_with_all = ["rootfs", "docker"])]
+    state_dir: Option<PathBuf>,
     /// VM with a persistent ext4 root (Linux KVM or Apple Silicon Hypervisor.framework).
     #[arg(
         long = "vm",
@@ -207,10 +211,9 @@ struct Hand {
         long = "workspace",
         alias = "vm-workspace",
         value_name = "PATH",
-        default_value = "/app",
         help_heading = "Workspace"
     )]
-    vm_workspace: String,
+    vm_workspace: Option<String>,
 
     /// CPU limit.
     #[arg(long = "cpus", alias = "vm-cpus", value_name = "COUNT", default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..), help_heading = "Resources")]
@@ -236,6 +239,10 @@ struct Hand {
     /// Display name [default: Nanocodex Docker Hand or Nanocodex VM].
     #[arg(long, help_heading = "Identity")]
     machine_name: Option<String>,
+
+    /// VM factory hosted by this native computer (managed separately, e.g. systemd).
+    #[arg(long, conflicts_with_all = ["rootfs", "docker"], help_heading = "Identity")]
+    vm_provider: Option<String>,
 
     /// Route managed browser work through this host alongside the VM or container Hand.
     #[arg(long, help_heading = "Browser")]
@@ -354,6 +361,10 @@ struct Host {
     #[arg(long, value_name = "COUNT", default_value_t = 4, value_parser = clap::value_parser!(u16).range(1..=64))]
     max_vms: u16,
 
+    /// Keep one never-assigned VM ready within --max-vms capacity.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    warm_spare: bool,
+
     /// Stable host UUID. Generated and persisted under --state-dir when omitted.
     #[arg(long, value_name = "UUID")]
     host_id: Option<uuid::Uuid>,
@@ -450,7 +461,7 @@ struct Run {
     #[arg(value_parser = NonEmptyStringValueParser::new())]
     prompt: String,
     /// Resume this account-owned agent. A new one is created when omitted.
-    #[arg(long, conflicts_with_all = ["model", "thinking", "reasoning_mode", "fast_mode"])]
+    #[arg(long, conflicts_with_all = ["model", "thinking", "reasoning_mode", "fast_mode", "chatgpt_account"])]
     agent: Option<String>,
     /// Stable idempotency key. The managed backend generates one when omitted.
     #[arg(long)]
@@ -534,6 +545,10 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         }
         #[cfg(target_os = "linux")]
         Some(Command::HandDesktop(command)) => return screen_native::serve_desktop(command).await,
+        Some(Command::Hand(command)) if command.rootfs.is_none() && command.docker.is_none() => {
+            return native_hand::serve_hand(command).await;
+        }
+        Some(Command::DeviceHand(command)) => return device_hand::serve(command).await,
         Some(Command::Hand(command)) => {
             let _observability = command
                 .observability
@@ -567,21 +582,36 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         _ => None,
     };
     let client = client_from_environment(managed_origin)?;
-    match command {
+    let mut device = if matches!(&command, None | Some(Command::Attach(_) | Command::Run(_))) {
+        Some(device_hand::BackgroundHand::start(&client)?)
+    } else {
+        None
+    };
+    let result = match command {
         Some(Command::Login(_) | Command::Status(_) | Command::Logout(_) | Command::Account(_)) => {
             unreachable!("handled before managed client setup")
         }
         Some(Command::Attach(command)) => {
             attach_tui(&client, command.agent.map(|agent| agent.agent_id)).await
         }
+        Some(Command::DeviceHand(_)) => unreachable!("handled before managed client setup"),
         Some(Command::Hand(_)) => unreachable!("handled before managed client setup"),
-        Some(Command::NativeHand(command)) => native_hand::serve(&client, command).await,
         Some(Command::HandScreen(command)) => screen_native::serve(&client, command).await,
         #[cfg(target_os = "linux")]
         Some(Command::HandDesktop(_)) => unreachable!("handled before managed client setup"),
         Some(Command::Host(_)) => unreachable!("handled before managed client setup"),
         Some(Command::New(settings)) => {
-            write_json(&client.create_with_settings(settings.resolve()).await?)
+            let account = settings.chatgpt_account.clone();
+            let settings = settings.resolve();
+            let receipt = match account {
+                Some(account) => {
+                    client
+                        .create_with_chatgpt_account(settings, &account)
+                        .await?
+                }
+                None => client.create_with_settings(settings).await?,
+            };
+            write_json(&receipt)
         }
         Some(Command::Settings(command)) => command.run(&client).await,
         Some(Command::Cron(command)) => command.run(&client).await,
@@ -615,7 +645,11 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::VmRunConfig(_)) => unreachable!("handled before managed client setup"),
         Some(Command::VmCloneImage { .. }) => unreachable!("handled before managed client setup"),
         None => new_tui(&client).await,
+    };
+    if let Some(device) = device.as_mut() {
+        device.stop().await;
     }
+    result
 }
 
 async fn launch_vm_hand(command: &Hand) -> Result<vm_hand::VmHand, ManagedError> {
@@ -869,14 +903,19 @@ fn supported_agent_page_origin(url: &Url) -> bool {
 
 async fn run_turn(client: &ManagedClient, command: Run) -> Result<(), ManagedError> {
     let created = command.agent.is_none();
-    let (agent, mut events, agent_id, _) = open_workspace_agent_with_settings(
-        client,
-        command.agent,
-        None,
-        command.settings.resolve(),
-        None,
-    )
-    .await?;
+    let account = command.settings.chatgpt_account.clone();
+    let settings = command.settings.resolve();
+    let requested_agent = match account {
+        Some(account) => Some(
+            client
+                .create_with_chatgpt_account(settings, &account)
+                .await?
+                .agent_id,
+        ),
+        None => command.agent,
+    };
+    let (agent, mut events, agent_id, _) =
+        open_workspace_agent_with_settings(client, requested_agent, None, settings, None).await?;
     if created {
         eprintln!("Managed agent: {agent_id}");
     }

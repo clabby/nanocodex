@@ -117,7 +117,9 @@ public final class RemoteViewer: ObservableObject {
     private var channelsReady = false
     private var frameTask: Task<Void, Never>?
     private var frameDeadline: Task<Void, Never>?
-    private var framePending = false
+    private var framePending = 0
+    private var frameRequestedAt: TimeInterval = 0
+    private var frameWindow: Int { min(6, max(1, hand?.frameWindow ?? 1)) }
     private let diagnosticsEnabled = ProcessInfo.processInfo.environment["NANOCODEX_REMOTE_DIAGNOSTICS"] == "1"
     private var diagnosticStarted: TimeInterval = 0
     private var diagnosticEvents: [[String: String]] = []
@@ -340,7 +342,7 @@ public final class RemoteViewer: ObservableObject {
         connectionSetup?.cancel(); connectionSetup = nil
         signalQueue?.cancel(); signalQueue = nil
         connectionDeadline?.cancel(); connectionDeadline = nil
-        frameTask?.cancel(); frameTask = nil; frameDeadline?.cancel(); frameDeadline = nil; framePending = false; frame = nil
+        frameTask?.cancel(); frameTask = nil; frameDeadline?.cancel(); frameDeadline = nil; framePending = 0; frame = nil
         let peer = self.peer, signaling = self.signaling
         if let frameProbe { track?.remove(frameProbe) }
         frameProbe = nil; diagnosticFirstFrame = nil
@@ -392,19 +394,31 @@ public final class RemoteViewer: ObservableObject {
 
     private func startFrames(service: RemoteService, attempt: UUID) throws {
         let signaling = makeSignaling(service); self.signaling = signaling
+        if frameWindow > 1 { framePending = frameWindow }
         signaling.onMessage = { [weak self] message in
             guard let self, epoch == attempt else { return }
             do {
                 switch message.type {
-                case "ready": requestFrame(attempt: attempt)
+                case "ready":
+                    recordConnectionEvent("signaling ready")
+                    armFrameDeadline(attempt: attempt); requestFrame(attempt: attempt)
                 case "frame":
-                    guard framePending else { throw RemoteError.invalidMessage }
-                    frame = try RemoteFrame.decode(message); framePending = false
+                    guard framePending > 0 else { throw RemoteError.invalidMessage }
+                    frame = try RemoteFrame.decode(message); framePending -= 1
+                    if diagnosticsEnabled, diagnosticFirstFrame == nil, let frame {
+                        diagnosticFirstFrame = ["elapsed_ms": Int((ProcessInfo.processInfo.systemUptime - diagnosticStarted) * 1000),
+                            "width": frame.width, "height": frame.height]
+                        recordConnectionEvent("first frame decoded")
+                    }
                     frameDeadline?.cancel(); frameDeadline = nil
                     transportReady = true; channelsReady = true; updateReady()
-                    frameTask = Task { [weak self] in
-                        do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
-                        guard let self, epoch == attempt else { return }; requestFrame(attempt: attempt)
+                    if frameWindow > 1 { requestFrame(attempt: attempt) }
+                    else {
+                        let delay = max(0, 0.1 - (ProcessInfo.processInfo.systemUptime - frameRequestedAt))
+                        frameTask = Task { [weak self] in
+                            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                            guard let self, epoch == attempt else { return }; requestFrame(attempt: attempt)
+                        }
                     }
                 case "control":
                     guard case .control(let control) = message.data else { throw RemoteError.invalidMessage }
@@ -421,12 +435,19 @@ public final class RemoteViewer: ObservableObject {
     }
 
     private func requestFrame(attempt: UUID) {
-        guard epoch == attempt, !framePending else { return }
-        framePending = true
-        signaling?.send(.init(type: "frame_request"))
+        guard epoch == attempt, framePending < frameWindow else { return }
+        let count = frameWindow - framePending
+        framePending += count; frameRequestedAt = ProcessInfo.processInfo.systemUptime
+        var request = RemoteMessage(type: "frame_request")
+        if frameWindow > 1 { request.count = count }
+        signaling?.send(request)
+        armFrameDeadline(attempt: attempt)
+    }
+    private func armFrameDeadline(attempt: UUID) {
+        frameDeadline?.cancel()
         frameDeadline = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(5)) } catch { return }
-            guard let self, epoch == attempt, framePending else { return }; fail(RemoteError.unavailable)
+            guard let self, epoch == attempt, framePending > 0 else { return }; fail(RemoteError.unavailable)
         }
     }
     private func receiveControl(_ data: Data) {
@@ -466,8 +487,12 @@ protocol RemoteCapture: AnyObject, Sendable {
     var onFailure: @Sendable (Error) -> Void { get set }
     @MainActor func stop() async
     func snapshot() throws -> RemoteSnapshot
+    func requestFrame()
 }
-extension RemoteCapture { func snapshot() throws -> RemoteSnapshot { throw RemoteError.unavailable } }
+extension RemoteCapture {
+    func snapshot() throws -> RemoteSnapshot { throw RemoteError.unavailable }
+    func requestFrame() {}
+}
 extension MacScreen: RemoteCapture {}
 extension MacInput: RemoteInputInjector { var controlAllowed: Bool { CGPreflightPostEventAccess() } }
 
@@ -476,6 +501,13 @@ typealias RemoteHostSignaling = RemoteSignalingTransport
 @MainActor
 public final class RemoteMacHost: ObservableObject {
     var diagnosticStates: [String] { viewers.values.map { $0.peer.diagnosticState } }
+    private(set) var diagnosticStartup: [[String: Any]] = []
+    func diagnosticMedia() async -> [[String: String]] {
+        guard let peer = viewers.values.first?.peer else { return [] }
+        return await peer.diagnosticMedia()
+    }
+    private let icePreparation = RemoteICEPreparation()
+    var fetchICE: @Sendable (RemoteService) async throws -> [RemoteICE] = { try await $0.ice() }
     @Published public private(set) var status = "Not sharing"
     @Published public private(set) var sharing = false
     @Published public private(set) var reconnecting = false
@@ -678,6 +710,9 @@ public final class RemoteMacHost: ObservableObject {
     private func connectPublication(service: RemoteService, machineID: String, name: String,
                                     surface: RemoteSurface, attempt: UUID) {
         guard epoch == attempt else { return }
+        let fetch = fetchICE
+        icePreparation.start { try await fetch(service) }
+        diagnosticStartup = []
         let surfaceID = surface.id
         do {
             let signaling = makeSignaling(service); self.signaling = signaling
@@ -777,12 +812,20 @@ public final class RemoteMacHost: ObservableObject {
         }
     }
 
+    private func recordStartup(_ event: String, began: TimeInterval) {
+        guard ProcessInfo.processInfo.environment["NANOCODEX_REMOTE_DIAGNOSTICS"] == "1", diagnosticStartup.count < 64 else { return }
+        diagnosticStartup.append(["event": event, "elapsed_ms": (ProcessInfo.processInfo.systemUptime - began) * 1000,
+                                  "uptime_ms": ProcessInfo.processInfo.systemUptime * 1000])
+    }
+
     private func addViewer(id: String, service: RemoteService, attempt: UUID) async {
         var connection: RemotePeer?
+        let began = ProcessInfo.processInfo.systemUptime
         do {
-            // A host may share for days. New viewers must not inherit the
-            // short-lived TURN credentials issued when sharing first started.
-            let ice = try await service.ice()
+            // Start this request with publication, before any viewer arrives.
+            // The bounded preparation renews on demand for long-lived hosts.
+            let ice = try await icePreparation.value()
+            recordStartup("host ICE ready", began: began)
             guard epoch == attempt, let source = captureSource, preparations.remove(id) != nil else { return }
             let peer = try RemotePeer(publishing: true, ice: ice, source: source); connection = peer
             viewers[id] = Viewer(peer: peer); viewerCount = viewers.count
@@ -794,10 +837,16 @@ public final class RemoteMacHost: ObservableObject {
                 guard let self, let peer, epoch == attempt, viewers[id]?.peer === peer else { return }
                 receive(data: data, motion: motion, viewerID: id)
             }
-            peer.onState = { [weak self] state in
-                if [.failed, .closed, .disconnected].contains(state) { Task { await self?.removeViewer(id, attempt: attempt) } }
+            peer.onState = { [weak self, weak peer] state in
+                guard let self, let peer, epoch == attempt, viewers[id]?.peer === peer else { return }
+                if state == .connected {
+                    recordStartup("host connected", began: began)
+                    capture?.requestFrame()
+                }
+                if [.failed, .closed, .disconnected].contains(state) { Task { await self.removeViewer(id, attempt: attempt) } }
             }
             try await peer.offer()
+            recordStartup("host offer sent", began: began)
             guard epoch == attempt, viewers[id]?.peer === peer else { return }
             viewers[id]?.renewal = Task { [weak self, weak peer] in
                 while !Task.isCancelled {
@@ -938,6 +987,7 @@ public final class RemoteMacHost: ObservableObject {
     // A signaling outage releases all control and fences old viewer callbacks,
     // while the selected Mac capture remains alive for the next publication.
     private func disconnectPublication() {
+        icePreparation.reset()
         epoch = UUID(); leaseTimer?.cancel(); signalQueue?.cancel(); preparations.removeAll()
         agentTask?.cancel(); agentTask = nil; agentRequestID = nil; publication = nil
         revokeControl()

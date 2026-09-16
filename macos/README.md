@@ -35,6 +35,10 @@ Nanocodex icon into the application. Bundle identity is
 `xyz.paradigm.nanocodex.macos`; its display name, menu, icon, About panel, and
 window title are **Nanocodex**. Local builds use ad hoc signing. Distribution
 signing and notarization require the distributor's Apple Developer identity.
+The bundled `nanocodex2` helper uses the nightly CLI's hypervisor signing policy
+so it is ready to host VMs without a runtime copy and re-sign. Its firmware
+loader uses `DYLD_LIBRARY_PATH`; the helper is signed separately from the
+hardened app, with the same entitlements as the standalone CLI.
 
 For development with the repository's `.env`:
 

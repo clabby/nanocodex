@@ -27,6 +27,10 @@ pub mod pricing;
 pub mod realtime;
 /// Complete typed request, event, and item model for the Responses protocol.
 pub mod responses;
+/// Shared, bounded caching of the native system trust store for TLS clients.
+#[cfg(all(feature = "native-tls", not(target_family = "wasm")))]
+pub mod tls;
+
 /// Managed session identities, inputs, and compaction results.
 #[cfg(feature = "client")]
 pub mod session;

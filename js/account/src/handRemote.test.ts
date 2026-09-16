@@ -102,7 +102,7 @@ test("WebRTC opens its viewer socket during ICE lookup and answers the initial o
   const candidate = { type: "candidate", candidate: "candidate:test", sdpMid: "0", sdpMLineIndex: 0 };
   f.sockets[0]!.message({ type: "signal", signal: candidate });
   f.sockets[0]!.message({ type: "signal", signal: { type: "offer", sdp: "initial" } });
-  await flush(); assert.deepEqual(f.sockets[0]!.sent, []);
+  await flush(); assert.equal(f.sockets[0]!.sent.length, 0);
   ice.resolve(Response.json({ iceServers: [{ urls: "stun:first.example" }] }));
   await connecting; await flush();
   assert.deepEqual(f.peers[0]!.config.iceServers, [{ urls: "stun:first.example" }]);
@@ -134,7 +134,7 @@ test("closing while ICE is pending aborts it and discards queued offers and late
   f.session.close();
   assert.equal(f.requests[0]!.signal!.aborted, true);
   ice.resolve(Response.json({ iceServers: [] })); await connecting; await flush();
-  assert.equal(f.peers.length, 0); assert.deepEqual(f.sockets[0]!.sent, []);
+  assert.equal(f.peers.length, 0); assert.equal(f.sockets[0]!.sent.length, 0);
   assert.equal(f.sockets[0]!.readyState, 3);
 });
 
@@ -168,7 +168,7 @@ test("messages queued behind a slow ICE lookup are bounded and cannot negotiate 
   for (let i = 0; i < 129; i++) f.sockets[0]!.message({ type: "signal", signal: { type: "candidate", candidate: String(i) } });
   assert.equal(f.session.state.connecting, false); assert.equal(f.sockets[0]!.readyState, 3);
   ice.resolve(Response.json({ iceServers: [] })); await connecting; await flush();
-  assert.equal(f.peers.length, 0); assert.deepEqual(f.sockets[0]!.sent, []);
+  assert.equal(f.peers.length, 0); assert.equal(f.sockets[0]!.sent.length, 0);
 });
 
 test("suspending a server screen releases control, clears its frame, and resumes with the current publication", async t => {
@@ -472,4 +472,41 @@ test("a stalled frame stream clears the picture and retries without falling back
   await f.tick(1000);
   assert.equal(f.sockets.length, 2); assert.equal(f.peers.length, 0);
   assert.ok(f.requests.every(request => !request.path.endsWith("/ice")));
+});
+
+test("windowed frames replenish after rendering without a relay round-trip pause and bound decoding", async t => {
+  const f = fixture(t, { ...frameHand, frame_window: 6 });
+  await f.session.connect();
+  f.sockets[0]!.message({ type: "ready", connection_id: "window-viewer" }); await flush();
+  assert.equal(f.sockets[0]!.url.searchParams.get("frame_window"), "6");
+  assert.equal(f.sockets[0]!.sent.length, 0);
+  const decodes: ((bitmap: { width: number; height: number; close(): void }) => void)[] = [];
+  f.setDecode(() => new Promise(resolve => { decodes.push(resolve); }));
+  for (let i = 0; i < 6; i++) f.sockets[0]!.message(frame());
+  await flush();
+  assert.equal(f.session.state.connected, false);
+  assert.equal(decodes.length, 1, "decode one image at a time");
+  assert.equal(f.sockets[0]!.sent.length, 0, "a slow renderer grants no new credits");
+  for (let i = 0; i < 6; i++) {
+    decodes[i]!({ width: 640, height: 360, close() {} }); await flush();
+    assert.deepEqual(f.sockets[0]!.sent.at(-1), { type: "frame_request", count: 1 });
+  }
+  assert.equal(f.drawn.length, 6);
+  assert.equal(f.sockets[0]!.sent.length, 6);
+  assert.equal(f.session.state.connected, true);
+  f.session.suspend();
+  await f.tick(1000);
+  assert.equal(f.sockets[0]!.sent.filter(m => m.type === "frame_request").length, 6);
+});
+
+test("windowed frames reject an unsolicited seventh image while decoding is blocked", async t => {
+  const f = fixture(t, { ...frameHand, frame_window: 6 });
+  await f.session.connect();
+  f.sockets[0]!.message({ type: "ready", connection_id: "window-viewer" }); await flush();
+  f.setDecode(() => new Promise(() => {}));
+  for (let i = 0; i < 7; i++) f.sockets[0]!.message(frame());
+  await flush();
+  assert.equal(f.session.state.connected, false);
+  assert.equal(f.session.state.connecting, false);
+  assert.match(f.session.state.status, /Invalid remote signal/);
 });

@@ -156,6 +156,10 @@ nanocodex2 new --model astra --thinking high
 nanocodex2 run "Inspect this repository" --model sol --thinking high
 nanocodex2 run "Continue the review" --agent AGENT_ID
 
+# Pin a new session to one connected ChatGPT account for testing.
+nanocodex2 new --chatgpt-account ACCOUNT_ID
+nanocodex2 run "Reply with hello" --chatgpt-account ACCOUNT_ID
+
 # Read settings or update one field for subsequent turns.
 nanocodex2 settings AGENT_ID
 nanocodex2 settings AGENT_ID model astra
@@ -315,7 +319,7 @@ VM-specific environment defaults are ignored when selecting Docker.
 On Linux, `--vm` checks access to `/dev/kvm`, the KVM API, and VM creation
 before account setup. If KVM is unavailable, the error explains how to enable
 it and shows `hand --docker IMAGE --volume NAME` as the explicit alternative.
-No backend is selected automatically.
+Run `hand` without a backend flag to connect the native computer.
 
 ## Browser egress through a connected Hand
 
@@ -323,7 +327,7 @@ Add `--browser` to a native, VM, or Docker Hand to publish a private Chromium
 session whose public requests leave through that machine's network connection:
 
 ```bash
-nanocodex2 native-hand --workspace /path/to/workspace --browser
+nanocodex2 hand --workspace /path/to/workspace --browser
 
 nanocodex2 hand \
   --docker nanocodex-hand:local \
@@ -359,6 +363,15 @@ factory to create a private VM when an agent uses its name as the `/mount`
 provider, and releases that VM when the durable agent is deleted.
 Every allocation gets its own cloned root image, Hosted Tools attachment, and
 machine identity. One host process can run up to `--max-vms` allocations.
+
+By default the factory keeps one fresh, never-assigned VM and its desktop
+running ahead of demand. Claiming a ready spare avoids booting in the mount
+request; remote screen/tools registration still happens at allocation time.
+The spare uses one VM's configured memory within `--max-vms`, and is replenished
+when capacity permits. A used VM is never returned to the spare pool. Retained
+allocations always restart from their own disks. Set `--warm-spare=false` to
+avoid idle VM resource use. A first factory launch or exhausted spare still
+pays cold-start time; this does not make cold boot instantaneous.
 
 ```bash
 NANOCODEX_API_KEY=ncx_live_... \
@@ -407,3 +420,83 @@ are omitted. Use `--log-format json`, `--log-file PATH`, or
 `--otel-endpoint URL` for standard JSON, retained-file, or OTLP output;
 `--log-filter` and
 `RUST_LOG` accept normal tracing filter directives.
+
+### This computer and its VMs
+
+Opening `nanocodex2`, attaching a conversation, or using `run` automatically
+connects this computer as an account-wide Hand in `~/Nanocodex`. The Mac app and
+terminal share one computer identity and local publisher, including across
+separate login keys for the same account. Closing one client leaves the host and
+its VMs running while another client is connected. The last client disconnects
+the host after a short grace period; retained VM disks remain on disk.
+
+Use `nanocodex2 hand` to keep the computer connected without opening a
+conversation. Use `hand --workspace /path/to/repo --state-dir /private/identity`
+for an additional explicit workspace, or `hand --vm ...` / `hand --docker ...`
+for an isolated Hand. Set `NANOCODEX_DISABLE_HAND=1` to disable automatic
+account-wide sharing in the CLI; the selected conversation's folder tools remain
+available.
+
+A configured desktop VM recipe (`desktopRootfs`, `guestRuntime`, `binary`, and
+optional `firmware` in the app's `vm.json`) starts an on-demand VM provider in the
+background. Execution VMs are created on demand; GPU preflight may boot a
+temporary guest. Native host readiness does not wait for VM registration or
+screen permissions. The app reports VM readiness
+separately. The GPU Hand build script writes the desktop recipe explicitly.
+
+`accountInfo().machines` advertises `vm_provider` on the online Mac. The agent
+uses the existing Mac mount for native work, or calls `mount` with that provider
+to create a private VM. Each VM has its own workspace and screen. A configured
+provider may still be connecting; mount verifies current readiness and capacity.
+
+## Computer Hands on macOS, Linux, and Windows
+
+Running the CLI (including `run` and `attach`) publishes the native computer in
+background. The desktop runtime joins that same publisher. All clients signed
+into the same account under the same OS user share one identity; closing one
+client preserves the others' native host and VMs. The last client stops the
+publisher after a short grace period. `NANOCODEX_DISABLE_HAND=1` opts out of
+CLI publication. `nanocodex2 hand` keeps the shared computer online explicitly;
+`hand --workspace PATH` publishes a separately retained workspace.
+
+Optional VM assets live in a `vm.json` recipe. `NANOCODEX_DESKTOP_DATA` overrides
+its containing directory:
+
+| Host | Default recipe directory |
+| --- | --- |
+| macOS | `~/Library/Application Support/Nanocodex/Native` |
+| Linux | `$XDG_DATA_HOME/nanocodex/native`, or `~/.local/share/nanocodex/native` |
+| Windows | `%LOCALAPPDATA%\Nanocodex\Native` |
+
+A recipe names `binary`, `desktopRootfs`, `guestRuntime`, optional `firmware`,
+and optional `gpu`. Use absolute paths to a VM-capable host executable, immutable
+desktop ext4 image, and Linux guest ELF. The native host connects independently
+of VM initialization. Its `vm_provider` tells the agent exactly where to create
+VMs on that computer; factory readiness and capacity are checked when mounting.
+
+On Windows the host runs natively; VM provisioning uses the Linux host executable
+inside a configured WSL2 distribution. Example Windows `vm.json`:
+
+```json
+{
+  "wslDistribution": "Ubuntu",
+  "binary": "/opt/nanocodex/current/nanocodex2",
+  "desktopRootfs": "/opt/nanocodex/images/desktop.ext4",
+  "guestRuntime": "/opt/nanocodex/current/nanocodex-vm-guest",
+  "firmware": "/opt/nanocodex/firmware",
+  "gpu": false
+}
+```
+
+These are Linux paths inside that distribution. WSL2 must expose readable and
+writable `/dev/kvm` to its default user; this requires working nested
+virtualization. The helper checks KVM before registering. Missing VM assets or
+KVM do not prevent native Windows shell/filesystem work. Credentials are passed
+in the child environment, never in command arguments. Closing the last client
+closes the factory's parent pipe so it drains and stops its VMs, including across
+WSL. See [Microsoft's WSL configuration reference](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
+for `nestedVirtualization` and supported Windows configurations.
+
+Linux servers installed with `nanocodex hand setup` keep their existing systemd
+services and retained identities. The installer links the native computer to its
+factory using `hand --vm-provider NAME`; re-run setup to update existing units.

@@ -20,6 +20,7 @@ rustdoc-args = ["-D", "warnings"]
 [features]
 default = ["native"]
 attachment = [
+    "nanocodex-oai-api/native-tls",
     "dep:async-trait",
     "dep:futures-util",
     "dep:http",

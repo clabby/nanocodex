@@ -116,6 +116,9 @@ struct HandCard: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
                     Label(hand.agentId == nil ? "All your threads" : "This thread", systemImage: hand.agentId == nil ? "square.stack" : "bubble.left")
+                    if let factory = hand.factory {
+                        Label(factory.status == "connected" ? "Native host · VMs ready" : "Native host · VMs \(factory.status)", systemImage: "shippingbox")
+                    }
                     if let active = hand.activeCalls, active > 0 { Text("\(active) command\(active == 1 ? "" : "s") running").foregroundStyle(.green) }
                     else if let calls = hand.calls, calls > 0 { Text("\(calls) command\(calls == 1 ? "" : "s")").foregroundStyle(.tertiary) }
                 }.font(.system(size: 11)).foregroundStyle(.secondary)
@@ -126,6 +129,7 @@ struct HandCard: View {
                     else { Text(hand.isRunning ? "Stop" : hand.status == "error" ? "Retry" : "Start").frame(minWidth: 33) }
                 }.buttonStyle(.bordered).controlSize(.small).disabled(model.busyHands.contains(hand.id)).accessibilityIdentifier("toggle-hand-\(hand.id)")
             }
+            if let error = hand.factory?.error { Text(error).font(.system(size: 12)).foregroundStyle(.secondary) }
             if let error = hand.error { Text(error).font(.system(size: 12)).foregroundStyle(.orange).textSelection(.enabled) }
         }.padding(.vertical, 8).accessibilityElement(children: .contain).accessibilityIdentifier("hand-\(hand.id)")
     }
@@ -228,7 +232,7 @@ struct RemoteSetupView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var advanced = false
-    var command: String { "nanocodex2 native-hand --workspace /path/to/workspace" }
+    var command: String { "nanocodex2 hand --workspace /path/to/workspace" }
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Connect another computer").font(.system(size: 23, weight: .semibold))

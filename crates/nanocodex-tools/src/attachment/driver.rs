@@ -8,7 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{
-    connect_async,
+    client_async_tls_with_config,
     tungstenite::{
         Message,
         client::IntoClientRequest,
@@ -64,12 +64,45 @@ pub(crate) async fn run(
             Ok(request) => request,
             Err(error) => break Err(error),
         };
+        let connect_started = Instant::now();
         let connected = tokio::select! {
             command = commands.recv() => match command { Some(Command::Detach) | None => break Ok(()) },
-            connected = connect_async(request) => connected,
+            connected = async {
+                let connector = if request.uri().scheme_str() == Some("wss") {
+                    Some(tokio_tungstenite::Connector::Rustls(nanocodex_oai_api::tls::native_client_config().await?))
+                } else { None };
+                tracing::info!(target: "nanocodex_tools::attachment",
+                    stage = "attachment.socket.trust",
+                    elapsed_ms = connect_started.elapsed().as_secs_f64() * 1000.0,
+                    "attachment TLS trust ready");
+                let host = request.uri().host().ok_or(tokio_tungstenite::tungstenite::Error::Url(
+                    tokio_tungstenite::tungstenite::error::UrlError::NoHostName,
+                ))?;
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                let port = request.uri().port_u16().unwrap_or(if connector.is_some() { 443 } else { 80 });
+                let addresses: Vec<_> = tokio::net::lookup_host((host, port)).await?.collect();
+                tracing::info!(target: "nanocodex_tools::attachment",
+                    stage = "attachment.socket.resolved",
+                    elapsed_ms = connect_started.elapsed().as_secs_f64() * 1000.0,
+                    "attachment address resolved");
+                let stream = tokio::net::TcpStream::connect(addresses.as_slice()).await?;
+                stream.set_nodelay(true)?;
+                tracing::info!(target: "nanocodex_tools::attachment",
+                    stage = "attachment.socket.tcp",
+                    elapsed_ms = connect_started.elapsed().as_secs_f64() * 1000.0,
+                    "attachment TCP connected");
+                client_async_tls_with_config(request, stream, None, connector).await
+            } => connected,
         };
         let socket = match connected {
-            Ok((socket, _)) => socket,
+            Ok((socket, response)) => {
+                tracing::info!(target: "nanocodex_tools::attachment",
+                    stage = "attachment.websocket_connected",
+                    duration_ms = connect_started.elapsed().as_secs_f64() * 1000.0,
+                    request_id = response.headers().get("x-nanocodex-request-id").and_then(|v| v.to_str().ok()).unwrap_or(""),
+                    "attachment WebSocket connected");
+                socket
+            }
             Err(tokio_tungstenite::tungstenite::Error::Http(response))
                 if matches!(response.status().as_u16(), 401 | 403) =>
             {
@@ -450,6 +483,7 @@ where
         events,
         status,
     } = context;
+    let catalog_started = Instant::now();
     if let Err(error) = send(
         &mut socket,
         &ExecutorFrame::Catalog {
@@ -469,6 +503,7 @@ where
     {
         return ConnectionEnd::Failed(error);
     }
+    let catalog_sent = Instant::now();
     match next_handshake_frame(&mut socket, commands).await {
         Ok(RemoteFrame::Ready {}) => {}
         Ok(frame) => {
@@ -481,6 +516,11 @@ where
         Err(ConnectionEnd::Rejected(reason)) => return reject(&mut socket, reason).await,
         Err(end) => return end,
     }
+    tracing::info!(target: "nanocodex_tools::attachment",
+        stage = "attachment.catalog_ready",
+        send_ms = catalog_sent.duration_since(catalog_started).as_secs_f64() * 1000.0,
+        acknowledge_ms = catalog_sent.elapsed().as_secs_f64() * 1000.0,
+        "attachment catalog acknowledged");
     emit(events, AttachmentEvent::Attached);
     let _ = status.send(AttachmentStatus::Ready);
     emit(

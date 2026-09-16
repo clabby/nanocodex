@@ -4,6 +4,10 @@ import XCTest
 
 private final class RecoveryCapture: RemoteCapture, @unchecked Sendable {
     var onFailure: @Sendable (Error) -> Void = { _ in }
+    private let lock = NSLock()
+    private var requests = 0
+    var frameRequests: Int { lock.withLock { requests } }
+    func requestFrame() { lock.withLock { requests += 1 } }
     @MainActor var stops = 0
     @MainActor func stop() async { stops += 1 }
 }
@@ -22,12 +26,14 @@ private final class RecoveryCapture: RemoteCapture, @unchecked Sendable {
     var messages: [RemoteMessage] = []
     var closed = false
     var connectError: Error?
+    var onSend: (RemoteMessage) -> Void = { _ in }
     let generation = UUID().uuidString
     func connect(hand: RemoteHand?) throws {
         if let connectError { throw connectError }
         onMessage(.init(type: "ready"))
     }
     func send(_ message: RemoteMessage) {
+        onSend(message)
         messages.append(message)
         if message.type == "catalog" {
             var reply = RemoteMessage(type: "published"); reply.generation = generation
@@ -38,6 +44,32 @@ private final class RecoveryCapture: RemoteCapture, @unchecked Sendable {
 }
 
 final class RemoteHostRecoveryTests: XCTestCase {
+    @MainActor private func makeHost() -> RemoteMacHost {
+        let host = RemoteMacHost()
+        host.fetchICE = { _ in [] }
+        return host
+    }
+
+    @MainActor func testConnectedViewerRequestsAnInitialFrameFromSharedCapture() async throws {
+        let service = try service(), host = makeHost(), capture = RecoveryCapture(), socket = RecoverySocket()
+        let viewer = try RemotePeer(publishing: false, ice: [])
+        defer { viewer.close(); service.close() }
+        host.makeSignaling = { _ in socket }
+        var connected = false
+        viewer.onState = { if $0 == .connected { connected = true } }
+        viewer.onSignal = { socket.onMessage(.init(type: "signal", viewerID: "viewer-one", signal: $0)) }
+        socket.onSend = { message in
+            if let signal = message.signal { Task { try await viewer.receive(signal) } }
+        }
+        await publish(host, service: service, capture: capture)
+        var joined = RemoteMessage(type: "viewer", viewerID: "viewer-one")
+        joined.surfaceID = "display-42"; socket.onMessage(joined)
+        try await eventually { connected && capture.frameRequests > 0 }
+        XCTAssertEqual(capture.frameRequests, 1)
+        await host.stop()
+        XCTAssertEqual(capture.stops, 1)
+    }
+
     private func service() throws -> RemoteService {
         try RemoteService(origin: URL(string: "https://recovery.test")!) { _ in }
     }
@@ -52,7 +84,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testNetworkReconnectRetainsCaptureAndIdentityButReleasesInput() async throws {
-        let service = try service(), host = RemoteMacHost(), capture = RecoveryCapture(), input = RecoveryInput()
+        let service = try service(), host = makeHost(), capture = RecoveryCapture(), input = RecoveryInput()
         defer { service.close() }
         var sockets: [RecoverySocket] = [], checks = 0
         host.makeSignaling = { _ in let socket = RecoverySocket(); sockets.append(socket); return socket }
@@ -86,7 +118,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testStopAndAccountReplacementFenceAnOutstandingAuthorization() async throws {
-        let firstService = try service(), nextService = try service(), host = RemoteMacHost()
+        let firstService = try service(), nextService = try service(), host = makeHost()
         defer { firstService.close(); nextService.close() }
         let oldCapture = RecoveryCapture(), nextCapture = RecoveryCapture()
         var sockets: [RecoverySocket] = []
@@ -109,7 +141,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testUnauthorizedRecoveryStopsBeforeOpeningAnotherSocket() async throws {
-        let service = try service(), host = RemoteMacHost(), capture = RecoveryCapture()
+        let service = try service(), host = makeHost(), capture = RecoveryCapture()
         defer { service.close() }
         var sockets: [RecoverySocket] = []
         host.makeSignaling = { _ in let socket = RecoverySocket(); sockets.append(socket); return socket }
@@ -125,7 +157,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testCaptureFailureDuringReconnectRemainsTerminal() async throws {
-        let service = try service(), host = RemoteMacHost(), capture = RecoveryCapture()
+        let service = try service(), host = makeHost(), capture = RecoveryCapture()
         defer { service.close() }
         let socket = RecoverySocket()
         host.makeSignaling = { _ in socket }
@@ -141,7 +173,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testPhonePublicationIsNeverAutomaticallyRestarted() async throws {
-        let service = try service(), host = RemoteMacHost(), capture = RecoveryCapture()
+        let service = try service(), host = makeHost(), capture = RecoveryCapture()
         defer { service.close() }
         let socket = RecoverySocket()
         host.makeSignaling = { _ in socket }
@@ -158,7 +190,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
         defer { service.close() }
         for error: Error in [RemoteError.unauthorized, RemoteError.screenPermission, RemoteError.inputPermission,
                              RemoteError.geometryChanged, URLError(.cancelled)] {
-            let host = RemoteMacHost(), capture = RecoveryCapture(), socket = RecoverySocket()
+            let host = makeHost(), capture = RecoveryCapture(), socket = RecoverySocket()
             host.makeSignaling = { _ in socket }
             host.recoveryDelay = { _ in XCTFail("Terminal failures must not schedule recovery"); return .zero }
             await publish(host, service: service, capture: capture)
@@ -170,7 +202,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testInitialSocketFailureRetriesWithBoundedBackoff() async throws {
-        let service = try service(), host = RemoteMacHost(), capture = RecoveryCapture()
+        let service = try service(), host = makeHost(), capture = RecoveryCapture()
         defer { service.close() }
         var sockets: [RecoverySocket] = [], attempts: [Int] = []
         XCTAssertEqual(host.recoveryDelay(0), .seconds(1))
@@ -191,7 +223,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testAutomaticSharingStartsAndRecoversCaptureWithRetainedDisplayAndIdentity() async throws {
-        let service = try service(), host = RemoteMacHost(), defaults = try automaticDefaults()
+        let service = try service(), host = makeHost(), defaults = try automaticDefaults()
         defer { service.close() }
         addTeardownBlock { await host.stop() }
         defaults.set("existing-installation", forKey: "nanocodex.remote.machine-id")
@@ -227,7 +259,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testExplicitStopPersistsAutomaticSharingOptOutUntilEnabledAgain() async throws {
-        let service = try service(), host = RemoteMacHost(), defaults = try automaticDefaults()
+        let service = try service(), host = makeHost(), defaults = try automaticDefaults()
         defer { service.close() }
         addTeardownBlock { await host.stop() }
         let surface = automaticSurface(), capture = RecoveryCapture()
@@ -243,7 +275,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
         XCTAssertEqual(capture.stops, 1)
         XCTAssertEqual(defaults.object(forKey: "nanocodex.remote.automatic-sharing") as? Bool, false)
 
-        let relaunched = RemoteMacHost()
+        let relaunched = makeHost()
         addTeardownBlock { await relaunched.stop() }
         var enumerations = 0
         relaunched.automaticSharingInterval = .milliseconds(5)
@@ -262,7 +294,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testAppShutdownStopsSupervisorWithoutDisablingFutureAutomaticSharing() async throws {
-        let service = try service(), host = RemoteMacHost(), defaults = try automaticDefaults()
+        let service = try service(), host = makeHost(), defaults = try automaticDefaults()
         defer { service.close() }
         addTeardownBlock { await host.stop() }
         let surface = automaticSurface()
@@ -291,7 +323,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
         let service = try service()
         defer { service.close() }
         for optOut in [false, true] {
-            let host = RemoteMacHost(), defaults = try automaticDefaults(), surface = automaticSurface()
+            let host = makeHost(), defaults = try automaticDefaults(), surface = automaticSurface()
             addTeardownBlock { await host.stop() }
             var pending: CheckedContinuation<Void, Never>?, returned = false, preparations = 0, sockets = 0
             host.automaticSharingInterval = .milliseconds(5)
@@ -316,7 +348,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testAutomaticSharingPermissionDenialDefersCaptureAndRetriesAfterGrant() async throws {
-        let service = try service(), host = RemoteMacHost(), defaults = try automaticDefaults()
+        let service = try service(), host = makeHost(), defaults = try automaticDefaults()
         defer { service.close() }
         addTeardownBlock { await host.stop() }
         let surface = automaticSurface()
@@ -351,7 +383,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
         let failures: [Error] = [RemoteError.unauthorized, RemoteError.invalidMessage,
             DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Invalid fixture message"))]
         for failure in failures {
-            let host = RemoteMacHost(), defaults = try automaticDefaults(), capture = RecoveryCapture()
+            let host = makeHost(), defaults = try automaticDefaults(), capture = RecoveryCapture()
             addTeardownBlock { await host.stop() }
             let surface = automaticSurface()
             var authorizations = 0, preparations = 0, sockets: [RecoverySocket] = []
@@ -376,7 +408,7 @@ final class RemoteHostRecoveryTests: XCTestCase {
     }
 
     @MainActor func testReplacedAutomaticPublisherRetiresUntilExplicitlyEnabledAgain() async throws {
-        let service = try service(), host = RemoteMacHost(), defaults = try automaticDefaults()
+        let service = try service(), host = makeHost(), defaults = try automaticDefaults()
         defer { service.close() }
         addTeardownBlock { await host.stop() }
         let surface = automaticSurface(), input = RecoveryInput()

@@ -6,6 +6,7 @@ use super::{Hand, HandNetwork};
 #[derive(Clone, Debug)]
 pub(crate) struct VmHandConfig {
     pub(crate) rootfs: PathBuf,
+    pub(crate) overlay_lower: Option<PathBuf>,
     pub(crate) docker: Option<DockerHandConfig>,
     pub(crate) vm_guest_runtime: Option<PathBuf>,
     pub(crate) vm_cache: PathBuf,
@@ -26,6 +27,7 @@ impl From<&Hand> for VmHandConfig {
     fn from(config: &Hand) -> Self {
         Self {
             rootfs: config.rootfs.clone().unwrap_or_default(),
+            overlay_lower: None,
             docker: config.docker.as_ref().map(|image| DockerHandConfig {
                 image: image.clone(),
                 volume: config.docker_volume.clone().unwrap_or_default(),
@@ -49,7 +51,7 @@ impl From<&Hand> for VmHandConfig {
                     .then(|| std::env::var_os("NANOCODEX_KRUNFW_DIR").map(PathBuf::from))
                     .flatten()
             }),
-            vm_workspace: config.vm_workspace.clone(),
+            vm_workspace: config.vm_workspace.clone().unwrap_or_else(|| "/app".into()),
             vm_cpus: config.vm_cpus,
             vm_memory_mib: config.vm_memory_mib,
             vm_gpu: config.vm_gpu,

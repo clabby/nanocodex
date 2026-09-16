@@ -88,9 +88,18 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
 
   constructor(ctx: DurableObjectState, env: AccountHostedToolsEnv) {
     super(ctx, env);
-    this.#broker = new HostedToolsBroker(ctx, { resumeRetainedSockets: true });
+    this.#broker = new HostedToolsBroker(ctx, { resumeRetainedSockets: true,
+      onCallTiming: (timing) => console.info({ type: "hand.call.broker", ...timing }),
+    });
     this.#remote = new HandRemoteBroker(ctx);
     this.#handHosts = new HandHosts(ctx.storage, this.#remote);
+  }
+
+  /** Discovery returns only its public projection in one RPC reply. */
+  async listMachines(ownerId: string) {
+    if (!isUserId(ownerId) || !await this.#owns(ownerId)) return [];
+    return this.#broker.machines().filter(machine => this.#broker.machineOnline(machine.id))
+      .map(machine => ({ id: machine.id, name: machine.name, capabilities: machine.capabilities }));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -222,6 +231,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       });
     }
     if (request.method === "POST" && url.pathname === "/invoke") {
+      const startedAt = performance.now();
       let invocation: InvocationRequest;
       try { invocation = await request.json<InvocationRequest>(); }
       catch { return Response.json({ error: "invalid_request" }, { status: 400 }); }
@@ -230,6 +240,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
         || typeof invocation.call_id !== "string" || typeof invocation.route_token !== "string") {
         return Response.json({ error: "not_found" }, { status: 404 });
       }
+      const ownedAt = performance.now();
       if (invocation.machine_id === undefined) {
         const remote = await this.#remote.invoke(invocation.name, invocation.route_token,
           invocation.input, invocation.session_id, request.signal);
@@ -245,12 +256,16 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       if (tool.routeToken !== invocation.route_token) {
         return Response.json({ error: "stale_catalog" }, { status: 409 });
       }
+      const resolvedAt = performance.now();
       const result = await tool.handler(invocation.input, {
         sessionId: invocation.session_id,
         callId: invocation.call_id,
         model: invocation.model,
         signal: request.signal,
       });
+      console.info({ type: "hand.call.account", session_id: invocation.session_id, source_call_id: invocation.call_id,
+        ownership_ms: ownedAt - startedAt, resolve_ms: resolvedAt - ownedAt,
+        handler_ms: performance.now() - resolvedAt, total_ms: performance.now() - startedAt });
       const branded = result as Record<PropertyKey, unknown>;
       return Response.json({
         output: branded.output,
@@ -463,6 +478,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     if (!this.#allowed(context)) {
       return failedToolResult("Account hand is outside the active grant", "unavailable", true);
     }
+    const startedAt = performance.now();
     let response: Response;
     try {
       response = await this.#namespace.getByName(this.#ownerId).fetch("https://account-tools.internal/invoke", {
@@ -486,6 +502,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
       });
       return failedToolResult("Account hand invocation outcome is unknown", "ambiguous");
     }
+    const responseAt = performance.now();
     if (!response.ok) {
       try { await response.body?.cancel(); } catch { /* No call was admitted for 404/409. */ }
       const preAdmission = response.status === 404 || response.status === 409;
@@ -522,6 +539,8 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
         true,
       );
     }
+    console.info({ type: "hand.call.provider", session_id: context.sessionId, source_call_id: context.callId,
+      fetch_ms: responseAt - startedAt, decode_ms: performance.now() - responseAt, total_ms: performance.now() - startedAt });
     const branded = {
       [TOOL_RESULT]: true,
       output: result.output,

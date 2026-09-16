@@ -1,3 +1,4 @@
+import { beginHandTiming, finishHandTiming, timeHandStage } from "./hand-timing";
 import { PreparedPersonalizationCache, personalizedVoiceContext, type PersonalizationScope, type PersonalizationSnapshot } from "./personalization";
 import { prepareEnvironment } from "./environment-setup";
 import { SessionOperations } from "./session-operations";
@@ -212,6 +213,7 @@ import {
 import { routeBrowserEgress } from "./browser-egress";
 import {
   accountInfo,
+  projectHandProviders,
   type AccountMachine,
 } from "./account-info";
 import { accountCatalog } from "./account-catalog";
@@ -1289,12 +1291,13 @@ async function managedFetch(
   trustedAgentPrincipal?: Principal,
 ): Promise<Response> {
   const began = performance.now();
+  beginHandTiming(request);
   const response = await managedAccessResponse(request, await managedFetchRoute(request, env, ctx, trustedAgentPrincipal), env);
   const path = new URL(request.url).pathname;
   if (path.startsWith("/v1/agents")) console.info({ type: "managed.request",
     request_id: response.headers.get("x-nanocodex-request-id"), method: request.method,
     path, status: response.status, duration_ms: performance.now() - began });
-  return response;
+  return finishHandTiming(request, response);
 }
 
 async function managedFetchRoute(
@@ -1440,10 +1443,10 @@ async function managedFetchRoute(
       const headers = new Headers(request.headers);
       headers.delete(REMOTE_VM_ASSERTION);
       forwardPrincipalAssertions(headers, principal);
-      return env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
+      return timeHandStage(request, "route", () => env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
         `https://account-tools.internal${url.pathname.slice("/v1/account".length)}${url.search}`,
         new Request(request, { headers }),
-      );
+      ));
     }
     if (url.pathname === "/v1/account/tool-host") {
       if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
@@ -1476,21 +1479,10 @@ async function managedFetchRoute(
         || !principal.capabilities.includes("tools:use")) {
         return json({ error: "forbidden" }, { status: 403 });
       }
-      const response = await env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
-        "https://account-tools.internal/snapshot", {
-          method: "POST", body: JSON.stringify({ owner_id: principal.userId }),
-        },
-      );
-      if (response.status === 404) return json({ data: [] }, { headers: { "cache-control": "no-store" } });
-      if (!response.ok) return json({ error: "hands_unavailable" }, { status: 503 });
-      const snapshot = await response.json<{ machines: Array<{ online: boolean; machine: {
-        id: string; name: string; capabilities: readonly string[];
-      } }> }>();
-      // Expose only the public machine projection, never routing tokens, tool
-      // credentials, or the host's physical workspace path.
-      return json({ data: snapshot.machines.filter(({ online }) => online).map(({ machine }) => ({
-        id: machine.id, name: machine.name, workspace: machineMountRoot(machine.id),
-        capabilities: machine.capabilities,
+      const machines = await timeHandStage(request, "route", () =>
+        env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).listMachines(principal.userId));
+      return json({ data: machines.map(machine => ({
+        ...machine, workspace: machineMountRoot(machine.id),
       })) }, { headers: { "cache-control": "no-store" } });
     }
     if (/^\/v1\/(agent-definitions|environment-templates)(?:\/|$)/.test(url.pathname)) {
@@ -2419,11 +2411,11 @@ async function routeVmHostToolAttachment(
   const pool = env.NANOCODEX_VM_HOST_POOLS.getByName(poolLocator);
   let validated: Response;
   try {
-    validated = await pool.fetch("https://vm-host-pool.internal/validate-attachment", {
+    validated = await timeHandStage(request, "grant_headers", () => pool.fetch("https://vm-host-pool.internal/validate-attachment", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ allocation_id: allocationId, bearer }),
-    });
+    }));
   } catch {
     return json({ error: "attachment_unavailable" }, { status: 503 });
   }
@@ -2432,7 +2424,7 @@ async function routeVmHostToolAttachment(
     return json({ error: "not_found" }, { status: 404 });
   }
   let grant: VmHostAttachmentGrant;
-  try { grant = await validated.json<VmHostAttachmentGrant>(); }
+  try { grant = await timeHandStage(request, "grant_body", () => validated.json<VmHostAttachmentGrant>()); }
   catch { return json({ error: "attachment_unavailable" }, { status: 503 }); }
   if (!validVmHostAttachmentGrant(grant) || grant.allocation_id !== allocationId) {
     return json({ error: "attachment_unavailable" }, { status: 503 });
@@ -3130,7 +3122,7 @@ export class DurableAgentSession extends DurableComputerSession {
 
   /** Private RPC: live ownership without serializing a streamed HTTP body. */
   resolveCredentialSubject(assertions: Record<string, string>, traceId?: string):
-    { subject: string; strategy: "session_v1" | "directory_v1" } | undefined {
+    { subject: string; strategy: "session_v1" | "directory_v1"; chatgpt_account_id?: string } | undefined {
     return performanceSyncScope(traceId && /^[0-9a-f-]{36}$/.test(traceId) ? traceId : this.ctx.id.toString(), "voice.ownership", () => {
     const asserted = forwardedPrincipal(new Headers(assertions));
     const session = this.#session();
@@ -3149,7 +3141,9 @@ export class DurableAgentSession extends DurableComputerSession {
       deleting: this.#deleting, deleted: this.#deleted,
       exported: this.#durabilityExported, importPending: false,
     }) === undefined) return undefined;
-    return { subject, strategy: direct ? "session_v1" : "directory_v1" };
+    const accountId = this.#configuration().chatgpt_account_id;
+    return { subject, strategy: direct ? "session_v1" : "directory_v1",
+      ...(accountId ? { chatgpt_account_id: accountId } : {}) };
     });
   }
 
@@ -3460,7 +3454,9 @@ export class DurableAgentSession extends DurableComputerSession {
       // Catalog acknowledgement must follow installation of the owning router's
       // exact attached/cloud contract validator.
       try {
-        await this.#ensureAgent();
+        // A live router already owns the dynamic attachment catalog validator.
+        // Re-discovering unrelated account tools delays every VM attachment.
+        await performanceStage("attachment.router_ready", () => this.#ensureAgent(undefined, { reuseReady: true }));
       } catch (error) {
         console.error({ type: "managed.tool_router_startup_failed", error_kind: errorKind(error) });
         return json({ error: "tool_router_unavailable" }, { status: 503 });
@@ -6768,9 +6764,13 @@ export class DurableAgentSession extends DurableComputerSession {
     await this.#scheduleNextAlarm();
   }
 
-  async #ensureAgent(catalog?: Promise<unknown>): Promise<CloudflareAgent.Agent> {
+  async #ensureAgent(
+    catalog?: Promise<unknown>,
+    options: { reuseReady?: boolean } = {},
+  ): Promise<CloudflareAgent.Agent> {
     if (this.#durabilityExported) throw new Error("durability state was exported");
     if (this.#deleting || this.#deleted) throw retryableError("agent is being deleted");
+    if (options.reuseReady && this.#agent && !this.#agentShutdownPromise) return this.#agent;
     const session = this.#session();
     let accountMcpRefreshMs = 0;
     if (session?.runtime_profile === "managed" && accountToolsEnabled(this.#configuration())) {
@@ -7250,11 +7250,11 @@ export class DurableAgentSession extends DurableComputerSession {
       })] : []),
       web({
         url: "https://managed-tools.internal/web-search",
-        fetch: managedWebFetch(this.env, this.#credentialSubject()),
+        fetch: managedWebFetch(this.env, this.#credentialSubject(), configuration.chatgpt_account_id),
       }),
       imageGeneration({
         url: "https://managed-tools.internal/image-generation",
-        fetch: managedImageFetch(this.env, this.#credentialSubject()),
+        fetch: managedImageFetch(this.env, this.#credentialSubject(), configuration.chatgpt_account_id),
         workspace: sharedBrainWorkspace,
       }),
       viewImage({ workspace: sharedBrainWorkspace }),
@@ -7353,7 +7353,7 @@ export class DurableAgentSession extends DurableComputerSession {
           : [
             "You are the durable Nanocodex brain running on Cloudflare Workers. Use Code Mode, tools, and Just Bash in /brain first. /brain is durable shared scratch mounted read-write in every Cloudflare hand; it never contains credentials or control-plane authority.",
             computer.instructions,
-            "The agent starts without a sandbox hand. File work, text processing, HTTP, supported Git/GitHub commands, and JavaScript computation in Code Mode need no hand. When the task needs native binaries, package installation, builds, tests, a server, or a process session, reuse a suitable attached hand from accountInfo or mount output; otherwise call mount with provider cf_sandbox and a useful stable name. A known native command such as cargo test should go directly to a suitable hand. If a brain command reveals an unsupported binary or runtime capability, select or mount a hand and continue there, checking for partial effects before retrying. A compiler error or failing test on a hand should be investigated there. Use another provider only when the user supplied its exact connected VM factory name. Do not ask the user to request a routine sandbox mount. mount provisions and attaches the hand before it returns.",
+            "The agent starts without a sandbox hand. File work, text processing, HTTP, supported Git/GitHub commands, and JavaScript computation in Code Mode need no hand. When the task needs native binaries, package installation, builds, tests, a server, or a process session, reuse a suitable attached hand from accountInfo or mount output; otherwise call mount with provider cf_sandbox and a useful stable name. A known native command such as cargo test should go directly to a suitable hand. If a brain command reveals an unsupported binary or runtime capability, select or mount a hand and continue there, checking for partial effects before retrying. A compiler error or failing test on a hand should be investigated there. When the user requests a VM on a particular computer, discover that online computer in accountInfo().machines and use its exact vm_provider as mount.provider. The computer itself is already a native hand; creating a VM gives it a separate isolated workspace and screen. Do not ask the user for an internal factory name. Offline historical registrations do not override an online computer's current capabilities. Do not ask the user to request a routine sandbox mount. mount provisions and attaches the hand before it returns.",
             "Subagents share your tools and permissions. Delegate independent work when it advances the task.",
             "Hands appear as logical top-level paths returned by mount or listed in accountInfo().machines. exec_command defaults to /brain; omit workdir or use /brain for Just Bash. For native execution, select the hand whose advertised workspace matches the user's project, and set workdir to its exact mount or a path beneath it. The mount already maps to that workspace: if /laptop maps to /Users/me/repo, use /laptop for the project root or /laptop/src for its src directory; do not append the host's absolute workspace path. The root of that cwd selects where the process runs. write_stdin remains pinned to the hand that created its session. There is no environment or host argument.",
             "A Code Mode cell captures its mount mapping. Commands in Promise.all may run concurrently on different cwd roots, and subagents use the same cwd rule independently. A disconnect or reconnect never retargets an admitted command or session.",
@@ -7396,12 +7396,12 @@ export class DurableAgentSession extends DurableComputerSession {
       } });
       Object.defineProperty(agentOptions, internalConfiguration, { value: this.#settings() });
       phaseStartedAt = performance.now();
-      const owner = this.#credentialBinding?.strategy === "session_v1" ? {
+      const owner = this.#credentialBinding?.strategy === "session_v1" || configuration.chatgpt_account_id ? {
         // Adapter lifecycle ownership is keyed by the exact context object.
         ctx: this.ctx,
         env: { NANOCODEX: scopedManagedModelEgress(
           this.env.NANOCODEX, this.ctx.id.toString(), this.#credentialSubject(),
-          this.env.NANOCODEX_SESSION_MODEL_EGRESS === undefined ? undefined : {
+          this.#credentialBinding?.strategy !== "session_v1" || this.env.NANOCODEX_SESSION_MODEL_EGRESS === undefined ? undefined : {
             binding: this.env.NANOCODEX_SESSION_MODEL_EGRESS,
             owner: () => sessionCredentialOwner({
               subject: this.#credentialSubject(), storageId: this.ctx.id.toString(),
@@ -7411,6 +7411,7 @@ export class DurableAgentSession extends DurableComputerSession {
               exported: this.#durabilityExported, importPending: this.#durabilityImportState === "pending",
             }),
           },
+          configuration.chatgpt_account_id,
         ) },
       } : this;
       agent = await CloudflareAgent.create(owner, agentOptions);
@@ -8250,7 +8251,7 @@ export class DurableAgentSession extends DurableComputerSession {
     context?: Pick<ToolContext, "sessionId" | "subagent">,
   ): readonly AccountMachine[] {
     if (!this.#canUseExecutionNamespace(authorization)) return [];
-    return Object.freeze([
+    return Object.freeze(projectHandProviders([
       ...this.#availableManagedMounts().map((mount) => {
         const hostMachine = mount.provider === "host" ? this.#hostMachineForMount(mount) : undefined;
         return Object.freeze({
@@ -8278,7 +8279,7 @@ export class DurableAgentSession extends DurableComputerSession {
             capabilities: machine.capabilities,
           });
         }),
-    ]);
+    ]));
   }
 
   #canUseExecutionNamespace(
@@ -10476,7 +10477,7 @@ function canonicalJson(value: unknown): string {
   )).join(",")}}`;
 }
 
-function managedWebFetch(env: Env, subject: string): typeof fetch {
+function managedWebFetch(env: Env, subject: string, accountId?: string): typeof fetch {
   return async (input, init) => {
     const incoming = new Request(input, init);
     const value = await incoming.json<{
@@ -10495,11 +10496,11 @@ function managedWebFetch(env: Env, subject: string): typeof fetch {
       commands: value.commands,
       settings: { allowed_callers: ["direct"], external_web_access: true },
       max_output_tokens: 10_000,
-    });
+    }, accountId);
   };
 }
 
-function managedImageFetch(env: Env, subject: string): typeof fetch {
+function managedImageFetch(env: Env, subject: string, accountId?: string): typeof fetch {
   return async (input, init) => {
     const incoming = new Request(input, init);
     const value = await incoming.json<{
@@ -10525,6 +10526,7 @@ function managedImageFetch(env: Env, subject: string): typeof fetch {
         quality: "auto",
         size: "auto",
       },
+      accountId,
     );
     const payload = await upstream.json<{
       data?: Array<{ b64_json?: unknown }>;
@@ -10550,6 +10552,7 @@ function fetchManagedTool(
   subject: string,
   path: "/v1/search" | "/v1/images/generations" | "/v1/images/edits",
   body: unknown,
+  accountId?: string,
 ): Promise<Response> {
   return env.NANOCODEX.fetch(new Request(`https://nanocodex.internal${path}`, {
     method: "POST",
@@ -10558,6 +10561,7 @@ function fetchManagedTool(
       "content-type": "application/json",
       "user-agent": "nanocodex-managed/0.1.0",
       "x-nanocodex-subject": subject,
+      ...(accountId ? { "x-nanocodex-chatgpt-account-id": accountId } : {}),
     },
     body: JSON.stringify(body),
   }));

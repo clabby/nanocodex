@@ -33,7 +33,7 @@ test("real nanocodex2 steers and continues a long durable tool turn", {
     return response.json();
   };
   await writeFile(`${cwd}/step.py`, `import pathlib,sys,secrets,json\nroot=pathlib.Path(__file__).parent\nn=int(sys.argv[1])\nassert 1<=n<=64\nif n>1:\n previous=json.loads((root/f'receipt-{n-1:02}.json').read_text())\n assert sys.argv[2]==previous['token'], 'use the token from the previous tool result'\nreceipt={'index':n,'token':secrets.token_hex(8)}\nwith (root/f'receipt-{n:02}.json').open('x') as f: json.dump(receipt,f)\nfor i in range(100): print(f'Record {n}/{i}: checkpoint the current conversation, preserve settled effects, and continue the next batch.')\nprint(json.dumps(receipt))\n`);
-  const hand = spawn(binary, ["native-hand", "--workspace", cwd, "--state-dir", `${cwd}/identity`,
+  const hand = spawn(binary, ["hand", "--workspace", cwd, "--state-dir", `${cwd}/identity`,
     "--machine-name", "Durability E2E", "--log-file", `${cwd}/hand.log`],
     { cwd, env, stdio: ["ignore", "ignore", "pipe"] });
   hand.stderr.pipe(createWriteStream(`${cwd}/hand-stderr.log`));

@@ -1,3 +1,4 @@
+import { runtimeDataDirectory } from "../src/data-directory.mjs";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
@@ -9,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { WebSocketServer } from "ws";
 import { DesktopRuntime } from "../src/runtime.mjs";
 import { createVmTools, supportsLocalVms } from "../src/vm-tools.mjs";
-import { desktopDefaults } from "../src/configuration.mjs";
+import { desktopDefaults, desktopDataDirectory } from "../src/configuration.mjs";
 
 test("VM callers cannot supply paths or override a host recipe; unsupported platforms do not advertise hosting", () => {
   const tools = createVmTools({ hostName: "Mac", list() {}, start() {}, stop() {} });
@@ -33,7 +34,7 @@ test("remote Hand calls create, reuse, stop and restart a retained private VM", 
   await writeFile(rootfs, "immutable-template"); await writeFile(guestRuntime, "guest");
   await writeFile(binary, `#!${process.execPath}\nif(process.argv[2]==='__vm-clone-image'){require('node:fs').copyFileSync(process.argv[3],process.argv[4],require('node:fs').constants.COPYFILE_EXCL);process.exit(0); }\nif(process.argv[2]==='host'){ const fs=require('node:fs'), image=process.argv[process.argv.indexOf('--vm-template')+1]; fs.writeFileSync(image+'.args',JSON.stringify(process.argv)); const gate=setInterval(()=>{if(fs.existsSync(image+'.ready')){clearInterval(gate);console.log(JSON.stringify({fields:{stage:'vm.host.ready'}}));}},10); } else if(process.argv.includes('__hand-screen')) console.error('Hand screen is ready'); else { if(!process.argv.includes('--vm-gpu')) process.exit(7); console.log(JSON.stringify({fields:{stage:'vm.hand.ready'}})); } setInterval(() => {},1000);\n`, { mode: 0o700 });
   await writeFile(join(path, "vm.json"), JSON.stringify({ rootfs, desktopRootfs, guestRuntime, binary, gpu: true }));
-  const defaults = await desktopDefaults({ NANOCODEX_DESKTOP_DATA: path });
+  const defaults = await desktopDefaults({ NANOCODEX_DESKTOP_DATA: path, NANOCODEX_DEVICE_BINARY: "" });
   assert.equal(defaults.gpu, true);
   assert.equal(defaults.desktopRootfs, desktopRootfs);
   const server = createServer((_req, response) => { response.setHeader("content-type", "application/json"); response.end('{"data":[]}'); });
@@ -104,4 +105,16 @@ test("remote Hand calls create, reuse, stop and restart a retained private VM", 
   await runtime.stopHand(host.id);
   assert.equal(runtime.state().hands.find(hand => hand.id === first.machine_id).status, "stopped");
   assert.equal(runtime.state().hands.find(hand => hand.id === host.id).factory.status, "stopped");
+});
+
+
+test("computer Hand defaults use platform data directories and respect overrides", () => {
+  assert.equal(runtimeDataDirectory({}, "darwin", "/home/test"), "/home/test/Library/Application Support/Nanocodex/Runtime");
+  assert.equal(runtimeDataDirectory({}, "linux", "/home/test"), desktopDataDirectory({}, "linux", "/home/test"));
+  assert.equal(runtimeDataDirectory({ NANOCODEX_DESKTOP_DATA: "/override" }, "darwin", "/home/test"), "/override");
+  assert.equal(desktopDataDirectory({}, "darwin", "/home/test"), "/home/test/Library/Application Support/Nanocodex/Native");
+  assert.equal(desktopDataDirectory({}, "linux", "/home/test"), "/home/test/.local/share/nanocodex/native");
+  assert.equal(desktopDataDirectory({ XDG_DATA_HOME: "/data" }, "linux", "/home/test"), "/data/nanocodex/native");
+  assert.equal(desktopDataDirectory({ LOCALAPPDATA: "/profile/local" }, "win32", "/home/test"), "/profile/local/Nanocodex/Native");
+  assert.equal(desktopDataDirectory({ NANOCODEX_DESKTOP_DATA: "/override" }, "win32", "/home/test"), "/override");
 });

@@ -14,6 +14,8 @@ import { createComputerTools, discoverComputer } from "nanocodex-computer";
 import WebSocket from "ws";
 import { mergeAccountHands, restoredAccountHands } from "./account-hands.mjs";
 import { createVmTools, supportsLocalVms } from "./vm-tools.mjs";
+import { describeDeviceHand, connectDeviceHand } from "./device-hand.mjs";
+import { runtimeDataDirectory } from "./data-directory.mjs";
 import { desktopFactoryRecipe, superviseVmFactory } from "./vm-factory.mjs";
 
 export const DEFAULT_ORIGIN = "https://nanocodex.gakonst.workers.dev";
@@ -201,13 +203,14 @@ export class DesktopRuntime extends EventEmitter {
   #dataDirectory;
   #folderPreparations = new Map();
   #defaultPreparation;
+  #deviceIdentity;
   #helperPreparations = new Map();
   #refreshPending;
   #handDiscoveryPending;
   #eventSnapshots = new WeakMap();
   #vmLaunchQueue = Promise.resolve();
 
-  constructor({ baseUrl = DEFAULT_ORIGIN, apiKey, saved = {}, defaults = {}, dataDirectory = join(homedir(), "Library", "Application Support", "Nanocodex", "Runtime"), persist = async () => {}, saveConnection = async () => {} } = {}) {
+  constructor({ baseUrl = DEFAULT_ORIGIN, apiKey, saved = {}, defaults = {}, dataDirectory = runtimeDataDirectory(), persist = async () => {}, saveConnection = async () => {} } = {}) {
     super();
     if (!saved || typeof saved !== "object" || Array.isArray(saved)) saved = {};
     this.#persist = persist;
@@ -620,6 +623,29 @@ export class DesktopRuntime extends EventEmitter {
     const pending = { generation };
     pending.promise = (async () => {
       let hand = this.#state.hands.find(candidate => candidate.kind === "local" && !candidate.agentId);
+      if (this.#state.defaults.deviceBinary) {
+        if (this.#deviceIdentity?.generation !== generation) {
+          const config = await describeDeviceHand(this.#state.defaults.deviceBinary, this.#deviceEnvironment());
+          this.#sameAccount(generation);
+          this.#deviceIdentity = { generation, config };
+        }
+        const config = this.#deviceIdentity.config;
+        this.#sameAccount(generation);
+        if (hand?.id !== config.id) {
+          // Retire only the former automatic registration. User-created folder
+          // Hands and retained VM records keep their own identities and files.
+          if (hand?.id.startsWith("mac-")) {
+            await this.#stopHand(hand.id);
+            this.#state.hands = this.#state.hands.filter(item => item.id !== hand.id);
+            this.#state.accountHands = this.#state.accountHands.filter(item => item.id !== hand.id);
+          }
+          await this.saveHand(config);
+          this.#sameAccount(generation);
+          hand = this.#state.hands.find(item => item.id === config.id);
+          this.#state.hands = [hand, ...this.#state.hands.filter(item => item.id !== config.id)];
+          await this.#save();
+        }
+      }
       if (!hand) {
         const config = validateHand({ id: `mac-${randomUUID()}`, kind: "local", name: this.#state.defaults.name, workspace: this.#state.defaults.workspace });
         await this.saveHand(config);
@@ -632,7 +658,7 @@ export class DesktopRuntime extends EventEmitter {
       this.#sameAccount(generation);
       if (!this.#state.defaultHandEnabled) return null;
       const connected = this.#state.hands.find(candidate => candidate.id === hand.id);
-      if (connected?.status !== "connected") throw new Error(connected?.error || "This Mac is reconnecting.");
+      if (connected?.status !== "connected") throw new Error(connected?.error || "This computer is reconnecting.");
       return structuredClone(connected);
     })().finally(() => { if (this.#defaultPreparation === pending) this.#defaultPreparation = undefined; });
     this.#defaultPreparation = pending;
@@ -731,7 +757,30 @@ export class DesktopRuntime extends EventEmitter {
     }
     this.#emit(); return this.state();
   }
+  #deviceEnvironment() {
+    return { ...process.env, NANOCODEX_API_KEY: this.#options.apiKey, NANOCODEX_MANAGED_URL: this.#options.baseUrl,
+      NANOCODEX_DESKTOP_DATA: this.#dataDirectory };
+  }
+  async #startDevice(hand, resource) {
+    const connection = connectDeviceHand({ binary: this.#state.defaults.deviceBinary, env: this.#deviceEnvironment(),
+      signal: resource.abort.signal, onState: state => {
+        if (resource.abort.signal.aborted) return;
+        hand.status = state.status;
+        if (state.factory) hand.factory = state.factory;
+        if (state.error) hand.error = this.#safeError(state.error);
+        else delete hand.error;
+        if (state.status === "error") {
+          resource.abort.abort();
+          void resource.close().finally(() => { if (this.#resources.get(hand.id) === resource) this.#resources.delete(hand.id); });
+        }
+        this.#emit();
+      } });
+    resource.add(() => connection.close());
+    await connection.ready;
+    this.#log(hand, "This computer is connected. CLI and app share this Hand.");
+  }
   async #startLocal(hand, resource) {
+    if (this.#state.defaults.deviceBinary && this.#isDefaultHand(hand.id)) return this.#startDevice(hand, resource);
     const processes = await createNodeProcessTools({ workspace: hand.workspace, onActivity: event => {
       if (event.type === "started") { hand.calls++; hand.activeCalls++; }
       else hand.activeCalls = Math.max(0, hand.activeCalls - 1);

@@ -20,6 +20,65 @@ private final class MacFrameReceiver: NSObject, RTCVideoRenderer, @unchecked Sen
 }
 
 final class AccountMacTests: XCTestCase {
+    // Creates its own temporary publication; captures metadata only and sends no input.
+    @MainActor func testLiveMacScreenLatency() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["NANOCODEX_TEST_MAC_LATENCY"] == "1",
+              let address = env["NANOCODEX_MANAGED_URL"], let origin = URL(string: address),
+              let token = env["NANOCODEX_API_KEY"], let output = env["NANOCODEX_TEST_MAC_LATENCY_OUTPUT"] else {
+            throw XCTSkip("Requires an explicit live Mac latency fixture")
+        }
+        let service = try RemoteService(origin: origin) { $0.setValue("Bearer " + token, forHTTPHeaderField: "Authorization") }
+        let host = RemoteMacHost(), viewer = RemoteViewer()
+        let machine = "bench-mac-" + UUID().uuidString.lowercased()
+        do {
+            let surfaces = try await MacScreen.surfaces()
+            let surface = try XCTUnwrap(surfaces.first)
+            let began = ProcessInfo.processInfo.systemUptime
+            await host.start(service: service, machineID: machine, name: "Mac latency fixture", surfaceID: surface.id)
+            try await eventually { host.sharing }
+            let publicationMs = (ProcessInfo.processInfo.systemUptime - began) * 1000
+            let catalogAt = ProcessInfo.processInfo.systemUptime
+            let hands = try await service.list()
+            let hand = try XCTUnwrap(hands.first { $0.machineID == machine })
+            let catalogMs = (ProcessInfo.processInfo.systemUptime - catalogAt) * 1000
+            var samples: [[String: Any]] = []
+            for _ in 0..<3 {
+                let connectedAt = ProcessInfo.processInfo.systemUptime
+                await viewer.connect(service: service, hand: hand)
+                var media: [[String: Any]] = []
+                let mediaTask = Task { @MainActor in
+                    while !Task.isCancelled {
+                        let stats = await host.diagnosticMedia()
+                        if !stats.isEmpty { media.append(["elapsed_ms": (ProcessInfo.processInfo.systemUptime - connectedAt) * 1000, "stats": stats]) }
+                        do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
+                    }
+                }
+                defer { mediaTask.cancel() }
+                try await eventually {
+                    guard viewer.connected, let data = viewer.diagnosticPresentation.data(using: .utf8),
+                          let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+                    return value["first_frame"] is [String: Any]
+                }
+                let data = try XCTUnwrap(viewer.diagnosticPresentation.data(using: .utf8))
+                var sample = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                mediaTask.cancel(); await mediaTask.value
+                sample["media"] = media
+                sample["started_uptime_ms"] = connectedAt * 1000
+                let controlAt = ProcessInfo.processInfo.systemUptime
+                viewer.takeControl(); try await eventually { viewer.controlling }
+                sample["control_ms"] = (ProcessInfo.processInfo.systemUptime - controlAt) * 1000
+                sample["host_startup"] = host.diagnosticStartup
+                samples.append(sample); viewer.releaseControl(); viewer.close()
+            }
+            try JSONSerialization.data(withJSONObject: ["publication_ms": publicationMs, "catalog_ms": catalogMs, "samples": samples], options: [.prettyPrinted, .sortedKeys])
+                .write(to: URL(fileURLWithPath: output), options: .atomic)
+            viewer.close(); await host.stop(); service.close()
+        } catch {
+            viewer.close(); await host.stop(); service.close(); throw error
+        }
+    }
+
     // Start sharing from the Mac app's real Screens UI, then focus its
     // empty composer before running this test. Inspect that composer afterwards
     // to confirm the marker arrived; this test does not claim to inspect app UI.

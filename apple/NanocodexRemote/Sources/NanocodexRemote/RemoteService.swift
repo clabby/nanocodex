@@ -1,4 +1,5 @@
 import Foundation
+import InboxCore
 
 public struct RemoteHand: Decodable, Identifiable, Sendable {
     public enum Transport: String, Decodable, Sendable { case frames = "frames-v1" }
@@ -12,10 +13,11 @@ public struct RemoteHand: Decodable, Identifiable, Sendable {
     public let machineName: String
     public let generation: String
     public let transport: Transport?
+    public private(set) var frameWindow: Int? = nil
     public var identity: String { machineID + ":" + id + ":" + generation }
     enum CodingKeys: String, CodingKey {
         case id, name, kind, width, height, controllable, generation, transport
-        case machineID = "machine_id", machineName = "machine_name"
+        case machineID = "machine_id", machineName = "machine_name", frameWindow = "frame_window"
     }
 }
 
@@ -67,7 +69,7 @@ public final class RemoteService: @unchecked Sendable {
         var request = try makeRequest(path: path)
         request.httpMethod = method; request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await ManagedAccess.data(for: request, using: session)
         guard let response = response as? HTTPURLResponse else { throw RemoteError.unavailable }
         guard (200..<300).contains(response.statusCode) else {
             throw [401, 403].contains(response.statusCode) ? RemoteError.unauthorized : RemoteError.unavailable
@@ -83,15 +85,19 @@ public final class RemoteService: @unchecked Sendable {
         return request
     }
 
-    fileprivate func socket(hand: RemoteHand?) throws -> URLSessionWebSocketTask {
+    fileprivate func socket(hand: RemoteHand?, live: Bool = false) throws -> URLSessionWebSocketTask {
         var path = "/host"
         if let hand {
             var components = URLComponents()
             components.queryItems = [URLQueryItem(name: "machine_id", value: hand.machineID),
                 URLQueryItem(name: "surface_id", value: hand.id), URLQueryItem(name: "generation", value: hand.generation)]
+            if hand.transport == .frames, let window = hand.frameWindow, window > 1 {
+                components.queryItems?.append(URLQueryItem(name: "frame_window", value: String(min(6, window))))
+            }
             path = "/view?" + components.percentEncodedQuery!
         }
         var request = try makeRequest(path: path)
+        if hand != nil, !live { request = ManagedAccess.prepared(request) }
         var url = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
         url.scheme = url.scheme == "https" ? "wss" : "ws"; request.url = url.url
         let socket = session.webSocketTask(with: request)
@@ -112,6 +118,7 @@ public struct RemoteMessage: Codable, Sendable {
     public var signal: RemoteSignal?
     var requestID: String?, agentID: String?, deadlineAt: Double?, input: RemoteAgentInput?
     var agentStatus: String?, jpeg: String?, width: Int?, height: Int?
+    var count: Int?
     var data: RemoteRelayData?
     public init(type: String, viewerID: String? = nil, signal: RemoteSignal? = nil,
                 machineID: String? = nil, machineName: String? = nil, surfaces: [RemoteSurface]? = nil) {
@@ -123,7 +130,7 @@ public struct RemoteMessage: Codable, Sendable {
         case connectionID = "connection_id", viewerID = "viewer_id", surfaceID = "surface_id"
         case machineID = "machine_id", machineName = "machine_name"
         case requestID = "request_id", agentID = "agent_id", deadlineAt = "deadline_at", input
-        case agentStatus = "status", jpeg, width, height
+        case agentStatus = "status", jpeg, width, height, count
     }
 }
 
@@ -153,17 +160,32 @@ public final class RemoteSignaling: RemoteSignalingTransport {
 
     public func connect(hand: RemoteHand? = nil) throws {
         guard socket == nil, !closed else { throw RemoteError.closed }
-        let connection = try service.socket(hand: hand)
+        var connection = try service.socket(hand: hand)
         publishing = hand == nil
         socket = connection; connection.resume()
         resetWatchdog()
         reader = Task { [weak self] in
             guard let self else { return }
+            var retried = false
+            var admitted = false
             do {
                 while !Task.isCancelled && !closed {
-                    let wire = try await connection.receive()
+                    let wire: URLSessionWebSocketTask.Message
+                    do { wire = try await connection.receive() }
+                    catch {
+                        guard hand != nil, !admitted, !retried, !closed, !Task.isCancelled,
+                              let request = connection.originalRequest,
+                              let response = connection.response as? HTTPURLResponse,
+                              ManagedAccess.rejected(request, response: response) else { throw error }
+                        retried = true
+                        connection.cancel(with: .goingAway, reason: nil)
+                        connection = try service.socket(hand: hand, live: true)
+                        socket = connection; connection.resume()
+                        continue
+                    }
                     guard case .string(let value) = wire, value.utf8.count <= (hand?.transport == .frames ? 750_000 : 70_000) else { throw RemoteError.invalidMessage }
                     let message = try JSONDecoder().decode(RemoteMessage.self, from: Data(value.utf8))
+                    admitted = true
                     if message.type == "ready" {
                         guard let id = message.connectionID, id.count <= 128, renewal == nil else { throw RemoteError.invalidMessage }
                         resetWatchdog(); startRenewal(id)

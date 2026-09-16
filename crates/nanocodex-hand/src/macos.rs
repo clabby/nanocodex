@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     sync::{Mutex, OnceLock, mpsc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -622,6 +622,7 @@ fn capture_available() -> Result<()> {
     Ok(())
 }
 fn capture() -> Result<Value> {
+    let began = Instant::now();
     capture_available()?;
     let bounds = display_bounds()?;
     let scale = (1280.0 / bounds.size.width.max(bounds.size.height)).min(1.0);
@@ -630,6 +631,7 @@ fn capture() -> Result<Value> {
     let display_id = CGMainDisplayID();
     let (sender, receiver) = mpsc::sync_channel(1);
     let completion = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
+        let content_ms = began.elapsed().as_secs_f64() * 1000.0;
         autoreleasepool(|_| {
             // SAFETY: ScreenCaptureKit owns callback arguments for this invocation.
             // Retained filter/config and copied completion block survive the async call.
@@ -658,14 +660,20 @@ fn capture() -> Result<Value> {
                 configuration.setHeight(height);
                 configuration.setShowsCursor(true);
                 let sender = sender.clone();
+                let image_started = Instant::now();
                 let image_completion = RcBlock::new(
                     move |image: *mut CGImage, err: *mut NSError| {
+                        let image_ms = image_started.elapsed().as_secs_f64() * 1000.0;
+                        let encode_started = Instant::now();
                         let result = match image.as_ref().filter(|_| err.is_null()) {
                             Some(image) => encode_capture(image),
                             None => Err(error(
                                 "ScreenCaptureKit could not capture the main display; check Screen Recording permission and the active desktop session",
                             )),
                         };
+                        tracing::debug!(target: "nanocodex_hand", stage = "screen.macos.capture", content_ms, image_ms,
+                            encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0,
+                            total_ms = began.elapsed().as_secs_f64() * 1000.0, success = result.is_ok());
                         let _ = sender.send(result);
                     },
                 );
@@ -679,7 +687,12 @@ fn capture() -> Result<Value> {
     });
     // SAFETY: the escaping block is copied by the async API and owns its channel.
     unsafe {
-        SCShareableContent::getShareableContentWithCompletionHandler(&completion);
+        // Only display metadata is used below. Enumerating off-screen and desktop
+        // windows needlessly adds work; the capture filter still includes every
+        // window on the selected display.
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+            true, true, &completion,
+        );
     }
     receiver
         .recv_timeout(Duration::from_secs(5))

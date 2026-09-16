@@ -9,6 +9,12 @@ public final class MacScreen: NSObject, SCStreamOutput, SCStreamDelegate, @unche
     private let source: RTCVideoSource
     private let capturer: RTCVideoCapturer
     private let frames = DispatchQueue(label: "nanocodex.remote.capture", qos: .userInteractive)
+    // Accessed only on frames. A static desktop may produce no new complete
+    // sample when a viewer joins; retain one buffer to seed its encoder.
+    private var latestFrame: CVPixelBuffer?
+    private var lastTimestamp: Int64 = 0
+    private var priming: DispatchSourceTimer?
+    private var primingID = UUID()
     private var stream: SCStream?
     private let lock = NSLock()
     private var stopped = true
@@ -21,6 +27,8 @@ public final class MacScreen: NSObject, SCStreamOutput, SCStreamDelegate, @unche
         self.source = source; capturer = RTCVideoCapturer(delegate: source)
         super.init()
     }
+
+    deinit { priming?.cancel() }
 
     public static func surfaces() async throws -> [RemoteSurface] {
         guard CGPreflightScreenCaptureAccess() else { throw RemoteError.screenPermission }
@@ -61,6 +69,7 @@ public final class MacScreen: NSObject, SCStreamOutput, SCStreamDelegate, @unche
 
     @MainActor public func stop() async {
         lock.withLock { stopped = true }
+        frames.sync { priming?.cancel(); priming = nil; latestFrame = nil }
         snapshotBuffer.clear()
         let capture = stream; stream = nil
         try? await capture?.stopCapture()
@@ -75,6 +84,36 @@ public final class MacScreen: NSObject, SCStreamOutput, SCStreamDelegate, @unche
         return try snapshotBuffer.snapshot()
     }
 
+    func requestFrame() {
+        frames.async { [weak self] in
+            guard let self, !self.lock.withLock({ self.stopped }) else { return }
+            // The connection callback can precede encoder readiness. A single
+            // seed may be dropped; prime for at most one second, sharing one
+            // timer across viewers and yielding to actual capture frames.
+            self.priming?.cancel()
+            let id = UUID(); self.primingID = id
+            let deadline = ProcessInfo.processInfo.systemUptime + 1
+            let timer = DispatchSource.makeTimerSource(queue: self.frames)
+            timer.schedule(deadline: .now(), repeating: .milliseconds(33))
+            timer.setEventHandler { [weak self] in
+                guard let self, self.primingID == id else { return }
+                guard ProcessInfo.processInfo.systemUptime < deadline, CGPreflightScreenCaptureAccess(),
+                      self.lock.withLock({ !self.stopped && self.displayID.map { CGDisplayBounds($0) == self.displayBounds } == true }) else {
+                    self.priming?.cancel(); self.priming = nil; return
+                }
+                guard let buffer = self.latestFrame else { return }
+                let time = CMTimeConvertScale(CMClockGetTime(CMClockGetHostTimeClock()), timescale: 1_000_000_000, method: .default).value
+                if time - self.lastTimestamp >= 30_000_000 { self.send(buffer, timestamp: time) }
+            }
+            self.priming = timer; timer.resume()
+        }
+    }
+
+    private func send(_ buffer: CVPixelBuffer, timestamp: Int64) {
+        lastTimestamp = max(timestamp, lastTimestamp + 1)
+        source.capturer(capturer, didCapture: RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0, timeStampNs: lastTimestamp))
+    }
+
     public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, !lock.withLock({ stopped }), sampleBuffer.isValid,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
@@ -86,10 +125,11 @@ public final class MacScreen: NSObject, SCStreamOutput, SCStreamDelegate, @unche
         }
         if changed { onFailure(RemoteError.geometryChanged); return }
         snapshotBuffer.update(buffer)
+        latestFrame = buffer
         // Keep the IOSurface-backed pixel buffer; no JPEG, base64, subprocess, or
         // unbounded DispatchQueue hop exists between ScreenCaptureKit and WebRTC.
         let time = CMTimeConvertScale(sampleBuffer.presentationTimeStamp, timescale: 1_000_000_000, method: .default).value
-        source.capturer(capturer, didCapture: RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0, timeStampNs: time))
+        send(buffer, timestamp: time)
     }
 }
 

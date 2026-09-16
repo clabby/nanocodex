@@ -2291,6 +2291,14 @@ import AppKit
 import SwiftUI
 
 final class BackgroundHandTests: XCTestCase {
+    func testNativeHostRemainsConnectedWhileVMFactoryIsUnavailable() throws {
+        let data = Data(#"{"id":"mac","name":"My Mac","kind":"local","workspace":"/workspace","status":"connected","factory":{"status":"unavailable","error":"No VM image configured"}}"#.utf8)
+        let hand = try JSONDecoder().decode(Hand.self, from: data)
+        XCTAssertTrue(hand.isRunning)
+        XCTAssertEqual(hand.factory?.status, "unavailable")
+        XCTAssertEqual(hand.factory?.error, "No VM image configured")
+    }
+
     @MainActor
     func testNativeControlPanelRendering() async throws {
         let model = AppModel(runtimeDirectory: "/tmp/nanocodex-panel-" + UUID().uuidString)

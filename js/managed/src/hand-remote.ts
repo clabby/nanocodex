@@ -9,14 +9,15 @@ const noStore = { "cache-control": "no-store" };
 export const REMOTE_VM_ASSERTION = "x-nanocodex-remote-vm";
 export type RemoteVMPublisher = { machineId: string; routeId: string; expiresAt: number; surfaceKind?: "desktop" };
 
-type Surface = { id: string; name: string; kind: "desktop" | "window" | "phone" | "vm"; width: number; height: number; controllable: boolean; agent_tools?: boolean; transport?: "frames-v1" };
+type Surface = { id: string; name: string; kind: "desktop" | "window" | "phone" | "vm"; width: number; height: number; controllable: boolean; agent_tools?: boolean; transport?: "frames-v1"; frame_window?: number };
 type Attachment = {
   kind: typeof TAG; role: "host" | "viewer"; id: string; generation: string; expiresAt: number;
   machineId?: string; machineName?: string; surfaces?: Surface[]; hostId?: string; surfaceId?: string;
   rateWindow: number; rateCount: number;
   vm?: RemoteVMPublisher;
   transport?: "frames-v1";
-  framePending?: boolean;
+  framePending?: boolean | number;
+  frameWindow?: number;
 };
 type Context = Pick<DurableObjectState, "acceptWebSocket" | "getWebSockets">;
 
@@ -98,19 +99,28 @@ export class HandRemoteBroker {
     let host: WebSocket | undefined;
     if (url.pathname === "/hands/view") {
       const machineId = url.searchParams.get("machine_id"), surfaceId = url.searchParams.get("surface_id"), generation = url.searchParams.get("generation");
-      if ([...url.searchParams].length !== 3 || !machineId || !surfaceId || !generation) return this.invalid();
+      const initial = url.searchParams.get("frame_window");
+      if ([...url.searchParams].length !== (initial === null ? 3 : 4) || !machineId || !surfaceId || !generation) return this.invalid();
       const selected = this.hosts().find(({ state }) => state.machineId === machineId && state.generation === generation
         && state.surfaces?.some(surface => surface.id === surfaceId));
       if (!selected) return Response.json({ error: "remote_unavailable" }, { status: 409, headers: noStore });
       host = selected.socket;
       Object.assign(state, { role: "viewer", hostId: selected.state.id, generation, machineId, surfaceId,
-        transport: selected.state.surfaces!.find(surface => surface.id === surfaceId)!.transport });
+        transport: selected.state.surfaces!.find(surface => surface.id === surfaceId)!.transport,
+        frameWindow: selected.state.surfaces!.find(surface => surface.id === surfaceId)!.frame_window ?? 1 });
+      if (initial !== null) {
+        if (state.transport !== "frames-v1" || state.frameWindow! <= 1 || !/^[1-6]$/.test(initial) || Number(initial) > state.frameWindow!) return this.invalid();
+        state.framePending = Number(initial);
+      }
     } else if (url.pathname !== "/hands/host" || url.search) return this.invalid();
     const [client, server] = Object.values(new WebSocketPair());
     this.context.acceptWebSocket(server, [TAG]);
     server.serializeAttachment(state);
     this.send(server, { type: "ready", connection_id: state.id, generation: state.generation, expires_at: state.expiresAt });
-    if (host) this.send(host, { type: "viewer", viewer_id: state.id, surface_id: state.surfaceId, generation: state.generation });
+    if (host) {
+      this.send(host, { type: "viewer", viewer_id: state.id, surface_id: state.surfaceId, generation: state.generation });
+      if (state.framePending) this.send(host, { type: "frame_request", viewer_id: state.id, count: state.framePending });
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -242,12 +252,16 @@ export class HandRemoteBroker {
   private relayFrameMessage(socket: WebSocket, state: Attachment, value: Record<string, any>): void {
     if (state.role === "viewer") {
       if (state.transport !== "frames-v1" || !["frame_request", "control", "input"].includes(value.type)) throw new Error();
-      exact(value, value.type === "frame_request" ? ["type"] : ["type", "data"]);
+      exact(value, value.type === "frame_request" ? ["type", "count"] : ["type", "data"]);
       const host = this.hosts().find(({ state: host }) => host.id === state.hostId && host.generation === state.generation);
       if (!host) throw new Error();
       if (value.type === "frame_request") {
-        if (state.framePending) return;
-        state.framePending = true; socket.serializeAttachment(state);
+        const count = value.count ?? 1, window = state.frameWindow ?? 1;
+        if ((value.count !== undefined && window === 1) || !Number.isInteger(count) || count < 1 || count > window) throw new Error();
+        const pending = Number(state.framePending ?? 0);
+        if (value.count === undefined && pending >= window) return;
+        if (pending + count > window) throw new Error();
+        state.framePending = pending + count; socket.serializeAttachment(state);
       } else if (!value.data || typeof value.data !== "object" || Array.isArray(value.data)
         || new TextEncoder().encode(JSON.stringify(value.data)).length > 8192) throw new Error();
       this.send(host.socket, { ...value, viewer_id: state.id });
@@ -266,7 +280,7 @@ export class HandRemoteBroker {
       if (!target.framePending || typeof value.jpeg !== "string" || value.jpeg.length > 700_000
         || !/^\/9j\/[A-Za-z0-9+/]*={0,2}$/.test(value.jpeg)
         || ![value.width, value.height].every(n => Number.isInteger(n) && n > 0 && n <= 1280)) throw new Error();
-      target.framePending = false; viewer.serializeAttachment(target);
+      target.framePending = Number(target.framePending) - 1; viewer.serializeAttachment(target);
       this.send(viewer, { type: "frame", jpeg: value.jpeg, width: value.width, height: value.height });
     } else {
       exact(value, ["type", "viewer_id", "data"]);
@@ -307,12 +321,14 @@ function normalizeSurfaces(value: unknown): Surface[] {
   const ids = new Set();
   return value.map(surface => {
     if (!surface || typeof surface !== "object") throw new Error();
-    exact(surface, ["id", "name", "kind", "width", "height", "controllable", "agent_tools", "transport"]);
+    exact(surface, ["id", "name", "kind", "width", "height", "controllable", "agent_tools", "transport", "frame_window"]);
     if (typeof surface.id !== "string" || !ID.test(surface.id) || ids.has(surface.id)
       || typeof surface.name !== "string" || !surface.name.trim() || new TextEncoder().encode(surface.name).length > 128
       || !["desktop", "window", "phone", "vm"].includes(surface.kind) || typeof surface.controllable !== "boolean"
       || (surface.agent_tools !== undefined && typeof surface.agent_tools !== "boolean")
       || (surface.transport !== undefined && surface.transport !== "frames-v1")
+      || (surface.frame_window !== undefined && (surface.transport !== "frames-v1"
+        || !Number.isInteger(surface.frame_window) || surface.frame_window < 1 || surface.frame_window > 6))
       || ![surface.width, surface.height].every(n => Number.isInteger(n) && n > 0 && n <= 16384)) throw new Error();
     ids.add(surface.id); return surface as Surface;
   });

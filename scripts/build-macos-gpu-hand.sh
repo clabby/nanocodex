@@ -58,6 +58,6 @@ node --input-type=module - "$output" <<'JS'
 import {writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 const output=process.argv[2];
-writeFileSync(join(output,'vm.json'), JSON.stringify({binary:join(output,'nanocodex2'),rootfs:join(output,'desktop.ext4'),guestRuntime:join(output,'nanocodex-vm-guest'),firmware:join(output,'firmware'),gpu:true},null,2)+'\n');
+writeFileSync(join(output,'vm.json'), JSON.stringify({binary:join(output,'nanocodex2'),rootfs:join(output,'desktop.ext4'),desktopRootfs:join(output,'desktop.ext4'),guestRuntime:join(output,'nanocodex-vm-guest'),firmware:join(output,'firmware'),gpu:true},null,2)+'\n');
 JS
 printf 'Prepared GPU Hand assets and recipe at %s\n' "$output"

@@ -3,6 +3,8 @@ import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { parseEnv } from "node:util";
+import { desktopDataDirectory } from "./data-directory.mjs";
+export { desktopDataDirectory } from "./data-directory.mjs";
 import { DEFAULT_ORIGIN } from "./runtime.mjs";
 
 export async function desktopEnvironment(file = process.env.NANOCODEX_ENV_FILE) {
@@ -16,12 +18,13 @@ export async function desktopDefaults(environment = process.env) {
   // An installed app keeps its prepared VM recipe across Finder launches. This
   // file contains local asset paths only, never account credentials.
   let recipe = {};
-  const directory = environment.NANOCODEX_DESKTOP_DATA ?? join(homedir(), "Library", "Application Support", "Nanocodex", "Native");
+  const directory = desktopDataDirectory(environment);
   try { recipe = JSON.parse(await readFile(join(directory, "vm.json"), "utf8")); }
   catch (error) { if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error; }
   if (!recipe || typeof recipe !== "object" || Array.isArray(recipe)) recipe = {};
   if (typeof recipe.gpu === "boolean") defaults.gpu = recipe.gpu;
   const candidates = {
+    deviceBinary: [environment.NANOCODEX_DEVICE_BINARY ?? join(homedir(), ".nanocodex", "current", process.platform === "win32" ? "nanocodex2.exe" : "nanocodex2")],
     binary: [environment.NANOCODEX_HAND_BINARY, recipe.binary, environment.NANOCODEX_ENV_FILE && join(dirname(environment.NANOCODEX_ENV_FILE), "target", "debug", "nanocodex2")],
     rootfs: [environment.NANOCODEX_VM_ROOTFS, recipe.rootfs],
     desktopRootfs: [environment.NANOCODEX_VM_DESKTOP_ROOTFS, recipe.desktopRootfs],
@@ -42,7 +45,7 @@ export async function desktopDefaults(environment = process.env) {
 /** Preference files contain no key. A digest fences saved grants and tab drafts
  * to the account that created them. OS credential storage belongs to each app. */
 export async function desktopPreferences({ directory, apiKey, baseUrl = DEFAULT_ORIGIN }) {
-  const path = join(directory ?? join(homedir(), "Library", "Application Support", "Nanocodex", "Native"), "desktop.json");
+  const path = join(directory ?? desktopDataDirectory(), "desktop.json");
   const scopeFor = connection => connection?.apiKey
     ? createHash("sha256").update(`${connection.baseUrl}\0${connection.apiKey}`).digest("hex")
     : undefined;
