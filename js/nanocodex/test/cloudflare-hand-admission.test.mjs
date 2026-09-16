@@ -22,3 +22,17 @@ test("a broker failure is never retried after the admission boundary", async () 
   }), /lost after admission/);
   assert.equal(calls, 1);
 });
+
+test("the upgrade crosses RPC as finite URL and header data, then becomes a local broker Request", async () => {
+  const source = viewer();
+  source.headers.set("authorization", "Bearer fixture");
+  let routed;
+  await forwardHandViewerUpgrade(source, { async prepare(value) {
+    assert.equal(value instanceof Request, false);
+    assert.deepEqual(value, { url: source.url, method: "GET", headers: [...source.headers] });
+    return { ownerId: "account", request: { ...value, url: "https://internal.test/hands/view" }, headers: [] };
+  } }, { getByName() { return { async fetch(request) { routed = request; return new Response(null, { status: 204 }); } }; } });
+  assert.ok(routed instanceof Request);
+  assert.equal(routed.url, "https://internal.test/hands/view");
+  assert.equal(routed.headers.get("authorization"), "Bearer fixture");
+});

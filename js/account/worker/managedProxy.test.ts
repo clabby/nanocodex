@@ -167,12 +167,12 @@ test("configured viewers use one authorized broker upgrade without the managed f
   const response = await routeManaged(request, {
     NANOCODEX_BACKEND: { fetch() { throw new Error("must not bridge a viewer"); }, connect() { throw new Error("unused"); } },
     NANOCODEX_HAND_ADMISSION: { async prepare(candidate) {
-      assert.equal(candidate, request); admissions++;
-      return { ownerId: "authorized-owner", request: internal, headers: [["x-nanocodex-request-id", "direct-id"]] };
+      assert.equal(candidate.url, request.url); assert.deepEqual(candidate.headers, [...request.headers]); admissions++;
+      return { ownerId: "authorized-owner", request: { url: internal.url, method: internal.method, headers: [...internal.headers] }, headers: [["x-nanocodex-request-id", "direct-id"]] };
     } },
     NANOCODEX_HAND_BROKER: { getByName(owner) {
       assert.equal(owner, "authorized-owner");
-      return { async fetch(candidate) { assert.equal(candidate, internal); brokerFetches++; return new Response(null, { status: 204 }); } };
+      return { async fetch(candidate) { assert.equal(candidate.url, internal.url); assert.deepEqual([...candidate.headers], [...internal.headers]); brokerFetches++; return new Response(null, { status: 204 }); } };
     } },
   }, new URL(request.url));
   assert.equal(response?.status, 204);
@@ -186,7 +186,7 @@ test("a failed broker upgrade never falls back to a second admission", async () 
   let fallback = 0; let brokerFetches = 0;
   const response = await routeManaged(request, {
     NANOCODEX_BACKEND: { async fetch() { fallback++; return new Response(null); }, connect() { throw new Error("unused"); } },
-    NANOCODEX_HAND_ADMISSION: { async prepare() { return { ownerId: "account", request, headers: [] }; } },
+    NANOCODEX_HAND_ADMISSION: { async prepare() { return { ownerId: "account", request: { url: request.url, method: request.method, headers: [...request.headers] }, headers: [] }; } },
     NANOCODEX_HAND_BROKER: { getByName() { return { async fetch() { brokerFetches++; throw new Error("connection lost"); } }; } },
   }, new URL(request.url));
   assert.equal(response?.status, 503);

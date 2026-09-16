@@ -1,11 +1,13 @@
+/** Finite RPC data: no Request streams or upgrade handles cross the service boundary. */
+export type HandViewerRequest = Readonly<{ url: string; method: string; headers: [string, string][] }>;
 /** Private service result. Requests retain the original public origin during authorization. */
 export type PreparedHandViewer = Readonly<{
   ownerId: string;
-  request: Request;
+  request: HandViewerRequest;
   headers: [string, string][];
 }>;
 export type HandViewerAdmissionBinding = Readonly<{
-  prepare(request: Request): Promise<Response | PreparedHandViewer>;
+  prepare(request: HandViewerRequest): Promise<Response | PreparedHandViewer>;
 }>;
 export type HandViewerBrokerNamespace = Readonly<{
   getByName(ownerId: string): Readonly<{ fetch(request: Request): Promise<Response> }>;

@@ -1,4 +1,4 @@
-import { isHandViewerUpgrade, type PreparedHandViewer } from "nanocodex/cloudflare/hand-admission";
+import { isHandViewerUpgrade, type HandViewerRequest, type PreparedHandViewer } from "nanocodex/cloudflare/hand-admission";
 import { authenticate, forwardPrincipalAssertions, type AccountAuthEnv, type Principal } from "./account-auth";
 import { REMOTE_VM_ASSERTION } from "./hand-remote";
 import { beginHandTiming, finishHandTiming } from "./hand-timing";
@@ -37,7 +37,8 @@ export function forwardHandRequest(request: Request, principal: Principal): Requ
 }
 
 /** Private binding only. No socket is admitted here, and no successful 101 token is issued. */
-export async function prepareHandViewerAdmission(request: Request, env: AccountAuthEnv): Promise<Response | PreparedHandViewer> {
+export async function prepareHandViewerAdmission(payload: HandViewerRequest, env: AccountAuthEnv): Promise<Response | PreparedHandViewer> {
+  const request = new Request(payload.url, { method: payload.method, headers: payload.headers });
   beginHandTiming(request);
   const authorized = isHandViewerUpgrade(request)
     ? await authorizeHandRequest(request, env)
@@ -45,6 +46,7 @@ export async function prepareHandViewerAdmission(request: Request, env: AccountA
   const metadata = finishHandTiming(request, await managedAccessResponse(request,
     authorized instanceof Response ? authorized : new Response(null, { status: 204, headers: { "cache-control": "no-store" } }), env, false));
   if (authorized instanceof Response) return metadata;
-  return { ownerId: authorized.userId, request: forwardHandRequest(request, authorized),
+  const internal = forwardHandRequest(request, authorized);
+  return { ownerId: authorized.userId, request: { url: internal.url, method: internal.method, headers: [...internal.headers] },
     headers: [...metadata.headers] };
 }

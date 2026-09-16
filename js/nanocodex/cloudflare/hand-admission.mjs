@@ -8,11 +8,11 @@ export function isHandViewerUpgrade(request) {
 export async function forwardHandViewerUpgrade(request, admission, brokers) {
   if (!isHandViewerUpgrade(request)) throw new TypeError("invalid_hand_viewer_upgrade");
   const began = performance.now();
-  const prepared = await admission.prepare(request);
+  const prepared = await admission.prepare({ url: request.url, method: request.method, headers: [...request.headers] });
   if (prepared instanceof Response) return prepared;
   const admitted = performance.now();
   // The service owns the account and internal request. Never derive either from client assertions.
-  const response = await brokers.getByName(prepared.ownerId).fetch(prepared.request);
+  const response = await brokers.getByName(prepared.ownerId).fetch(new Request(prepared.request.url, { method: prepared.request.method, headers: prepared.request.headers }));
   const headers = new Headers(response.headers);
   for (const [name, value] of prepared.headers) {
     if (name === "server-timing") headers.append(name, value);

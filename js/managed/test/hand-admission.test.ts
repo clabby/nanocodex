@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { authorizeHandRequest, forwardHandRequest, prepareHandViewerAdmission } from "../src/hand-admission";
+import { authorizeHandRequest, forwardHandRequest, prepareHandViewerAdmission as prepare } from "../src/hand-admission";
 import { managedAccessResponse, observeManagedAccess } from "../src/managed-access";
 import { forwardHandViewerUpgrade } from "../../nanocodex/cloudflare/hand-admission.mjs";
 import type { AccountAuthEnv, Principal } from "../src/account-auth";
@@ -11,6 +11,9 @@ const principal: Principal = {
   role: "writer", subjectId: "api_key:fixture", credentialId: "fixture", authorizationEpoch: 1,
   capabilities: ["agents:read", "tools:use"],
 };
+function prepareHandViewerAdmission(request: Request, env: AccountAuthEnv) {
+  return prepare({ url: request.url, method: request.method, headers: [...request.headers] }, env);
+}
 function viewer(extra: Record<string, string> = {}) {
   return new Request("https://managed.test/v1/account/hands/view?machine_id=m&surface_id=s&generation=g", {
     headers: { upgrade: "websocket", authorization: "Bearer account-key", ...extra },
@@ -30,8 +33,8 @@ describe("finite Hand viewer authorization", () => {
     if (prepared instanceof Response) throw new Error("unexpected rejection");
     expect(prepared.ownerId).toBe(principal.userId);
     expect(prepared.request.url).toBe("https://account-tools.internal/hands/view?machine_id=m&surface_id=s&generation=g");
-    expect(prepared.request.headers.get("x-nanocodex-owner-id")).toBe(principal.userId);
-    expect(prepared.request.headers.has("x-nanocodex-remote-vm")).toBe(false);
+    expect(new Headers(prepared.request.headers).get("x-nanocodex-owner-id")).toBe(principal.userId);
+    expect(new Headers(prepared.request.headers).has("x-nanocodex-remote-vm")).toBe(false);
     expect(new Headers(prepared.headers).has("x-nanocodex-access")).toBe(false);
     expect(new Headers(prepared.headers).get("cache-control")).toBe("no-store");
   });
@@ -96,7 +99,8 @@ describe("finite Hand viewer authorization", () => {
   it("preserves the broker's sole upgraded socket and authenticated metadata", async () => {
     const [client] = Object.values(new WebSocketPair());
     const source = viewer();
-    const admission = { prepare: async () => ({ ownerId: principal.userId, request: forwardHandRequest(source, principal),
+    const internal = forwardHandRequest(source, principal);
+    const admission = { prepare: async () => ({ ownerId: principal.userId, request: { url: internal.url, method: internal.method, headers: [...internal.headers] },
       headers: [["x-nanocodex-request-id", "fixture-id"], ["server-timing", 'managed_auth;dur=0;desc="access"']] as [string, string][] }) };
     const fetch = vi.fn(async () => new Response(null, { status: 101, webSocket: client }));
     const getByName = vi.fn(() => ({ fetch }));

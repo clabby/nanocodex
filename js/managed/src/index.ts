@@ -1,3 +1,4 @@
+import type { HandViewerRequest } from "nanocodex/cloudflare/hand-admission";
 import { authorizeHandRequest, forwardHandRequest, prepareHandViewerAdmission } from "./hand-admission";
 import { beginHandTiming, finishHandTiming, timeHandStage } from "./hand-timing";
 import { PreparedPersonalizationCache, personalizedVoiceContext, type PersonalizationScope, type PersonalizationSnapshot } from "./personalization";
@@ -2658,7 +2659,7 @@ function createManagedNamespaceRuntime(
 
 /** Finite admission only; the account front door forwards the socket directly to its broker. */
 export class ManagedHandAdmission extends WorkerEntrypoint<Env> {
-  prepare(request: Request) { return prepareHandViewerAdmission(request, this.env); }
+  prepare(request: HandViewerRequest) { return prepareHandViewerAdmission(request, this.env); }
 }
 
 /** Private, ownership-only capability for the credential broker. */
