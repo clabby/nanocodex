@@ -1,5 +1,9 @@
+import { forwardHandViewerUpgrade, isHandViewerUpgrade, type HandViewerAdmissionBinding, type HandViewerBrokerNamespace } from "nanocodex/cloudflare/hand-admission";
+
 export type ManagedProxyEnv = {
   NANOCODEX_BACKEND?: Fetcher;
+  NANOCODEX_HAND_ADMISSION?: HandViewerAdmissionBinding;
+  NANOCODEX_HAND_BROKER?: HandViewerBrokerNamespace;
 };
 
 const MANAGED_ROUTE = /^(?:\/auth(?:\/.*)?|\/webauthn\/.*|\/sandbox-preview\/[^/]+(?:\/.*)?|\/v1\/(?:auth(?:\/.*)?|me|account\/(?:tool-host|vm-host|hand-hosts(?:\/[0-9a-f-]{36})?|hands(?:\/(?:screens|host|view|renew|ice))?)|hand-hosts\/[0-9a-f-]{36}\/[0-9a-f-]{36}\/hands\/(?:host|ice|renew)|system\/vm-host|vm-host-attachments\/[A-Za-z0-9_-]{43}\/[0-9a-f-]{36}\/(?:tool-host|hands\/(?:host|ice|renew))|wallet(?:\/(?:balance|connect|revoke-access-key))?|egress|api-keys(?:\/.*)?|credentials(?:\/.*)?|connect(?:\/.*)?|connectors(?:\/.*)?|agents(?:\/.*)?|rooms(?:\/.*)?|history(?:\/.*)?|memory(?:\/.*)?|organization(?:\/.*)?))$/;
@@ -28,10 +32,14 @@ export async function routeManaged(
   try {
     const started = performance.now();
     const startedAt = Date.now();
-    const response = await env.NANOCODEX_BACKEND.fetch(request);
+    const direct = env.NANOCODEX_HAND_ADMISSION && env.NANOCODEX_HAND_BROKER && isHandViewerUpgrade(request);
+    // Missing deployment bindings use the existing route; failures after admission never retry it.
+    const response = direct
+      ? await forwardHandViewerUpgrade(request, env.NANOCODEX_HAND_ADMISSION!, env.NANOCODEX_HAND_BROKER!)
+      : await env.NANOCODEX_BACKEND.fetch(request);
     if (/^\/v1\/account\/hands\/(?:screens|host|view|ice|renew)$/.test(url.pathname)) {
       console.info({ type: "hand.proxy", request_id: response.headers.get("x-nanocodex-request-id"),
-        method: request.method, path: url.pathname, status: response.status,
+        method: request.method, path: url.pathname, status: response.status, route: direct ? "direct_broker" : "managed",
         backend_ms: performance.now() - started, started_at_ms: startedAt, finished_at_ms: Date.now(),
         request_colo: typeof request.cf?.colo === "string" ? request.cf.colo : undefined });
     }

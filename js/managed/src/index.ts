@@ -1,3 +1,4 @@
+import { authorizeHandRequest, forwardHandRequest, prepareHandViewerAdmission } from "./hand-admission";
 import { beginHandTiming, finishHandTiming, timeHandStage } from "./hand-timing";
 import { PreparedPersonalizationCache, personalizedVoiceContext, type PersonalizationScope, type PersonalizationSnapshot } from "./personalization";
 import { prepareEnvironment } from "./environment-setup";
@@ -1427,26 +1428,14 @@ async function managedFetchRoute(
       });
     }
     if (url.pathname.startsWith("/v1/account/hands/")) {
-      const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
-      if (!principal) return json({ error: "unauthorized" }, { status: 401 });
-      if (principal.connectGrant || !principal.capabilities.includes("agents:read")
-        || !principal.capabilities.includes("tools:use")
-        || (url.pathname.endsWith("/host") && !principal.capabilities.includes("agents:write"))) {
-        return json({ error: "forbidden" }, { status: 403 });
-      }
-      if (principal.kind !== "api_key" && (request.method !== "GET" || request.headers.has("upgrade"))
-        && request.headers.get("origin") !== url.origin) return json({ error: "forbidden_origin" }, { status: 403 });
+      const authorized = await authorizeHandRequest(request, env, trustedAgentPrincipal);
+      if (authorized instanceof Response) return authorized;
+      const principal = authorized;
       if (url.pathname === "/v1/account/hands/ice") {
         if (request.method !== "POST" || url.search) return json({ error: "invalid_request" }, { status: 400 });
         return remoteICE(env, principal.userId);
       }
-      const headers = new Headers(request.headers);
-      headers.delete(REMOTE_VM_ASSERTION);
-      forwardPrincipalAssertions(headers, principal);
-      return timeHandStage(request, "route", () => env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
-        `https://account-tools.internal${url.pathname.slice("/v1/account".length)}${url.search}`,
-        new Request(request, { headers }),
-      ));
+      return timeHandStage(request, "route", () => env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(forwardHandRequest(request, principal)));
     }
     if (url.pathname === "/v1/account/tool-host") {
       if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
@@ -2665,6 +2654,11 @@ function createManagedNamespaceRuntime(
     },
   } satisfies NamedTool));
   return Object.freeze({ tools, capture });
+}
+
+/** Finite admission only; the account front door forwards the socket directly to its broker. */
+export class ManagedHandAdmission extends WorkerEntrypoint<Env> {
+  prepare(request: Request) { return prepareHandViewerAdmission(request, this.env); }
 }
 
 /** Private, ownership-only capability for the credential broker. */
