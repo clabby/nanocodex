@@ -710,7 +710,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let directory = private_state_directory();
         let state =
-            NativeState::open(workspace.path(), directory.path(), "Test Linux".into()).unwrap();
+            NativeState::open(workspace.path(), directory.path(), "Test host".into()).unwrap();
         let machine_id = state.machine.id().to_owned();
         let (catalogs_tx, mut catalogs) = mpsc::unbounded_channel();
         let (completed_tx, mut completed) = mpsc::unbounded_channel();
@@ -759,7 +759,7 @@ mod tests {
         .expect("native Hand lifecycle timed out");
         server.abort();
         let restarted =
-            NativeState::open(workspace.path(), directory.path(), "Test Linux".into()).unwrap();
+            NativeState::open(workspace.path(), directory.path(), "Test host".into()).unwrap();
         assert_eq!(restarted.machine.id(), machine_id);
     }
 }

@@ -212,6 +212,22 @@ accepts matching locally built Linux `nanocodex2`, `nanocodex-vm-guest`, and
 runtime source needed to build the VM image; no local checkout is required.
 Image reuse includes that source in its cache key.
 
+### Windows Hand
+
+Download `nanocodex-hand-setup-x86_64.exe` from the latest release and
+double-click it on an x86-64 Windows 10 or 11 computer. Keep **Sign in and
+connect this computer now** selected, then enter the account phone number and
+the six-digit SMS code. No terminal setup or administrator access is required.
+
+The installer bundles the account Hand and native Windows computer-control
+runtime. It verifies both before enrollment, uses a dedicated per-user account
+credential, and registers a hidden interactive startup task with failure
+recovery. Running in the signed-in session is deliberate: Windows Graphics
+Capture, UI Automation, and input cannot control that desktop from a Session 0
+service. Start-menu shortcuts stop, repair, inspect, or uninstall the Hand.
+See [`windows/hand`](windows/hand) for behavior, security boundaries, build
+instructions, and the real Notepad control smoke test.
+
 ## Rust: start here
 
 Build one agent, submit ordered prompts through its cheap handle, and await a

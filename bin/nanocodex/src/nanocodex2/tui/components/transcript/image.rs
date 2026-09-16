@@ -571,6 +571,10 @@ fn encode(picker: &Picker, image: DynamicImage, size: Size) -> Option<Arc<Sliced
 }
 
 fn local_path(destination: &str, workspace: &Path) -> Option<PathBuf> {
+    let destination_path = Path::new(destination);
+    if destination_path.is_absolute() {
+        return Some(destination_path.to_path_buf());
+    }
     let base = Url::from_directory_path(workspace).ok()?;
     let destination = base.join(destination).ok()?;
     if destination.scheme() != "file" {

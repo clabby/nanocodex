@@ -195,6 +195,68 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build-windows-hand:
+    name: build Windows Hand installer
+    needs: prepare-release
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+      WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          cache-on-failure: true
+      - name: Build Windows Hand payload
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          VERGEN_GIT_SHA: ${{ github.sha }}
+          STABLE_GIT_COMMIT: ${{ github.sha }}
+        run: |
+          cargo build --locked --release --package nanocodex2-bin --bin nanocodex2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release `
+            --manifest-path crates/experimental/nanocodex-computer/runtime/Cargo.toml `
+            --bin nanocodex-computer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Sign payload when Authenticode is configured
+        shell: pwsh
+        run: >-
+          ./windows/hand/sign.ps1 -Path
+          ./target/release/nanocodex2.exe,
+          ./crates/experimental/nanocodex-computer/runtime/target/release/nanocodex-computer.exe
+      - name: Build and sign one-click installer
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          $version = $env:RELEASE_VERSION.TrimStart("v")
+          ./windows/hand/build.ps1 `
+            -Nanocodex2 ./target/release/nanocodex2.exe `
+            -Computer ./crates/experimental/nanocodex-computer/runtime/target/release/nanocodex-computer.exe `
+            -Version $version `
+            -NumericVersion $version
+          ./windows/hand/sign.ps1 -Path ./dist/windows-hand/nanocodex-hand-setup-x86_64.exe
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          Copy-Item target/release/nanocodex2.exe dist/windows-hand/nanocodex2-x86_64-pc-windows-msvc.exe
+          Copy-Item crates/experimental/nanocodex-computer/runtime/target/release/nanocodex-computer.exe dist/windows-hand/nanocodex-computer-x86_64-pc-windows-msvc.exe
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nanocodex-hand-x86_64-pc-windows-msvc
+          path: dist/windows-hand/*
+          if-no-files-found: error
+
   publish-crates:
     name: publish crates.io packages
     needs: build
@@ -306,10 +368,11 @@ jobs:
 
   finalize-release:
     name: attach GitHub release assets
-    needs: [build, publish-crates, publish-npm]
+    needs: [build, build-windows-hand, publish-crates, publish-npm]
     if: >-
       ${{ always() &&
           needs.build.result == 'success' &&
+          needs.build-windows-hand.result == 'success' &&
           needs.publish-crates.result == 'success' &&
           needs.publish-npm.result == 'success' }}
     runs-on: ubuntu-22.04
