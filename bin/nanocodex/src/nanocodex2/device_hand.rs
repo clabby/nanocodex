@@ -278,119 +278,116 @@ async fn share(
     key: &str,
     cancel: &CancellationToken,
 ) -> Result<(), ManagedError> {
-    loop {
-        if cancel.is_cancelled() {
-            return Ok(());
-        }
-        match open(directory) {
-            Ok(mut state) => {
-                let socket = socket_path(directory)?;
-                let _ = fs::remove_file(&socket);
-                let listener = tokio::net::UnixListener::bind(&socket).map_err(error)?;
-                let _socket_file = SocketFile(socket);
-                let lease_cancel = cancel.clone();
-                let leases = tokio::spawn(async move {
-                    watch_clients(listener, lease_cancel).await;
-                });
-                let machine = serde_json::to_value(&state.machine).map_err(error)?;
-                let recipe = factory_recipe(directory, state.machine.id());
-                let factory_error = recipe.as_ref().err().map(ToString::to_string);
-                let recipe = recipe.unwrap_or(None);
-                if let Some(recipe) = &recipe {
-                    let mut capabilities: Vec<String> = state
-                        .machine
-                        .capabilities()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect();
-                    capabilities.push(format!("vm_factory:{}", recipe.name));
-                    state.machine = AttachmentMachine::new(
-                        state.machine.id(),
-                        state.machine.name(),
-                        state.machine.workspace(),
-                        capabilities,
-                    )
-                    .map_err(error)?;
-                }
-                let status = std::sync::Arc::new(std::sync::Mutex::new(
-                    json!({"machine": machine, "status": "connecting"}),
-                ));
-                {
-                    let mut status = status.lock().unwrap();
-                    if recipe.is_none() {
-                        status["factory"] = json!({"status": "unavailable", "error": factory_error.unwrap_or_else(|| "No desktop VM image is configured".into())});
-                    }
-                    publish(directory, &status)?;
-                }
-                let factory = recipe.map(|recipe| {
-                    let (directory, origin, key, cancel, status) = (
-                        directory.to_owned(),
-                        origin.to_owned(),
-                        key.to_owned(),
-                        cancel.clone(),
-                        status.clone(),
-                    );
-                    tokio::spawn(async move {
-                        supervise_factory(recipe, &directory, &origin, &key, &cancel, &status)
-                            .await;
-                    })
-                });
-                // Capture permissions and optional VM startup must not hold up
-                // publication of the native shell/filesystem catalog.
-                let screen_cancel = cancel.clone();
-                let screen_target = client.account_attachment_target()?;
-                let screen_machine = state.machine.clone();
-                let screen_directory = directory.to_owned();
-                let mut screen = tokio::spawn(async move {
-                    if let Ok(screen) = super::screen_native::NativeScreen::start(
-                        &screen_target,
-                        &screen_machine,
-                        &screen_directory,
-                    )
-                    .await
-                    {
-                        screen_cancel.cancelled().await;
-                        let _ = screen.shutdown().await;
-                    }
-                });
-                let result = super::native_hand::run_observed(
-                    client.account_attachment_target()?,
-                    &state,
-                    None,
-                    async {
-                        cancel.cancelled().await;
-                        Ok(())
-                    },
-                    |event| {
-                        let next = match event {
-                            AttachmentEvent::CatalogPublished { .. } => "connected",
-                            AttachmentEvent::Connecting => "connecting",
-                            _ => return,
-                        };
-                        let mut status = status.lock().unwrap();
-                        status["status"] = json!(next);
-                        let _ = publish(directory, &status);
-                        emit(&status);
-                    },
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    match open(directory) {
+        Ok(mut state) => {
+            let socket = socket_path(directory)?;
+            let _ = fs::remove_file(&socket);
+            let listener = tokio::net::UnixListener::bind(&socket).map_err(error)?;
+            let _socket_file = SocketFile(socket);
+            let lease_cancel = cancel.clone();
+            let leases = tokio::spawn(async move {
+                watch_clients(listener, lease_cancel).await;
+            });
+            let machine = serde_json::to_value(&state.machine).map_err(error)?;
+            let recipe = factory_recipe(directory, state.machine.id());
+            let factory_error = recipe.as_ref().err().map(ToString::to_string);
+            let recipe = recipe.unwrap_or(None);
+            if let Some(recipe) = &recipe {
+                let mut capabilities: Vec<String> = state
+                    .machine
+                    .capabilities()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                capabilities.push(format!("vm_factory:{}", recipe.name));
+                state.machine = AttachmentMachine::new(
+                    state.machine.id(),
+                    state.machine.name(),
+                    state.machine.workspace(),
+                    capabilities,
                 )
-                .await;
-                cancel.cancel();
-                let _ = leases.await;
-                if let Some(factory) = factory {
-                    let _ = factory.await;
-                }
-                if tokio::time::timeout(Duration::from_secs(5), &mut screen)
-                    .await
-                    .is_err()
-                {
-                    screen.abort();
-                }
-                let _ = fs::remove_file(directory.join("status.json"));
-                return result;
+                .map_err(error)?;
             }
-            Err(e) if e.to_string().contains("another native Hand") => return Ok(()),
-            Err(e) => return Err(e),
+            let status = std::sync::Arc::new(std::sync::Mutex::new(
+                json!({"machine": machine, "status": "connecting"}),
+            ));
+            {
+                let mut status = status.lock().unwrap();
+                if recipe.is_none() {
+                    status["factory"] = json!({"status": "unavailable", "error": factory_error.unwrap_or_else(|| "No desktop VM image is configured".into())});
+                }
+                publish(directory, &status)?;
+            }
+            let factory = recipe.map(|recipe| {
+                let (directory, origin, key, cancel, status) = (
+                    directory.to_owned(),
+                    origin.to_owned(),
+                    key.to_owned(),
+                    cancel.clone(),
+                    status.clone(),
+                );
+                tokio::spawn(async move {
+                    supervise_factory(recipe, &directory, &origin, &key, &cancel, &status).await;
+                })
+            });
+            // Capture permissions and optional VM startup must not hold up
+            // publication of the native shell/filesystem catalog.
+            let screen_cancel = cancel.clone();
+            let screen_target = client.account_attachment_target()?;
+            let screen_machine = state.machine.clone();
+            let screen_directory = directory.to_owned();
+            let mut screen = tokio::spawn(async move {
+                if let Ok(screen) = super::screen_native::NativeScreen::start(
+                    &screen_target,
+                    &screen_machine,
+                    &screen_directory,
+                )
+                .await
+                {
+                    screen_cancel.cancelled().await;
+                    let _ = screen.shutdown().await;
+                }
+            });
+            let result = super::native_hand::run_observed(
+                client.account_attachment_target()?,
+                &state,
+                None,
+                async {
+                    cancel.cancelled().await;
+                    Ok(())
+                },
+                |event| {
+                    let next = match event {
+                        AttachmentEvent::CatalogPublished { .. } => "connected",
+                        AttachmentEvent::Connecting => "connecting",
+                        _ => return,
+                    };
+                    let mut status = status.lock().unwrap();
+                    status["status"] = json!(next);
+                    let _ = publish(directory, &status);
+                    emit(&status);
+                },
+            )
+            .await;
+            cancel.cancel();
+            let _ = leases.await;
+            if let Some(factory) = factory {
+                let _ = factory.await;
+            }
+            if tokio::time::timeout(Duration::from_secs(5), &mut screen)
+                .await
+                .is_err()
+            {
+                screen.abort();
+            }
+            let _ = fs::remove_file(directory.join("status.json"));
+            result
         }
+        Err(e) if e.to_string().contains("another native Hand") => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -436,13 +433,12 @@ async fn connect(directory: &Path, cancel: &CancellationToken) -> Result<(), Man
     let mut previous = Value::Null;
     let mut bytes = [0u8; 1];
     loop {
-        if let Ok(bytes) = fs::read(directory.join("status.json")) {
-            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                if previous != value {
-                    emit(&value);
-                    previous = value;
-                }
-            }
+        if let Ok(bytes) = fs::read(directory.join("status.json"))
+            && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+            && previous != value
+        {
+            emit(&value);
+            previous = value;
         }
         tokio::select! {
             () = cancel.cancelled() => return Ok(()),
