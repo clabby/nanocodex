@@ -44,7 +44,17 @@ final class AccountMacTests: XCTestCase {
             let catalogMs = (ProcessInfo.processInfo.systemUptime - catalogAt) * 1000
             var samples: [[String: Any]] = []
             for _ in 0..<3 {
+                let connectedAt = ProcessInfo.processInfo.systemUptime
                 await viewer.connect(service: service, hand: hand)
+                var media: [[String: Any]] = []
+                let mediaTask = Task { @MainActor in
+                    while !Task.isCancelled {
+                        let stats = await host.diagnosticMedia()
+                        if !stats.isEmpty { media.append(["elapsed_ms": (ProcessInfo.processInfo.systemUptime - connectedAt) * 1000, "stats": stats]) }
+                        do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
+                    }
+                }
+                defer { mediaTask.cancel() }
                 try await eventually {
                     guard viewer.connected, let data = viewer.diagnosticPresentation.data(using: .utf8),
                           let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
@@ -52,9 +62,13 @@ final class AccountMacTests: XCTestCase {
                 }
                 let data = try XCTUnwrap(viewer.diagnosticPresentation.data(using: .utf8))
                 var sample = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                mediaTask.cancel(); await mediaTask.value
+                sample["media"] = media
+                sample["started_uptime_ms"] = connectedAt * 1000
                 let controlAt = ProcessInfo.processInfo.systemUptime
                 viewer.takeControl(); try await eventually { viewer.controlling }
                 sample["control_ms"] = (ProcessInfo.processInfo.systemUptime - controlAt) * 1000
+                sample["host_startup"] = host.diagnosticStartup
                 samples.append(sample); viewer.releaseControl(); viewer.close()
             }
             try JSONSerialization.data(withJSONObject: ["publication_ms": publicationMs, "catalog_ms": catalogMs, "samples": samples], options: [.prettyPrinted, .sortedKeys])

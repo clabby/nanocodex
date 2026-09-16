@@ -1,5 +1,8 @@
 # Computer Hands and VM startup — 2026-09-16
 
+See the [native screen startup follow-up](screen-startup.md) for ICE prefetch,
+initial frame delivery, bitrate controls, and the outstanding Linux host-access issue.
+
 See [further Hand component measurements](hands-components.md) for the inventory
 and Mac capture improvements, native WebRTC startup breakdown, and remaining
 connection/tool overhead.

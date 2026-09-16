@@ -63,6 +63,20 @@ public final class RemotePeer: NSObject {
     private var receivedCandidates = 0
     private var appliedCandidates = 0
     var diagnosticState: String { "\(connection.connectionState.rawValue)/\(connection.iceConnectionState.rawValue) channels=\(reliable?.readyState.rawValue ?? -1),\(motion?.readyState.rawValue ?? -1) ICE=\(gatheredCandidates)/\(receivedCandidates)/\(appliedCandidates) SDP=\(connection.localDescription != nil)/\(remoteDescriptionSet)" }
+    func diagnosticMedia() async -> [[String: String]] {
+        await withCheckedContinuation { continuation in
+            connection.statistics { report in
+                continuation.resume(returning: report.statistics.values.compactMap { statistic in
+                    guard ["outbound-rtp", "candidate-pair"].contains(statistic.type) else { return nil }
+                    var values = ["type": statistic.type]
+                    for key in ["framesEncoded", "framesSent", "keyFramesEncoded", "totalEncodeTime", "packetsSent", "bytesSent", "totalPacketSendDelay", "availableOutgoingBitrate", "currentRoundTripTime", "nominated"] {
+                        values[key] = statistic.values[key]?.description
+                    }
+                    return values
+                })
+            }
+        }
+    }
     func selectedLocalCandidate() async -> String? {
         await withCheckedContinuation { continuation in
             connection.statistics { report in
@@ -115,6 +129,10 @@ public final class RemotePeer: NSObject {
         else { throw RemoteError.unavailable }
         connection = peer
         if let localVideoTrack {
+            // The default 300 kbps estimate paces the first desktop keyframe
+            // for hundreds of milliseconds. Seed 1 Mbps without imposing a
+            // minimum: congestion control can immediately adapt to slow links.
+            _ = peer.setBweMinBitrateBps(nil, currentBitrateBps: 1_000_000, maxBitrateBps: nil)
             let initOptions = RTCRtpTransceiverInit(); initOptions.direction = .sendOnly
             let encoding = RTCRtpEncodingParameters()
             encoding.maxBitrateBps = 12_000_000; encoding.maxFramerate = 60
