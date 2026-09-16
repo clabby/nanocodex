@@ -457,13 +457,17 @@ async fn session(
                             }
                         }
                     },
-                    "viewer_left"=>{viewers.remove(viewer);pending_frames.remove(viewer);if lease.owner==viewer{release(&mut lease,backend,&mut socket).await?;}if let Some(video)=&mut socket.video{video.remove(viewer);}},
+                    "viewer_left"=>{
+                        viewers.remove(viewer);
+                        pending_frames.remove(viewer);
+                        if lease.owner==viewer{release(&mut lease,backend,&mut socket).await?;}
+                        if let Some(video)=&mut socket.video{video.remove(viewer);}
+                    },
                     "signal" if viewers.contains(viewer)=>{
-                        if let Some(video)=&mut socket.video {
-                            if !matches!(tokio::time::timeout(Duration::from_secs(3),video.signal(viewer,&value["signal"])).await,Ok(Ok(()))) {
-                                if lease.owner==viewer{release(&mut lease,backend,&mut socket).await?;}
-                                send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?;viewers.remove(viewer);
-                            }
+                        if let Some(video)=&mut socket.video
+                            && !matches!(tokio::time::timeout(Duration::from_secs(3),video.signal(viewer,&value["signal"])).await,Ok(Ok(()))) {
+                            if lease.owner==viewer{release(&mut lease,backend,&mut socket).await?;}
+                            send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?;viewers.remove(viewer);
                         }
                     },
                     "frame_request" if viewers.contains(viewer)=>{

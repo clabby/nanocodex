@@ -1980,24 +1980,56 @@ mod docker_hand_live {
                     .unwrap()
                     .contains("H264/90000")
             );
-            // Agent observations remain available independently of the video stream.
-            send(
-                &mut socket,
-                json!({"type":"frame_request","viewer_id":"test-viewer"}),
-            )
-            .await;
-            let frame = loop {
-                let message = receive(&mut socket).await;
-                if message["type"] == "signal" {
-                    assert!(message["signal"].get("candidate").is_some(), "{message}");
-                    continue;
+            let mut media = webrtc::api::media_engine::MediaEngine::default();
+            media.register_default_codecs().unwrap();
+            let api = webrtc::api::APIBuilder::new().with_media_engine(media).build();
+            let peer = api.new_peer_connection(Default::default()).await.unwrap();
+            let (packets, mut received) = mpsc::unbounded_channel();
+            peer.on_track(Box::new(move |track, _, _| {
+                let packets = packets.clone();
+                Box::pin(async move {
+                    let (packet, _) = track.read_rtp().await.unwrap();
+                    assert!(!packet.payload.is_empty());
+                    assert_eq!(track.codec().capability.mime_type.to_lowercase(), "video/h264");
+                    packets.send(()).unwrap();
+                })
+            }));
+            let (candidates, mut outgoing) = mpsc::unbounded_channel();
+            peer.on_ice_candidate(Box::new(move |candidate| {
+                if let Some(candidate) = candidate {
+                    let candidate = candidate.to_json().unwrap();
+                    candidates.send(json!({"type":"signal","viewer_id":"test-viewer","signal":{
+                        "type":"candidate", "candidate":candidate.candidate,
+                        "sdpMid":candidate.sdp_mid, "sdpMLineIndex":candidate.sdp_mline_index,
+                    }})).unwrap();
                 }
-                break message;
-            };
-            assert_eq!(frame["type"], "frame");
-            assert!(frame["jpeg"].as_str().unwrap().starts_with("/9j/"));
+                Box::pin(async {})
+            }));
+            peer.set_remote_description(
+                webrtc::peer_connection::sdp::session_description::RTCSessionDescription::offer(
+                    offer["signal"]["sdp"].as_str().unwrap().to_owned(),
+                ).unwrap(),
+            ).await.unwrap();
+            let answer = peer.create_answer(None).await.unwrap();
+            peer.set_local_description(answer.clone()).await.unwrap();
+            send(&mut socket, json!({"type":"signal","viewer_id":"test-viewer","signal":{
+                "type":"answer", "sdp":answer.sdp,
+            }})).await;
+            loop {
+                tokio::select! {
+                    packet = received.recv() => { packet.unwrap(); break; }
+                    candidate = outgoing.recv() => { send(&mut socket, candidate.unwrap()).await; }
+                    message = receive(&mut socket) => {
+                        assert_eq!(message["type"], "signal", "{message}");
+                        let signal = &message["signal"];
+                        assert_eq!(signal["type"], "candidate", "{message}");
+                        peer.add_ice_candidate(serde_json::from_value(signal.clone()).unwrap()).await.unwrap();
+                    }
+                }
+            }
             state.ready.send("screen").unwrap();
             while socket.recv().await.is_some() {}
+            peer.close().await.unwrap();
         })
     }
 
@@ -2036,7 +2068,7 @@ mod docker_hand_live {
         let app = Router::new()
             .route("/v1/account/tool-host", get(tools))
             .route("/v1/account/hands/host", get(screen))
-            .route("/v1/account/hands/host/ice", post(ice))
+            .route("/v1/account/hands/ice", post(ice))
             .with_state(service);
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let config = tempfile::tempdir().unwrap();
