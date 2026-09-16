@@ -931,25 +931,24 @@ impl ManagedClient {
             }
             None => request.send().await?,
         };
-        if let Some(token) = &token {
-            if response.status() == reqwest::StatusCode::UNAUTHORIZED
-                && response
-                    .headers()
-                    .get("x-nanocodex-access-rejected")
-                    .is_some_and(|value| value == "1")
+        if let Some(token) = &token
+            && response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && response
+                .headers()
+                .get("x-nanocodex-access-rejected")
+                .is_some_and(|value| value == "1")
+        {
             {
-                {
-                    let mut cache = self
-                        .access
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if cache.as_ref().is_some_and(|entry| entry.token == *token) {
-                        *cache = None;
-                    }
+                let mut cache = self
+                    .access
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if cache.as_ref().is_some_and(|entry| entry.token == *token) {
+                    *cache = None;
                 }
-                if let Some(retry) = retry {
-                    response = retry.send().await?;
-                }
+            }
+            if let Some(retry) = retry {
+                response = retry.send().await?;
             }
         }
         if eligible && response.status().is_success() {
@@ -959,20 +958,19 @@ impl ManagedClient {
                 .get("x-nanocodex-access-ttl-ms")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
-            if let (Some(token), Some(ttl @ 1..=120_000)) = (token, ttl) {
-                if token.as_bytes().starts_with(b"ncx_access_v1.")
-                    && token.as_bytes().len() <= 16_384
-                {
-                    let until = began + Duration::from_millis(ttl);
-                    let mut cache = self
-                        .access
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if cache.as_ref().is_none_or(|entry| entry.until < until) {
-                        let mut token = token.clone();
-                        token.set_sensitive(true);
-                        *cache = Some(ManagedAccess { token, until });
-                    }
+            if let (Some(token), Some(ttl @ 1..=120_000)) = (token, ttl)
+                && token.as_bytes().starts_with(b"ncx_access_v1.")
+                && token.as_bytes().len() <= 16_384
+            {
+                let until = began + Duration::from_millis(ttl);
+                let mut cache = self
+                    .access
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if cache.as_ref().is_none_or(|entry| entry.until < until) {
+                    let mut token = token.clone();
+                    token.set_sensitive(true);
+                    *cache = Some(ManagedAccess { token, until });
                 }
             }
         }
