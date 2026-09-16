@@ -154,3 +154,86 @@ test("screen proxy timing preserves authentication headers, response identity an
     assert.equal(JSON.stringify(logs).includes("private-"), false);
   } finally { console.info = original; }
 });
+
+const localPrincipal = { kind: "api_key" as const, userId: "owner", organizationId: "org", teamId: "team",
+  authorizationEpoch: 1, capabilities: ["agents:read", "tools:use"] };
+const localSecret = "local-viewer-fixture-secret-at-least-thirty-two-bytes";
+async function cachedViewer(identity = localPrincipal, extra: Record<string, string> = {}, age = 0) {
+  const { createManagedAccessClaims, signManagedAccessClaims } = await import("nanocodex/cloudflare/managed-access");
+  const source = new Request("https://account.test/v1/account/hands/screens", { headers: { authorization: "Bearer fixture", ...extra } });
+  const claims = await createManagedAccessClaims(source, identity, Date.now() - age);
+  const token = await signManagedAccessClaims(claims, { NANOCODEX_ACCESS_SECRET: localSecret });
+  return new Request("https://account.test/v1/account/hands/view?generation=fixture", {
+    headers: { ...Object.fromEntries(source.headers), upgrade: "websocket", "x-nanocodex-access": token },
+  });
+}
+function localEnvironment(broker: (request: Request) => Promise<Response>, backend: (request: Request) => Promise<Response>) {
+  return { NANOCODEX_ACCESS_SECRET: localSecret,
+    NANOCODEX_HAND_BROKER: { getByName(owner: string) { assert.equal(owner, localPrincipal.userId); return { fetch: broker }; } } as unknown as DurableObjectNamespace,
+    NANOCODEX_BACKEND: { fetch: backend, connect() { throw new Error("unused"); } } as unknown as Fetcher };
+}
+
+test("verified viewer authority skips the managed service and addresses only its authenticated account", async () => {
+  const request = await cachedViewer();
+  let brokerCalls = 0;
+  const response = await routeManaged(request, localEnvironment(async forwarded => {
+    brokerCalls++;
+    assert.equal(forwarded.url, "https://account-tools.internal/hands/view?generation=fixture");
+    assert.equal(forwarded.headers.get("x-nanocodex-owner-id"), "owner");
+    return new Response(null, { status: 204 });
+  }, async () => { throw new Error("managed service must not be called"); }), new URL(request.url));
+  assert.equal(brokerCalls, 1);
+  assert.equal(response?.status, 204);
+  assert.match(response!.headers.get("server-timing")!, /desc="access"/);
+  assert.equal(response!.headers.has("x-nanocodex-access"), false, "reuse cannot extend authority");
+});
+
+test("unusable viewer snapshots and disallowed scope preserve the original managed rejection path", async () => {
+  const valid = await cachedViewer();
+  const browser = { ...localPrincipal, kind: "account_session" } as unknown as typeof localPrincipal;
+  const requests = [
+    new Request(valid, { headers: { authorization: "Bearer fixture", upgrade: "websocket" } }),
+    new Request(valid, { headers: { ...Object.fromEntries(valid.headers), "x-nanocodex-access": "invalid" } }),
+    new Request(valid, { headers: { ...Object.fromEntries(valid.headers), authorization: "Bearer changed" } }),
+    new Request(valid, { headers: { ...Object.fromEntries(valid.headers), cookie: "nanocodex_account=added" } }),
+    await cachedViewer(localPrincipal, {}, 120_001),
+    await cachedViewer(localPrincipal, {}, -30_000),
+    await cachedViewer({ ...localPrincipal, capabilities: ["agents:read"] }),
+    await cachedViewer({ ...localPrincipal, connectGrant: { grantId: "grant" } } as typeof localPrincipal),
+    await cachedViewer(browser, { cookie: "nanocodex_account=fixture" }),
+    await cachedViewer(browser, { cookie: "nanocodex_account=fixture", origin: "https://evil.test" }),
+    new Request("https://other.test/v1/account/hands/view", valid),
+    new Request("https://account.test/v1/account/hands/renew", valid),
+    new Request("https://account.test/v1/account/hands/host", valid),
+  ];
+  for (const request of requests) {
+    let calls = 0;
+    const response = await routeManaged(request, localEnvironment(async () => { throw new Error("broker must not be reached"); }, async forwarded => {
+      calls++; assert.equal(forwarded, request);
+      return new Response(null, { status: 401, headers: { "x-nanocodex-access-rejected": "1" } });
+    }), new URL(request.url));
+    assert.equal(calls, 1);
+    assert.equal(response?.headers.get("x-nanocodex-access-rejected"), "1");
+  }
+  for (const secret of [undefined, "short", "rotated-secret-at-least-thirty-two-characters"]) {
+    let calls = 0;
+    const env = localEnvironment(async () => { throw new Error("broker must not be reached"); }, async forwarded => {
+      calls++; assert.equal(forwarded, valid); return new Response(null, { status: 401 });
+    });
+    await routeManaged(valid, { ...env, NANOCODEX_ACCESS_SECRET: secret }, new URL(valid.url));
+    assert.equal(calls, 1);
+  }
+});
+
+test("direct broker failure and stale generation never replay through the managed service", async () => {
+  for (const throws of [false, true]) {
+    const request = await cachedViewer(); let brokerCalls = 0; let backendCalls = 0;
+    const response = await routeManaged(request, localEnvironment(async () => {
+      brokerCalls++; if (throws) throw new Error("broker disconnected");
+      return new Response(null, { status: 409 });
+    }, async () => { backendCalls++; return new Response(null, { status: 204 }); }), new URL(request.url));
+    assert.equal(brokerCalls, 1); assert.equal(backendCalls, 0);
+    assert.equal(response?.status, throws ? 503 : 409);
+    assert.equal(response?.headers.has("x-nanocodex-access-rejected"), false);
+  }
+});

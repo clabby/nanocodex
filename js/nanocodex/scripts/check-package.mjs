@@ -52,6 +52,8 @@ const requiredFiles = [
   "browser/agent.worker.mjs",
   "browser/workspace.mjs",
   "browser/workspace.d.mts",
+  "cloudflare/managed-access.mjs",
+  "cloudflare/managed-access.d.mts",
   "cloudflare/egress.mjs",
   "cloudflare/egress.d.mts",
   "cloudflare/egress-subject.mjs",

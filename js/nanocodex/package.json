@@ -51,6 +51,10 @@
       "types": "./cloudflare/index.d.mts",
       "import": "./cloudflare/index.mjs"
     },
+    "./cloudflare/managed-access": {
+      "types": "./cloudflare/managed-access.d.mts",
+      "import": "./cloudflare/managed-access.mjs"
+    },
     "./cloudflare/egress": {
       "types": "./cloudflare/egress.d.mts",
       "import": "./cloudflare/egress.mjs"

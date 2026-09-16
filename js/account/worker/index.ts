@@ -118,6 +118,8 @@ type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptE
   CHATGPT_SESSIONS?: DurableObjectNamespace;
   EGRESS?: Fetcher;
   NANOCODEX_BACKEND?: Fetcher;
+  NANOCODEX_ACCESS_SECRET?: string;
+  NANOCODEX_HAND_BROKER?: DurableObjectNamespace;
   NANOCODEX_PUBLIC_ORIGIN?: string;
 };
 
