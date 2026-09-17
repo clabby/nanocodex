@@ -63,7 +63,13 @@ function fixture(t: TestContext, hand: RemoteHand = screen) {
   const canvas = { width: 0, height: 0, getContext: () => ({ drawImage(bitmap: Bitmap) { drawn.push(bitmap); } }) };
   const globals = {
     location: new URL("https://account.example"), RTCPeerConnection: Peer, WebSocket: Socket,
-    MediaStream: class { constructor(publicTracks: unknown[]) { void publicTracks; } },
+    MediaStream: class {
+      tracks: any[] = [];
+      getTracks() { return this.tracks; }
+      getAudioTracks() { return this.tracks.filter(track => track.kind === "audio"); }
+      addTrack(track: any) { this.tracks.push(track); }
+      removeTrack(track: any) { this.tracks = this.tracks.filter(value => value !== track); }
+    },
     createImageBitmap: (source: Blob) => { decoded.push(source); return decode(source); },
   };
   for (const [name, value] of Object.entries(globals)) {
@@ -78,7 +84,7 @@ function fixture(t: TestContext, hand: RemoteHand = screen) {
     if (path.endsWith("/ice")) return iceResponse();
     return Response.json({ iceServers: [] });
   });
-  const video = { srcObject: null as unknown, play: async () => {} };
+  const video = { muted: true, srcObject: null as unknown, play: async () => {} };
   const session = new RemoteBrowserSession(hand, video as HTMLVideoElement, () => {}, canvas as unknown as HTMLCanvasElement);
   t.after(() => session.close());
   return {
@@ -593,3 +599,37 @@ for (const status of [401, 403, 409]) {
     assert.equal(f.session.state.connected, false);
   });
 }
+
+
+test("audio and video tracks share a stream in either arrival order", async t => {
+  const f = fixture(t); await f.session.connect(); f.peers[0]!.open();
+  const audio = { kind: "audio", stop() {} }, video = { kind: "video", stop() {} };
+  f.peers[0]!.ontrack!({ track: audio });
+  const stream = f.video.srcObject as MediaStream;
+  f.peers[0]!.ontrack!({ track: video });
+  assert.equal(f.video.srcObject, stream);
+  assert.equal(stream.getTracks().length, 2);
+  assert.equal(f.session.state.audioAvailable, true);
+  await f.session.setAudioEnabled(true);
+  assert.equal(f.video.muted, false);
+  assert.equal(f.session.state.audioEnabled, true);
+  await f.session.setAudioEnabled(false);
+  assert.equal(f.video.muted, true);
+  f.video.srcObject = null;
+  f.peers[0]!.ontrack!({ track: video });
+  f.peers[0]!.ontrack!({ track: audio });
+  assert.equal((f.video.srcObject as MediaStream).getTracks().length, 2);
+  f.session.close(); assert.equal(f.session.state.audioAvailable, false);
+});
+
+test("blocked sound falls back to muted video without reconnecting", async t => {
+  const f = fixture(t); await f.session.connect(); f.peers[0]!.open();
+  let attempts = 0;
+  f.video.play = async () => { attempts++; if (!f.video.muted) throw new Error("autoplay blocked"); };
+  await f.session.setAudioEnabled(true);
+  assert.equal(attempts, 2);
+  assert.equal(f.video.muted, true);
+  assert.equal(f.session.state.audioEnabled, false);
+  assert.equal(f.session.state.connected, true);
+  assert.equal(f.sockets.length, 1);
+});

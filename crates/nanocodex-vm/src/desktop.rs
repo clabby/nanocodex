@@ -1126,6 +1126,66 @@ impl Drop for Desktop {
     }
 }
 
+/// Continuous X11 capture runs separately from the serialized input owner.
+/// The encoder has no account credentials, no audio input, and no frame queue.
+pub fn video_command(runtime: &Path) -> Result<Command> {
+    let display = fs::read_to_string(runtime.join("display"))?;
+    if !display.starts_with(':')
+        || display.len() > 6
+        || !display[1..].bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(invalid("invalid desktop display"));
+    }
+    let mut command = Command::new("ffmpeg");
+    command.env("XAUTHORITY", runtime.join("Xauthority")).args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-f",
+        "x11grab",
+        "-framerate",
+        "60",
+        "-video_size",
+        "1280x800",
+        "-draw_mouse",
+        "1",
+        "-i",
+        &display,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "zerolatency",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "baseline",
+        "-level",
+        "3.2",
+        "-b:v",
+        "6M",
+        "-maxrate",
+        "6M",
+        "-bufsize",
+        "100k",
+        "-g",
+        "30",
+        "-bf",
+        "0",
+        "-x264-params",
+        "aud=1:repeat-headers=1:scenecut=0",
+        "-flush_packets",
+        "1",
+        "-f",
+        "h264",
+        "pipe:1",
+    ]);
+    Ok(command)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1374,64 +1434,4 @@ mod tests {
         assert!(!runtime.join("Xauthority").exists());
         assert!(!Path::new(&socket).exists());
     }
-}
-
-/// Continuous X11 capture runs separately from the serialized input owner.
-/// The encoder has no account credentials, no audio input, and no frame queue.
-pub fn video_command(runtime: &Path) -> Result<Command> {
-    let display = fs::read_to_string(runtime.join("display"))?;
-    if !display.starts_with(':')
-        || display.len() > 6
-        || !display[1..].bytes().all(|b| b.is_ascii_digit())
-    {
-        return Err(invalid("invalid desktop display"));
-    }
-    let mut command = Command::new("ffmpeg");
-    command.env("XAUTHORITY", runtime.join("Xauthority")).args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-f",
-        "x11grab",
-        "-framerate",
-        "60",
-        "-video_size",
-        "1280x800",
-        "-draw_mouse",
-        "1",
-        "-i",
-        &display,
-        "-an",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-tune",
-        "zerolatency",
-        "-pix_fmt",
-        "yuv420p",
-        "-profile:v",
-        "baseline",
-        "-level",
-        "3.2",
-        "-b:v",
-        "6M",
-        "-maxrate",
-        "6M",
-        "-bufsize",
-        "100k",
-        "-g",
-        "30",
-        "-bf",
-        "0",
-        "-x264-params",
-        "aud=1:repeat-headers=1:scenecut=0",
-        "-flush_packets",
-        "1",
-        "-f",
-        "h264",
-        "pipe:1",
-    ]);
-    Ok(command)
 }

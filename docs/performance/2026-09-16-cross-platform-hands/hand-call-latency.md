@@ -25,7 +25,7 @@ not an explanation of all of it.
   First construction still loads discovery. Ordinary turn startup still refreshes
   account tools. Deletion, export, shutdown, lease and generation checks remain.
 - SQL call transitions return their updated row with `UPDATE ... RETURNING`.
-  This removes two follow-up SELECTs from a successful dispatch/result cycle.
+  This removes two follow-up SELECT queries from a successful dispatch/result cycle.
   A failed state comparison still reads the retained row, preserving duplicate,
   replay and conflict handling. This is a query-count reduction; no latency
   improvement is inferred from it.

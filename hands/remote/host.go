@@ -108,6 +108,15 @@ func serveWayland(parent context.Context, config hostConfig) error {
 		}
 		defer capture.close()
 	}
+	var audio *audioCapture
+	if config.capture == nil {
+		audio, err = startDesktopAudio(ctx, diagnostics)
+		if err != nil {
+			logger.Printf("Desktop audio unavailable: %v", err)
+		} else {
+			defer audio.close()
+		}
+	}
 	socket, err := service.socket(ctx)
 	if err != nil {
 		return err
@@ -384,19 +393,25 @@ func serveWayland(parent context.Context, config hostConfig) error {
 		}
 		peer := &hostPeer{connection: connection}
 		peers[id] = peer
-		sender, err := connection.AddTrack(capture.track)
-		if err != nil {
-			remove(id)
-			return err
+		tracks := []webrtc.TrackLocal{capture.track}
+		if audio != nil {
+			tracks = append(tracks, audio.track)
 		}
-		go func() {
-			buffer := make([]byte, 1500)
-			for {
-				if _, _, err := sender.Read(buffer); err != nil {
-					return
-				}
+		for _, track := range tracks {
+			sender, err := connection.AddTrack(track)
+			if err != nil {
+				remove(id)
+				return err
 			}
-		}()
+			go func() {
+				buffer := make([]byte, 1500)
+				for {
+					if _, _, err := sender.Read(buffer); err != nil {
+						return
+					}
+				}
+			}()
+		}
 		ordered := false
 		retransmits := uint16(0)
 		peer.control, err = connection.CreateDataChannel("remote-control-v1", nil)

@@ -172,6 +172,9 @@ function Screen({ hand, onBack }: { hand: RemoteHand; onBack(): void }) {
   return <>
     <div className="remote-screen-toolbar"><button type="button" onClick={onBack}>All screens</button><span role="status">{state.status}</span>
       {!state.connected && <button type="button" disabled={state.connecting} onClick={() => session.current?.reconnect()}>Reconnect</button>}
+      {state.audioAvailable && <button type="button" aria-pressed={Boolean(state.audioEnabled)}
+        onClick={() => { void session.current?.setAudioEnabled(!state.audioEnabled); }}>
+        {state.audioEnabled ? "Mute sound" : "Enable sound"}</button>}
       <button type="button" disabled={!state.connected || !activeHand.controllable} onClick={() => state.controlling ? session.current?.releaseControl() : session.current?.takeControl()}>
         {state.controlling ? "Release control" : "Take control"}</button></div>
     <div className="remote-screen-canvas" tabIndex={0} role="application" aria-label="Remote screen" data-testid="remote-screen"
@@ -185,7 +188,7 @@ function Screen({ hand, onBack }: { hand: RemoteHand; onBack(): void }) {
         const position = point(event.clientX, event.clientY); if (!position) return;
         const scale = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? activeHand.height : 1;
         session.current?.input({ kind: "scroll", ...position, deltaX: Math.min(4096, Math.max(-4096, -event.deltaX * scale)), deltaY: Math.min(4096, Math.max(-4096, -event.deltaY * scale)) });
-      }}><video ref={video} autoPlay playsInline muted data-testid="remote-video" style={{ visibility: state.connected && activeHand.transport !== "frames-v1" ? "visible" : "hidden" }} />
+      }}><video ref={video} autoPlay playsInline muted={!state.audioEnabled} data-testid="remote-video" style={{ visibility: state.connected && activeHand.transport !== "frames-v1" ? "visible" : "hidden" }} />
       <canvas ref={frameCanvas} className="remote-screen-frame" data-testid="remote-frame" aria-label="Remote desktop picture"
         style={{ visibility: state.connected && activeHand.transport === "frames-v1" ? "visible" : "hidden" }} />
       <textarea ref={keyboardInput} className="remote-keyboard-input" aria-label="Remote keyboard" tabIndex={-1}

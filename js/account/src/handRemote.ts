@@ -5,7 +5,7 @@ export type RemoteHand = Readonly<{
   transport?: "webrtc" | "frames-v1";
   frame_window?: number;
 }>;
-export type RemoteState = Readonly<{ status: string; connected: boolean; controlling: boolean; connecting: boolean }>;
+export type RemoteState = Readonly<{ status: string; connected: boolean; controlling: boolean; connecting: boolean; audioAvailable?: boolean; audioEnabled?: boolean }>;
 export type RemoteInput = {
   kind: "move" | "button" | "scroll" | "key" | "text" | "releaseAll";
   x?: number; y?: number; button?: number; down?: boolean; key?: number; text?: string; deltaX?: number; deltaY?: number;
@@ -177,8 +177,20 @@ export class RemoteBrowserSession {
         };
         peer.ontrack = ({ track }) => {
           if (!this.current(epoch)) return;
-          this.video.srcObject = new MediaStream([track]);
-          void this.video.play().catch(() => { if (this.current(epoch)) this.update({ status: "Tap the picture to start video." }); });
+          if (track.kind !== "video" && track.kind !== "audio") return;
+          const stream = this.video.srcObject instanceof MediaStream ? this.video.srcObject : new MediaStream();
+          for (const previous of stream.getTracks()) {
+            if (previous.kind === track.kind) { stream.removeTrack(previous); previous.stop(); }
+          }
+          stream.addTrack(track);
+          this.video.srcObject = stream;
+          this.update({ audioAvailable: stream.getAudioTracks().length > 0 });
+          track.onended = () => {
+            if (!this.current(epoch)) return;
+            stream.removeTrack(track);
+            this.update({ audioAvailable: stream.getAudioTracks().length > 0 });
+          };
+          void this.playMedia(epoch);
         };
         peer.onconnectionstatechange = () => {
           if (!this.current(epoch)) return;
@@ -271,6 +283,25 @@ export class RemoteBrowserSession {
     } catch (error) { if (this.current(epoch)) this.fail(error); }
   }
 
+  /** Called directly by a user gesture so mobile autoplay can unlock sound. */
+  async setAudioEnabled(enabled: boolean): Promise<void> {
+    if (this.closed || this.suspended) return;
+    this.video.muted = !enabled;
+    this.update({ audioEnabled: enabled });
+    await this.playMedia(this.epoch);
+  }
+  private async playMedia(epoch: number): Promise<void> {
+    try { await this.video.play(); }
+    catch {
+      if (!this.current(epoch)) return;
+      // A denied audio autoplay must not prevent the picture from starting.
+      this.video.muted = true;
+      this.update({ audioEnabled: false });
+      try { await this.video.play(); }
+      catch { if (this.current(epoch)) this.update({ status: "Tap the picture to start video." }); }
+    }
+  }
+
   takeControl(): void {
     if (this.state.connected && this.hand.controllable && !this.state.controlling && !this.controlRequested
       && (this.hand.transport === "frames-v1" || this.peer?.connectionState === "connected")) {
@@ -324,6 +355,7 @@ export class RemoteBrowserSession {
     if (this.peer) { this.peer.onconnectionstatechange = this.peer.ontrack = this.peer.onicecandidate = this.peer.ondatachannel = null; this.peer.close(); }
     this.socket = undefined; this.peer = undefined; this.reliable = undefined; this.motion = undefined;
     this.video.srcObject = null;
+    this.update({ audioAvailable: false });
     if (this.canvas) { this.canvas.width = 0; this.canvas.height = 0; }
   }
   private fail(error: unknown): void {

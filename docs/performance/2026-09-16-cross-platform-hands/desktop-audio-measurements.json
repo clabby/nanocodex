@@ -1,0 +1,36 @@
+{
+  "date": "2026-09-16",
+  "method": "Actual Chromium viewer component, production screen publisher and signaling through local server-side authentication proxy; four-second997Hz tone played through desktop output.",
+  "omarchy": {
+    "toneHz": 997,
+    "maximumRms": 0.10857935691395183,
+    "peakHz": 996.09375,
+    "peakDb": -33.32392883300781,
+    "muted": false,
+    "tracks": [
+      {
+        "kind": "audio",
+        "readyState": "live"
+      },
+      {
+        "kind": "video",
+        "readyState": "live"
+      }
+    ],
+    "inbound": [
+      {
+        "kind": "audio",
+        "packetsReceived": 319,
+        "packetsLost": 0,
+        "totalAudioEnergy": 0.09667080433216134,
+        "totalSamplesDuration": 7.819999999999878
+      },
+      {
+        "kind": "video",
+        "packetsReceived": 24472,
+        "packetsLost": 0,
+        "framesDecoded": 377
+      }
+    ]
+  }
+}
