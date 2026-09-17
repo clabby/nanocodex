@@ -34,6 +34,14 @@ The installer bundles FFmpeg for H.264 screen streaming. The stream requests
 source, available CPU, and network. A software-rendered VM does not guarantee
 60 distinct frames per second.
 
+WebRTC needs inbound UDP reachability or a TURN relay. For a VM behind NAT, see
+the [shared video network settings](../../crates/nanocodex-hand/README.md).
+Configure Windows Firewall for the installed `nanocodex2.exe`, the selected UDP
+range, and the intended viewer networks. Windows can create an explicit Block
+rule when its initial firewall prompt is cancelled; that rule takes precedence
+over later Allow rules. Review any such rule before enabling a scoped allowance.
+The installer preserves existing firewall policy.
+
 ## Build
 
 Build `nanocodex2.exe` from the main workspace and `nanocodex-computer.exe` from
