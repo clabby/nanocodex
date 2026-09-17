@@ -26,6 +26,8 @@ mod spinner;
 mod theme;
 #[path = "transcript/mod.rs"]
 mod transcript;
+#[path = "../voice_command.rs"]
+mod voice;
 
 // Keep production components on their normal module paths in this private target.
 mod tui {
