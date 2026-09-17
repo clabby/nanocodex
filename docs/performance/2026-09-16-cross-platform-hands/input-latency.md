@@ -2,15 +2,17 @@
 
 The native Omarchy publisher now forwards complete encoder packets without
 waiting for the following H.264 access-unit delimiter. In the wired 4K test,
-this reduced median input-to-scheduled-presentation latency by 13–15 ms.
+the final restart-safe implementation reduced median input-to-scheduled-
+presentation latency by 9 ms and the 95th percentile by 19 ms.
 
 | Capture framing | Actions | Median | 95th percentile |
 | --- | ---: | ---: | ---: |
 | Previous Annex-B lookahead | 20 | 92.3 ms | 107.2 ms |
-| Explicit encoder packet lengths | 20 | 77.3 ms | 87.2 ms |
-| Explicit lengths, second connection | 20 | 79.7 ms | 92.1 ms |
+| Initial F1 encoder packet lengths | 20 | 77.3 ms | 87.2 ms |
+| Initial F1, second connection | 20 | 79.7 ms | 92.1 ms |
+| Final C1 atomic records | 20 | 83.2 ms | 87.8 ms |
 
-Both new-framing runs had zero decoded-video frame drops and zero video/audio
+All three uncontended new-framing runs had zero decoded-video frame drops and zero video/audio
 packet loss. The session retained 3840×2160 capture at 60 Hz, NVENC at a
 60,000 kbps ceiling, desktop audio, and leased relative pointer input.
 These are short samples on the existing wired network, not a WAN or game-scene
@@ -28,10 +30,14 @@ same monotonic browser clock. It is scheduled presentation timing, not a camera
 measurement of photons from a physical monitor. Samples were separated by
 150 ms; the test released control and removed the temporary application.
 
-The first comparison also reduced median send-to-packet-receive time from
-64.6 to 49.7 ms. This supports the encoder-forwarding path as the source of the
+The final C1 comparison also reduced median send-to-packet-receive time from
+64.6 to 54.2 ms. This supports the encoder-forwarding path as the source of the
 improvement. Original observations and summary statistics are in
 [input-latency-measurements.json](input-latency-measurements.json).
+
+One C1 run overlapped a second fullscreen/control probe and measured 99.8 ms
+median. It is retained in the data as contended and excluded from the table;
+the following uncontended run is the reported final C1 measurement.
 
 A separate experiment set both audio and video receiver `jitterBufferTarget`
 values to zero. Its matched color-toggle median was 98.0 ms versus the normal
@@ -62,9 +68,11 @@ malformed metadata, and legacy Annex-B handling. The staged binary also passed
 an actual host NVENC 4K encode: its declared 125,005-byte frame matched the
 complete H.264 payload exactly.
 
-This change is implemented in the Go companion. The shared Rust native/VM
-publisher still uses delimiter lookahead at the time of this report; its
-cross-platform framed-output port requires its own runtime verification.
+The shared Rust native/VM publisher also forwards explicitly framed encoder
+packets. See the independently verified
+[Windows encoded-frame latency results](windows-encoded-frame-latency.md).
+Its fresh pipe/parser per child uses F1; the Waymote companion uses C1 because
+replacement children inherit the same pipe.
 
 
 Waymote replaces its encoder on resolution/configuration changes using SIGKILL
@@ -76,3 +84,13 @@ pipe, and verifies that only the complete replacement frame is emitted. This
 passes on macOS and Linux; parameter-set changes and byte-at-a-time reads have
 separate coverage. A capture-forwarding error now appears in diagnostics rather
 than being discarded before the generic capture-stopped message.
+
+
+The deployed C1 publisher also passed a live forced-restart test. Three seconds
+into a 15-second published-browser measurement, the encoder helper received
+SIGKILL. Video resumed after a 1.67-second intentional restart gap, with 576
+subsequent frame callbacks and the actual video element still 3840×2160. The
+publisher PID remained unchanged with zero systemd restarts and one viewer
+WebSocket throughout. Across the measurement, 802 video frames decoded without
+drops/loss and 750 audio packets arrived without loss. Audio continued while
+the encoder restarted; the browser was deliberately closed after measurement.

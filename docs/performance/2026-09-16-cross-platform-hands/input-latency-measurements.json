@@ -625,6 +625,348 @@
           "processingMs": 3.4
         }
       ]
+    },
+    "chunked": {
+      "controlGrantMs": 5.300000011920929,
+      "summary": {
+        "callbackMs": {
+          "mean": 91.96159998927105,
+          "median": 90.99999998211842,
+          "p95": 104.09999998807871
+        },
+        "scheduledDisplayMs": {
+          "mean": 99.39499998927121,
+          "median": 99.84999998211879,
+          "p95": 107.00000001192166
+        },
+        "receivedMs": {
+          "mean": 70.84999998927124,
+          "median": 71.84999999403954,
+          "p95": 80.19999998807907
+        }
+      },
+      "media": [
+        {
+          "kind": "audio",
+          "packetsLost": 0,
+          "packetsReceived": 421
+        },
+        {
+          "kind": "video",
+          "framesDecoded": 502,
+          "framesDropped": 0,
+          "packetsLost": 0,
+          "packetsReceived": 2251
+        }
+      ],
+      "samples": [
+        {
+          "callbackMs": 86.49999998807834,
+          "scheduledDisplayMs": 102.99999998807834,
+          "receivedMs": 74.99999998807834,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 90.60000000000036,
+          "scheduledDisplayMs": 89.79999999999927,
+          "receivedMs": 62.100000000000364,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 105.19999996423758,
+          "scheduledDisplayMs": 105.19999996423758,
+          "receivedMs": 80.59999996423721,
+          "processingMs": 3.3
+        },
+        {
+          "callbackMs": 93.6000000119202,
+          "scheduledDisplayMs": 102.00000001192166,
+          "receivedMs": 77.30000001192093,
+          "processingMs": 3.3
+        },
+        {
+          "callbackMs": 89.99999998807834,
+          "scheduledDisplayMs": 106.59999998807871,
+          "receivedMs": 80.19999998807907,
+          "processingMs": 4.8999999999999995
+        },
+        {
+          "callbackMs": 84,
+          "scheduledDisplayMs": 92.29999999999927,
+          "receivedMs": 63.600000000000364,
+          "processingMs": 3.5
+        },
+        {
+          "callbackMs": 91.39999996423649,
+          "scheduledDisplayMs": 91.59999996423721,
+          "receivedMs": 63.69999996423758,
+          "processingMs": 4.3
+        },
+        {
+          "callbackMs": 86.99999998807834,
+          "scheduledDisplayMs": 95.3999999880798,
+          "receivedMs": 71.99999998807834,
+          "processingMs": 5.7
+        },
+        {
+          "callbackMs": 86.29999997615778,
+          "scheduledDisplayMs": 94.69999997615741,
+          "receivedMs": 68.9999999761585,
+          "processingMs": 3.3
+        },
+        {
+          "callbackMs": 96.69999998807907,
+          "scheduledDisplayMs": 96.69999998807907,
+          "receivedMs": 75.8999999880798,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 100.00000001192166,
+          "scheduledDisplayMs": 100.00000001192166,
+          "receivedMs": 65.80000001192093,
+          "processingMs": 2
+        },
+        {
+          "callbackMs": 86.09999998807871,
+          "scheduledDisplayMs": 94.49999998807834,
+          "receivedMs": 71.79999998807943,
+          "processingMs": 3.3
+        },
+        {
+          "callbackMs": 89.79999997615778,
+          "scheduledDisplayMs": 105.4999999761585,
+          "receivedMs": 74.69999997615741,
+          "processingMs": 6.6
+        },
+        {
+          "callbackMs": 104.09999998807871,
+          "scheduledDisplayMs": 112.3999999880798,
+          "receivedMs": 77.3999999880798,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 91.60000000000036,
+          "scheduledDisplayMs": 100,
+          "receivedMs": 71.89999999999964,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 84.79999998807943,
+          "scheduledDisplayMs": 93.09999998807871,
+          "receivedMs": 62.59999998807871,
+          "processingMs": 3.3
+        },
+        {
+          "callbackMs": 81.8999999880798,
+          "scheduledDisplayMs": 98.19999998807907,
+          "receivedMs": 59.799999988079435,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 91.43199996423755,
+          "scheduledDisplayMs": 99.69999996423758,
+          "receivedMs": 70.99999996423685,
+          "processingMs": 3.3
+        },
+        {
+          "callbackMs": 98.70000001192057,
+          "scheduledDisplayMs": 107.00000001192166,
+          "receivedMs": 76.90000001192129,
+          "processingMs": 3.7
+        },
+        {
+          "callbackMs": 99.5,
+          "scheduledDisplayMs": 100.20000000000073,
+          "receivedMs": 65.70000000000073,
+          "processingMs": 3.9
+        }
+      ],
+      "note": "Concurrent fullscreen/control probe; excluded from latency comparison."
+    },
+    "chunked_repeat": {
+      "controlGrantMs": 2.5,
+      "summary": {
+        "callbackMs": {
+          "mean": 76.40820000178837,
+          "median": 77.09999998807962,
+          "p95": 87.19999998807907
+        },
+        "scheduledDisplayMs": {
+          "mean": 81.52000000178823,
+          "median": 83.15000001192129,
+          "p95": 87.79999999999927
+        },
+        "receivedMs": {
+          "mean": 53.680000001787995,
+          "median": 54.200000011921475,
+          "p95": 59.899999999999636
+        }
+      },
+      "media": [
+        {
+          "kind": "audio",
+          "packetsLost": 0,
+          "packetsReceived": 417
+        },
+        {
+          "kind": "video",
+          "framesDecoded": 476,
+          "framesDropped": 0,
+          "packetsLost": 0,
+          "packetsReceived": 2178
+        }
+      ],
+      "samples": [
+        {
+          "callbackMs": 79.5,
+          "scheduledDisplayMs": 87.79999999999927,
+          "receivedMs": 59.899999999999636,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 58.29999997615778,
+          "scheduledDisplayMs": 66.59999997615887,
+          "receivedMs": 44.29999997615778,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 68.49999998807834,
+          "scheduledDisplayMs": 76.79999998807943,
+          "receivedMs": 53.69999998807907,
+          "processingMs": 4.4
+        },
+        {
+          "callbackMs": 72.4999999761585,
+          "scheduledDisplayMs": 80.79999997615778,
+          "receivedMs": 52.499999976158506,
+          "processingMs": 3.5
+        },
+        {
+          "callbackMs": 65.76599998807978,
+          "scheduledDisplayMs": 74.29999998807943,
+          "receivedMs": 47.19999998807907,
+          "processingMs": 6
+        },
+        {
+          "callbackMs": 65.80000002384259,
+          "scheduledDisplayMs": 74.20000002384222,
+          "receivedMs": 45.90000002384113,
+          "processingMs": 3.3
+        },
+        {
+          "callbackMs": 79.30000002384259,
+          "scheduledDisplayMs": 87.60000002384186,
+          "receivedMs": 60.90000002384113,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 75.3999999880798,
+          "scheduledDisplayMs": 83.69999998807907,
+          "receivedMs": 59.19999998807907,
+          "processingMs": 3.8
+        },
+        {
+          "callbackMs": 75.4999999761585,
+          "scheduledDisplayMs": 83.79999997615778,
+          "receivedMs": 55.699999976157414,
+          "processingMs": 3.7
+        },
+        {
+          "callbackMs": 67.5000000238415,
+          "scheduledDisplayMs": 75.80000002384259,
+          "receivedMs": 48.500000023841494,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 85.80000001192093,
+          "scheduledDisplayMs": 86.50000001192166,
+          "receivedMs": 54.90000001192129,
+          "processingMs": 4
+        },
+        {
+          "callbackMs": 81.80000002384259,
+          "scheduledDisplayMs": 81.80000002384259,
+          "receivedMs": 55.20000002384222,
+          "processingMs": 4.2
+        },
+        {
+          "callbackMs": 85.80000002384259,
+          "scheduledDisplayMs": 85.5000000238415,
+          "receivedMs": 56.000000023841494,
+          "processingMs": 3.7
+        },
+        {
+          "callbackMs": 75.26599999999962,
+          "scheduledDisplayMs": 83.5,
+          "receivedMs": 56.100000000000364,
+          "processingMs": 3.5
+        },
+        {
+          "callbackMs": 83.10000000000036,
+          "scheduledDisplayMs": 83.79999999999927,
+          "receivedMs": 54.70000000000073,
+          "processingMs": 3.7
+        },
+        {
+          "callbackMs": 78.70000000000073,
+          "scheduledDisplayMs": 79.20000000000073,
+          "receivedMs": 52.899999999999636,
+          "processingMs": 3.8
+        },
+        {
+          "callbackMs": 82.83200002384183,
+          "scheduledDisplayMs": 82.80000002384259,
+          "receivedMs": 53.70000002384222,
+          "processingMs": 3.3
+        },
+        {
+          "callbackMs": 65.39999997615814,
+          "scheduledDisplayMs": 73.69999997615741,
+          "receivedMs": 49.699999976157414,
+          "processingMs": 3.4
+        },
+        {
+          "callbackMs": 87.19999998807907,
+          "scheduledDisplayMs": 87.19999998807907,
+          "receivedMs": 53.09999998807871,
+          "processingMs": 3.6
+        },
+        {
+          "callbackMs": 94.20000002384222,
+          "scheduledDisplayMs": 95.0000000238415,
+          "receivedMs": 59.500000023841494,
+          "processingMs": 3.3
+        }
+      ],
+      "note": "Final shipped C1 atomic framing; no concurrent Omarchy viewer/control probe."
     }
+  },
+  "liveEncoderRestart": {
+    "killUnixMs": 1789607339038,
+    "measurementStartUnixMs": 1789607336039.502,
+    "measurementEndUnixMs": 1789607351041.617,
+    "videoWidth": 3840,
+    "videoHeight": 2160,
+    "websocketConnections": 1,
+    "frameCallbacksBeforeGap": 183,
+    "frameCallbacksAfterGap": 576,
+    "restartGapMs": 1666.6000000000004,
+    "mediaDelta": {
+      "video": {
+        "framesDecoded": 802,
+        "framesDropped": 0,
+        "packetsReceived": 52028,
+        "packetsLost": 0
+      },
+      "audio": {
+        "framesDecoded": 0,
+        "framesDropped": 0,
+        "packetsReceived": 750,
+        "packetsLost": 0
+      }
+    },
+    "publisherPidBeforeAndAfter": 200953,
+    "systemdRestarts": 0,
+    "note": "Video resumes on same browser peer after intentional encoder SIGKILL; audio continues. Socket close occurs during deliberate browser teardown after measurement."
   }
 }
