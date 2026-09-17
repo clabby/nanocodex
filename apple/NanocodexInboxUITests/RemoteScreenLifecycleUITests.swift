@@ -32,7 +32,7 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         XCTAssertTrue(canvas.exists)
         let initialHeight = canvas.frame.height
         // Drag the system sheet's navigation bar, outside the remote canvas.
-        let bar = app.navigationBars["Dashboard"]
+        let bar = app.navigationBars.firstMatch
         let handle = bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
         handle.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)))
         let expanded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -55,7 +55,7 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         screens.tap(); XCTAssertTrue(desktop.waitForExistence(timeout: 10)); desktop.tap(); requireWatching()
         let card = XCTAttachment(screenshot: app.screenshot())
         card.name = "native-screen-card-medium"; card.lifetime = .keepAlways; add(card)
-        let dismissHandle = app.navigationBars["Dashboard"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        let dismissHandle = app.navigationBars.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
         dismissHandle.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
         XCTAssertTrue(canvas.waitForNonExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, draft)

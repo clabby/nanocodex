@@ -29,7 +29,7 @@ final class AgentNotificationUITests: XCTestCase {
         app.launchEnvironment["NANOCODEX_DEMO_PROFILE"] = profile
         app.launch()
         if springboard.alerts.buttons["Allow"].waitForExistence(timeout: 5) { springboard.alerts.buttons["Allow"].tap() }
-        XCTAssertTrue(app.buttons["tab-overview"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 20))
         openNotifications()
         let inbox = thread("Build the agent inbox"), data = thread("Tighten the fuel forecast")
         capture("agent-thread-notifications-initial")
@@ -62,29 +62,29 @@ final class AgentNotificationUITests: XCTestCase {
         XCTAssertTrue(data.exists)
         // A foreground refresh must not reinsert the cleared thread.
         app.activate()
-        XCTAssertTrue(app.buttons["tab-overview"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 10))
         openNotifications()
         XCTAssertFalse(inbox.exists)
         XCTAssertTrue(data.exists)
         // iOS 26's simulator drops synthesized notification taps. Exercise
         // the exact destination here; native activation is checked manually.
         app.open(URL(string: "nanocodex://activity?account=demo.\(profile)&agent=data")!)
-        XCTAssertTrue(app.buttons["browser-tab:data"].waitForExistence(timeout: 20))
-        XCTAssertTrue(app.buttons["browser-tab:data"].isSelected)
+        XCTAssertTrue(app.buttons["conversation-title:data"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["conversation-title:data"].isSelected)
         capture("agent-thread-notification-opened")
         // XCTest preserves demo configuration when launching an explicit URL.
         // A system cold-launch tap does not preserve test launch environment.
         app.terminate()
         app.open(URL(string: "nanocodex://activity?account=demo.\(profile)&agent=inbox")!)
-        XCTAssertTrue(app.buttons["browser-tab:inbox"].waitForExistence(timeout: 20))
-        XCTAssertTrue(app.buttons["browser-tab:inbox"].isSelected)
+        XCTAssertTrue(app.buttons["conversation-title:inbox"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["conversation-title:inbox"].isSelected)
         openNotifications()
         XCTAssertFalse(inbox.exists)
         app.activate()
         app.terminate()
         app.launchEnvironment["NANOCODEX_DEMO_ACTIVITY"] = "0"
         app.launch()
-        XCTAssertTrue(app.buttons["tab-overview"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 10))
         openNotifications()
         XCTAssertFalse(inbox.exists)
         XCTAssertFalse(data.exists)

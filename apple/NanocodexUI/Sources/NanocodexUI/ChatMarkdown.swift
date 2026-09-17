@@ -7,11 +7,12 @@ private let markdownPerformanceLog = OSLog(subsystem: "xyz.paradigm.centaur", ca
 /// This view supplies the block layout that SwiftUI Text does not render.
 public struct ChatMarkdown: View {
     private let text: String
+    private let compact: Bool
 
-    public init(text: String) { self.text = text }
+    public init(text: String, compact: Bool = false) { self.text = text; self.compact = compact }
 
     public var body: some View {
-        ChatMarkdownContent(text: text).equatable()
+        ChatMarkdownContent(text: text, compact: compact).equatable()
     }
 }
 
@@ -19,6 +20,7 @@ public struct ChatMarkdown: View {
 /// reparse unchanged messages. Environment changes still update this view.
 private struct ChatMarkdownContent: View, Equatable {
     let text: String
+    let compact: Bool
     @StateObject private var renderer = ChatMarkdownRenderer()
     #if os(macOS)
     @ScaledMetric(relativeTo: .body) private var textSize = 16
@@ -26,15 +28,15 @@ private struct ChatMarkdownContent: View, Equatable {
     @ScaledMetric(relativeTo: .body) private var textSize = 17
     #endif
 
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.text == rhs.text }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.text == rhs.text && lhs.compact == rhs.compact }
 
     var body: some View {
         Group {
             if let rendered = renderer.rendered, rendered.source == text || text.hasPrefix(rendered.source) {
                 content(rendered.blocks)
             } else {
-                Text(text).lineSpacing(5).textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(text).lineSpacing(compact ? 3 : 5).textSelection(.enabled)
+                    .frame(maxWidth: compact ? nil : .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -44,7 +46,7 @@ private struct ChatMarkdownContent: View, Equatable {
     }
 
     private func content(_ blocks: [ChatMarkdownBlock]) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: compact ? 10 : 14) {
             ForEach(blocks) { block in
                 switch block.kind {
                 case .code(let language): code(block.text, language: language)
@@ -55,10 +57,10 @@ private struct ChatMarkdownContent: View, Equatable {
                         if let marker { Text(marker).foregroundStyle(.secondary).frame(minWidth: 14, alignment: .trailing) }
                         Text(inline(block.text))
                             .font(.system(size: heading > 0 ? textSize + (heading == 1 ? 8 : heading == 2 ? 4 : 2) : textSize, weight: heading > 0 ? .semibold : .regular))
-                            .lineSpacing(5)
+                            .lineSpacing(compact ? 3 : 5)
                             .foregroundStyle(quote ? Color.secondary : .primary)
                             .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(maxWidth: compact ? nil : .infinity, alignment: .leading)
                             .accessibilityAddTraits(heading > 0 ? .isHeader : [])
                     }
                     .fixedSize(horizontal: false, vertical: true)
@@ -67,7 +69,7 @@ private struct ChatMarkdownContent: View, Equatable {
             }
         }
         .font(.system(size: textSize))
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: compact ? nil : .infinity, alignment: .leading)
     }
 
     private func inline(_ value: AttributedString) -> AttributedString {

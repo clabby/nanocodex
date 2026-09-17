@@ -21,35 +21,31 @@ private enum Ink {
     static let muted = Color.secondary
     static let accent = Color.primary
     static let amber = Color.secondary
+    static let assistant = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark ? .secondarySystemGroupedBackground
+            : UIColor(red: 0.91, green: 0.91, blue: 0.92, alpha: 1)
+    })
+    static let running = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark ? UIColor(red: 0.35, green: 0.85, blue: 0.5, alpha: 1)
+            : UIColor(red: 0.17, green: 0.45, blue: 0.24, alpha: 1)
+    })
+    static let userMessage = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark ? UIColor(red: 0.125, green: 0.23, blue: 0.32, alpha: 1)
+            : UIColor(red: 0.86, green: 0.93, blue: 1, alpha: 1)
+    })
 }
 
 struct InboxView: View {
     @ObservedObject var model: InboxModel
-    @State private var showOverview = false
+    @State private var showConversations = false
+    @State private var drawerTranslation: CGFloat = 0
     @State private var readingPositions = ConversationReadingPositions()
     @State private var showScheduledJobs = false
     @State private var showConnectors = false
     @State private var showSettings = false
     @State private var showScreens = false
-    @State private var screenFraction = 0.46
-    @GestureState private var screenResize: CGFloat = 0
-    @State private var tabScrub: TabScrub?
-    @State private var tabScrubEdge = 0
-    @State private var toolbarBounds = CGRect.zero
-    @GestureState private var draggingTabs = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.scenePhase) private var scenePhase
-    @ScaledMetric(relativeTo: .subheadline) private var tabWidth = 154.0
-    @ScaledMetric(relativeTo: .subheadline) private var tabHeight = 44.0
     @State private var composerFocused = false
-
-    private struct TabScrub {
-        let ids: [String]
-        var index: Int
-        var translation: CGFloat = 0
-        var remainder: CGFloat = 0
-        var selectedID: String { ids[index] }
-    }
 
     var body: some View {
         NavigationStack {
@@ -76,22 +72,31 @@ struct InboxView: View {
                         .navigationBarTitleDisplayMode(.inline)
                         #endif
                 }
-                .navigationDestination(isPresented: $showSettings) {
-                    settings
-                        #if os(iOS)
-                        .toolbar(.visible, for: .navigationBar)
-                        .navigationBarTitleDisplayMode(.inline)
-                        #endif
-                }
         }
         .foregroundStyle(Ink.text)
         .tint(Ink.accent)
-        .fullScreenCover(isPresented: $showOverview) {
-            ConversationOverview(model: model) { id in
-                selectConversation(id)
-                showOverview = false
+        .sheet(isPresented: $showSettings) {
+            NavigationStack {
+                settings
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showSettings = false }
+                        }
+                    }
             }
             .tint(Ink.accent)
+            .presentationDragIndicator(.visible)
+            .presentationCornerRadius(30)
+        }
+        .sheet(isPresented: $showScreens) {
+            if let service = model.remoteService {
+                NavigationStack {
+                    RemoteDashboard(service: service, onClose: { showScreens = false })
+                }
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(30)
+            }
         }
         .sheet(isPresented: $model.showContext) { ContextInboxView(model: model).tint(Ink.accent) }
         .onChange(of: model.focused?.activeTurns ?? []) { _, turns in
@@ -106,23 +111,9 @@ struct InboxView: View {
         }
         .onChange(of: model.connected) { _, connected in
             if connected && model.musicConnectorToOpen != nil { showConnectors = true }
-            if !connected { showScreens = false; showScheduledJobs = false; showConnectors = false; showSettings = false; showOverview = false; readingPositions.values.removeAll() }
+            if !connected { showConversations = false; showScreens = false; showScheduledJobs = false; showConnectors = false; showSettings = false; readingPositions.values.removeAll() }
         }
-        .onChange(of: draggingTabs) { _, dragging in
-            if !dragging { tabScrub = nil; tabScrubEdge = 0 }
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase != .active { tabScrub = nil; tabScrubEdge = 0 }
-        }
-        .task(id: tabScrubEdge) {
-            guard tabScrubEdge != 0 else { return }
-            let direction = tabScrubEdge
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .milliseconds(90)) } catch { return }
-                guard let scrub = tabScrub else { return }
-                moveTabScrub(to: scrub.index + direction)
-            }
-        }
+
     }
 
     private var inbox: some View {
@@ -131,28 +122,91 @@ struct InboxView: View {
             if model.restoringAccount {
                 accountRestoration
             } else if model.connected {
-                inboxContent
+                conversationWorkspace
             } else { ConnectView(model: model) }
+        }
+    }
+    private var conversationWorkspace: some View {
+        GeometryReader { geometry in
+            let width = min(geometry.size.width - 24, 420)
+            let reveal = showConversations ? width + drawerTranslation : drawerTranslation
+            ZStack(alignment: .leading) {
+                if showConversations || drawerTranslation > 0 {
+                    ConversationDrawer(model: model, select: { id in
+                        selectConversation(id)
+                        setConversationsVisible(false)
+                    }, close: { setConversationsVisible(false) }, create: createAgent,
+                    settings: { showSettings = true })
+                    .frame(width: width, height: geometry.size.height)
+                    // Slide the conversation above a stationary list. Moving
+                    // a newly inserted native scroll view can strand its rows
+                    // offscreen when the same drag dismisses the keyboard.
+                    .allowsHitTesting(showConversations)
+                    .accessibilityHidden(!showConversations)
+                    .transition(.opacity)
+                }
+                // Keep the transcript and editor mounted. Opening navigation must
+                // not rebuild history, lose a draft, or start preview streams.
+                inboxContent
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .background(Ink.background)
+                    .clipShape(RoundedRectangle(cornerRadius: reveal > 0 ? 28 : 0))
+                    .shadow(color: .black.opacity(reveal > 0 ? 0.12 : 0), radius: 16, x: -4)
+                    .overlay {
+                        if showConversations {
+                            Color.clear.contentShape(Rectangle())
+                                .onTapGesture { setConversationsVisible(false) }
+                        }
+                    }
+                    .accessibilityHidden(showConversations)
+                    .offset(x: reveal)
+            }
+            .clipped()
+            .contentShape(Rectangle())
+            .simultaneousGesture(DragGesture(minimumDistance: 16)
+                .onChanged { value in
+                    // Reserve navigation for a rightward pull from the left
+                    // edge. Code blocks and transcript swipes keep their input.
+                    guard showConversations || value.startLocation.x <= 28,
+                          abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
+                    if showConversations {
+                        drawerTranslation = max(-width, min(0, value.translation.width))
+                    } else if value.translation.width > 0 {
+                        composerFocused = false
+                        drawerTranslation = min(width, value.translation.width)
+                    }
+                }
+                .onEnded { value in
+                    guard showConversations || value.startLocation.x <= 28 else { return }
+                    let horizontal = abs(value.translation.width) > abs(value.translation.height) * 1.5
+                    let visible: Bool
+                    if showConversations {
+                        visible = !(horizontal && (value.translation.width < -width * 0.25
+                            || value.predictedEndTranslation.width < -width * 0.5))
+                    } else {
+                        visible = horizontal && (value.translation.width > width * 0.25
+                            || value.predictedEndTranslation.width > width * 0.5)
+                    }
+                    setConversationsVisible(visible)
+                })
+        }
+    }
+    private func setConversationsVisible(_ visible: Bool) {
+        composerFocused = false
+        withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.92)) {
+            drawerTranslation = 0
+            showConversations = visible
         }
     }
     private var inboxContent: some View {
         VStack(spacing: 0) {
-            browserTabs.padding(.vertical, 4)
-                .modifier(InboxHeaderGlass())
-                .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 6)
-            GeometryReader { geometry in
-                VStack(spacing: 0) {
-                    if showScreens, let service = model.remoteService {
-                        let available = geometry.size.height
-                        let height = screenHeight(available: available, translation: screenResize)
-                        RemoteDashboard(service: service, onClose: { showScreens = false })
-                            .id(ObjectIdentifier(service)).frame(height: height).clipped()
-                        screenDivider(available: available)
-                    }
+            // Scrolled content can retain offscreen hit regions at large text
+            // sizes. Keep navigation above those regions as well as visually.
+            conversationHeader.zIndex(1)
+            Group {
                     if let identity = model.focusedConversationIdentity {
                         ConversationView(model: model, identity: identity, readingPositions: readingPositions).id(identity)
                     } else { emptyState.frame(maxWidth: .infinity, maxHeight: .infinity) }
-                }
             }
             .overlay(alignment: .topTrailing) {
                 // A delayed reconnect must not push the transcript down while
@@ -180,81 +234,76 @@ struct InboxView: View {
                     }).frame(maxWidth: 620)
                 }
                 browserToolbar
-            }.background(Ink.background)
-        }
-    }
-
-    private var browserTabs: some View {
-        // Capture selection once. A lazy strip may evaluate distant tabs during
-        // layout; resolving the focused card inside each label makes that work
-        // quadratic in the number of conversations.
-        let selectedID = model.deck.focusedID
-        let highlightedID = tabScrub?.selectedID ?? selectedID
-        let cards = model.tabCards
-        return GeometryReader { geometry in
-            let width = min(tabWidth, geometry.size.width)
-            ScrollViewReader { scroll in
-                ScrollView(.horizontal) {
-                    LazyHStack(spacing: 6) {
-                        ForEach(cards) { card in
-                            Button { selectConversation(card.id) } label: {
-                                HStack(spacing: 6) {
-                                    Text(card.title).font(.subheadline.weight(highlightedID == card.id ? .semibold : .regular))
-                                        .lineLimit(1).frame(maxWidth: width - 24)
-                                }
-                                .padding(.horizontal, 12).frame(height: tabHeight - 8)
-                                .contentShape(Rectangle())
-                            }
-                            // Stable widths keep distant selections accurate in a lazy strip.
-                            .frame(width: width, height: tabHeight).id(card.id)
-                            .accessibilityLabel(card.title)
-                            .accessibilityValue(card.status)
-                            .accessibilityAddTraits(selectedID == card.id ? [.isSelected] : [])
-                            .accessibilityIdentifier("browser-tab:" + card.id)
-                        }
-                    }
-                }
-                .scrollIndicators(.hidden)
-                .onChange(of: highlightedID, initial: true) { _, id in
-                    guard let id else { return }
-                    withAnimation(tabScrub == nil || reduceMotion ? nil : .interactiveSpring(response: 0.18, dampingFraction: 0.92)) {
-                        scroll.scrollTo(id, anchor: .center)
-                    }
-                }
             }
-            .accessibilityIdentifier("browser-tabs")
+            .padding(.bottom, 4)
+            .background {
+                LinearGradient(colors: [Ink.background.opacity(0), Ink.background, Ink.background], startPoint: .top, endPoint: .bottom)
+                    .ignoresSafeArea(edges: .bottom)
+            }
         }
-        .buttonStyle(.plain).padding(.horizontal, 8)
-        .frame(height: tabHeight)
     }
 
-    private func screenHeight(available: CGFloat, translation: CGFloat = 0) -> CGFloat {
-        let maximum = max(0, available - 100 - 24)
-        return min(max(100, available * screenFraction + translation), maximum)
+    private var conversationHeader: some View {
+        let card = model.focused
+        return HStack(spacing: 12) {
+            Button { setConversationsVisible(true) } label: {
+                Image(systemName: "line.3.horizontal").frame(width: 44, height: 44).contentShape(Rectangle())
+            }
+            .modifier(InboxHeaderGlass())
+            .accessibilityLabel("Conversations").accessibilityIdentifier("conversation-drawer-open")
+            Button { setConversationsVisible(true) } label: {
+                VStack(spacing: 3) {
+                    Text("Nanocodex").font(.caption2.weight(.medium)).foregroundStyle(Ink.muted).lineLimit(1)
+                    HStack(spacing: 6) {
+                        if card?.isRunning == true {
+                            Circle().fill(Ink.running).frame(width: 6, height: 6).accessibilityHidden(true)
+                        }
+                        Text(card?.title ?? "New conversation")
+                            .font(.subheadline.weight(.semibold)).lineLimit(1)
+                    }
+                }
+                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel(card?.title ?? "New conversation")
+            .accessibilityValue(card?.status ?? "")
+            .accessibilityAddTraits(.isSelected)
+            .accessibilityIdentifier("conversation-title:" + (card?.id ?? "empty"))
+            appMenu.modifier(InboxHeaderGlass())
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 18, weight: .medium))
+        .padding(.horizontal, 16).padding(.vertical, 6)
     }
 
-    private func screenDivider(available: CGFloat) -> some View {
-        Capsule().fill(Ink.muted.opacity(0.45)).frame(width: 36, height: 4)
-            .frame(maxWidth: .infinity).frame(height: 24).contentShape(Rectangle())
-            .gesture(DragGesture().updating($screenResize) { value, state, _ in state = value.translation.height }
-                .onEnded { value in
-                    let height = screenHeight(available: available, translation: value.translation.height)
-                    screenFraction = min(0.75, max(0.25, height / max(1, available)))
-                })
-            .accessibilityElement().accessibilityLabel("Screen height")
-            .accessibilityIdentifier("screen-pane-divider")
+    private var appMenu: some View {
+        Menu {
+            Button { composerFocused = false; showScheduledJobs = true } label: {
+                Label("Scheduled jobs", systemImage: "clock")
+            }.accessibilityIdentifier("inbox-scheduled-jobs")
+            if !model.isDemo {
+                Button { composerFocused = false; showConnectors = true } label: {
+                    Label("Connectors", systemImage: "link")
+                }.accessibilityIdentifier("inbox-connectors")
+            }
+            Button { composerFocused = false; showSettings = true } label: {
+                Label("Account settings", systemImage: "gearshape")
+            }
+        } label: {
+            Image(systemName: "ellipsis").frame(width: 44, height: 44).contentShape(Rectangle())
+        }.accessibilityLabel("App menu").accessibilityIdentifier("app-menu")
     }
 
     private var browserToolbar: some View {
         HStack(spacing: 0) {
             Button { composerFocused = false; model.back() } label: {
-                Image(systemName: "chevron.left").frame(width: 44, height: 44)
+                Image(systemName: "chevron.left").frame(width: 44, height: 44).contentShape(Rectangle())
             }
             .accessibilityLabel("Back").accessibilityIdentifier("conversation-back")
             .disabled(!model.canGoBack)
             Spacer(minLength: 0)
             Button { composerFocused = false; showScreens.toggle() } label: {
-                Image(systemName: "display").frame(width: 44, height: 44)
+                Image(systemName: "display").frame(width: 44, height: 44).contentShape(Rectangle())
                     .background(showScreens ? Ink.surface : Color.clear, in: RoundedRectangle(cornerRadius: 10))
             }
             .accessibilityLabel("Remote screens").disabled(model.remoteService == nil)
@@ -262,92 +311,22 @@ struct InboxView: View {
             .accessibilityIdentifier("conversation-remote-screens")
             Spacer(minLength: 0)
             Button(action: createAgent) {
-                Image(systemName: "plus").frame(width: 44, height: 44)
+                Image(systemName: "plus").frame(width: 44, height: 44).contentShape(Rectangle())
             }
             .accessibilityLabel("New conversation").accessibilityIdentifier("new-conversation")
             .keyboardShortcut("n", modifiers: .command)
             Spacer(minLength: 0)
-            Button {
-                guard !draggingTabs else { return }
-                composerFocused = false; showOverview = true
-            } label: {
-                Text(String(model.tabCards.count)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
-                    .frame(minWidth: 23, minHeight: 25)
-                    .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Ink.text, lineWidth: 1.5))
-                    .frame(width: 44, height: 44)
+            Button { composerFocused = false; model.showContext = true } label: {
+                Image(systemName: "tray").frame(width: 44, height: 44).contentShape(Rectangle())
             }
-            .accessibilityLabel("Conversation overview").accessibilityValue("\(model.tabCards.count) active conversations")
-            .accessibilityHint("Tap to show windows. Drag left or right to move through tabs; hold at an edge to keep scrolling.")
-            .accessibilityIdentifier("tab-overview")
-            .highPriorityGesture(tabScrubGesture)
-            .accessibilityAdjustableAction { direction in
-                let ids = model.tabCards.map(\.id)
-                guard let current = ids.firstIndex(of: model.focused?.id ?? "") else { return }
-                let next = direction == .increment ? current + 1 : current - 1
-                if ids.indices.contains(next) { selectConversation(ids[next]) }
-            }
-            Spacer(minLength: 0)
-            Menu {
-                Button { composerFocused = false; showScheduledJobs = true } label: {
-                    Label("Scheduled jobs", systemImage: "clock")
-                }.accessibilityIdentifier("inbox-scheduled-jobs")
-                if !model.isDemo {
-                    Button { composerFocused = false; showConnectors = true } label: {
-                        Label("Connectors", systemImage: "link")
-                    }.accessibilityIdentifier("inbox-connectors")
-                }
-                Button { composerFocused = false; showSettings = true } label: {
-                    Label("Account settings", systemImage: "gearshape")
-                }
-            } label: {
-                Image(systemName: "ellipsis").frame(width: 44, height: 44)
-            }.accessibilityLabel("App menu").accessibilityIdentifier("app-menu")
+            .accessibilityLabel("Context from other apps").accessibilityIdentifier("conversation-context")
         }
-        .font(.system(size: 20, weight: .medium)).buttonStyle(.plain)
-        .padding(.horizontal, 16).padding(.bottom, 2).frame(maxWidth: 620)
-        .frame(maxWidth: .infinity).background(Ink.background)
-        .overlay(alignment: .top) { Rectangle().fill(Ink.border.opacity(0.35)).frame(height: 0.5) }
-        .background(GeometryReader { geometry in
-            Color.clear.onAppear { toolbarBounds = geometry.frame(in: .global) }
-                .onChange(of: geometry.frame(in: .global)) { _, frame in toolbarBounds = frame }
-        })
-    }
-
-    private var tabScrubGesture: some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .global)
-            .updating($draggingTabs) { _, dragging, _ in dragging = true }
-            .onChanged { value in
-                if tabScrub == nil {
-                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                    let ids = model.tabCards.map(\.id)
-                    guard ids.count > 1, let origin = ids.firstIndex(of: model.focused?.id ?? "") else { return }
-                    tabScrub = TabScrub(ids: ids, index: origin)
-                }
-                guard var scrub = tabScrub else { return }
-                scrub.remainder += value.translation.width - scrub.translation
-                scrub.translation = value.translation.width
-                let steps = Int(scrub.remainder / 28)
-                scrub.remainder -= CGFloat(steps) * 28
-                tabScrub = scrub
-                moveTabScrub(to: scrub.index + steps)
-                tabScrubEdge = value.location.x < toolbarBounds.minX + 24 ? -1
-                    : value.location.x > toolbarBounds.maxX - 24 ? 1 : 0
-            }
-            .onEnded { _ in
-                let selected = tabScrub?.selectedID
-                tabScrub = nil; tabScrubEdge = 0
-                // Scrubbing only moves the lightweight strip. Load history once,
-                // after release, instead of opening every conversation passed.
-                if let selected { selectConversation(selected) }
-            }
-    }
-
-    private func moveTabScrub(to index: Int) {
-        guard var scrub = tabScrub else { return }
-        let next = min(max(index, 0), scrub.ids.count - 1)
-        guard next != scrub.index else { return }
-        scrub.index = next; tabScrub = scrub
-        UISelectionFeedbackGenerator().selectionChanged()
+        .font(.system(size: 20, weight: .regular)).buttonStyle(.plain)
+        .padding(.horizontal, 10).padding(.vertical, 3)
+        .modifier(InboxHeaderGlass())
+        .frame(maxWidth: 420)
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity)
     }
 
     private func selectConversation(_ id: String) {
@@ -421,8 +400,8 @@ struct InboxView: View {
                 }
             }
             Section("Controls") {
-                Text("Tap a tab at the top to switch conversations. The bottom bar has Back, Screens, + for a new conversation, the tab selector, and the app menu. Tap the tab selector to see all windows, or drag it to switch tabs.")
-                Text("The overview shows the latest conversation history. A green border identifies running agents. Drafts and reading positions stay with each conversation.").font(.caption)
+                Text("Open Conversations at the top to search and switch agents. The floating dock has Back, Screens, + for a new conversation, and captured context. Use the sidebar to switch conversations.")
+                Text("The sidebar lists your conversations. Green identifies running agents. Drafts and reading positions stay with each conversation.").font(.caption)
                 Text("Scroll up to read earlier messages. Send queues a message; Steer now updates the current turn without stopping it. ⌘Return sends your message.").font(.caption)
             }
         }
@@ -435,7 +414,7 @@ struct InboxView: View {
         #if os(iOS)
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
         #endif
-        showOverview = false
+        setConversationsVisible(false)
         model.newAgent()
     }
 
@@ -454,243 +433,129 @@ private struct InboxHeaderGlass: ViewModifier {
     }
 }
 
-private struct ConversationOverview: View {
+/// Navigation uses roster summaries only, without parsing Markdown or starting preview streams.
+private struct ConversationDrawer: View {
     @ObservedObject var model: InboxModel
-    var select: (String) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    let select: (String) -> Void
+    let close: () -> Void
+    let create: () -> Void
+    let settings: () -> Void
     @State private var query = ""
-    @State private var runningOnly = false
-    @State private var showingClosed = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var order: [String]
 
-    init(model: InboxModel, select: @escaping (String) -> Void) {
-        self.model = model
-        self.select = select
-        _order = State(initialValue: model.overviewCards.sorted(by: AgentCard.mostRecentFirst).map(\.id))
+    init(model: InboxModel, select: @escaping (String) -> Void, close: @escaping () -> Void,
+         create: @escaping () -> Void, settings: @escaping () -> Void) {
+        self.model = model; self.select = select; self.close = close
+        self.create = create; self.settings = settings
+        _order = State(initialValue: model.cards.sorted(by: AgentCard.mostRecentFirst).map(\.id))
     }
 
     private var visibleCards: [AgentCard] {
-        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let source = showingClosed ? model.closedConversationCards : model.overviewCards
-        let cards = Dictionary(uniqueKeysWithValues: source.map { ($0.id, $0) })
-        let ordered = showingClosed ? source : order.compactMap { cards[$0] }
-        return ordered.filter { card in
-            (!runningOnly || card.isRunning) && (text.isEmpty || card.title.localizedCaseInsensitiveContains(text)
-                || card.id.localizedCaseInsensitiveContains(text) || card.preview.localizedCaseInsensitiveContains(text))
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Include previously hidden tabs: navigation no longer has a hidden state.
+        let byID = Dictionary(uniqueKeysWithValues: model.cards.map { ($0.id, $0) })
+        let cards = order.compactMap { byID[$0] }
+        return cards.filter { card in
+            search.isEmpty
+                || card.title.localizedCaseInsensitiveContains(search)
+                || card.id.localizedCaseInsensitiveContains(search)
+                || card.preview.localizedCaseInsensitiveContains(search)
         }
     }
 
-    private func overviewDescription(_ card: AgentCard) -> String {
-        let latest = model.overviewRows(for: card.id).last {
-            ($0.role == "You" || ($0.role == "Agent" && $0.agentID == nil && $0.phase != "commentary")) && !$0.text.isEmpty
+    private func conversationRow(_ card: AgentCard) -> some View {
+        let preview = String(card.preview.prefix(160))
+        // A roster entry has no activity state yet. Do not present the model's
+        // initial "Checking" value as ongoing work in every conversation.
+        let knownStatus = card.isRunning ? "Running" : card.status == "Checking" ? "" : card.status
+        let subtitle = card.error != nil ? "Couldn’t refresh" : card.isRunning ? card.activitySummary : (preview.isEmpty ? knownStatus : preview)
+        let status = [knownStatus, preview, card.error ?? ""].filter { !$0.isEmpty }.joined(separator: ". ")
+        return HStack(alignment: .top, spacing: 10) {
+            Image(systemName: card.isRunning ? "circle.fill" : card.error != nil ? "exclamationmark.circle" : "bubble.left")
+                .font(.system(size: card.isRunning ? 8 : 15))
+                .foregroundStyle(card.isRunning ? Ink.running : Ink.muted)
+                .frame(width: 18, height: 22).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(card.title).font(.subheadline.weight(model.focused?.id == card.id ? .semibold : .regular))
+                    .lineLimit(2).foregroundStyle(card.isRunning ? Ink.running : Ink.text)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption).foregroundStyle(Ink.muted).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
         }
-        let text = latest.map { String((ContextPrompt.separate($0.text)?.request ?? $0.text).suffix(600)) } ?? ""
-        return card.status + (text.isEmpty ? "" : ". " + text)
+        .padding(12).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+        .background(model.focused?.id == card.id ? Ink.surface : Color.clear, in: RoundedRectangle(cornerRadius: 18))
+        .contentShape(Rectangle())
+        // Tap recognition must fail when dragging. A plain Button can fire
+        // on release after the drawer's simultaneous swipe gesture.
+        .onTapGesture { select(card.id) }
+        .accessibilityRepresentation {
+            Button(card.title) { select(card.id) }
+                .accessibilityValue(status)
+                .accessibilityAddTraits(model.focused?.id == card.id ? [.isSelected] : [])
+                .accessibilityIdentifier("conversation-row:" + card.id)
+        }
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Picker("Conversations", selection: $runningOnly) {
-                    Text("All").tag(false)
-                    Text("Running").tag(true)
-                }.pickerStyle(.segmented).padding(.horizontal, 16).padding(.top, 8)
-                    .accessibilityIdentifier("overview-filter")
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: dynamicTypeSize.isAccessibilitySize ? 280 : 155), spacing: 14)], spacing: 18) {
-                    ForEach(visibleCards) { card in
-                        ConversationOverviewCard(model: model, card: card,
-                            description: overviewDescription(card), canClose: !showingClosed,
-                            select: { select(card.id) }, close: {
-                                withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.86)) {
-                                    model.closeConversationTab(card.id)
-                                }
-                            })
-                            .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
-                        .onAppear { model.setOverviewVisible(card.id, visible: true) }
-                        .onDisappear { model.setOverviewVisible(card.id, visible: false) }
-                    }
-                }.padding(16)
-                    .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.86), value: visibleCards.map(\.id))
-                if visibleCards.isEmpty {
-                    ContentUnavailableView(model.cards.isEmpty ? "No conversations" : "No matching conversations", systemImage: "bubble.left.and.bubble.right",
-                                           description: Text(model.cards.isEmpty ? "Use + to start a conversation." : "Try another search or load older conversations below."))
-                }
-                if !showingClosed && model.hasOlderConversations {
-                    Button("Load older conversations") { model.loadOlderConversations() }
-                        .buttonStyle(.bordered)
-                        .padding(.bottom, 20)
-                        .accessibilityIdentifier("load-older-conversations")
-                }
-            }.scrollDismissesKeyboard(.interactively).accessibilityIdentifier("conversation-overview")
+        VStack(spacing: 16) {
+            HStack {
+                Button(action: settings) { Image(systemName: "gearshape").frame(width: 44, height: 44) }
+                    .modifier(InboxHeaderGlass()).accessibilityLabel("Account settings")
+                Spacer()
+                Text("Conversations").font(.subheadline.weight(.semibold))
+                Spacer()
+                Button(action: close) { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
+                    .modifier(InboxHeaderGlass()).accessibilityLabel("Return to conversation")
+                    .accessibilityIdentifier("conversation-drawer-close")
             }
-            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search conversations")
-            .background(Ink.background)
-            .navigationTitle(showingClosed ? "Closed tabs" : "Conversations")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItemGroup(placement: .bottomBar) {
-                    Menu {
-                        Button(showingClosed ? "Show open tabs" : "Closed tabs", systemImage: "clock") {
-                            showingClosed.toggle()
-                        }
-                    } label: { Text("More") }
-                    .accessibilityIdentifier("overview-more")
-                    Spacer()
-                    Button {
-                        model.newAgent()
-                        dismiss()
-                    } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("New conversation").accessibilityIdentifier("new-conversation-overview")
-                    Spacer()
-                    Button("Done") { dismiss() }
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(visibleCards) { card in
+                        conversationRow(card)
+                    }
+                    if visibleCards.isEmpty {
+                        ContentUnavailableView("No matching conversations", systemImage: "bubble.left.and.bubble.right",
+                                               description: Text("Try another search."))
+                    }
                 }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .accessibilityIdentifier("conversation-list")
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(Ink.muted)
+                TextField("Search conversations", text: $query)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityIdentifier("conversation-search")
+                if !query.isEmpty {
+                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
+                        .foregroundStyle(Ink.muted).accessibilityLabel("Clear search")
+                }
+            }
+            .font(.subheadline).padding(.horizontal, 14).frame(minHeight: 48)
+            .modifier(InboxHeaderGlass())
+            HStack {
+                Spacer()
+                Button(action: create) { Image(systemName: "square.and.pencil").frame(width: 44, height: 44) }
+                    .modifier(InboxHeaderGlass()).accessibilityLabel("New conversation")
+                    .accessibilityIdentifier("drawer-new-conversation")
             }
         }
-        .onChange(of: model.overviewCards.map(\.id)) { _, ids in
-            // Live history updates must not move another window under a tap.
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
+        .background(Ink.background)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("conversation-drawer")
+        .accessibilityAction(.escape, close)
+        .onChange(of: model.cards.map(\.id)) { _, ids in
+            // Streaming updates must not move a different row beneath a finger.
             let available = Set(ids)
             order.removeAll { !available.contains($0) }
             let known = Set(order)
             order.append(contentsOf: ids.filter { !known.contains($0) })
         }
-        .onDisappear { model.stopOverview() }
-    }
-}
-
-private struct ConversationOverviewCard: View {
-    @ObservedObject var model: InboxModel
-    let card: AgentCard
-    let description: String
-    let canClose: Bool
-    var select: () -> Void
-    var close: () -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @GestureState private var swipe: CGFloat = 0
-
-    private var selected: Bool { model.deck.focusedID == card.id }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "bubble.left.fill")
-                    .foregroundStyle(card.isRunning ? Color.green : Color.secondary)
-                    .accessibilityHidden(true)
-                Text(card.title).font(.subheadline.weight(.medium)).lineLimit(1)
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture(perform: select)
-                    .accessibilityRepresentation { Button("Open " + card.title, action: select) }
-                if canClose {
-                    Button(action: close) {
-                        Image(systemName: "xmark").font(.system(size: 12, weight: .medium))
-                            .frame(width: 44, height: 44).contentShape(Rectangle())
-                    }
-                    .accessibilityLabel("Close " + card.title)
-                    .accessibilityHint("Keeps the conversation and any running work")
-                    .accessibilityIdentifier("overview-close:" + card.id)
-                }
-            }.padding(.leading, 12)
-            let queue = model.queuePresentation(agentID: card.id, rows: model.overviewRows(for: card.id))
-            ConversationMiniature(model: model, card: card, rows: queue.rows, pendingCount: queue.queuedMessages.count).equatable()
-                    .frame(height: 230)
-                    .frame(maxWidth: .infinity)
-                    .background(Ink.background)
-                    .contentShape(Rectangle())
-                    // A tap recognizer fails when dragging; a plain Button can
-                    // activate on release after a simultaneous swipe gesture.
-                    .onTapGesture(perform: select)
-                    .accessibilityRepresentation {
-                        Button(card.title, action: select)
-                            .accessibilityValue(description)
-                            .accessibilityHint("Open conversation")
-                            .accessibilityAddTraits(selected ? [.isSelected] : [])
-                            .accessibilityIdentifier("overview-card:" + card.id)
-                    }
-        }
-        .buttonStyle(.plain)
-        .background(Ink.card)
-        .clipShape(RoundedRectangle(cornerRadius: 18))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18)
-                .strokeBorder(selected ? Color.accentColor : Ink.border, lineWidth: selected ? 2 : 0.5)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("overview-preview:" + card.id)
-        .offset(x: reduceMotion ? 0 : swipe)
-        .opacity(1 - min(abs(swipe) / 300, 0.65))
-        .simultaneousGesture(DragGesture(minimumDistance: 24)
-            .updating($swipe) { value, offset, _ in
-                guard canClose, abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
-                offset = value.translation.width
-            }
-            .onEnded { value in
-                guard canClose, abs(value.translation.width) > 90,
-                      abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
-                close()
-            })
-    }
-}
-
-private struct ConversationMiniature: View, Equatable {
-    let model: InboxModel
-    let card: AgentCard
-    let rows: [TranscriptRow]
-    let pendingCount: Int
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.card.id == rhs.card.id && lhs.card.activeTurns == rhs.card.activeTurns
-            && lhs.card.error == rhs.card.error && lhs.card.checked == rhs.card.checked
-            && lhs.card.turnCount == rhs.card.turnCount && lhs.rows == rhs.rows && lhs.pendingCount == rhs.pendingCount
-    }
-    private let scale: CGFloat = 0.48
-
-    var body: some View {
-        GeometryReader { viewport in
-            let items = Array(ConversationItem.group(rows, activeTurns: card.activeTurns).suffix(4))
-            VStack(alignment: .leading, spacing: 18) {
-                if items.isEmpty && pendingCount == 0 {
-                    if let error = card.error {
-                        Text(error).font(.system(size: 17)).foregroundStyle(Ink.muted)
-                    } else if card.checked, card.turnCount == 0, card.previewRows.isEmpty {
-                        Text("Send a message to begin.").font(.system(size: 17)).foregroundStyle(Ink.muted)
-                    } else {
-                        ProgressView().frame(maxWidth: .infinity)
-                    }
-                }
-                ForEach(items) { item in
-                    if let row = item.message {
-                        ConversationMessageView(row: row, model: model, agentID: card.id)
-                    } else {
-                        VStack(alignment: .leading, spacing: 14) {
-                            HStack(spacing: 10) {
-                                if item.isRunning { ProgressView().controlSize(.mini) }
-                                else {
-                                    Image(systemName: "checkmark").font(.system(size: 12))
-                                    Text("Activity").font(.system(size: 13, weight: .medium))
-                                }
-                                Spacer(minLength: 4)
-                            }.foregroundStyle(Ink.muted).padding(13)
-                                .background(Ink.surface, in: RoundedRectangle(cornerRadius: 14))
-                            InboxGeneratedOutputView(rows: item.activity).equatable()
-                        }
-                    }
-                }
-                if pendingCount > 0 {
-                    Label("\(pendingCount) pending message\(pendingCount == 1 ? "" : "s")", systemImage: "clock")
-                        .font(.system(size: 14)).foregroundStyle(Ink.muted)
-                }
-            }
-            .padding(20)
-            .frame(width: viewport.size.width / scale, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .scaleEffect(scale, anchor: .bottomLeading)
-            .frame(width: viewport.size.width, height: viewport.size.height, alignment: .bottomLeading)
-        }
-        .clipped().allowsHitTesting(false).accessibilityHidden(true)
-        // Preview updates stay steady even while a running transcript grows.
-        .transaction { $0.animation = nil; $0.disablesAnimations = true }
     }
 }
 
@@ -735,11 +600,14 @@ private struct AgentComposerView: View {
     @State private var composerOverflows = false
     @State private var showPhotos = false
     @State private var showFiles = false
+    @State private var showAttachmentMenu = false
+    @State private var attachmentAction: AttachmentAction?
     @State private var selectedPhotos: [PhotosPickerItem] = []
     @State private var photoTarget: InboxModel.AttachmentTarget?
     @State private var fileTarget: InboxModel.AttachmentTarget?
     @State private var pickerError: String?
     @State private var queueContentHeight: CGFloat = 64
+    private enum AttachmentAction { case camera, photos, files, context }
     #if os(iOS)
     @State private var showCamera = false
     @State private var cameraTarget: InboxModel.AttachmentTarget?
@@ -874,28 +742,10 @@ private struct AgentComposerView: View {
                 Text(error).font(.caption).foregroundStyle(Ink.muted).frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16).padding(.vertical, 8).accessibilityIdentifier("attachment-error")
             }
-            HStack(alignment: .bottom, spacing: 8) {
-                Menu {
-                    #if os(iOS)
-                    Button { Task { await openCamera() } } label: { Label("Camera", systemImage: "camera") }
-                        .disabled(model.preparingAttachments).accessibilityIdentifier("choose-camera")
-                    #endif
-                    Button {
-                        guard let target = model.captureAttachmentTarget() else { return }
-                        photoTarget = target; selectedPhotos = []; pickerError = nil; focused = false; showPhotos = true
-                    } label: { Label("Photos & Videos", systemImage: "photo.on.rectangle") }
-                        .disabled(model.preparingAttachments).accessibilityIdentifier("choose-photos")
-                    Button {
-                        guard let target = model.captureAttachmentTarget() else { return }
-                        fileTarget = target; pickerError = nil; focused = false; showFiles = true
-                    } label: { Label("Files", systemImage: "folder") }
-                        .disabled(model.preparingAttachments).accessibilityIdentifier("choose-files")
-                    Button { focused = false; model.showContext = true } label: {
-                        Label("Context from other apps", systemImage: "tray.full")
-                    }
-                } label: {
+            HStack(alignment: .bottom, spacing: 2) {
+                Button { focused = false; showAttachmentMenu = true } label: {
                     Image(systemName: "plus").frame(width: 44, height: 44).contentShape(Rectangle())
-                }.menuStyle(.borderlessButton).accessibilityLabel("Add attachments").accessibilityIdentifier("add-attachments")
+                }.accessibilityLabel("Add attachments").accessibilityIdentifier("add-attachments")
                 ChatComposerEditor(text: $model.draft, focused: $focused, overflowing: $composerOverflows)
                     .accessibilityIdentifier("composer")
                     .overlay(alignment: .topLeading) {
@@ -925,8 +775,9 @@ private struct AgentComposerView: View {
                         } else {
                             Image(systemName: sendShowsStop ? "stop.fill" : model.busy.contains(model.focused?.id ?? "") ? "ellipsis" : "arrow.up")
                         }
-                    }.font(.system(size: 18, weight: .semibold)).frame(width: 44, height: 44)
+                    }.font(.system(size: 16, weight: .semibold)).frame(width: 32, height: 32)
                         .background(Ink.accent.opacity(sendShowsStop || model.canSend ? 1 : 0.22), in: Circle()).foregroundStyle(Ink.background)
+                        .frame(width: 44, height: 44).contentShape(Rectangle())
                 }.buttonStyle(.plain)
                     .disabled(sendShowsStop ? stopRequest.map { $0.error == nil } ?? false : !model.canSend)
                     .accessibilityLabel(sendShowsStop ? stopRequest.map { $0.error == nil ? "Stopping turn" : "Retry stop" } ?? "Stop turn" : model.focused?.isRunning == true ? "Queue message" : "Send message")
@@ -946,16 +797,40 @@ private struct AgentComposerView: View {
                             .accessibilityIdentifier("expand-composer")
                     }
                 }
-                .padding(.horizontal, 8).padding(.bottom, 8).padding(.top, visiblePending.isEmpty ? 8 : 0)
-                .padding(.leading, 6).accessibilityElement(children: .contain).accessibilityIdentifier("composer-input")
+                .padding(.horizontal, 4).padding(.bottom, 4).padding(.top, visiblePending.isEmpty ? 4 : 0).accessibilityElement(children: .contain).accessibilityIdentifier("composer-input")
 
         }.background(ChatPalette.composer, in: RoundedRectangle(cornerRadius: 28))
             .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(Color.primary.opacity(focused ? 0.18 : 0.1)))
             .shadow(color: .black.opacity(0.035), radius: 8, y: 2)
-            .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 8).background(Ink.background)
+            .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 6).background(Ink.background)
             .onChange(of: model.focusedConversationIdentity) { _, _ in
                 showExpandedEditor = false
                 focused = false
+            }
+            .sheet(isPresented: $showAttachmentMenu, onDismiss: openSelectedAttachmentAction) {
+                NavigationStack {
+                    List {
+                        Section {
+                            attachmentOption("Photos & Videos", icon: "photo.on.rectangle", action: .photos, identifier: "choose-photos")
+                            attachmentOption("Camera", icon: "camera", action: .camera, identifier: "choose-camera")
+                            attachmentOption("Files", icon: "folder", action: .files, identifier: "choose-files")
+                        }
+                        Section {
+                            attachmentOption("Context from other apps", icon: "tray.full", action: .context, identifier: "choose-context")
+                        }
+                    }
+                    .navigationTitle("Add to conversation")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showAttachmentMenu = false }
+                        }
+                    }
+                }
+                .tint(Ink.accent)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(30)
             }
             .sheet(isPresented: $showExpandedEditor) {
                 ExpandedAgentComposer(
@@ -1000,6 +875,34 @@ private struct AgentComposerView: View {
                 case .failure(let error): pickerError = error.localizedDescription
                 }
             }
+    }
+
+    private func attachmentOption(_ title: String, icon: String, action: AttachmentAction, identifier: String) -> some View {
+        Button {
+            attachmentAction = action
+            showAttachmentMenu = false
+        } label: {
+            Label(title, systemImage: icon).frame(minHeight: 32)
+        }
+        .disabled(model.preparingAttachments)
+        .accessibilityIdentifier(identifier)
+    }
+
+    private func openSelectedAttachmentAction() {
+        guard let action = attachmentAction else { return }
+        attachmentAction = nil
+        switch action {
+        case .camera:
+            Task { await openCamera() }
+        case .photos:
+            guard let target = model.captureAttachmentTarget() else { return }
+            photoTarget = target; selectedPhotos = []; pickerError = nil; showPhotos = true
+        case .files:
+            guard let target = model.captureAttachmentTarget() else { return }
+            fileTarget = target; pickerError = nil; showFiles = true
+        case .context:
+            model.showContext = true
+        }
     }
 
     #if os(iOS)
@@ -1410,7 +1313,7 @@ private struct ConversationMessageContent: View, Equatable {
                         else { Text("Thought process") }
                     }.font(.system(size: 13)).foregroundStyle(Ink.muted)
                 } else if row.role == "You", let content = ContextPrompt.separate(row.text) {
-                    Text(content.request).font(.system(size: 17)).lineSpacing(5).textSelection(.enabled)
+                    Text(content.request).font(.body).lineSpacing(3).textSelection(.enabled)
                     DisclosureGroup("Captured context (\(content.captures.count))") {
                         ForEach(Array(content.captures.enumerated()), id: \.offset) { _, capture in
                             VStack(alignment: .leading, spacing: 4) {
@@ -1420,8 +1323,7 @@ private struct ConversationMessageContent: View, Equatable {
                         }
                     }.font(.caption).foregroundStyle(Ink.muted)
                 } else if row.role == "Agent", !row.text.isEmpty {
-                    ChatMarkdown(text: row.text)
-                    if !row.running { ChatCopyButton(text: row.text).padding(.leading, -8) }
+                    ChatMarkdown(text: row.text, compact: true)
                 } else if !row.text.isEmpty {
                     Text(row.text).font(.system(size: row.role == "Status" ? 14 : 17))
                         .lineSpacing(5).textSelection(.enabled)
@@ -1462,9 +1364,19 @@ private struct ConversationMessageContent: View, Equatable {
             }
             .accessibilityElement(children: .contain)
             .accessibilityLabel(row.role == "You" ? "Your message" : row.role == "Agent" ? "Assistant message" : row.role)
-            .padding(row.role == "You" ? 16 : 0)
-            .background(row.role == "You" ? Ink.surface : Color.clear, in: RoundedRectangle(cornerRadius: 24))
-            if row.role != "You" { Spacer(minLength: 0) }
+            .padding(.horizontal, row.role == "You" || row.role == "Agent" ? 12 : 0)
+            .padding(.vertical, row.role == "You" || row.role == "Agent" ? 9 : 0)
+            .background(row.role == "You" ? Ink.userMessage : row.role == "Agent" ? Ink.assistant : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 18))
+            .contextMenu {
+                if row.role == "Agent", !row.text.isEmpty {
+                    ChatCopyButton(text: row.text, showsLabel: true)
+                }
+            }
+            .accessibilityAction(named: "Copy response") {
+                UIPasteboard.general.string = row.text
+            }
+            if row.role != "You" { Spacer(minLength: row.role == "Agent" ? 16 : 0) }
         }.frame(maxWidth: .infinity, alignment: row.role == "You" ? .trailing : .leading)
     }
 }
@@ -1672,6 +1584,7 @@ private struct ConversationContentView: View {
                                     rowGeometry.expandedActivity.remove(content.id)
                                     if pendingReadingRestore?.rowID == content.id { pendingReadingRestore = nil }
                                 }
+                                if historyRequestInFlight { rememberHistoryPosition(in: viewport) }
                             }, onInteraction: { pendingReadingRestore = nil })
                         }
                         }.id(item.id)
@@ -1697,6 +1610,9 @@ private struct ConversationContentView: View {
                 }.padding(.horizontal, 20).padding(.vertical, verticalPadding).frame(maxWidth: 780).frame(maxWidth: .infinity)
 
             }
+            // Clip hit testing as well as drawing: offscreen disclosure buttons
+            // must not intercept the header at accessibility text sizes.
+            .contentShape(Rectangle())
             .defaultScrollAnchor(.top)
             .defaultScrollAnchor(followsLatest ? .bottom : .top, for: .sizeChanges)
             .defaultScrollAnchor(readingPositions.values[identity]?.atLatest == false ? .top : .bottom, for: .initialOffset)
@@ -1901,49 +1817,81 @@ private struct ConversationActivityView: View {
     var onExpansion: (Bool) -> Void = { _ in }
     var onInteraction: () -> Void = {}
     @State private var expanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var visibleStep: String?
     private var failures: Int { item.activity.filter { $0.tool?.status == "Failed" }.count }
+    private var headline: String {
+        guard item.isRunning else { return "Activity" }
+        let current = item.activity.last(where: \.running) ?? item.activity.last
+        return current?.tool?.title ?? (current?.role == "Thinking" ? "Thinking" : "Working")
+    }
+    private var summary: String {
+        let calls = item.activity.filter { $0.tool != nil }.count
+        let thoughts = item.activity.filter { $0.role == "Thinking" }.count
+        var parts: [String] = []
+        if thoughts > 0 { parts.append("Reasoning") }
+        if calls > 0 { parts.append("\(calls) tool call\(calls == 1 ? "" : "s")") }
+        if parts.isEmpty { parts.append(item.activity.isEmpty ? "Getting started" : "\(item.activity.count) steps") }
+        return parts.joined(separator: " · ")
+    }
     var body: some View {
-        Group {
-            if item.activity.isEmpty {
-                ProgressView().accessibilityLabel("Activity")
-            } else {
-                DisclosureGroup(isExpanded: $expanded) {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(item.activity) { row in
-                                ConversationActivityStep(row: row, live: item.isRunning && row.running)
-                                    .id(row.id)
-                                    .background(GeometryReader { geometry in
-                                        Color.clear.preference(key: ConversationRowFrames.self,
-                                            value: [row.id: geometry.frame(in: .named("conversation-viewport"))])
-                                    })
-                            }
-                        }.scrollTargetLayout().padding(.vertical, 8)
-                    }.scrollPosition(id: $visibleStep, anchor: .top)
-                        .frame(maxHeight: 300).fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("activity-timeline")
-                        .background(GeometryReader { geometry in
-                            Color.clear.preference(key: ConversationRowFrames.self,
-                                value: [item.id + ":timeline": geometry.frame(in: .named("conversation-viewport"))])
-                        })
-                        .onScrollPhaseChange { _, phase in
-                            if phase == .tracking || phase == .interacting { onInteraction() }
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                let opening = !expanded
+                if opening && visibleStep == nil { visibleStep = item.activity.first?.id }
+                // Register the reading anchor before expansion publishes geometry.
+                onExpansion(opening)
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { expanded = opening }
+            } label: {
+                HStack(spacing: 10) {
+                    Group {
+                        if item.isRunning { ProgressView().controlSize(.small) }
+                        else { Image(systemName: failures > 0 ? "exclamationmark.circle" : "checkmark.circle") }
+                    }.frame(width: 20).foregroundStyle(failures > 0 ? Color.orange : Ink.muted)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(headline).font(.subheadline.weight(.medium)).foregroundStyle(Ink.text)
+                        Text(summary).font(.caption).foregroundStyle(Ink.muted)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    if failures > 0 {
+                        Text("\(failures) failed").font(.caption.weight(.medium)).foregroundStyle(.orange)
+                    }
+                    if !item.activity.isEmpty {
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.caption.weight(.semibold)).foregroundStyle(Ink.muted)
+                    }
+                }.frame(minHeight: 44).contentShape(Rectangle())
+            }.buttonStyle(.plain).disabled(item.activity.isEmpty)
+                .accessibilityIdentifier("activity-disclosure")
+                .accessibilityLabel("Activity")
+                .accessibilityValue("\(expanded ? "Expanded" : "Collapsed"), \(headline), \(summary), \(failures) failed")
+                .accessibilityHint(item.activity.isEmpty ? "Waiting for activity" : "Show or hide thinking and tool calls")
+            if expanded && !item.activity.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(item.activity) { row in
+                            ConversationActivityStep(row: row, live: item.isRunning && row.running)
+                                .id(row.id)
+                                .background(GeometryReader { geometry in
+                                    Color.clear.preference(key: ConversationRowFrames.self,
+                                        value: [row.id: geometry.frame(in: .named("conversation-viewport"))])
+                                })
                         }
-                } label: {
-                    HStack(spacing: 10) {
-                        if item.isRunning { ProgressView().controlSize(.mini) }
-                        Text("Activity").font(.subheadline)
-                    }.frame(minHeight: 44).foregroundStyle(Ink.muted)
-                }.tint(Ink.muted)
-                    .accessibilityIdentifier("activity-disclosure")
-                    .accessibilityLabel("Activity")
-                    .accessibilityValue(Text(expanded ? "Expanded" : "Collapsed"))
-                    .accessibilityHint("\(item.activity.count) steps, \(failures) issues")
+                    }.scrollTargetLayout().padding(.top, 8)
+                }.scrollPosition(id: $visibleStep, anchor: .top)
+                    .frame(maxHeight: 300).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("activity-timeline")
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: ConversationRowFrames.self,
+                            value: [item.id + ":timeline": geometry.frame(in: .named("conversation-viewport"))])
+                    })
+                    .onScrollPhaseChange { _, phase in
+                        if phase == .tracking || phase == .interacting { onInteraction() }
+                    }
             }
-        }.frame(maxWidth: .infinity, alignment: .leading)
+        }.padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Ink.surface, in: RoundedRectangle(cornerRadius: 16))
+            .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityElement(children: .contain).accessibilityIdentifier("activity-group")
-            .onChange(of: expanded) { _, value in onExpansion(value) }
     }
 }
 
@@ -1951,37 +1899,58 @@ private struct ConversationActivityStep: View {
     let row: TranscriptRow
     let live: Bool
     @State private var expanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var failed: Bool { row.tool?.status == "Failed" }
     private var title: String { row.tool?.title ?? (row.role == "Thinking" ? "Thinking" : "Progress update") }
     private var subject: String {
         if let subject = row.tool?.subject { return subject }
-        let firstLine = String(row.text.split(whereSeparator: \.isNewline).first ?? "")
-        let parsed = try? AttributedString(markdown: firstLine, options: .init(failurePolicy: .returnPartiallyParsedIfPossible))
-        return parsed.map { String($0.characters) } ?? firstLine
+        // A bounded plain preview avoids parsing a growing Markdown document on every token.
+        let firstLine = row.text.prefix(180).split(whereSeparator: \.isNewline).first ?? ""
+        return firstLine.trimmingCharacters(in: CharacterSet(charactersIn: "#*` _"))
+    }
+    private var status: String {
+        if failed { return "Failed" }
+        if live { return "Running" }
+        if row.tool?.status == "Stopped" { return "Stopped" }
+        // A past turn can retain an unfinished tool. Don't claim it completed.
+        if row.running || row.tool?.status == "Running" { return "Interrupted" }
+        return "Completed"
     }
     var body: some View {
-        let summary = subject
-        DisclosureGroup(isExpanded: $expanded) {
-            ScrollView {
-                Group {
-                    if row.tool != nil { ToolActivityView(row: row) }
-                    else if row.role == "Thinking" { ChatMarkdown(text: row.text) }
-                    else { Text(row.text).font(.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                }.padding(.vertical, 8)
-            }.frame(maxHeight: 240).fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("activity-detail-" + row.id)
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: failed ? "exclamationmark.circle" : row.role == "Tool" ? "terminal" : "text.alignleft")
-                    .foregroundStyle(failed ? Ink.amber : Ink.muted)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.subheadline).foregroundStyle(Ink.text).lineLimit(1)
-                    if !summary.isEmpty { Text(summary).font(.caption).foregroundStyle(Ink.muted).lineLimit(1) }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                if live { ProgressView().controlSize(.mini) }
-                else if failed { Text("Failed").font(.caption).foregroundStyle(Ink.amber) }
-            }.frame(minHeight: 44)
-        }.tint(Ink.muted).accessibilityIdentifier("activity-step-" + row.id)
+        VStack(alignment: .leading, spacing: 0) {
+            Button { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { expanded.toggle() } } label: {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: failed ? "exclamationmark.circle.fill" : row.role == "Tool" ? "terminal" : "text.alignleft")
+                        .font(.subheadline).foregroundStyle(failed ? Color.orange : Ink.muted)
+                        .frame(width: 20).padding(.top, 3)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(title).font(.subheadline.weight(.medium)).foregroundStyle(Ink.text)
+                            Spacer(minLength: 4)
+                            if live { ProgressView().controlSize(.mini) }
+                            Text(status).font(.caption2).foregroundStyle(failed ? Color.orange : Ink.muted)
+                        }
+                        if !subject.isEmpty { Text(subject).font(.caption).foregroundStyle(Ink.muted).lineLimit(2).multilineTextAlignment(.leading) }
+                    }
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.caption2.weight(.semibold)).foregroundStyle(Ink.muted).padding(.top, 4)
+                }.padding(.vertical, 10).frame(minHeight: 44).contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityIdentifier("activity-step-" + row.id)
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            if expanded {
+                ScrollView {
+                    Group {
+                        if row.tool != nil { ToolActivityView(row: row) }
+                        else if row.role == "Thinking" { ChatMarkdown(text: row.text) }
+                        else { Text(row.text).font(.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                    }.padding(12)
+                }.frame(maxHeight: 240).fixedSize(horizontal: false, vertical: true)
+                    .background(Ink.background, in: RoundedRectangle(cornerRadius: 12))
+                    .accessibilityIdentifier("activity-detail-" + row.id)
+                    .padding(.bottom, 10)
+            }
+            Divider().opacity(0.4)
+        }.accessibilityElement(children: .contain)
     }
 }
 

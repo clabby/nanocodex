@@ -1,10 +1,12 @@
 # Nanocodex for iPhone and iPad
 
-A native SwiftUI app for iPhone and iPad. One managed agent per tab:
+A native SwiftUI app for iPhone and iPad. One conversation per managed agent:
 review the latest update, steer its current turn, and switch between agents.
-The interface uses ChatGPT-style neutral surfaces, native typography, a rounded
-composer, and right-aligned user message bubbles, with Nanocodex naming and
-agent tabs, a live overview, and steering controls.
+The interface uses a compact conversation header, a searchable session drawer,
+soft message bubbles, a rounded composer, and a floating navigation dock. The
+Muse reference and timestamped interaction notes live in
+[`docs/ux/2026-09-16-muse-dogfood.md`](../docs/ux/2026-09-16-muse-dogfood.md).
+Nanocodex retains per-agent drafts, steering, voice, and remote screens.
 Appearance follows the system light/dark setting, including conversations, the composer,
 and voice controls.
 The native Mac app lives in [`macos/`](../macos/README.md). It owns the tiled
@@ -23,29 +25,29 @@ HighlightSwift in light and dark mode. Unsupported languages remain readable
 as plain code. Desktop pane
 arrangement, tiling, navigation shortcuts, and per-agent state remain owned by
 the existing workspace.
-The mobile tab strip and switcher count default to conversations touched in the last
-24 hours, plus running, focused, and explicitly opened conversations. The overview
-loads older conversations in batches of 24 with **Load older conversations**; browsing
-older previews does not add them to the tab strip. Roster and state checks continue
-for background work, while older transcripts load only when opened or visible.
+The sidebar lists all known conversations, including conversations previously hidden
+by the old tab interface. Rows are created lazily and search covers the whole roster.
+Roster and state checks continue for background work; transcripts load when opened.
 The composer grows up to six lines, then scrolls; its expand button opens a larger
 editor sharing the same draft and attachments.
 
-Each tab opens the full conversation directly. The full-screen overview shows
-searchable cards with miniature transcripts and an outline around the selected tab.
-Close a card with its × button or a horizontal swipe; the overview stays open while
-the remaining cards rearrange. Closing the selected tab selects its neighbor.
-Closed tabs remain closed across launches on this device and can be reopened from
-**More → Closed tabs**. Closing preserves conversation history, drafts, and running work.
-Overview cards render miniature transcripts with the same message components and
-latest available content.
+The current conversation stays mounted while the session drawer opens. The drawer
+uses lightweight roster summaries and search, without tabs, preview grids, or status
+filters. Running agents have a green title and dot, with status available to VoiceOver.
+Selecting a row restores that agent's draft and reading position. Swipe right from
+the left 28 points of the screen to open the drawer; swipe left to close. The
+conversation follows the finger and settles with a short spring over the stationary list. Vertical scrolling
+keeps it open. Previously hidden conversations are available in this same list.
+Reply bubbles hug their content with 12-point horizontal and 9-point vertical padding.
+Long-press a reply to copy it; code blocks retain their own copy controls. The composer
+uses 4-point vertical padding around controls with 44-point touch targets.
 Unchanged Markdown stays behind an equality boundary, so typing, scrolling, and
 another row's streamed updates do not reparse completed messages. Parsing runs on
 a background actor with a bounded cache; streamed changes coalesce for 32 ms,
 and cancelled parses cannot replace newer content. The
 `ChatMarkdownParse` Points of Interest signpost measures actual parsing work.
 
-Generated attachments appear directly in conversations and their overview previews, outside
+Generated attachments appear directly in conversations, outside
 collapsed Activity. Tool text, memory payloads, and command diagnostics stay
 inside Activity; only assistant replies supply conversation text. The shared
 `ChatGeneratedOutput` parser combines raw and structured tool results, including
@@ -138,9 +140,10 @@ Return/Tab/Esc controls below the video.
 
 | Action | Result |
 | --- | --- |
-| Tap an agent tab | Switch agents while preserving each agent’s draft and queued messages |
-| Tab bar plus | Open a new agent immediately and start composing |
-| Tab overview | See agents’ latest content and running status; tap a preview to select it |
+| Header → Conversations | Search and switch agents while preserving each agent’s draft and queued messages |
+| Dock plus | Open a new agent immediately and start composing |
+| Swipe right from the left edge | Open the conversation drawer, including while composing |
+| Swipe drawer left | Return to the current conversation without losing the draft |
 | Drag down while typing | Interactively dismiss the keyboard while keeping the current conversation and draft |
 | Scroll a conversation | Read the full history, reasoning, and expandable tool details while keeping the composer available |
 | Attachment plus → Camera / Photos & Videos / Files | Take a photo or attach photos/videos; preview or remove attachments before sending |
@@ -148,16 +151,22 @@ Return/Tab/Esc controls below the video.
 | Steer now on queued message | Inject the queued input into the active turn through the steering API |
 | Voice | Start an interactive spoken conversation with this agent; minimize the panel to keep talking |
 | Stop turn | Immediately cancel the selected turn from the send button |
-| Bottom menu → Account settings | Manage the account and device Hand |
-| Bottom menu → Scheduled jobs | View active and paused jobs across the account, inspect their schedule, or open the source chat and latest run |
+| Header menu → Account settings | Manage the account and device Hand in a dismissible sheet |
+| Header menu → Scheduled jobs | View active and paused jobs across the account, inspect their schedule, or open the source chat and latest run |
 
-Conversation tabs sit at the top. Below the composer, the bottom bar groups Back,
-new-agent plus, overview, Remote screens, and the rightmost app menu. Back returns
-to the previous conversation, retaining its draft and reading position.
-The overview replaces the sidebar: search conversations, filter to running agents,
-or select a live preview. The app menu opens Scheduled jobs and Account settings.
-The full conversation scrolls independently; horizontal swipes and upward pulls do not switch
-agents or create conversations.
+The compact header shows the selected conversation, its running indicator, a
+Conversations button, and the app menu. Below the composer, the floating dock
+groups Back, Remote screens, new-agent plus, and captured context.
+Back returns to the previous conversation, retaining its draft and reading position.
+The sidebar owns conversation switching. The drawer uses a short, damped horizontal transition and respects
+Reduce Motion. Glass controls use opaque surfaces with Reduce Transparency.
+
+Attachments open in a native sheet, then hand off to the existing photo, camera,
+or file picker after dismissal. Settings has its own navigation stack in a sheet;
+remote screens use medium/large sheet detents and retain the selected viewer while
+resizing. These surfaces leave the conversation and its draft in place. The app
+menu keeps Scheduled jobs and Connectors accessible. Horizontal swipes inside the
+transcript and upward pulls do not switch agents or create conversations.
 Streamed responses follow the bottom while you are reading the latest output. Scrolling
 back pauses following and preserves your reading position. A small circular down-arrow
 above the composer returns to the latest messages and resumes following, including
@@ -186,19 +195,15 @@ agent was deleted during discovery. Only confirmed removals become empty results
 advertised but unreadable agents and authorization failures retain their warning.
 
 When no conversation is available, the empty page offers an action to start one.
-The tab overview shows each agent’s latest available content and status, sorted
-by most recent activity first. Live event timestamps advance that ordering;
-replayed history and stale account snapshots cannot move a conversation backward.
-The top tab strip retains its order while replies arrive.
-Searching or filtering the overview keeps the current conversation selected.
-Live changes preserve the selected tab;
+The sidebar opens sorted by most recent activity and retains its order while replies
+arrive. Searching keeps the current conversation selected.
+Live changes preserve the selected conversation;
 new work does not steal focus while typing. Drafts belong to agent IDs. Multiple
 active turns get an explicit selector. Navigation never approves tools, stops an
 agent, or deletes history. No approval endpoints are invented by this client.
 
-The selected agent and visible overview previews receive live updates.
-Other agents refresh in the background. Overview observation follows the visible
-previews and stops when the overview closes. The stream resumes from an exact decimal cursor with
+The selected agent receives live updates. Other agents refresh in the background.
+The stream resumes from an exact decimal cursor with
 backoff after disconnect. Backgrounding detaches observation; agents continue
 on the service. Foregrounding reloads history and resumes. Active-turn state
 reads cannot overwrite newer streamed events. Changing accounts invalidates old
@@ -593,6 +598,14 @@ XCTest runner environment. For `testPerformanceInboxInteractionJourney`, also se
 with conversation history on that account. These journeys use no demo arguments,
 sample agents, or mocked service responses.
 
+`testPerformanceCurrentSessionDrawerAndSheets` measures the currently selected saved
+conversation while opening/dismissing the sidebar, attachments, and settings. It
+preserves the selected identity and draft, sends no messages, and records three
+CPU/memory/hitch iterations after XCTest's warm-up. The final Muse-inspired UI
+passed this check on iPhone 17 Pro with zero hitches in all three iterations; this
+is a narrow navigation result with no Muse or pre-change baseline. See
+[the reference study and validation notes](../docs/ux/2026-09-16-muse-dogfood.md).
+
 `testPerformanceSavedAccountResponsiveColdLaunch` measures process-cold launch
 until the app responds and separately records saved-account restoration through
 the `RestoreAccount` signpost. OS and filesystem caches remain warm.
@@ -612,7 +625,7 @@ scope and never connects to the account service. Use `ChatMarkdownParse` Points
 of Interest with Time Profiler to inspect actual parsing during this journey;
 simulator metrics do not represent physical-device input latency.
 
-Thinking, tool calls, explicit progress commentary, and subagent updates share one collapsed **Activity** row per turn. Running activity uses a native spinner without changing status text or step counts in the transcript. Counts remain available to accessibility; failed steps show their status after expansion. Expand once for a compact, scrollable timeline, then expand a step for its notes, inputs, and results. Both levels use native DisclosureGroup controls with bounded scrollable content. Final answers and errors remain visible outside Activity; older untagged assistant text is preserved. Commands retain code formatting and structured results use readable fields. Expansion respects Reduce Motion, and new steps never grow the closed transcript.
+Thinking, tool calls, explicit progress commentary, and subagent updates share one compact **Activity** card per turn. While running, the header identifies the current action with a native spinner. A quiet reasoning/tool-count summary remains after completion; failed-call counts stay visible even when collapsed. Expand once for a bounded timeline with per-step state and subject, then expand a step for rich thinking, inputs, and results. Content is created only when expanded, and text previews are bounded without Markdown parsing. Final answers, generated attachments, and errors remain outside Activity. Commands retain code formatting and structured results use readable fields. Explicit accessibility expansion values accompany the controls; opening activity preserves the reader's position when older history arrives.
 
 Images and videos open in native Quick Look, including original uploads, draft attachments, and generated media. Original files download only when opened; the conversation uses bounded thumbnails with stable loading heights. Generated media has independent, stable transcript rows; it is projected with its history page so earlier outputs within the same turn cannot arrive as a second layout insertion. Scrolling toward earlier messages prefetches one cursor-bound page within two viewports of the top, without inserting it or moving the reader. Crossing the load boundary reuses that request and presents the page without the live-stream batching delay. Geometry updates reuse an item index and only recalculate history retention when the visible selection changes. Reconnect controls do not change the transcript viewport, and history insertions cannot reverse the inferred swipe direction. One history insertion consumes the direct scroll direction that triggered it; deceleration and bounce-back do not establish a new paging direction. Expanded Activity retains the visible tool step while earlier work arrives, even when the timeline changes height. Legacy sampled video frames stay grouped inside one attachment and open as a native preview collection. Attachment descriptors, echoed user history, and image-inspection results do not become generated replies. Remote screens use UIScrollView/AppKit magnification: pinch to zoom, pan locally while watching, or use two fingers to pan a magnified screen while controlling its pointer with one finger.
 
@@ -622,9 +635,16 @@ New conversations open synchronously as local drafts. Creation runs in the backg
 
 Verified on 2026-09-06: seven native UI checks passed, including creation delayed by 10–20 seconds, immediate send, cancellation before admission, draft and keyboard preservation, retry, navigation, and relaunch. The signed-in iPhone journey also passed against the real backend: opening, two turns, history after relaunch, and voice connect/mute/minimize/end.
 
-Conversation scroll targets retain the visible message across prepended history and new output, and new conversations open at the latest messages. Returning to the foreground resumes the existing cursor and transcript rather than clearing the screen. Conversation scrolling preserves the selected agent; navigation uses the tab strip and overview.
+Conversation scroll targets retain the visible message across prepended history and new output, and new conversations open at the latest messages. Returning to the foreground resumes the existing cursor and transcript rather than clearing the screen. Conversation scrolling preserves the selected agent; navigation uses the searchable sidebar.
 
-The conversation keeps the same agent composer fixed above the keyboard while you read older messages. Sending dismisses the iPhone/iPad keyboard. Sending to an idle conversation immediately displays the message and local attachment previews in the transcript, even while conversation creation or admission is pending. The bubble retains its identity through acknowledgement and execution; unconfirmed delivery shows Retry and Cancel beside that message. Follow-ups waiting behind another turn appear once in the queue above the composer; execution evidence promotes them into the conversation. API-accepted steering appears with an explicit steering label. The queue follows server order across devices and relaunch; messages whose content has not loaded retain a placeholder and queue position. Cancelling and retrying keep the same identity. “Steer now” injects the input through the active turn’s steering API without stopping that turn. With an empty draft and a running turn, the send button becomes Stop; adding text or an image restores Send in the same position. Drafts, queued follow-ups, steering, and stop controls belong to the selected agent. Switching tabs or opening the overview preserves that work.
+The conversation keeps the same agent composer fixed above the keyboard while you read older messages. Sending dismisses the iPhone/iPad keyboard. Sending to an idle conversation immediately displays the message and local attachment previews in the transcript, even while conversation creation or admission is pending. The bubble retains its identity through acknowledgement and execution; unconfirmed delivery shows Retry and Cancel beside that message. Follow-ups waiting behind another turn appear once in the queue above the composer; execution evidence promotes them into the conversation. API-accepted steering appears with an explicit steering label. The queue follows server order across devices and relaunch; messages whose content has not loaded retain a placeholder and queue position. Cancelling and retrying keep the same identity. “Steer now” injects the input through the active turn’s steering API without stopping that turn. With an empty draft and a running turn, the send button becomes Stop; adding text or an image restores Send in the same position. Drafts, queued follow-ups, steering, and stop controls belong to the selected agent. Switching conversations or opening the drawer preserves that work.
+
+Verified on 2026-09-17: eight focused compact-UI simulator journeys passed across
+runs, plus 24 shared rendering tests. The Release iPhone 17 Pro test preserved the
+conversation and draft through three measured drawer-left-swipe, attachment, and
+settings rounds, with zero reported hitches. The drawer uses tap recognition that
+fails during a drag, preventing swipe release from selecting a row. See the UX
+notes and compact-device metrics above for scope, recordings, and limitations.
 
 Verified on 2026-09-12: focused simulator checks cover immediate first-send rendering during delayed creation, stable bubbles through delayed failure and Retry, cached tabs without reload, startup restoration, and reading position during streaming. Transcript grouping is computed with the conversation revision rather than each scroll update. Row geometry does not publish per-pixel view updates, and history navigation follows native scroll events without an additional drag recognizer. The phone uses a fully measured native stack for its bounded history window, avoiding feedback between estimated lazy heights and scroll restoration. Native visibility events load and release generated image thumbnails as they enter and leave the viewport. Native size-change anchoring follows streamed output. Image previews apply media validation directly without encoding the complete image into JSON first. Desktop thread loading uses the system progress indicator, and first-send failures remain beside their original bubble. These fixture checks do not measure physical-device network latency.
 
