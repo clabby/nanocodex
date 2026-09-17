@@ -67,12 +67,12 @@
     const stateArgs = options => options?.disableDiffing === undefined ? {app} : {app,disableDiff:options.disableDiffing};
     return {
       async getAXState(options) {
-        const result = await computer.get_app_state(stateArgs(options));
+        const result = await computer.get_app_state({...stateArgs(options),screenshot:false});
         await emitState(result.text, options);
         return result.text;
       },
       async getScreenshot(options) {
-        const result = await computer.get_app_state({app});
+        const result = await computer.get_app_state({app,text:false});
         if (result.screenshot === null) {
           const error = new Error(result.screenshotError?.message ?? ('Screenshot unavailable for ' + app + '.'));
           if (result.screenshotError?.code !== undefined) error.code = result.screenshotError.code;
@@ -96,7 +96,9 @@
           ...(options?.mouseButton === undefined ? {} : {mouse_button:options.mouseButton}),
           ...(options?.clickCount === undefined ? {} : {click_count:options.clickCount})});
       },
-      drag(from,to) { return computer.drag({app,from_x:from[0],from_y:from[1],to_x:to[0],to_y:to[1]}); },
+      drag(from,to,options) { return computer.drag({app,from_x:from[0],from_y:from[1],to_x:to[0],to_y:to[1],
+        ...(options?.mouseButton === undefined ? {} : {mouse_button:options.mouseButton}),
+        ...(options?.modifiers === undefined ? {} : {modifiers:options.modifiers})}); },
       pressKey(key) { return computer.press_key({app,key}); },
       scroll(value,direction,pages) {
         return computer.scroll({app,...(Array.isArray(value) ? {x:value[0],y:value[1]} : {element_index:value}),direction,...(pages === undefined ? {} : {pages})});
@@ -164,7 +166,7 @@
     await emit();
     const result = {
       async getState(options) {
-        const appPromise = !computer || computer.target === 'linux' ? [] : computer.list_apps();
+        const appPromise = typeof computer?.list_apps === 'function' ? computer.list_apps() : [];
         const [apps, infos] = await Promise.all([appPromise,browsers?.list() ?? []]);
         const states = browsers ? await Promise.all(infos.map(async info => {
           const browser = await browsers.get(info.id);
@@ -267,14 +269,14 @@
         }
       } : {}),
       async getApp(identifier) {
-        if (computer.target !== 'mac') throw new Error('Native app bindings are unavailable for ' + computer.target + '.');
-        const state = await computer.get_app_state({app:identifier,disableDiff:true});
+        if (typeof computer.get_app_state !== 'function') throw new Error('Native app bindings are unavailable for ' + computer.target + '.');
+        const state = await computer.get_app_state({app:identifier,disableDiff:true,screenshot:false});
         const app = nativeTarget(computer,state.app);
         await emit(state.text);
         return app;
       },
       async listApps(options) {
-        if (computer.target !== 'mac') throw new Error('Native app bindings are unavailable for ' + computer.target + '.');
+        if (typeof computer.get_app_state !== 'function') throw new Error('Native app bindings are unavailable for ' + computer.target + '.');
         const apps = await computer.list_apps();await emit(apps,options);return apps;
       }
     });
