@@ -216,6 +216,8 @@ jobs:
         run: npx wrangler deploy --config wrangler.broker.jsonc --message "$DEPLOY_MESSAGE"
       - name: Deploy X Worker
         run: pnpm deploy:x
+      - name: Deploy agent email service
+        run: pnpm deploy:email
       - name: Deploy managed agent service
         working-directory: js/managed
         run: npx wrangler deploy --config wrangler.jsonc --containers-rollout "${{ steps.managed-container.outputs.rollout }}" --message "$DEPLOY_MESSAGE"
