@@ -355,7 +355,7 @@ fn native_video(runtime: PathBuf) -> super::screen_video::VideoSource {
 fn native_video() -> super::screen_video::VideoSource {
     preview(native_command())
 }
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn preview(source: super::screen_broadcast::Source) -> super::screen_video::VideoSource {
     std::sync::Arc::new(move || {
         let source = source.clone();
@@ -445,7 +445,7 @@ fn native_raw_frames(max_width: usize, max_height: usize) -> super::screen_broad
                     Ok(())
                 }
             }
-            let (native_width, native_height) = nanocodex_hand::main_display_dimensions()?;
+            let (native_width, native_height) = nanocodex_hand::main_display_pixel_dimensions()?;
             let scale = (max_width as f64 / native_width as f64)
                 .min(max_height as f64 / native_height as f64)
                 .min(1.0);
@@ -476,71 +476,5 @@ fn native_raw_frames(max_width: usize, max_height: usize) -> super::screen_broad
 
 #[cfg(target_os = "macos")]
 fn native_video() -> super::screen_video::VideoSource {
-    std::sync::Arc::new(|| {
-        Box::pin(async {
-            use std::process::Stdio;
-            let (mut raw, width, height) = native_raw_frames(1280, 1280)().await?;
-            let mut command = tokio::process::Command::new("ffmpeg");
-            command.args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-f",
-                "rawvideo",
-                "-pixel_format",
-                "bgra",
-                "-video_size",
-                &format!("{width}x{height}"),
-                "-framerate",
-                "60",
-                "-i",
-                "pipe:0",
-                "-an",
-                "-c:v",
-                "h264_videotoolbox",
-                "-realtime",
-                "1",
-                "-profile:v",
-                "baseline",
-                "-b:v",
-                "6M",
-                "-maxrate",
-                "6M",
-                "-bufsize",
-                "100k",
-                "-g",
-                "30",
-                "-bf",
-                "0",
-                "-bsf:v",
-                "h264_metadata=aud=insert",
-                "-flush_packets",
-                "1",
-                "-f",
-                "h264",
-                "pipe:1",
-            ]);
-            let mut child = command
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()?;
-            let mut input = child.stdin.take().ok_or("encoder input unavailable")?;
-            let pump = super::screen_video::Task(tokio::spawn(async move {
-                let _owner = raw.owner;
-                let _ = tokio::io::copy(&mut raw.reader, &mut input).await;
-            }));
-            let encoded = super::screen_video::Capture::child(child)?;
-            let owner = super::screen_video::Task(tokio::spawn(async move {
-                let _owners = (encoded.owner, pump);
-                std::future::pending::<()>().await;
-            }));
-            Ok(super::screen_video::Capture {
-                reader: encoded.reader,
-                owner,
-            })
-        })
-    })
+    preview(native_command())
 }
