@@ -13,6 +13,7 @@ mod context;
 mod editor;
 mod format;
 mod history;
+mod links;
 mod pane;
 mod prompt;
 mod scheduler;
@@ -550,6 +551,7 @@ struct DriverRuntime {
     settings_updates: JoinSet<SettingsCompletion>,
     settings_queue: VecDeque<(PaneId, String, SettingsMutation)>,
     shells: JoinSet<(PaneId, ShellExecution)>,
+    links: JoinSet<(PaneId, Result<(), String>)>,
     history_loads: JoinSet<HistoryCompletion>,
     history_replays: JoinSet<HistoryReplayCompletion>,
     history_prefetch: HistoryPrefetch,
@@ -1551,6 +1553,7 @@ async fn run_inner(
         settings_updates: JoinSet::new(),
         settings_queue: VecDeque::new(),
         shells: JoinSet::new(),
+        links: JoinSet::new(),
         history_loads: JoinSet::new(),
         history_replays: JoinSet::new(),
         history_prefetch: HistoryPrefetch::default(),
@@ -2308,6 +2311,14 @@ async fn run_inner(
                         }
                         ConnectionResult::Disconnected(Ok(())) => {}
                     }
+                }
+            }
+            Some(result) = runtime.links.join_next(), if !runtime.links.is_empty() => {
+                let (pane, result) = result.unwrap_or_else(|error| (
+                    PaneId::Main, Err(format!("Could not open link: {error}")),
+                ));
+                if let Err(error) = result {
+                    request_render(app.update(AppEvent::NotifyError { pane, error }), &mut scheduler);
                 }
             }
             result = runtime.settings_updates.join_next(), if !runtime.settings_updates.is_empty() => {
@@ -3398,7 +3409,13 @@ async fn apply_update(
                         );
                         runtime.start_submission(pane, id, prompt);
                     }
-                    RootEffect::OpenLink(destination) => open_link(&destination),
+                    RootEffect::OpenLink(destination) => {
+                        let client = runtime.client.clone();
+                        let agent_id = runtime.agent_id.clone();
+                        runtime.links.spawn(async move {
+                            (pane, links::open(&client, &agent_id, &destination).await)
+                        });
+                    }
                     RootEffect::OpenDraftEditor => {
                         if !runtime.idle() {
                             absorb(
@@ -3691,22 +3708,6 @@ fn is_image_paste(event: &Event) -> bool {
     )
 }
 
-fn open_link(destination: &str) {
-    #[cfg(target_os = "macos")]
-    let mut command = std::process::Command::new("open");
-    #[cfg(target_os = "linux")]
-    let mut command = std::process::Command::new("xdg-open");
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = std::process::Command::new("cmd");
-        command.args(["/C", "start", ""]);
-        command
-    };
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    return;
-    let _ = command.arg(destination).spawn();
-}
-
 fn terminal_error(error: io::Error) -> ManagedError {
     ManagedError::Configuration(format!("terminal error: {error}"))
 }
@@ -3967,6 +3968,7 @@ mod tests {
             settings_updates: JoinSet::new(),
             settings_queue: VecDeque::new(),
             shells: JoinSet::new(),
+            links: JoinSet::new(),
             history_loads: JoinSet::new(),
             history_replays: JoinSet::new(),
             history_prefetch: HistoryPrefetch::default(),
