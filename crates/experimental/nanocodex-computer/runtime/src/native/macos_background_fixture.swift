@@ -50,4 +50,8 @@ let height = NSScreen.screens[0].frame.height
 let f = window.frame
 log("ready \(ProcessInfo.processInfo.processIdentifier) \(window.windowNumber) \(f.origin.x) \(height-f.maxY) \(f.width) \(f.height)")
 Timer.scheduledTimer(withTimeInterval: 20, repeats: false) { _ in app.terminate(nil) }
+let eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .mouseMoved]) { event in
+    log("pointer type=\(event.type.rawValue) window=\(event.windowNumber) point=\(event.locationInWindow.x),\(event.locationInWindow.y) key=\(window.isKeyWindow) active=\(app.isActive)")
+    return event
+}
 app.run()

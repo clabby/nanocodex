@@ -1498,6 +1498,29 @@ impl Desktop for MacDesktop {
         apps::instructions(app)
     }
     fn app_policy_target(&mut self, identifier: &str) -> Result<App> {
+        // NSWorkspace's process list can lag launch/exit notifications. An
+        // explicit PID must resolve that live process, never a cached namesake.
+        if let Ok(pid) = identifier.parse::<i32>() {
+            let process = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+                .filter(|process| pid > 0 && !process.isTerminated())
+                .ok_or_else(|| Error::action("Application process not found"))?;
+            return Ok(App {
+                id: process
+                    .bundleIdentifier()
+                    .ok_or_else(|| Error::action("Application has no bundle identifier"))?
+                    .to_string(),
+                name: process
+                    .localizedName()
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| identifier.into()),
+                path: process
+                    .bundleURL()
+                    .and_then(|url| url.path())
+                    .ok_or_else(|| Error::action("Application has no bundle path"))?
+                    .to_string(),
+                pid,
+            });
+        }
         let running = self.apps()?;
         let mut matches = running.into_iter().filter(|app| {
             app.id == identifier
@@ -1567,6 +1590,9 @@ impl Desktop for MacDesktop {
             .collect())
     }
     fn bind(&mut self, identifier: &str) -> Result<App> {
+        if identifier.parse::<i32>().is_ok() {
+            return self.app_policy_target(identifier);
+        }
         let find = |apps: Vec<App>| -> Result<Option<App>> {
             let matches: Vec<_> = apps
                 .into_iter()

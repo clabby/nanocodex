@@ -85,6 +85,24 @@ pub(super) fn focus_window(pid: i32, id: Option<u32>) -> Result<()> {
             "Target rejected background window focus notification",
         ));
     }
+    // AppKit-active and native-key are separate states. Without the exact-window
+    // key records, the first mouse down merely makes an inactive window key and
+    // is discarded by controls that do not accept first mouse. Address only this
+    // app; never change WindowServer's front process or raise its windows.
+    for kind in [1, 2] {
+        let mut key_record = [0u8; 248];
+        key_record[4] = 248;
+        key_record[8] = kind;
+        key_record[0x3a] = 0x10;
+        key_record[0x3c..0x40].copy_from_slice(&id.to_le_bytes());
+        key_record[0x20..0x30].fill(0xff);
+        if unsafe { post(&psn, key_record.as_ptr()) } != 0 {
+            return Err(Error::action(
+                "Target rejected background key-window notification",
+            ));
+        }
+    }
+    pump(Duration::from_millis(10));
     Ok(())
 }
 
@@ -260,6 +278,112 @@ mod tests {
     }
     #[test]
     #[ignore = "live owned AppKit receiver; requires Accessibility permission"]
+    fn owned_receiver_accepts_first_production_click() {
+        use std::process::{Command, Stdio};
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("BackgroundFixture.app");
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        std::fs::write(bundle.join("Contents/Info.plist"), r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>org.nanocodex.background-fixture</string><key>CFBundleExecutable</key><string>BackgroundFixture</string><key>CFBundleName</key><string>BackgroundFixture</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"#).unwrap();
+        let executable = bundle.join("Contents/MacOS/BackgroundFixture");
+        assert!(
+            Command::new("swiftc")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/native/macos_background_fixture.swift"
+                ))
+                .arg("-o")
+                .arg(&executable)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let log = dir.path().join("events");
+        std::fs::write(&log, "").unwrap();
+        let front = || {
+            NSWorkspace::sharedWorkspace()
+                .frontmostApplication()
+                .map(|a| a.processIdentifier())
+        };
+        let cursor = || {
+            let p = CGEvent::new(source().unwrap()).unwrap().location();
+            [p.x, p.y]
+        };
+        let before_front = front();
+        let before_cursor = cursor();
+        let mut child = Command::new(&executable)
+            .arg(&log)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        struct Stop<'a>(&'a mut std::process::Child);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _stop = Stop(&mut child);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let header = loop {
+            let contents = std::fs::read_to_string(&log).unwrap();
+            if contents.starts_with("ready ") {
+                break contents;
+            }
+            assert!(Instant::now() < deadline, "fixture startup timed out");
+            pump(Duration::from_millis(10));
+        };
+        let pid: i32 = header.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let mut desktop = MacDesktop::new();
+        let app = desktop.bind(&pid.to_string()).unwrap();
+        desktop.snapshot(&app).unwrap();
+        let identity = desktop
+            .handles
+            .iter()
+            .find(|(_, ax)| ax.text("AXRole").as_deref() == Some("AXTextArea"))
+            .unwrap()
+            .0
+            .clone();
+        eprintln!(
+            "fixture={header} target={:?} frame={:?} id={:?}",
+            desktop.handle(&identity).unwrap().frame(),
+            desktop.current_context(&app).unwrap().frame,
+            desktop.current_context(&app).unwrap().window_id
+        );
+        desktop
+            .action(
+                &app,
+                Action::Click {
+                    target: Target::Element { identity },
+                    button: 0,
+                    count: 1,
+                },
+            )
+            .unwrap();
+        desktop
+            .action(
+                &app,
+                Action::TypeText {
+                    text: "fresh-click".into(),
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let receipt = std::fs::read_to_string(&log).unwrap();
+            if receipt.contains("text-state fresh-click") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fresh production click did not focus editor: {receipt}"
+            );
+            pump(Duration::from_millis(10));
+        }
+        assert_eq!(front(), before_front);
+        assert_eq!(cursor(), before_cursor);
+    }
+    #[test]
+    #[ignore = "live owned AppKit receiver; requires Accessibility permission"]
     fn owned_receiver_accepts_pointer_and_keyboard_without_front_or_cursor_changes() {
         use std::process::{Command, Stdio};
         let dir = tempfile::tempdir().unwrap();
@@ -421,7 +545,7 @@ mod tests {
         }
         eprintln!("background input elapsed: {:?}", action_start.elapsed());
         let mut desktop = MacDesktop::new();
-        let app = desktop.bind("org.nanocodex.background-fixture").unwrap();
+        let app = desktop.bind(&pid.to_string()).unwrap();
         assert_eq!(app.pid, pid);
         assert!(desktop.validate_app(&app).unwrap());
         desktop.snapshot(&app).unwrap();
