@@ -43,9 +43,15 @@ browser buffering. No improvement is claimed for that experiment.
 Pipe reads do not identify frame boundaries. The encoder uses FFmpeg's tee
 muxer to flush packet metadata to a separate local pipe before writing the
 corresponding Annex-B payload. The companion reads exactly the declared packet
-length and forwards an `NCH264F1` stream with unsigned, big-endian 32-bit packet
-lengths. Each packet is bounded to 8 MiB; truncated lengths/payloads and invalid
-metadata fail closed. The receiver also accepts the previous Annex-B stream.
+length and forwards an `NCH264C1` stream of bounded records. Each record has
+an unsigned big-endian 32-bit payload length; its top bit marks the last chunk
+of the frame. Header and payload are written together: at most 4096 bytes on
+Linux and 512 bytes on other Unix systems, within the platform's atomic pipe
+write guarantee. A replacement encoder's exact header resets any unfinished
+frame at a record boundary. No synchronization marker is sought inside video
+payloads. Each assembled frame is bounded to 8 MiB; truncated or malformed
+records fail closed. The receiver also accepts earlier `NCH264F1` packets and
+the previous Annex-B stream.
 Set `NANOCODEX_SCREEN_FRAME_BOUNDARIES=annexb` to select the previous encoder
 output for troubleshooting. No settings are specific to one GPU or machine.
 
@@ -59,3 +65,14 @@ complete H.264 payload exactly.
 This change is implemented in the Go companion. The shared Rust native/VM
 publisher still uses delimiter lookahead at the time of this report; its
 cross-platform framed-output port requires its own runtime verification.
+
+
+Waymote replaces its encoder on resolution/configuration changes using SIGKILL
+while retaining the output pipe. The initial F1 implementation rejected a
+second stream header; moreover, a killed writer could leave a partial large
+packet. C1 addresses both cases. A regression test actually kills a subprocess
+blocked while writing a 1 MiB frame, starts a replacement stream on the same
+pipe, and verifies that only the complete replacement frame is emitted. This
+passes on macOS and Linux; parameter-set changes and byte-at-a-time reads have
+separate coverage. A capture-forwarding error now appears in diagnostics rather
+than being discarded before the generic capture-stopped message.

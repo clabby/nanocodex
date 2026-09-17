@@ -124,3 +124,52 @@ func TestFramedH264BoundariesAndValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestFramedH264EncoderRestartKeepsNewParameterSets(t *testing.T) {
+	first := []byte{0, 0, 0, 1, 0x67, 0x42, 0, 0x20, 0, 0, 1, 0x68, 0x11, 0, 0, 1, 0x65, 0x33}
+	second := []byte{0, 0, 0, 1, 0x67, 0x42, 0, 0x34, 0, 0, 1, 0x68, 0x22, 0, 0, 1, 0x65, 0x44}
+	var wire bytes.Buffer
+	for _, frame := range [][]byte{first, second} {
+		wire.WriteString(framedH264Magic)
+		_ = binary.Write(&wire, binary.BigEndian, uint32(len(frame)))
+		wire.Write(frame)
+	}
+	for _, reader := range []io.Reader{bytes.NewReader(wire.Bytes()), iotest.OneByteReader(bytes.NewReader(wire.Bytes()))} {
+		var got [][]byte
+		err := readH264Frames(reader, func(frame []byte) error { got = append(got, append([]byte{}, frame...)); return nil })
+		if err != nil || len(got) != 2 || !bytes.Equal(got[0], first) || !bytes.Equal(got[1], second) {
+			t.Fatalf("encoder restart lost parameter sets: %v, %x", err, got)
+		}
+	}
+	for _, suffix := range []string{"", "F", "ZZZZ"} {
+		bad := append([]byte(framedH264Magic), []byte("NCH2"+suffix)...)
+		if err := readH264Frames(bytes.NewReader(bad), func([]byte) error { return nil }); err == nil {
+			t.Fatal("invalid restart accepted")
+		}
+	}
+}
+
+func TestChunkedH264RejectsCorruptionAndKeepsPayloadMagic(t *testing.T) {
+	frame := append([]byte{0, 0, 0, 1, 0x65}, []byte(chunkedH264Magic)...)
+	var wire bytes.Buffer
+	wire.WriteString(chunkedH264Magic)
+	if err := writeEncodedFrame(&wire, frame); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	if err := readH264Frames(iotest.OneByteReader(bytes.NewReader(wire.Bytes())), func(got []byte) error {
+		count++
+		if !bytes.Equal(got, frame) {
+			t.Fatal("payload mistaken for reset")
+		}
+		return nil
+	}); err != nil || count != 1 {
+		t.Fatalf("chunk framing: %v, %d", err, count)
+	}
+	for _, record := range [][]byte{{0, 0, 0, 0}, {0, 0, 0x10, 0}, {0x80, 0, 0, 8, 0, 0, 1}, {0, 0, 0, 4, 0, 0, 1, 0x65}} {
+		bad := append([]byte(chunkedH264Magic), record...)
+		if err := readH264Frames(bytes.NewReader(bad), func([]byte) error { t.Fatal("bad chunk emitted"); return nil }); err == nil {
+			t.Fatal("bad chunk accepted")
+		}
+	}
+}

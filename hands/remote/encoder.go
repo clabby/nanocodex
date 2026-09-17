@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -177,13 +178,12 @@ func runFramedScreenEncoder(ffmpeg string, args []string, input io.Reader, outpu
 }
 
 func forwardEncodedFrames(metadata io.Reader, video io.Reader, output io.Writer) error {
-	if _, err := io.WriteString(output, framedH264Magic); err != nil {
+	if _, err := io.WriteString(output, chunkedH264Magic); err != nil {
 		return err
 	}
 	scanner := bufio.NewScanner(metadata)
 	scanner.Buffer(make([]byte, 1024), 16*1024)
 	var frame []byte
-	var header [4]byte
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "#") {
@@ -205,13 +205,39 @@ func forwardEncodedFrames(metadata io.Reader, video io.Reader, output io.Writer)
 		if _, err := io.ReadFull(video, frame); err != nil {
 			return err
 		}
-		binary.BigEndian.PutUint32(header[:], uint32(size))
-		if _, err := output.Write(header[:]); err != nil {
-			return err
-		}
-		if _, err := output.Write(frame); err != nil {
+		if err := writeEncodedFrame(output, frame); err != nil {
 			return err
 		}
 	}
 	return scanner.Err()
+}
+
+// One Write contains an entire record. Linux guarantees pipe writes <=4096
+// bytes are atomic, including when Waymote kills a blocked encoder. Other Unix
+// platforms use POSIX's conservative 512-byte lower bound. A replacement child
+// can therefore reset a partial frame at the next record boundary safely.
+func writeEncodedFrame(output io.Writer, frame []byte) error {
+	payloadLimit := 512 - 4
+	if runtime.GOOS == "linux" {
+		payloadLimit = maxH264ChunkPayload
+	}
+	var record [maxH264ChunkPayload + 4]byte
+	for len(frame) > 0 {
+		size := min(len(frame), payloadLimit)
+		value := uint32(size)
+		if size == len(frame) {
+			value |= h264FinalChunk
+		}
+		binary.BigEndian.PutUint32(record[:4], value)
+		copy(record[4:], frame[:size])
+		n, err := output.Write(record[:size+4])
+		if err != nil {
+			return err
+		}
+		if n != size+4 {
+			return io.ErrShortWrite
+		}
+		frame = frame[size:]
+	}
+	return nil
 }

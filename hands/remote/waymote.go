@@ -93,11 +93,14 @@ func startWaymoteWithDiagnostics(ctx context.Context, executable string, diagnos
 	capture := &waymoteCapture{track: track, input: input, video: video, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		forwarder := h264Forwarder{}
-		_ = forwarder.read(video, func(out *rtp.Packet) error {
+		err := forwarder.read(video, func(out *rtp.Packet) error {
 			// A viewer can unbind during a write without stopping other viewers.
 			_ = track.WriteRTP(out)
 			return nil
 		})
+		if err != nil && ctx.Err() == nil {
+			fmt.Fprintf(diagnostics, "Wayland video forwarding failed: %v\n", err)
+		}
 		cancel()
 		_ = command.Wait()
 		close(capture.done)

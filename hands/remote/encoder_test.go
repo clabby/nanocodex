@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,14 @@ import (
 // The Wayland integration tests execute this test binary as Waymote's encoder,
 // exercising the same subprocess boundary as the production companion.
 func TestMain(m *testing.M) {
+	if os.Getenv("NANOCODEX_TEST_ATOMIC_ENCODER") == "1" {
+		_, _ = io.WriteString(os.Stdout, chunkedH264Magic)
+		frame := append([]byte{0, 0, 0, 1, 0x65}, bytes.Repeat([]byte{0x35}, 1024*1024)...)
+		if err := writeEncodedFrame(os.Stdout, frame); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv(encoderHelperEnv) == "1" {
 		if err := runScreenEncoder(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -117,5 +128,60 @@ func TestEncoderMetadataRejectsMalformedAndTruncatedFrames(t *testing.T) {
 		if err := forwardEncodedFrames(strings.NewReader(line+"\n"), strings.NewReader("tiny"), io.Discard); err == nil {
 			t.Fatalf("accepted %q", line)
 		}
+	}
+}
+
+func TestKilledEncoderRestartsAtAtomicRecordBoundary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix Waymote process boundary")
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	child := exec.Command(os.Args[0])
+	child.Env = append(os.Environ(), "NANOCODEX_TEST_ATOMIC_ENCODER=1")
+	child.Stdout = writer
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer child.Process.Kill()
+	// Read just one complete nonfinal record, then SIGKILL while the large
+	// frame writer is backpressured by the pipe. Keep the shared pipe open.
+	prefix := make([]byte, 12)
+	if _, err := io.ReadFull(reader, prefix); err != nil {
+		t.Fatal(err)
+	}
+	size := int(binary.BigEndian.Uint32(prefix[8:]))
+	if string(prefix[:8]) != chunkedH264Magic || size < 1 || size > maxH264ChunkPayload {
+		t.Fatal("invalid initial atomic record")
+	}
+	first := make([]byte, size)
+	if _, err := io.ReadFull(reader, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = child.Wait()
+	second := []byte{0, 0, 0, 1, 0x67, 0x42, 0, 0x34, 0, 0, 1, 0x68, 0x22, 0, 0, 1, 0x65, 0x44}
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(writer, chunkedH264Magic)
+		if err == nil {
+			err = writeEncodedFrame(writer, second)
+		}
+		writer.Close()
+		done <- err
+	}()
+	var frames [][]byte
+	err = readH264Frames(io.MultiReader(bytes.NewReader(append(prefix, first...)), reader), func(frame []byte) error { frames = append(frames, append([]byte{}, frame...)); return nil })
+	if err != nil || len(frames) != 1 || !bytes.Equal(frames[0], second) {
+		t.Fatalf("killed frame corrupted replacement: %v, %d frames", err, len(frames))
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

@@ -14,6 +14,9 @@ import (
 
 const maxH264Frame = 8 * 1024 * 1024
 const framedH264Magic = "NCH264F1"
+const chunkedH264Magic = "NCH264C1"
+const maxH264ChunkPayload = 4092
+const h264FinalChunk = uint32(1 << 31)
 
 // Waymote enables x264 access-unit delimiters and a fixed 60 Hz encoder.
 // Packetize its Annex-B stdout without decoding or re-encoding. The pipe works
@@ -56,7 +59,7 @@ func (forwarder *h264Forwarder) read(reader io.Reader, write func(*rtp.Packet) e
 func readH264Frames(reader io.Reader, emit func([]byte) error) error {
 	buffered := bufio.NewReader(reader)
 	prefix, _ := buffered.Peek(len(framedH264Magic))
-	if string(prefix) != framedH264Magic {
+	if string(prefix) != framedH264Magic && string(prefix) != chunkedH264Magic {
 		scanner := bufio.NewScanner(buffered)
 		scanner.Buffer(make([]byte, 64*1024), maxH264Frame)
 		scanner.Split(h264AccessUnit)
@@ -67,28 +70,57 @@ func readH264Frames(reader io.Reader, emit func([]byte) error) error {
 		}
 		return scanner.Err()
 	}
+	chunked := string(prefix) == chunkedH264Magic
 	_, _ = buffered.Discard(len(framedH264Magic))
 	var header [4]byte
 	var frame []byte
 	for {
 		_, err := io.ReadFull(buffered, header[:])
-		if err == io.EOF {
+		if err == io.EOF && len(frame) == 0 {
 			return nil
 		}
 		if err != nil {
+			if err == io.EOF {
+				return io.ErrUnexpectedEOF
+			}
 			return err
 		}
-		size := int(binary.BigEndian.Uint32(header[:]))
-		if size < 1 || size > maxH264Frame {
+		// Waymote SIGKILLs/replaces the encoder on configuration changes while
+		// keeping stdout open. C1 records are atomic pipe writes, so a new
+		// stream starts at a record boundary even if the last frame was partial.
+		// Never search arbitrary encoded payload for a synchronization marker.
+		if string(header[:]) == framedH264Magic[:4] {
+			var suffix [4]byte
+			if _, err := io.ReadFull(buffered, suffix[:]); err != nil {
+				return err
+			}
+			switch string(suffix[:]) {
+			case framedH264Magic[4:]:
+				chunked = false
+			case chunkedH264Magic[4:]:
+				chunked = true
+			default:
+				return errors.New("invalid framed H.264 restart header")
+			}
+			frame = frame[:0]
+			continue
+		}
+		value := binary.BigEndian.Uint32(header[:])
+		final := !chunked || value&h264FinalChunk != 0
+		size := int(value)
+		if chunked {
+			size = int(value & ^h264FinalChunk)
+		}
+		if size < 1 || size > maxH264Frame || (chunked && size > maxH264ChunkPayload) || len(frame)+size > maxH264Frame {
 			return errors.New("invalid framed H.264 size")
 		}
-		if cap(frame) < size {
-			frame = make([]byte, size)
-		} else {
-			frame = frame[:size]
-		}
-		if _, err := io.ReadFull(buffered, frame); err != nil {
+		start := len(frame)
+		frame = append(frame, make([]byte, size)...)
+		if _, err := io.ReadFull(buffered, frame[start:]); err != nil {
 			return err
+		}
+		if !final {
+			continue
 		}
 		if !bytes.HasPrefix(frame, []byte{0, 0, 1}) && !bytes.HasPrefix(frame, []byte{0, 0, 0, 1}) {
 			return errors.New("invalid framed H.264 payload")
@@ -96,6 +128,7 @@ func readH264Frames(reader io.Reader, emit func([]byte) error) error {
 		if err := emit(frame); err != nil {
 			return err
 		}
+		frame = frame[:0]
 	}
 }
 
