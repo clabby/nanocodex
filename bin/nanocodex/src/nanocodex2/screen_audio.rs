@@ -138,6 +138,8 @@ async fn native_capture() -> Result<Capture> {
             "48000",
             "-ac",
             "2",
+            "-flush_packets",
+            "1",
             "-f",
             "s16le",
             "pipe:1",
@@ -222,13 +224,24 @@ mod tests {
     }
     #[tokio::test]
     async fn opus_track_starts_from_pcm_and_stops_its_source_on_drop() {
-        let source: VideoSource = Arc::new(|| {
-            Box::pin(async {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Stopped(Arc<AtomicBool>);
+        impl Drop for Stopped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let stopped = Arc::new(AtomicBool::new(false));
+        let observed = stopped.clone();
+        let source: VideoSource = Arc::new(move || {
+            let stopped = stopped.clone();
+            Box::pin(async move {
                 use tokio::io::AsyncWriteExt;
                 let (reader, mut writer) = tokio::io::duplex(FRAME_SAMPLES * 2);
                 Ok(Capture {
                     reader: Box::new(reader),
                     owner: Task(tokio::spawn(async move {
+                        let _stopped = Stopped(stopped);
                         while writer.write_all(&[0u8; FRAME_SAMPLES * 2]).await.is_ok() {
                             tokio::time::sleep(Duration::from_millis(20)).await;
                         }
@@ -239,5 +252,12 @@ mod tests {
         let audio = Audio::start(&source).await.unwrap();
         assert_eq!(audio.track.codec().mime_type, "audio/opus");
         drop(audio);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !observed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping audio must cancel its capture owner");
     }
 }
