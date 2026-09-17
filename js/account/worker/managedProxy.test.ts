@@ -237,3 +237,11 @@ test("direct broker failure and stale generation never replay through the manage
     assert.equal(response?.headers.has("x-nanocodex-access-rejected"), false);
   }
 });
+
+test("cloud phone controls and signed callbacks reach managed authentication", () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  for (const path of ["health", "check", "calls", `calls/${id}`, `calls/${id}/hangup`, `status/${id}`, `media/${id}/`, "internal/state", "internal/setup"])
+    assert.equal(isManagedRoutePath(`/v1/phone/bridge/${path}`), true);
+  for (const path of ["", "internal/secrets", "calls/invalid", `media/${id}`])
+    assert.equal(isManagedRoutePath(`/v1/phone/bridge/${path}`), false);
+});

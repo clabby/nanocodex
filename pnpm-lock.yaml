@@ -421,6 +421,9 @@ importers:
       '@cloudflare/computer':
         specifier: 0.2.1
         version: 0.2.1(ai@7.0.90(zod@4.5.4))(supports-color@10.2.2)(zod@4.5.4)
+      '@cloudflare/containers':
+        specifier: 0.3.7
+        version: 0.3.7
       '@cloudflare/sandbox':
         specifier: 0.12.4
         version: 0.12.4(patch_hash=7fa7387e610c11eed36979117adfdd317b44eed0f2feffba0c35cdfa24aed2b2)
