@@ -18,3 +18,8 @@ pub use windows::{ensure_interactive_session, request, video_command};
 mod windows_audio;
 #[cfg(target_os = "windows")]
 pub use windows_audio::capture_audio;
+
+#[cfg(target_os = "macos")]
+mod macos_audio;
+#[cfg(target_os = "macos")]
+pub use macos_audio::{capture_audio, capture_video, main_display_dimensions};
