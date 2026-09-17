@@ -9,6 +9,18 @@
 .remote-screens button:focus-visible, .remote-screen-canvas:focus-visible { outline: 2px solid #5589df; outline-offset: -2px; }
 .remote-screen-toolbar span { flex: 1; font-size: 12px; }
 .remote-screen-canvas { position: relative; flex: 1; min-height: 0; background: #111; touch-action: none; user-select: none; }
+.remote-screen-view { display: flex; flex: 1; flex-direction: column; min-height: 0; color: inherit; background: var(--surface, #fff); }
+.remote-screen-view:fullscreen, .remote-screen-expanded { width: 100%; height: 100%; background: #111; color: #fff; }
+.remote-screen-expanded { position: fixed; inset: 0; width: 100vw; height: 100dvh; z-index: 1; }
+.remote-screen-view[data-pointer-locked="true"] .remote-screen-canvas { cursor: none; }
+.remote-screen-view:fullscreen[data-pointer-locked="true"] .remote-screen-toolbar,
+.remote-screen-view:fullscreen[data-pointer-locked="true"] .remote-screen-text,
+.remote-screen-expanded[data-pointer-locked="true"] .remote-screen-toolbar,
+.remote-screen-expanded[data-pointer-locked="true"] .remote-screen-text { display: none; }
+.remote-virtual-cursor { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 2; }
+.remote-capture-hint { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); padding: 6px 10px; border-radius: 6px; color: #fff; background: #0009; font-size: 12px; white-space: nowrap; pointer-events: none; animation: remote-capture-hint 4s forwards; }
+@keyframes remote-capture-hint { 0%, 70% { opacity: 1; } 100% { opacity: 0; } }
+.remote-screen-notice { margin: 0; padding: 8px 16px; font-size: 12px; }
 .remote-screens video, .remote-screen-frame { display: block; position: absolute; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
 .remote-keyboard-input { position: absolute; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; padding: 0; border: 0; pointer-events: none; resize: none; }
 .remote-screen-list { padding: 16px; overflow: auto; }
@@ -17,5 +29,5 @@
 .remote-screen-list small, .remote-screen-text small { opacity: .65; }
 .remote-screen-text { display: flex; align-items: center; gap: 8px; padding: 12px; flex-wrap: wrap; }
 .remote-screen-text input { min-width: 140px; flex: 1; padding: 9px; border: 1px solid #8885; border-radius: 6px; font: inherit; color: inherit; background: transparent; }
-@media (max-width: 600px) { .remote-screens { height: 94dvh; }.remote-screen-toolbar { gap: 8px; padding: 10px; }.remote-screen-text small { width: 100%; } }
+@media (max-width: 600px) { .remote-screens { height: 94dvh; }.remote-screen-toolbar { gap: 8px; padding: 10px; flex-wrap: wrap; }.remote-screen-text small { width: 100%; } }
 .remote-screens-open { display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; padding: 6px; font: inherit; }

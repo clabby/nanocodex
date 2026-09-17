@@ -72,8 +72,9 @@ type hostPeer struct {
 	renewal        context.CancelFunc
 }
 type controlMessage struct {
-	Type       string `json:"type"`
-	Generation string `json:"generation,omitempty"`
+	Type            string `json:"type"`
+	Generation      string `json:"generation,omitempty"`
+	RelativePointer bool   `json:"relativePointer,omitempty"`
 }
 
 // All peer, lease and input state changes are serialized by the host loop.
@@ -323,7 +324,7 @@ func serveWayland(parent context.Context, config hostConfig) error {
 		}
 		switch message.Type {
 		case "acquire":
-			if message.Generation != "" {
+			if message.Generation != "" || message.RelativePointer {
 				remove(event.viewer)
 				return
 			}
@@ -338,7 +339,7 @@ func serveWayland(parent context.Context, config hostConfig) error {
 				fail(err)
 				return
 			}
-			if sendControl(peer, controlMessage{Type: "granted", Generation: lease.acquire(event.viewer, now)}) != nil {
+			if sendControl(peer, controlMessage{Type: "granted", Generation: lease.acquire(event.viewer, now), RelativePointer: true}) != nil {
 				remove(event.viewer)
 			}
 		case "renew":

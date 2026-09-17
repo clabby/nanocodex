@@ -157,6 +157,8 @@ func (capture *waymoteCapture) apply(event remoteInput) error {
 	switch event.Kind {
 	case "move":
 		return nil
+	case "relativeMove":
+		return capture.record(8, 0, math.Float32bits(float32(*event.DeltaX)), math.Float32bits(float32(*event.DeltaY)), sequence)
 	case "button":
 		return capture.record(2, down, 0x110+uint32(*event.Button), 0, sequence)
 	case "scroll":

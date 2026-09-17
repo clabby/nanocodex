@@ -7,6 +7,43 @@ const screen: RemoteHand = {
   machine_id: "server:018f0000-0000-7000-8000-000000000001", machine_name: "Linux server", generation: "first",
 };
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+
+test("relative control is negotiated per lease and deltas use reliable ordering", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.session.takeControl();
+  assert.equal(f.session.state.controlPending, true);
+  f.peers[0]!.reliable.message({ type: "granted", generation: "relative", relativePointer: true });
+  assert.equal(f.session.state.relativePointer, true);
+  assert.equal(f.session.state.controlPending, false);
+  f.session.input({ kind: "relativeMove", deltaX: 12.5, deltaY: -2 });
+  f.session.input({ kind: "button", button: 0, down: true });
+  assert.deepEqual(f.peers[0]!.reliable.sent.slice(-2), [
+    { kind: "relativeMove", deltaX: 12.5, deltaY: -2, sequence: 1, generation: "relative" },
+    { kind: "button", button: 0, down: true, sequence: 2, generation: "relative" },
+  ]);
+  assert.equal(f.peers[0]!.motion.sent.length, 0, "relative deltas must not be dropped or reordered as absolute motion");
+  f.session.releaseControl();
+  assert.equal(f.session.state.relativePointer, false);
+});
+
+test("legacy grants and rejected control never leave mouse capture pending", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.session.takeControl(); f.peers[0]!.reliable.message({ type: "denied" });
+  assert.equal(f.session.state.controlPending, false);
+  f.session.takeControl(); f.peers[0]!.reliable.message({ type: "granted", generation: "legacy" });
+  assert.equal(f.session.state.relativePointer, false);
+  assert.equal(f.session.state.controlPending, false);
+});
+
+test("malformed relative capability tears down capture intent", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.session.takeControl(); f.peers[0]!.reliable.message({ type: "granted", generation: "bad", relativePointer: "yes" });
+  assert.equal(f.session.state.connected, false);
+  assert.equal(f.session.state.controlPending, false);
+});
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; });

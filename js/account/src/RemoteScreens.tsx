@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useAccountSession } from "./AccountSession";
 import { accountQueryKey } from "./queryClient";
-import { useEffect, useRef, useState, type PointerEvent, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { Monitor, X } from "lucide-react";
 import { listRemoteHands, RemoteBrowserSession, remoteKeys, type RemoteHand, type RemoteState } from "./handRemote";
@@ -42,7 +42,7 @@ function ScreensDialog({ onClose }: { onClose(): void }) {
     return () => dialog.current?.close();
   }, []);
   return <dialog ref={dialog} className="remote-screens" aria-labelledby="remote-screens-title"
-    onCancel={event => { event.preventDefault(); onClose(); }}>
+    onCancel={event => { event.preventDefault(); if (!selected) onClose(); }}>
     <header><h2 id="remote-screens-title">{selected ? `${selected.machine_name} · ${selected.name}` : "Remote screens"}</h2>
       <button type="button" aria-label="Close remote screens" onClick={onClose}><X size={18} /></button></header>
     {selected ? <Screen key={`${selected.machine_id}:${selected.id}`} hand={selected} onBack={() => setSelected(undefined)} /> : <div className="remote-screen-list">
@@ -61,6 +61,17 @@ function ScreensDialog({ onClose }: { onClose(): void }) {
 
 type Pointer = { x: number; y: number; originX: number; originY: number; pressed: boolean; button: number; touch: boolean };
 function Screen({ hand, onBack }: { hand: RemoteHand; onBack(): void }) {
+  const view = useRef<HTMLDivElement>(null);
+  const picture = useRef<HTMLDivElement>(null);
+  const virtualCursor = useRef<SVGSVGElement>(null);
+  const pointerPosition = useRef({ x: 0.5, y: 0.5 });
+  const ownedLock = useRef(false);
+  const ownedFullscreen = useRef(false);
+  const captureAttempt = useRef(0);
+  const [pointerLocked, setPointerLocked] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [captureNotice, setCaptureNotice] = useState("");
   const video = useRef<HTMLVideoElement>(null);
   const frameCanvas = useRef<HTMLCanvasElement>(null);
   const keyboardInput = useRef<HTMLTextAreaElement>(null);
@@ -95,10 +106,113 @@ function Screen({ hand, onBack }: { hand: RemoteHand; onBack(): void }) {
     document.addEventListener("visibilitychange", visibility);
     return () => {
       mounted = false;
+      ++captureAttempt.current;
+      if (picture.current && document.pointerLockElement === picture.current) document.exitPointerLock();
+      if (view.current && document.fullscreenElement === view.current) void document.exitFullscreen().catch(() => {});
       window.removeEventListener("blur", release); window.removeEventListener("pagehide", pause); window.removeEventListener("pageshow", resume);
       document.removeEventListener("visibilitychange", visibility); connection.close(); session.current = undefined;
     };
   }, [hand]);
+
+  useEffect(() => {
+    const lockChanged = () => {
+      const locked = document.pointerLockElement === picture.current;
+      const released = ownedLock.current && !locked;
+      ownedLock.current = locked; setPointerLocked(locked);
+      if (locked) { setCaptureNotice(""); keyboardInput.current?.focus({ preventScroll: true }); }
+      if (released) { releaseInput(); session.current?.releaseControl(); }
+    };
+    const fullscreenChanged = () => {
+      const active = document.fullscreenElement === view.current;
+      if (ownedFullscreen.current && !active) releaseControl();
+      ownedFullscreen.current = active; setFullscreen(active);
+    };
+    const lockFailed = () => setCaptureNotice("Mouse capture was unavailable. You can still control inside the picture.");
+    document.addEventListener("pointerlockchange", lockChanged);
+    document.addEventListener("pointerlockerror", lockFailed);
+    document.addEventListener("fullscreenchange", fullscreenChanged);
+    return () => {
+      document.removeEventListener("pointerlockchange", lockChanged);
+      document.removeEventListener("pointerlockerror", lockFailed);
+      document.removeEventListener("fullscreenchange", fullscreenChanged);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!state.controlling && !state.controlPending) {
+      ++captureAttempt.current;
+      if (picture.current && document.pointerLockElement === picture.current) document.exitPointerLock();
+    } else if (state.controlling && pointerLocked) {
+      // Relative zero enables the publisher's captured cursor without warping it.
+      session.current?.input(state.relativePointer ? { kind: "relativeMove", deltaX: 0, deltaY: 0 }
+        : { kind: "move", ...pointerPosition.current });
+      keyboardInput.current?.focus({ preventScroll: true });
+      positionVirtualCursor();
+    }
+  }, [state.controlling, state.controlPending, state.relativePointer, pointerLocked, fullscreen]);
+
+  function releaseControl() {
+    ++captureAttempt.current;
+    releaseInput(); session.current?.releaseControl();
+    if (picture.current && document.pointerLockElement === picture.current) document.exitPointerLock();
+  }
+  function enterFullscreen() {
+    if (!view.current) return;
+    if (view.current.requestFullscreen) void view.current.requestFullscreen().catch(() => setExpanded(true));
+    else setExpanded(true);
+  }
+  function toggleFullscreen() {
+    if (fullscreen) { releaseControl(); void document.exitFullscreen().catch(() => {}); }
+    else if (expanded) { releaseControl(); setExpanded(false); }
+    else enterFullscreen();
+  }
+  function takeControl() {
+    if (state.controlling || state.controlPending) { releaseControl(); return; }
+    setCaptureNotice(""); session.current?.takeControl();
+    const attempt = ++captureAttempt.current;
+    // Request pointer lock before fullscreen consumes this click's activation.
+    // Touch screens retain their existing gestures and never hide a pointer.
+    if (window.matchMedia("(any-pointer: fine)").matches && picture.current?.requestPointerLock) {
+      try {
+        const request = picture.current.requestPointerLock();
+        void Promise.resolve(request).then(() => {
+          if (attempt !== captureAttempt.current && document.pointerLockElement === picture.current) document.exitPointerLock();
+        }).catch(() => {
+          if (attempt === captureAttempt.current) setCaptureNotice("Mouse capture was unavailable. You can still control inside the picture.");
+        });
+      } catch { setCaptureNotice("Mouse capture was unavailable. You can still control inside the picture."); }
+    }
+    enterFullscreen();
+  }
+  function positionVirtualCursor() {
+    const bounds = picture.current?.getBoundingClientRect();
+    if (!bounds || !virtualCursor.current) return;
+    const width = video.current?.videoWidth || frameCanvas.current?.width || activeHand.width;
+    const height = video.current?.videoHeight || frameCanvas.current?.height || activeHand.height;
+    const scale = Math.min(bounds.width / width, bounds.height / height);
+    virtualCursor.current.style.transform = `translate(${(bounds.width - width * scale) / 2 + pointerPosition.current.x * width * scale}px, ${(bounds.height - height * scale) / 2 + pointerPosition.current.y * height * scale}px)`;
+  }
+  function lockedMouseMove(event: MouseEvent<HTMLDivElement>) {
+    if (!state.controlling || document.pointerLockElement !== picture.current) return;
+    const deltaX = Math.max(-4096, Math.min(4096, event.movementX));
+    const deltaY = Math.max(-4096, Math.min(4096, event.movementY));
+    if (!deltaX && !deltaY) return;
+    if (state.relativePointer) session.current?.input({ kind: "relativeMove", deltaX, deltaY });
+    else {
+      const bounds = picture.current!.getBoundingClientRect();
+      const width = video.current?.videoWidth || activeHand.width, height = video.current?.videoHeight || activeHand.height;
+      const scale = Math.min(bounds.width / width, bounds.height / height);
+      pointerPosition.current = { x: Math.max(0, Math.min(1, pointerPosition.current.x + deltaX / (width * scale))),
+        y: Math.max(0, Math.min(1, pointerPosition.current.y + deltaY / (height * scale))) };
+      positionVirtualCursor(); session.current?.input({ kind: "move", ...pointerPosition.current });
+    }
+  }
+  function lockedMouseButton(event: MouseEvent<HTMLDivElement>, down: boolean) {
+    if (!state.controlling || document.pointerLockElement !== picture.current) return;
+    event.preventDefault();
+    const button = event.button === 2 ? 1 : event.button === 1 ? 2 : 0;
+    session.current?.input({ kind: "button", button, down, ...(state.relativePointer ? {} : pointerPosition.current) });
+  }
 
   function point(clientX: number, clientY: number, clamp = false) {
     const frames = activeHand.transport === "frames-v1";
@@ -113,6 +227,7 @@ function Screen({ hand, onBack }: { hand: RemoteHand; onBack(): void }) {
     return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
   }
   function pointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (document.pointerLockElement === picture.current) return;
     if (!state.controlling) { void video.current?.play().catch(() => {}); return; }
     const position = point(event.clientX, event.clientY); if (!position) return;
     event.preventDefault(); keyboardInput.current?.focus({ preventScroll: true }); event.currentTarget.setPointerCapture(event.pointerId);
@@ -125,9 +240,11 @@ function Screen({ hand, onBack }: { hand: RemoteHand; onBack(): void }) {
     } else if (!touch) session.current?.input({ kind: "button", ...position, button, down: true });
   }
   function pointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (document.pointerLockElement === picture.current) return;
     if (!state.controlling) return;
     const pointer = pointers.current.get(event.pointerId), position = point(event.clientX, event.clientY, Boolean(pointer));
     if (!position) return;
+    pointerPosition.current = position;
     if (pointers.current.size > 1 && pointer) {
       session.current?.input({ kind: "scroll", ...position,
         deltaX: Math.max(-4096, Math.min(4096, (position.x - pointer.x) * activeHand.width)),
@@ -143,6 +260,7 @@ function Screen({ hand, onBack }: { hand: RemoteHand; onBack(): void }) {
     if (pointer) { pointer.x = position.x; pointer.y = position.y; }
   }
   function pointerUp(event: PointerEvent<HTMLDivElement>) {
+    if (document.pointerLockElement === picture.current) return;
     const pointer = pointers.current.get(event.pointerId); if (!pointer) return;
     const position = point(event.clientX, event.clientY, true)!;
     if (pointers.current.size === 1) {
@@ -157,6 +275,9 @@ function Screen({ hand, onBack }: { hand: RemoteHand; onBack(): void }) {
   function releaseInput() { pointers.current.clear(); keys.current.clear(); lastEscape.current = 0; session.current?.input({ kind: "releaseAll" }); }
   function keyboard(event: KeyboardEvent<HTMLDivElement>, down: boolean) {
     if (!state.controlling || event.nativeEvent.isComposing) return;
+    if (down && event.code === "Escape" && document.pointerLockElement === picture.current) {
+      event.preventDefault(); event.stopPropagation(); releaseControl(); return;
+    }
     if (down && event.code === "Escape" && !event.repeat) {
       const now = performance.now(), previous = lastEscape.current; lastEscape.current = now;
       if ((previous > 0 && now - previous <= 500) || (event.metaKey && event.shiftKey)) {
@@ -169,28 +290,33 @@ function Screen({ hand, onBack }: { hand: RemoteHand; onBack(): void }) {
     else if (down) { keys.current.add(key); session.current?.input({ kind: "key", key, down: true }); }
     else if (keys.current.delete(key)) session.current?.input({ kind: "key", key, down: false });
   }
-  return <>
+  return <div ref={view} className={`remote-screen-view${expanded ? " remote-screen-expanded" : ""}`} data-pointer-locked={pointerLocked}>
     <div className="remote-screen-toolbar"><button type="button" onClick={onBack}>All screens</button><span role="status">{state.status}</span>
       {!state.connected && <button type="button" disabled={state.connecting} onClick={() => session.current?.reconnect()}>Reconnect</button>}
       {state.audioAvailable && <button type="button" aria-pressed={Boolean(state.audioEnabled)}
         onClick={() => { void session.current?.setAudioEnabled(!state.audioEnabled); }}>
         {state.audioEnabled ? "Mute sound" : "Enable sound"}</button>}
-      <button type="button" disabled={!state.connected || !activeHand.controllable} onClick={() => state.controlling ? session.current?.releaseControl() : session.current?.takeControl()}>
-        {state.controlling ? "Release control" : "Take control"}</button></div>
-    <div className="remote-screen-canvas" tabIndex={0} role="application" aria-label="Remote screen" data-testid="remote-screen"
+      <button type="button" onClick={toggleFullscreen}>{fullscreen || expanded ? "Exit fullscreen" : "Fullscreen"}</button>
+      <button type="button" disabled={!state.connected || !activeHand.controllable} onClick={takeControl}>
+        {state.controlling ? "Release control" : state.controlPending ? "Cancel control" : "Take control"}</button></div>
+    {captureNotice && <p className="remote-screen-notice" role="status">{captureNotice}</p>}
+    <div ref={picture} className="remote-screen-canvas" tabIndex={0} role="application" aria-label="Remote screen" data-testid="remote-screen"
       onFocus={event => { if (event.target === event.currentTarget && state.controlling) keyboardInput.current?.focus({ preventScroll: true }); }}
       onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}
+      onMouseMove={lockedMouseMove} onMouseDown={event => lockedMouseButton(event, true)} onMouseUp={event => lockedMouseButton(event, false)}
       onPointerCancel={releaseInput} onLostPointerCapture={event => { if (pointers.current.has(event.pointerId)) releaseInput(); }}
       onKeyDown={event => keyboard(event, true)} onKeyUp={event => keyboard(event, false)}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) releaseInput(); }}
       onContextMenu={event => event.preventDefault()} onWheel={event => {
         if (!state.controlling) return;
-        const position = point(event.clientX, event.clientY); if (!position) return;
+        const position = pointerLocked ? (state.relativePointer ? {} : pointerPosition.current) : point(event.clientX, event.clientY); if (!position) return;
         const scale = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? activeHand.height : 1;
         session.current?.input({ kind: "scroll", ...position, deltaX: Math.min(4096, Math.max(-4096, -event.deltaX * scale)), deltaY: Math.min(4096, Math.max(-4096, -event.deltaY * scale)) });
       }}><video ref={video} autoPlay playsInline muted={!state.audioEnabled} data-testid="remote-video" style={{ visibility: state.connected && activeHand.transport !== "frames-v1" ? "visible" : "hidden" }} />
       <canvas ref={frameCanvas} className="remote-screen-frame" data-testid="remote-frame" aria-label="Remote desktop picture"
         style={{ visibility: state.connected && activeHand.transport === "frames-v1" ? "visible" : "hidden" }} />
+      {pointerLocked && !state.relativePointer && <svg ref={virtualCursor} className="remote-virtual-cursor" width="16" height="22" viewBox="0 0 16 22" aria-hidden="true"><path d="M1 1v17l4-4 3 7 3-1-3-7h6Z" fill="white" stroke="black" /></svg>}
+      {pointerLocked && <span className="remote-capture-hint">Esc releases mouse and keyboard</span>}
       <textarea ref={keyboardInput} className="remote-keyboard-input" aria-label="Remote keyboard" tabIndex={-1}
         autoComplete="off" autoCapitalize="off" spellCheck={false} inputMode="none" data-1p-ignore
         onCompositionEnd={event => {
@@ -207,7 +333,7 @@ function Screen({ hand, onBack }: { hand: RemoteHand; onBack(): void }) {
       <button type="submit" disabled={!text || new TextEncoder().encode(text).length > 4096}>Send</button>
       <button type="button" onClick={() => { for (const down of [true, false]) session.current?.input({ kind: "key", key: 40, down }); }}>Return</button>
       {activeHand.kind === "phone" && <button type="button" onClick={() => session.current?.input({ kind: "key", key: 74, down: true })}>Home</button>}
-      <small>Esc twice releases control</small>
+      <small>{pointerLocked ? "Esc releases mouse and keyboard" : "Esc twice releases control"}</small>
     </form>}
-  </>;
+  </div>;
 }

@@ -5,9 +5,9 @@ export type RemoteHand = Readonly<{
   transport?: "webrtc" | "frames-v1";
   frame_window?: number;
 }>;
-export type RemoteState = Readonly<{ status: string; connected: boolean; controlling: boolean; connecting: boolean; audioAvailable?: boolean; audioEnabled?: boolean }>;
+export type RemoteState = Readonly<{ status: string; connected: boolean; controlling: boolean; connecting: boolean; audioAvailable?: boolean; audioEnabled?: boolean; controlPending?: boolean; relativePointer?: boolean }>;
 export type RemoteInput = {
-  kind: "move" | "button" | "scroll" | "key" | "text" | "releaseAll";
+  kind: "move" | "relativeMove" | "button" | "scroll" | "key" | "text" | "releaseAll";
   x?: number; y?: number; button?: number; down?: boolean; key?: number; text?: string; deltaX?: number; deltaY?: number;
 };
 
@@ -305,12 +305,12 @@ export class RemoteBrowserSession {
   takeControl(): void {
     if (this.state.connected && this.hand.controllable && !this.state.controlling && !this.controlRequested
       && (this.hand.transport === "frames-v1" || this.peer?.connectionState === "connected")) {
-      this.controlRequested = true; this.acquireControl();
+      this.controlRequested = true; this.update({ controlPending: true }); this.acquireControl();
     }
   }
   private acquireControl(): void {
     if (this.control !== "idle" || !this.controlRequested) return;
-    this.control = "acquiring"; this.send({ type: "acquire" });
+    this.control = "acquiring"; this.update({ controlPending: true }); this.send({ type: "acquire" });
   }
   releaseControl(): void {
     this.controlRequested = false;
@@ -319,7 +319,7 @@ export class RemoteBrowserSession {
     else if (generation) this.control = { kind: "releasing", generation };
     clearInterval(this.controlTimer); this.controlTimer = undefined;
     if (generation && !this.closed) this.send({ type: "release", generation });
-    if (!this.closed) this.update({ controlling: false, ...(this.state.connected ? { status: "Watching" } : {}) });
+    if (!this.closed) this.update({ controlling: false, controlPending: false, relativePointer: false, ...(this.state.connected ? { status: "Watching" } : {}) });
   }
   input(event: RemoteInput): void {
     if (!this.state.controlling || !this.generation || this.closed || this.suspended) return;
@@ -355,7 +355,7 @@ export class RemoteBrowserSession {
     if (this.peer) { this.peer.onconnectionstatechange = this.peer.ontrack = this.peer.onicecandidate = this.peer.ondatachannel = null; this.peer.close(); }
     this.socket = undefined; this.peer = undefined; this.reliable = undefined; this.motion = undefined;
     this.video.srcObject = null;
-    this.update({ audioAvailable: false });
+    this.update({ audioAvailable: false, controlPending: false, relativePointer: false });
     if (this.canvas) { this.canvas.width = 0; this.canvas.height = 0; }
   }
   private fail(error: unknown): void {
@@ -471,8 +471,9 @@ export class RemoteBrowserSession {
         this.send({ type: "release", generation: value.generation }); return;
       }
       if (this.control !== "acquiring") throw new RemoteError("Invalid remote control response.", true);
+      if (value.relativePointer !== undefined && typeof value.relativePointer !== "boolean") throw new RemoteError("Invalid remote control response.", true);
       this.control = { kind: "held", generation: value.generation }; this.sequence = 0;
-      this.update({ controlling: true, status: "You’re controlling" });
+      this.update({ controlling: true, controlPending: false, relativePointer: value.relativePointer === true, status: "You’re controlling" });
       clearInterval(this.controlTimer);
       this.controlTimer = setInterval(() => { if (this.current(epoch)) this.send({ type: "renew", generation: this.generation }); }, 3000);
     } else if (value.type === "revoked") {
@@ -481,17 +482,18 @@ export class RemoteBrowserSession {
         const released = this.control.kind === "releasing";
         this.control = "idle";
         clearInterval(this.controlTimer); this.controlTimer = undefined;
-        this.update({ controlling: false, status: "Watching" });
+        this.update({ controlling: false, controlPending: false, relativePointer: false, status: "Watching" });
         if (released) { this.acquireControl(); return; }
       } else if (this.control === "acquiring") this.control = "cancelled-acquire";
       // An unsolicited revocation cancels intent, including an in-flight grant.
       this.controlRequested = false;
+      this.update({ controlling: false, controlPending: false, relativePointer: false });
     } else if (value.type === "denied") {
       const cancelled = this.control === "cancelled-acquire";
       if (!cancelled && this.control !== "acquiring") throw new RemoteError("Invalid remote control response.", true);
       this.control = "idle";
       if (cancelled) this.acquireControl();
-      else { this.controlRequested = false; this.update({ status: "Another viewer is controlling this screen." }); }
+      else { this.controlRequested = false; this.update({ controlPending: false, relativePointer: false, status: "Another viewer is controlling this screen." }); }
     }
     else throw new RemoteError("Invalid remote control response.", true);
   }
