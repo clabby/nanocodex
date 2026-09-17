@@ -17,6 +17,7 @@ import { managedCredentialSubject, scopedManagedModelEgress, sessionCredentialOw
 import { remoteICE } from "./hand-remote-ice";
 import { REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { serverHandTool } from "./ssh-hand-setup";
+import { phoneAdminConfigured } from "./phone-admin";
 import { phoneTools } from "./phone-tool";
 import { PhoneContainer } from "./phone-container";
 export { PhoneContainer };
@@ -365,6 +366,7 @@ export interface Env extends
   NANOCODEX_PHONE_BRIDGE_URL?: string;
   NANOCODEX_PHONE_BRIDGE_TOKEN?: string;
   NANOCODEX_PHONE_OWNER_ID?: string;
+  NANOCODEX_PHONE_ADMIN_ID?: string;
   NANOCODEX_PHONE_PUBLIC_ORIGIN?: string;
   NANOCODEX_PHONE_MANAGED_API_KEY?: string;
   TWILIO_VOICE_FROM_NUMBER?: string;
@@ -1408,7 +1410,7 @@ async function managedFetchRoute(
 ): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/v1/phone/bridge/")) {
-      if (!env.NANOCODEX_PHONES || !env.NANOCODEX_PHONE_OWNER_ID) return new Response("Not found", { status: 404 });
+      if (!env.NANOCODEX_PHONES || !env.NANOCODEX_PHONE_OWNER_ID || !phoneAdminConfigured(env)) return new Response("Not found", { status: 404 });
       const target = new URL(url);
       target.pathname = url.pathname.slice("/v1/phone/bridge".length);
       return env.NANOCODEX_PHONES.getByName(env.NANOCODEX_PHONE_OWNER_ID).fetch(new Request(target, request));
