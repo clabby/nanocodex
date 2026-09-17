@@ -13,6 +13,7 @@ mod browser_webmcp;
 mod contracts;
 mod cua_setup_lifecycle;
 mod cua_setup_module;
+mod desktop_screenshot;
 mod download_elicitation;
 mod host_guardian;
 mod host_messaging;
