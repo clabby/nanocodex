@@ -80,7 +80,9 @@ test verified clicks, scrolling, Shift+middle drags and Unicode typing through
 MacDesktop while the foreground application stayed unchanged. It does not yet
 establish compatibility with Chromium/Electron, arbitrary menus, or every app.
 The original Sky private-input recipe was not completely recovered; do not claim
-binary-equivalent Sky behavior. Public CGEventPostToPid is still used.
+binary-equivalent Sky behavior. Public CGEventPostToPid is still used. Native plain-text paste uses background
+typing without changing the shared clipboard; Markdown and HTML paste are
+refused. Use `typeText` or `setValue` for native app text.
 
 Linux has an opt-in Hyprland app backend, independently bound to a window's
 compositor stable ID, address, PID, process start time and executable. Executable
