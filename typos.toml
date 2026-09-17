@@ -22,7 +22,11 @@ extend-ignore-re = ['\b[0-9A-F]{24}\b']
 # Tool call IDs are provider-generated opaque values, including nested call suffixes.
 # Keep spelling enabled for prose and model output in the benchmark JSON.
 [type.json]
-extend-ignore-re = ['\b(?:req|resp|sess)_[0-9a-f]+\b', '\b[0-9a-f]{16}-[A-Z]{3}\b', '\b[0-9a-f]{5}-[0-9a-z]{4}\b', '"call_id"\s*:\s*"call_[A-Za-z0-9_-]+(?:/code-[0-9]+)?"']
+extend-ignore-re = ['\b(?:req|resp|sess|msg)_[0-9a-f]+\b', '\b[0-9a-f]{16}-[A-Z]{3}\b', '\b[0-9a-f]{5}-[0-9a-z]{4}\b', '"call_id"\s*:\s*"call_[A-Za-z0-9_-]+(?:/code-[0-9]+)?"']
+
+# Match both 'truncated' and 'truncation' in retained measurement helpers.
+[type.py]
+extend-ignore-re = ["'truncat'"]
 
 [default]
 # Exact executable name used by the remote-screen hand.

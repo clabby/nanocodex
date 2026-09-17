@@ -102,7 +102,7 @@ Production did not emit `managed.sql_batch` events. Existing named `managed.perf
 - Native turn admission: 17 session-state reads and two ownership reads in its encompassing scope.
 - Native DELETE: two session-state and two ownership reads; VM DELETE: three session-state and two ownership reads.
 
-Nested scopes overlap and must not be summed. Their zero read durations are limited by the Workers timer; no claim is made that these SQL operations are free or that other SELECTs do not occur.
+Nested scopes overlap and must not be summed. Their zero read durations are limited by the Workers timer; no claim is made that these SQL operations are free or that other SELECT statements do not occur.
 
 | Delete cohort | CLI wall | Managed DELETE scope | `delete.containers` scope |
 |---|---:|---:|---:|

@@ -71,6 +71,6 @@ This ranks observed costs in their affected journeys, not parts that can all be 
 
 Read the linked component reports for exact request/turn/allocation IDs, individual samples, model usage, failure outcomes, clock definitions and raw safe trace records. [Cleanup and unchanged deployment receipts](cleanup-and-provenance.json) close the pass. Actual [input speech](voice-audio/input-please-say-ready.wav) and [recorded response](voice-audio/response-1.wav) are retained.
 
-**Complete SQL query/row totals remain unmeasured.** Production statement tracing is off. Named admission scopes show 17 session-state plus two ownership reads fresh and nine session-state reads on follow-up; these are partial counters, not all SELECTs. We cannot infer the cost or redundancy of uninstrumented queries.
+**Complete SQL query/row totals remain unmeasured.** Production statement tracing is off. Named admission scopes show 17 session-state plus two ownership reads fresh and nine session-state reads on follow-up; these are partial counters, not all SELECT statements. We cannot infer the cost or redundancy of uninstrumented queries.
 
 Also unmeasured: physical phone or installed-release UI tap latency, live Windows Hands, forced cold Worker/container/image conditions, exhausted spare pools, full capture/encode/decode breakdown, barge-in and fleet tail percentiles. No application fix or deployment was made; changes in this checkout are measurement reports and evidence only. Temporary diagnostic tails are stopped.
