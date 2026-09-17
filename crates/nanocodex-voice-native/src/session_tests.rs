@@ -141,6 +141,10 @@ fn package_availability_requires_helper_and_native_runtime() {
     });
     std::fs::write(&runtime, b"synthetic runtime").unwrap();
     assert!(package_has_runtime(&root));
+    std::fs::remove_file(runtime).unwrap();
+    assert!(!package_has_runtime(&root));
+    std::fs::write(voice.join("libwebrtc.json"), b"{}").unwrap();
+    assert!(package_has_runtime(&root));
     std::fs::remove_file(helper).unwrap();
     assert!(!package_has_runtime(&root));
     std::fs::remove_dir_all(root).unwrap();

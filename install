@@ -161,7 +161,7 @@ if [[ -n "$voice_archive_checksum" ]]; then
       exit 1
     fi
   done
-  if [[ ! -d "$voice_stage/nanocodex-resources/voice/lib" || ! -d "$voice_stage/nanocodex-resources/voice/licenses" ]]; then
+  if [[ ! -d "$voice_stage/nanocodex-resources/voice/lib" && ! -f "$voice_stage/nanocodex-resources/voice/libwebrtc.json" ]] || [[ ! -d "$voice_stage/nanocodex-resources/voice/licenses" ]]; then
     echo "nanocodex: voice runtime libraries or licenses are missing" >&2
     exit 1
   fi

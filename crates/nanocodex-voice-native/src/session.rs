@@ -167,7 +167,8 @@ fn package_has_runtime(package: &std::path::Path) -> bool {
     } else {
         ("bin/nanocodex-voice-host", "lib/libgstreamer-1.0.so.0")
     };
-    voice.join(helper).is_file() && voice.join(runtime).is_file()
+    voice.join(helper).is_file()
+        && (voice.join(runtime).is_file() || voice.join("libwebrtc.json").is_file())
 }
 
 impl RealtimeWebrtcSessionHandle {

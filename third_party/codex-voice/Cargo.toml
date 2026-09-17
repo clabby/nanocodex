@@ -1,5 +1,5 @@
 [workspace]
-members = ["voice-host", "process-hardening"]
+members = ["voice-host", "webrtc-host", "process-hardening"]
 resolver = "2"
 
 [workspace.package]

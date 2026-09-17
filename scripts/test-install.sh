@@ -92,6 +92,7 @@ make_voice_fixture() {
 import io, sys, tarfile
 with tarfile.open(sys.argv[1], 'w:gz', format=tarfile.USTAR_FORMAT) as archive:
     names = ['bin/nanocodex-voice-host', 'runtime.json', 'manifest.json', 'sources.json', 'NOTICE.md', 'lib/libgstreamer-1.0.so.0', 'licenses/LGPL-2.1.txt']
+    if sys.argv[2] == 'static': names[names.index('lib/libgstreamer-1.0.so.0')] = 'libwebrtc.json'
     if sys.argv[2] == 'incomplete': names.remove('bin/nanocodex-voice-host')
     for name in names:
         entry = tarfile.TarInfo('nanocodex-resources/voice/' + name)
@@ -108,7 +109,7 @@ PY
 
 run_case() {
   local format="$1"
-  local case_root="$temporary_root/$format"
+  local case_root="$temporary_root/$format-${2:-valid}"
   local fixture="$case_root/fixture"
   local marker="$case_root/profile-injection"
   local install_root="$case_root/install '\$(touch $marker)'"
@@ -127,7 +128,7 @@ run_case() {
     digest="$(sha256_file "$fixture/$asset")"
     printf '%s  %s\n' "$digest" "$asset" >> "$fixture/SHA256SUMS"
   done
-  make_voice_fixture "$fixture"
+  make_voice_fixture "$fixture" "${2:-valid}"
 
   output="$(
     PATH="$mock_bin:$PATH" \
@@ -239,6 +240,7 @@ run_rejected_case() {
 
 run_case raw
 run_case gzip
+run_case raw static
 run_rejected_case missing-main-checksum
 run_rejected_case missing-companion-checksum
 run_rejected_case invalid-main-checksum
