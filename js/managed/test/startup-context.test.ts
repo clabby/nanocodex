@@ -527,6 +527,25 @@ it("pins request provenance once and does not infer a calling Hand from attached
   });
 });
 
+it("preserves the first client's attribution and timezone across restart and later callers", async () => {
+  await withStartup(async (startup, state) => {
+    startup.reserveOrigin("websocket", { reported: { client: "nanocodex2", hand: "user:hand", cwd: "/hand/src", timezone: "America/Los_Angeles" },
+      principal: { kind: "api_key", user_id: "owner" } });
+    const restored = new ManagedStartupContext(state.storage);
+    restored.reserveOrigin("http", { reported: { client: "web", timezone: "UTC" } });
+    const origin = restored.requestOrigin(environment.accountInfo.machines);
+    expect(origin).toMatchObject({ transport: "websocket", client: { name: "nanocodex2" },
+      hand: { key: "user:hand", path: "/hand" }, cwd: "/hand/src", timezone: "America/Los_Angeles",
+      principal: { kind: "api_key", user_id: "owner" } });
+    restored.reservePrepared("first", undefined, true);
+    await restored.prepare("first", vi.fn(), async () => ({ ...environment, request_origin: origin }), assertActive);
+    const initial = contextText(state);
+    expect(initial).toContain('"user_timezone":"America/Los_Angeles"');
+    await new ManagedStartupContext(state.storage).prepare("first", vi.fn(), async () => environment, assertActive);
+    expect(contextText(state)).toBe(initial);
+  });
+});
+
 it("escapes Hand names and team memories inside startup XML", async () => {
   await withStartup(async (startup, state) => {
     startup.reservePrepared("first", { organization_id: "org", team_id: "team", user_id: "owner",

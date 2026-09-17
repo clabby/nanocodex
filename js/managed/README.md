@@ -138,7 +138,7 @@ storage ownership.
 ## Prepared personalization
 
 Managed admission no longer runs prompt-derived history search or memory scan.
-The MemoryScope prepares a deterministic snapshot of saved team memories; Sessions
+The MemoryScope prepares deterministic snapshots of saved personal and team memories; Sessions
 warm a disposable copy on create, open, or activity without awaiting it. Each turn
 pins the eligible local copy or a cache miss. A miss proceeds without retrieval.
 Explicit `find_session`, `read_session`, and memory tools remain available.
@@ -148,12 +148,13 @@ lease. New memories coalesce until refresh; replacements and deletions invalidat
 issued copies before the mutation succeeds. Failed invalidations retain durable
 retry debt. Expiry is checked again before model injection. Previously delivered
 conversation history cannot be erased; later prepared blocks replace or withdraw
-prior prepared context. Source facts remain shared team data, not private user
-facts. No conversation summarizer or inferred personal profile is added here.
+prior prepared context. Existing team facts remain shared; personal facts are
+stored separately for the authenticated user within their organization.
+No conversation summarizer or inferred personal profile is added here.
 
-The source selection is indexed, limited to 32 facts and 8 KB of fact content,
+Each source selection is indexed, limited to 32 facts and 8 KB of fact content,
 and does not write scan/use counters. A team snapshot serves multiple agents;
-active subscriber leases are bounded to 256 per organization. Additional agents
+active subscriber leases are bounded to 256 per memory store. Additional agents
 proceed with a cache miss. Refresh is activity-driven, so idle users incur no
 periodic job. Identical content is not appended again on later turns, and pinned
 context is pruned when the associated turn receipts are archived.
@@ -162,6 +163,30 @@ Voice startup receives optional prepared context in the existing context respons
 Updated Rust/WASM and Apple voice clients accept it as bounded background data;
 older clients ignore the optional field. Media readiness never awaits preparation.
 Account/environment discovery remains a separate first-turn dependency.
+
+### Personal memories and request attribution
+
+`memory` accepts `scope: "personal" | "team"` (default `team`). Use personal for
+private user preferences and facts, and team for shared knowledge. A scan receipt
+and every memory key belong to their scope; keep it unchanged across scan, read,
+put, and delete. Both scopes use the existing root-only write policy, capability
+checks, secret filtering, version checks, and forget/correction invalidation.
+Personal memory is isolated by authenticated user and organization and follows
+that user across teams in that organization. Connected-app grants cannot access
+personal memories or receive them in prepared context. Team memories are never
+relabelled or copied into personal storage.
+
+`GET /v1/memory?scope=personal`, POST operations with `scope: "personal"`, and
+`DELETE /v1/memory/:id?version=:version&scope=personal` use the authenticated user;
+a request cannot supply another user ID. The JavaScript managed SDK accepts
+`{ scope: "personal" }` on `listMemories`, `memory`, and `deleteMemory`.
+
+Clients may send bounded `x-nanocodex-client-context` JSON (`client`, `hand`,
+logical `cwd`, `timezone`). The SDK exposes `requestOrigin`; the native CLI sets
+its own context automatically. The authenticated edge overwrites the principal
+assertion. HTTP, WebSocket, and voice admission pin caller context on the first
+turn; reconnects and retries cannot replace it. The snapshot is appended once,
+without rewriting baseline instructions, cache keys, or the conversation prefix.
 
 ## Public journeys and protocol boundaries
 
@@ -264,8 +289,8 @@ Account/environment discovery remains a separate first-turn dependency.
   Successful memory puts and deletes emit authorized `managed.voice.context`
   events; Rust validates call scope, deduplicates cursors, and queues background
   context through reconnects. Retrieved context is data, never instructions.
-- `/v1/history/*` and `/v1/memory` expose organization- and team-scoped
-  retained context. `/v1/credentials` and `/v1/connectors` manage brokered
+- `/v1/history/*` exposes retained team history; `/v1/memory` exposes team or
+  personal memories. `/v1/credentials` and `/v1/connectors` manage brokered
   credentials, OAuth connections, and MCP connections without exposing secrets.
 - Managed agents can search completed team conversations with `find_session`
   (`find_sessions` remains available) and verify exact turns with `read_session`.
@@ -273,10 +298,12 @@ Account/environment discovery remains a separate first-turn dependency.
 - Before the first model request, the host appends one durable developer message
   in `<startup_context>` tags after the baseline prompt and static runtime rules.
   It includes the startup UTC time, account/team/session scope, known request
-  transport, available Hands, connected accounts, and a bounded prepared snapshot
-  of saved team memories when available. Hand/client provenance and user timezone
-  remain unknown when the host has no evidence; account ownership is not treated
-  as proof of who initiated a request.
+  transport, authenticated principal, available Hands, connected accounts, and bounded
+  prepared snapshots of personal and team memories when available. The CLI reports
+  its project Hand and logical cwd; web and Apple clients report client type and
+  timezone. Client/Hand attribution is explicitly client-reported, not proof of a
+  physical device or person. Hand keys/cwd are matched against authorized Hands;
+  missing or unmatched attribution remains unknown and never grants authority.
   `environment().hands` maps each Hand key to its logical `path`, capabilities,
   name, online status, and providers. Use that path as `exec_command.workdir`.
   `environment().accounts[service].connections` lists exact account selectors;
@@ -294,7 +321,7 @@ Account/environment discovery remains a separate first-turn dependency.
   namespace so admitted calls can recover their receipts. A broker-confirmed
   unstarted call returns an unavailable-hand result for the agent to handle;
   transport failures with unknown admission retain the existing call identity.
-  Subsequent turns use `memory` to scan, read, put/replace, and delete team facts;
+  Subsequent turns use `memory` to scan, read, put/replace, and delete scoped facts;
   mutations require root-agent `memory:write` authority and puts require a scan.
 - `create_cron` saves a recurring prompt through the same durable scheduler as
   `/v1/agents/:id/triggers/:triggerId`. Supply a stable `id`, five-field `cron`,

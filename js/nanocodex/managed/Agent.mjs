@@ -1,3 +1,4 @@
+import { requestOriginContext } from "../tools/environment.mjs";
 import { ManagedError } from "./ManagedError.mjs";
 import { registerManagedAgent } from "./internal.mjs";
 import { managedAccessFetch } from "./Access.mjs";
@@ -24,7 +25,7 @@ const TURN_SUBMISSION_TIMEOUT_MS = 10_000;
 const TURN_STATE_POLL_INITIAL_MS = 1_000;
 const TURN_STATE_POLL_MAX_MS = 5_000;
 const TURN_STATE_READ_TIMEOUT_MS = 2_000;
-const ALLOWED_OPTIONS = new Set(["apiKey", "baseUrl", "fetch", "toolsTransport"]);
+const ALLOWED_OPTIONS = new Set(["apiKey", "baseUrl", "fetch", "toolsTransport", "requestOrigin"]);
 const CREATE_SETTINGS = new Set(["model", "thinking", "reasoningMode", "fastMode"]);
 const SETTINGS_PATCH = CREATE_SETTINGS;
 const MODELS = new Set(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra"]);
@@ -248,9 +249,16 @@ export async function readSession(request, options = {}) {
   return managedReadSessionResponse(body);
 }
 
+function memoryClient(options) {
+  const { scope = "team", ...clientOptions } = options;
+  if (scope !== "team" && scope !== "personal") throw new TypeError("memory scope must be team or personal");
+  return { client: managedClient(clientOptions), scope };
+}
+
 /** List the authenticated account's hosted durable memory. */
 export async function listMemories(options = {}) {
-  const body = await managedClient(options).json("/v1/memory");
+  const { client, scope } = memoryClient(options);
+  const body = await client.json(`/v1/memory${scope === "personal" ? "?scope=personal" : ""}`);
   if (!body || typeof body !== "object" || Array.isArray(body) || !Array.isArray(body.memories)) {
     throw new ManagedError("invalid_response", "managed memory list is malformed");
   }
@@ -260,8 +268,9 @@ export async function listMemories(options = {}) {
 /** Compare-and-swap delete one account-owned hosted memory. */
 export async function deleteMemory(key, options = {}) {
   validateMemoryKey(key);
-  await managedClient(options).empty(
-    `/v1/memory/${key.id}?version=${key.version}`,
+  const { client, scope } = memoryClient(options);
+  await client.empty(
+    `/v1/memory/${key.id}?version=${key.version}${scope === "personal" ? "&scope=personal" : ""}`,
     { method: "DELETE" },
   );
 }
@@ -269,9 +278,10 @@ export async function deleteMemory(key, options = {}) {
 /** Run one atomic durable-memory operation in the authenticated account scope. */
 export async function memory(operation, options = {}) {
   validateMemoryOperation(operation);
-  const body = await managedClient(options).json("/v1/memory", {
+  const { client, scope } = memoryClient(options);
+  const body = await client.json("/v1/memory", {
     method: "POST",
-    body: JSON.stringify(operation),
+    body: JSON.stringify(scope === "personal" ? { ...operation, scope } : operation),
   });
   return managedMemoryResponse(body, operation.operation);
 }
@@ -1530,6 +1540,10 @@ function managedClient(options) {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable in this runtime");
   const authorizedFetch = managedAccessFetch(fetchImpl, new URL(baseUrl).origin, apiKey);
+  const requestOrigin = requestOriginContext(options.requestOrigin ?? {
+    client: typeof window === "undefined" ? "javascript" : "web",
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  });
   const toolsTransport = options.toolsTransport;
   if (toolsTransport !== undefined
       && typeof toolsTransport !== "function"
@@ -1539,6 +1553,7 @@ function managedClient(options) {
 
   const response = async (path, init = {}) => {
     const headers = new Headers();
+    if (path === "/v1/agents" || path.startsWith("/v1/agents/")) headers.set("x-nanocodex-client-context", JSON.stringify(requestOrigin));
     if (init.body !== undefined) headers.set("content-type", "application/json");
     if (init.accept) headers.set("accept", init.accept);
     if (init.idempotencyKey) headers.set("idempotency-key", init.idempotencyKey);

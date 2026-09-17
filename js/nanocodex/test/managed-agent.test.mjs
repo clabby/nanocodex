@@ -469,7 +469,8 @@ test("managed server authentication sends only an ncx_live bearer and omits cook
   assert.deepEqual(agents, []);
   assert.equal(captured.credentials, "omit");
   assert.equal(captured.headers.get("authorization"), `Bearer ${apiKey}`);
-  assert.deepEqual([...captured.headers.keys()], ["authorization"]);
+  assert.deepEqual([...captured.headers.keys()], ["authorization", "x-nanocodex-client-context"]);
+  assert.equal(JSON.parse(captured.headers.get("x-nanocodex-client-context")).client, "javascript");
 
   await assert.rejects(
     Agent.list({ baseUrl: origin, apiKey: "sk-provider-secret" }),
@@ -2228,4 +2229,35 @@ test("conversation preparation is explicit, bodyless, and resolves on acceptance
   assert.equal(new URL(requests[0].url).pathname, `/v1/agents/${agentId}/prepare`);
   assert.equal(requests[0].method, "POST");
   assert.equal(requests[0].body, null);
+});
+
+
+test("personal memory sends explicit scope without accepting caller-selected user identities", async () => {
+  const seen = [];
+  const options = { baseUrl: origin, apiKey, scope: "personal", fetch: async (url, init) => {
+    seen.push({ url: String(url), body: init.body && JSON.parse(init.body) });
+    if (init.method === "DELETE") return new Response(null, { status: 204 });
+    if (init.method === "POST") return Response.json({ operation: "read", memories: [] });
+    return Response.json({ memories: [] });
+  } };
+  await Agent.listMemories(options);
+  await Agent.memory({ operation: "read", keys: [{ id: 1, version: 1 }] }, options);
+  await Agent.deleteMemory({ id: 1, version: 1 }, options);
+  assert.equal(seen[0].url, origin + "/v1/memory?scope=personal");
+  assert.equal(seen[1].body.scope, "personal");
+  assert.equal(seen[2].url, origin + "/v1/memory/1?version=1&scope=personal");
+  await assert.rejects(Agent.listMemories({ ...options, scope: "other-user" }), /scope/);
+  await assert.rejects(Agent.listMemories({ ...options, userId: "other-user" }), /do not accept userId/);
+});
+
+test("managed clients freeze and send explicit Hand attribution separately from authentication", async () => {
+  const reported = { client: "desktop", hand: "user:laptop", cwd: "/laptop/repo", timezone: "America/Los_Angeles" };
+  let captured;
+  await Agent.list({ baseUrl: origin, apiKey, requestOrigin: reported, fetch: async (_url, init) => {
+    captured = new Headers(init.headers);
+    return Response.json({ data: [] });
+  } });
+  assert.deepEqual(JSON.parse(captured.get("x-nanocodex-client-context")), reported);
+  assert.equal(captured.get("authorization"), `Bearer ${apiKey}`);
+  await assert.rejects(Agent.list({ baseUrl: origin, apiKey, requestOrigin: { client: "desktop", user_id: "forged" } }), /invalid request origin/);
 });

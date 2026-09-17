@@ -33,3 +33,27 @@ export function contextData(tag, value) {
   const text = JSON.stringify(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   return `<${tag}>\n${text}\n</${tag}>`;
 }
+
+/** Client-reported context is descriptive data, never identity or authorization. */
+export function requestOriginContext(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).some(key => !["client", "hand", "cwd", "timezone"].includes(key))) {
+    throw new TypeError("invalid request origin");
+  }
+  const result = {};
+  for (const key of ["client", "hand", "cwd", "timezone"]) {
+    const text = value[key];
+    if (text === undefined) continue;
+    if (typeof text !== "string" || !text.length || text.length > (key === "cwd" ? 512 : 128)
+      || !/^[\x20-\x7e]+$/.test(text)) throw new TypeError(`invalid request origin ${key}`);
+    result[key] = text;
+  }
+  if (result.client && !/^[A-Za-z0-9_.-]+$/.test(result.client)) throw new TypeError("invalid request origin client");
+  if (result.cwd && (!result.cwd.startsWith("/") || result.cwd.includes("\\")
+    || result.cwd.split("/").some(part => part === "." || part === ".."))) throw new TypeError("invalid request origin cwd");
+  if (result.timezone) {
+    try { new Intl.DateTimeFormat("en-US", { timeZone: result.timezone }); }
+    catch { throw new TypeError("invalid request origin timezone"); }
+  }
+  return result;
+}

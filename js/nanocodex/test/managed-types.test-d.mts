@@ -206,3 +206,10 @@ async function configurationContracts() {
 void configurationContracts;
 
 void Agent.create({ baseUrl: "https://managed.example", configuration: { chatgpt_account_id: "account-a" } });
+
+await Agent.listMemories({ scope: "personal" });
+await Agent.memory({ operation: "scan", query: "my preferences" }, { scope: "personal" });
+await Agent.deleteMemory({ id: 1, version: 1 }, { scope: "personal" });
+Agent.open("0198d3f0-8844-7000-8000-000000000001", {
+  requestOrigin: { client: "web", timezone: "America/Los_Angeles" },
+});

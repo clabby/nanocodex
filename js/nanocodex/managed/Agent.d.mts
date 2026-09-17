@@ -1,3 +1,4 @@
+import type { RequestOriginContext } from "../tools/environment.mjs";
 import type { Model, PromptInput, ReasoningMode, Thinking, TurnUsage } from "../types.mjs";
 import type { AgentId } from "../runtime/subagents.mjs";
 
@@ -106,6 +107,8 @@ export type Organization = Readonly<{
 export type OrganizationUpdate = Readonly<{ name: string | null }>;
 
 export type Options = Readonly<{
+  /** Descriptive client-reported context; never grants authority or changes execution placement. */
+  requestOrigin?: RequestOriginContext;
   /** Managed service origin. Defaults to the current browser origin. */
   baseUrl?: string | URL | undefined;
   /** Server credential. Browsers omit this and authenticate with the account cookie. */
@@ -448,15 +451,16 @@ export function remove(id: string, options?: Options): Promise<void>;
 export { remove as delete };
 export function findSessions(request: FindSessionsRequest, options?: Options): Promise<FindSessionsResponse>;
 export function readSession(request: ReadSessionRequest, options?: Options): Promise<ReadSessionResponse>;
+export type MemoryOptions = Options & Readonly<{ scope?: "team" | "personal" }>;
 /** List the authenticated account's hosted durable memory. */
-export function listMemories(options?: Options): Promise<readonly MemoryRecord[]>;
+export function listMemories(options?: MemoryOptions): Promise<readonly MemoryRecord[]>;
 /** Compare-and-swap delete one hosted durable memory; deleting an absent id is idempotent. */
-export function deleteMemory(key: MemoryKey, options?: Options): Promise<void>;
-export function memory(operation: MemoryScanOperation, options?: Options): Promise<MemoryScanResult>;
-export function memory(operation: MemoryReadOperation, options?: Options): Promise<MemoryReadResult>;
-export function memory(operation: MemoryPutOperation, options?: Options): Promise<MemoryPutResult>;
-export function memory(operation: MemoryDeleteOperation, options?: Options): Promise<MemoryDeleteResult>;
-export function memory(operation: MemoryOperation, options?: Options): Promise<MemoryResult>;
+export function deleteMemory(key: MemoryKey, options?: MemoryOptions): Promise<void>;
+export function memory(operation: MemoryScanOperation, options?: MemoryOptions): Promise<MemoryScanResult>;
+export function memory(operation: MemoryReadOperation, options?: MemoryOptions): Promise<MemoryReadResult>;
+export function memory(operation: MemoryPutOperation, options?: MemoryOptions): Promise<MemoryPutResult>;
+export function memory(operation: MemoryDeleteOperation, options?: MemoryOptions): Promise<MemoryDeleteResult>;
+export function memory(operation: MemoryOperation, options?: MemoryOptions): Promise<MemoryResult>;
 export function getOrganization(options?: Options): Promise<Organization>;
 export function updateOrganization(request: OrganizationUpdate, options?: Options): Promise<Organization>;
 

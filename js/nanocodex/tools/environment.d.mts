@@ -30,3 +30,5 @@ export type AgentEnvironment = Readonly<{
 }>;
 export function projectEnvironment(info: AccountEnvironmentSource, host: Readonly<{ runtime: string; default_cwd: string }>): AgentEnvironment;
 export function contextData(tag: string, value: unknown): string;
+export type RequestOriginContext = Readonly<{ client?: string; hand?: string; cwd?: string; timezone?: string }>;
+export function requestOriginContext(value: unknown): RequestOriginContext;

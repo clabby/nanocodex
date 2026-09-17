@@ -139,6 +139,7 @@ export type Principal = Readonly<{
 }>;
 
 export function forwardPrincipalAssertions(headers: Headers, principal: Principal): void {
+  headers.set("x-nanocodex-request-principal", JSON.stringify({ kind: principal.kind, user_id: principal.userId }));
   headers.set(SESSION_OWNER_ASSERTION, principal.userId);
   headers.set(SESSION_ORGANIZATION_ASSERTION, principal.organizationId);
   headers.set(SESSION_TEAM_ASSERTION, principal.teamId);

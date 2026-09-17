@@ -348,6 +348,12 @@ final class ProtocolTests: XCTestCase {
         defer { client.close() }
         let request = try client.request(path: "/v1/agents")
         XCTAssertEqual(request.url?.absoluteString, "https://example.com/v1/agents")
+        let reported = try XCTUnwrap(request.value(forHTTPHeaderField: "x-nanocodex-client-context"))
+        let context = try JSONDecoder().decode([String: String].self, from: Data(reported.utf8))
+        XCTAssertTrue(["ios", "macos", "apple"].contains(context["client"] ?? ""))
+        XCTAssertEqual(context["timezone"], TimeZone.current.identifier)
+        XCTAssertNil(context["hand"])
+        XCTAssertEqual(try client.request(path: "/v1/agents/followup").value(forHTTPHeaderField: "x-nanocodex-client-context"), reported)
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer " + key)
         XCTAssertNil(request.url?.query)
         XCTAssertThrowsError(try client.request(path: "//example.org/v1/agents"))

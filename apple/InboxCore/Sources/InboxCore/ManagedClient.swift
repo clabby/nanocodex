@@ -74,8 +74,17 @@ public final class ManagedClient: @unchecked Sendable {
     let credential: AccountCredential
     private let session: URLSession
     private let responseCache: URLCache?
+    private let requestOrigin: [String: String]
     public init(credential: AccountCredential, configuration: URLSessionConfiguration? = nil) {
         self.credential = credential
+        #if os(iOS)
+        let clientName = "ios"
+        #elseif os(macOS)
+        let clientName = "macos"
+        #else
+        let clientName = "apple"
+        #endif
+        requestOrigin = ["client": clientName, "timezone": TimeZone.current.identifier]
         let config = configuration ?? URLSessionConfiguration.default
         config.httpShouldSetCookies = false
         config.httpCookieStorage = nil
@@ -98,6 +107,10 @@ public final class ManagedClient: @unchecked Sendable {
         request.httpMethod = method
         request.setValue("Bearer " + credential.apiKey, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if path == "/v1/agents" || path.hasPrefix("/v1/agents/") {
+            let context = try JSONSerialization.data(withJSONObject: requestOrigin, options: [.sortedKeys])
+            request.setValue(String(decoding: context, as: UTF8.self), forHTTPHeaderField: "x-nanocodex-client-context")
+        }
         if let body {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.withoutEscapingSlashes]
             request.httpBody = try encoder.encode(body)

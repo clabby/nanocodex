@@ -81,6 +81,7 @@ pub struct ManagedClient {
     pub(crate) http: reqwest::Client,
     pub(crate) base_url: Url,
     pub(crate) bearer: Arc<str>,
+    pub(crate) request_origin: Option<HeaderValue>,
     access: Arc<Mutex<Option<ManagedAccess>>>,
 }
 
@@ -121,6 +122,52 @@ impl ManagedClient {
         Self::builder(origin, api_key)?.build()
     }
 
+    /// Adds descriptive client and logical Hand context to HTTP and WebSocket requests.
+    /// This metadata never grants authority or changes command placement.
+    ///
+    /// # Errors
+    /// Returns a configuration error for oversized or invalid header data.
+    pub fn with_request_origin(
+        mut self,
+        client: &str,
+        hand: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<Self, ManagedError> {
+        if client.is_empty()
+            || client.len() > 128
+            || !client
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
+            || hand.is_some_and(|value| {
+                value.is_empty()
+                    || value.len() > 128
+                    || !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+            })
+            || cwd.is_some_and(|value| {
+                value.len() > 512
+                    || !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+                    || !value.starts_with('/')
+                    || value.contains('\\')
+                    || value.split('/').any(|part| part == "." || part == "..")
+            })
+        {
+            return Err(ManagedError::Configuration(
+                "invalid request origin".to_owned(),
+            ));
+        }
+        let mut context = serde_json::json!({ "client": client });
+        if let Some(hand) = hand {
+            context["hand"] = hand.into();
+        }
+        if let Some(cwd) = cwd {
+            context["cwd"] = cwd.into();
+        }
+        self.request_origin = Some(HeaderValue::from_str(&context.to_string()).map_err(|_| {
+            ManagedError::Configuration("invalid request origin header".to_owned())
+        })?);
+        Ok(self)
+    }
+
     fn from_builder(mut builder: ManagedClientBuilder) -> Result<Self, ManagedError> {
         install_default_rustls_crypto_provider();
         validate_origin(&builder.origin)?;
@@ -152,6 +199,7 @@ impl ManagedClient {
             http,
             base_url: builder.origin,
             bearer: api_bearer,
+            request_origin: None,
             access: Arc::new(Mutex::new(None)),
         })
     }
@@ -947,9 +995,12 @@ impl ManagedClient {
 
     async fn send_with_access(
         &self,
-        request: reqwest::RequestBuilder,
+        mut request: reqwest::RequestBuilder,
         url: &Url,
     ) -> Result<Response, reqwest::Error> {
+        if let Some(origin) = &self.request_origin {
+            request = request.header("x-nanocodex-client-context", origin.clone());
+        }
         let eligible = (url.path() == "/v1/agents" || url.path().starts_with("/v1/agents/"))
             && !["ws", "events", "tool-host", "device-host", "sideband"]
                 .contains(&url.path().rsplit('/').next().unwrap_or_default());
@@ -1178,6 +1229,51 @@ mod tests {
 
     fn key() -> String {
         format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43))
+    }
+
+    #[tokio::test]
+    async fn request_origin_is_descriptive_and_sent_over_http() {
+        use axum::http::{HeaderMap, header::AUTHORIZATION};
+        let expected =
+            serde_json::json!({ "client": "nanocodex2", "hand": "user:laptop", "cwd": "/laptop" });
+        let app = Router::new().route(
+            "/v1/agents",
+            get(move |headers: HeaderMap| async move {
+                assert!(headers.contains_key(AUTHORIZATION));
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(
+                        headers["x-nanocodex-client-context"].as_bytes()
+                    )
+                    .unwrap(),
+                    expected
+                );
+                axum::Json(serde_json::json!({ "data": [] }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let key = ManagedApiKey::parse(format!("ncx_live_{}_{}", "k".repeat(12), "s".repeat(43)))
+            .unwrap();
+        let client = ManagedClient::new(format!("http://{address}"), key)
+            .unwrap()
+            .with_request_origin("nanocodex2", Some("user:laptop"), Some("/laptop"))
+            .unwrap();
+        assert!(client.list().await.unwrap().data.is_empty());
+        assert!(
+            client
+                .clone()
+                .with_request_origin("bad\nname", None, None)
+                .is_err()
+        );
+        assert!(
+            client
+                .with_request_origin("cli", None, Some("/laptop/../other"))
+                .is_err()
+        );
+        server.abort();
     }
 
     #[tokio::test]

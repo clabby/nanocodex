@@ -980,6 +980,12 @@ async fn open_workspace_agent_with_settings(
     let attachment_metadata = config
         .attachment_metadata()
         .map_err(|error| ManagedError::Configuration(error.to_string()))?;
+    let hand_key = format!("user:{}", attachment_metadata.attachment_id());
+    let hand_cwd = format!("/{}", attachment_metadata.attachment_id());
+    let client =
+        client
+            .clone()
+            .with_request_origin("nanocodex2", Some(&hand_key), Some(&hand_cwd))?;
     let mut tools = Tools::builder()
         .without_defaults()
         .add(WorkspaceTools::new(&workspace));
