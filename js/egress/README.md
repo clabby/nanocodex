@@ -171,7 +171,7 @@ eligible identity exists. The private control routes are:
 
 - `GET /users/:user/connectors` for capability-projected status.
 - `POST /users/:user/connectors/:provider` and the corresponding `/callback`
-  route, where provider is `github`, `google`, `slack`, or `x`.
+  route, where provider is `github`, `google`, `slack`, `x`, `spotify`, or `soundcloud`.
 - `DELETE /users/:user/connectors/:provider/connections/:connectionId` for one
   exact grant.
 
@@ -209,6 +209,8 @@ For a brokered request, supply the entry ID in `x-nanocodex-vault-id` and use
 `x-api-key: {{NANOCODEX_VAULT_API_KEY}}`. The broker substitutes the key only at
 the final fetch. Existing destination policy and status-only responses apply;
 API-key entries cannot satisfy login/password placeholders.
+
+### Spotify OAuth
 
 The native iPhone Spotify flow uses ncspot's public PKCE registration and its
 fixed `http://127.0.0.1:8989/login` redirect. It does not require
