@@ -190,7 +190,7 @@ Earlier retry attempts keep their own errors; other turns and child agents keep
 running.
 
 Scrolling back through older history keeps typing and live updates responsive.
-`nanocodex2 attach` and the in-TUI thread picker show recent threads first,
+`nanocodex2 attach` and the in-TUI `/attach` command show recent threads first,
 ordered by last activity, with titles above session IDs. Type to fuzzy search
 titles and IDs; space-separated terms can appear in any order. Title matches rank
 by relevance, with recent activity breaking ties. The same query also searches

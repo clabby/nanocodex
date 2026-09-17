@@ -2562,6 +2562,16 @@ impl RootNode {
 
     fn apply_settings_command(&mut self, command: SettingsCommand) -> ComponentUpdate<RootEffect> {
         match command {
+            SettingsCommand::Attach => {
+                if !self.action_availability().new_session {
+                    self.notification = Some(Notification::plain(
+                        "Finish the current work before attaching to another thread".into(),
+                        Color::Red,
+                    ));
+                    return ComponentUpdate::render(RenderRequest::Immediate);
+                }
+                self.load_sessions()
+            }
             SettingsCommand::Screen | SettingsCommand::Zoom => ComponentUpdate {
                 effects: vec![if command == SettingsCommand::Screen {
                     RootEffect::Screen
@@ -4362,6 +4372,39 @@ mod live_control_tests {
             terminal_expected: false,
         });
         assert!(!rendered(&mut root).contains("Thinking…"));
+    }
+
+    #[test]
+    fn slash_attach_opens_thread_picker_from_draft_and_actions() {
+        for typed in [false, true] {
+            let mut root = root_with_draft(if typed { "" } else { "/attach" });
+            if typed {
+                for character in "/attach".chars() {
+                    root.update(key(KeyCode::Char(character)));
+                }
+            }
+            let update = root.update(key(KeyCode::Enter));
+            assert!(matches!(
+                update.effects.as_slice(),
+                [RootEffect::LoadSessions {
+                    kind: super::SessionListKind::Resume,
+                    ..
+                }]
+            ));
+            assert!(root.composer.component().draft().is_empty());
+            assert_eq!(root.in_flight_turns, 0);
+        }
+    }
+
+    #[test]
+    fn slash_attach_rejects_arguments_and_active_work_without_submitting() {
+        let mut root = root_with_draft("/attach unexpected");
+        assert!(root.update(key(KeyCode::Enter)).effects.is_empty());
+        assert!(root.pending_session_list.is_none());
+        let mut root = root_with_draft("/attach");
+        root.in_flight_turns = 1;
+        assert!(root.update(key(KeyCode::Enter)).effects.is_empty());
+        assert!(root.pending_session_list.is_none());
     }
 
     #[test]
