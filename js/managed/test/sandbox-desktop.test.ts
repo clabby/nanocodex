@@ -22,9 +22,9 @@ it("starts after binding, keeps credentials out of argv, reuses a running proces
   expect(f.bind).toHaveBeenCalledWith(scope);
   expect(f.runtime.writeFile).toHaveBeenCalledWith("/run/nanocodex-hand/credential.next", "a".repeat(43) + "\n");
   const command = f.runtime.startProcess.mock.calls[0] as unknown as [string, unknown];
-  expect(command[0]).toContain("'server-host' '--width' '1920' '--height' '1080' '--url'");
+  expect(command[0]).toContain("'server-host' '--frames' '--width' '1920' '--height' '1080' '--url'");
   expect(command[0]).toContain("NANOCODEX_SCREEN_BITRATE_KBPS=24000");
-  expect(command[0]).not.toContain("'--frames'");
+  expect(command[0]).toContain("'--frames'");
   expect(command[0]).not.toContain("a".repeat(43));
   expect(command[0]).toContain("'cf:mount-test'");
   f.runtime.getProcess.mockResolvedValue({ status: "running" });
@@ -41,11 +41,11 @@ it("starts after binding, keeps credentials out of argv, reuses a running proces
   expect(f.values.size).toBe(0);
 });
 
-it("replaces a running legacy frame publisher once", async () => {
+it("restores the restricted sandbox preview transport once", async () => {
   const f = fixture();
   await f.desktop.configure(scope);
   const state = f.values.get("nanocodex-desktop") as Record<string, unknown>;
-  delete state.transport;
+  state.transport = "webrtc";
   f.runtime.getProcess.mockResolvedValue({ status: "running" });
   await f.desktop.ensure();
   expect(f.runtime.killProcess).toHaveBeenCalledTimes(1);

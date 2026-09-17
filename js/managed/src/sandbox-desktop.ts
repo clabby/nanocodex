@@ -3,7 +3,7 @@ import { HAND_HOST_ID } from "./hand-hosts";
 
 export type SandboxDesktopScope = { owner: string; id: string; machineId: string; name: string };
 export type SandboxHandHosts = { getByName(name: string): Pick<DurableObjectStub, "fetch"> };
-type State = SandboxDesktopScope & { credential?: string; expiresAt?: number; processId?: string; transport?: "webrtc" };
+type State = SandboxDesktopScope & { credential?: string; expiresAt?: number; processId?: string; transport?: "webrtc" | "frames-v1" };
 type Runtime = Pick<Sandbox, "exec" | "writeFile" | "getProcess" | "startProcess" | "killProcess">;
 const KEY = "nanocodex-desktop";
 const DIRECTORY = "/run/nanocodex-hand";
@@ -47,8 +47,8 @@ export class SandboxDesktop {
     await this.bind({ owner: state.owner, id: state.id, machineId: state.machineId, name: state.name });
     const process = state.processId ? await this.runtime.getProcess(state.processId) : null;
     let running = process && ["running", "starting"].includes(process.status);
-    // Replace legacy frame-only publishers when an existing sandbox resumes.
-    if (running && state.transport !== "webrtc") {
+    // Cloudflare sandboxes retain HTTPS previews: their scoped egress blocks raw media sockets.
+    if (running && state.transport !== "frames-v1") {
       await this.runtime.killProcess(state.processId!);
       running = false;
     }
@@ -74,12 +74,12 @@ export class SandboxDesktop {
     if (!written.success) throw new Error("could not install sandbox desktop credential");
     if (running) return;
     state.processId = `nanocodex-desktop-${crypto.randomUUID()}`;
-    state.transport = "webrtc";
+    state.transport = "frames-v1";
     await this.storage.put(KEY, state);
     const endpoint = `https://nanocodex-hand.internal/v1/hand-hosts/${state.owner}/${state.id}/hands`;
     // All values are trusted, validated metadata and shell-quoted. The private
     // token only appears in writeFile's payload, never argv or process logs.
-    const args = ["/usr/local/bin/nanocodex-remote", "server-host", "--width", "1920", "--height", "1080", "--url", endpoint,
+    const args = ["/usr/local/bin/nanocodex-remote", "server-host", "--frames", "--width", "1920", "--height", "1080", "--url", endpoint,
       "--credential-file", `${DIRECTORY}/credential`, "--machine-id", state.machineId,
       "--name", state.name, "--workspace", "/workspace"];
     await this.runtime.startProcess("NANOCODEX_SCREEN_BITRATE_KBPS=24000 " + args.map(shellQuote).join(" "), {
