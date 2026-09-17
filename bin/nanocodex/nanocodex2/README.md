@@ -12,6 +12,37 @@ keyboard input for capability probes. Recognized Kitty, Ghostty, iTerm2, and
 WezTerm environments use native images where supported; other terminals use
 half-block images.
 
+## Hand screens
+
+Type `/screen`, filter by Hand name, then press Enter to watch its live screen
+beside the conversation. It stays inside the current terminal window. Tab and
+Shift+Tab cycle the chat, screen, and any existing `/btw` pane; `/zoom` toggles
+the focused pane between the split layout and full width. In the screen pane,
+`z` also toggles zoom, `r` reconnects, and Esc closes the viewer. `/screen` there
+returns to Hand selection. Watching does not acquire mouse or keyboard control.
+Desktop Opus audio plays automatically through the local output device. Press
+`m` to mute or unmute. Closing the viewer or switching Hands stops its audio;
+watching never opens the microphone. Audio failure is shown separately and
+does not interrupt video.
+
+The viewer receives the Hand's live H.264/WebRTC stream and targets 60 video
+frames per second. `ffmpeg` decodes video and `ffplay` handles stereo Opus RTP,
+packet reordering and audio output. Both come from the local FFmpeg package.
+Executable discovery checks PATH and standard Homebrew/system directories.
+
+Local Kitty-compatible terminals, including Ghostty, read temporary RGB pixel
+buffers directly, avoiding per-frame base64 encoding and Rust-side resizing.
+The decoder scales to the pane’s pixel dimensions and refreshes on zoom/resize.
+Frames replace one named image placement, keeping the image grid stable between
+updates. Pending transfers are bounded and reclaimed on close. Over SSH, or
+when local file transfers are unavailable, the viewer falls back to inline
+terminal graphics. Other image protocols and text previews remain supported.
+The displayed FPS counts distinct frames presented by the TUI. Source cadence,
+terminal rendering and transport still determine actual throughput; a 60 fps
+target does not upgrade a slower publisher. Slow presentation drops stale frames
+instead of queuing old video. `frames-v1` Hands retain their existing lower-rate
+image transport and do not publish audio.
+
 ## Account sign-in
 
 ```bash

@@ -6292,6 +6292,7 @@ dependencies = [
 name = "nanocodex2-bin"
 version = "0.6.1"
 dependencies = [
+ "anyhow",
  "arboard",
  "axum",
  "base64 0.22.1",

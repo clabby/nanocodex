@@ -5,7 +5,6 @@ use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    io,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -622,29 +621,7 @@ fn candidate_signal(candidate: RTCIceCandidateInit) -> Value {
     json!({"type":"candidate", "candidate":candidate.candidate, "sdpMid":"0", "sdpMLineIndex":0})
 }
 
-pub(crate) fn ice_servers(value: &Value) -> Result<Vec<RTCIceServer>> {
-    value["iceServers"]
-        .as_array()
-        .filter(|s| s.len() <= 16)
-        .ok_or_else(|| io::Error::other("invalid ICE servers"))?
-        .iter()
-        .map(|s| {
-            let urls = match &s["urls"] {
-                Value::String(s) => vec![s.clone()],
-                Value::Array(urls) => urls
-                    .iter()
-                    .map(|u| u.as_str().map(str::to_owned).ok_or("invalid ICE URL"))
-                    .collect::<std::result::Result<Vec<_>, _>>()?,
-                _ => return Err("invalid ICE URLs".into()),
-            };
-            Ok(RTCIceServer {
-                urls,
-                username: s["username"].as_str().unwrap_or("").into(),
-                credential: s["credential"].as_str().unwrap_or("").into(),
-            })
-        })
-        .collect()
-}
+pub(crate) use super::screen_ice::ice_servers;
 
 #[cfg(test)]
 mod tests {

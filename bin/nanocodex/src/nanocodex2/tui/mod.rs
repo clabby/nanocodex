@@ -15,6 +15,7 @@ mod history;
 mod pane;
 mod prompt;
 mod scheduler;
+mod screen;
 mod session;
 mod shell;
 mod spinner;
@@ -490,6 +491,7 @@ struct PendingVoice {
 }
 
 struct DriverRuntime {
+    screen: screen::Controller,
     pending_voice: Option<PendingVoice>,
     voice: Option<crate::voice::Session>,
     client: ManagedClient,
@@ -1456,6 +1458,7 @@ async fn run_inner(
     let mut input = EventStream::new();
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
     let mut runtime = DriverRuntime {
+        screen: screen::Controller::new(components::video_picker()),
         client: client.clone(),
         pending_voice: None,
         voice: None,
@@ -1668,6 +1671,15 @@ async fn run_inner(
             terminal
                 .draw(|frame| app.render(frame))
                 .map_err(terminal_error)?;
+            runtime.screen.size.send_if_modified(|size| {
+                let current = app.screen_size();
+                if *size == current {
+                    false
+                } else {
+                    *size = current;
+                    true
+                }
+            });
             scheduler.presented(Instant::now());
         }
 
@@ -1678,6 +1690,12 @@ async fn run_inner(
                 (Some(&mut voice.status), Some(&mut voice.transcripts))
             });
         tokio::select! {
+            changed = runtime.screen.updates.changed() => {
+                if changed.is_ok() {
+                    let snapshot = runtime.screen.updates.borrow_and_update().clone();
+                    request_render(app.update(AppEvent::Screen(snapshot)), &mut scheduler);
+                }
+            }
             Some(transcript) = async { match &mut voice_transcripts { Some(receiver) => receiver.recv().await, None => pending().await } } => {
                 let record = runtime.local_record(LocalEvent::VoiceTranscript(transcript))?;
                 request_render(app.update(AppEvent::Transcript { pane: PaneId::Main, record }), &mut scheduler);
@@ -2631,6 +2649,7 @@ async fn apply_update(
     let mut stopping = false;
     while let Some(effect) = effects.pop_front() {
         match effect {
+            AppEffect::Screen(command) => runtime.screen.command(&runtime.client, command),
             AppEffect::Shutdown => stopping = true,
             AppEffect::SetTheme(_) => scheduler.request_immediate(Instant::now()),
             AppEffect::OpenFork { pane, .. } => {
@@ -2647,6 +2666,9 @@ async fn apply_update(
             AppEffect::Pane { pane, effect } => {
                 // Keep the hosted effect boundary visually separate from app-level routing.
                 match effect {
+                    RootEffect::Screen | RootEffect::Zoom => {
+                        unreachable!("workspace commands are handled by AppNode")
+                    }
                     RootEffect::Voice(command) => {
                         let outcome = runtime.voice_command(pane, command);
                         absorb(
@@ -3657,6 +3679,7 @@ mod tests {
             ManagedApiKey::parse(format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43)))
                 .unwrap();
         DriverRuntime {
+            screen: crate::tui::screen::Controller::new(ratatui_image::picker::Picker::halfblocks()),
             pending_voice: None,
             voice: None,
             client: ManagedClient::new("http://127.0.0.1:9", api_key).unwrap(),

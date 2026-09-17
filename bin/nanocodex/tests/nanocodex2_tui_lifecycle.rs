@@ -479,6 +479,9 @@ impl Fixture {
         let listed_agent = Arc::new(Mutex::new(AGENT.to_owned()));
         let resume_gate = Arc::new(tokio::sync::Semaphore::new(1));
         let app = Router::new()
+            .route("/v1/account/hands/screens", get(|| async { Json(json!({"surfaces": [{"id":"desktop","machine_id":"screen-test-hand","machine_name":"SCREEN_TEST_HAND","name":"Desktop","generation":"screen-generation","width":32,"height":18,"transport":"frames-v1"}]})) }))
+            .route("/v1/account/hands/view", get(test_screen_socket))
+            .route("/v1/account/hands/renew", post(|| async { Json(json!({"ok":true})) }))
             .route(
                 "/v1/agents",
                 post(|| async {
@@ -661,13 +664,21 @@ async fn terminal_id_command_shows_attached_agent_without_sending_input() {
 
 #[tokio::test]
 async fn terminal_id_command_during_startup_does_not_submit_a_turn() {
-    // Startup eagerly connects; hold history so the pre-connection assertion
-    // does not race the background connection finishing.
+    // Startup eagerly connects. Hold history, but allow the identity to arrive
+    // before replay finishes: either ID response must remain a local control.
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let mut fixture = Fixture::launch_with_history(false, false, Vec::new(), gate.clone()).await;
     fixture.terminal.wait_text("nanocodex2").await;
     fixture.terminal.prompt("/id", "\r");
-    fixture.terminal.wait_text("No agent ID yet").await;
+    fixture.terminal.wait_text("ID").await;
+    let screen = fixture.terminal.screen.lock().unwrap().screen().contents();
+    if screen.contains(AGENT) {
+        assert!(screen.contains("Agent ID"));
+        fixture.terminal.input("\x1b");
+        fixture.terminal.wait_no_text("Agent ID").await;
+    } else {
+        assert!(screen.contains("No agent ID yet"), "{screen}");
+    }
     assert!(fixture.submissions.try_recv().is_err());
     gate.add_permits(1);
 
@@ -3082,4 +3093,92 @@ async fn terminal_batch_children_expand_independently_and_collapse_with_parent()
     click_row(&mut fixture.terminal, "check-first");
     fixture.terminal.wait_no_text("FIRST_CHILD_OUTPUT").await;
     fixture.terminal.wait_text("SECOND_CHILD_OUTPUT").await;
+}
+
+async fn test_screen_socket(
+    upgrade: WebSocketUpgrade,
+    Query(query): Query<HashMap<String, String>>,
+) -> axum::response::Response {
+    assert_eq!(
+        query.get("machine_id").map(String::as_str),
+        Some("screen-test-hand")
+    );
+    assert_eq!(query.get("surface_id").map(String::as_str), Some("desktop"));
+    assert_eq!(
+        query.get("generation").map(String::as_str),
+        Some("screen-generation")
+    );
+    upgrade.on_upgrade(|mut socket| async move {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+            .encode_image(&image::RgbImage::from_pixel(
+                32,
+                18,
+                image::Rgb([40, 120, 200]),
+            ))
+            .unwrap();
+        let jpeg = base64::engine::general_purpose::STANDARD.encode(bytes);
+        socket
+            .send(Message::Text(
+                json!({"type":"ready", "connection_id":"screen-test-connection"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        while let Some(Ok(Message::Text(text))) = socket.recv().await {
+            let message: Value = serde_json::from_str(&text).unwrap();
+            if message["type"] == "ping" {
+                if socket
+                    .send(Message::Text(json!({"type":"pong"}).to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            // Watching must never acquire the remote input lease.
+            assert_eq!(message["type"], "frame_request");
+            tokio::time::sleep(Duration::from_millis(16)).await;
+            if socket
+                .send(Message::Text(
+                    json!({"type":"frame", "jpeg":jpeg,"width":32,"height":18})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn terminal_screen_selection_zoom_and_tabs_preserve_chat_draft() {
+    let mut fixture = Fixture::start().await;
+    fixture.terminal.prompt("/screen", "\r");
+    fixture.terminal.wait_text("Select Hand").await;
+    fixture.terminal.wait_text("SCREEN_TEST_HAND").await;
+    fixture.terminal.input("\r");
+    fixture.terminal.wait_text("Watching").await;
+    fixture.terminal.input("\t");
+    fixture.terminal.prompt("DRAFT_WHILE_WATCHING", "");
+    fixture.terminal.wait_text("DRAFT_WHILE_WATCHING").await;
+    fixture.terminal.input("\t");
+    fixture.terminal.prompt("/zoom", "\r");
+    fixture.terminal.wait_text(": restore").await;
+    fixture.terminal.wait_no_text("DRAFT_WHILE_WATCHING").await;
+    fixture.terminal.input("\t");
+    fixture.terminal.wait_text("DRAFT_WHILE_WATCHING").await;
+    fixture.terminal.wait_no_text("Watching").await;
+    fixture.terminal.input("\t\x1b");
+    fixture.terminal.wait_text("DRAFT_WHILE_WATCHING").await;
+    fixture.terminal.wait_no_text("Screen").await;
+    assert!(fixture.submissions.try_recv().is_err());
+    fixture.terminal.input("\r");
+    let turn = fixture.submission("DRAFT_WHILE_WATCHING").await;
+    fixture.complete(&turn);
 }

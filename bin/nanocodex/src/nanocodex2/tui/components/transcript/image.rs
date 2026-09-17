@@ -168,6 +168,10 @@ struct TmuxClient {
     font_size: Option<FontSize>,
 }
 
+pub(crate) fn video_picker() -> Picker {
+    PICKER.get_or_init(Picker::halfblocks).clone()
+}
+
 pub(crate) fn initialize() {
     let inside_tmux = env::var_os("TMUX").is_some();
     let tmux_client = inside_tmux.then(tmux_client).flatten();

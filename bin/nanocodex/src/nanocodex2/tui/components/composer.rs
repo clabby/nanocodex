@@ -61,6 +61,8 @@ pub(crate) enum ComposerEffect {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SettingsCommand {
+    Screen,
+    Zoom,
     Voice(crate::voice::Command),
     OpenEffort,
     SetEffort(ReasoningEffort),
@@ -74,6 +76,13 @@ impl SettingsCommand {
         let mut parts = input.split_whitespace();
         let command = parts.next()?;
         match command {
+            "/screen" | "/zoom" => Some(if parts.next().is_some() {
+                Self::Invalid(format!("Usage: {command}"))
+            } else if command == "/screen" {
+                Self::Screen
+            } else {
+                Self::Zoom
+            }),
             "/voice" => {
                 let argument = parts.next().unwrap_or_default();
                 Some(if parts.next().is_some() {

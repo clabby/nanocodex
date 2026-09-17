@@ -275,6 +275,8 @@ pub(crate) enum SessionListKind {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RootEffect {
+    Screen,
+    Zoom,
     Voice(crate::voice::Command),
     ShowAgentId,
     Submit(Submission),
@@ -729,6 +731,10 @@ impl RootNode {
         };
     }
 
+    pub(crate) fn allows_pane_switch(&self) -> bool {
+        self.overlay.is_none() && !self.composer.component().draft().starts_with('/')
+    }
+
     pub(crate) const fn composer(&self) -> &Composer {
         self.composer.component()
     }
@@ -1021,7 +1027,7 @@ impl RootNode {
                     && !self.composer.component().has_images()
                     && matches!(
                         self.composer.component().draft().split_whitespace().next(),
-                        Some("/voice")
+                        Some("/voice" | "/screen" | "/zoom")
                     )
                 {
                     let mut update = self
@@ -1720,6 +1726,14 @@ impl RootNode {
         let update = actions.update(ActionsEvent::Terminal(event));
         match update.effects.into_iter().next() {
             Some(ActionsEffect::Dismiss) => self.overlay = None,
+            Some(ActionsEffect::Trigger(Action::Screen)) => {
+                self.overlay = None;
+                return self.apply_settings_command(SettingsCommand::Screen);
+            }
+            Some(ActionsEffect::Trigger(Action::Zoom)) => {
+                self.overlay = None;
+                return self.apply_settings_command(SettingsCommand::Zoom);
+            }
             Some(ActionsEffect::Trigger(Action::Voice)) => {
                 self.overlay = None;
                 return self
@@ -2525,6 +2539,14 @@ impl RootNode {
 
     fn apply_settings_command(&mut self, command: SettingsCommand) -> ComponentUpdate<RootEffect> {
         match command {
+            SettingsCommand::Screen | SettingsCommand::Zoom => ComponentUpdate {
+                effects: vec![if command == SettingsCommand::Screen {
+                    RootEffect::Screen
+                } else {
+                    RootEffect::Zoom
+                }],
+                render: RenderRequest::Immediate,
+            },
             SettingsCommand::Voice(command) => ComponentUpdate {
                 effects: vec![RootEffect::Voice(command)],
                 render: RenderRequest::Immediate,

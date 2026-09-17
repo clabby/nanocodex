@@ -21,6 +21,7 @@ mod host;
 mod installation;
 mod native_hand;
 mod screen_audio;
+mod screen_ice;
 #[cfg(target_os = "macos")]
 mod screen_macos;
 mod screen_native;
