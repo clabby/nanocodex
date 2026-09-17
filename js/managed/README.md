@@ -98,11 +98,33 @@ tools. Credential selection remains live in the broker. Without the optional
 binding, the transport retains the usual broker ownership lookup; legacy
 directory subjects retain their existing authority.
 
-First-turn runtime discovery and environment bootstrap share one live connector
-and MCP catalog read. This snapshot is scoped to that admission, never cached
-across turns. Warm-turn discovery and later explicit account-info calls still
-read current state. Egress must expose `/users/:user/catalog` before deploying
-this managed startup path.
+Active clients call `POST /v1/agents/:id/prepare` (no body), or the managed SDK's
+`agent.prepare()`, when opening a conversation. The authenticated mutation
+requires `agents:write`, `tools:use`, and the ChatGPT connector for delegated
+grants. It acknowledges with HTTP 202 `{ "state": "preparing" }`; this means
+accepted, not provider-ready. One session-owned task starts runtime/socket
+preconnection, personalization, and first-turn account metadata. Prompt and
+voice media admission do not await the activation HTTP request. Passive event
+and history subscriptions do not prepare models. Preparation installs an idle
+alarm and expires after the configured runtime idle interval (30 seconds by
+default); reopening the conversation renews it. No `generate:false` model
+request is inserted before a prompt.
+
+Connector/MCP discovery, hosted-tool snapshots, and startup account metadata
+are retained in memory for at most `MANAGED_ACCESS_TTL_MS` (two minutes), measured
+from the start of each read. Concurrent callers share reads. Startup metadata
+is keyed by owner, organization, team, authorization epoch and exact turn
+authorization; catalog reuse is owner/authority scoped. Runtime shutdown,
+including settings replacement, invalidates these snapshots. Failed reads are
+not retained as successful snapshots. Explicit account-info tools still force
+live discovery, and tool invocation retains its existing live authorization.
+These caches store discovery metadata, not credentials or an authorization
+bypass. Egress must expose `/users/:user/catalog` for this startup path.
+
+`managed.agent.transport` observations include the managed turn and runtime
+request IDs, failure class/phase, retry delay, connection generation and whether
+a retry opens a new socket. Raw provider frames and error strings remain
+excluded from logs and replay storage.
 
 The resolver reads retained ownership without constructing the agent runtime.
 Deleted, exported, or pending-import sessions deny resolution; egress never

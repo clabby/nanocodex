@@ -2213,3 +2213,19 @@ test("managed memory preserves requested scan/read batches above former maxima",
   assert.equal(read.memories.length, 30);
   assert.equal(read.memories[29].key.id, 30);
 });
+
+test("conversation preparation is explicit, bodyless, and resolves on acceptance", async () => {
+  const requests = [];
+  const controller = new AbortController();
+  const agent = Agent.open(agentId, { baseUrl: origin, apiKey, fetch: async (input, init) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    return Response.json({ state: "preparing" }, { status: 202 });
+  } });
+  assert.equal(requests.length, 0);
+  await agent.prepare({ signal: controller.signal });
+  assert.equal(requests.length, 1);
+  assert.equal(new URL(requests[0].url).pathname, `/v1/agents/${agentId}/prepare`);
+  assert.equal(requests[0].method, "POST");
+  assert.equal(requests[0].body, null);
+});

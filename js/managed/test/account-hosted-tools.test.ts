@@ -618,3 +618,47 @@ function machineEntry() {
     timeout_ms: 30_000,
   };
 }
+
+it("reuses bounded discovery but keeps forced refresh and live authority", async () => {
+  let now = 1000, allowed = true;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+  const fetch = vi.fn(async () => Response.json(snapshot));
+  const provider = new AccountHostedToolsProvider({ getByName: () => ({ fetch }) } as unknown as DurableObjectNamespace<AccountHostedTools>, ACCOUNT_A, () => allowed);
+  try {
+    await Promise.all([provider.refresh(120_000), provider.refresh(120_000)]);
+    await provider.refresh(120_000);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    allowed = false;
+    expect(provider.definitions()).toEqual([]);
+    expect(provider.machineTool("laptop", "exec_command")).toBeUndefined();
+    allowed = true;
+    expect(provider.definitions()).not.toEqual([]);
+    now += 120_000;
+    await provider.refresh(120_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await provider.refresh();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    provider.invalidate();
+    fetch.mockImplementationOnce(async () => new Response(null, { status: 503 }));
+    await expect(provider.refresh(120_000)).rejects.toThrow();
+    await provider.refresh(120_000);
+    expect(fetch).toHaveBeenCalledTimes(5);
+  } finally { clock.mockRestore(); }
+});
+
+it("an invalidated in-flight discovery cannot publish or satisfy the next refresh", async () => {
+  let release!: (response: Response) => void;
+  const first = new Promise<Response>(resolve => { release = resolve; });
+  const fetch = vi.fn().mockImplementationOnce(() => first)
+    .mockImplementation(async () => Response.json({ tools: [], machines: [] }));
+  const provider = new AccountHostedToolsProvider({ getByName: () => ({ fetch }) } as unknown as DurableObjectNamespace<AccountHostedTools>, ACCOUNT_A, () => true);
+  const pending = provider.refresh(120_000);
+  provider.invalidate();
+  const replacement = provider.refresh(120_000);
+  release(Response.json(snapshot));
+  await Promise.all([pending, replacement]);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(provider.definitions()).toEqual([]);
+  await provider.refresh(120_000);
+  expect(fetch).toHaveBeenCalledTimes(2);
+});

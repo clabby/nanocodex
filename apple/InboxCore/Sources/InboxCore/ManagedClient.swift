@@ -137,6 +137,10 @@ public final class ManagedClient: @unchecked Sendable {
         return "/v1/agents/" + id
     }
     public func state(_ id: String) async throws -> JSON { try await json(path: Self.agentPath(id)) }
+    /// Starts server-owned preparation without waiting for model readiness.
+    public func prepare(_ id: String) async throws {
+        _ = try await json(path: Self.agentPath(id) + "/prepare", method: "POST")
+    }
     /// Refresh every unique agent with at most four operations in flight. Resolve
     /// history policy when a slot opens, so a tab switch can change who owns it.
     public func refreshAgents(_ agentIDs: [String],

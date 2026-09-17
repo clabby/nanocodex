@@ -303,6 +303,10 @@ function agentHandle(client, id, summary, retainedEventStream) {
     id,
     ...(summary === undefined ? {} : { summary }),
     events,
+    // Activation is explicit: passive event/history readers never warm a model.
+    prepare: (options = {}) => client.json(`${agentPath(id)}/prepare`, {
+      method: "POST", ...(options.signal === undefined ? {} : { signal: options.signal }),
+    }).then(() => undefined),
     requiredActions: Object.freeze({
       list: () => client.json(`${agentPath(id)}/required-actions`),
       submit: (callId, outcome) => {

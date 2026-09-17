@@ -1,3 +1,4 @@
+import { transportObservation } from "./transport-observation";
 import { handRequestFailure, handBrokerRequest } from "nanocodex/cloudflare/managed-access";
 import { beginHandTiming, finishHandTiming, timeHandStage } from "./hand-timing";
 import { PreparedPersonalizationCache, personalizedVoiceContext, type PersonalizationScope, type PersonalizationSnapshot } from "./personalization";
@@ -217,8 +218,9 @@ import {
   accountInfo,
   projectHandProviders,
   type AccountMachine,
+  type AccountInfo,
 } from "./account-info";
-import { accountCatalog } from "./account-catalog";
+import { AccountCatalogCache } from "./account-catalog";
 import { connectorToolsProvider } from "./connector-tools";
 import { accountConnectorsTool } from "./account-connectors-tool";
 import {
@@ -259,7 +261,7 @@ import {
   type HostPrincipalEnv,
 } from "./host-principals";
 import { routeManagedRealtimeTransport } from "./managed-realtime-transport";
-import { managedAccessResponse } from "./managed-access";
+import { managedAccessResponse, MANAGED_ACCESS_TTL_MS } from "./managed-access";
 import {
   HistorySearchError,
   MAX_HISTORY_SEARCH_LIMIT,
@@ -1206,6 +1208,9 @@ function isUniqueStringArray(value: unknown): value is string[] {
 }
 
 const SAFE_OBSERVATION_FIELDS = new Set([
+  "request_id", "turn_id", "failure_phase", "replay_mode", "next_attempt", "max_attempts",
+  "connection_generation", "model_call_index", "status_code", "retry_delay_ms", "duration_ms",
+  "opens_new_socket", "server_requested_delay",
   "runtime_ready_ms",
   "bootstrap_ready_ms",
   "inject_ms",
@@ -1284,6 +1289,22 @@ function observeManagedPrincipal(
     ...(env.DEPLOYMENT_SHA === undefined ? {} : { deployment_sha: env.DEPLOYMENT_SHA }),
     ...safeObservationDetail(detail),
   });
+}
+
+/** A relay may forward a zero-byte POST as a non-null stream. */
+async function hasRequestBody(request: Request): Promise<boolean> {
+  if (request.body === null) return false;
+  const reader = request.body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return false;
+      if (value.byteLength > 0) return true;
+    }
+  } finally {
+    await reader.cancel();
+    reader.releaseLock();
+  }
 }
 
 async function managedFetch(
@@ -2190,6 +2211,19 @@ async function managedFetchRoute(
         method: request.method, headers: sessionHeaders, body: request.body, signal: request.signal,
       });
     }
+    if (resource === "prepare") {
+      if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
+      if (url.search !== "" || await hasRequestBody(request)) return json({ error: "invalid_request" }, { status: 400 });
+      if (!principal.capabilities.includes("agents:write") || !principal.capabilities.includes("tools:use")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      if (principal.connectGrant && !principal.connectGrant.connectors.includes("chatgpt")) {
+        return json({ error: "connector_forbidden" }, { status: 403 });
+      }
+      const failure = requireSameOriginMutation(request, url, principal);
+      if (failure) return failure;
+      return stub.fetch("https://session.internal/prepare", { method: "POST", headers: sessionHeaders });
+    }
     if (resource === "settings") {
       if (request.method !== "PATCH") {
         return json({ error: "method_not_allowed" }, { status: 405 });
@@ -2842,6 +2876,11 @@ export class DurableAgentSession extends DurableComputerSession {
   readonly #pendingTurnIds = new Set<string>();
   readonly #turnInputs = new Map<string, PromptInput>();
   readonly #admissionTasks = new Map<string, Promise<ManagedTurnRow>>();
+  readonly #accountCatalog = new AccountCatalogCache();
+  #accountDiscoveryKey?: string;
+  #preparedAccountInfo?: { key: string; expiresAt: number; promise: Promise<AccountInfo> };
+  #preparationTask?: Promise<void>;
+  #preparationExpiresAt = 0;
   #accountMcpConnections?: readonly ManagedAccountMcpConnection[];
   #accountMcpRefreshTask?: Promise<void>;
   readonly #cancellationTasks = new Map<string, Promise<void>>();
@@ -3426,6 +3465,18 @@ export class DurableAgentSession extends DurableComputerSession {
       if (!match) return json({ error: "not_found" }, { status: 404 });
       return this.#attachmentStore().fetch(request, match[1]!, match[2]);
     }
+    if (request.method === "POST" && url.pathname === "/prepare") {
+      if (ownerAssertion === null || !turnAuthorization.capabilities.includes("agents:write")
+        || !turnAuthorization.capabilities.includes("tools:use")) return json({ error: "forbidden" }, { status: 403 });
+      if (url.search !== "" || await hasRequestBody(request)) return json({ error: "invalid_request" }, { status: 400 });
+      if (this.#deleting || this.#deleted || this.#durabilityExported) return json({ error: "agent_unavailable" }, { status: 409 });
+      if (this.#session()?.runtime_profile !== "managed") return json({ error: "unsupported_runtime" }, { status: 409 });
+      if (turnAuthorization.connectGrant && !turnAuthorization.connectGrant.connectors.includes("chatgpt")) {
+        return json({ error: "connector_forbidden" }, { status: 403 });
+      }
+      this.#prepareActiveConversation(turnAuthorization);
+      return json({ state: "preparing" }, { status: 202 });
+    }
     if (request.method === "GET" && url.pathname === "/socket")
       return this.#upgrade(turnAuthorization, url.searchParams.get("cursor"));
     if (request.method === "POST" && url.pathname === "/vm-host-revoke") {
@@ -3839,8 +3890,7 @@ export class DurableAgentSession extends DurableComputerSession {
     if ((this.#agent || this.#agentPromise)
       && session !== undefined
       && (this.#managedRealtimeSession() !== undefined
-        || session.last_active
-          + this.#idleTimeoutMs() > Date.now())) {
+        || Math.max(session.last_active + this.#idleTimeoutMs(), this.#preparationExpiresAt) > Date.now())) {
       await this.#scheduleNextAlarm();
       return;
     }
@@ -3857,8 +3907,7 @@ export class DurableAgentSession extends DurableComputerSession {
     // originally observed an idle session.
     if (this.#recoverableTurnCount() > 0 || this.#agentPromise
       || this.#managedRealtimeSession() !== undefined
-      || (this.#session()?.last_active ?? 0)
-        + this.#idleTimeoutMs() > Date.now()) {
+      || Math.max((this.#session()?.last_active ?? 0) + this.#idleTimeoutMs(), this.#preparationExpiresAt) > Date.now()) {
       this.#scheduleRecovery();
       await this.#scheduleNextAlarm();
       return;
@@ -6109,7 +6158,7 @@ export class DurableAgentSession extends DurableComputerSession {
       const catalog = dispatchInputJson === undefined && row.state !== "cancelling"
         && session.runtime_profile === "managed" && accountToolsEnabled(this.#configuration())
         && this.#startupContext.needsEnvironment(row.id)
-        ? accountCatalog(this.env.NANOCODEX, session.owner_id) : undefined;
+        ? this.#catalog(session) : undefined;
       const agentReady = this.#ensureAgent(catalog).then((agent) => {
         assertActive();
         if (this.#agent !== agent) throw retryableError("agent became unavailable during admission");
@@ -6128,15 +6177,7 @@ export class DurableAgentSession extends DurableComputerSession {
             const session = this.#session()!;
             const authorization = parseTurnAuthorization(row.authorization_json);
             const [account, agent] = await Promise.all([
-              withHardDeadline("startup accountInfo", 10_000, (signal) => accountInfo(
-                this.env.NANOCODEX, session.owner_id, {
-                  allowedConnectors: accountConnectorProjection(authorization),
-                  allowedConnections: accountConnectionProjection(authorization),
-                  enabled: session.runtime_profile === "managed", signal,
-                  ...(catalog === undefined ? {} : { catalog }),
-                },
-              )).catch(() => accountInfo(this.env.NANOCODEX, session.owner_id, { enabled: false })
-                .then((info) => ({ ...info, status: "unavailable" as const }))),
+              this.#startupAccountInfo(session, authorization),
               agentReady,
             ]);
             assertActive();
@@ -6764,6 +6805,60 @@ export class DurableAgentSession extends DurableComputerSession {
     await this.#scheduleNextAlarm();
   }
 
+  #prepareActiveConversation(authorization: TurnAuthorization): void {
+    const expiresAt = Date.now() + this.#idleTimeoutMs();
+    this.#preparationExpiresAt = expiresAt;
+    this.#warmPersonalization();
+    if (this.#preparationTask) return;
+    const task = (async () => {
+      await this.#settingsMutationTail;
+      const session = this.#session();
+      if (!session) return;
+      // All speculative work belongs to this task; a prompt reuses the same reads.
+      await performanceStage("conversation.prepare", async () => {
+        const results = await Promise.allSettled([this.#ensureAgent(), this.#startupAccountInfo(session, authorization)]);
+        for (const result of results) if (result.status === "rejected") throw result.reason;
+      });
+      this.#preparationExpiresAt = Math.max(this.#preparationExpiresAt, expiresAt);
+    })();
+    this.#preparationTask = task;
+    this.ctx.waitUntil(task.catch((error) => {
+      this.#observe("managed.preparation_failed", { error_kind: errorKind(error) }, "warn");
+    }).finally(async () => {
+      if (this.#preparationTask === task) this.#preparationTask = undefined;
+      await this.#scheduleNextAlarm();
+    }));
+  }
+
+  #startupAccountInfo(session: SessionRow, authorization: TurnAuthorization): Promise<AccountInfo> {
+    const key = canonicalJson([session.owner_id, session.organization_id, session.team_id,
+      session.authorization_epoch, authorization]);
+    const now = Date.now();
+    if (this.#preparedAccountInfo?.key === key && this.#preparedAccountInfo.expiresAt > now) {
+      return this.#preparedAccountInfo.promise;
+    }
+    const promise = withHardDeadline("startup accountInfo", 10_000, (signal) => accountInfo(
+      this.env.NANOCODEX, session.owner_id, {
+        allowedConnectors: accountConnectorProjection(authorization),
+        allowedConnections: accountConnectionProjection(authorization),
+        enabled: session.runtime_profile === "managed", signal,
+        ...(session.runtime_profile === "managed" ? { catalog: this.#catalog(session) } : {}),
+      },
+    )).catch(() => accountInfo(this.env.NANOCODEX, session.owner_id, { enabled: false })
+      .then((info) => ({ ...info, status: "unavailable" as const })));
+    const entry = { key, expiresAt: now + MANAGED_ACCESS_TTL_MS, promise };
+    this.#preparedAccountInfo = entry;
+    void promise.then((info) => {
+      if (info.status !== "ready" && this.#preparedAccountInfo === entry) this.#preparedAccountInfo = undefined;
+    });
+    return promise;
+  }
+
+  #catalog(session: SessionRow): Promise<unknown> {
+    return this.#accountCatalog.get(this.env.NANOCODEX, session.owner_id,
+      JSON.stringify([session.organization_id, session.team_id, session.authorization_epoch]));
+  }
+
   async #ensureAgent(
     catalog?: Promise<unknown>,
     options: { reuseReady?: boolean } = {},
@@ -6774,6 +6869,12 @@ export class DurableAgentSession extends DurableComputerSession {
     const session = this.#session();
     let accountMcpRefreshMs = 0;
     if (session?.runtime_profile === "managed" && accountToolsEnabled(this.#configuration())) {
+      const discoveryKey = JSON.stringify([session.owner_id, session.organization_id, session.team_id, session.authorization_epoch]);
+      if (this.#accountDiscoveryKey !== discoveryKey) {
+        this.#accountHostedTools?.invalidate();
+        this.#accountDiscoveryKey = discoveryKey;
+      }
+      catalog ??= this.#catalog(session);
       const refreshStartedAt = performance.now();
       await Promise.all([
         performanceStage("account.mcp_discovery", () => this.#refreshAccountMcpConnections(session, catalog)),
@@ -6977,7 +7078,7 @@ export class DurableAgentSession extends DurableComputerSession {
           : this.#authorizationForToolContext(context),
       ),
     );
-    await performanceStage("account.hosted_tools", () => this.#accountHostedTools!.refresh());
+    await performanceStage("account.hosted_tools", () => this.#accountHostedTools!.refresh(MANAGED_ACCESS_TTL_MS));
   }
 
   #managedBrowserRuntime(session: SessionRow): Promise<ManagedBrowserRuntime> {
@@ -8709,24 +8810,7 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   #observeTransportEvent(event: AgentEvent): void {
-    const payload = event.payload;
-    const operation = [payload.direction, payload.phase ?? payload.purpose]
-      .filter((value): value is string => typeof value === "string")
-      .join(":");
-    this.#observe("managed.agent.transport", {
-      message_type: event.type,
-      ...(typeof payload.transport === "string" ? { transport: payload.transport } : {}),
-      ...(operation ? { operation_kind: operation } : {}),
-      ...(typeof payload.attempt === "number" ? { attempt_count: payload.attempt } : {}),
-      ...(typeof payload.error_class === "string" ? { error_kind: payload.error_class } : {}),
-      outcome: event.type.endsWith(".failed")
-        ? "failure"
-        : event.type.endsWith(".completed")
-        ? "success"
-        : event.type.endsWith(".retrying")
-        ? "retrying"
-        : "observed",
-    });
+    this.#observe("managed.agent.transport", transportObservation(event, this.#eventTurnId ?? this.#eventTurnQueue[0]));
   }
 
   #releaseEventTurn(id: string): void {
@@ -9083,6 +9167,10 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   async #shutdownAgent(strict = false): Promise<void> {
+    this.#accountCatalog.invalidate();
+    this.#preparedAccountInfo = undefined;
+    this.#accountHostedTools?.invalidate();
+    this.#preparationExpiresAt = 0;
     let shutdown = this.#agentShutdownPromise;
     if (!shutdown) {
       const agent = this.#agent;
@@ -9514,7 +9602,7 @@ export class DurableAgentSession extends DurableComputerSession {
       && this.#managedRealtimeSession() === undefined) {
       const session = this.#session();
       const lastActive = session?.last_active ?? now;
-      targets.push(Math.max(now + 1, lastActive + this.#idleTimeoutMs()));
+      targets.push(Math.max(now + 1, lastActive + this.#idleTimeoutMs(), this.#preparationExpiresAt));
     }
     if (!this.#streamError) {
       for (const row of this.#managedTurns(

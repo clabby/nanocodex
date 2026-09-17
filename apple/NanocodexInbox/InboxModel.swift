@@ -1302,6 +1302,7 @@ final class InboxModel: ObservableObject {
         threadLoading = !focusedHistoryLoaded
         guard let client, isActive else { return }
         let epoch = generation, token = observation
+        if !isDemo { Task { try? await client.prepare(id) } }
         if !focusedHistoryLoaded {
             if let opening = openingHistory, opening.id == id {
                 focusedHistoryRequest = opening.request

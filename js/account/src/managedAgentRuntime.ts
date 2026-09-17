@@ -243,6 +243,7 @@ function managedEventWatcher(
   accountId?: string,
 ): ReturnType<ControllerAgent["events"]["watch"]> {
   const controller = new AbortController();
+  if (isManagedAgent(managed)) void managed.prepare({ signal: controller.signal }).catch(() => {});
   const cacheKey = [...accountQueryKey(accountId), "conversation-history", managed.id] as const;
   const cached = historyEnabled && accountId ? appQueryClient.getQueryData<RetainedManagedHistory>(cacheKey) : undefined;
   const cacheObserver = historyEnabled && accountId ? new QueryObserver<RetainedManagedHistory>(appQueryClient, {

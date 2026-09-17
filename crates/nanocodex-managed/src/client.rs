@@ -907,6 +907,19 @@ impl ManagedClient {
         unreachable!("the last read attempt always returns")
     }
 
+    pub(crate) fn prepare_active_conversation(&self, agent_id: &str) {
+        let client = self.clone();
+        let path = format!("{}/prepare", agent_path(agent_id));
+        // Bound the best-effort activation request; submission never joins it.
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                client.request(Method::POST, &path, None, None),
+            )
+            .await;
+        });
+    }
+
     async fn request(
         &self,
         method: Method,

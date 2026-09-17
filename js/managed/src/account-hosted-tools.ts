@@ -327,6 +327,9 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
   #validator: HostedToolsCatalogValidator | undefined;
   #refreshing?: Promise<void>;
   #loaded = false;
+  #loadedAt = 0;
+  #generation = 0;
+  #refreshGeneration = 0;
 
   constructor(
     namespace: DurableObjectNamespace<AccountHostedTools>,
@@ -366,9 +369,21 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     return this.#loaded ? Promise.resolve() : this.refresh();
   }
 
-  refresh(): Promise<void> {
-    if (this.#refreshing) return this.#refreshing;
-    const refreshing = this.#load().then(() => { this.#loaded = true; }).finally(() => {
+  invalidate(): void {
+    this.#loadedAt = 0;
+    this.#generation += 1;
+  }
+
+  refresh(maxAgeMs = 0): Promise<void> {
+    if (this.#refreshing) return this.#refreshGeneration === this.#generation
+      ? this.#refreshing : this.#refreshing.catch(() => {}).then(() => this.refresh(maxAgeMs));
+    if (maxAgeMs > 0 && this.#loadedAt > 0 && Date.now() - this.#loadedAt < maxAgeMs) return Promise.resolve();
+    const generation = this.#generation;
+    this.#refreshGeneration = generation;
+    const startedAt = Date.now();
+    const refreshing = this.#load(generation).then(() => {
+      if (generation === this.#generation) { this.#loaded = true; this.#loadedAt = startedAt; }
+    }).finally(() => {
       if (this.#refreshing === refreshing) this.#refreshing = undefined;
     });
     this.#refreshing = refreshing;
@@ -384,7 +399,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     this.#publish({ tools: [], machines: [] });
   }
 
-  async #load(): Promise<void> {
+  async #load(generation: number): Promise<void> {
     let snapshot: unknown;
     try {
       snapshot = await fetchResponseWithDeadline(
@@ -406,6 +421,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     } catch (error) {
       throw Object.assign(new Error("Account hand discovery interrupted", { cause: error }), { code: "host_interrupted" });
     }
+    if (generation !== this.#generation) return;
     if (!validSnapshot(snapshot)) {
       this.#publish({ tools: [], machines: [] });
       return;

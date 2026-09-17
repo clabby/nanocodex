@@ -392,6 +392,9 @@ export type CronTrigger = Readonly<{
 }>;
 
 export type Agent = Readonly<{
+  /** Start bounded background runtime/socket preparation for an active conversation.
+   * Resolves on acceptance, not provider readiness. Never required before prompt(). */
+  prepare(options?: Readonly<{ signal?: AbortSignal }>): Promise<void>;
   requiredActions: Readonly<{
     list(): Promise<{ data: readonly Readonly<{ call_id: string; session_id: string; source_call_id: string; name: string; input: unknown; deadline_at: number }>[] }>;
     submit(callId: string, outcome: import("nanocodex-tools/hosted").HostedToolCallOutcome): Promise<void>;

@@ -435,10 +435,11 @@ export class DesktopRuntime extends EventEmitter {
     this.#requireConnection();
     const generation = this.#generation;
     const existing = this.#threads.get(id);
-    if (existing) { await existing.ready; this.#sameAccount(generation); existing.abort.signal.throwIfAborted(); return this.#snapshot(existing); }
+    if (existing) { void existing.agent.prepare({ signal: existing.abort.signal }).catch(() => {}); await existing.ready; this.#sameAccount(generation); existing.abort.signal.throwIfAborted(); return this.#snapshot(existing); }
     const agent = Agent.open(id, this.#options);
     const thread = { id, agent, abort: new AbortController(), events: [], cursors: new Set(), hasMore: false, connected: false, activeTurns: [], acceptedTurns: 0, settings: { ...DEFAULT_SETTINGS }, cursor: "0", stateCursor: "0" };
     this.#threads.set(id, thread);
+    void agent.prepare({ signal: thread.abort.signal }).catch(() => {});
     thread.ready = (async () => {
       const [page, state] = await Promise.all([agent.events.page({ limit: 256, signal: thread.abort.signal }), this.request(`/v1/agents/${encodeURIComponent(id)}`, { signal: thread.abort.signal })]);
       if (thread.abort.signal.aborted) throw new Error("Thread closed.");

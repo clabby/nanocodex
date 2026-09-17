@@ -90,7 +90,7 @@ export type AccountInfo = Readonly<{
 }>;
 
 export type AccountInfoOptions = Readonly<{
-  /** Admission-scoped live catalog; never retained between turns. */
+  /** A live or bounded owner/authority-scoped discovery snapshot. */
   catalog?: Promise<unknown>;
   allowedConnectors?: readonly ConnectorCapabilityId[];
   allowedConnections?: ConnectorConnectionSelection;
