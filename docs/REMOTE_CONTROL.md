@@ -69,9 +69,19 @@ and input. VNC is not required. Wayland remains the Linux compositor/input backe
 
 ## Agent control and human takeover
 
-Each published surface advertises an account-owned `screen_*` tool through the
-existing Hand registry. An agent discovers it with `tool_search`, observes the
-screen, and sends click, text, key, scroll, or drag actions. Code Mode callers
+Agents use `computer({workdir:"/omarchy-desktop", action:"observe"})` for a Hand's
+live screen, then send click, type, key, scroll, or drag actions. Alternatively,
+`select_computer` pins the Hand and returns its available interfaces; subsequent
+`computer` calls can omit `workdir`. This works without a native CUA companion,
+including Wayland and screen-only publishers. `environment` advertises `computer`
+and `screen` capabilities. Native `cua_repl` remains available on Hands that
+publish that runtime. Selection never substitutes another desktop or connection
+after a disconnect; select again to capture a replacement publication.
+Computer discovery refreshes before a new computer-tool cell captures its routes,
+so reconnecting publishers are not hidden by a cached startup inventory.
+
+Each surface also advertises its account-owned `screen_*` tool through
+`tool_search`, including individual windows when no unique desktop exists. Code Mode callers
 use `image(result)` to display returned screenshots. Coordinates are normalized
 across the whole image; keyboard actions use USB HID usages and optional
 modifiers. An observation is bounded to 1280 pixels on its longest edge.

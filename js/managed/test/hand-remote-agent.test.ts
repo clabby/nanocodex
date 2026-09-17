@@ -1,7 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { AccountHostedTools } from "../src/account-hosted-tools";
+import { AccountHostedTools, AccountHostedToolsProvider } from "../src/account-hosted-tools";
 import { screenAction } from "../src/hand-remote-agent";
+import { createNamespaceExecutionRuntime } from "../src/namespace-tools";
 
 const owner = "11111111-1111-4111-8111-111111111193";
 const other = "22222222-2222-4222-8222-222222222293";
@@ -25,6 +26,43 @@ async function host(machine: string) {
   return { stub, socket, state, tool };
 }
 describe("agent screen protocol", () => {
+  it("routes screen-only Hands through computer without a native companion, preserving grants and reconnect fencing", async () => {
+    const connected = await host("wayland-computer");
+    let allowed = true;
+    const provider = new AccountHostedToolsProvider(namespace(), owner, () => allowed);
+    await provider.refresh();
+    const machine = provider.screenMachines().find(machine => machine.id === "wayland-computer")!;
+    expect(machine.capabilities).toEqual(["computer", "screen"]);
+    expect(provider.machineOnline(machine.id)).toBe(true);
+    const runtime = createNamespaceExecutionRuntime(() => [machine], () => undefined, undefined,
+      (id, context) => provider.screenTool(id, context));
+    const context = { sessionId: "screen-session", callId: "screen-call", parentCallId: "cell", model: "fixture", signal: new AbortController().signal };
+    expect(await runtime.tools.select_computer!.handler({ workdir: "/wayland-computer" }, context))
+      .toMatchObject({ tools: ["computer"] });
+    const requested = next(connected.socket);
+    const pending = runtime.tools.computer!.handler({ action: "observe" }, context);
+    const request = await requested;
+    expect(request).toMatchObject({ type: "agent_call", surface_id: "desktop", input: { action: "observe" } });
+    connected.socket.send(JSON.stringify({ type: "agent_result", request_id: request.request_id, status: "ok", jpeg: "/9j/2Q==", width: 1, height: 1 }));
+    expect(await pending).toMatchObject({ success: true,
+      structuredResult: { status: "ok", image_url: "data:image/jpeg;base64,/9j/2Q==", detail: "original" } });
+    allowed = false;
+    expect(provider.screenTool(machine.id)).toBeUndefined();
+    expect(await runtime.tools.computer!.handler({ action: "click", x: 0.5, y: 0.5 }, context))
+      .toMatchObject({ success: false, structuredResult: { status: "unavailable" } });
+    allowed = true;
+    const replacement = await host(machine.id);
+    await provider.refresh();
+    expect(await runtime.tools.computer!.handler({ action: "click", x: 0.5, y: 0.5 }, { ...context, parentCallId: "next" }))
+      .toMatchObject({ success: false, structuredResult: { status: "unavailable" } });
+    await runtime.tools.select_computer!.handler({ workdir: "/wayland-computer" }, { ...context, parentCallId: "reselect" });
+    const released = next(replacement.socket);
+    const release = runtime.tools.computer!.handler({ action: "release" }, context);
+    const releaseRequest = await released;
+    replacement.socket.send(JSON.stringify({ type: "agent_result", request_id: releaseRequest.request_id, status: "ok" }));
+    expect(await release).toMatchObject({ success: true });
+    replacement.socket.close();
+  });
   it("rejects mixed, unbounded, and malformed input before sending anything", () => {
     for (const value of [ { action: "click", x: 0.2, y: 0.4, text: "mixed" }, { action: "drag", x: 0, y: 0, endX: 1, endY: 1, durationMs: 5000 },
       { action: "type", text: "🦄".repeat(1025) }, { action: "key", key: 40, modifiers: [224, 224] }, { action: "scroll", x: NaN, y: 0, deltaX: 0, deltaY: 2 } ]) {

@@ -60,6 +60,7 @@ import {
   machineMountRoot,
   type MachineToolResolver,
   type NamespaceMachine,
+  type ScreenToolResolver,
 } from "./namespace-tools";
 import {
   ContainerProxy,
@@ -2615,8 +2616,9 @@ export function createManagedNamespaceTools(
   canUseExecutionNamespace: (context: ToolContext) => boolean,
   machines: (context: ToolContext) => readonly NamespaceMachine[] = () => [],
   resolveMachineTool: MachineToolResolver = () => undefined,
-  prepareNamespace: (context: ToolContext) => Promise<void> = async () => {},
+  prepareNamespace: (context: ToolContext, toolName?: string) => Promise<void> = async () => {},
   brain?: Readonly<{ tool: NamedTool; allowed(context: ToolContext): boolean }>,
+  resolveScreenTool?: ScreenToolResolver,
 ): NamedTool[] {
   return createManagedNamespaceRuntime(
     canUseExecutionNamespace,
@@ -2624,6 +2626,7 @@ export function createManagedNamespaceTools(
     resolveMachineTool,
     prepareNamespace,
     brain,
+    resolveScreenTool,
   ).tools;
 }
 
@@ -2631,26 +2634,28 @@ function createManagedNamespaceRuntime(
   canUseExecutionNamespace: (context: ToolContext) => boolean,
   machines: (context: ToolContext) => readonly NamespaceMachine[] = () => [],
   resolveMachineTool: MachineToolResolver = () => undefined,
-  prepareNamespace: (context: ToolContext) => Promise<void> = async () => {},
+  prepareNamespace: (context: ToolContext, toolName?: string) => Promise<void> = async () => {},
   brain?: Readonly<{ tool: NamedTool; allowed(context: ToolContext): boolean }>,
+  resolveScreenTool?: ScreenToolResolver,
 ): Readonly<{ tools: NamedTool[]; capture(context: ToolContext): Promise<void> }> {
   const runtime = createNamespaceExecutionRuntime(
     machines,
     resolveMachineTool,
     brain?.tool,
+    resolveScreenTool,
   );
   const captured = new Set<string>();
   const preparations = new Map<string, Promise<void>>();
   const cellKey = (context: ToolContext): string => (
     `${context.sessionId}\u0000${context.parentCallId || context.callId}`
   );
-  const capture = async (context: ToolContext): Promise<void> => {
+  const capture = async (context: ToolContext, toolName?: string): Promise<void> => {
     const key = cellKey(context);
     if (captured.has(key)) return;
     const pending = preparations.get(key);
     if (pending !== undefined) return pending;
     const preparation = (async () => {
-      await prepareNamespace(context);
+      await prepareNamespace(context, toolName);
       runtime.capture(context);
       captured.add(key);
     })();
@@ -2688,7 +2693,7 @@ function createManagedNamespaceRuntime(
           "the current authorization cannot use execution hands",
         );
       }
-      await capture(context);
+      await capture(context, name);
       return tool.handler(input, context);
     },
     releaseSession: (sessionId: string) => {
@@ -7335,12 +7340,36 @@ export class DurableAgentSession extends DurableComputerSession {
       (context) => this.#canUseExecutionNamespace(this.#authorizationForToolContext(context)),
       namespaceMachines,
       resolveNamespaceMachineTool,
-      (context) => this.#refreshMountedHostMounts(
-        this.#authorizationForToolContext(context),
-      ),
+      async (context, toolName) => {
+        await this.#refreshMountedHostMounts(this.#authorizationForToolContext(context));
+        // Publishers reconnect independently of shell attachments. A cached
+        // startup inventory must not hide a screen that has since come online.
+        if ((toolName === "select_computer" || toolName === "computer")
+          && this.#hasFullAccountAuthority(this.#authorizationForToolContext(context))) {
+          await this.#accountHostedTools?.refresh();
+        }
+      },
       {
         tool: computer.tool,
         allowed: (context) => this.#authorizationForToolContext(context)?.capabilities.includes("tools:use") === true,
+      },
+      (machineId, context) => {
+        const authorization = this.#authorizationForToolContext(context);
+        if (!this.#canUseExecutionNamespace(authorization) || !this.#hasFullAccountAuthority(authorization)) return undefined;
+        if (machineId.startsWith("user:")) {
+          const id = machineId.slice("user:".length);
+          if (!this.#userHandMachines(context).some(machine => machine.id === id)) return undefined;
+          return this.#accountHostedTools?.screenTool(id, context);
+        }
+        if (machineId.startsWith("sandbox:")) {
+          const mount = this.#managedMount(machineId.slice("sandbox:".length));
+          if (mount?.state !== "mounted") return undefined;
+          if (mount.provider === "cloudflare") return this.#accountHostedTools?.screenTool(`cf:${mount.provider_resource_id}`, context);
+          if (mount.provider !== "host") return undefined;
+          const allocation = vmHostMountAllocation(mount);
+          return allocation ? this.#accountHostedTools?.screenTool(allocation.machine_id, context) : undefined;
+        }
+        return undefined;
       },
     );
     const cloudTools: NamedTool[] = [
@@ -8449,7 +8478,9 @@ export class DurableAgentSession extends DurableComputerSession {
           provider: managedMountPublicProvider(mount),
           mount: mount.root,
           workspace: mount.root,
-          capabilities: hostMachine?.capabilities ?? SANDBOX_HAND_CAPABILITIES,
+          capabilities: [...new Set([...(hostMachine?.capabilities ?? SANDBOX_HAND_CAPABILITIES),
+            ...(this.#hasFullAccountAuthority(authorization) && this.#accountHostedTools?.screenTool(
+              hostMachine?.id ?? `cf:${mount.provider_resource_id}`, context) ? ["computer", "screen"] : [])])],
         });
       }),
       ...userHands.map((machine) => {
@@ -8485,6 +8516,7 @@ export class DurableAgentSession extends DurableComputerSession {
     context?: Pick<ToolContext, "sessionId" | "subagent">,
   ): readonly HostedMachine[] {
     const leasedMachineIds = new Set(this.#managedMounts().flatMap((mount) => {
+      if (mount.provider === "cloudflare") return [`cf:${mount.provider_resource_id}`];
       const allocation = vmHostMountAllocation(mount);
       return allocation === undefined ? [] : [allocation.machine_id];
     }));
@@ -8492,10 +8524,17 @@ export class DurableAgentSession extends DurableComputerSession {
       ...this.#hostedTools.machines(),
       ...(this.#accountHostedTools?.machines(context) ?? []),
     ];
+    // Screen-only publishers have no shell attachment. Merge by identity so a
+    // separately published screen never makes its native Hand ambiguous.
+    for (const screen of this.#accountHostedTools?.screenMachines(context) ?? []) {
+      if (!machines.some(machine => machine.id === screen.id)) machines.push(screen);
+    }
     const counts = new Map<string, number>();
     for (const machine of machines) counts.set(machine.id, (counts.get(machine.id) ?? 0) + 1);
     return machines
       .filter((machine) => counts.get(machine.id) === 1 && !leasedMachineIds.has(machine.id))
+      .map(machine => this.#accountHostedTools?.screenTool(machine.id, context)
+        ? { ...machine, capabilities: [...new Set([...machine.capabilities, "computer", "screen"])] } : machine)
       .sort((left, right) => left.id.localeCompare(right.id));
   }
 

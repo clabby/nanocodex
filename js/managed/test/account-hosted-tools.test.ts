@@ -9,6 +9,7 @@ import { HOSTED_TOOLS_PRE_ADMISSION_UNAVAILABLE } from "nanocodex-tools/hosted";
 import { ToolRouter, toolMapSource } from "nanocodex-tools/runtime/tool-router";
 import { SqlHostedToolsPersistence } from "../src/hosted-tools-broker";
 import { createNamespaceExecutionTools } from "../src/namespace-tools";
+import { screenTool } from "../src/hand-remote-agent";
 
 import {
   AccountHostedTools,
@@ -53,6 +54,26 @@ const snapshot = {
 };
 
 describe("account Hosted Tools provider", () => {
+  it("joins screen discovery by machine identity without promoting an offline factory", async () => {
+    const target = { machine_id: "laptop", machine_name: "Build laptop", id: "desktop", name: "Desktop",
+      kind: "desktop", generation: "screen-generation", width: 1280, height: 800, controllable: true, agent_tools: true };
+    let catalog = { ...snapshot, screens: [target], tools: [...snapshot.tools, screenTool(target)],
+      machines: [{ ...snapshot.machines[0]!, online: false }] };
+    const provider = new AccountHostedToolsProvider(fakeNamespace(new Map([[ACCOUNT_A, async () => Response.json(catalog)]])), ACCOUNT_A, () => true);
+    await provider.refresh();
+    expect(provider.machines()).toHaveLength(1);
+    expect(provider.machines()[0]).toMatchObject({ id: "laptop", workspace: "/work/nanocodex",
+      capabilities: ["filesystem", "native-shell", "computer", "screen"] });
+    expect(provider.machineOnline("laptop")).toBe(false);
+    expect(provider.screenTool("laptop")).toBeDefined();
+    expect(provider.screenTool("other")).toBeUndefined();
+    // Metadata alone cannot bind a route for a different screen generation.
+    catalog = { ...catalog, screens: [{ ...target, generation: "replacement" }] };
+    await provider.refresh();
+    expect(provider.screenTool("laptop")).toBeUndefined();
+    expect(provider.screenMachines()).toEqual([]);
+    expect(provider.machines()[0]!.capabilities).not.toContain("screen");
+  });
   it("returns transitioned SQL rows without a second SELECT and retains failed transitions", async () => {
     const namespace = (env as unknown as {
       NANOCODEX_ACCOUNT_TOOLS: DurableObjectNamespace<AccountHostedTools>;

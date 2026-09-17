@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { HandPaths } from "./hand-paths";
 import { HandRemoteBroker, REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
+import { screenTool, type ScreenTarget } from "./hand-remote-agent";
 import { HandHosts, boundedJSON } from "./hand-hosts";
 import { remoteICE, type RemoteICEEnv } from "./hand-remote-ice";
 import {
@@ -40,6 +41,7 @@ type AccountHostedMachine = Readonly<{
 type AccountHostedToolsSnapshot = Readonly<{
   tools: readonly AccountHostedTool[];
   machines: readonly AccountHostedMachine[];
+  screens?: readonly ScreenTarget[];
 }>;
 
 type RoutedHostedTool = HostedToolsCodeTool & Readonly<{
@@ -207,6 +209,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       }
       const provider = this.#broker.provider();
       return Response.json({
+        screens: this.#remote.list().filter(target => target.agent_tools),
         tools: [...provider.definitions().flatMap((definition) => {
           const tool = provider.resolve(definition.name) as RoutedHostedTool | undefined;
           return tool?.routeToken === undefined ? [] : [{
@@ -329,6 +332,8 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
   #onlineMachineIds = new Set<string>();
   #tools = new Map<string, RoutedHostedTool>();
   #machineTools = new Map<string, HostedToolsCodeTool>();
+  #screenTools = new Map<string, HostedToolsCodeTool>();
+  #screenMachines: readonly HostedMachine[] = [];
   #validator: HostedToolsCatalogValidator | undefined;
   #refreshing?: Promise<void>;
   #loaded = false;
@@ -368,6 +373,14 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     context?: AuthorizationContext,
   ): HostedToolsCodeTool | undefined {
     return this.#allowed(context) ? this.#machineTools.get(machineToolKey(machineId, name)) : undefined;
+  }
+
+  screenTool(machineId: string, context?: AuthorizationContext): HostedToolsCodeTool | undefined {
+    return this.#allowed(context) ? this.#screenTools.get(machineId) : undefined;
+  }
+
+  screenMachines(context?: AuthorizationContext): readonly HostedMachine[] {
+    return this.#allowed(context) ? this.#screenMachines : [];
   }
 
   settled(): Promise<void> {
@@ -481,12 +494,41 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
         }));
       }
     }
-    this.#machines = Object.freeze(snapshot.machines.map(({ machine }) => machine));
+    const screenTools = new Map<string, HostedToolsCodeTool>();
+    const screenMachines = new Map<string, HostedMachine>();
+    const groups = new Map<string, ScreenTarget[]>();
+    for (const target of snapshot.screens ?? []) {
+      if (!target.agent_tools) continue;
+      const group = groups.get(target.machine_id) ?? [];
+      group.push(target);
+      groups.set(target.machine_id, group);
+    }
+    for (const [machineId, targets] of groups) {
+      // Prefer the whole desktop; never guess between multiple window surfaces.
+      const target = targets.find(target => target.id === "desktop") ?? (targets.length === 1 ? targets[0] : undefined);
+      if (!target) continue;
+      const expected = screenTool(target);
+      const tool = tools.get(expected.definition.name);
+      if (!tool || tool.provider !== "screens" || tool.routeToken !== expected.route_token) continue;
+      screenTools.set(machineId, tool);
+      screenMachines.set(machineId, { id: machineId, name: target.machine_name,
+        workspace: "/", capabilities: ["computer", "screen"] });
+    }
+    this.#machines = Object.freeze(snapshot.machines.map(({ machine }) => ({ ...machine,
+        capabilities: screenTools.has(machine.id)
+          ? [...new Set([...machine.capabilities, "computer", "screen"])] : machine.capabilities,
+      })));
+    this.#screenMachines = Object.freeze([...screenMachines.values()]);
     this.#onlineMachineIds = new Set(snapshot.machines
       .filter(({ online }) => online === true)
       .map(({ machine }) => machine.id));
+    // A live screen cannot make an offline shell/VM factory look online.
+    for (const id of screenTools.keys()) {
+      if (!snapshot.machines.some(entry => entry.machine.id === id)) this.#onlineMachineIds.add(id);
+    }
     this.#tools = tools;
     this.#machineTools = machineTools;
+    this.#screenTools = screenTools;
   }
 
   async #invoke(
@@ -585,6 +627,12 @@ function validSnapshot(snapshot: unknown): snapshot is AccountHostedToolsSnapsho
   if (!snapshot || typeof snapshot !== "object") return false;
   const candidate = snapshot as Partial<AccountHostedToolsSnapshot>;
   if (!Array.isArray(candidate.tools) || !Array.isArray(candidate.machines)) return false;
+  if (candidate.screens !== undefined && (!Array.isArray(candidate.screens) || candidate.screens.some(target =>
+    !target || typeof target.machine_id !== "string" || typeof target.machine_name !== "string"
+    || typeof target.id !== "string" || typeof target.name !== "string" || typeof target.kind !== "string"
+    || typeof target.generation !== "string" || typeof target.controllable !== "boolean"
+    || typeof target.agent_tools !== "boolean" || !Number.isSafeInteger(target.width) || target.width < 1
+    || !Number.isSafeInteger(target.height) || target.height < 1))) return false;
   const toolNames = new Set<string>();
   for (const entry of candidate.tools) {
     if (!entry || typeof entry !== "object" || typeof entry.route_token !== "string"

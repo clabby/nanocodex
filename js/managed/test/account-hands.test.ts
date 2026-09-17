@@ -35,13 +35,13 @@ it("lists only the owner's live Hands without private routing metadata", async (
     }] }));
     expect(await ready).toEqual({ type: "ready" });
     expect(await namespace.getByName(owner).listMachines(owner)).toEqual([{
-      id: "ios-phone", name: "iPhone", capabilities: ["native", "background_limited"],
+      id: "ios-phone", name: "iPhone", workspace: "/iphone", capabilities: ["native", "background_limited"],
     }]);
     expect(await namespace.getByName(owner).listMachines(other)).toEqual([]);
     const response = await call();
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({ data: [{
-      id: "ios-phone", name: "iPhone", workspace: "/ios-phone", capabilities: ["native", "background_limited"],
+      id: "ios-phone", name: "iPhone", workspace: "/iphone", capabilities: ["native", "background_limited"],
     }] });
     expect(await (await call({ ...principal, userId: other })).json()).toEqual({ data: [] });
     expect((await call({ ...principal, capabilities: ["agents:read"] })).status).toBe(403);

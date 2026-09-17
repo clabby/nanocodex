@@ -23,6 +23,50 @@ const context = (overrides: Partial<{
 });
 
 describe("cwd-root namespace execution", () => {
+  it("selects a Wayland screen without a companion and preserves its captured route and images", async () => {
+    const result = { [Symbol.for("nanocodex.toolResult")]: true, output: [{ type: "input_image", image_url: "data:image/jpeg;base64,original" }],
+      structuredResult: { image_url: "data:image/jpeg;base64,original", status: "ok" }, success: true };
+    const original = vi.fn(async () => result), replacement = vi.fn(async () => result);
+    let screen = original;
+    const runtime = createNamespaceExecutionRuntime(
+      () => [{ id: "omarchy", root: "/omarchy-desktop", workspace: "/srv/workspace" }],
+      () => undefined, undefined, () => ({ handler: screen }),
+    );
+    expect(await runtime.tools.select_computer!.handler({ workdir: "/omarchy-desktop" }, context()))
+      .toEqual({ workdir: "/omarchy-desktop", machine_id: "omarchy", tools: ["computer"] });
+    screen = replacement;
+    expect(await runtime.tools.computer!.handler({ action: "observe" }, context({ parentCallId: "next" }))).toBe(result);
+    expect(original).toHaveBeenCalledWith({ action: "observe" }, expect.anything());
+    expect(replacement).not.toHaveBeenCalled();
+    await runtime.tools.computer!.handler({ workdir: "/omarchy-desktop", action: "click", x: 0.2, y: 0.3 }, context({ parentCallId: "explicit-again" }));
+    expect(original).toHaveBeenCalledTimes(2);
+    expect(replacement).not.toHaveBeenCalled();
+    await expect(runtime.tools[CUA_JS_NAME]!.handler({ code: "await cua.getState()" }, context())).rejects.toThrow('computer({action:"observe"})');
+    await expect(runtime.tools[CUA_RESET_NAME]!.handler({}, context())).rejects.toThrow("no cua_repl runtime to reset");
+    await runtime.tools.select_computer!.handler({ workdir: "/omarchy-desktop" }, context({ parentCallId: "reselect" }));
+    await runtime.tools.computer!.handler({ action: "observe" }, context({ parentCallId: "after-reselect" }));
+    expect(replacement).toHaveBeenCalledOnce();
+    await runtime.tools.computer!.releaseSession?.("root-session");
+    await runtime.tools.computer!.handler({ action: "observe" }, context());
+    expect(replacement).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes screen workdirs exactly and validates input before touching either desktop", async () => {
+    const first = vi.fn(), second = vi.fn();
+    const runtime = createNamespaceExecutionRuntime(
+      () => [{ id: "mac", workspace: "/Users/me" }, { id: "windows", workspace: "C:\\Users\\me" }],
+      () => undefined, undefined, id => ({ handler: id === "mac" ? first : second }),
+    );
+    await expect(runtime.tools.computer!.handler({ action: "observe" }, context())).rejects.toThrow("Multiple computers");
+    await runtime.tools.computer!.handler({ workdir: "/windows", action: "click", x: 0.2, y: 0.4 }, context());
+    expect(second).toHaveBeenCalledExactlyOnceWith({ action: "click", x: 0.2, y: 0.4 }, expect.anything());
+    expect(first).not.toHaveBeenCalled();
+    await expect(runtime.tools.computer!.handler({ workdir: "/mac", action: "click", x: 2, y: 0 }, context())).rejects.toThrow("Invalid point");
+    await expect(runtime.tools.computer!.handler({ workdir: "/brain", action: "observe" }, context())).rejects.toThrow("no live screen");
+    expect(first).not.toHaveBeenCalled();
+    await expect(runtime.tools.computer!.handler({ action: "observe" }, context({ sessionId: "other" }))).rejects.toThrow("Multiple computers");
+  });
+
   it("routes old identity paths through the same captured Hand as its readable name", async () => {
     const execute = vi.fn(async () => ({ output: "ok", exit_code: 0 }));
     const runtime = createNamespaceExecutionRuntime(

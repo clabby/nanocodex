@@ -175,20 +175,54 @@ describe("managed sandbox preview wiring", () => {
       (_machineId, name) => sourceTools[name],
     );
 
-    expect(tools.map(({ name }) => name)).toEqual(["exec_command", "write_stdin", "preview"]);
-    await expect(tools[0]!.handler(
+    expect(tools.map(({ name }) => name)).toEqual(["computer", "select_computer", "mcp__cua_repl__js", "mcp__cua_repl__js_reset", "exec_command", "write_stdin", "preview"]);
+    const exec = tools.find(({ name }) => name === "exec_command")!;
+    await expect(exec.handler(
       { cmd: "pwd", workdir: "/test" },
       toolContext(),
     )).resolves.toEqual({ ok: true });
     expect(sourceHandler).toHaveBeenCalledTimes(1);
 
     executionAuthorized = false;
-    await expect(tools[0]!.handler({}, toolContext())).rejects.toMatchObject({
+    await expect(exec.handler({}, toolContext())).rejects.toMatchObject({
       status: 403,
       code: "namespace_forbidden",
       message: "the current authorization cannot use execution hands",
     });
     expect(sourceHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it("rechecks execution authority before invoking a captured screen", async () => {
+    let allowed = true;
+    const screen = vi.fn(async () => ({ status: "ok" }));
+    const tools = createManagedNamespaceTools(() => allowed,
+      () => [{ id: "desktop", workspace: "/" }], () => undefined, async () => {}, undefined,
+      () => ({ handler: screen }));
+    const select = tools.find(tool => tool.name === "select_computer")!;
+    const computer = tools.find(tool => tool.name === "computer")!;
+    await select.handler({ workdir: "/desktop" }, toolContext());
+    allowed = false;
+    await expect(computer.handler({ action: "click", x: 0.5, y: 0.5 }, toolContext()))
+      .rejects.toMatchObject({ status: 403, code: "namespace_forbidden" });
+    expect(screen).not.toHaveBeenCalled();
+  });
+
+  it("refreshes screen discovery before selecting a publisher absent from the startup snapshot", async () => {
+    const screen = vi.fn(async () => ({ status: "ok" }));
+    let connected = false;
+    const refresh = vi.fn(async (_context, name) => {
+      if (name === "select_computer") connected = true;
+    });
+    const tools = createManagedNamespaceTools(() => true,
+      () => [{ id: "omarchy", workspace: "/workspace" }], () => undefined, refresh, undefined,
+      () => connected ? { handler: screen } : undefined);
+    const context = toolContext();
+    expect(await tools.find(tool => tool.name === "select_computer")!.handler({ workdir: "/omarchy" }, context))
+      .toMatchObject({ tools: ["computer"] });
+    expect(refresh).toHaveBeenCalledWith(context, "select_computer");
+    await tools.find(tool => tool.name === "computer")!.handler({ action: "observe" }, context);
+    expect(screen).toHaveBeenCalledOnce();
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes an epoch-bound retained route once before a new subagent namespace snapshot", async () => {

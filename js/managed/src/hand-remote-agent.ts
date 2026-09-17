@@ -14,6 +14,28 @@ export type ScreenTool = HostedToolsCatalogCandidate & { route_token: string };
 export type ScreenTarget = { machine_id: string; machine_name: string; id: string; name: string;
   kind: string; generation: string; width: number; height: number; controllable: boolean; agent_tools?: boolean };
 
+// Shared by deferred screen tools and the always-available computer tool.
+export const SCREEN_DESCRIPTION = "Observe or control the selected Hand's live screen, including Wayland, macOS, Windows, phones, and VM desktops. "
+  + "Observe returns a current screenshot; input actions return a screenshot after applying input. "
+  + "In Code Mode, emit the returned image_url with image(result) to see it; use text(result) for errors. "
+  + "Coordinates x/y/endX/endY are normalized from 0 to 1 across the whole image. "
+  + "Human takeover has priority: busy means stop sending input until the human releases control. "
+  + "Use key with USB HID usage (Return 40, Escape 41, Backspace 42, Tab 43, Home 74); "
+  + "modifiers are held only for that key (Control 224, Shift 225, Alt 226, Command 227). "
+  + "Paired iPhone supports click, drag, scroll, text, Return, Backspace, and Home. "
+  + "Do not retry ambiguous input automatically; observe its effect first.";
+
+export const SCREEN_PARAMETERS = { type: "object", additionalProperties: false, required: ["action"], properties: {
+  action: { type: "string", enum: ["observe", "click", "type", "key", "scroll", "drag", "release"] },
+  x: { type: "number", minimum: 0, maximum: 1 }, y: { type: "number", minimum: 0, maximum: 1 },
+  endX: { type: "number", minimum: 0, maximum: 1 }, endY: { type: "number", minimum: 0, maximum: 1 },
+  button: { type: "integer", minimum: 0, maximum: 2, description: "0 left/tap, 1 right/long press, 2 middle" },
+  text: { type: "string", maxLength: 4096 }, key: { type: "integer", minimum: 4, maximum: 231 },
+  modifiers: { type: "array", maxItems: 4, uniqueItems: true, items: { type: "integer", minimum: 224, maximum: 231 } },
+  deltaX: { type: "number", minimum: -4096, maximum: 4096 }, deltaY: { type: "number", minimum: -4096, maximum: 4096 },
+  durationMs: { type: "integer", minimum: 50, maximum: 1500 },
+} } as const;
+
 export function screenTool(target: ScreenTarget): ScreenTool {
   // Stable discovery name, immutable invocation route. Re-publication never
   // silently redirects a tool admitted against a previous sharing session.
@@ -26,25 +48,8 @@ export function screenTool(target: ScreenTarget): ScreenTool {
     route_token: "screen:v1:" + JSON.stringify([target.machine_id, target.id, target.generation]),
     summary: `See and control ${target.machine_name} · ${target.name} (${target.kind}).`,
     definition: { type: "function", name: "screen_" + hash.toString(16), strict: false, defer_loading: true,
-      description: `Live screen of ${target.machine_name} · ${target.name} (${target.kind}, ${target.width}×${target.height}). `
-        + "Observe returns a current screenshot. Input actions return a screenshot after applying input. "
-        + "In Code Mode, emit the returned image_url with image(result) to see it; use text(result) for errors. "
-        + "Coordinates x/y/endX/endY are normalized from 0 to 1 across the whole image. "
-        + "Human takeover has priority: busy means stop sending input until the human releases control. "
-        + "Use key with USB HID usage (Return 40, Escape 41, Backspace 42, Tab 43, Home 74); "
-        + "modifiers are held only for that key (Control 224, Shift 225, Alt 226, Command 227). "
-        + "Paired iPhone supports click, drag, scroll, text, Return, Backspace, and Home. "
-        + "Do not retry ambiguous input automatically; observe its effect first.",
-      parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
-        action: { type: "string", enum: ["observe", "click", "type", "key", "scroll", "drag", "release"] },
-        x: { type: "number", minimum: 0, maximum: 1 }, y: { type: "number", minimum: 0, maximum: 1 },
-        endX: { type: "number", minimum: 0, maximum: 1 }, endY: { type: "number", minimum: 0, maximum: 1 },
-        button: { type: "integer", minimum: 0, maximum: 2, description: "0 left/tap, 1 right/long press, 2 middle" },
-        text: { type: "string", maxLength: 4096 }, key: { type: "integer", minimum: 4, maximum: 231 },
-        modifiers: { type: "array", maxItems: 4, uniqueItems: true, items: { type: "integer", minimum: 224, maximum: 231 } },
-        deltaX: { type: "number", minimum: -4096, maximum: 4096 }, deltaY: { type: "number", minimum: -4096, maximum: 4096 },
-        durationMs: { type: "integer", minimum: 50, maximum: 1500 },
-      } },
+      description: `Live screen of ${target.machine_name} · ${target.name} (${target.kind}, ${target.width}×${target.height}). ${SCREEN_DESCRIPTION}`,
+      parameters: SCREEN_PARAMETERS,
       output_schema: { type: "object", properties: { status: { type: "string" }, message: { type: "string" },
         image_url: { type: "string" }, detail: { type: "string" }, width: { type: "integer" }, height: { type: "integer" },
         machine_id: { type: "string" }, surface_id: { type: "string" } }, required: ["status", "message", "machine_id", "surface_id"] },

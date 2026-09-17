@@ -50,6 +50,16 @@ explicit selection. The CUA argument schemas never acquire routing fields.
 `/brain` has no desktop. A disconnected attachment cannot silently
 redirect an admitted call to a replacement machine.
 
+Hosted agents also expose `computer` for live screen control across macOS,
+Windows, Wayland, phones, and VM desktops. Use
+`computer({workdir:"/omarchy-desktop", action:"observe"})`, or select the Hand
+first and omit `workdir`. Selection returns the available tool names. A screen
+publisher can provide `computer` without the native CUA companion; use its
+screenshots and normalized coordinates for click, type, key, scroll, and drag.
+The native `cua_repl` contract still requires the companion. Screen routes retain
+their publication generation, respect human control, and never replay input on
+reconnect. Reselect after reconnecting a screen.
+
 macOS uses AppKit, Accessibility and ScreenCaptureKit, with the normal OS grants
 and an unlocked graphical session. Linux uses X11/XTEST; native Hands bind the
 companion to their private Xvfb display and Xauthority. A plain Wayland session
@@ -59,7 +69,8 @@ Linux desktop hosts require `libpulse` and `libxkbcommon` (Debian/Ubuntu package
 `libpulse0` and `libxkbcommon0`); Hand installers and images include them.
 Browser-only Linux sessions do not require `DISPLAY`; the X11 connection opens
 on the first native desktop operation.
-The separate legacy Wayland screen-only service is not a CUA tool host.
+The separate Wayland screen service provides the hosted `computer` interface;
+it does not provide the native `cua_repl` runtime.
 
 | Surface | Platforms | Operations |
 | --- | --- | --- |

@@ -1,4 +1,5 @@
 import type { ToolMap } from "nanocodex";
+import { SCREEN_DESCRIPTION, SCREEN_PARAMETERS, screenAction } from "./hand-remote-agent";
 import { CUA_JS_NAME, CUA_RESET_NAME, CUA_DESCRIPTION, CUA_PARAMETERS, CUA_RESET_DESCRIPTION, CUA_RESET_PARAMETERS, validateInput } from "nanocodex-computer/contract";
 import {
   createNamespaceManifest,
@@ -36,6 +37,8 @@ export type MachineToolResolver = (
   context: ToolContext,
 ) => RoutedTool | undefined;
 
+export type ScreenToolResolver = (machineId: string, context: ToolContext) => RoutedTool | undefined;
+
 type MountedHand = Readonly<{
   mountId: string;
   machineId?: string;
@@ -46,6 +49,7 @@ type MountedHand = Readonly<{
   preview?: RoutedTool;
   cua?: RoutedTool;
   cuaReset?: RoutedTool;
+  screen?: RoutedTool;
 }>;
 
 type CellBinding = Readonly<{
@@ -74,6 +78,7 @@ export function createNamespaceExecutionRuntime(
   machines: (context: ToolContext) => readonly NamespaceMachine[],
   resolveMachineTool: MachineToolResolver = () => undefined,
   brainExec?: RoutedTool,
+  resolveScreenTool: ScreenToolResolver = () => undefined,
 ): NamespaceExecutionRuntime {
   const brain = Object.freeze({
     mountId: "mount:brain",
@@ -91,7 +96,7 @@ export function createNamespaceExecutionRuntime(
     const key = `${context.sessionId}\u0000${context.parentCallId || context.callId}`;
     const retained = cells.get(key);
     if (retained !== undefined) return retained;
-    const created = createCellBinding(brain, machines(context), resolveMachineTool, context, key);
+    const created = createCellBinding(brain, machines(context), resolveMachineTool, context, key, resolveScreenTool);
     cells.set(key, created);
     return created;
   };
@@ -115,7 +120,7 @@ export function createNamespaceExecutionRuntime(
   const computer = (context: ToolContext): MountedHand => {
     const retained = computers.get(context.sessionId);
     if (retained) return retained;
-    const available = [...cell(context).hands.values()].filter(hand => hand.cua && hand.cuaReset);
+    const available = [...cell(context).hands.values()].filter(hand => hand.screen || (hand.cua && hand.cuaReset));
     if (available.length !== 1) {
       throw new Error(available.length === 0
         ? "No computer is attached to this conversation"
@@ -127,8 +132,30 @@ export function createNamespaceExecutionRuntime(
   };
 
   const tools: ToolMap = {
+    computer: {
+      description: `${SCREEN_DESCRIPTION} Supply a Hand workdir from environment or mount, or call select_computer first. Prefer this tool for the visible desktop. /brain has no screen.`,
+      parameters: { ...SCREEN_PARAMETERS, properties: { ...SCREEN_PARAMETERS.properties,
+        workdir: { type: "string", description: "Hand workdir; omit to use the selected computer." },
+      } },
+      handler: async (input, context) => {
+        const value = record(input);
+        const workdir = optionalString(value.workdir, "workdir");
+        const action = screenAction(without(value, "workdir"));
+        const binding = cell(context);
+        const requested = workdir
+          ? binding.hands.get(routeNamespaceCwd(binding.scope, canonicalCwd(binding, workdir), "namespace.discover").mount.mountId)
+          : computer(context);
+        const selected = computers.get(context.sessionId);
+        // Repeated workdirs must not move a click to a new publication after
+        // observing the old one. select_computer explicitly refreshes the route.
+        const hand = selected && selected.machineId === requested?.machineId ? selected : requested;
+        if (!hand?.screen) throw new Error(`Hand ${hand?.root ?? workdir} has no live screen. ${hand?.cua && hand.cuaReset ? "Use select_computer and cua_repl.js for its native CUA runtime." : "Connect its screen publisher, then select it again."}`);
+        computers.set(context.sessionId, hand);
+        return hand.screen.handler(action, context);
+      }, releaseSession, dispose,
+    },
     select_computer: {
-      description: "Select the mounted Hand for subsequent cua_repl.js and cua_repl.js_reset calls in this conversation. Use a workdir returned by mount or environment. One available computer is selected automatically; multiple computers require an explicit selection. The selected connection remains pinned until you select again. /brain has no desktop.",
+      description: "Select the Hand for subsequent computer, cua_repl.js and cua_repl.js_reset calls. Returns available tools: use computer for the live screen; cua_repl.js requires a native CUA runtime. Use a workdir returned by mount or environment. One available computer is selected automatically; multiple computers require an explicit selection. Connections remain pinned until you select again. /brain has no desktop.",
       parameters: { type: "object", properties: { workdir: { type: "string", description: "Mounted Hand root selecting the computer." } }, required: ["workdir"], additionalProperties: false },
       handler: async (input, context) => {
         const value = record(input);
@@ -137,9 +164,10 @@ export function createNamespaceExecutionRuntime(
         const binding = cell(context);
         const route = routeNamespaceCwd(binding.scope, canonicalCwd(binding, workdir), "namespace.discover");
         const hand = binding.hands.get(route.mount.mountId);
-        if (!hand?.cua || !hand.cuaReset) throw new Error(`namespace mount ${route.mount.root} has no CUA runtime`);
+        if (!hand?.screen && (!hand?.cua || !hand.cuaReset)) throw new Error(`namespace mount ${route.mount.root} has no CUA runtime or live screen`);
         computers.set(context.sessionId, hand);
-        return { workdir: hand.root, machine_id: hand.machineId };
+        return { workdir: hand.root, machine_id: hand.machineId,
+          tools: [...(hand.screen ? ["computer"] : []), ...(hand.cua && hand.cuaReset ? [CUA_JS_NAME, CUA_RESET_NAME] : [])] };
       }, releaseSession, dispose,
     },
     [CUA_JS_NAME]: {
@@ -147,7 +175,9 @@ export function createNamespaceExecutionRuntime(
       parameters: CUA_PARAMETERS,
       handler: async (input, context) => {
         validateInput(input);
-        return computer(context).cua!.handler(input, context);
+        const hand = computer(context);
+        if (!hand.cua) throw new Error(`Hand ${hand.root} provides live screen control through computer. Call computer({action:"observe"}) to see it; this Hand has no native cua_repl runtime.`);
+        return hand.cua.handler(input, context);
       }, releaseSession, dispose,
     },
     [CUA_RESET_NAME]: {
@@ -155,7 +185,9 @@ export function createNamespaceExecutionRuntime(
       parameters: CUA_RESET_PARAMETERS,
       handler: async (input, context) => {
         validateInput(input, true);
-        return computer(context).cuaReset!.handler(input, context);
+        const hand = computer(context);
+        if (!hand.cuaReset) throw new Error(`Hand ${hand.root} uses computer for live screen control and has no cua_repl runtime to reset.`);
+        return hand.cuaReset.handler(input, context);
       }, releaseSession, dispose,
     },
     exec_command: {
@@ -291,6 +323,7 @@ function createCellBinding(
   resolveMachineTool: MachineToolResolver,
   context: ToolContext,
   key: string,
+  resolveScreenTool: ScreenToolResolver,
 ): CellBinding {
   const hands: MountedHand[] = [brain];
   const roots = new Set([brain.root]);
@@ -310,6 +343,7 @@ function createCellBinding(
       preview: resolveMachineTool(machine.id, "preview", context),
       cua: resolveMachineTool(machine.id, CUA_JS_NAME, context),
       cuaReset: resolveMachineTool(machine.id, CUA_RESET_NAME, context),
+      screen: resolveScreenTool(machine.id, context),
     }));
   }
   const manifest = createNamespaceManifest({
