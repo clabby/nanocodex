@@ -23,9 +23,17 @@ export type ConnectorConnection = Readonly<{
   capabilities: readonly ConnectorCapability[];
 }>;
 
+export type ConnectorAccountStatus = Readonly<{
+  account_id: string;
+  connected: boolean;
+  active: boolean;
+  limited_until?: number | undefined;
+}>;
+
 export type ConnectorStatus = Readonly<{
   connected: boolean;
   connections: readonly ConnectorConnection[];
+  accounts?: readonly ConnectorAccountStatus[] | undefined;
   account_id?: string | undefined;
   connection_id?: string | undefined;
   label?: string | undefined;
