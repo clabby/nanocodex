@@ -19,20 +19,22 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::collections::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const RESUME_KEY_BINDINGS: [(&str, &str); 3] = [
+const RESUME_KEY_BINDINGS: [(&str, &str); 4] = [
     ("↑↓/ctrl-n/p", "move"),
     ("enter/tab", "resume"),
+    ("pgup/pgdn", "preview"),
     ("esc", "close"),
 ];
-const MENTION_KEY_BINDINGS: [(&str, &str); 3] = [
+const MENTION_KEY_BINDINGS: [(&str, &str); 4] = [
     ("↑↓/ctrl-n/p", "move"),
     ("enter/tab", "insert"),
+    ("pgup/pgdn", "preview"),
     ("esc", "close"),
 ];
 const SEARCH_LABEL: &str = "Search: ";
@@ -70,6 +72,7 @@ pub(super) struct SessionPicker {
     query: String,
     matches: Vec<usize>,
     selected: usize,
+    preview_scroll: u16,
     mode: SessionPickerMode,
 }
 
@@ -100,6 +103,7 @@ impl SessionPicker {
             query: String::new(),
             matches,
             selected: 0,
+            preview_scroll: 0,
             mode,
         }
     }
@@ -131,14 +135,24 @@ impl SessionPicker {
                 if key.code == KeyCode::Up || key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.selected = self.selected.saturating_sub(1);
+                self.preview_scroll = 0;
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             KeyCode::Down | KeyCode::Char('n')
                 if key.code == KeyCode::Down || key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
+                self.preview_scroll = 0;
                 if !self.matches.is_empty() {
                     self.selected = (self.selected + 1).min(self.matches.len() - 1);
                 }
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            KeyCode::PageUp => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(5);
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            KeyCode::PageDown => {
+                self.preview_scroll = self.preview_scroll.saturating_add(5);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             KeyCode::Enter | KeyCode::Tab => self.select(),
@@ -182,6 +196,7 @@ impl SessionPicker {
     fn query_changed(&mut self) -> ComponentUpdate<SessionPickerEffect> {
         self.revision = self.revision.wrapping_add(1);
         self.content_hits.clear();
+        self.preview_scroll = 0;
         self.search_error = None;
         self.searching = !self.query.trim().is_empty();
         self.refresh_matches();
@@ -217,7 +232,10 @@ impl SessionPicker {
                         continue;
                     };
                     self.content_hits.entry(hit.session_id).or_insert_with(|| {
-                        hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ")
+                        hit.snippet
+                            .chars()
+                            .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+                            .collect()
                     });
                     if !self.matches.contains(&index) {
                         self.matches.push(index);
@@ -261,7 +279,13 @@ impl SessionPicker {
         );
     }
 
-    fn render_sessions(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn render_sessions(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        theme: &Theme,
+        inline_preview: bool,
+    ) {
         if area.is_empty() {
             return;
         }
@@ -298,9 +322,12 @@ impl SessionPicker {
                 )),
                 Line::from(Span::styled(detail, Style::default().fg(theme.muted()))),
             ];
-            if let Some(snippet) = self.content_hits.get(&session.session_id) {
+            if inline_preview && let Some(snippet) = self.content_hits.get(&session.session_id) {
                 lines.push(Line::from(Span::styled(
-                    format!("Content: {snippet}"),
+                    format!(
+                        "Content: {}",
+                        snippet.split_whitespace().collect::<Vec<_>>().join(" ")
+                    ),
                     Style::default().fg(theme.muted()),
                 )));
             }
@@ -312,6 +339,74 @@ impl SessionPicker {
         let selected = (!self.matches.is_empty()).then_some(self.selected);
         let mut state = ListState::default().with_selected(selected);
         frame.render_stateful_widget(list, area, &mut state);
+    }
+    fn render_preview(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Match preview ")
+            .border_style(Style::default().fg(theme.border()));
+        let body = block.inner(area);
+        frame.render_widget(block, area);
+        if body.is_empty() {
+            return;
+        }
+        let Some(&index) = self.matches.get(self.selected) else {
+            self.preview_scroll = 0;
+            frame.render_widget(
+                Paragraph::new("Select a matching thread to preview.")
+                    .style(Style::default().fg(theme.muted()))
+                    .wrap(Wrap { trim: false }),
+                body,
+            );
+            return;
+        };
+        let session = &self.sessions[index];
+        let mut lines = vec![
+            Line::from(Span::styled(
+                if session.preview.trim().is_empty() {
+                    "Untitled thread"
+                } else {
+                    &session.preview
+                },
+                Style::default()
+                    .fg(theme.text())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::default(),
+        ];
+        if let Some(snippet) = self
+            .content_hits
+            .get(&session.session_id)
+            .filter(|s| !s.trim().is_empty())
+        {
+            lines.extend(
+                snippet
+                    .lines()
+                    .map(|line| highlighted_excerpt(line, &self.query, theme)),
+            );
+        } else {
+            let message = if self.searching {
+                "Searching thread contents…"
+            } else if self.search_error.is_some() {
+                "Content preview unavailable. Title matches are still available."
+            } else if self.query.trim().is_empty() {
+                "Type to search this thread's contents and preview the matching passage."
+            } else {
+                "Matched the title or ID. No matching content excerpt returned."
+            };
+            lines.push(Line::from(Span::styled(
+                message,
+                Style::default().fg(theme.muted()),
+            )));
+        }
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let maximum = paragraph
+            .line_count(body.width)
+            .saturating_sub(usize::from(body.height));
+        self.preview_scroll = self
+            .preview_scroll
+            .min(u16::try_from(maximum).unwrap_or(u16::MAX));
+        frame.render_widget(paragraph.scroll((self.preview_scroll, 0)), body);
     }
 }
 
@@ -357,7 +452,7 @@ impl Component for SessionPicker {
                 &MENTION_KEY_BINDINGS,
             ),
         };
-        let layout = Floating::new(title, 76, 18, key_bindings).render(frame, area, theme);
+        let layout = Floating::new(title, 136, 28, key_bindings).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -393,8 +488,84 @@ impl Component for SessionPicker {
             ..layout.body
         };
         self.render_search(frame, search, theme);
-        self.render_sessions(frame, sessions, theme);
+        if sessions.width >= 88 {
+            let list_width = sessions.width * 2 / 5;
+            self.render_sessions(
+                frame,
+                Rect {
+                    width: list_width,
+                    ..sessions
+                },
+                theme,
+                false,
+            );
+            self.render_preview(
+                frame,
+                Rect {
+                    x: sessions.x + list_width + 1,
+                    width: sessions.width - list_width - 1,
+                    ..sessions
+                },
+                theme,
+            );
+        } else if sessions.height >= 10 {
+            let list_height = sessions.height / 2;
+            self.render_sessions(
+                frame,
+                Rect {
+                    height: list_height,
+                    ..sessions
+                },
+                theme,
+                false,
+            );
+            self.render_preview(
+                frame,
+                Rect {
+                    y: sessions.y + list_height,
+                    height: sessions.height - list_height,
+                    ..sessions
+                },
+                theme,
+            );
+        } else {
+            self.render_sessions(frame, sessions, theme, true);
+        }
     }
+}
+
+// Mark literal query terms without inventing a character match for semantic results.
+fn highlighted_excerpt<'a>(text: &'a str, query: &str, theme: &Theme) -> Line<'a> {
+    let graphemes: Vec<_> = text.graphemes(true).collect();
+    let normalized: Vec<_> = graphemes.iter().map(|g| g.to_lowercase()).collect();
+    let mut matched = vec![false; graphemes.len()];
+    for term in query.split_whitespace() {
+        let term: Vec<_> = term.graphemes(true).map(str::to_lowercase).collect();
+        if term.is_empty() || term.len() > normalized.len() {
+            continue;
+        }
+        for (start, window) in normalized.windows(term.len()).enumerate() {
+            if window == term {
+                matched[start..start + term.len()].fill(true);
+            }
+        }
+    }
+    Line::from(
+        graphemes
+            .into_iter()
+            .zip(matched)
+            .map(|(text, matched)| {
+                let style = if matched {
+                    Style::default()
+                        .fg(theme.accent())
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(theme.text())
+                };
+                Span::styled(text, style)
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn visible_tail(query: &str, width: usize) -> &str {
@@ -489,8 +660,114 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(content.contains("Content: We discussed database migrations"));
+        assert!(content.contains("Match preview"));
+        assert!(content.contains("We discussed database migrations"));
         assert!(!content.contains("Searching thread contents"));
+    }
+
+    fn screen(picker: &mut SessionPicker, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| picker.render(frame, frame.area(), &crate::tui::theme::Theme::default()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn find_text(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(usize, u16)> {
+        (0..buffer.area.height).find_map(|y| {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row.find(needle).map(|x| (x, y))
+        })
+    }
+
+    #[test]
+    fn selected_excerpt_is_on_the_right_and_tracks_navigation() {
+        let mut picker = SessionPicker::new(
+            vec![
+                summary("one", "First thread"),
+                summary("two", "Second thread"),
+            ],
+            SessionPickerMode::Resume,
+        );
+        picker.insert_paste("database");
+        picker.search_results(
+            1,
+            "database".into(),
+            Ok(vec![
+                hit("one", "First database passage"),
+                hit("two", "Second database passage"),
+            ]),
+        );
+        let buffer = screen(&mut picker, 140, 30);
+        let (list_x, _) = find_text(&buffer, "First thread").unwrap();
+        let (excerpt_x, _) = find_text(&buffer, "First database passage").unwrap();
+        assert!(excerpt_x > list_x + 40);
+        assert!(find_text(&buffer, "Second database passage").is_none());
+        picker.update(key(KeyCode::Down));
+        let buffer = screen(&mut picker, 140, 30);
+        assert!(find_text(&buffer, "Second database passage").is_some());
+        assert!(find_text(&buffer, "First database passage").is_none());
+        picker.insert_paste(" unmatched");
+        let buffer = screen(&mut picker, 140, 30);
+        assert!(find_text(&buffer, "Second database passage").is_none());
+    }
+
+    #[test]
+    fn preview_stacks_on_narrow_screens_and_scrolls_long_excerpts() {
+        let mut picker = SessionPicker::new(
+            vec![summary("one", "Thread title")],
+            SessionPickerMode::Resume,
+        );
+        picker.insert_paste("needle");
+        let excerpt = (0..50)
+            .map(|n| format!("needle line {n}\n"))
+            .collect::<String>();
+        picker.search_results(1, "needle".into(), Ok(vec![hit("one", &excerpt)]));
+        let buffer = screen(&mut picker, 70, 26);
+        assert!(
+            find_text(&buffer, "Match preview").unwrap().1
+                > find_text(&buffer, "Thread title").unwrap().1
+        );
+        assert!(find_text(&buffer, "needle line 0").is_some());
+        picker.update(key(KeyCode::PageDown));
+        let buffer = screen(&mut picker, 70, 26);
+        assert!(find_text(&buffer, "needle line 0").is_none());
+        assert!(picker.preview_scroll > 0);
+        for _ in 0..100 {
+            picker.update(key(KeyCode::PageDown));
+        }
+        let buffer = screen(&mut picker, 70, 26);
+        assert!(find_text(&buffer, "needle line 49").is_some());
+        picker.update(key(KeyCode::Up));
+        assert_eq!(picker.preview_scroll, 0);
+        for (width, height) in [(3, 3), (30, 8), (80, 12)] {
+            screen(&mut picker, width, height);
+        }
+    }
+
+    #[test]
+    fn excerpt_highlights_case_insensitive_unicode_terms_without_changing_text() {
+        use ratatui::style::Modifier;
+        let text = "A CAFÉ database 👩‍💻 passage";
+        let line =
+            super::highlighted_excerpt(text, "café database", &crate::tui::theme::Theme::default());
+        assert_eq!(
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            text
+        );
+        let highlighted = line
+            .spans
+            .iter()
+            .filter(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(highlighted, "CAFÉdatabase");
     }
 
     #[test]

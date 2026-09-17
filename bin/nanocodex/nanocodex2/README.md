@@ -195,7 +195,10 @@ ordered by last activity, with titles above session IDs. Type to fuzzy search
 titles and IDs; space-separated terms can appear in any order. Title matches rank
 by relevance, with recent activity breaking ties. The same query also searches
 retained user and assistant messages after a short typing pause. Content matches
-appear with excerpts, once per attachable thread, below title matches. This uses
+appear once per attachable thread, below title matches. A preview pane on the
+right shows the selected thread's matching passage, wraps the text, and highlights
+literal query terms. Page Up/Down scrolls the preview. In narrower terminals the
+preview moves below the list; very small terminals keep compact inline excerpts. This uses
 the server's history search (up to 20 hits), while title/ID matching stays local
 and fuzzy. Clearing the query restores recent threads. Use arrows or Ctrl+N/Ctrl+P to
 move, Enter/Tab to select, Ctrl+U to clear, and Esc/Ctrl+C to close.
