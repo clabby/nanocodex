@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"testing"
 	"testing/iotest"
@@ -92,5 +93,34 @@ func TestVideoClockSurvivesLongRunningPublisherAndRTPWrap(t *testing.T) {
 	ticks := uint64(36*60*60) * 90000
 	if err != nil || stamp != uint32(ticks) {
 		t.Fatalf("long-running clock overflow: %d, %v", stamp, err)
+	}
+}
+
+func TestFramedH264BoundariesAndValidation(t *testing.T) {
+	frame := []byte{0, 0, 0, 1, 9, 0xf0, 0, 0, 1, 0x65, 0x35}
+	var stream bytes.Buffer
+	stream.WriteString(framedH264Magic)
+	for range 2 {
+		_ = binary.Write(&stream, binary.BigEndian, uint32(len(frame)))
+		stream.Write(frame)
+	}
+	for _, reader := range []io.Reader{bytes.NewReader(stream.Bytes()), iotest.OneByteReader(bytes.NewReader(stream.Bytes()))} {
+		count := 0
+		err := readH264Frames(reader, func(got []byte) error {
+			count++
+			if !bytes.Equal(got, frame) {
+				t.Fatal("frame changed")
+			}
+			return nil
+		})
+		if err != nil || count != 2 {
+			t.Fatalf("framing failed: %v, %d", err, count)
+		}
+	}
+	for _, payload := range [][]byte{{0, 0}, {0, 0, 0, 0}, {0, 128, 0, 1}, {0, 0, 0, 8, 0, 0, 1}, {0, 0, 0, 4, 1, 2, 3, 4}} {
+		invalid := append([]byte(framedH264Magic), payload...)
+		if err := readH264Frames(bytes.NewReader(invalid), func([]byte) error { t.Fatal("bad frame emitted"); return nil }); err == nil {
+			t.Fatal("bad frame accepted")
+		}
 	}
 }

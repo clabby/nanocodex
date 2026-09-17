@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"time"
@@ -12,6 +13,7 @@ import (
 )
 
 const maxH264Frame = 8 * 1024 * 1024
+const framedH264Magic = "NCH264F1"
 
 // Waymote enables x264 access-unit delimiters and a fixed 60 Hz encoder.
 // Packetize its Annex-B stdout without decoding or re-encoding. The pipe works
@@ -29,11 +31,8 @@ func (forwarder *h264Forwarder) read(reader io.Reader, write func(*rtp.Packet) e
 	}
 	started := forwarder.now()
 	var lastTicks int64
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), maxH264Frame)
-	scanner.Split(h264AccessUnit)
-	for scanner.Scan() {
-		payloads := forwarder.encoder.Payload(1180, scanner.Bytes())
+	return readH264Frames(reader, func(frame []byte) error {
+		payloads := forwarder.encoder.Payload(1180, frame)
 		// A compositor or busy encoder may skip frames. Advancing a fixed
 		// 1/60 second per delivered frame makes playback fall behind wall time.
 		elapsed := forwarder.now().Sub(started)
@@ -50,8 +49,54 @@ func (forwarder *h264Forwarder) read(reader io.Reader, write func(*rtp.Packet) e
 				return err
 			}
 		}
+		return nil
+	})
+}
+
+func readH264Frames(reader io.Reader, emit func([]byte) error) error {
+	buffered := bufio.NewReader(reader)
+	prefix, _ := buffered.Peek(len(framedH264Magic))
+	if string(prefix) != framedH264Magic {
+		scanner := bufio.NewScanner(buffered)
+		scanner.Buffer(make([]byte, 64*1024), maxH264Frame)
+		scanner.Split(h264AccessUnit)
+		for scanner.Scan() {
+			if err := emit(scanner.Bytes()); err != nil {
+				return err
+			}
+		}
+		return scanner.Err()
 	}
-	return scanner.Err()
+	_, _ = buffered.Discard(len(framedH264Magic))
+	var header [4]byte
+	var frame []byte
+	for {
+		_, err := io.ReadFull(buffered, header[:])
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		size := int(binary.BigEndian.Uint32(header[:]))
+		if size < 1 || size > maxH264Frame {
+			return errors.New("invalid framed H.264 size")
+		}
+		if cap(frame) < size {
+			frame = make([]byte, size)
+		} else {
+			frame = frame[:size]
+		}
+		if _, err := io.ReadFull(buffered, frame); err != nil {
+			return err
+		}
+		if !bytes.HasPrefix(frame, []byte{0, 0, 1}) && !bytes.HasPrefix(frame, []byte{0, 0, 0, 1}) {
+			return errors.New("invalid framed H.264 payload")
+		}
+		if err := emit(frame); err != nil {
+			return err
+		}
+	}
 }
 
 func h264AccessUnit(data []byte, atEOF bool) (int, []byte, error) {

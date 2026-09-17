@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The Wayland integration tests execute this test binary as Waymote's encoder,
@@ -63,6 +66,56 @@ func TestScreenNetworkPortBounds(t *testing.T) {
 	for _, config := range []hostConfig{{}, {UDPPortMin: 50000, UDPPortMax: 50031}} {
 		if err := config.validateNetwork(); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// Keep raw input open after one frame: an Annex-B lookahead parser would stall
+// forever here. This exercises real encoder, tee flushes, framing, and reader.
+func TestEncoderForwardsOneFrameBeforeNextCapture(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("FFmpeg unavailable")
+	}
+	input, feed := io.Pipe()
+	output, sink := io.Pipe()
+	defer input.Close()
+	defer feed.Close()
+	defer output.Close()
+	defer sink.Close()
+	args := strings.Fields("-hide_banner -loglevel error -f rawvideo -pixel_format bgra -video_size 64x64 -framerate 60 -i pipe:0 -an -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -x264-params aud=1:repeat-headers=1 -f h264 pipe:1")
+	done := make(chan error, 1)
+	go func() { done <- runFramedScreenEncoder(ffmpeg, args, input, sink); sink.Close() }()
+	frames := make(chan []byte, 2)
+	go func() {
+		_ = readH264Frames(output, func(frame []byte) error { frames <- append([]byte{}, frame...); return nil })
+	}()
+	if _, err := feed.Write(make([]byte, 64*64*4)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case frame := <-frames:
+		if len(frame) < 10 {
+			t.Fatal("empty encoded frame")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("encoder waited for another capture")
+	}
+	feed.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("encoder did not exit")
+	}
+}
+
+func TestEncoderMetadataRejectsMalformedAndTruncatedFrames(t *testing.T) {
+	for _, line := range []string{"garbage", "1,0,0,1,4,0x00", "0,0,0,1,0,0x00", "0,0,0,1,8388609,0x00", "0,0,0,1,8,0x00"} {
+		if err := forwardEncodedFrames(strings.NewReader(line+"\n"), strings.NewReader("tiny"), io.Discard); err == nil {
+			t.Fatalf("accepted %q", line)
 		}
 	}
 }
