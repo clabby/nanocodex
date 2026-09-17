@@ -4,7 +4,7 @@ The Wayland Go publisher and native Rust publisher send desktop output as a
 stereo Opus WebRTC track: 48 kHz, 128 kbit/s, 20 ms packets. Audio shares the
 existing authenticated peer and authorization lifecycle. Linux resolves the
 actual playback sink monitor; Windows uses native WASAPI render loopback. Neither
-falls back to a microphone. Frames-v 1 and the macOS native publisher currently
+falls back to a microphone. Frames-v1 and the macOS native publisher currently
 remain video-only.
 
 The web viewer retains both tracks in one MediaStream. Enable sound is a user
@@ -59,3 +59,33 @@ cover the changed paths. The full account test run also exercises the existing
 budget and took 7.92 seconds locally; its budget is now 30 seconds with its
 pagination assertions preserved. Existing documentation spelling and Rust
 item-order lint failures were repaired without changing runtime behavior.
+
+## Published verification
+
+Account version `a6d8b881-ca3f-490a-9826-a1f20ee26b2a` serves
+`index-CVenutuc.js`, verified byte-for-byte against the built artifact (SHA-256
+`1777fbe9e21f234722fb4ffda1c9e80bed00d5c286ae40a80ca3c75de691df69`).
+The full published `/connect` app, with no component fixture, then repeated the
+997 Hz desktop tone test: RMS 0.10857, FFT 996.09 Hz, 327 audio packets and zero
+loss. The actual video element reported 3840 by 2160 while its MediaStream held
+both live tracks. It decoded 317 video frames with no packet loss and kept one
+viewer connection. This explicitly checks the visible video element, since the
+previous viewer replaced its entire stream when each new track arrived. Existing
+open browser tabs need reloading to receive the updated track handling.
+
+Windows separately measured 713 frames over 12 seconds (59.38 fps), zero lost or
+dropped frames, and 1 ms RTT at 1920 by 1080 with a 20 Mbit/s ceiling (4.36 Mbit/s
+actual traffic during that motion sample).
+
+The final published Windows viewer then played a system WAV after the connection
+was ready. Web Audio measured RMS 0.10238 and nonzero decoded energy. The actual
+video element stayed 1920 by 1080 with both tracks live and sound enabled. Over
+approximately 74 seconds including the playback wait, it kept one viewer socket,
+received 3,625 Opus packets with zero loss, and decoded 4,339 video frames with
+zero packet loss. A separate simultaneous motion/audio probe reported 59.65 fps,
+716 frames over 12 seconds, zero drops or loss, and RMS 0.11028.
+
+The same shared Rust audio tests pass on native Linux and actual Windows GNU.
+The Windows native suite has eight passing tests. The final web suite has 165
+passing tests, including 44 viewer tests; all nine focused Rust screen/audio tests
+and the Rust CLI Clippy check pass. The Go suite passes with the race detector.
