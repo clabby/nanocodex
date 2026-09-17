@@ -41,7 +41,7 @@ use ratatui::{
 };
 use ratatui_image::sliced::{SignedPosition, SlicedImage};
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     ops::Range,
     path::Path,
     sync::Arc,
@@ -79,7 +79,7 @@ pub(crate) struct Transcript {
     model: TranscriptModel,
     cache: LayoutCache,
     scroll: ScrollState,
-    pending_scroll: ScrollCommand,
+    pending_scroll: VecDeque<ScrollCommand>,
     last_top: Option<Anchor>,
     viewport_height: u16,
     new_updates: u64,
@@ -254,7 +254,7 @@ impl Transcript {
             model: TranscriptModel::default(),
             cache: LayoutCache::default(),
             scroll: ScrollState::Follow,
-            pending_scroll: ScrollCommand::None,
+            pending_scroll: VecDeque::new(),
             last_top: None,
             viewport_height: 0,
             new_updates: 0,
@@ -768,14 +768,18 @@ impl Transcript {
     }
 
     fn update_scroll(&mut self, command: ScrollCommand) -> ComponentUpdate<TranscriptEffect> {
-        self.pending_scroll = command;
+        // Preserve input order, including reversals at the transcript boundaries.
+        // Multiple wheel events can arrive before the next frame is rendered.
+        if command != ScrollCommand::None {
+            self.pending_scroll.push_back(command);
+        }
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn follow_tail(&mut self) -> ComponentUpdate<TranscriptEffect> {
         let was_detached = matches!(self.scroll, ScrollState::Detached(_));
         self.scroll = ScrollState::Follow;
-        self.pending_scroll = ScrollCommand::None;
+        self.pending_scroll.clear();
         self.new_updates = 0;
 
         if was_detached {
@@ -892,7 +896,9 @@ impl Transcript {
     }
 
     fn wheel_size(&self) -> i32 {
-        (self.page_size() + 2) / 3
+        // Terminals already generate repeated events for trackpad motion.
+        // Scaling each event by viewport height skips unread lines.
+        1
     }
 
     fn render_plan(&mut self, width: u16, height: u16, theme: &Theme) -> RenderPlan {
@@ -986,7 +992,32 @@ impl Transcript {
     }
 
     fn apply_pending_scroll(&mut self, width: u16, height: u16, theme: &Theme) {
-        let command = std::mem::take(&mut self.pending_scroll);
+        while let Some(command) = self.pending_scroll.pop_front() {
+            self.apply_scroll(command, width, height, theme);
+            // Normalize between events just as rendering would. Reversing at
+            // an edge must not depend on whether a frame landed in between.
+            if !self.pending_scroll.is_empty() {
+                let tail = self.tail_top(width, height, theme);
+                let top = match self.scroll {
+                    ScrollState::Follow => tail,
+                    ScrollState::Detached(anchor) => self
+                        .resolve_anchor(anchor, width, theme)
+                        .map(|anchor| self.fill_viewport_from(anchor, height, width, theme)),
+                };
+                self.last_top = top;
+                if let Some(top) = top {
+                    if Some(top) == tail {
+                        self.scroll = ScrollState::Follow;
+                        self.new_updates = 0;
+                    } else {
+                        self.scroll = ScrollState::Detached(top);
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_scroll(&mut self, command: ScrollCommand, width: u16, height: u16, theme: &Theme) {
         match command {
             ScrollCommand::None => {}
             ScrollCommand::End => {
@@ -2271,18 +2302,72 @@ mod history_tests {
     }
 
     #[test]
-    fn wheel_scroll_uses_one_third_of_the_viewport() {
+    fn wheel_scroll_moves_one_line_independent_of_viewport_height() {
         let mut transcript = Transcript::new();
         transcript.viewport_height = 32;
 
         assert_eq!(
             transcript.scroll_command(&wheel(MouseEventKind::ScrollUp)),
-            Some(ScrollCommand::Rows(-10))
+            Some(ScrollCommand::Rows(-1))
         );
         assert_eq!(
             transcript.scroll_command(&wheel(MouseEventKind::ScrollDown)),
-            Some(ScrollCommand::Rows(10))
+            Some(ScrollCommand::Rows(1))
         );
+    }
+
+    #[test]
+    fn scroll_burst_preserves_every_event_and_direction_change() {
+        let theme = Theme::default();
+        let make_transcript = || {
+            let mut transcript = Transcript::new();
+            for sequence in 1..=40 {
+                let _ = transcript.update(TranscriptEvent::Record(user(sequence, "message")));
+            }
+            let _ = transcript.render_plan(80, 10, &theme);
+            let _ = transcript.update_scroll(ScrollCommand::Rows(-5));
+            let _ = transcript.render_plan(80, 10, &theme);
+            transcript
+        };
+        for commands in [
+            vec![ScrollCommand::Rows(-1); 8],
+            vec![
+                ScrollCommand::Rows(-2),
+                ScrollCommand::Rows(1000),
+                ScrollCommand::Rows(-1),
+            ],
+            vec![
+                ScrollCommand::Rows(-1),
+                ScrollCommand::Rows(8),
+                ScrollCommand::Rows(-1),
+            ],
+            vec![
+                ScrollCommand::Home,
+                ScrollCommand::Rows(-1),
+                ScrollCommand::Rows(1),
+            ],
+            vec![
+                ScrollCommand::Rows(-5),
+                ScrollCommand::End,
+                ScrollCommand::Rows(-1),
+            ],
+        ] {
+            let mut batched = make_transcript();
+            let mut sequential = make_transcript();
+            for command in commands {
+                let _ = batched.update_scroll(command);
+                let _ = sequential.update_scroll(command);
+                let _ = sequential.render_plan(80, 10, &theme);
+            }
+            let actual = batched.render_plan(80, 10, &theme);
+            let expected = sequential.render_plan(80, 10, &theme);
+            assert_eq!(actual.anchors, expected.anchors);
+            assert_eq!(batched.new_updates, sequential.new_updates);
+            assert_eq!(
+                matches!(batched.scroll, ScrollState::Follow),
+                matches!(sequential.scroll, ScrollState::Follow)
+            );
+        }
     }
 
     #[test]
