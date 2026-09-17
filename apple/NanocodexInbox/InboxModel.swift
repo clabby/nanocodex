@@ -248,8 +248,10 @@ final class InboxModel: ObservableObject {
     }
     var projectTasks: [ProjectTask] {
         projectAgents.compactMap { card in
-            guard card.parentAgentID != nil, let turn = card.projectTurnID,
-                  var task = tasks(agentID: card.id).first(where: { $0.turnID == turn }) else { return nil }
+            guard card.parentAgentID != nil, card.projectTurnID != nil else { return nil }
+            let history = tasks(agentID: card.id)
+            let active = card.activeTurns.first.flatMap { turn in history.first { $0.turnID == turn } }
+            guard var task = active ?? history.first else { return nil }
             task.title = card.title
             if card.isRunning { task.status = "Working" }
             return task

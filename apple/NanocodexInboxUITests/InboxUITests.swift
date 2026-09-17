@@ -32,6 +32,34 @@ final class InboxUITests: XCTestCase {
         XCTAssertEqual(composer(app).value as? String, "Keep my project draft")
     }
 
+    func testProjectChildNavigationAndOriginLinkPreserveSeparateDrafts() {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString, "NANOCODEX_DEMO_PROJECT_TASKS": "1"])
+        switchConversation(app, id: "inbox")
+        composer(app).tap(); composer(app).typeText("Master follow-up")
+        app.buttons["project-tasks"].tap()
+        app.segmentedControls["project-activity-segments"].buttons["Agents"].tap()
+        app.buttons["project-agent:auth"].tap()
+        XCTAssertTrue(app.buttons["conversation-title:auth"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["conversation-title:auth"].isSelected)
+        XCTAssertNotEqual(composer(app).value as? String, "Master follow-up")
+        composer(app).tap(); composer(app).typeText("Child follow-up")
+        app.buttons["conversation-drawer-open"].tap()
+        XCTAssertTrue(app.buttons["conversation-row:inbox"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["conversation-row:auth"].exists, "Child belongs inside its project")
+        app.buttons["conversation-row:inbox"].tap()
+        XCTAssertEqual(composer(app).value as? String, "Master follow-up")
+        let linked = app.buttons["message-thread:layout"]
+        XCTAssertTrue(linked.waitForExistence(timeout: 5)); linked.tap()
+        XCTAssertTrue(app.scrollViews["project-task-detail"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Completed"].exists)
+        capture(app, "project-origin-thread")
+        app.buttons["Done"].tap()
+        app.buttons["project-tasks"].tap()
+        app.segmentedControls["project-activity-segments"].buttons["Agents"].tap()
+        app.buttons["project-agent:auth"].tap()
+        XCTAssertEqual(composer(app).value as? String, "Child follow-up")
+    }
+
     func testNamedProjectSurvivesRelaunch() {
         let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString])
         app.buttons["conversation-drawer-open"].tap()

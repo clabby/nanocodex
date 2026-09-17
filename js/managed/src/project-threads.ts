@@ -106,7 +106,8 @@ export async function spawnPersistentProjectThread(input: ProjectThreadInput, ho
 export function projectThreadTools(handlers: {
   spawn(input: ProjectThreadInput, context: ToolContext): Promise<unknown>;
   list(context: ToolContext): Promise<unknown>;
-  read(agentId: string, context: ToolContext): Promise<unknown>;
+  read(agentId: string, context: ToolContext, turnId?: string): Promise<unknown>;
+  send(input: { agent_id: string; id: string; input: string }, context: ToolContext): Promise<unknown>;
 }): NamedTool[] {
   return [{
     name: "spawn_project_thread",
@@ -123,7 +124,14 @@ export function projectThreadTools(handlers: {
     handler: (input, context) => { z.object({}).strict().parse(input); return handlers.list(context); },
   }, {
     name: "read_project_thread", description: "Read a persistent project thread's admitted task, execution state and final result. Only threads in the current project are accessible. If still running, continue independent work before checking again.",
-    parameters: { type: "object", properties: { agent_id: { type: "string" } }, required: ["agent_id"], additionalProperties: false },
-    handler: (input, context) => handlers.read(z.object({ agent_id: z.string().regex(uuid) }).strict().parse(input).agent_id, context),
+    parameters: { type: "object", properties: { agent_id: { type: "string" }, turn_id: { type: "string" } }, required: ["agent_id"], additionalProperties: false },
+    handler: (input, context) => {
+      const value = z.object({ agent_id: z.string().regex(uuid), turn_id: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/).optional() }).strict().parse(input);
+      return handlers.read(value.agent_id, context, value.turn_id);
+    },
+  }, {
+    name: "send_project_thread", description: "Continue a directly delegated persistent thread with a follow-up instead of creating a new thread. Supply a stable id and explicit task input. Exact retries reuse the same turn; different input conflicts. Outcomes return automatically to this conversation.",
+    parameters: { type: "object", properties: { agent_id: { type: "string" }, id: { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$" }, input: { type: "string", minLength: 1, maxLength: 65536 } }, required: ["agent_id", "id", "input"], additionalProperties: false },
+    handler: (input, context) => handlers.send(z.object({ agent_id: z.string().regex(uuid), id: projectThreadInput.shape.id, input: projectThreadInput.shape.input }).strict().parse(input), context),
   }];
 }

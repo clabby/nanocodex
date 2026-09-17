@@ -81,7 +81,8 @@ describe("persistent project threads", () => {
   it("passes the exact invoking context and rejects authority overrides before execution", async () => {
     const spawn = vi.fn(async () => ({ agent_id: child }));
     const list = vi.fn(async () => []); const read = vi.fn(async () => ({}));
-    const tools = projectThreadTools({ spawn, list, read });
+    const send = vi.fn(async () => ({}));
+    const tools = projectThreadTools({ spawn, list, read, send });
     await tools[0]!.handler({ id: "fix", title: "Fix sign-in", input: "Reproduce and fix the loop" }, context);
     expect(spawn).toHaveBeenCalledExactlyOnceWith({ id: "fix", title: "Fix sign-in", input: "Reproduce and fix the loop" }, context);
     for (const extra of [{ owner_id: parent }, { capabilities: ["admin"] }, { configuration: {} }]) {
@@ -90,5 +91,11 @@ describe("persistent project threads", () => {
     expect(spawn).toHaveBeenCalledTimes(1);
     await expect(async () => tools[2]!.handler({ agent_id: "../../other" }, context)).rejects.toThrow();
     expect(read).not.toHaveBeenCalled();
+    await tools[2]!.handler({ agent_id: child, turn_id: 'project-followup:review' }, context);
+    expect(read).toHaveBeenCalledExactlyOnceWith(child, context, 'project-followup:review');
+    await tools[3]!.handler({ agent_id: child, id: 'review', input: 'Address review comments' }, context);
+    expect(send).toHaveBeenCalledExactlyOnceWith({ agent_id: child, id: 'review', input: 'Address review comments' }, context);
+    await expect(async () => tools[3]!.handler({ agent_id: child, id: 'review', input: 'Work', capabilities: ['admin'] }, context)).rejects.toThrow();
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });
