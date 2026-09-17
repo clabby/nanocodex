@@ -30,6 +30,13 @@ jobs:
           toolchain: "1.97"
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
+          # These jobs use the same Rust version and native build profiles.
+          # rust-cache still separates runner image, OS, architecture and compiler inputs.
+          shared-key: native-ci
+          env-vars: ImageOS
+          workspaces: |
+            . -> target
+            crates/experimental/nanocodex-computer/runtime -> target
           cache-on-failure: true
       - run: cargo test --workspace --locked
 
@@ -54,6 +61,13 @@ jobs:
           toolchain: "1.97"
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
+          # These jobs use the same Rust version and native build profiles.
+          # rust-cache still separates runner image, OS, architecture and compiler inputs.
+          shared-key: native-ci
+          env-vars: ImageOS
+          workspaces: |
+            . -> target
+            crates/experimental/nanocodex-computer/runtime -> target
           cache-on-failure: true
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -135,6 +149,13 @@ jobs:
           python-version: "3.12"
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
+          # These jobs use the same Rust version and native build profiles.
+          # rust-cache still separates runner image, OS, architecture and compiler inputs.
+          shared-key: native-ci
+          env-vars: ImageOS
+          workspaces: |
+            . -> target
+            crates/experimental/nanocodex-computer/runtime -> target
           cache-on-failure: true
       - name: Build and test the account Hand
         shell: pwsh
