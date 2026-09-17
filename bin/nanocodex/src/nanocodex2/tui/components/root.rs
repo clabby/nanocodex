@@ -175,6 +175,12 @@ pub(crate) enum RootEvent {
     TurnsCancelled,
     ForkReady,
     NewSessionFailed(String),
+    SessionSearchResults {
+        picker_id: u64,
+        request_id: u64,
+        query: String,
+        result: Result<Vec<nanocodex_managed::SessionSearchHit>, String>,
+    },
     SessionsLoaded {
         request_id: u64,
         sessions: Vec<SessionSummary>,
@@ -288,6 +294,12 @@ pub(crate) enum RootEffect {
     OpenLink(String),
     ReloadConfig,
     NewSession(Model),
+    SearchSessions {
+        picker_id: u64,
+        request_id: u64,
+        query: String,
+    },
+    CancelSessionSearch,
     LoadSessions {
         request_id: u64,
         kind: SessionListKind,
@@ -2113,8 +2125,8 @@ impl RootNode {
         } else {
             SessionPickerMode::Resume
         };
-        self.overlay = Some(Overlay::Sessions(Node::new(SessionPicker::new(
-            sessions, mode,
+        self.overlay = Some(Overlay::Sessions(Node::new(SessionPicker::new_with_id(
+            sessions, mode, request_id,
         ))));
         update
     }
@@ -2125,10 +2137,21 @@ impl RootNode {
         };
         let update = picker.update(SessionPickerEvent::Terminal(event));
         match update.effects.into_iter().next() {
+            Some(SessionPickerEffect::Search { request_id, query }) => ComponentUpdate {
+                effects: vec![RootEffect::SearchSessions {
+                    picker_id: picker.component().id(),
+                    request_id,
+                    query,
+                }],
+                render: update.render,
+            },
             Some(SessionPickerEffect::Dismiss) => {
                 self.overlay = None;
                 self.pending_session_mention = None;
-                ComponentUpdate::render(RenderRequest::Immediate)
+                ComponentUpdate {
+                    effects: vec![RootEffect::CancelSessionSearch],
+                    render: RenderRequest::Immediate,
+                }
             }
             Some(SessionPickerEffect::Resume(session_id)) => {
                 self.overlay = None;
@@ -3418,6 +3441,28 @@ impl Component for RootNode {
             RootEvent::TurnsCancelled => self.turns_cancelled(),
             RootEvent::ForkReady => self.fork_ready(),
             RootEvent::NewSessionFailed(message) => self.new_session_failed(message),
+            RootEvent::SessionSearchResults {
+                picker_id,
+                request_id,
+                query,
+                result,
+            } => {
+                let Some(Overlay::Sessions(picker)) = &mut self.overlay else {
+                    return ComponentUpdate::none();
+                };
+                if picker.component().id() != picker_id {
+                    return ComponentUpdate::none();
+                }
+                let update = picker.update(SessionPickerEvent::SearchResults {
+                    request_id,
+                    query,
+                    result,
+                });
+                ComponentUpdate {
+                    effects: Vec::new(),
+                    render: update.render,
+                }
+            }
             RootEvent::SessionsLoaded {
                 request_id,
                 sessions,
@@ -5190,6 +5235,41 @@ mod live_control_tests {
     }
 
     #[test]
+    fn content_results_are_scoped_to_the_picker_that_requested_them() {
+        use super::RenderRequest;
+        let mut root = root_with_draft("");
+        root.load_sessions();
+        let picker_id = root.pending_session_list.unwrap();
+        root.sessions_loaded(picker_id, Vec::new());
+        let update = root.update(key(KeyCode::Char('x')));
+        assert!(
+            matches!(update.effects.as_slice(), [RootEffect::SearchSessions { picker_id: id, request_id: 1, query }] if *id == picker_id && query == "x")
+        );
+        let update = root.update(RootEvent::SessionSearchResults {
+            picker_id: picker_id + 1,
+            request_id: 1,
+            query: "x".into(),
+            result: Ok(Vec::new()),
+        });
+        assert!(matches!(update.render, RenderRequest::None));
+        let update = root.update(RootEvent::SessionSearchResults {
+            picker_id,
+            request_id: 1,
+            query: "x".into(),
+            result: Ok(Vec::new()),
+        });
+        assert!(matches!(update.render, RenderRequest::Immediate));
+        root.update(key(KeyCode::Esc));
+        let update = root.update(RootEvent::SessionSearchResults {
+            picker_id,
+            request_id: 1,
+            query: "x".into(),
+            result: Ok(Vec::new()),
+        });
+        assert!(matches!(update.render, RenderRequest::None));
+    }
+
+    #[test]
     fn resuming_a_session_keeps_input_paused_during_background_updates() {
         use crate::tui::{session::SessionSummary, theme::Theme};
         use ratatui::{Terminal, backend::TestBackend};
@@ -5200,7 +5280,7 @@ mod live_control_tests {
                 root.pending_session_list.unwrap(),
                 vec![SessionSummary {
                     session_id: "selected-agent".to_owned(),
-                    started_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
                     model: "gpt-6-astra".to_owned(),
                     effort: ReasoningEffort::Low,
                     reasoning_mode: ReasoningMode::Standard,
