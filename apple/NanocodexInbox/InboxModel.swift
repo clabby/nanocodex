@@ -22,11 +22,12 @@ final class InboxModel: ObservableObject {
     // App Intents and windows share the same account and Hand connection.
     static let shared = InboxModel()
     enum Filter: String, CaseIterable { case inbox = "Inbox", running = "Running", all = "All" }
-    @Published var cards: [AgentCard] = [] { didSet { scheduleAgentNotifications() } }
+    @Published var cards: [AgentCard] = [] { didSet { taskCache.removeAll(keepingCapacity: true); scheduleAgentNotifications() } }
     @Published var deck = InboxDeck()
     @Published var filter: Filter = .all { didSet { reconcile() } }
     @Published var drafts: [String: String] = [:]
-    @Published var rows: [TranscriptRow] = [] { didSet { mediaProjection.update(rows) } }
+    @Published var rows: [TranscriptRow] = [] { didSet { mediaProjection.update(rows); taskRowsRevision = UUID(); taskCache.removeAll(keepingCapacity: true) } }
+    private var taskRowsRevision = UUID()
     private var mediaProjection = InboxMediaProjection()
     var generatedOutputsByRow: [String: [ChatGeneratedOutput]] { mediaProjection.outputs }
     @Published var threadLoading = false
@@ -49,7 +50,7 @@ final class InboxModel: ObservableObject {
     }
     private var tabHistories: [String: TabHistory] = [:]
     private var recentTabs: [String] = []
-    @Published private var overviewTranscripts: [String: [TranscriptRow]] = [:]
+    @Published private var overviewTranscripts: [String: [TranscriptRow]] = [:] { didSet { taskRowsRevision = UUID(); taskCache.removeAll(keepingCapacity: true) } }
     private var overviewVisible = Set<String>()
     private var overviewTasks: [String: Task<Void, Never>] = [:]
     private var overviewTokens: [String: UUID] = [:]
@@ -158,7 +159,7 @@ final class InboxModel: ObservableObject {
     private var streamReceivedFrame = false
     private var generation = UUID()
     private var observation = UUID() { didSet { cancelOlderHistoryPrefetch() } }
-    private var events: [AgentEvent] = [] { didSet { eventsRevision = UUID() } }
+    private var events: [AgentEvent] = [] { didSet { eventsRevision = UUID(); taskCache.removeAll(keepingCapacity: true) } }
     private var eventsRevision = UUID()
     private var projectedFirstCursor: Cursor?
     private let preferences = InboxPreferencesWriter()
@@ -173,7 +174,7 @@ final class InboxModel: ObservableObject {
     }
     private var olderHistoryPrefetch: (id: String, before: Cursor, task: Task<(EventPage, [Int]), Error>)?
     private var seen: [String: String] = [:] { didSet { scheduleAgentNotifications() } }
-    private var scope = "" { didSet { scheduleAgentNotifications() } }
+    private var scope = "" { didSet { restoreProjects(); scheduleAgentNotifications() } }
     private lazy var agentNotifications = AgentNotificationController(open: { [weak self] url in self?.openAgentActivity(url) })
     private var agentNotificationUpdate: Task<Void, Never>?
     private var pendingActivityURL: URL?
@@ -210,6 +211,104 @@ final class InboxModel: ObservableObject {
         guard connected, let id = AgentActivityLink.destination(url, account: scope),
               cards.contains(where: { $0.id == id }) else { return }
         select(id)
+    }
+
+    private struct TaskCache {
+        var events: UUID
+        var rows: UUID
+        var turns: [String]
+        var pending: [PendingMessage]
+        var result: [ProjectTask]
+    }
+    private var taskCache: [String: TaskCache] = [:]
+    @Published private var savedProjects: [InboxProject] = []
+    var projects: [InboxProject] {
+        let available = Set(cards.map(\.id))
+        func members(_ root: String) -> [String] {
+            [root] + cards.filter { $0.projectRootID == root && $0.id != root }.map(\.id)
+        }
+        let saved = savedProjects.filter { available.contains($0.primaryAgentID) }.map { project in
+            InboxProject(id: project.id, name: project.name, primaryAgentID: project.primaryAgentID,
+                         agentIDs: members(project.primaryAgentID))
+        }
+        let assigned = Set(saved.flatMap(\.agentIDs))
+        return saved + cards.filter { !assigned.contains($0.id)
+            && ($0.projectRootID == nil || !available.contains($0.projectRootID!) || $0.projectRootID == $0.id)
+        }.sorted(by: AgentCard.mostRecentFirst).map {
+            InboxProject(id: "project-" + $0.id, name: $0.title, primaryAgentID: $0.id, agentIDs: members($0.id))
+        }
+    }
+    var focusedProject: InboxProject? {
+        guard let id = focused?.id else { return nil }
+        return projects.first { $0.agentIDs.contains(id) }
+    }
+    var projectAgents: [AgentCard] {
+        let ids = Set(focusedProject?.agentIDs ?? [])
+        return cards.filter { ids.contains($0.id) }.sorted(by: AgentCard.mostRecentFirst)
+    }
+    var projectTasks: [ProjectTask] {
+        projectAgents.compactMap { card in
+            guard card.parentAgentID != nil, let turn = card.projectTurnID,
+                  var task = tasks(agentID: card.id).first(where: { $0.turnID == turn }) else { return nil }
+            task.title = card.title
+            if card.isRunning { task.status = "Working" }
+            return task
+        }
+    }
+    func tasks(agentID: String) -> [ProjectTask] {
+        let card = cards.first { $0.id == agentID }
+        let active = card?.activeTurns ?? []
+        let pendingTasks = pending.filter { $0.agentID == agentID }
+        if let cached = taskCache[agentID], cached.events == eventsRevision,
+           cached.rows == taskRowsRevision, cached.turns == active, cached.pending == pendingTasks {
+            return cached.result
+        }
+        let history = agentID == focused?.id ? events : overviewEvents[agentID] ?? tabHistories[agentID]?.events ?? []
+        let transcript = agentID == focused?.id ? rows : (isDemo ? overviewRows(for: agentID) : overviewTranscripts[agentID] ?? tabHistories[agentID]?.rows ?? card?.previewRows ?? [])
+        var result = ProjectTask.project(agentID: agentID, rows: transcript, events: history,
+                                   activeTurns: active, pending: pendingTasks).map { task in
+            var task = task
+            let input = task.rows.first { $0.role == "You" }?.text
+                ?? pending.first { $0.agentID == agentID && $0.id == task.turnID }?.input ?? task.title
+            task.title = String((ContextPrompt.separate(input)?.request ?? input).prefix(180))
+            if task.title == "Task", card?.parentAgentID != nil { task.title = card?.title ?? "Task" }
+            return task
+        }
+        if let turn = card?.projectTurnID, !result.contains(where: { $0.turnID == turn }) {
+            result.append(ProjectTask(agentID: agentID, turnID: turn, title: card?.title ?? "Task", status: "History", rows: []))
+        }
+        if taskCache.count > 16 { taskCache.removeAll(keepingCapacity: true) }
+        taskCache[agentID] = TaskCache(events: eventsRevision, rows: taskRowsRevision, turns: active, pending: pendingTasks, result: result)
+        return result
+    }
+    func selectProject(_ id: String) {
+        guard let project = projects.first(where: { $0.id == id }) else { return }
+        select(project.primaryAgentID)
+    }
+    func createProject(name: String) {
+        guard connected else { return }
+        newAgent()
+        guard let id = focused?.id else { return }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        savedProjects.append(InboxProject(id: UUID().uuidString, name: name.isEmpty ? "New project" : name, primaryAgentID: id))
+        persistProjects()
+    }
+    func renameProject(_ id: String, name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, var project = projects.first(where: { $0.id == id }) else { return }
+        project.name = name
+        savedProjects.removeAll { $0.id == id }; savedProjects.append(project)
+        persistProjects()
+    }
+    private func restoreProjects() {
+        taskCache.removeAll()
+        savedProjects = UserDefaults.standard.data(forKey: "inbox.projects." + scope)
+            .flatMap { try? JSONDecoder().decode([InboxProject].self, from: $0) } ?? []
+    }
+    private func persistProjects() {
+        guard !scope.isEmpty, let data = try? JSONEncoder().encode(savedProjects) else { return }
+        let key = "inbox.projects." + scope
+        preferences.enqueue { $0.set(data, forKey: key) }
     }
 
     var focused: AgentCard? {
@@ -1016,6 +1115,7 @@ final class InboxModel: ObservableObject {
                 var card = retained[summary.id] ?? summary
                 card.title = summary.title; card.updatedAt = max(card.updatedAt, summary.updatedAt); card.turnCount = summary.turnCount
                 card.mayHaveScheduledJobs = summary.mayHaveScheduledJobs
+                card.projectRootID = summary.projectRootID; card.parentAgentID = summary.parentAgentID; card.originTurnID = summary.originTurnID; card.projectTurnID = summary.projectTurnID
                 return card
             } + created
             if cards != merged { cards = merged }
@@ -2471,6 +2571,8 @@ final class InboxModel: ObservableObject {
     private func bindCreatedAgent(_ localID: String, to id: String) {
         let wasFocused = deck.focusedID == localID
         createdAgentIDs[localID] = id
+        for index in savedProjects.indices { savedProjects[index].replaceAgent(localID, with: id) }
+        persistProjects()
         if closedConversationIDs.remove(localID) != nil { closedConversationIDs.insert(id) }
         if openedConversations.remove(localID) != nil { openedConversations.insert(id) }
         // A concurrent roster can list the real agent before create returns.
@@ -2561,6 +2663,10 @@ final class InboxModel: ObservableObject {
             if let turns = UserDefaults.standard.dictionary(forKey: "inbox.demoTurns." + scope) as? [String: [String]] {
                 for index in cards.indices { cards[index].activeTurns = turns[cards[index].id] ?? cards[index].activeTurns }
             }
+        }
+        for project in savedProjects where project.primaryAgentID.hasPrefix("demo-")
+            && !cards.contains(where: { $0.id == project.primaryAgentID }) && demoRows[project.primaryAgentID] != nil {
+            var card = newConversationCard(project.primaryAgentID); card.title = project.name; cards.append(card)
         }
         activateContext()
         restoreCreations()

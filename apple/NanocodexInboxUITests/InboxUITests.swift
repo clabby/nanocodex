@@ -6,6 +6,54 @@ final class InboxUITests: XCTestCase {
     }
     override func setUp() { super.setUp(); continueAfterFailure = false }
 
+    func testProjectTasksAndAgentsPreserveDraft() {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString, "NANOCODEX_DEMO_PROJECT_TASKS": "1"])
+        switchConversation(app, id: "inbox")
+        composer(app).tap()
+        composer(app).typeText("Keep my project draft")
+        app.buttons["project-tasks"].tap()
+        XCTAssertTrue(app.segmentedControls["project-activity-segments"].waitForExistence(timeout: 5))
+        capture(app, "project-tasks-sheet")
+        let task = app.buttons["project-task:auth:project:auth"]
+        XCTAssertTrue(task.waitForExistence(timeout: 5))
+        task.tap()
+        XCTAssertTrue(app.scrollViews["project-task-detail"].waitForExistence(timeout: 5))
+        capture(app, "project-task-detail")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.segmentedControls["project-activity-segments"].buttons["Agents"].tap()
+        XCTAssertTrue(app.buttons["project-agent:inbox"].waitForExistence(timeout: 5))
+        capture(app, "project-agents-sheet")
+        app.buttons["project-activity-close"].tap()
+        XCTAssertEqual(composer(app).value as? String, "Keep my project draft")
+        capture(app, "project-chat")
+        app.buttons["conversation-drawer-open"].tap()
+        capture(app, "project-sidebar")
+        app.buttons["conversation-drawer-close"].tap()
+        XCTAssertEqual(composer(app).value as? String, "Keep my project draft")
+    }
+
+    func testNamedProjectSurvivesRelaunch() {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        app.buttons["conversation-drawer-open"].tap()
+        app.buttons["drawer-new-conversation"].tap()
+        let alert = app.alerts["New project"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 5))
+        alert.textFields.firstMatch.tap()
+        alert.textFields.firstMatch.typeText("Orbit UX")
+        alert.buttons["Save"].tap()
+        app.buttons["project-tasks"].tap()
+        XCTAssertTrue(app.navigationBars["Orbit UX"].waitForExistence(timeout: 5))
+        app.buttons["project-activity-close"].tap()
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 10))
+        app.buttons["conversation-drawer-open"].tap()
+        let savedProject = app.scrollViews["conversation-list"].buttons["Orbit UX"]
+        XCTAssertTrue(savedProject.waitForExistence(timeout: 5))
+        savedProject.tap()
+        app.buttons["project-tasks"].tap()
+        XCTAssertTrue(app.navigationBars["Orbit UX"].waitForExistence(timeout: 5))
+    }
+
     func testCompactReplyContextMenuCopiesResponse() {
         let app = launch(["NANOCODEX_DEMO_THINKING_MARKDOWN": "1", "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
         selectInbox(app)
@@ -43,7 +91,7 @@ final class InboxUITests: XCTestCase {
         openDrawerFromEdge(app)
         app.buttons["conversation-row:data"].tap()
         XCTAssertTrue(app.buttons["conversation-title:data"].waitForExistence(timeout: 5))
-        app.buttons["conversation-back"].tap()
+        navigationAction(app, "Back").tap()
         XCTAssertEqual(composer(app).value as? String, "Keep my edge swipe draft")
     }
 
@@ -61,7 +109,7 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5)); row.tap()
         XCTAssertEqual(selectedConversationTab(app).label, "Make long sessions bulletproof")
         XCTAssertNotEqual(composer(app).value as? String, "Keep this draft through navigation")
-        app.buttons["conversation-back"].tap()
+        navigationAction(app, "Back").tap()
         XCTAssertEqual(composer(app).value as? String, "Keep this draft through navigation")
         app.buttons["add-attachments"].tap()
         XCTAssertTrue(app.buttons["choose-photos"].waitForExistence(timeout: 5))
@@ -466,7 +514,7 @@ final class InboxUITests: XCTestCase {
         let title = self.selectedConversationTab(app)
         XCTAssertTrue(title.waitForExistence(timeout: 10)); title.tap()
         XCTAssertTrue(app.scrollViews["conversation"].waitForExistence(timeout: 5))
-        let chatScreens = app.buttons["conversation-remote-screens"]
+        let chatScreens = navigationAction(app, "conversation-remote-screens")
         XCTAssertTrue(chatScreens.waitForExistence(timeout: 5)); chatScreens.tap()
         XCTAssertTrue(desktop.waitForExistence(timeout: 15)); desktop.tap()
         XCTAssertTrue(control.waitForExistence(timeout: 10))
@@ -1620,11 +1668,12 @@ final class InboxUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Ready"].exists)
         XCTAssertFalse(app.staticTexts["Demo"].exists)
         let create = app.buttons["new-conversation"]
-        let screens = app.buttons["conversation-remote-screens"]
-        let context = app.buttons["conversation-context"]
+        XCTAssertTrue(create.isHittable)
         XCTAssertFalse(app.buttons["conversation-overview-open"].exists)
-        XCTAssertLessThan(screens.frame.maxX, create.frame.minX)
-        XCTAssertLessThan(create.frame.maxX, context.frame.minX)
+        app.buttons["app-menu"].tap()
+        XCTAssertTrue(app.buttons["conversation-remote-screens"].exists)
+        XCTAssertTrue(app.buttons["conversation-context"].exists)
+        app.tap()
         selectTab(app, id: "inbox", title: "Build the agent inbox")
         XCTAssertEqual(self.selectedConversationTab(app).label, "Build the agent inbox")
         XCTAssertFalse(app.staticTexts["Running"].exists)
@@ -2604,8 +2653,9 @@ final class InboxUITests: XCTestCase {
             XCTAssertTrue(other.waitForExistence(timeout: 5))
             other.tap()
             XCTAssertFalse(app.buttons["conversation-title:" + originalID].isSelected)
-            XCTAssertTrue(app.buttons["conversation-back"].isEnabled)
-            app.buttons["conversation-back"].tap()
+            let back = navigationAction(app, "Back")
+            XCTAssertTrue(back.isEnabled)
+            back.tap()
             XCTAssertTrue(app.buttons["conversation-title:" + originalID].isSelected)
             XCTAssertEqual(latestUserText(app).label, originalInput)
             XCTAssertTrue(self.assistantText(app, matching: NSPredicate(format: "label CONTAINS %@", "TAB_CACHE_OK")).exists)
@@ -2678,20 +2728,14 @@ final class InboxUITests: XCTestCase {
         selectTab(app, id: "durability", title: "Make long sessions bulletproof")
         composer(app).tap(); composer(app).typeText("Retain my draft when going back")
         selectTab(app, id: "hands", title: "Reconnect the browser Hand")
-        let back = app.buttons["conversation-back"]
+        let back = navigationAction(app, "Back")
         XCTAssertTrue(back.isEnabled)
-        let controls = ["conversation-back", "conversation-remote-screens", "new-conversation", "conversation-context"].map { app.buttons[$0] }
-        for (left, right) in zip(controls, controls.dropFirst()) {
-            XCTAssertLessThan(left.frame.maxX, right.frame.minX)
-            XCTAssertEqual(left.frame.midY, right.frame.midY, accuracy: 1)
-        }
-        XCTAssertLessThanOrEqual(selectedConversationTab(app).frame.maxY, app.scrollViews["conversation"].frame.minY)
         back.tap()
         XCTAssertEqual(self.selectedConversationTab(app).label, "Make long sessions bulletproof")
         XCTAssertEqual(composer(app).value as? String, "Retain my draft when going back")
         app.buttons["new-conversation"].tap()
         XCTAssertEqual(self.selectedConversationTab(app).label, "New agent")
-        back.tap()
+        navigationAction(app, "Back").tap()
         XCTAssertEqual(self.selectedConversationTab(app).label, "Make long sessions bulletproof")
         XCTAssertEqual(composer(app).value as? String, "Retain my draft when going back")
         selectTab(app, id: "hands", title: "Reconnect the browser Hand")
@@ -2785,7 +2829,7 @@ final class InboxUITests: XCTestCase {
         let selected = self.selectedConversationTab(app).label
         app.buttons["conversation-drawer-open"].tap()
         XCTAssertEqual(app.segmentedControls.count, 0)
-        XCTAssertTrue((app.buttons["conversation-row:inbox"].value as? String ?? "").contains("Stopped"))
+        XCTAssertTrue((app.buttons["conversation-row:inbox"].value as? String ?? "").contains("0 active agents"))
         capture(app, "stopped-agents-remain-in-drawer")
         XCTAssertTrue(app.buttons["conversation-row:inbox"].waitForExistence(timeout: 5))
         app.buttons["conversation-drawer-close"].tap()
