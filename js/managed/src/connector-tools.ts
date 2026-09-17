@@ -122,7 +122,7 @@ const PARAMETERS = {
   properties: {
     method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"], description: "HTTP method; defaults to GET. Writes require the user's requested action." },
     path: { type: "string", maxLength: 8192, description: "Absolute API path with optional query string, starting with one /. No host, credentials or fragment. Use provider pagination with bounded page sizes." },
-    connection_id: { type: "string", pattern: "^[A-Za-z0-9_-]{43}$", description: "Exact connectorAccounts id from accountInfo. Required to select among multiple accounts." },
+    connection_id: { type: "string", pattern: "^[A-Za-z0-9_-]{43}$", description: "Exact accounts[service].connections id from environment(). Required to select among multiple accounts." },
     body: { type: "object", additionalProperties: true, description: "JSON request body for a write operation, using the provider API schema." },
   },
   required: ["path"],
@@ -143,7 +143,7 @@ export function connectorToolsProvider(options: Options) {
       capability,
       definition: {
         type: "function" as const, name, defer_loading: true as const, strict: false,
-        description: `${spec.summary} Authenticated JSON HTTP request tool at ${spec.origin}. Use method and path, not invented operation names. Example GET ${spec.example}. ${spec.operations} Other paths and bodies must follow ${spec.docs}. Requires a connected account and granted provider scopes; inspect accountInfo.connectorAccounts and connectorTools for current availability. Credentials and token refresh stay in the broker. Never automatically retry writes. On 429 respect retry_after.`,
+        description: `${spec.summary} Authenticated JSON HTTP request tool at ${spec.origin}. Use method and path, not invented operation names. Example GET ${spec.example}. ${spec.operations} Other paths and bodies must follow ${spec.docs}. Requires a connected account and granted provider scopes; inspect environment().accounts for current availability. Credentials and token refresh stay in the broker. Never automatically retry writes. On 429 respect retry_after.`,
         parameters: { ...PARAMETERS, properties: { ...PARAMETERS.properties, method: { ...PARAMETERS.properties.method, enum: [...spec.methods] } } },
       },
       tool: {

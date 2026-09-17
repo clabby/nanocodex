@@ -161,7 +161,10 @@ impl ToolExecution {
                 };
             }
         }
-        if matches!(identity.family, "accountInfo" | "account_connectors") {
+        if matches!(
+            identity.family,
+            "environment" | "accountInfo" | "account_connectors"
+        ) {
             return Self::Account;
         }
         if identity.family == "runtimeInfo" {
@@ -304,6 +307,7 @@ fn split_machine_tool(name: &str) -> Option<(&str, &str)> {
         "wait_agent",
         "update_plan",
         "write_stdin",
+        "environment",
         "accountInfo",
         "runtimeInfo",
         "apply_patch",

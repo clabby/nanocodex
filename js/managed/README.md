@@ -5,7 +5,7 @@ authenticates public requests, projects the caller's authority, and routes work
 to durable, account-scoped services.
 
 Managed agents have a native `browseX` tool for public X posts, profiles, search,
-followers, and following. `accountInfo().apis` advertises the tool independently
+followers, and following. `environment().apis` advertises the tool independently
 of connector authentication. It calls the private [X Worker](../x-api/README.md)
 through `NANOCODEX_X`; deploy it with `pnpm deploy:x` before `pnpm deploy:managed`.
 
@@ -270,17 +270,26 @@ Account/environment discovery remains a separate first-turn dependency.
 - Managed agents can search completed team conversations with `find_session`
   (`find_sessions` remains available) and verify exact turns with `read_session`.
   Each call requires its own agent's `history:read` capability.
-- The first admitted prompt automatically calls `find_session` and `memory`
-  (`operation: "scan"`) before the model starts, using a bounded query from
-  that prompt. The normal tool handlers enforce the caller's capabilities.
-  Retrieval runs in parallel with runtime and account discovery. A durable
-  developer message injects the results and the safe `accountInfo` snapshot,
-  including known hands, logical mounts, and capabilities, before the first
-  model request. Retrieved content is explicitly untrusted data. Bootstrap emits
-  no tool events and leaves the user prompt unchanged. Stable instructions stay
-  first; the snapshot is appended once, preserving the cached conversation prefix.
-  Durable receipts and checkpoint reconciliation prevent duplicate injection on
-  recovery or reconnect. Later connection changes are available through `accountInfo`.
+- Before the first model request, the host appends one durable developer message
+  in `<startup_context>` tags after the baseline prompt and static runtime rules.
+  It includes the startup UTC time, account/team/session scope, known request
+  transport, available Hands, connected accounts, and a bounded prepared snapshot
+  of saved team memories when available. Hand/client provenance and user timezone
+  remain unknown when the host has no evidence; account ownership is not treated
+  as proof of who initiated a request.
+  `environment().hands` maps each Hand key to its logical `path`, capabilities,
+  name, online status, and providers. Use that path as `exec_command.workdir`.
+  `environment().accounts[service].connections` lists exact account selectors;
+  service entries also advertise deferred tools and documentation.
+  XML data is escaped and explicitly carries no instructional authority.
+  Startup does not search past threads using the current prompt: `find_session`,
+  `read_session`, and `memory scan/read` provide scoped recall when needed.
+  The environment and timestamp are frozen once, including across retries,
+  reconnects, and pending-memory invalidation. Later turns append to the existing
+  conversation without rewriting its cacheable prefix or changing cache keys.
+  Existing memory correction/forget invalidation remains effective; it never
+  refreshes the startup environment. Use `environment()` for an explicit refresh.
+  Old configurations naming `accountInfo` are normalized to `environment`.
   User hands include `online` attachment status. Offline hands remain in the
   namespace so admitted calls can recover their receipts. A broker-confirmed
   unstarted call returns an unavailable-hand result for the agent to handle;
@@ -509,8 +518,8 @@ inspection, immutable turn artifacts and HTTP tool results are documented in
 Managed agents discover first-party `github_request`, Google Workspace capability
 `*_request`, `slack_request`, `x_request`, `spotify_request`, and
 `soundcloud_request` tools through the same `tool_search` used by connected MCPs.
-`accountInfo.connectorTools` advertises tools for connected, grant-visible services;
-`connectorAccounts` supplies exact account selectors. Each call uses authenticated
+`environment().accounts` advertises tools for connected, grant-visible services;
+`accounts[service].connections` supplies exact account selectors. Each call uses authenticated
 egress with live grant and connection checks, broker-owned token refresh, fixed
 provider origins, bounded JSON bodies/responses, and no automatic write retries.
 Provider scopes and endpoint availability still apply. Spotify connection links

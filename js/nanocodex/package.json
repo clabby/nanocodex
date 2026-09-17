@@ -130,6 +130,10 @@
     "./wasm": {
       "types": "./wasm.d.mts",
       "import": "./pkg-web/nanocodex_bg.wasm"
+    },
+    "./tools/environment": {
+      "types": "./tools/environment.d.mts",
+      "import": "./tools/environment.mjs"
     }
   },
   "files": [

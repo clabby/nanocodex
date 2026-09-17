@@ -8,7 +8,7 @@ claiming that a machine supports files, processes, and desktop control.
 
 ## Architecture checklist
 
-The product diagram uses illustrative mount names. `accountInfo` returns the
+The product diagram uses illustrative mount names. `environment` returns the
 actual mounts available to the current agent; `workdir` selects the execution
 Hand. Code Mode runs in the managed service, while native commands run on the
 selected Hand. Screen tools select their exact machine and publication instead

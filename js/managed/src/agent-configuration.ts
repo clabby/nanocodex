@@ -41,7 +41,12 @@ export type AgentEnvironment = z.infer<typeof environmentSchema>;
 export type NetworkPolicy = z.infer<typeof networkSchema>;
 export function parseConfiguration(value: unknown): AgentConfiguration {
   if (new TextEncoder().encode(JSON.stringify(value ?? {})).byteLength > 1_000_000) throw new TypeError("configuration exceeds 1 MB");
-  return configurationSchema.parse(value ?? {});
+  return normalizeToolNames(configurationSchema.parse(value ?? {}));
+}
+/** Apply tool aliases on both admission and reads of retained configurations. */
+export function normalizeToolNames(configuration: AgentConfiguration): AgentConfiguration {
+  if (!configuration.tools?.includes("accountInfo")) return configuration;
+  return { ...configuration, tools: [...new Set(configuration.tools.map(name => name === "accountInfo" ? "environment" : name))] };
 }
 /** Account discovery is unnecessary when policy excludes every account provider. */
 export function accountToolsEnabled(configuration: AgentConfiguration): boolean {
@@ -96,7 +101,9 @@ export async function configurationCatalog(request: Request, storage: DurableObj
     if (new TextEncoder().encode(body).byteLength > 1_000_000) throw new TypeError("template exceeds 1 MB");
     const current = storage.sql.exec<{ body: string; created_at: number }>(
       "SELECT body, created_at FROM managed_configuration_catalog WHERE kind = ? AND id = ?", kind!, id).toArray()[0];
-    if (current && current.body !== body) return Response.json({ error: "immutable_template" }, { status: 409 });
+    const retainedBody = current && kind === "agent-definitions"
+      ? JSON.stringify(normalizeToolNames(JSON.parse(current.body) as AgentConfiguration)) : current?.body;
+    if (current && retainedBody !== body) return Response.json({ error: "immutable_template" }, { status: 409 });
     if (!current && storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM managed_configuration_catalog").one().n >= 1000)
       return Response.json({ error: "template_limit" }, { status: 409 });
     const createdAt = current?.created_at ?? Date.now();

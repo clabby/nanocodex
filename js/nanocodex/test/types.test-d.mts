@@ -678,3 +678,11 @@ function checkVoiceControls(voice: VoiceResource) {
   const fence: Promise<void> = voice.noteTypedInput();
   void muted; void level; void fence;
 }
+
+// Shared model-facing environment projection is a public package contract.
+import { projectEnvironment, contextData, type AgentEnvironment } from "nanocodex/tools/environment";
+const startupEnvironment: AgentEnvironment = projectEnvironment({
+  status: "ready", apis: [], machines: [], authenticated: [], accounts: {},
+  connectorAccounts: {}, identity: {}, stablecoins: [], authorizations: [], vault: [],
+}, { runtime: "test", default_cwd: "/brain" });
+contextData("environment", startupEnvironment);

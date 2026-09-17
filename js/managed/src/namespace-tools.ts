@@ -126,7 +126,7 @@ export function createNamespaceExecutionRuntime(
 
   const tools: ToolMap = {
     select_computer: {
-      description: "Select the mounted Hand for subsequent cua_repl.js and cua_repl.js_reset calls in this conversation. Use a workdir returned by mount or accountInfo. One available computer is selected automatically; multiple computers require an explicit selection. The selected connection remains pinned until you select again. /brain has no desktop.",
+      description: "Select the mounted Hand for subsequent cua_repl.js and cua_repl.js_reset calls in this conversation. Use a workdir returned by mount or environment. One available computer is selected automatically; multiple computers require an explicit selection. The selected connection remains pinned until you select again. /brain has no desktop.",
       parameters: { type: "object", properties: { workdir: { type: "string", description: "Mounted Hand root selecting the computer." } }, required: ["workdir"], additionalProperties: false },
       handler: async (input, context) => {
         const value = record(input);
@@ -157,7 +157,7 @@ export function createNamespaceExecutionRuntime(
       }, releaseSession, dispose,
     },
     exec_command: {
-      description: "Run a command in durable /brain using bounded Just Bash by default. Use an explicit hand workdir returned by mount or accountInfo only for native binaries, builds, or process sessions. A hand mount already represents its advertised workspace: if /laptop maps to /Users/me/repo, use /laptop for that workspace or /laptop/src for its src directory, never /laptop/Users/me/repo. No execution hand is attached by default.",
+      description: "Run a command in durable /brain using bounded Just Bash by default. Use an explicit hand workdir returned by mount or environment only for native binaries, builds, or process sessions. A hand mount already represents its advertised workspace: if /laptop maps to /Users/me/repo, use /laptop for that workspace or /laptop/src for its src directory, never /laptop/Users/me/repo. No execution hand is attached by default.",
       parameters: EXEC_COMMAND_PARAMETERS,
       outputSchema: EXECUTION_OUTPUT_SCHEMA,
       supportsParallelToolCalls: true,
