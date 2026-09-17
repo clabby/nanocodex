@@ -142,6 +142,8 @@ impl Notification {
 pub(crate) enum RootEvent {
     VoiceStatus(Option<crate::voice_state::Status>),
     ShowAgentId(String),
+    VaultReview(crate::tui::vault::Review),
+    VaultReceipt(String),
     Terminal(Event),
     PasteImage(String),
     #[cfg(test)]
@@ -240,6 +242,7 @@ pub(crate) struct RestoredSessionProjection {
     context_diagnostics: ContextDiagnostics,
     context_tokens: Option<u64>,
     recent_prompts: Vec<RecentPromptDraft>,
+    seen_vault_requests: std::collections::HashSet<String>,
 }
 
 impl RestoredSessionProjection {
@@ -257,6 +260,9 @@ impl RestoredSessionProjection {
             let observation = self.context_diagnostics.observe(&record);
             if observation.completed_tokens.is_some() {
                 self.context_tokens = observation.completed_tokens;
+            }
+            if let Some((key, _)) = crate::tui::vault::request(&record) {
+                self.seen_vault_requests.insert(key);
             }
             let _ = self.transcript.update(TranscriptEvent::Record(record));
         }
@@ -285,6 +291,8 @@ pub(crate) enum RootEffect {
     Zoom,
     Voice(crate::voice::Command),
     ShowAgentId,
+    Vault(crate::tui::vault::Command),
+    ApproveVault(crate::tui::vault::Review),
     Submit(Submission),
     Reflect(Submission),
     RunShell(String),
@@ -345,6 +353,7 @@ pub(crate) enum RootEffect {
 }
 
 enum Overlay {
+    VaultReview(crate::tui::vault::Review),
     AgentId(String),
     Actions(Node<ActionsMenu>),
     ContextDiagnostics(Node<ContextDiagnosticsPanel>),
@@ -437,6 +446,7 @@ pub(crate) struct RootNode {
     subagents: SubagentTree,
     context_diagnostics: ContextDiagnostics,
     recent_prompts: Vec<RecentPromptDraft>,
+    seen_vault_requests: std::collections::HashSet<String>,
     pending_session_mention: Option<usize>,
     pending_session_list: Option<u64>,
     next_session_list: u64,
@@ -491,6 +501,7 @@ impl RootNode {
             subagents,
             context_diagnostics: ContextDiagnostics::default(),
             recent_prompts: Vec::new(),
+            seen_vault_requests: Default::default(),
             pending_session_mention: None,
             pending_session_list: None,
             next_session_list: 0,
@@ -660,6 +671,7 @@ impl RootNode {
             context_diagnostics: ContextDiagnostics::default(),
             context_tokens: None,
             recent_prompts: Vec::new(),
+            seen_vault_requests: Default::default(),
         };
         projection.append_records(records);
         if stream_closed {
@@ -676,6 +688,8 @@ impl RootNode {
         projection
             .transcript
             .set_effort(self.composer.component().effort());
+        self.seen_vault_requests
+            .extend(projection.seen_vault_requests);
         self.transcript = Node::new(projection.transcript);
         self.context_diagnostics = projection.context_diagnostics;
         self.recent_prompts = projection.recent_prompts;
@@ -727,6 +741,8 @@ impl RootNode {
         }
         self.set_fast_mode(fast_mode);
         projection.transcript.set_workspace(workspace);
+        self.seen_vault_requests
+            .extend(projection.seen_vault_requests);
         self.transcript = Node::new(projection.transcript);
         self.context_diagnostics = projection.context_diagnostics;
         self.recent_prompts = projection.recent_prompts;
@@ -874,6 +890,23 @@ impl RootNode {
             .render_chrome(frame, transcript_area, theme);
         if let Some(overlay) = &mut self.overlay {
             match overlay {
+                Overlay::VaultReview(review) => {
+                    let layout = Floating::new(
+                        "Approve Vault website",
+                        86,
+                        24,
+                        &[("ctrl+enter", "approve"), ("esc", "cancel")],
+                    )
+                    .render(frame, area, theme);
+                    let lines =
+                        crate::tui::vault::review_lines(&review.description(), layout.body.width);
+                    review.visible = lines.len() <= usize::from(layout.body.height);
+                    if review.visible {
+                        frame.render_widget(Paragraph::new(lines.join("\n")), layout.body);
+                    } else {
+                        frame.render_widget(Paragraph::new("Enlarge the terminal to review the complete website approval. Approval is disabled until all details fit. Esc cancels.").wrap(Wrap { trim: false }), layout.body);
+                    }
+                }
                 Overlay::AgentId(id) => {
                     let layout =
                         Floating::new("Agent ID", 58, 7, &[("enter", "copy"), ("esc", "close")])
@@ -1501,6 +1534,7 @@ impl RootNode {
 
     fn update_overlay(&mut self, event: Event, now: Instant) -> ComponentUpdate<RootEffect> {
         match &self.overlay {
+            Some(Overlay::VaultReview(_)) => self.update_vault_review(event),
             Some(Overlay::AgentId(_)) => self.update_agent_id(event),
             Some(Overlay::Actions(_)) => self.update_actions(event),
             Some(Overlay::ContextDiagnostics(_)) => self.update_context_diagnostics(event),
@@ -2223,6 +2257,28 @@ impl RootNode {
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
+    fn update_vault_review(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let approve = matches!(&event, Event::Key(key) if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::CONTROL && key.kind == crossterm::event::KeyEventKind::Press);
+        if !approve && !is_escape(&event) {
+            return ComponentUpdate::none();
+        }
+        if approve && !matches!(&self.overlay, Some(Overlay::VaultReview(review)) if review.visible)
+        {
+            return ComponentUpdate::none();
+        }
+        let Some(Overlay::VaultReview(review)) = self.overlay.take() else {
+            return ComponentUpdate::none();
+        };
+        ComponentUpdate {
+            effects: if approve {
+                vec![RootEffect::ApproveVault(review)]
+            } else {
+                Vec::new()
+            },
+            render: RenderRequest::Immediate,
+        }
+    }
+
     fn update_agent_id(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
         let Some(Overlay::AgentId(id)) = &self.overlay else {
             return ComponentUpdate::none();
@@ -2505,6 +2561,17 @@ impl RootNode {
             render = render.max(self.update_transcript(TranscriptEvent::FollowTail).render);
         }
         let effects = match update.effect {
+            Some(ComposerEffect::Vault(command)) => {
+                let command = if command == crate::tui::vault::Command::Latest {
+                    self.transcript
+                        .component()
+                        .latest_vault_command()
+                        .unwrap_or(crate::tui::vault::Command::Help)
+                } else {
+                    command
+                };
+                vec![RootEffect::Vault(command)]
+            }
             Some(ComposerEffect::ShowAgentId) => vec![RootEffect::ShowAgentId],
             Some(ComposerEffect::Submit(prompt)) if self.has_active_turns() => {
                 let (id, prompt) = self.queue.component_mut().begin_steer(prompt);
@@ -3234,7 +3301,14 @@ impl RootNode {
                 .component_mut()
                 .replace(self.context_diagnostics.clone());
         }
+        let vault = crate::tui::vault::request(&record);
         let mut update = self.update_transcript(TranscriptEvent::Record(record));
+        if let Some((key, command)) = vault {
+            if self.seen_vault_requests.insert(key) {
+                update.effects.push(RootEffect::Vault(command));
+                update.render = RenderRequest::Immediate;
+            }
+        }
         if let Some(event) = turn_timer {
             let timer = self.update_composer(event, RenderRequest::Streaming);
             update.effects.extend(timer.effects);
@@ -3547,6 +3621,15 @@ impl Component for RootNode {
                 self.replay_history(*projection);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
+            RootEvent::VaultReceipt(receipt) => {
+                self.thread = ThreadState::Started;
+                self.queue.component_mut().push(Submission::text(receipt));
+                self.submit_next_queued()
+            }
+            RootEvent::VaultReview(review) => {
+                self.overlay = Some(Overlay::VaultReview(review));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             RootEvent::ShowAgentId(id) => {
                 self.overlay = Some(Overlay::AgentId(id));
                 ComponentUpdate::render(RenderRequest::Immediate)
@@ -3630,7 +3713,7 @@ fn recent_prompt(record: &TranscriptRecord) -> Option<RecentPromptDraft> {
     }
     let prompt = record.decode_payload::<UserPrompt>().ok()?;
     Some(RecentPromptDraft {
-        text: prompt.text,
+        text: crate::tui::vault::receipt_summary(&prompt.text).unwrap_or(prompt.text),
         recorded_at_unix_ms: record.recorded_at_unix_ms(),
     })
 }
@@ -4288,6 +4371,172 @@ mod live_control_tests {
             };
             assert!(content.iter().any(|item| matches!(item, UserInput::Image { image_url, .. } if image_url.ends_with("attached"))));
         }
+    }
+
+    fn vault_review() -> crate::tui::vault::Review {
+        crate::tui::vault::Review {
+            login: nanocodex_managed::VaultLogin {
+                id: "abcdefghijklmnopqrstuv".into(),
+                name: "Verified login".into(),
+                browser_origin: Some("https://old.example.com".into()),
+            },
+            origin: "https://example.com".into(),
+            agent_id: "agent".into(),
+            generation: 1,
+            visible: false,
+        }
+    }
+
+    #[test]
+    fn vault_review_requires_visible_explicit_approval_and_cancels() {
+        let mut root = root_with_draft("keep this draft");
+        root.update(RootEvent::VaultReview(vault_review()));
+        assert!(
+            root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::CONTROL,
+            ))))
+            .effects
+            .is_empty()
+        );
+        assert!(root.update(key(KeyCode::Char('a'))).effects.is_empty());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                root.render_focused(
+                    frame,
+                    frame.area(),
+                    &crate::tui::theme::Theme::default(),
+                    true,
+                )
+            })
+            .unwrap();
+        assert!(root.update(key(KeyCode::Enter)).effects.is_empty());
+        assert!(root.update(key(KeyCode::Char('a'))).effects.is_empty());
+        let approved = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(
+            matches!(approved.effects.as_slice(), [RootEffect::ApproveVault(review)] if review.login.name == "Verified login" && review.origin == "https://example.com")
+        );
+        assert_eq!(root.composer.component().draft(), "keep this draft");
+        root.update(RootEvent::VaultReview(vault_review()));
+        assert!(root.update(key(KeyCode::Esc)).effects.is_empty());
+        assert!(root.overlay.is_none());
+    }
+
+    #[test]
+    fn vault_live_requests_deduplicate_echoes_and_replayed_history() {
+        use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+        use serde_json::value::to_raw_value;
+        let record = |sequence, tool: &str, result: serde_json::Value| {
+            Arc::new(TranscriptRecord::from_agent(
+                sequence,
+                sequence,
+                AgentEvent {
+                    protocol_version: 1,
+                    request_id: Arc::from("vault-turn"),
+                    seq: sequence,
+                    kind: AgentEventKind::ToolResult,
+                    payload: to_raw_value(
+                        &json!({"call_id": format!("call-{sequence}"), "tool": tool,
+                    "status": "completed",
+                    "structured_result": if tool == "request_vault_intake" { result.clone() } else { serde_json::Value::Null },
+                    "result": if tool == "request_vault_intake" { serde_json::Value::Null } else { result }}),
+                    )
+                    .unwrap()
+                    .into(),
+                },
+            ))
+        };
+        let request = json!({"type":"vault_intake","status":"input_required","operation":"authorize_origin",
+            "kind":"login","vault_id":"abcdefghijklmnopqrstuv","origin":"https://example.com"});
+        let direct = record(1, "request_vault_intake", request.clone());
+        let echo = record(
+            2,
+            "exec",
+            json!({"content":[{"type":"text","text":request.to_string()}]}),
+        );
+        let mut root = root_with_draft("preserved draft");
+        assert!(matches!(
+            root.update(RootEvent::Transcript(direct.clone()))
+                .effects
+                .as_slice(),
+            [RootEffect::Vault(crate::tui::vault::Command::Review { .. })]
+        ));
+        assert!(
+            root.update(RootEvent::Transcript(echo.clone()))
+                .effects
+                .is_empty()
+        );
+        assert_eq!(root.composer.component().draft(), "preserved draft");
+        let mut restored = root_with_draft("restored draft");
+        restored.replay_history(RootNode::project_open_session(
+            ReasoningEffort::default(),
+            vec![direct],
+        ));
+        assert!(restored.overlay.is_none());
+        assert!(
+            restored
+                .update(RootEvent::Transcript(echo))
+                .effects
+                .is_empty()
+        );
+        assert_eq!(restored.composer.component().draft(), "restored draft");
+        let create = record(
+            3,
+            "request_vault_intake",
+            json!({"type":"vault_intake", "status":"input_required", "kind":"login"}),
+        );
+        assert!(matches!(
+            root.update(RootEvent::Transcript(create))
+                .effects
+                .as_slice(),
+            [RootEffect::Vault(crate::tui::vault::Command::Open)]
+        ));
+        let invalid = record(
+            4,
+            "request_vault_intake",
+            json!({"type":"vault_intake", "status":"input_required", "kind":"login", "origin":"http://example.com"}),
+        );
+        assert!(
+            root.update(RootEvent::Transcript(invalid))
+                .effects
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn vault_recent_receipt_is_readable() {
+        let text = json!({"type":"vault_intake_receipt","status":"saved","operation":"authorize_origin","id":"abcdefghijklmnopqrstuv","kind":"login","name":"Example","browser_origin":"https://example.com"}).to_string();
+        let record = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text,
+            },
+        )
+        .unwrap();
+        let prompt = super::recent_prompt(&record).unwrap();
+        assert!(prompt.text.contains("Website approved for Example"));
+        assert!(!prompt.text.contains("vault_intake_receipt"));
+    }
+
+    #[test]
+    fn vault_command_is_local_and_receipt_is_submitted() {
+        let mut root = root_with_draft("/vault review abcdefghijklmnopqrstuv https://example.com");
+        assert!(matches!(
+            root.update(key(KeyCode::Enter)).effects.as_slice(),
+            [RootEffect::Vault(crate::tui::vault::Command::Review { .. })]
+        ));
+        let receipt = crate::tui::vault::receipt(&vault_review().login);
+        let update = root.update(RootEvent::VaultReceipt(receipt.clone()));
+        assert!(
+            matches!(update.effects.as_slice(), [RootEffect::Submit(prompt)] if prompt.display_text() == receipt)
+        );
     }
 
     #[test]
