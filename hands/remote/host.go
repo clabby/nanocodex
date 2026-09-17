@@ -72,8 +72,9 @@ type hostPeer struct {
 	renewal        context.CancelFunc
 }
 type controlMessage struct {
-	Type       string `json:"type"`
-	Generation string `json:"generation,omitempty"`
+	Type            string `json:"type"`
+	Generation      string `json:"generation,omitempty"`
+	RelativePointer bool   `json:"relativePointer,omitempty"`
 }
 
 // All peer, lease and input state changes are serialized by the host loop.
@@ -107,6 +108,15 @@ func serveWayland(parent context.Context, config hostConfig) error {
 			return err
 		}
 		defer capture.close()
+	}
+	var audio *audioCapture
+	if config.capture == nil {
+		audio, err = startDesktopAudio(ctx, diagnostics)
+		if err != nil {
+			logger.Printf("Desktop audio unavailable: %v", err)
+		} else {
+			defer audio.close()
+		}
 	}
 	socket, err := service.socket(ctx)
 	if err != nil {
@@ -314,7 +324,7 @@ func serveWayland(parent context.Context, config hostConfig) error {
 		}
 		switch message.Type {
 		case "acquire":
-			if message.Generation != "" {
+			if message.Generation != "" || message.RelativePointer {
 				remove(event.viewer)
 				return
 			}
@@ -329,7 +339,7 @@ func serveWayland(parent context.Context, config hostConfig) error {
 				fail(err)
 				return
 			}
-			if sendControl(peer, controlMessage{Type: "granted", Generation: lease.acquire(event.viewer, now)}) != nil {
+			if sendControl(peer, controlMessage{Type: "granted", Generation: lease.acquire(event.viewer, now), RelativePointer: true}) != nil {
 				remove(event.viewer)
 			}
 		case "renew":
@@ -384,19 +394,25 @@ func serveWayland(parent context.Context, config hostConfig) error {
 		}
 		peer := &hostPeer{connection: connection}
 		peers[id] = peer
-		sender, err := connection.AddTrack(capture.track)
-		if err != nil {
-			remove(id)
-			return err
+		tracks := []webrtc.TrackLocal{capture.track}
+		if audio != nil {
+			tracks = append(tracks, audio.track)
 		}
-		go func() {
-			buffer := make([]byte, 1500)
-			for {
-				if _, _, err := sender.Read(buffer); err != nil {
-					return
-				}
+		for _, track := range tracks {
+			sender, err := connection.AddTrack(track)
+			if err != nil {
+				remove(id)
+				return err
 			}
-		}()
+			go func() {
+				buffer := make([]byte, 1500)
+				for {
+					if _, _, err := sender.Read(buffer); err != nil {
+						return
+					}
+				}
+			}()
+		}
 		ordered := false
 		retransmits := uint16(0)
 		peer.control, err = connection.CreateDataChannel("remote-control-v1", nil)

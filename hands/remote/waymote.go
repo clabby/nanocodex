@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -52,7 +53,12 @@ func startWaymoteWithDiagnostics(ctx context.Context, executable string, diagnos
 		cancel()
 		return nil, err
 	}
-	command := exec.CommandContext(ctx, executable, "--frame-rate", "60", "--bitrate", "6000", "--xkb-layout", "us", "--ffmpeg", helper)
+	bitrate, err := screenBitrate(os.Getenv("NANOCODEX_SCREEN_BITRATE_KBPS"))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, executable, "--frame-rate", "60", "--bitrate", strconv.Itoa(bitrate), "--xkb-layout", "us", "--ffmpeg", helper)
 	command.Env = append(os.Environ(), encoderHelperEnv+"=1")
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
@@ -87,11 +93,14 @@ func startWaymoteWithDiagnostics(ctx context.Context, executable string, diagnos
 	capture := &waymoteCapture{track: track, input: input, video: video, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		forwarder := h264Forwarder{}
-		_ = forwarder.read(video, func(out *rtp.Packet) error {
+		err := forwarder.read(video, func(out *rtp.Packet) error {
 			// A viewer can unbind during a write without stopping other viewers.
 			_ = track.WriteRTP(out)
 			return nil
 		})
+		if err != nil && ctx.Err() == nil {
+			fmt.Fprintf(diagnostics, "Wayland video forwarding failed: %v\n", err)
+		}
 		cancel()
 		_ = command.Wait()
 		close(capture.done)
@@ -151,6 +160,8 @@ func (capture *waymoteCapture) apply(event remoteInput) error {
 	switch event.Kind {
 	case "move":
 		return nil
+	case "relativeMove":
+		return capture.record(8, 0, math.Float32bits(float32(*event.DeltaX)), math.Float32bits(float32(*event.DeltaY)), sequence)
 	case "button":
 		return capture.record(2, down, 0x110+uint32(*event.Button), 0, sequence)
 	case "scroll":
@@ -235,4 +246,16 @@ var hidToEvdev = map[uint16]uint32{
 	73: 110, 74: 102, 75: 104, 76: 111, 77: 107, 78: 109, 79: 106, 80: 105, 81: 108, 82: 103,
 	83: 69, 84: 98, 85: 55, 86: 74, 87: 78, 88: 96, 89: 79, 90: 80, 91: 81, 92: 75, 93: 76, 94: 77, 95: 71, 96: 72, 97: 73, 98: 82, 99: 83, 100: 86, 103: 117,
 	224: 29, 225: 42, 226: 56, 227: 125, 228: 97, 229: 54, 230: 100, 231: 126,
+}
+
+// Shared desktop quality setting, in kbit/s; bounds avoid accidental unbounded traffic.
+func screenBitrate(value string) (int, error) {
+	if value == "" {
+		return 6000, nil
+	}
+	bitrate, err := strconv.Atoi(value)
+	if err != nil || bitrate < 1000 || bitrate > 100000 {
+		return 0, errors.New("NANOCODEX_SCREEN_BITRATE_KBPS must be 1000 through 100000")
+	}
+	return bitrate, nil
 }

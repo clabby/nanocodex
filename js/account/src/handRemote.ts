@@ -5,16 +5,17 @@ export type RemoteHand = Readonly<{
   transport?: "webrtc" | "frames-v1";
   frame_window?: number;
 }>;
-export type RemoteState = Readonly<{ status: string; connected: boolean; controlling: boolean; connecting: boolean }>;
+export type RemoteState = Readonly<{ status: string; connected: boolean; controlling: boolean; connecting: boolean; audioAvailable?: boolean; audioEnabled?: boolean; controlPending?: boolean; relativePointer?: boolean }>;
 export type RemoteInput = {
-  kind: "move" | "button" | "scroll" | "key" | "text" | "releaseAll";
+  kind: "move" | "relativeMove" | "button" | "scroll" | "key" | "text" | "releaseAll";
   x?: number; y?: number; button?: number; down?: boolean; key?: number; text?: string; deltaX?: number; deltaY?: number;
 };
 
 const encoder = new TextEncoder();
 class RemoteError extends Error {
   readonly terminal: boolean;
-  constructor(message: string, terminal = false) { super(message); this.terminal = terminal; }
+  readonly status?: number;
+  constructor(message: string, terminal = false, status?: number) { super(message); this.terminal = terminal; this.status = status; }
 }
 async function request(path: string, method = "GET", body?: unknown, signal?: AbortSignal): Promise<any> {
   const response = await fetch("/v1/account/hands" + path, {
@@ -24,7 +25,7 @@ async function request(path: string, method = "GET", body?: unknown, signal?: Ab
   });
   if (!response.ok) {
     const unauthorized = [401, 403].includes(response.status);
-    throw new RemoteError(unauthorized ? "This remote session is no longer authorized." : "This screen is unavailable.", unauthorized);
+    throw new RemoteError(unauthorized ? "This remote session is no longer authorized." : "This screen is unavailable.", unauthorized, response.status);
   }
   return response.json();
 }
@@ -92,6 +93,10 @@ export class RemoteBrowserSession {
   private connectingTimer?: ReturnType<typeof setTimeout>;
   private retryTimer?: ReturnType<typeof setTimeout>;
   private renewTimer?: ReturnType<typeof setInterval>;
+  private renewRetryTimer?: ReturnType<typeof setTimeout>;
+  private disconnectTimer?: ReturnType<typeof setTimeout>;
+  private suspendTimer?: ReturnType<typeof setTimeout>;
+  private renewing = false;
   private controlTimer?: ReturnType<typeof setInterval>;
   private frameTimer?: ReturnType<typeof setTimeout>;
   private frameDeadline?: ReturnType<typeof setTimeout>;
@@ -117,12 +122,23 @@ export class RemoteBrowserSession {
     this.suspended = false; this.retries = 0; this.recoveryDeadline = undefined;
     void this.start(true);
   }
-  suspend(): void {
+  suspend(delay = 0): void {
     if (this.closed || this.suspended) return;
+    // Release input immediately, but keep a short tab/app switch from forcing
+    // another authenticated socket + ICE handshake when the user comes back.
+    if (delay > 0) {
+      this.releaseControl();
+      this.suspendTimer ??= setTimeout(() => this.suspend(), delay);
+      return;
+    }
+    clearTimeout(this.suspendTimer); this.suspendTimer = undefined;
     this.suspended = true; this.detach();
     this.update({ status: "Paused", connected: false, controlling: false, connecting: false });
   }
-  resume(): void { if (this.suspended && !this.closed) this.reconnect(); }
+  resume(): void {
+    clearTimeout(this.suspendTimer); this.suspendTimer = undefined;
+    if (this.suspended && !this.closed) this.reconnect();
+  }
 
   private current(epoch: number): boolean { return epoch === this.epoch && !this.closed && !this.suspended; }
   private async start(refresh: boolean): Promise<void> {
@@ -161,13 +177,33 @@ export class RemoteBrowserSession {
         };
         peer.ontrack = ({ track }) => {
           if (!this.current(epoch)) return;
-          this.video.srcObject = new MediaStream([track]);
-          void this.video.play().catch(() => { if (this.current(epoch)) this.update({ status: "Tap the picture to start video." }); });
+          if (track.kind !== "video" && track.kind !== "audio") return;
+          const stream = this.video.srcObject instanceof MediaStream ? this.video.srcObject : new MediaStream();
+          for (const previous of stream.getTracks()) {
+            if (previous.kind === track.kind) { stream.removeTrack(previous); previous.stop(); }
+          }
+          stream.addTrack(track);
+          this.video.srcObject = stream;
+          this.update({ audioAvailable: stream.getAudioTracks().length > 0 });
+          track.onended = () => {
+            if (!this.current(epoch)) return;
+            stream.removeTrack(track);
+            this.update({ audioAvailable: stream.getAudioTracks().length > 0 });
+          };
+          void this.playMedia(epoch);
         };
         peer.onconnectionstatechange = () => {
           if (!this.current(epoch)) return;
-          if (["failed", "disconnected", "closed"].includes(connectedPeer.connectionState)) this.fail(new RemoteError("Screen disconnected."));
-          else this.ready();
+          if (connectedPeer.connectionState === "disconnected") {
+            this.releaseControl();
+            this.disconnectTimer ??= setTimeout(() => {
+              if (this.current(epoch) && connectedPeer.connectionState === "disconnected") this.fail(new RemoteError("Screen disconnected."));
+            }, 3000);
+          } else {
+            clearTimeout(this.disconnectTimer); this.disconnectTimer = undefined;
+            if (["failed", "closed"].includes(connectedPeer.connectionState)) this.fail(new RemoteError("Screen disconnected."));
+            else this.ready();
+          }
         };
         peer.ondatachannel = ({ channel }) => { if (this.current(epoch)) this.channel(channel, epoch); else channel.close(); };
       }).catch(error => { if (this.current(epoch)) this.fail(error); });
@@ -203,11 +239,7 @@ export class RemoteBrowserSession {
             if (this.renewTimer || typeof message.connection_id !== "string" || message.connection_id.length > 128) throw new RemoteError("Invalid remote lease.", true);
             const id = message.connection_id;
             this.authorized(epoch);
-            this.renewTimer = setInterval(() => {
-              void request("/renew", "POST", { connection_id: id }, signal).then(() => {
-                if (this.current(epoch) && socket.readyState === WebSocket.OPEN) socket.send('{"type":"ping"}');
-              }).catch(error => { if (this.current(epoch)) this.fail(error); });
-            }, 10_000);
+            this.renewTimer = setInterval(() => { void this.renew(id, epoch, signal); }, 10_000);
             if (frames) {
               this.armFrameDeadline(epoch);
               this.requestFrame(epoch);
@@ -251,14 +283,34 @@ export class RemoteBrowserSession {
     } catch (error) { if (this.current(epoch)) this.fail(error); }
   }
 
+  /** Called directly by a user gesture so mobile autoplay can unlock sound. */
+  async setAudioEnabled(enabled: boolean): Promise<void> {
+    if (this.closed || this.suspended) return;
+    this.video.muted = !enabled;
+    this.update({ audioEnabled: enabled });
+    await this.playMedia(this.epoch);
+  }
+  private async playMedia(epoch: number): Promise<void> {
+    try { await this.video.play(); }
+    catch {
+      if (!this.current(epoch)) return;
+      // A denied audio autoplay must not prevent the picture from starting.
+      this.video.muted = true;
+      this.update({ audioEnabled: false });
+      try { await this.video.play(); }
+      catch { if (this.current(epoch)) this.update({ status: "Tap the picture to start video." }); }
+    }
+  }
+
   takeControl(): void {
-    if (this.state.connected && this.hand.controllable && !this.state.controlling && !this.controlRequested) {
-      this.controlRequested = true; this.acquireControl();
+    if (this.state.connected && this.hand.controllable && !this.state.controlling && !this.controlRequested
+      && (this.hand.transport === "frames-v1" || this.peer?.connectionState === "connected")) {
+      this.controlRequested = true; this.update({ controlPending: true }); this.acquireControl();
     }
   }
   private acquireControl(): void {
     if (this.control !== "idle" || !this.controlRequested) return;
-    this.control = "acquiring"; this.send({ type: "acquire" });
+    this.control = "acquiring"; this.update({ controlPending: true }); this.send({ type: "acquire" });
   }
   releaseControl(): void {
     this.controlRequested = false;
@@ -267,7 +319,7 @@ export class RemoteBrowserSession {
     else if (generation) this.control = { kind: "releasing", generation };
     clearInterval(this.controlTimer); this.controlTimer = undefined;
     if (generation && !this.closed) this.send({ type: "release", generation });
-    if (!this.closed) this.update({ controlling: false, ...(this.state.connected ? { status: "Watching" } : {}) });
+    if (!this.closed) this.update({ controlling: false, controlPending: false, relativePointer: false, ...(this.state.connected ? { status: "Watching" } : {}) });
   }
   input(event: RemoteInput): void {
     if (!this.state.controlling || !this.generation || this.closed || this.suspended) return;
@@ -275,7 +327,9 @@ export class RemoteBrowserSession {
   }
   close(status = "Disconnected"): void {
     if (this.closed) return;
-    this.closed = true; this.detach();
+    this.closed = true;
+    clearTimeout(this.suspendTimer); this.suspendTimer = undefined;
+    this.detach();
     this.update({ status, connected: false, controlling: false, connecting: false });
   }
   private detach(): void {
@@ -293,12 +347,15 @@ export class RemoteBrowserSession {
     clearTimeout(this.watchdog); clearTimeout(this.connectingTimer); clearTimeout(this.retryTimer);
     clearTimeout(this.frameTimer); clearTimeout(this.frameDeadline); this.framePending = 0; this.frameQueued = 0;
     clearInterval(this.renewTimer); clearInterval(this.controlTimer);
+    clearTimeout(this.renewRetryTimer); clearTimeout(this.disconnectTimer);
+    this.renewRetryTimer = this.disconnectTimer = undefined; this.renewing = false;
     this.watchdog = this.connectingTimer = this.retryTimer = this.renewTimer = this.controlTimer = undefined;
     this.frameTimer = this.frameDeadline = undefined;
     if (this.socket) { this.socket.onclose = this.socket.onerror = this.socket.onmessage = null; this.socket.close(); }
     if (this.peer) { this.peer.onconnectionstatechange = this.peer.ontrack = this.peer.onicecandidate = this.peer.ondatachannel = null; this.peer.close(); }
     this.socket = undefined; this.peer = undefined; this.reliable = undefined; this.motion = undefined;
     this.video.srcObject = null;
+    this.update({ audioAvailable: false, controlPending: false, relativePointer: false });
     if (this.canvas) { this.canvas.width = 0; this.canvas.height = 0; }
   }
   private fail(error: unknown): void {
@@ -317,6 +374,22 @@ export class RemoteBrowserSession {
       if (performance.now() >= this.recoveryDeadline!) this.update({ status, connecting: false });
       else void this.start(true);
     }, delay);
+  }
+  private async renew(id: string, epoch: number, signal: AbortSignal): Promise<void> {
+    if (!this.current(epoch) || this.renewing) return;
+    clearTimeout(this.renewRetryTimer); this.renewRetryTimer = undefined;
+    this.renewing = true;
+    try {
+      await request("/renew", "POST", { connection_id: id }, signal);
+      if (this.current(epoch) && this.socket?.readyState === WebSocket.OPEN) this.socket.send('{"type":"ping"}');
+    } catch (error) {
+      if (!this.current(epoch)) return;
+      const transient = !(error instanceof RemoteError) || error.status === 408 || error.status === 429 || (error.status ?? 0) >= 500;
+      if (!transient) { this.fail(error); return; }
+      // A failed HTTP request does not invalidate a still-current socket lease.
+      // Retry within the original watchdog; only authenticated renewal extends it.
+      this.renewRetryTimer = setTimeout(() => { void this.renew(id, epoch, signal); }, 500);
+    } finally { if (this.current(epoch)) this.renewing = false; }
   }
   private authorized(epoch: number): void {
     clearTimeout(this.watchdog);
@@ -398,8 +471,9 @@ export class RemoteBrowserSession {
         this.send({ type: "release", generation: value.generation }); return;
       }
       if (this.control !== "acquiring") throw new RemoteError("Invalid remote control response.", true);
+      if (value.relativePointer !== undefined && typeof value.relativePointer !== "boolean") throw new RemoteError("Invalid remote control response.", true);
       this.control = { kind: "held", generation: value.generation }; this.sequence = 0;
-      this.update({ controlling: true, status: "You’re controlling" });
+      this.update({ controlling: true, controlPending: false, relativePointer: value.relativePointer === true, status: "You’re controlling" });
       clearInterval(this.controlTimer);
       this.controlTimer = setInterval(() => { if (this.current(epoch)) this.send({ type: "renew", generation: this.generation }); }, 3000);
     } else if (value.type === "revoked") {
@@ -408,17 +482,18 @@ export class RemoteBrowserSession {
         const released = this.control.kind === "releasing";
         this.control = "idle";
         clearInterval(this.controlTimer); this.controlTimer = undefined;
-        this.update({ controlling: false, status: "Watching" });
+        this.update({ controlling: false, controlPending: false, relativePointer: false, status: "Watching" });
         if (released) { this.acquireControl(); return; }
       } else if (this.control === "acquiring") this.control = "cancelled-acquire";
       // An unsolicited revocation cancels intent, including an in-flight grant.
       this.controlRequested = false;
+      this.update({ controlling: false, controlPending: false, relativePointer: false });
     } else if (value.type === "denied") {
       const cancelled = this.control === "cancelled-acquire";
       if (!cancelled && this.control !== "acquiring") throw new RemoteError("Invalid remote control response.", true);
       this.control = "idle";
       if (cancelled) this.acquireControl();
-      else { this.controlRequested = false; this.update({ status: "Another viewer is controlling this screen." }); }
+      else { this.controlRequested = false; this.update({ controlPending: false, relativePointer: false, status: "Another viewer is controlling this screen." }); }
     }
     else throw new RemoteError("Invalid remote control response.", true);
   }

@@ -56,12 +56,13 @@ url.workspace = true
 uuid.workspace = true
 whoami.workspace = true
 webrtc.workspace = true
+opusic-c.workspace = true
 
 [target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
 fs2.workspace = true
 nanocodex-vm.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 nanocodex-hand = { version = "0.6.1", path = "../../../crates/nanocodex-hand" }
 
 [target.'cfg(target_os = "linux")'.dependencies]

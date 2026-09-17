@@ -9,11 +9,20 @@ param(
 
     [switch]$SkipLogin,
 
-    [switch]$NoStart
+    [switch]$NoStart,
+
+    [switch]$Service
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($Service -or ($Action -ne "Plan" -and $null -ne (Get-Service -Name "NanocodexHand" -ErrorAction SilentlyContinue))) {
+    $parameters = @{} + $PSBoundParameters
+    [void]$parameters.Remove("Service")
+    & (Join-Path $PSScriptRoot "setup-service.ps1") @parameters
+    exit $LASTEXITCODE
+}
 
 $taskName = "Nanocodex Hand"
 $dataDir = Join-Path $env:LOCALAPPDATA "Nanocodex\Hand"

@@ -6027,6 +6027,8 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "windows 0.62.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6314,6 +6316,7 @@ dependencies = [
  "nanocodex-tools",
  "nanocodex-vm",
  "nix 0.31.3",
+ "opusic-c",
  "percent-encoding",
  "png 0.18.1",
  "portable-pty",

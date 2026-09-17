@@ -36,7 +36,15 @@ impl ScreenPublisher {
         machine: &AttachmentMachine,
         backend: ScreenBackend,
         video: Option<VideoSource>,
+        audio: Option<VideoSource>,
     ) -> Result<Self, ManagedError> {
+        // Explicit deployment fallback for networks where ICE cannot connect
+        // (for example, nested NAT without an authenticated TURN relay).
+        let video = if std::env::var("NANOCODEX_SCREEN_TRANSPORT").as_deref() == Ok("frames-v1") {
+            None
+        } else {
+            video
+        };
         endpoint(target)?;
         let started = Instant::now();
         let first =
@@ -64,7 +72,7 @@ impl ScreenPublisher {
                 let result = tokio::select! {
                     _ = &mut stopped => break,
                     changed = targets.changed() => { if changed.is_err() { break; } continue; },
-                    result = session(&target, &machine, &backend, video.as_ref(), dimensions, &mut ready) => result,
+                    result = session(&target, &machine, &backend, video.as_ref(), audio.as_ref(), dimensions, &mut ready) => result,
                 };
                 let _ = tokio::time::timeout(
                     Duration::from_secs(3),
@@ -231,6 +239,13 @@ struct Lease {
     motion: u64,
     discrete: u64,
 }
+fn control_grant(generation: &str) -> Value {
+    let mut grant = json!({"type":"granted", "generation":generation});
+    if cfg!(target_os = "windows") {
+        grant["relativePointer"] = json!(true);
+    }
+    grant
+}
 impl Lease {
     fn expired(&self) -> bool {
         self.deadline
@@ -294,6 +309,7 @@ async fn session(
     machine: &AttachmentMachine,
     backend: &ScreenBackend,
     video: Option<&VideoSource>,
+    audio: Option<&VideoSource>,
     dimensions: (u64, u64),
     ready: &mut Option<oneshot::Sender<()>>,
 ) -> Result<(), SessionError> {
@@ -341,7 +357,7 @@ async fn session(
     .map_err(|_| SessionError::Closed)?;
     tracing::info!(target: "nanocodex2", stage = "screen.socket.connected", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
     let video = match video {
-        Some(source) => match Video::start(source).await {
+        Some(source) => match Video::start(source, audio).await {
             Ok(video) => Some(video),
             Err(_) => {
                 tracing::warn!("Continuous screen encoder unavailable; using screenshot fallback");
@@ -486,7 +502,7 @@ async fn session(
                                     if job.take().is_some(){send(&mut socket,json!({"type":"agent_result","request_id":std::mem::take(&mut request_id),"status":"cancelled"})).await?;}
                                     release(&mut lease,backend,&mut socket).await?;
                                 }
-                                if lease.owner.is_empty(){release(&mut lease,backend,&mut socket).await?;lease.acquire(viewer);send(&mut socket,json!({"type":"control","viewer_id":viewer,"data":{"type":"granted","generation":lease.generation}})).await?;}
+                                if lease.owner.is_empty(){release(&mut lease,backend,&mut socket).await?;lease.acquire(viewer);send(&mut socket,json!({"type":"control","viewer_id":viewer,"data":control_grant(&lease.generation)})).await?;}
                                 else{send(&mut socket,json!({"type":"control","viewer_id":viewer,"data":{"type":"denied"}})).await?;}
                             },
                             "renew" if lease.valid(viewer,data["generation"].as_str().unwrap_or(""))=>lease.deadline=Some(Instant::now()+Duration::from_secs(10)),
@@ -648,6 +664,15 @@ fn steps(action: &Value) -> Result<Vec<(Duration, Value)>, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn relative_pointer_is_advertised_only_by_supported_native_hosts() {
+        let grant = control_grant("lease-generation");
+        assert_eq!(grant["generation"], "lease-generation");
+        assert_eq!(
+            grant["relativePointer"].as_bool(),
+            cfg!(target_os = "windows").then_some(true)
+        );
+    }
     #[tokio::test]
     async fn frame_window_streams_only_credited_frames_and_stops_on_disconnect() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -722,7 +747,7 @@ mod tests {
             );
             socket.close(None).await.unwrap();
         });
-        let publisher = ScreenPublisher::start(&target, &machine, backend, None)
+        let publisher = ScreenPublisher::start(&target, &machine, backend, None, None)
             .await
             .unwrap();
         peer.await.unwrap();

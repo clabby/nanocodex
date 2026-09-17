@@ -20,6 +20,8 @@ if ($plan.arguments -notlike "*-Workspace*$workspace*") { throw "Task lost the s
 if ($plan.accountFile -notlike "*Nanocodex*Hand*account.json") { throw "Account state is not isolated to the Hand" }
 
 try {
+    & (Join-Path $PSScriptRoot "run-hand.ps1") -InstallDir $InstallDir -Workspace $workspace -DataDir $plan.dataDir -Validate | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Installed runner arguments do not match the bundled Hand CLI" }
     & $script `
         -Action Install `
         -InstallDir $InstallDir `

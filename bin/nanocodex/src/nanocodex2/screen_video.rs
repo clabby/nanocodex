@@ -1,5 +1,5 @@
 //! Continuous 60 Hz H.264 capture, independent of agent screenshots and input.
-//! Encoders emit Annex B with access-unit delimiters. Only signaling crosses the
+//! Encoders expose packet boundaries; legacy Annex B remains supported. Only signaling crosses the
 //! account broker; media and leased input use authenticated WebRTC peers.
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
@@ -47,6 +47,73 @@ impl Drop for Task {
     }
 }
 impl Capture {
+    /// Native FFmpeg capture reports packet lengths before writing H.264 bytes.
+    /// Rebuild only the known capture command, preserving its environment/cwd.
+    pub(crate) fn ffmpeg(command: std::process::Command) -> Result<Self> {
+        let legacy = std::env::var("NANOCODEX_SCREEN_FRAME_BOUNDARIES").as_deref() == Ok("annexb");
+        if legacy {
+            return Self::child(
+                tokio::process::Command::from(command)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()?,
+            );
+        }
+        let args: Vec<_> = command.get_args().collect();
+        if args.len() < 3 || args[args.len() - 3..] != ["-f", "h264", "pipe:1"] {
+            return Err("unsupported native FFmpeg output".into());
+        }
+        let mut framed = tokio::process::Command::new(command.get_program());
+        if let Some(directory) = command.get_current_dir() {
+            framed.current_dir(directory);
+        }
+        for (key, value) in command.get_envs() {
+            if let Some(value) = value {
+                framed.env(key, value);
+            } else {
+                framed.env_remove(key);
+            }
+        }
+        // The pipe is reserved for frame metadata. FFmpeg errors surface as
+        // capture EOF; never mix diagnostics with trusted packet boundaries.
+        framed
+            .args(["-probesize", "32", "-analyzeduration", "0"])
+            .args(&args[..args.len() - 3])
+            .args([
+                "-loglevel",
+                "quiet",
+                "-map",
+                "0:v:0",
+                "-f",
+                "tee",
+                "[f=framecrc:flush_packets=1]pipe:2|[f=h264:flush_packets=1]pipe:1",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(target_os = "windows")]
+        framed.creation_flags(0x08000000); // CREATE_NO_WINDOW.
+        let mut child = framed.spawn()?;
+        let metadata = child.stderr.take().ok_or("encoder metadata unavailable")?;
+        let video = child.stdout.take().ok_or("encoder stdout unavailable")?;
+        let (writer, reader) = tokio::io::duplex(64 * 1024);
+        Ok(Self {
+            reader: Box::new(reader),
+            owner: Task(tokio::spawn(async move {
+                if let Err(error) =
+                    super::screen_video_frames::forward_encoded_frames(metadata, video, writer)
+                        .await
+                {
+                    tracing::warn!(%error, "encoded frame forwarding stopped");
+                    let _ = child.kill().await;
+                }
+                let _ = child.wait().await;
+            })),
+        })
+    }
     pub(crate) fn child(mut child: tokio::process::Child) -> Result<Self> {
         let reader = child.stdout.take().ok_or("encoder stdout unavailable")?;
         Ok(Self {
@@ -63,10 +130,54 @@ impl Capture {
 struct AccessUnits {
     bytes: Vec<u8>,
     scanned: usize,
+    framed: Option<bool>,
 }
 impl AccessUnits {
     fn push(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
         self.bytes.extend_from_slice(bytes);
+        if self.bytes.len() > 8 * 1024 * 1024 + 64 * 1024 {
+            return Err("H.264 access unit exceeds limit".into());
+        }
+        if self.framed.is_none() {
+            let magic = b"NCH264F1";
+            if self.bytes.len() < magic.len() && magic.starts_with(&self.bytes) {
+                return Ok(Vec::new());
+            }
+            self.framed = Some(self.bytes.starts_with(magic));
+            if self.framed == Some(true) {
+                self.bytes.drain(..magic.len());
+            }
+        }
+        if self.framed == Some(true) {
+            let mut units = Vec::new();
+            while self.bytes.len() >= 4 {
+                // A framed source may restart at a record boundary. Native
+                // capture has a fresh pipe per child; legacy VM sources can reuse it.
+                if self.bytes.starts_with(b"NCH2") {
+                    if self.bytes.len() < 8 {
+                        break;
+                    }
+                    if self.bytes.starts_with(b"NCH264F1") {
+                        self.bytes.drain(..8);
+                        continue;
+                    }
+                }
+                let size = u32::from_be_bytes(self.bytes[..4].try_into().unwrap()) as usize;
+                if size == 0 || size > 8 * 1024 * 1024 {
+                    return Err("invalid H.264 frame size".into());
+                }
+                if self.bytes.len() < size + 4 {
+                    break;
+                }
+                let frame = self.bytes[4..size + 4].to_vec();
+                if !frame.starts_with(&[0, 0, 1]) && !frame.starts_with(&[0, 0, 0, 1]) {
+                    return Err("invalid framed Annex B packet".into());
+                }
+                units.push(frame);
+                self.bytes.drain(..size + 4);
+            }
+            return Ok(units);
+        }
         if self.bytes.len() > 8 * 1024 * 1024 {
             return Err("H.264 access unit exceeds limit".into());
         }
@@ -119,7 +230,7 @@ impl Drop for Connection {
 struct Peer {
     connection: Connection,
     control: Arc<RTCDataChannel>,
-    _rtcp: Task,
+    _rtcp: Vec<Task>,
     candidates: Vec<RTCIceCandidateInit>,
     answered: bool,
     started: Instant,
@@ -132,6 +243,7 @@ struct Motion {
 }
 pub(crate) struct Video {
     track: Arc<TrackLocalStaticSample>,
+    audio: Option<super::screen_audio::Audio>,
     peers: HashMap<String, Peer>,
     events: mpsc::Sender<Event>,
     incoming: mpsc::Receiver<Event>,
@@ -140,14 +252,17 @@ pub(crate) struct Video {
     _capture: Task,
 }
 impl Video {
-    pub(crate) async fn start(source: &VideoSource) -> Result<Self> {
+    pub(crate) async fn start(
+        source: &VideoSource,
+        audio_source: Option<&VideoSource>,
+    ) -> Result<Self> {
         let mut capture = tokio::time::timeout(Duration::from_secs(8), source()).await??;
         let track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
                 mime_type: "video/H264".into(),
                 clock_rate: 90_000,
                 sdp_fmtp_line:
-                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e020".into(),
+                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e034".into(),
                 ..Default::default()
             },
             "desktop".into(),
@@ -199,8 +314,20 @@ impl Video {
             }
         }));
         tokio::time::timeout(Duration::from_secs(10), waiting).await??;
+        let audio = if let Some(source) = audio_source {
+            match super::screen_audio::Audio::start(source).await {
+                Ok(audio) => Some(audio),
+                Err(error) => {
+                    tracing::warn!(%error, "desktop audio unavailable");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Ok(Self {
             track,
+            audio,
             peers: HashMap::new(),
             events,
             incoming,
@@ -283,6 +410,18 @@ impl Video {
                 webrtc::ice::udp_network::EphemeralUDP::new(min, max)?,
             ));
         }
+        if let Ok(address) = std::env::var("NANOCODEX_VIDEO_ADVERTISE_IP") {
+            // A VM/container can bind its private interface while advertising
+            // an administrator-configured, port-preserving NAT address.
+            let address: std::net::IpAddr = address.parse()?;
+            if address.is_unspecified() || address.is_multicast() {
+                return Err("video advertised address must be unicast".into());
+            }
+            settings.set_nat_1to1_ips(
+                vec![address.to_string()],
+                webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
+            );
+        }
         let api = APIBuilder::new()
             .with_setting_engine(settings)
             .with_media_engine(engine)
@@ -305,6 +444,13 @@ impl Video {
         let rtcp = Task(tokio::spawn(async move {
             while sender.read_rtcp().await.is_ok() {}
         }));
+        let mut rtcp = vec![rtcp];
+        if let Some(audio) = &self.audio {
+            let sender = connection.add_track(audio.track.clone()).await?;
+            rtcp.push(Task(tokio::spawn(async move {
+                while sender.read_rtcp().await.is_ok() {}
+            })));
+        }
         let control = connection
             .create_data_channel("remote-control-v1", None)
             .await?;
@@ -524,6 +670,31 @@ mod tests {
                 .push(&vec![0; 8 * 1024 * 1024 + 1])
                 .is_err()
         );
+    }
+    #[test]
+    fn framed_packet_arrives_without_following_frame() {
+        let frame = [0, 0, 0, 1, 9, 16, 0, 0, 1, 5, 42];
+        let mut input = b"NCH264F1".to_vec();
+        input.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+        input.extend_from_slice(&frame);
+        for split in 0..=input.len() {
+            let mut parser = AccessUnits::default();
+            let mut frames = parser.push(&input[..split]).unwrap();
+            frames.extend(parser.push(&input[split..]).unwrap());
+            assert_eq!(frames, vec![frame.to_vec()]);
+        }
+        let repeated = [input.clone(), input].concat();
+        for split in 0..=repeated.len() {
+            let mut parser = AccessUnits::default();
+            let mut frames = parser.push(&repeated[..split]).unwrap();
+            frames.extend(parser.push(&repeated[split..]).unwrap());
+            assert_eq!(frames, vec![frame.to_vec(), frame.to_vec()]);
+        }
+        for size in [0u32, 8 * 1024 * 1024 + 1] {
+            let mut input = b"NCH264F1".to_vec();
+            input.extend_from_slice(&size.to_be_bytes());
+            assert!(AccessUnits::default().push(&input).is_err());
+        }
     }
     #[test]
     fn candidate_matches_strict_broker_contract() {

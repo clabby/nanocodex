@@ -17,7 +17,7 @@ reuse, decoded WAN frames, and request-ID-correlated account proxy spans.
 | Component | Before | After | What the evidence supports |
 | --- | ---: | ---: | --- |
 | Linux spare replenishment | 10.3–10.9 s | 0.87–1.04 s | Cached immutable base plus private overlay; first base copy is still 7.2 s |
-| Native Hand call median | 407 ms | 446 ms | Two fewer SELECTs; no demonstrated end-to-end speedup |
+| Native Hand call median | 407 ms | 446 ms | Two fewer SELECT queries; no demonstrated end-to-end speedup |
 | Warm VM WebSocket connection | 1,305–1,368 ms | 979–983 ms | Repeated catalog discovery removed from attachment |
 | Fresh-agent mount of a prepared VM, median | 3,178 ms | 1,832 ms | Three samples each; removes a traced 1.3–1.7 s empty-pool lookup; first after sample remained 2,937 ms |
 | Screen authentication | 189–196 ms live | No observed I/O wait with snapshot | Reuses credential-bound, 120-second authority; live renewal remains |

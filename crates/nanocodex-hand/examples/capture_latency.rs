@@ -1,9 +1,9 @@
 //! Observe the local display without saving or emitting image contents.
 //! Requires the invoking application's existing OS screen-recording permission.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::time::Instant;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .json()
@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn main() {
-    eprintln!("This capture probe requires macOS.");
+    eprintln!("This capture probe requires macOS or Windows.");
 }

@@ -16,10 +16,11 @@ AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL=https://github.com/gakonst/nanocodex
 AppSupportURL=https://github.com/gakonst/nanocodex/issues
-DefaultDirName={localappdata}\Programs\Nanocodex Hand
+DefaultDirName={autopf}\Nanocodex Hand
+UsePreviousAppDir=no
 DefaultGroupName=Nanocodex Hand
 DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 Compression=lzma2/ultra64
@@ -42,25 +43,40 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "payload\nanocodex2.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "payload\nanocodex-computer.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "payload\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "payload\ffmpeg-*.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "run-hand.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "setup-hand.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "setup-service.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "hand-service.cs"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Start or repair Nanocodex Hand"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Repair -InstallDir ""{app}"""; WorkingDir: "{app}"
-Name: "{group}\Stop Nanocodex Hand"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Stop -InstallDir ""{app}"""; WorkingDir: "{app}"
+Name: "{group}\Start or repair Nanocodex Hand"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Repair -Service -InstallDir ""{app}"""; WorkingDir: "{app}"
+Name: "{group}\Stop Nanocodex Hand"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Stop -Service -InstallDir ""{app}"""; WorkingDir: "{app}"
 Name: "{group}\Nanocodex Hand logs"; Filename: "{localappdata}\Nanocodex\Hand"
 Name: "{group}\Uninstall Nanocodex Hand"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Install -InstallDir ""{app}"""; Description: "Sign in and connect this computer now"; Flags: postinstall waituntilterminated skipifsilent
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Repair -InstallDir ""{app}"" -Service -SkipLogin"; Flags: runhidden waituntilterminated runascurrentuser; Check: HasConfiguredHand
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Install -InstallDir ""{app}"" -Service"; Description: "Sign in and connect this computer now"; Flags: postinstall waituntilterminated skipifsilent runasoriginaluser
 
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Uninstall -InstallDir ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveNanocodexHandTask"
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\setup-hand.ps1"" -Action Uninstall -Service -InstallDir ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveNanocodexHandTask"
+
+[UninstallDelete]
+Type: files; Name: "{app}\nanocodex-hand-service.exe"
+Type: files; Name: "{app}\service.log"
+Type: files; Name: "{app}\service.log.1"
 
 [Messages]
-WelcomeLabel2=This installs a personal Nanocodex Hand for the current Windows user.%n%nAfter installation, sign in with a phone number and the six-digit SMS code. The Hand then starts automatically whenever this user signs in and can control this user's apps and files through the connected Nanocodex account.
+WelcomeLabel2=This installs Nanocodex Hand and its background Windows service.%n%nAfter installation, sign in with a phone number and the six-digit SMS code. The service starts at boot and keeps the Hand running whenever this Windows user is signed in. The connected Nanocodex account can control this user's apps and files. Desktop control requires a signed-in Windows session.
 
 [Code]
+function HasConfiguredHand: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\hand-service.xml'));
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
@@ -72,7 +88,7 @@ begin
   if FileExists(SetupScript) then
   begin
     Arguments := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
-      SetupScript + '" -Action Stop -InstallDir "' + ExpandConstant('{app}') + '"';
+      SetupScript + '" -Action Stop -Service -InstallDir "' + ExpandConstant('{app}') + '"';
     if (not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
       Arguments, '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or
       (ResultCode <> 0) then

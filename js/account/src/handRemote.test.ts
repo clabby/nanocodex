@@ -7,6 +7,43 @@ const screen: RemoteHand = {
   machine_id: "server:018f0000-0000-7000-8000-000000000001", machine_name: "Linux server", generation: "first",
 };
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+
+test("relative control is negotiated per lease and deltas use reliable ordering", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.session.takeControl();
+  assert.equal(f.session.state.controlPending, true);
+  f.peers[0]!.reliable.message({ type: "granted", generation: "relative", relativePointer: true });
+  assert.equal(f.session.state.relativePointer, true);
+  assert.equal(f.session.state.controlPending, false);
+  f.session.input({ kind: "relativeMove", deltaX: 12.5, deltaY: -2 });
+  f.session.input({ kind: "button", button: 0, down: true });
+  assert.deepEqual(f.peers[0]!.reliable.sent.slice(-2), [
+    { kind: "relativeMove", deltaX: 12.5, deltaY: -2, sequence: 1, generation: "relative" },
+    { kind: "button", button: 0, down: true, sequence: 2, generation: "relative" },
+  ]);
+  assert.equal(f.peers[0]!.motion.sent.length, 0, "relative deltas must not be dropped or reordered as absolute motion");
+  f.session.releaseControl();
+  assert.equal(f.session.state.relativePointer, false);
+});
+
+test("legacy grants and rejected control never leave mouse capture pending", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.session.takeControl(); f.peers[0]!.reliable.message({ type: "denied" });
+  assert.equal(f.session.state.controlPending, false);
+  f.session.takeControl(); f.peers[0]!.reliable.message({ type: "granted", generation: "legacy" });
+  assert.equal(f.session.state.relativePointer, false);
+  assert.equal(f.session.state.controlPending, false);
+});
+
+test("malformed relative capability tears down capture intent", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.session.takeControl(); f.peers[0]!.reliable.message({ type: "granted", generation: "bad", relativePointer: "yes" });
+  assert.equal(f.session.state.connected, false);
+  assert.equal(f.session.state.controlPending, false);
+});
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; });
@@ -63,7 +100,13 @@ function fixture(t: TestContext, hand: RemoteHand = screen) {
   const canvas = { width: 0, height: 0, getContext: () => ({ drawImage(bitmap: Bitmap) { drawn.push(bitmap); } }) };
   const globals = {
     location: new URL("https://account.example"), RTCPeerConnection: Peer, WebSocket: Socket,
-    MediaStream: class { constructor(publicTracks: unknown[]) { void publicTracks; } },
+    MediaStream: class {
+      tracks: any[] = [];
+      getTracks() { return this.tracks; }
+      getAudioTracks() { return this.tracks.filter(track => track.kind === "audio"); }
+      addTrack(track: any) { this.tracks.push(track); }
+      removeTrack(track: any) { this.tracks = this.tracks.filter(value => value !== track); }
+    },
     createImageBitmap: (source: Blob) => { decoded.push(source); return decode(source); },
   };
   for (const [name, value] of Object.entries(globals)) {
@@ -78,7 +121,7 @@ function fixture(t: TestContext, hand: RemoteHand = screen) {
     if (path.endsWith("/ice")) return iceResponse();
     return Response.json({ iceServers: [] });
   });
-  const video = { srcObject: null as unknown, play: async () => {} };
+  const video = { muted: true, srcObject: null as unknown, play: async () => {} };
   const session = new RemoteBrowserSession(hand, video as HTMLVideoElement, () => {}, canvas as unknown as HTMLCanvasElement);
   t.after(() => session.close());
   return {
@@ -509,4 +552,121 @@ test("windowed frames reject an unsolicited seventh image while decoding is bloc
   assert.equal(f.session.state.connected, false);
   assert.equal(f.session.state.connecting, false);
   assert.match(f.session.state.status, /Invalid remote signal/);
+});
+
+test("a brief background switch releases control and resumes the existing connection", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.session.takeControl(); f.peers[0]!.reliable.message({ type: "granted", generation: "lease" });
+  f.session.suspend(15_000);
+  assert.equal(f.session.state.controlling, false);
+  assert.equal(f.peers[0]!.reliable.sent.at(-1).type, "release");
+  await f.tick(500); f.session.resume(); await f.tick(15_000);
+  assert.equal(f.session.state.connected, true);
+  assert.equal(f.peers.length, 1);
+  assert.equal(f.sockets.length, 1);
+});
+
+test("long background pauses still detach and resume with a fresh authorized publication", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.session.suspend(15_000); await f.tick(15_000);
+  assert.equal(f.session.state.status, "Paused");
+  assert.equal(f.sockets[0]!.readyState, 3);
+  f.session.resume(); await flush();
+  assert.equal(f.sockets.length, 2);
+  assert.equal(f.catalogReads, 1);
+});
+
+test("temporary WebRTC disconnects recover without replacing the peer or granting input", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  const peer = f.peers[0]!;
+  peer.connectionState = "disconnected"; peer.onconnectionstatechange!();
+  f.session.takeControl(); assert.equal(peer.reliable.sent.length, 0);
+  await f.tick(2000);
+  peer.connectionState = "connected"; peer.onconnectionstatechange!();
+  await f.tick(2000);
+  assert.equal(f.session.state.connected, true);
+  assert.equal(f.peers.length, 1);
+  assert.equal(f.sockets.length, 1);
+});
+
+test("a sustained WebRTC disconnect still replaces the peer after a bounded grace", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.peers[0]!.connectionState = "disconnected"; f.peers[0]!.onconnectionstatechange!();
+  await f.tick(3000);
+  assert.equal(f.peers[0]!.connectionState, "closed");
+  await f.tick(1000);
+  assert.equal(f.peers.length, 2);
+});
+
+test("a transient renewal failure retries inside the original lease without disconnecting", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.sockets[0]!.message({ type: "ready", connection_id: "viewer" }); await flush();
+  f.setStatus(503); await f.tick(10_000);
+  assert.equal(f.session.state.connected, true);
+  f.setStatus(200); await f.tick(500);
+  assert.equal(f.requests.filter(r => r.path.endsWith("/renew")).length, 2);
+  f.sockets[0]!.message({ type: "renewed" }); await flush();
+  await f.tick(15_000);
+  assert.equal(f.session.state.connected, true);
+  assert.equal(f.sockets.length, 1);
+});
+
+test("renewal retries never extend authorization without a fresh authenticated renewal", async t => {
+  const f = fixture(t);
+  await f.session.connect(); f.peers[0]!.open();
+  f.sockets[0]!.message({ type: "ready", connection_id: "viewer" }); await flush();
+  f.setStatus(503); await f.tick(10_000); await f.tick(500); await f.tick(14_500);
+  assert.equal(f.session.state.connected, false);
+  assert.equal(f.session.state.connecting, false);
+  assert.equal(f.session.state.status, "This remote session is no longer authorized.");
+});
+
+for (const status of [401, 403, 409]) {
+  test(`renewal HTTP ${status} fails immediately instead of retrying a missing or revoked lease`, async t => {
+    const f = fixture(t);
+    await f.session.connect(); f.peers[0]!.open();
+    f.sockets[0]!.message({ type: "ready", connection_id: "viewer" }); await flush();
+    f.setStatus(status); await f.tick(10_000);
+    assert.equal(f.sockets[0]!.readyState, 3);
+    assert.equal(f.session.state.connected, false);
+  });
+}
+
+
+test("audio and video tracks share a stream in either arrival order", async t => {
+  const f = fixture(t); await f.session.connect(); f.peers[0]!.open();
+  const audio = { kind: "audio", stop() {} }, video = { kind: "video", stop() {} };
+  f.peers[0]!.ontrack!({ track: audio });
+  const stream = f.video.srcObject as MediaStream;
+  f.peers[0]!.ontrack!({ track: video });
+  assert.equal(f.video.srcObject, stream);
+  assert.equal(stream.getTracks().length, 2);
+  assert.equal(f.session.state.audioAvailable, true);
+  await f.session.setAudioEnabled(true);
+  assert.equal(f.video.muted, false);
+  assert.equal(f.session.state.audioEnabled, true);
+  await f.session.setAudioEnabled(false);
+  assert.equal(f.video.muted, true);
+  f.video.srcObject = null;
+  f.peers[0]!.ontrack!({ track: video });
+  f.peers[0]!.ontrack!({ track: audio });
+  assert.equal((f.video.srcObject as MediaStream).getTracks().length, 2);
+  f.session.close(); assert.equal(f.session.state.audioAvailable, false);
+});
+
+test("blocked sound falls back to muted video without reconnecting", async t => {
+  const f = fixture(t); await f.session.connect(); f.peers[0]!.open();
+  let attempts = 0;
+  f.video.play = async () => { attempts++; if (!f.video.muted) throw new Error("autoplay blocked"); };
+  await f.session.setAudioEnabled(true);
+  assert.equal(attempts, 2);
+  assert.equal(f.video.muted, true);
+  assert.equal(f.session.state.audioEnabled, false);
+  assert.equal(f.session.state.connected, true);
+  assert.equal(f.sockets.length, 1);
 });

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -67,9 +71,12 @@ func runScreenEncoder() error {
 	} else {
 		fmt.Fprintln(os.Stderr, "Screen encoder: software H.264")
 	}
-	command := exec.Command(ffmpeg, args...)
-	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return command.Run()
+	if os.Getenv("NANOCODEX_SCREEN_FRAME_BOUNDARIES") == "annexb" {
+		command := exec.Command(ffmpeg, args...)
+		command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+		return command.Run()
+	}
+	return runFramedScreenEncoder(ffmpeg, args, os.Stdin, os.Stdout)
 }
 
 func screenEncoderArgs(original []string, hardware bool) ([]string, error) {
@@ -126,4 +133,111 @@ func trimK(value string) string {
 		return value[:len(value)-1]
 	}
 	return ""
+}
+
+// The tee's first slave reports each encoded packet length before the second
+// slave writes its bytes. Both flush every packet, so forwarding never waits
+// for the next capture. Unlike pipe-read boundaries, these are real access-unit
+// boundaries supplied by the encoder. Keep FFmpeg diagnostics on stderr.
+func runFramedScreenEncoder(ffmpeg string, args []string, input io.Reader, output io.Writer) error {
+	metadata, metadataWriter, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer metadata.Close()
+	defer metadataWriter.Close()
+	// Raw capture metadata is fully specified; avoid probing additional frames.
+	args = append([]string{"-probesize", "32", "-analyzeduration", "0"}, args...)
+	for i := len(args) - 2; i > 0; i-- {
+		if args[i-1] == "-f" && args[i] == "h264" {
+			args[i] = "tee"
+			break
+		}
+	}
+	args = append(args[:len(args)-1], "-map", "0:v:0", "[f=framecrc:flush_packets=1]pipe:3|[f=h264:flush_packets=1]pipe:1")
+	command := exec.Command(ffmpeg, args...)
+	command.Stdin, command.Stderr = input, os.Stderr
+	command.ExtraFiles = []*os.File{metadataWriter}
+	video, err := command.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err = command.Start(); err != nil {
+		return err
+	}
+	metadataWriter.Close()
+	err = forwardEncodedFrames(metadata, video, output)
+	if err != nil {
+		_ = command.Process.Kill()
+	}
+	waitErr := command.Wait()
+	if err != nil {
+		return err
+	}
+	return waitErr
+}
+
+func forwardEncodedFrames(metadata io.Reader, video io.Reader, output io.Writer) error {
+	if _, err := io.WriteString(output, chunkedH264Magic); err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(metadata)
+	scanner.Buffer(make([]byte, 1024), 16*1024)
+	var frame []byte
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ",")
+		if len(fields) < 6 || strings.TrimSpace(fields[0]) != "0" {
+			return fmt.Errorf("invalid encoder frame metadata")
+		}
+		size, err := strconv.Atoi(strings.TrimSpace(fields[4]))
+		if err != nil || size < 1 || size > maxH264Frame {
+			return fmt.Errorf("invalid encoder frame size")
+		}
+		if cap(frame) < size {
+			frame = make([]byte, size)
+		} else {
+			frame = frame[:size]
+		}
+		if _, err := io.ReadFull(video, frame); err != nil {
+			return err
+		}
+		if err := writeEncodedFrame(output, frame); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+// One Write contains an entire record. Linux guarantees pipe writes <=4096
+// bytes are atomic, including when Waymote kills a blocked encoder. Other Unix
+// platforms use POSIX's conservative 512-byte lower bound. A replacement child
+// can therefore reset a partial frame at the next record boundary safely.
+func writeEncodedFrame(output io.Writer, frame []byte) error {
+	payloadLimit := 512 - 4
+	if runtime.GOOS == "linux" {
+		payloadLimit = maxH264ChunkPayload
+	}
+	var record [maxH264ChunkPayload + 4]byte
+	for len(frame) > 0 {
+		size := min(len(frame), payloadLimit)
+		value := uint32(size)
+		if size == len(frame) {
+			value |= h264FinalChunk
+		}
+		binary.BigEndian.PutUint32(record[:4], value)
+		copy(record[4:], frame[:size])
+		n, err := output.Write(record[:size+4])
+		if err != nil {
+			return err
+		}
+		if n != size+4 {
+			return io.ErrShortWrite
+		}
+		frame = frame[size:]
+	}
+	return nil
 }
