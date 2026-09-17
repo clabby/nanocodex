@@ -6135,7 +6135,7 @@ export class DurableAgentSession extends DurableComputerSession {
       }
     } catch (error) {
       if (this.#managedTurn(id)?.state === "cancelling") {
-        this.#commitManagedResolution(id, classifyTurnFailure(id, error));
+        this.#commitManagedResolution(id, classifyTurnFailure(id, error), "control");
       }
       throw error;
     }
@@ -8630,6 +8630,7 @@ export class DurableAgentSession extends DurableComputerSession {
   #commitManagedResolution(
     id: string,
     resolution: TurnResolution,
+    source: "admission" | "control" = "admission",
   ): ManagedTurnRow {
     if (resolution.kind === "retry" && resolution.blockedBy !== undefined) {
       this.#reconcilePendingOperation(resolution.blockedBy);
@@ -8639,6 +8640,7 @@ export class DurableAgentSession extends DurableComputerSession {
       id,
       row?.state === "cancelling",
       resolution,
+      source,
     ));
   }
 

@@ -104,8 +104,70 @@ describe("managed durable turn admission", () => {
     });
   });
 
-  for (const prior of ["failed", "completed", "cancelled", "missing-dispatch"] as const) {
-    it(`reconciles a Rust pending identity against a ${prior} managed projection`, async () => {
+  it("stops cold cancellation retries after permanent restore failure", async () => {
+    const sessions = (env as unknown as {
+      NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
+    }).NANOCODEX_SESSIONS;
+    await runInDurableObject(sessions.getByName(crypto.randomUUID()), async (session, state) => {
+      const runtimeEnv = (session as unknown as { env: Record<string, unknown> }).env;
+      const message = "durability state at revision 353 is invalid: EOF while parsing a value at line 1 column 0";
+      let attempts = 0;
+      Object.defineProperty(session, "env", { value: {
+        ...runtimeEnv,
+        NANOCODEX_ACCOUNT_TOOLS: { getByName: () => {
+          attempts++;
+          throw Object.assign(new Error(message), { code: "failed" });
+        } },
+      } });
+      const now = Date.now();
+      state.storage.sql.exec(`INSERT INTO session_state (
+        singleton, session_id, owner_id, organization_id, team_id, authorization_epoch,
+        public_origin, runtime_profile, last_active
+      ) VALUES (1, ?, 'fixture-owner', 'fixture-organization', 'fixture-team', 1,
+        'https://nanocodex.example/', 'managed', ?)`, crypto.randomUUID(), now);
+      // Reproduce an old cancellation already trapped in the one-minute loop.
+      state.storage.sql.exec(`INSERT INTO managed_turns (
+        id, request_hash, input_json, authorization_json, state, accepted_cursor,
+        may_have_inner_operation, attempt_count, retry_at, created_at, accepted_at, updated_at
+      ) VALUES ('corrupt', 'hash', '"fixture"', '{"capabilities":[]}', 'cancelling',
+        0, 1, 10000, ?, ?, ?, ?)`, now - 1, now - 86400_000, now - 86400_000, now - 60_000);
+      const row = () => state.storage.sql.exec<{
+        state: string; retry_at: number | null; terminal_cursor: number | null;
+        terminal_json: string | null; attempt_count: number;
+      }>("SELECT state, retry_at, terminal_cursor, terminal_json, attempt_count FROM managed_turns WHERE id = 'corrupt'").one();
+      try {
+        await session.alarm();
+        const deadline = Date.now() + 3_000;
+        while (row().state === "cancelling" && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        const failed = row();
+        expect(failed).toMatchObject({ state: "failed", retry_at: null, attempt_count: 10000 });
+        expect(failed.terminal_cursor).not.toBeNull();
+        const receipt = await session.fetch(new Request("https://session.internal/turns/corrupt"));
+        expect(await receipt.json()).toMatchObject({
+          state: "failed", error: message, terminal: { type: "turn_failed", id: "corrupt", error: message },
+        });
+        const status = await session.fetch(new Request("https://session.internal/state"));
+        expect(await status.json()).toMatchObject({ active_turns: [] });
+        const attempted = attempts;
+        expect(attempted).toBeGreaterThan(0);
+        // Later alarms and repeated Stop must not restart or append failures.
+        await session.alarm();
+        await session.fetch(new Request("https://session.internal/turns/corrupt/cancel", { method: "POST" }));
+        await session.alarm();
+        expect(row()).toEqual(failed);
+        expect(attempts).toBe(attempted);
+      } finally {
+        state.storage.sql.exec("UPDATE managed_turns SET state = 'failed', retry_at = NULL WHERE id = 'corrupt'");
+        await state.storage.deleteAlarm();
+      }
+    });
+  });
+
+  for (const [prior, cancelling] of (["failed", "completed", "cancelled", "missing-dispatch"] as const)
+    .flatMap(prior => [false, true].map(cancelling => [prior, cancelling] as const))) {
+    it(`reconciles a Rust pending identity against a ${prior} managed projection while cancelling=${cancelling}`, async () => {
       const sessions = (env as unknown as {
         NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
       }).NANOCODEX_SESSIONS;
@@ -147,6 +209,9 @@ describe("managed durable turn admission", () => {
             JSON.stringify("original input"),
           );
         }
+        if (cancelling) {
+          expect((await session.fetch(new Request("https://session.internal/turns/later/cancel", { method: "POST" }))).status).toBe(202);
+        }
         const response = await session.fetch(new Request("https://session.internal/turns", {
           method: "POST", body: JSON.stringify({ id: "later", input: "follow on" }),
         }));
@@ -161,7 +226,7 @@ describe("managed durable turn admission", () => {
           id: string; state: string; terminal_json: string | null; terminal_cursor: number | null;
           retry_at: number | null;
         }>("SELECT id, state, terminal_json, terminal_cursor, retry_at FROM managed_turns ORDER BY created_at").toArray();
-        expect(rows[1]).toMatchObject({ id: "later", state: "accepted" });
+        expect(rows[1]).toMatchObject({ id: "later", state: cancelling ? "cancelling" : "accepted" });
         expect(rows[1]!.retry_at).not.toBeNull();
         expect(rows[0]).toMatchObject(prior === "missing-dispatch" ? {
           id: "older", state: "failed", terminal_json: "{}", terminal_cursor: 1,

@@ -18,6 +18,7 @@ export function managedControlTransitionForResolution(
   id: string,
   cancelling: boolean,
   resolution: TurnResolution,
+  source: "admission" | "control" = "control",
 ): ManagedTurnTransition {
   const error = resolution.kind === "retry"
     ? resolution.error
@@ -40,7 +41,10 @@ export function managedControlTransitionForResolution(
     };
   }
   const terminal = resolution.terminal;
-  if (cancelling && terminal.type !== "turn_cancelled") {
+  // A failed cancel request does not prove that live work has stopped. A
+  // terminal admission failure does: no turn can run, and retrying permanent
+  // restore failures only leaves the inbox stuck in cancellation forever.
+  if (source === "control" && cancelling && terminal.type !== "turn_cancelled") {
     return {
       type: "turn_cancelling",
       id,
