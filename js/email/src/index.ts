@@ -5,6 +5,7 @@ export interface Env {
   MAILBOX: DurableObjectNamespace<Mailbox>;
   MAILBOX_ADDRESS?: string;
   MAILBOX_OWNER_ID?: string;
+  MAILBOX_ADMIN_ID?: string;
   EMAIL_SEND_ENABLED?: string;
   EMAIL?: SendEmail;
 }
@@ -40,6 +41,7 @@ export function address(value: unknown): string {
 }
 function config(env: Env) {
   const owner = bounded(env.MAILBOX_OWNER_ID, 256);
+  if (!env.MAILBOX_ADMIN_ID || owner !== env.MAILBOX_ADMIN_ID) fail("mailbox_not_configured");
   return { owner, address: address(env.MAILBOX_ADDRESS) };
 }
 function identity(env: Env, input: Record<string, unknown>) {

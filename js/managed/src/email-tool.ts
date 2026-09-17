@@ -6,6 +6,7 @@ export interface EmailServiceBinding {
 export interface EmailConfig {
   NANOCODEX_EMAIL?: EmailServiceBinding;
   NANOCODEX_EMAIL_OWNER_ID?: string;
+  NANOCODEX_EMAIL_ADMIN_ID?: string;
 }
 interface Options {
   config: EmailConfig;
@@ -17,6 +18,8 @@ interface Options {
 
 function available(options: Options): boolean {
   return !options.multiplayer && !!options.config.NANOCODEX_EMAIL
+    && !!options.config.NANOCODEX_EMAIL_ADMIN_ID
+    && options.config.NANOCODEX_EMAIL_OWNER_ID === options.config.NANOCODEX_EMAIL_ADMIN_ID
     && !!options.owner && options.owner === options.config.NANOCODEX_EMAIL_OWNER_ID;
 }
 

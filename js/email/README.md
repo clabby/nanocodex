@@ -62,3 +62,13 @@ the fixed sender address. Replying requires an explicit recipient and stored
 message ID. `operation_id` belongs to the originating agent's send: switching
 agent identity while replaying it is a conflict. Transport interruptions never
 automatically retry writes.
+
+## Admin configuration
+
+The dedicated mailbox is enabled only for deployment-selected admin account
+`631f6a83-9e3f-474a-977a-68897d3ee436`. `NANOCODEX_EMAIL_ADMIN_ID` must match
+`NANOCODEX_EMAIL_OWNER_ID` in the managed Worker; `MAILBOX_ADMIN_ID` must match
+`MAILBOX_OWNER_ID` in the email Worker. Missing or mismatched settings disable
+access, including inbound routing. These are operator-controlled bindings,
+not model arguments or a self-service signup flow. This designates the channel
+admin and does not create a platform-wide administrator role.

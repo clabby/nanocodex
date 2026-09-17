@@ -273,15 +273,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         sideband.send(&frame).await?;
                         protocol.frames_sent(1);
                     }
-                    if let Some(delegation) = update.delegation {
-                        if !pending_delegations.contains(&delegation.id) {
-                            if pending_delegations.len() >= MAX_DELEGATIONS {
-                                return Err("too many pending delegations".into());
-                            }
-                            let event = delegation_event(&delegation.id, &delegation.input, &delegation.transcript)?;
-                            emit(event).await?;
-                            pending_delegations.insert(delegation.id);
+                    if let Some(delegation) = update.delegation
+                        && !pending_delegations.contains(&delegation.id) {
+                        if pending_delegations.len() >= MAX_DELEGATIONS {
+                            return Err("too many pending delegations".into());
                         }
+                        let event = delegation_event(&delegation.id, &delegation.input, &delegation.transcript)?;
+                        emit(event).await?;
+                        pending_delegations.insert(delegation.id);
                     }
                 }
             }
@@ -331,7 +330,7 @@ mod tests {
             .collect::<Vec<_>>();
         let event = delegation_event("d1", &"é".repeat(4_000), &transcript).unwrap();
         let bytes = serde_json::to_vec(&event).unwrap();
-        assert!(bytes.len() + 1 <= MAX_LINE);
+        assert!(bytes.len() < MAX_LINE);
         let decoded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded["id"], "d1");
         assert!(!decoded["transcript"].as_array().unwrap().is_empty());

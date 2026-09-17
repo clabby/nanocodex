@@ -5,7 +5,7 @@ const context = () => ({ callId: "call", parentCallId: "", sessionId: "session",
 function fixture() {
   const execute = vi.fn().mockResolvedValue({ status: "accepted" });
   const authorize = vi.fn();
-  const config: EmailConfig = { NANOCODEX_EMAIL_OWNER_ID: "owner", NANOCODEX_EMAIL: { execute } };
+  const config: EmailConfig = { NANOCODEX_EMAIL_OWNER_ID: "owner", NANOCODEX_EMAIL_ADMIN_ID: "owner", NANOCODEX_EMAIL: { execute } };
   const tool = emailTools({ config, owner: "owner", agentId: "agent", authorize })[0]!;
   return { execute, authorize, config, tool };
 }
@@ -53,4 +53,12 @@ it("never retries a write after an ambiguous RPC failure or leaks provider error
   f.execute.mockRejectedValue(new Error("private provider data"));
   await expect(f.tool.handler({ operation: "send" }, context())).rejects.toThrow("outcome may be unknown");
   expect(f.execute).toHaveBeenCalledOnce();
+});
+
+it.each([undefined, "", "other"])("requires the deployment email admin and rechecks revocation: %s", async admin => {
+  const f = fixture();
+  f.config.NANOCODEX_EMAIL_ADMIN_ID = admin;
+  expect(emailTools({config:f.config,owner:"owner",agentId:"agent",authorize(){}})).toEqual([]);
+  await expect(f.tool.handler({operation:"status"},context())).rejects.toThrow("unavailable");
+  expect(f.execute).not.toHaveBeenCalled();
 });

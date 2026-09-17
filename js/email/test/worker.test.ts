@@ -169,3 +169,13 @@ describe("mailbox Worker boundaries", () => {
   });
 
 });
+
+it.each([undefined, "", "other"])("rejects mailbox access and incoming routing without its deployment admin: %s", async admin => {
+  const configured = {...bindings, MAILBOX_ADMIN_ID: admin};
+  const service = new EmailService(createExecutionContext(), configured);
+  expect(await service.execute({...base,operation:"status"})).toEqual({status:"error",error:{code:"mailbox_not_configured"}});
+  const message = inbound("From: person@example.net\r\nTo: agent@example.com\r\n\r\nHello");
+  await worker.email(message as unknown as ForwardableEmailMessage, configured);
+  expect(message.setReject).toHaveBeenCalledWith("Mailbox unavailable");
+  expect(await (await worker.fetch(new Request("https://email/health"),configured)).json()).toEqual({ready:false,send_enabled:false});
+});
