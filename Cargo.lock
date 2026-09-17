@@ -6209,6 +6209,7 @@ dependencies = [
  "landlock",
  "libkrun",
  "nanocodex-computer",
+ "nanocodex-hand",
  "nanocodex-tools",
  "nix 0.31.3",
  "oci-client",
