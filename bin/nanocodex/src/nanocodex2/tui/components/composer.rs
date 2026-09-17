@@ -77,7 +77,7 @@ impl SettingsCommand {
             "/voice" => {
                 let argument = parts.next().unwrap_or_default();
                 Some(if parts.next().is_some() {
-                    Self::Invalid("Usage: /voice [start|stop|mute|unmute|status]".into())
+                    Self::Invalid("Usage: /voice [on|off|mute|unmute|status|voices|VOICE]".into())
                 } else {
                     match crate::voice::Command::parse(argument) {
                         Ok(command) => Self::Voice(command),

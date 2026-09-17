@@ -482,7 +482,15 @@ impl SettingsMutation {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingVoice {
+    pane: PaneId,
+    name: &'static str,
+    muted: bool,
+}
+
 struct DriverRuntime {
+    pending_voice: Option<PendingVoice>,
     voice: Option<crate::voice::Session>,
     client: ManagedClient,
     agent: Option<Nanocodex>,
@@ -618,6 +626,96 @@ fn history_replay_matches(
 }
 
 impl DriverRuntime {
+    fn voice_status(&self) -> Option<crate::voice_state::Status> {
+        self.voice
+            .as_ref()
+            .map(|voice| voice.status.borrow().clone())
+            .or_else(|| {
+                self.pending_voice
+                    .map(|pending| crate::voice_state::Status {
+                        text: "Voice connecting…".into(),
+                        muted: pending.muted,
+                        ..Default::default()
+                    })
+            })
+    }
+
+    fn take_ready_voice(&mut self) -> Option<PendingVoice> {
+        if self.agent_id.is_empty()
+            || !self.managed_events_open
+            || self.pending_resume.is_some()
+            || self.recovery.is_some()
+            || self.voice.is_some()
+        {
+            return None;
+        }
+        self.pending_voice.take()
+    }
+
+    fn voice_command(
+        &mut self,
+        pane: PaneId,
+        command: crate::voice::Command,
+    ) -> Result<Option<String>, String> {
+        use crate::voice::Command;
+        let command = match command {
+            Command::Toggle if self.voice.is_some() || self.pending_voice.is_some() => {
+                Command::Stop
+            }
+            Command::Toggle => Command::Start(None),
+            other => other,
+        };
+        match command {
+            Command::Start(Some(_)) if self.voice.is_some() => {
+                Err("Stop /voice before changing the voice.".into())
+            }
+            Command::Start(None) if self.voice.is_some() => Ok(None),
+            Command::Start(name) => {
+                let pending = self.pending_voice.get_or_insert(PendingVoice {
+                    pane,
+                    name: "cove",
+                    muted: false,
+                });
+                if let Some(name) = name {
+                    pending.name = name;
+                }
+                Ok(None)
+            }
+            Command::Stop => {
+                self.pending_voice = None;
+                if let Some(voice) = &self.voice {
+                    voice.stop();
+                }
+                Ok(None)
+            }
+            Command::ToggleMute | Command::Unmute => {
+                if let Some(voice) = &self.voice {
+                    voice.mute(command == Command::ToggleMute && !voice.is_muted());
+                } else if let Some(pending) = &mut self.pending_voice {
+                    pending.muted = command == Command::ToggleMute && !pending.muted;
+                } else {
+                    return Err("Start /voice before muting.".into());
+                }
+                Ok(None)
+            }
+            Command::List => Ok(Some(format!(
+                "Voices: {}. Use /voice NAME.",
+                nanocodex_voice_protocol::CHATGPT_REALTIME_VOICES.join(", ")
+            ))),
+            Command::Status => Ok(Some(self.voice_status().map_or_else(
+                || "Voice is off".into(),
+                |status| {
+                    if status.muted {
+                        format!("{} · microphone muted", status.text)
+                    } else {
+                        status.text
+                    }
+                },
+            ))),
+            Command::Toggle => unreachable!("toggle resolved above"),
+        }
+    }
+
     fn finish_resume(&mut self, task_id: tokio::task::Id) -> Option<PaneId> {
         let (task, _) = self.pending_resume.as_ref()?;
         if task.id() != task_id {
@@ -1032,6 +1130,7 @@ impl DriverRuntime {
 
     fn start_new_session(&mut self, settings: AgentSettings) {
         self.voice.take();
+        self.pending_voice = None;
         // Stop routing input and events to the previous agent before exposing
         // the new composer. Creation then uses the same pending-input path as launch.
         if let Some(previous) = self.agent.take() {
@@ -1358,6 +1457,7 @@ async fn run_inner(
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
     let mut runtime = DriverRuntime {
         client: client.clone(),
+        pending_voice: None,
         voice: None,
         agent: None,
         startup_attach: matches!(attach, Some(Some(_))),
@@ -1543,6 +1643,27 @@ async fn run_inner(
                 break;
             }
         }
+        if let Some(pending) = runtime.take_ready_voice() {
+            match crate::voice::Session::start(
+                runtime.client.clone(),
+                runtime.agent_id.clone(),
+                pending.name,
+                pending.muted,
+            ) {
+                Ok(voice) => runtime.voice = Some(voice),
+                Err(error) => request_render(
+                    app.update(AppEvent::NotifyError {
+                        pane: pending.pane,
+                        error: error.to_string(),
+                    }),
+                    &mut scheduler,
+                ),
+            }
+            request_render(
+                app.update(AppEvent::VoiceStatus(runtime.voice_status())),
+                &mut scheduler,
+            );
+        }
         if scheduler.is_due(Instant::now()) {
             terminal
                 .draw(|frame| app.render(frame))
@@ -1552,14 +1673,27 @@ async fn run_inner(
 
         let render_deadline = scheduler.deadline();
         let animation_deadline = app.animation_deadline();
+        let (mut voice_status, mut voice_transcripts) =
+            runtime.voice.as_mut().map_or((None, None), |voice| {
+                (Some(&mut voice.status), Some(&mut voice.transcripts))
+            });
         tokio::select! {
-            changed = async { runtime.voice.as_mut().unwrap().status.changed().await }, if runtime.voice.is_some() => {
-                let voice = runtime.voice.as_ref().unwrap();
-                let mut status = voice.status.borrow().clone();
-                if voice.is_muted() && !status.finished && !status.text.contains("muted") { status.text.push_str(" · microphone muted"); }
+            Some(transcript) = async { match &mut voice_transcripts { Some(receiver) => receiver.recv().await, None => pending().await } } => {
+                let record = runtime.local_record(LocalEvent::VoiceTranscript(transcript))?;
+                request_render(app.update(AppEvent::Transcript { pane: PaneId::Main, record }), &mut scheduler);
+            }
+            changed = async { match &mut voice_status { Some(receiver) => receiver.changed().await, None => pending().await } } => {
+                let voice = runtime.voice.as_mut().unwrap();
+                let status = voice.status.borrow_and_update().clone();
                 let finished = changed.is_err() || status.finished;
-                if finished { runtime.voice.take(); }
-                let update = app.update(AppEvent::VoiceStatus((!finished).then_some(status.text.clone())));
+                if finished {
+                    let mut voice = runtime.voice.take().unwrap();
+                    while let Ok(transcript) = voice.transcripts.try_recv() {
+                        let record = runtime.local_record(LocalEvent::VoiceTranscript(transcript))?;
+                        request_render(app.update(AppEvent::Transcript { pane: PaneId::Main, record }), &mut scheduler);
+                    }
+                }
+                let update = app.update(AppEvent::VoiceStatus((!finished).then_some(status.clone())));
                 request_render(update, &mut scheduler);
                 if finished {
                     let event = if status.text.starts_with("Voice failed") || status.text.contains("cleanup unconfirmed") { AppEvent::NotifyError {pane: PaneId::Main, error: status.text} } else { AppEvent::NotifySuccess {pane: PaneId::Main, message: status.text} };
@@ -1571,6 +1705,16 @@ async fn run_inner(
                     .transpose()
                     .map_err(terminal_error)?
                     .ok_or_else(|| terminal_error(io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input closed")))?;
+                // Mute remains global while another pane or a modal has focus.
+                if (runtime.voice.is_some() || runtime.pending_voice.is_some())
+                    && matches!(&event, Event::Key(key) if key.code == KeyCode::Char('x') && key.modifiers == KeyModifiers::CONTROL)
+                {
+                    if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press) {
+                        let _ = runtime.voice_command(PaneId::Main, crate::voice::Command::ToggleMute);
+                        request_render(app.update(AppEvent::VoiceStatus(runtime.voice_status())), &mut scheduler);
+                    }
+                    continue;
+                }
                 let refresh_cursor = matches!(&event, Event::FocusGained | Event::Mouse(_));
                 if refresh_cursor {
                     terminal.invalidate_cursor_visibility();
@@ -1712,6 +1856,8 @@ async fn run_inner(
                             if error.is_cancelled() {
                                 continue;
                             }
+                            runtime.pending_voice = None;
+                            request_render(app.update(AppEvent::VoiceStatus(runtime.voice_status())), &mut scheduler);
                             if runtime.recovery == Some(RecoveryPhase::Connecting) {
                                 runtime.recovery = Some(RecoveryPhase::Disconnected);
                                 request_render(app.update(AppEvent::AgentReconnectFailed { pane: PaneId::Main, error: message }), &mut scheduler);
@@ -1796,6 +1942,8 @@ async fn run_inner(
                             runtime.recovery = Some(RecoveryPhase::Replaying);
                         }
                         ConnectionResult::Recovered(Err(failure)) => {
+                            runtime.pending_voice = None;
+                            request_render(app.update(AppEvent::VoiceStatus(runtime.voice_status())), &mut scheduler);
                             runtime.recovery = Some(RecoveryPhase::Disconnected);
                             request_render(app.update(AppEvent::AgentReconnectFailed {
                                 pane: PaneId::Main,
@@ -1973,6 +2121,8 @@ async fn run_inner(
                             runtime.start_history_prefetch(pane);
                         }
                         ConnectionResult::Agent { purpose, result: Err(failure) } => {
+                            runtime.pending_voice = None;
+                            request_render(app.update(AppEvent::VoiceStatus(runtime.voice_status())), &mut scheduler);
                             let message = format!("Could not connect to the managed agent: {}", failure.error);
                             if matches!(purpose, ConnectionPurpose::Startup) {
                                 runtime.retry_target = Some(failure.retry);
@@ -2498,52 +2648,25 @@ async fn apply_update(
                 // Keep the hosted effect boundary visually separate from app-level routing.
                 match effect {
                     RootEffect::Voice(command) => {
-                        use crate::voice::Command;
-                        let message = match command {
-                            Command::Start if runtime.voice.is_some() => {
-                                runtime.voice.as_ref().unwrap().status.borrow().text.clone()
-                            }
-                            Command::Start if runtime.agent_id.is_empty() => {
-                                "Agent is still connecting. Try /voice when connected.".into()
-                            }
-                            Command::Start => match crate::voice::Session::start(
-                                runtime.client.clone(),
-                                runtime.agent_id.clone(),
-                                "cove",
-                                false,
-                            ) {
-                                Ok(voice) => {
-                                    runtime.voice = Some(voice);
-                                    "Voice connecting…".into()
-                                }
-                                Err(error) => error.to_string(),
-                            },
-                            Command::Stop => {
-                                if let Some(voice) = &runtime.voice {
-                                    voice.stop();
-                                }
-                                "Voice stopping…".into()
-                            }
-                            Command::Mute | Command::Unmute => {
-                                if let Some(voice) = &runtime.voice {
-                                    voice.mute(command == Command::Mute);
-                                }
-                                if command == Command::Mute {
-                                    "Microphone muted".into()
-                                } else {
-                                    "Microphone on".into()
-                                }
-                            }
-                            Command::Status => runtime.voice.as_ref().map_or_else(
-                                || "Voice is off".into(),
-                                |voice| voice.status.borrow().text.clone(),
-                            ),
-                        };
+                        let outcome = runtime.voice_command(pane, command);
                         absorb(
-                            app.update(AppEvent::NotifySuccess { pane, message }),
+                            app.update(AppEvent::VoiceStatus(runtime.voice_status())),
                             &mut effects,
                             scheduler,
                         );
+                        match outcome {
+                            Ok(Some(message)) => absorb(
+                                app.update(AppEvent::NotifySuccess { pane, message }),
+                                &mut effects,
+                                scheduler,
+                            ),
+                            Err(error) => absorb(
+                                app.update(AppEvent::NotifyError { pane, error }),
+                                &mut effects,
+                                scheduler,
+                            ),
+                            Ok(None) => {}
+                        }
                     }
                     RootEffect::Submit(prompt) | RootEffect::ContinueSubagent(prompt) => {
                         if let Some(voice) = &runtime.voice {
@@ -3442,6 +3565,83 @@ mod tests {
         assert!(runtime.finish_resume(completed).is_none());
     }
 
+    #[tokio::test]
+    async fn voice_requested_during_startup_starts_once_when_connected_with_selected_controls() {
+        use crate::voice::Command;
+        let mut runtime = history_runtime(HistoryWindow::default());
+        runtime.agent_id.clear();
+        assert_eq!(
+            runtime.voice_command(PaneId::Main, Command::Toggle),
+            Ok(None)
+        );
+        assert!(runtime.take_ready_voice().is_none());
+        assert_eq!(
+            runtime.voice_status().unwrap().phase,
+            crate::voice_state::Phase::Connecting
+        );
+        runtime
+            .voice_command(PaneId::Main, Command::Start(Some("ember")))
+            .unwrap();
+        runtime
+            .voice_command(PaneId::Main, Command::ToggleMute)
+            .unwrap();
+        // Repeated explicit start keeps the selected voice and mute preference.
+        runtime
+            .voice_command(PaneId::Main, Command::Start(None))
+            .unwrap();
+        runtime.agent_id = "connected-agent".into();
+        assert!(runtime.take_ready_voice().is_none());
+        runtime.managed_events_open = true;
+        let ready = runtime.take_ready_voice().unwrap();
+        assert_eq!(ready.name, "ember");
+        assert!(ready.muted);
+        assert!(runtime.take_ready_voice().is_none());
+    }
+
+    #[tokio::test]
+    async fn queued_voice_can_be_cancelled_and_does_not_leak_to_a_new_session() {
+        use crate::voice::Command;
+        let mut runtime = history_runtime(HistoryWindow::default());
+        for stop in [Command::Stop, Command::Toggle] {
+            runtime
+                .voice_command(PaneId::Main, Command::Start(None))
+                .unwrap();
+            runtime.voice_command(PaneId::Main, stop).unwrap();
+            runtime.managed_events_open = true;
+            assert!(runtime.take_ready_voice().is_none());
+            assert!(runtime.voice_status().is_none());
+        }
+        runtime
+            .voice_command(PaneId::Main, Command::Start(None))
+            .unwrap();
+        runtime.start_new_session(new_agent_settings());
+        assert!(runtime.pending_voice.is_none());
+    }
+
+    #[tokio::test]
+    async fn queued_voice_waits_for_recovery_and_session_switch() {
+        use crate::voice::Command;
+        let mut runtime = history_runtime(HistoryWindow::default());
+        runtime
+            .voice_command(PaneId::Main, Command::Toggle)
+            .unwrap();
+        runtime.managed_events_open = true;
+        runtime.recovery = Some(super::RecoveryPhase::Replaying);
+        assert!(runtime.take_ready_voice().is_none());
+        runtime.recovery = None;
+        let task = runtime.connection.spawn(std::future::pending());
+        runtime.pending_resume = Some((task, PaneId::Main));
+        assert!(runtime.take_ready_voice().is_none());
+        runtime.pending_resume.take().unwrap().0.abort();
+        runtime
+            .voice_command(PaneId::Main, Command::ToggleMute)
+            .unwrap();
+        runtime
+            .voice_command(PaneId::Main, Command::Unmute)
+            .unwrap();
+        assert!(!runtime.take_ready_voice().unwrap().muted);
+    }
+
     fn history_runtime(history: HistoryWindow) -> DriverRuntime {
         let mut history_sequences = HashMap::new();
         let mut sequence = 1;
@@ -3457,6 +3657,7 @@ mod tests {
             ManagedApiKey::parse(format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43)))
                 .unwrap();
         DriverRuntime {
+            pending_voice: None,
             voice: None,
             client: ManagedClient::new("http://127.0.0.1:9", api_key).unwrap(),
             agent: None,

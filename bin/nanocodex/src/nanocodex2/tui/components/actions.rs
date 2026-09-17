@@ -310,7 +310,7 @@ impl ActionsMenu {
 impl Action {
     const fn label(self) -> &'static str {
         match self {
-            Self::Voice => "Start voice",
+            Self::Voice => "Toggle voice",
             Self::AgentId => "Show agent ID",
             Self::Handoff => "Prepare handoff",
             Self::Review => "Review changes",

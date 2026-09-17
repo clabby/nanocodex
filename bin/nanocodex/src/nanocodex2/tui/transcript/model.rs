@@ -54,6 +54,7 @@ pub(crate) struct TranscriptModel {
     next_entry_id: usize,
     assistants: HashMap<AssistantKey, EntryId>,
     active_assistants: HashMap<AssistantCallKey, AssistantKey>,
+    voice_messages: HashMap<(String, String, u64), (EntryId, bool)>,
     managed_final_messages: HashMap<Arc<str>, EntryId>,
     managed_completed_turns: HashSet<String>,
     managed_stopped_turns: HashSet<String>,
@@ -427,6 +428,7 @@ impl TranscriptModel {
                         });
                     })
             }
+            "voice.transcript" => self.voice_transcript(record),
             "managed.final_message" => self.managed_final_message(record),
             "managed.turn_stopped" => self.managed_turn_stopped(record),
             "display.error" => self.decode_local::<DisplayError>(record).map(|payload| {
@@ -713,6 +715,34 @@ impl TranscriptModel {
             } else {
                 self.push(EntryKind::Error { message });
             }
+        }
+        Ok(())
+    }
+
+    fn voice_transcript(&mut self, record: &TranscriptRecord) -> Result<(), serde_json::Error> {
+        let caption = record.decode_payload::<crate::voice_state::Transcript>()?;
+        if !matches!(caption.speaker.as_str(), "user" | "assistant") || caption.text.is_empty() {
+            return Ok(());
+        }
+        let key = (caption.session, caption.speaker.clone(), caption.id);
+        let kind = if caption.speaker == "user" {
+            EntryKind::User { text: caption.text }
+        } else {
+            EntryKind::Assistant {
+                text: format!("**Voice**\n\n{}", caption.text),
+                complete: !caption.is_partial,
+            }
+        };
+        if let Some((id, complete)) = self.voice_messages.get(&key).copied() {
+            // A delayed partial cannot roll a finalized message backwards.
+            if complete && caption.is_partial {
+                return Ok(());
+            }
+            self.update(id, |entry| *entry = kind);
+            self.voice_messages.insert(key, (id, !caption.is_partial));
+        } else {
+            let id = self.push(kind);
+            self.voice_messages.insert(key, (id, !caption.is_partial));
         }
         Ok(())
     }
@@ -2107,6 +2137,51 @@ mod tests {
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
+
+    #[test]
+    fn voice_snapshots_remain_inline_complete_and_distinct_across_speakers_and_calls() {
+        use crate::{tui::transcript::LocalEvent, voice_state::Transcript};
+        let mut model = TranscriptModel::default();
+        let long = "A long spoken answer. ".repeat(200);
+        for (seq, session, speaker, id, text, partial) in [
+            (1, "first", "user", 0, "Check", true),
+            (2, "first", "assistant", 0, "Checking", true),
+            (3, "first", "user", 0, "Check Omarchy", false),
+            (4, "first", "assistant", 0, long.as_str(), false),
+            (5, "first", "assistant", 0, "late partial", true),
+            (6, "first", "assistant", 0, long.as_str(), false),
+            (7, "first", "user", 1, "Check Omarchy", false),
+            (8, "second", "assistant", 0, "New call", false),
+        ] {
+            model.apply(
+                &TranscriptRecord::from_local(
+                    seq,
+                    0,
+                    LocalEvent::VoiceTranscript(Transcript {
+                        session: session.into(),
+                        speaker: speaker.into(),
+                        id,
+                        text: text.into(),
+                        is_partial: partial,
+                    }),
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(model.entries().len(), 4);
+        assert!(
+            matches!(&model.entries()[0].kind, EntryKind::User { text } if text == "Check Omarchy")
+        );
+        assert!(
+            matches!(&model.entries()[1].kind, EntryKind::Assistant { text, complete: true } if text.ends_with(&long))
+        );
+        assert!(
+            matches!(&model.entries()[2].kind, EntryKind::User { text } if text == "Check Omarchy")
+        );
+        assert!(
+            matches!(&model.entries()[3].kind, EntryKind::Assistant { text, complete: true } if text.ends_with("New call"))
+        );
+    }
 
     #[test]
     fn managed_failure_settles_once_with_or_without_nested_terminal() {

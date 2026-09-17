@@ -62,11 +62,17 @@ in again replaces the saved key without revoking previous account keys.
 
 ## Voice
 
-In the terminal, use `/voice` to start talking in the current conversation.
-`/voice mute`, `/voice unmute`, `/voice status`, and `/voice stop` control the
-call. Voice also appears in the Actions menu. Typed input suppresses stale
-spoken replies; stopping voice stops audio immediately and leaves agent work
-running. Switching conversations closes the previous conversation's audio.
+In the terminal, `/voice` toggles voice in the current conversation. During agent
+startup it starts automatically once connected; mute and stop work while
+waiting. The empty conversation shows a pixel spinner around `nanocodex2`.
+Spoken user and voice-agent messages stream inline in the chat and remain in
+scrollback after the call ends. A compact strip above the composer shows audio
+levels and call status. Ctrl+X or `/voice mute` toggles the microphone; `/voice unmute`
+explicitly unmutes it. `/voice on` and `/voice off` (also `start`/`stop`) explicitly
+start or stop; `/voice status` reports state. `/voice voices` lists choices and
+`/voice cove` starts with a named voice. Voice also appears in the Actions menu.
+Typed input suppresses stale spoken replies; stopping voice stops audio
+immediately and leaves agent work running. Switching conversations closes the previous conversation's audio.
 
 For a voice-only terminal session:
 

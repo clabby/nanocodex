@@ -39,18 +39,37 @@ pub(crate) use command::Command;
 enum Input {
     Typed,
 }
-#[derive(Clone, Debug)]
-pub(crate) struct Status {
-    pub text: String,
-    pub finished: bool,
+use super::voice_state::{Phase, Status};
+
+#[derive(Default)]
+struct MediaControl {
+    media: Option<RealtimeWebrtcSessionHandle>,
+    ready: bool,
+    muted: bool,
 }
+impl MediaControl {
+    fn microphone_muted(&self) -> bool {
+        !self.ready || self.muted
+    }
+    fn apply_microphone(&self) -> Result<(), ManagedError> {
+        if let Some(media) = &self.media {
+            media
+                .set_microphone_muted(self.microphone_muted())
+                .map_err(|e| error(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct Session {
     stop: CancellationToken,
     native_stop: AbortHandle,
-    control: Arc<Mutex<Option<RealtimeWebrtcSessionHandle>>>,
+    control: Arc<Mutex<MediaControl>>,
     input: mpsc::Sender<Input>,
     muted: watch::Sender<bool>,
     pub status: watch::Receiver<Status>,
+    pub transcripts: mpsc::Receiver<super::voice_state::Transcript>,
+    presentation: watch::Sender<Status>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 impl Session {
@@ -75,9 +94,15 @@ impl Session {
         let (muted, microphone) = watch::channel(muted);
         let (status_tx, status) = watch::channel(Status {
             text: "Voice connecting…".into(),
-            finished: false,
+            muted: *microphone.borrow(),
+            ..Status::default()
         });
-        let control = Arc::new(Mutex::new(None));
+        let (transcript_tx, transcripts) = mpsc::channel(128);
+        let presentation = status_tx.clone();
+        let control = Arc::new(Mutex::new(MediaControl {
+            muted: *microphone.borrow(),
+            ..Default::default()
+        }));
         let actor_control = control.clone();
         let owner_stop = stop.clone();
         let owner_native_stop = native_stop.clone();
@@ -90,6 +115,7 @@ impl Session {
                 media: None,
                 control: actor_control,
                 status: status_tx,
+                transcripts: transcript_tx,
                 started: Instant::now(),
                 prefetch: None,
                 event_reader: None,
@@ -115,9 +141,11 @@ impl Session {
                 Ok(()) => "Voice stopped".to_owned(),
                 Err(error) => format!("Voice failed: {error}"),
             };
-            actor.status.send_replace(Status {
-                text: final_status.clone(),
-                finished: false,
+            actor.status.send_modify(|status| {
+                status.text = final_status.clone();
+                status.phase = Phase::Stopping;
+                status.microphone = 0;
+                status.speaker = 0;
             });
             // Cleanup uses stable identities and remains bounded even when a call was
             // cancelled during admission. A stale stop cannot close a newer session.
@@ -126,9 +154,9 @@ impl Session {
                 Ok(Ok(())) => final_status,
                 _ => format!("{final_status}; remote cleanup unconfirmed"),
             };
-            actor.status.send_replace(Status {
-                text,
-                finished: true,
+            actor.status.send_modify(|status| {
+                status.text = text;
+                status.finished = true;
             });
         });
         Ok(Self {
@@ -138,25 +166,34 @@ impl Session {
             input,
             muted,
             status,
+            presentation,
+            transcripts,
             task: Some(task),
         })
     }
     pub(crate) fn stop(&self) {
         self.native_stop.abort();
         self.stop.cancel();
+        self.presentation.send_modify(|status| {
+            status.phase = Phase::Stopping;
+            status.microphone = 0;
+            status.speaker = 0;
+        });
     }
     pub(crate) fn is_muted(&self) -> bool {
         *self.muted.borrow()
     }
     pub(crate) fn mute(&self, muted: bool) {
-        let control = self
+        let mut control = self
             .control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.muted.send_replace(muted);
-        if let Some(media) = control.as_ref()
-            && media.set_microphone_muted(muted).is_err()
-        {
+        self.presentation.send_modify(|status| {
+            status.muted = muted;
+        });
+        control.muted = muted;
+        if control.apply_microphone().is_err() {
             self.stop();
         }
     }
@@ -165,6 +202,7 @@ impl Session {
             .control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .media
             .as_ref()
         {
             media.set_speaker_suppressed(true);
@@ -191,8 +229,9 @@ struct Actor {
     session: String,
     protocol: ManagedVoiceProtocol,
     media: Option<RealtimeWebrtcSessionHandle>,
-    control: Arc<Mutex<Option<RealtimeWebrtcSessionHandle>>>,
+    control: Arc<Mutex<MediaControl>>,
     status: watch::Sender<Status>,
+    transcripts: mpsc::Sender<super::voice_state::Transcript>,
     started: Instant,
     prefetch: Option<tokio::task::JoinHandle<()>>,
     event_reader: Option<tokio::task::JoinHandle<()>>,
@@ -200,9 +239,8 @@ struct Actor {
 }
 impl Actor {
     fn status(&self, text: impl Into<String>) {
-        self.status.send_replace(Status {
-            text: text.into(),
-            finished: false,
+        self.status.send_modify(|status| {
+            status.text = text.into();
         });
     }
     fn timing(&self, stage: &str) {
@@ -230,11 +268,7 @@ impl Actor {
             )?;
             Ok::<_, ManagedError>((state, admitted))
         };
-        let settings = self
-            .protocol
-            .dispatch(&json!({"op":"session"}))
-            .map_err(error)?;
-        let media = async {
+        let prepare_media = async {
             let started =
                 tokio::task::spawn_blocking(move || RealtimeWebrtcSession::start(registration))
                     .await
@@ -245,43 +279,44 @@ impl Actor {
                     .control
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                started
-                    .handle
-                    .set_microphone_muted(*muted.borrow())
-                    .map_err(|e| error(e.to_string()))?;
-                *control = Some(started.handle.clone());
+                control.media = Some(started.handle.clone());
+                control.apply_microphone()?;
             }
             self.media = Some(started.handle.clone());
             self.timing("native.offer");
-            let call = self
-                .client
-                .voice_call(&self.agent, &self.session, &started.offer_sdp, settings)
-                .await?;
-            self.timing("call.answer");
-            let handle = started.handle;
-            let answer = async {
-                tokio::task::spawn_blocking(move || handle.apply_answer_sdp(call.sdp))
-                    .await
-                    .map_err(|_| error("Voice answer task failed"))?
-                    .map_err(|e| error(e.to_string()))?;
-                self.timing("native.connected");
-                Ok::<_, ManagedError>(())
-            };
-            let sideband = async {
-                let socket = self
-                    .client
-                    .voice_sideband(&self.agent, &self.session, &call.call_id)
-                    .await?;
-                self.timing("sideband.ready");
-                Ok::<_, ManagedError>(socket)
-            };
-            let ((), socket) = tokio::try_join!(answer, sideband)?;
-            self.timing("media.ready");
-            self.status("Voice media connected; preparing agent…");
-            Ok::<_, ManagedError>((socket, call.call_id))
+            Ok::<_, ManagedError>(started)
         };
-        let ((state, admitted), (mut socket, call)) = tokio::try_join!(start, media)?;
+        // Match the desktop app: context belongs in call creation, before
+        // speech starts. Appending startup fragments to a running conversation
+        // can provoke unsolicited responses while the user begins speaking.
+        let ((state, admitted), started) = tokio::try_join!(start, prepare_media)?;
         self.timing("agent.ready");
+        let settings = initial_call_settings(&mut self.protocol, &admitted["context"])?;
+        let call = self
+            .client
+            .voice_call(&self.agent, &self.session, &started.offer_sdp, settings)
+            .await?;
+        self.timing("call.answer");
+        let handle = started.handle;
+        let answer = async {
+            tokio::task::spawn_blocking(move || handle.apply_answer_sdp(call.sdp))
+                .await
+                .map_err(|_| error("Voice answer task failed"))?
+                .map_err(|e| error(e.to_string()))?;
+            self.timing("native.connected");
+            Ok::<_, ManagedError>(())
+        };
+        let sideband = async {
+            let socket = self
+                .client
+                .voice_sideband(&self.agent, &self.session, &call.call_id)
+                .await?;
+            self.timing("sideband.ready");
+            Ok::<_, ManagedError>(socket)
+        };
+        let ((), mut socket) = tokio::try_join!(answer, sideband)?;
+        let call = call.call_id;
+        self.timing("media.ready");
         let events = self
             .client
             .events(&self.agent, EventCursor::parse(state.latest_event_cursor)?)?;
@@ -290,15 +325,6 @@ impl Actor {
         // every time an audio/control event wins, starving agent output.
         let (event_sender, mut agent_events) = mpsc::channel(128);
         self.event_reader = Some(spawn_event_reader(events, event_sender));
-        let frames = self
-            .protocol
-            .dispatch(&json!({"op":"startup_context","context":admitted["context"]}))
-            .map_err(error)?;
-        if let Some(frames) = frames.as_array() {
-            for frame in frames {
-                socket.send(&frame.to_string()).await?;
-            }
-        }
         let effects = self.protocol.sideband_opened();
         self.apply(&mut socket, effects).await?;
         let mut connected = Instant::now();
@@ -307,6 +333,7 @@ impl Actor {
         flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut first_audio = false;
         let mut first_input = false;
+        let mut last_speech: Option<Instant> = None;
         self.status(if *muted.borrow() {
             "Voice active · microphone muted"
         } else {
@@ -377,8 +404,16 @@ impl Actor {
                 _ = flush.tick() => {
                     let media = self.media.as_ref().unwrap();
                     if let Some(error_text) = media.take_error() { return Err(error(error_text)); }
-                    if media.take_microphone_peak() > 200 && !first_input { first_input = true; self.timing("input.first_energy"); }
-                    if media.take_speaker_peak() > 200 {
+                    let microphone = media.take_microphone_peak();
+                    let speaker = media.take_speaker_peak();
+                    if speaker >= 512 { last_speech = Some(Instant::now()); }
+                    let speaking = last_speech.is_some_and(|last| last.elapsed() < Duration::from_millis(500));
+                    self.status.send_if_modified(|status| {
+                        let changed = status.microphone != microphone || status.speaker != speaker || status.speaking != speaking;
+                        status.microphone = microphone; status.speaker = speaker; status.speaking = speaking; changed
+                    });
+                    if microphone > 200 && !first_input { first_input = true; self.timing("input.first_energy"); }
+                    if speaker > 200 {
                         if !first_audio { first_audio = true; self.timing("audio.first_energy"); }
                         if let Some(sent) = self.speech_sent.take() {
                             self.timing("speech.first_energy");
@@ -404,11 +439,28 @@ impl Actor {
             self.status(status);
         }
         for transcript in effects.transcripts {
-            if !transcript.is_partial {
-                self.status(format!("Voice {}: {}", transcript.speaker, transcript.text));
-            }
+            self.transcripts
+                .send(super::voice_state::Transcript {
+                    session: self.session.clone(),
+                    speaker: transcript.speaker,
+                    id: transcript.id,
+                    text: transcript.text,
+                    is_partial: transcript.is_partial,
+                })
+                .await
+                .map_err(|_| error("Voice transcript consumer closed"))?;
         }
         if effects.ready == Some(true) {
+            {
+                let mut control = self
+                    .control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                control.ready = true;
+                control.apply_microphone()?;
+            }
+            self.status
+                .send_modify(|status| status.phase = Phase::Active);
             self.timing("protocol.ready");
         }
         for frame in &effects.frames {
@@ -464,6 +516,20 @@ impl Actor {
         Ok(())
     }
 }
+fn initial_call_settings(
+    protocol: &mut ManagedVoiceProtocol,
+    context: &serde_json::Value,
+) -> Result<serde_json::Value, ManagedError> {
+    let mut instructions = nanocodex_voice_protocol::chatgpt_realtime_instructions("there");
+    if let Some(context) = nanocodex_voice_protocol::managed_startup_context(context) {
+        instructions.push_str("\n\n");
+        instructions.push_str(&context);
+    }
+    protocol
+        .dispatch(&json!({"op":"session","instructions":instructions}))
+        .map_err(error)
+}
+
 fn spawn_event_reader(
     mut events: nanocodex_managed::ManagedEventStream,
     sender: mpsc::Sender<Result<nanocodex_managed::ManagedEvent, ManagedError>>,
@@ -509,20 +575,27 @@ pub(crate) async fn run(client: &ManagedClient, args: Args) -> Result<(), Manage
     let (agent, mut workspace_events, id, _) =
         super::open_workspace_agent_from(client, args.agent, None, None).await?;
     eprintln!("Managed agent: {id}");
-    let session = Session::start(client.clone(), id, &args.voice, args.muted)?;
+    let mut session = Session::start(client.clone(), id, &args.voice, args.muted)?;
     let mut status = session.status.clone();
     let deadline = tokio::time::sleep(Duration::from_secs(args.duration.unwrap_or(86400)));
     tokio::pin!(deadline);
     let mut failure = None;
+    let mut previous_text = String::new();
     loop {
         tokio::select! {
+            Some(transcript) = session.transcripts.recv() => {
+                println!("{}", json!({"type":"voice.transcript","transcript":transcript}));
+            }
             _ = workspace_events.next() => {},
             _ = tokio::signal::ctrl_c() => break,
             _ = &mut deadline => break,
             changed = status.changed() => {
                 if changed.is_err() { break; }
                 let value = status.borrow_and_update().clone();
-                println!("{}", json!({"type":"voice.status","text":value.text,"finished":value.finished}));
+                if value.text != previous_text || value.finished {
+                    println!("{}", json!({"type":"voice.status","text":value.text,"finished":value.finished}));
+                    previous_text.clone_from(&value.text);
+                }
                 if value.finished { if value.text.starts_with("Voice failed") { failure = Some(error(value.text)); } break; }
             }
         }
@@ -583,12 +656,63 @@ mod tests {
         server.abort();
     }
     #[test]
+    fn startup_context_is_in_call_instructions_without_live_context_frames() {
+        let mut protocol = ManagedVoiceProtocol::new("cove").unwrap();
+        protocol
+            .dispatch(&json!({"op":"configure","settings":{
+                "voice":"maple","instructions":"Speak briefly."
+            }}))
+            .unwrap();
+        let settings = initial_call_settings(
+            &mut protocol,
+            &json!({
+                "workspace":"/omarchy-desktop",
+                "prepared_personalization":"Prefers Rust.",
+                "history":[
+                    {"role":"user","content":[{"text":"Help me test voice."}]},
+                    {"role":"developer","content":[{"text":"Private host state."}]}
+                ]
+            }),
+        )
+        .unwrap();
+        let instructions = settings["instructions"].as_str().unwrap();
+        assert!(instructions.contains("/omarchy-desktop"));
+        assert!(instructions.contains("Prefers Rust."));
+        assert!(instructions.contains("Help me test voice."));
+        assert!(!instructions.contains("Private host state."));
+        assert_eq!(instructions.matches("Speak briefly.").count(), 1);
+        assert_eq!(settings["audio"]["output"]["voice"], "maple");
+        assert!(protocol.sideband_opened().frames.is_empty());
+    }
+
+    #[test]
+    fn microphone_waits_for_backend_and_preserves_startup_mute() {
+        let mut control = MediaControl::default();
+        assert!(control.microphone_muted());
+        control.muted = true;
+        control.muted = false;
+        assert!(control.microphone_muted(), "unmute cannot bypass startup");
+        control.muted = true;
+        control.ready = true;
+        assert!(
+            control.microphone_muted(),
+            "startup cannot override user mute"
+        );
+        control.muted = false;
+        assert!(!control.microphone_muted());
+    }
+
+    #[test]
     fn voice_controls_have_explicit_start_stop_and_privacy_transitions() {
-        assert_eq!(Command::parse("").unwrap(), Command::Start);
+        assert_eq!(Command::parse("").unwrap(), Command::Toggle);
         for (text, command) in [
-            ("start", Command::Start),
+            ("start", Command::Start(None)),
+            ("on", Command::Start(None)),
+            ("off", Command::Stop),
+            ("cove", Command::Start(Some("cove"))),
+            ("voices", Command::List),
             ("stop", Command::Stop),
-            ("mute", Command::Mute),
+            ("mute", Command::ToggleMute),
             ("unmute", Command::Unmute),
             ("status", Command::Status),
         ] {

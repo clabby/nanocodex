@@ -140,7 +140,7 @@ impl Notification {
 }
 
 pub(crate) enum RootEvent {
-    VoiceStatus(Option<String>),
+    VoiceStatus(Option<crate::voice_state::Status>),
     ShowAgentId(String),
     Terminal(Event),
     PasteImage(String),
@@ -390,7 +390,7 @@ pub(crate) struct RootNode {
     thread: ThreadState,
     key_confirmation: Option<KeyConfirmation>,
     notification: Option<Notification>,
-    voice_status: Option<String>,
+    voice_status: Option<crate::voice_state::Status>,
     discarded_draft: Option<ComposerDraft>,
     last_admitted_steer: Option<(QueueId, Submission)>,
     withdrawn_draft: Option<ComposerDraft>,
@@ -781,15 +781,25 @@ impl RootNode {
             ..area
         };
         self.composer_area = composer_area;
-        let queue_height = self
-            .queue
-            .component()
-            .desired_height()
-            .min(area.height.saturating_sub(height));
+        let voice_height = if self.voice_status.is_some() {
+            1.min(area.height.saturating_sub(height))
+        } else {
+            0
+        };
+        let voice_area = Rect {
+            y: composer_area.y.saturating_sub(voice_height),
+            height: voice_height,
+            ..area
+        };
+        let queue_height = self.queue.component().desired_height().min(
+            area.height
+                .saturating_sub(height)
+                .saturating_sub(voice_height),
+        );
         let queue_width = area.width.saturating_mul(95) / 100;
         let queue_area = Rect {
             x: area.x + area.width.saturating_sub(queue_width) / 2,
-            y: composer_area.y.saturating_sub(queue_height),
+            y: voice_area.y.saturating_sub(queue_height),
             width: queue_width,
             height: queue_height,
         };
@@ -798,7 +808,8 @@ impl RootNode {
             height: area
                 .height
                 .saturating_sub(height)
-                .saturating_sub(queue_height),
+                .saturating_sub(queue_height)
+                .saturating_sub(voice_height),
             ..area
         };
         self.transcript_area = transcript_area;
@@ -817,6 +828,9 @@ impl RootNode {
         };
         self.transcript.render(frame, transcript_area, theme);
         self.queue.render(frame, queue_area, theme);
+        if let Some(status) = &self.voice_status {
+            super::voice::render(frame, status, voice_area);
+        }
         let composer_selection = (self.selection.surface() == Some(Surface::Composer))
             .then(|| self.selection.range())
             .flatten();
@@ -874,21 +888,6 @@ impl RootNode {
                 }
             }
         }
-        if self.notification.is_none()
-            && self.overlay.is_none()
-            && let Some(status) = &self.voice_status
-        {
-            render_notification(
-                frame,
-                area,
-                theme,
-                &Line::from(format!(
-                    "{} · /voice mute · /voice stop",
-                    status.chars().take(160).collect::<String>()
-                )),
-                Color::Cyan,
-            );
-        }
         if let Some(notification) = &self.notification {
             render_notification(
                 frame,
@@ -904,6 +903,13 @@ impl RootNode {
     }
 
     fn update_terminal(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        if self.voice_status.is_some() && is_control_key(&event, 'x') {
+            if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Press) {
+                return ComponentUpdate::none();
+            }
+            return self
+                .apply_settings_command(SettingsCommand::Voice(crate::voice::Command::ToggleMute));
+        }
         if matches!(event, Event::Resize(_, _)) {
             self.selection.clear();
             self.selection_auto_scroll = None;
@@ -1008,6 +1014,28 @@ impl RootNode {
                 }
             }
             if is_submit_enter(&event) {
+                // Voice is a local control: accept it while ordinary prompts
+                // remain fenced behind the managed connection.
+                if self.queue_edit.is_none()
+                    && !self.queue.component().focused()
+                    && !self.composer.component().has_images()
+                    && matches!(
+                        self.composer.component().draft().split_whitespace().next(),
+                        Some("/voice")
+                    )
+                {
+                    let mut update = self
+                        .update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+                    if !connecting && update.effects.iter().any(|effect| matches!(effect,
+                        RootEffect::Voice(crate::voice::Command::Start(_))
+                        | RootEffect::Voice(crate::voice::Command::Toggle) if self.voice_status.is_none()))
+                    {
+                        self.reconnecting = Some(true);
+                        update.render = update.render.max(self.reconnection_status("Reconnecting…").render);
+                        update.effects.push(RootEffect::Reconnect);
+                    }
+                    return update;
+                }
                 if connecting {
                     return ComponentUpdate::none();
                 }
@@ -1695,7 +1723,7 @@ impl RootNode {
             Some(ActionsEffect::Trigger(Action::Voice)) => {
                 self.overlay = None;
                 return self
-                    .apply_settings_command(SettingsCommand::Voice(crate::voice::Command::Start));
+                    .apply_settings_command(SettingsCommand::Voice(crate::voice::Command::Toggle));
             }
             Some(ActionsEffect::Trigger(Action::AgentId)) => {
                 self.overlay = None;
@@ -3825,6 +3853,79 @@ mod history_tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     use std::sync::Arc;
+
+    #[test]
+    fn live_voice_is_inline_and_mute_preserves_the_draft() {
+        use crate::voice_state::{Phase, Status};
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        root.composer
+            .component_mut()
+            .replace_draft("keep my draft".into());
+        root.update(RootEvent::VoiceStatus(Some(Status {
+            phase: Phase::Active,
+            ..Status::default()
+        })));
+        for (sequence, speaker, text) in [
+            (1, "user", "Check Omarchy"),
+            (2, "assistant", "Checking now"),
+        ] {
+            let record = TranscriptRecord::from_local(
+                sequence,
+                0,
+                LocalEvent::VoiceTranscript(crate::voice_state::Transcript {
+                    session: "call".into(),
+                    speaker: speaker.into(),
+                    id: 0,
+                    text: text.into(),
+                    is_partial: false,
+                }),
+            )
+            .unwrap();
+            root.update(RootEvent::Transcript(Arc::new(record)));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+        terminal
+            .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..20)
+            .map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        let user = rows
+            .iter()
+            .position(|row| row.contains("Check Omarchy"))
+            .unwrap();
+        let assistant = rows
+            .iter()
+            .position(|row| row.contains("Checking now"))
+            .unwrap();
+        let draft = rows
+            .iter()
+            .position(|row| row.contains("keep my draft"))
+            .unwrap();
+        assert!(user < assistant && assistant < draft);
+        assert!(root.notification.is_none());
+        assert!(root.transcript_area.bottom() <= root.queue_area.y);
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        let update = root.update(RootEvent::Terminal(Event::Key(key)));
+        assert!(matches!(
+            update.effects.as_slice(),
+            [RootEffect::Voice(crate::voice::Command::ToggleMute)]
+        ));
+        let mut repeated = key;
+        repeated.kind = crossterm::event::KeyEventKind::Repeat;
+        assert!(
+            root.update(RootEvent::Terminal(Event::Key(repeated)))
+                .effects
+                .is_empty()
+        );
+        assert_eq!(root.composer.component().draft(), "keep my draft");
+        root.update(RootEvent::VoiceStatus(None));
+        terminal
+            .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
+            .unwrap();
+        assert_eq!(root.transcript_area.bottom(), root.composer_area.y);
+    }
 
     #[test]
     fn upward_at_top_and_home_request_older_history() {

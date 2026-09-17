@@ -660,11 +660,16 @@ async fn terminal_id_command_shows_attached_agent_without_sending_input() {
 }
 
 #[tokio::test]
-async fn terminal_id_command_before_creation_does_not_start_an_agent() {
-    let mut fixture = Fixture::start().await;
+async fn terminal_id_command_during_startup_does_not_submit_a_turn() {
+    // Startup eagerly connects; hold history so the pre-connection assertion
+    // does not race the background connection finishing.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut fixture = Fixture::launch_with_history(false, false, Vec::new(), gate.clone()).await;
+    fixture.terminal.wait_text("nanocodex2").await;
     fixture.terminal.prompt("/id", "\r");
     fixture.terminal.wait_text("No agent ID yet").await;
     assert!(fixture.submissions.try_recv().is_err());
+    gate.add_permits(1);
 
     fixture.terminal.prompt("create an agent", "\r");
     let turn = fixture.submission("create an agent").await;
@@ -2773,6 +2778,35 @@ async fn terminal_failed_initial_attach_retries_without_submitting_its_draft() {
     fixture.terminal.wait_text("steering accepted").await;
     fixture.complete(REMOTE_TURN);
     fixture.terminal.wait_text("Enter send").await;
+}
+
+#[tokio::test]
+async fn terminal_voice_during_attach_waits_and_can_be_muted_or_cancelled() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut fixture = Fixture::launch_with_history(false, true, Vec::new(), gate.clone()).await;
+    fixture.terminal.wait_text("Connecting").await;
+    fixture.terminal.prompt("/voice", "\r");
+    fixture.terminal.wait_text("ctrl+x mute").await;
+    fixture.terminal.prompt("DRAFT_WHILE_VOICE_CONNECTS", "");
+    fixture.terminal.input("\x18");
+    fixture.terminal.wait_text("ctrl+x unmute").await;
+    fixture
+        .terminal
+        .wait_text("DRAFT_WHILE_VOICE_CONNECTS")
+        .await;
+    fixture.terminal.input("\x15");
+    fixture.terminal.prompt("/voice", "\r");
+    fixture
+        .terminal
+        .wait_text_presence("ctrl+x unmute", false)
+        .await;
+    gate.add_permits(1);
+    fixture.terminal.wait_text("Enter send").await;
+    fixture.terminal.prompt("/voice status", "\r");
+    fixture.terminal.wait_text("Voice is off").await;
+    let output = fixture.terminal.output.lock().unwrap();
+    assert!(!String::from_utf8_lossy(&output).contains("Try /voice when connected"));
+    assert!(fixture.submissions.try_recv().is_err());
 }
 
 #[tokio::test]

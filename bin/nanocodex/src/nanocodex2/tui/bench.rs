@@ -28,6 +28,8 @@ mod theme;
 mod transcript;
 #[path = "../voice_command.rs"]
 mod voice;
+#[path = "../voice_state.rs"]
+mod voice_state;
 
 // Keep production components on their normal module paths in this private target.
 mod tui {

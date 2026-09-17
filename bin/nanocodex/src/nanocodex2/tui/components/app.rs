@@ -202,7 +202,7 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         id: String,
     },
-    VoiceStatus(Option<String>),
+    VoiceStatus(Option<crate::voice_state::Status>),
     NotifyError {
         pane: PaneId,
         error: String,

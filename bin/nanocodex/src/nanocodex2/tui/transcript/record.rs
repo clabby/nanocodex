@@ -63,6 +63,7 @@ pub(crate) struct SessionEnded {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum LocalEvent {
+    VoiceTranscript(crate::voice_state::Transcript),
     SessionStarted(SessionStarted),
     UserSubmitted {
         id: TurnId,
@@ -256,6 +257,9 @@ impl TranscriptRecord {
             ),
             LocalEvent::WorkerSteerFailed { error } => {
                 ("worker.steer_failed", to_raw_value(&EventError { error })?)
+            }
+            LocalEvent::VoiceTranscript(transcript) => {
+                ("voice.transcript", to_raw_value(&transcript)?)
             }
             LocalEvent::DisplayError { message } => {
                 ("display.error", to_raw_value(&DisplayError { message })?)

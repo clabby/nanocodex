@@ -46,6 +46,7 @@ mod vm_hand;
 mod vm_hand_config;
 mod vm_host;
 mod voice;
+mod voice_state;
 
 use std::{
     io::{self, Write},
