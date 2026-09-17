@@ -19,6 +19,7 @@ import { REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { serverHandTool } from "./ssh-hand-setup";
 import { phoneAdminConfigured } from "./phone-admin";
 import { phoneTools } from "./phone-tool";
+import { emailTools, type EmailConfig } from "./email-tool";
 import { PhoneContainer } from "./phone-container";
 export { PhoneContainer };
 import { createVaultIntakeTool } from "./vault-intake-tool";
@@ -355,6 +356,7 @@ const MEMORY_TEAM_ASSERTION = "x-nanocodex-team-id";
 const MEMORY_SUBJECT_ASSERTION = "x-nanocodex-subject-id";
 const MEMORY_MUTATION_ASSERTION = "x-nanocodex-memory-mutation";
 export interface Env extends
+  EmailConfig,
   AccountAuthEnv,
   ChiefOfStaffPrincipalEnv,
   HostPrincipalEnv {
@@ -7611,6 +7613,16 @@ export class DurableAgentSession extends DurableComputerSession {
       })]),
       ...(multiplayer ? [] : this.#memoryTools()),
       ...(multiplayer ? [] : [createVaultIntakeTool(context => this.#authorizeVaultTool(context))]),
+      ...emailTools({
+        config: this.env, owner: session.owner_id, agentId: session.session_id, multiplayer,
+        authorize: context => {
+          context.signal.throwIfAborted();
+          const authorization = this.#authorizationForToolContext(context);
+          if (!this.#hasFullAccountAuthority(authorization)
+            || !authorization.capabilities.includes("agents:write") || !authorization.capabilities.includes("tools:use"))
+            throw new ManagedRequestError(403, "forbidden", "email requires full account tool authority");
+        },
+      }),
       ...phoneTools({
         config: this.env, owner: session.owner_id, agentId: session.session_id, multiplayer,
         authorize: context => {
