@@ -531,19 +531,44 @@ where
         event,
         ServerEvent::Error | ServerEvent::Failed | ServerEvent::Incomplete
     ) {
-        if raw_event.get().contains(INVALID_IMAGE_ERROR) {
-            return Err(ResponsesError::InvalidImageRequest {
-                event: raw_event.get().to_owned(),
-            }
-            .into());
-        }
-        return Err(ResponsesError::api_event(raw_event.get().to_owned()).into());
+        return Err(provider_error(raw_event.get()).into());
     }
     Ok(ReceivedServerEvent {
         event,
         received_ns: received.received_ns,
         api_event_seq,
     })
+}
+
+fn provider_error(raw_event: &str) -> ResponsesError {
+    // Validation failures identify the rejected input field, whereas older image
+    // decoding failures only carry the provider's diagnostic message.
+    let invalid_image_url = serde_json::from_str::<serde_json::Value>(raw_event)
+        .ok()
+        .is_some_and(|event| {
+            let error = event
+                .get("error")
+                .or_else(|| event.pointer("/response/error"));
+            error.is_some_and(|error| {
+                error.get("type").and_then(serde_json::Value::as_str)
+                    == Some("invalid_request_error")
+                    && error.get("code").and_then(serde_json::Value::as_str)
+                        == Some("invalid_value")
+                    && error
+                        .get("param")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|param| {
+                            param.starts_with("input[") && param.ends_with(".image_url")
+                        })
+            })
+        });
+    if invalid_image_url || raw_event.contains(INVALID_IMAGE_ERROR) {
+        ResponsesError::InvalidImageRequest {
+            event: raw_event.to_owned(),
+        }
+    } else {
+        ResponsesError::api_event(raw_event.to_owned())
+    }
 }
 
 fn code_calls(items: &[ResponseItem]) -> Vec<CodeCall> {
@@ -633,8 +658,58 @@ mod tests {
 
     use super::{
         CodeCallKind, ContentItem, MessageRole, ResponseItem, StreamTiming, code_calls,
-        final_message,
+        final_message, provider_error,
     };
+
+    #[test]
+    fn invalid_image_url_validation_selects_image_recovery() {
+        let event = json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_value",
+                "message": "Invalid 'input[175].output[1].image_url'. Expected a base64-encoded data URL with an image MIME type (e.g. 'data:image/png;base64,...'), but got an invalid base64-encoded value.",
+                "param": "input[175].output[1].image_url"
+            },
+            "status": 400
+        });
+        for envelope in [
+            event.clone(),
+            json!({"type": "response.failed", "response": {"error": event["error"]}}),
+        ] {
+            let raw = envelope.to_string();
+            assert!(matches!(
+                provider_error(&raw),
+                crate::ResponsesError::InvalidImageRequest { event } if event == raw
+            ));
+        }
+
+        // Other invalid values must not discard images from the conversation.
+        for param in ["input[175].output[1].text", "model", "image_url"] {
+            let mut unrelated = event.clone();
+            unrelated["error"]["param"] = json!(param);
+            assert!(!matches!(
+                provider_error(&unrelated.to_string()),
+                crate::ResponsesError::InvalidImageRequest { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_invalid_image_failure_selects_image_recovery() {
+        let raw = json!({
+            "type": "response.failed",
+            "response": {"error": {
+                "code": "invalid_image",
+                "message": super::INVALID_IMAGE_ERROR
+            }}
+        })
+        .to_string();
+        assert!(matches!(
+            provider_error(&raw),
+            crate::ResponsesError::InvalidImageRequest { event } if event == raw
+        ));
+    }
 
     #[test]
     fn display_delta_cadence_records_gaps_and_stalls() {
