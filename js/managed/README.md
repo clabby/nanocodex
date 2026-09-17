@@ -521,6 +521,24 @@ These tools become available after the managed container image is built and
 rolled out. Existing running sandboxes need recreation with the updated image.
 When changing tool versions in CI, update the corresponding image pins too.
 
+### Opening files from another Hand
+
+`GET /v1/agents/:id/files?path=<logical absolute path>` serves private, uncached
+file bytes after checking account, organization, team, authorization epoch,
+`agents:read`, and `tools:use`. Connect grants cannot use this route. `/brain`
+reads stream from the conversation's R2 prefix. Hand paths resolve through the
+conversation's durable mount identities and use a captured execution route to
+read bounded binary chunks; filenames are quoted as data on POSIX and Windows.
+Missing or offline Hands fail explicitly. Only `file_path_unmapped` permits a
+client to try its own local filesystem.
+
+The terminal client downloads a complete file into a private temporary directory
+before invoking the local viewer, preserves the filename, and removes failed or
+cancelled downloads. Successful copies remain available to the viewer after the
+terminal exits. File links may include the documented `:line` or `:line:column`
+suffix. This behavior requires both the updated managed Worker and terminal
+client; no update to an existing Hand is required.
+
 ### Original media attachments
 
 The authenticated `/v1/agents/:id/attachments/:uuid` route stores original

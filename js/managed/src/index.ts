@@ -1,3 +1,4 @@
+import { downloadPath, downloadBrainFile, downloadHandFile, fileDownloadFailure, FileDownloadError } from "./file-download";
 import { callerContext, type CallerContext } from "./request-origin";
 import { HandPaths } from "./hand-paths";
 import { memoryTarget, memoryVisibility, personalMemoryTeam, scopedMemoryOperation, type MemoryVisibility } from "./memory-target";
@@ -17,7 +18,9 @@ import { managedCredentialSubject, scopedManagedModelEgress, sessionCredentialOw
 import { remoteICE } from "./hand-remote-ice";
 import { REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { serverHandTool } from "./ssh-hand-setup";
+import { phoneAdminConfigured } from "./phone-admin";
 import { phoneTools } from "./phone-tool";
+import { emailTools, type EmailConfig } from "./email-tool";
 import { PhoneContainer } from "./phone-container";
 export { PhoneContainer };
 import { createVaultIntakeTool } from "./vault-intake-tool";
@@ -354,6 +357,7 @@ const MEMORY_TEAM_ASSERTION = "x-nanocodex-team-id";
 const MEMORY_SUBJECT_ASSERTION = "x-nanocodex-subject-id";
 const MEMORY_MUTATION_ASSERTION = "x-nanocodex-memory-mutation";
 export interface Env extends
+  EmailConfig,
   AccountAuthEnv,
   ChiefOfStaffPrincipalEnv,
   HostPrincipalEnv {
@@ -365,6 +369,7 @@ export interface Env extends
   NANOCODEX_PHONE_BRIDGE_URL?: string;
   NANOCODEX_PHONE_BRIDGE_TOKEN?: string;
   NANOCODEX_PHONE_OWNER_ID?: string;
+  NANOCODEX_PHONE_ADMIN_ID?: string;
   NANOCODEX_PHONE_PUBLIC_ORIGIN?: string;
   NANOCODEX_PHONE_MANAGED_API_KEY?: string;
   TWILIO_VOICE_FROM_NUMBER?: string;
@@ -1408,7 +1413,7 @@ async function managedFetchRoute(
 ): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/v1/phone/bridge/")) {
-      if (!env.NANOCODEX_PHONES || !env.NANOCODEX_PHONE_OWNER_ID) return new Response("Not found", { status: 404 });
+      if (!env.NANOCODEX_PHONES || !env.NANOCODEX_PHONE_OWNER_ID || !phoneAdminConfigured(env)) return new Response("Not found", { status: 404 });
       const target = new URL(url);
       target.pathname = url.pathname.slice("/v1/phone/bridge".length);
       return env.NANOCODEX_PHONES.getByName(env.NANOCODEX_PHONE_OWNER_ID).fetch(new Request(target, request));
@@ -2280,6 +2285,13 @@ async function managedFetchRoute(
         headers: sessionHeaders,
       });
     }
+    if (resource === "files") {
+      if (request.method !== "GET") return json({ error: "method_not_allowed" }, { status: 405 });
+      if (principal.kind === "connect_grant" || principal.connectGrant
+        || !principal.capabilities.includes("agents:read") || !principal.capabilities.includes("tools:use"))
+        return json({ error: "forbidden" }, { status: 403 });
+      return stub.fetch(`https://session.internal/files${url.search}`, { headers: sessionHeaders, signal: request.signal });
+    }
     if (resource.startsWith("attachments/")) {
       if (principal.connectGrant || !principal.capabilities.includes(
         request.method === "GET" ? "agents:read" : "agents:write",
@@ -2998,6 +3010,7 @@ export class DurableAgentSession extends DurableComputerSession {
   readonly #cancellationTasks = new Map<string, Promise<void>>();
   readonly #hostedTools: HostedToolsBroker;
   #accountHostedTools?: AccountHostedToolsProvider;
+  readonly #fileReadAuthorizations = new Map<string, TurnAuthorization>();
   readonly #pendingDeviceToolCalls = new Map<string, PendingDeviceToolCall>();
   readonly #realtimeOperations = new Map<string, Promise<unknown>>();
   #realtimeOperationTail: Promise<void> = Promise.resolve();
@@ -3587,6 +3600,69 @@ export class DurableAgentSession extends DurableComputerSession {
       } catch {
         // Provider/parser failures may contain the private input; never reflect them.
         return json({ error: "challenge_unavailable" }, { status: 409 });
+      }
+    }
+    if (url.pathname === "/files") {
+      if (request.method !== "GET") return json({ error: "method_not_allowed" }, { status: 405 });
+      const session = this.#session();
+      if (!ownerAssertion || !session || session.runtime_profile !== "managed" || this.#deleting || this.#deleted)
+        return json({ error: "not_found" }, { status: 404 });
+      if (!this.#hasFullAccountAuthority(turnAuthorization)
+        || !turnAuthorization.capabilities.includes("agents:read") || !turnAuthorization.capabilities.includes("tools:use"))
+        return json({ error: "forbidden" }, { status: 403 });
+      const downloadSessionId = `file-download-${crypto.randomUUID()}`;
+      try {
+        const path = downloadPath(url);
+        if (path.startsWith("/brain/")) return await downloadBrainFile(this.#brainBucket(), session.session_id, path);
+        // This provider is scoped to the authenticated HTTP read, independent of
+        // whichever model turn may currently be running (or absent).
+        const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true);
+        await provider.refresh();
+        const mounts = this.#managedMounts();
+        const discovered = [...this.#hostedTools.machines(), ...provider.machines()];
+        const leased = new Set(mounts.flatMap(mount => mount.provider === "cloudflare"
+          ? [`cf:${mount.provider_resource_id}`] : [vmHostMountAllocation(mount)?.machine_id].filter((id): id is string => id !== undefined)));
+        const machines = discovered.filter(machine => !leased.has(machine.id)
+          && discovered.filter(candidate => candidate.id === machine.id).length === 1);
+        const roots = this.#handPaths.assign(machines, mounts.map(mount => mount.root));
+        const root = `/${path.split("/")[1]}`;
+        const mount = mounts.find(mount => mount.root === root);
+        const machine = machines.find(machine => roots.get(machine.id) === root || machineMountRoot(machine.id) === root);
+        const context: ToolContext = { sessionId: downloadSessionId, callId: `download-${crypto.randomUUID()}`,
+          parentCallId: "", model: "file-download", signal: request.signal };
+        this.#fileReadAuthorizations.set(downloadSessionId, turnAuthorization);
+        let exec: { handler(input: unknown, context: ToolContext): unknown | Promise<unknown> } | undefined;
+        let workspace: string | undefined;
+        if (mount) {
+          if (mount.state !== "mounted") throw new FileDownloadError("hand_unavailable", "The file's Hand is not mounted");
+          if (mount.provider === "cloudflare") {
+            workspace = "/workspace";
+            exec = cloudflareSandboxTools(this.env.NANOCODEX_SANDBOXES, mount.provider_resource_id,
+              this.env.NANOCODEX_SANDBOX_LOCAL === "true", session.public_origin, this.env.NANOCODEX_ADMIN_TOKEN,
+              undefined, () => this.#cloudflareNamespaceMounts("mounted"), { resourceId: session.session_id },
+              this.#credentialSubject()).exec_command;
+          } else {
+            const allocation = vmHostMountAllocation(mount);
+            if (allocation?.route_id) {
+              exec = this.#hostedTools.machineToolOnRoute(allocation.route_id, allocation.machine_id, "exec_command", context);
+              workspace = this.#hostMachineForMount(mount)?.workspace;
+            }
+          }
+        } else if (machine) {
+          workspace = machine.workspace;
+          exec = this.#hostedTools.machineTool(machine.id, "exec_command", context)
+            ?? provider.machineTool(machine.id, "exec_command", context);
+        } else if (root !== "/brain" && !this.#handPaths.roots().includes(root)
+          && ![...roots.keys()].some(id => machineMountRoot(id) === root)) {
+          throw new FileDownloadError("file_path_unmapped", "This path is outside the agent's Hands", 404);
+        }
+        if (!exec || !workspace) throw new FileDownloadError("hand_unavailable", "Reconnect the file's Hand to open this link");
+        return await downloadHandFile(path, workspace, root, exec, context,
+          () => !this.#deleting && !this.#deleted && !this.#durabilityExported,
+          () => { this.#fileReadAuthorizations.delete(downloadSessionId); });
+      } catch (error) {
+        this.#fileReadAuthorizations.delete(downloadSessionId);
+        return fileDownloadFailure(error);
       }
     }
     if (url.pathname.startsWith("/attachments/")) {
@@ -7609,6 +7685,16 @@ export class DurableAgentSession extends DurableComputerSession {
       })]),
       ...(multiplayer ? [] : this.#memoryTools()),
       ...(multiplayer ? [] : [createVaultIntakeTool(context => this.#authorizeVaultTool(context))]),
+      ...emailTools({
+        config: this.env, owner: session.owner_id, agentId: session.session_id, multiplayer,
+        authorize: context => {
+          context.signal.throwIfAborted();
+          const authorization = this.#authorizationForToolContext(context);
+          if (!this.#hasFullAccountAuthority(authorization)
+            || !authorization.capabilities.includes("agents:write") || !authorization.capabilities.includes("tools:use"))
+            throw new ManagedRequestError(403, "forbidden", "email requires full account tool authority");
+        },
+      }),
       ...phoneTools({
         config: this.env, owner: session.owner_id, agentId: session.session_id, multiplayer,
         authorize: context => {
@@ -8721,7 +8807,7 @@ export class DurableAgentSession extends DurableComputerSession {
     if (!accountToolsEnabled(configuration)) return false;
     const authorization = context === undefined
       ? this.#activeTurnAuthorization()
-      : this.#authorizationForToolContext(context);
+      : this.#fileReadAuthorizations.get(context.sessionId) ?? this.#authorizationForToolContext(context);
     if (!authorization) return false;
     return hostedToolCatalogEntryAllowed(
       authorization.connectGrant,
