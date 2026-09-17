@@ -621,6 +621,8 @@ impl Desktop for Win32 {
             "drag" => Action::Drag {
                 from: [finite(&params, "from_x")?, finite(&params, "from_y")?],
                 to: [finite(&params, "to_x")?, finite(&params, "to_y")?],
+                button: 0,
+                modifiers: Vec::new(),
             },
             "press_key" => Action::PressKey {
                 key: params["key"].as_str().unwrap().into(),
@@ -796,7 +798,17 @@ fn action_at(
             }
             Ok(())
         }
-        Action::Drag { from, to } => {
+        Action::Drag {
+            from,
+            to,
+            button,
+            modifiers,
+        } => {
+            if button != 0 || !modifiers.is_empty() {
+                return Err(Error::unsupported(
+                    "Modified native drag is unavailable on this Windows backend",
+                ));
+            }
             let frame = rectangle(root)?;
             move_pointer(crate::native::window_point(frame, from)?)?;
             send(&[mouse(MOUSEEVENTF_LEFTDOWN, 0)])?;

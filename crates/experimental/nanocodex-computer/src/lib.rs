@@ -387,6 +387,9 @@ impl Process {
             "DISPLAY",
             "XAUTHORITY",
             "WAYLAND_DISPLAY",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "NANOCODEX_COMPUTER_BACKGROUND",
+            "NANOCODEX_HYPRLAND_CAPTURE",
             "XDG_RUNTIME_DIR",
             "DBUS_SESSION_BUS_ADDRESS",
             "LANG",
@@ -398,6 +401,13 @@ impl Process {
         }
         command.envs(&config.environment);
         if let Some(directory) = &config.desktop_runtime {
+            if config
+                .environment
+                .contains_key(std::ffi::OsStr::new("NANOCODEX_COMPUTER_BACKGROUND"))
+                || std::env::var_os("NANOCODEX_COMPUTER_BACKGROUND").is_some()
+            {
+                return Err("Background CUA cannot be combined with a private X11 desktop".into());
+            }
             let ready: Value =
                 serde_json::from_slice(&std::fs::read(directory.join("ready")).map_err(
                     |_| "This Hand's desktop is unavailable; start its screen before using CUA.",

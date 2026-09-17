@@ -19,7 +19,8 @@ impl Mode {
         if method == "sky.setup"
             && let Ok(value) = result
         {
-            self.mac = value.get("target").and_then(Value::as_str) == Some("mac");
+            self.mac = value.get("target").and_then(Value::as_str) == Some("mac")
+                || value.get("appInterface").and_then(Value::as_bool) == Some(true);
         }
     }
     pub(crate) fn request<'a>(&self, method: &str, input: &'a Value) -> Result<Option<&'a str>> {

@@ -10,7 +10,7 @@ mod references;
 use crate::{
     Error, Result,
     ax::Node,
-    clipboard::{self, Item, Pasteboard},
+    clipboard::{Item, Pasteboard},
 };
 use accessibility_sys::*;
 use block2::RcBlock;
@@ -28,23 +28,25 @@ use core_foundation::{
     url::CFURL,
 };
 use core_graphics::{
-    event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField},
+    event::{CGEvent, CGEventFlags, CGEventType, CGMouseButton, EventField},
     event_source::{CGEventSource, CGEventSourceStateID},
     geometry::{CGPoint, CGSize},
 };
 use monitor::Monitor;
+#[path = "macos_background.rs"]
+mod background;
 use objc2::{
     AnyThread, DefinedClass, define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, ProtocolObject},
 };
+use objc2_app_kit::NSWorkspaceOpenConfiguration;
 use objc2_app_kit::{
     NSAccessibilityAttachmentTextAttribute, NSAccessibilityLinkTextAttribute,
     NSAccessibilityListItemIndexTextAttribute, NSAccessibilityListItemLevelTextAttribute,
-    NSAccessibilityListItemPrefixTextAttribute, NSApplicationActivationOptions, NSFont,
-    NSFontDescriptor, NSFontFamilyAttribute, NSFontNameAttribute, NSPasteboard, NSPasteboardItem,
-    NSPasteboardItemDataProvider, NSPasteboardType, NSPasteboardWriting, NSRunningApplication,
-    NSWorkspace,
+    NSAccessibilityListItemPrefixTextAttribute, NSFont, NSFontDescriptor, NSFontFamilyAttribute,
+    NSFontNameAttribute, NSPasteboard, NSPasteboardItem, NSPasteboardItemDataProvider,
+    NSPasteboardType, NSPasteboardWriting, NSRunningApplication, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSData, NSDictionary, NSError, NSNumber, NSObject, NSObjectProtocol, NSString, NSURL,
@@ -880,7 +882,7 @@ fn pump(duration: Duration) {
     }
 }
 fn source() -> Result<CGEventSource> {
-    CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    CGEventSource::new(CGEventSourceStateID::Private)
         .map_err(|_| Error::action("Cannot allocate event source"))
 }
 
@@ -944,12 +946,6 @@ impl MacDesktop {
     fn snapshot_native(&mut self, app: &App) -> Result<Node> {
         self.source_warnings.remove(&app.pid);
         self.ensure_monitor(app)?;
-        if NSRunningApplication::runningApplicationWithProcessIdentifier(app.pid)
-            .is_some_and(|a| !a.isActive())
-        {
-            Self::focus(app)?;
-            self.needs_settle.insert(app.pid);
-        }
         self.settle(app);
         self.ensure_monitor(app)?;
         let window = self.root(app)?;
@@ -960,7 +956,7 @@ impl MacDesktop {
         }
         let context = WindowContext {
             frame: window.frame(),
-            window_id: window.text("AXWindowNumber").and_then(|n| n.parse().ok()),
+            window_id: background::window_id(&window),
             window: window.clone(),
         };
         let menu = self
@@ -1132,10 +1128,10 @@ impl MacDesktop {
         loop {
             let now = Instant::now();
             let quiet = self.monitors.get(&app.pid).map_or_else(
-                || now.duration_since(started) >= Duration::from_millis(250),
-                |m| m.quiet(now, Duration::from_millis(250), started),
+                || now.duration_since(started) >= Duration::from_millis(30),
+                |m| m.quiet(now, Duration::from_millis(30), started),
             );
-            if quiet || now.duration_since(started) >= Duration::from_secs(2) {
+            if quiet || now.duration_since(started) >= Duration::from_millis(250) {
                 break;
             }
             pump(Duration::from_millis(10));
@@ -1337,32 +1333,6 @@ impl MacDesktop {
         }
         context.references.check()
     }
-    fn focus(app: &App) -> Result<()> {
-        let application = NSRunningApplication::runningApplicationWithProcessIdentifier(app.pid)
-            .ok_or_else(|| Error::action("Application terminated"))?;
-        if !application.isActive()
-            && !application.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows)
-        {
-            return Err(Error::action("Cannot activate target app"));
-        }
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if application.isTerminated() {
-                return Err(Error::action("Application terminated during activation"));
-            }
-            if application.isActive()
-                && NSWorkspace::sharedWorkspace()
-                    .frontmostApplication()
-                    .is_some_and(|front| front.processIdentifier() == app.pid)
-            {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(Error::action("Target application did not become active"));
-            }
-            pump(Duration::from_millis(10));
-        }
-    }
     fn location(&self, app: &App, target: &Target) -> Result<[f64; 2]> {
         match target {
             Target::Point { point } => self.screen_point(app, *point),
@@ -1398,7 +1368,7 @@ impl MacDesktop {
             ));
         }
         Ok(WindowContext {
-            window_id: window.text("AXWindowNumber").and_then(|n| n.parse().ok()),
+            window_id: background::window_id(&window),
             window,
             frame,
         })
@@ -1477,75 +1447,53 @@ impl MacDesktop {
         }
         Ok(())
     }
-    fn mouse(
+    fn post_pointer(
         &self,
         app: &App,
+        context: &WindowContext,
+        event: &CGEvent,
         position: [f64; 2],
-        kind: CGEventType,
-        button: CGMouseButton,
-        count: u32,
     ) -> Result<()> {
-        // The WindowServer performs pointer hit testing for the public event
-        // stream. Posting a mouse event directly to a PID does not provide the
-        // window-relative location AppKit needs and can hit another control.
-        // Releases must still be sent if focus changes during a drag.
-        if !matches!(
-            kind,
-            CGEventType::LeftMouseUp | CGEventType::RightMouseUp | CGEventType::OtherMouseUp
-        ) {
-            self.check_pointer_target(app, position)?;
-        }
-        let event = CGEvent::new_mouse_event(
-            source()?,
-            kind,
-            CGPoint::new(position[0], position[1]),
-            button,
-        )
-        .map_err(|_| Error::action("Cannot allocate mouse event"))?;
-        event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, count as i64);
-        event.post(CGEventTapLocation::HID);
-        Ok(())
-    }
-
-    fn check_pointer_target(&self, app: &App, position: [f64; 2]) -> Result<()> {
-        self.current_context(app)?;
-        if !NSWorkspace::sharedWorkspace()
-            .frontmostApplication()
-            .is_some_and(|front| front.processIdentifier() == app.pid)
-        {
-            return Err(Error::action(
-                "Target application lost activation before pointer input",
-            ));
-        }
-        let system = unsafe { AXUIElementCreateSystemWide() };
-        if system.is_null() {
-            return Err(Error::action("Cannot inspect pointer target"));
-        }
-        let system = unsafe { CFType::wrap_under_create_rule(system.cast()) };
-        let mut target = ptr::null_mut();
-        ax_ok(unsafe {
-            AXUIElementCopyElementAtPosition(
-                system.as_CFTypeRef().cast_mut().cast(),
-                position[0] as f32,
-                position[1] as f32,
-                &mut target,
-            )
-        })?;
-        if target.is_null() {
-            return Err(Error::action("No accessibility target at pointer location"));
-        }
-        let target = unsafe { CFType::wrap_under_create_rule(target.cast()) };
-        let mut pid = 0;
-        ax_ok(unsafe { AXUIElementGetPid(target.as_CFTypeRef().cast_mut().cast(), &mut pid) })?;
-        if pid != app.pid {
-            return Err(Error::action(
-                "Pointer target is covered by another application; observe again",
-            ));
-        }
-        Ok(())
+        background::post_pointer(app.pid, context.window_id, context.frame, event, position)
     }
 }
 impl Desktop for MacDesktop {
+    fn prepare_screenshot(&mut self, app: &App) -> Result<()> {
+        self.ensure_monitor(app)?;
+        self.settle(app);
+        let window = self.root(app)?;
+        let frame = Some(window.checked_frame()?);
+        if self.contexts.get(&app.pid).is_some_and(|prior| unsafe { CFEqual(prior.window.0.as_CFTypeRef(), window.0.as_CFTypeRef()) } == 0 || prior.frame != frame) {
+            self.invalidate_screenshot(app);
+        }
+        self.contexts.insert(
+            app.pid,
+            WindowContext {
+                frame,
+                window_id: background::window_id(&window),
+                window,
+            },
+        );
+        Ok(())
+    }
+
+    fn validate_app(&mut self, app: &App) -> Result<bool> {
+        Ok(
+            NSRunningApplication::runningApplicationWithProcessIdentifier(app.pid).is_some_and(
+                |running| {
+                    !running.isTerminated()
+                        && running
+                            .bundleIdentifier()
+                            .is_some_and(|id| id.to_string() == app.id)
+                        && running
+                            .bundleURL()
+                            .and_then(|url| url.path())
+                            .is_some_and(|path| path.to_string() == app.path)
+                },
+            ),
+        )
+    }
+
     fn app_specific_instructions(&mut self, app: &App) -> Option<String> {
         apps::instructions(app)
     }
@@ -1646,20 +1594,61 @@ impl Desktop for MacDesktop {
             Some(NSURL::fileURLWithPath(&NSString::from_str(identifier)))
         } else {
             workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(identifier))
-        };
-        let url = url.ok_or_else(|| Error::action("Application not found"))?;
-        if !workspace.openURL(&url) {
-            return Err(Error::action("Application launch failed"));
         }
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(5) {
-            if let Some(app) = find(self.apps()?)? {
-                return Ok(app);
+        .ok_or_else(|| Error::action("Application not found"))?;
+        let configuration = NSWorkspaceOpenConfiguration::configuration();
+        configuration.setActivates(false);
+        configuration.setPromptsUserIfNeeded(false);
+        configuration.setAddsToRecentItems(false);
+        let (send, receive) = std::sync::mpsc::channel();
+        let callback = RcBlock::new(
+            move |running: *mut NSRunningApplication, error: *mut NSError| {
+                let result = unsafe {
+                    if let Some(error) = error.as_ref() {
+                        Err(Error::action(error.localizedDescription().to_string()))
+                    } else if let Some(running) = running.as_ref() {
+                        Ok(running.processIdentifier())
+                    } else {
+                        Err(Error::action("Background launch returned no application"))
+                    }
+                };
+                let _ = send.send(result);
+            },
+        );
+        workspace.openApplicationAtURL_configuration_completionHandler(
+            &url,
+            &configuration,
+            Some(&callback),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match receive.try_recv() {
+                Ok(result) => {
+                    let pid = result?;
+                    if NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+                        .is_some_and(|running| running.isActive())
+                    {
+                        return Err(Error::action(
+                            "Application activated itself during background launch; no input was sent",
+                        ));
+                    }
+                    return find(self.apps()?)?
+                        .ok_or_else(|| Error::action("Launched application identity unavailable"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(Error::action("Background launch callback disconnected"));
+                }
+                _ => {}
             }
-            pump(Duration::from_millis(50));
+            if Instant::now() >= deadline {
+                return Err(Error::action(
+                    "Background launch timed out; do not retry without checking running applications",
+                ));
+            }
+            pump(Duration::from_millis(10));
         }
-        Err(Error::action("Application launch timed out"))
     }
+
     fn snapshot(&mut self, app: &App) -> Result<Node> {
         let result = self.snapshot_native(app);
         if result.is_err() {
@@ -1695,7 +1684,20 @@ impl Desktop for MacDesktop {
         }
         trusted()?;
         self.ensure_monitor(app)?;
-        Self::focus(app)?;
+        self.application(app)?;
+        // App-local synthetic focus is distinct from the user's front process.
+        // Validate the window first; no global activation fallback is allowed.
+        if matches!(
+            &action,
+            Action::Click { .. }
+                | Action::Drag { .. }
+                | Action::PressKey { .. }
+                | Action::TypeText { .. }
+                | Action::Scroll { .. }
+        ) {
+            let context = self.current_context(app)?;
+            background::focus_window(app.pid, context.window_id)?;
+        }
         self.needs_settle.insert(app.pid);
         match action {
             Action::SetValue { identity, value } => {
@@ -1723,38 +1725,10 @@ impl Desktop for MacDesktop {
             }
             Action::SelectText { identity, range } => {
                 let ax = self.handle(&identity)?;
-                let can_focus = ax.settable("AXFocused");
-                // AppKit field editors expose a writable selected range only
-                // after their concrete text control becomes first responder.
-                // Do not focus an arbitrary non-text element as a fallback.
-                if !ax.settable("AXSelectedTextRange")
-                    && (!can_focus
-                        || !ax.text("AXRole").is_some_and(|role| {
-                            matches!(
-                                role.as_str(),
-                                "AXTextField" | "AXTextArea" | "AXSearchField" | "AXComboBox"
-                            )
-                        }))
-                {
-                    return Err(Error::action("Selected text range is not settable"));
-                }
-                if can_focus {
-                    ax.set("AXFocused", &CFBoolean::true_value().as_CFType())?;
-                }
-                let focus_deadline = Instant::now() + Duration::from_secs(1);
-                while can_focus && ax.boolean("AXFocused") != Some(true) {
-                    if Instant::now() >= focus_deadline {
-                        return Err(Error::action("Text target did not acquire keyboard focus"));
-                    }
-                    pump(Duration::from_millis(10));
-                }
-                while !ax.settable("AXSelectedTextRange") {
-                    if Instant::now() >= focus_deadline {
-                        return Err(Error::action(
-                            "Selected text range is not settable after focusing the text target",
-                        ));
-                    }
-                    pump(Duration::from_millis(10));
+                if !ax.settable("AXSelectedTextRange") {
+                    return Err(Error::action(
+                        "Background selection is unsupported for this unfocused text control; click the control first",
+                    ));
                 }
                 let range = core_foundation::base::CFRange {
                     location: range
@@ -1803,7 +1777,14 @@ impl Desktop for MacDesktop {
                     pump(Duration::from_millis(10));
                 }
             }
-            Action::Secondary { identity, action } => self.handle(&identity)?.perform(&action)?,
+            Action::Secondary { identity, action } => {
+                if action == "AXRaise" {
+                    return Err(Error::action(
+                        "Raising windows is unsupported in background mode",
+                    ));
+                }
+                self.handle(&identity)?.perform(&action)?;
+            }
             Action::Click {
                 target,
                 button,
@@ -1816,7 +1797,6 @@ impl Desktop for MacDesktop {
                     }
                     if button == 0 && count == 1 && ax.actions()?.iter().any(|a| a == "AXPress") {
                         ax.perform("AXPress")?;
-                        pump(Duration::from_millis(50));
                         return self.ensure_monitor(app);
                     }
                 }
@@ -1838,42 +1818,49 @@ impl Desktop for MacDesktop {
                         CGEventType::OtherMouseUp,
                     ),
                 };
+                let context = self.current_context_with_geometry(app, true)?;
+                let event_source = source()?;
+                let mut events = Vec::new();
+                // Prepare all allocations and pin one context before any down.
                 for click in 1..=count {
-                    self.mouse(app, p, down, button, click)?;
-                    self.mouse(app, p, up, button, click)?;
+                    for kind in [down, up] {
+                        let event = CGEvent::new_mouse_event(
+                            event_source.clone(),
+                            kind,
+                            CGPoint::new(p[0], p[1]),
+                            button,
+                        )
+                        .map_err(|_| Error::action("Cannot allocate background click event"))?;
+                        event.set_flags(CGEventFlags::empty());
+                        event.set_integer_value_field(
+                            EventField::MOUSE_EVENT_CLICK_STATE,
+                            i64::from(click),
+                        );
+                        events.push(event);
+                    }
+                }
+                for event in events {
+                    self.post_pointer(app, &context, &event, p)?;
                 }
             }
-            Action::Drag { from, to } => {
+            Action::Drag {
+                from,
+                to,
+                button,
+                modifiers,
+            } => {
                 let from = self.screen_point(app, from)?;
                 let to = self.screen_point(app, to)?;
-                self.mouse(
-                    app,
+                let context = self.current_context_with_geometry(app, true)?;
+                background::drag(
+                    app.pid,
+                    context.window_id,
+                    context.frame,
                     from,
-                    CGEventType::LeftMouseDown,
-                    CGMouseButton::Left,
-                    1,
+                    to,
+                    button,
+                    &modifiers,
                 )?;
-                let movement = (|| -> Result<()> {
-                    for step in 1..=20 {
-                        let t = step as f64 / 20.;
-                        self.mouse(
-                            app,
-                            [
-                                from[0] + t * (to[0] - from[0]),
-                                from[1] + t * (to[1] - from[1]),
-                            ],
-                            CGEventType::LeftMouseDragged,
-                            CGMouseButton::Left,
-                            1,
-                        )?;
-                        pump(Duration::from_millis(5));
-                    }
-                    Ok(())
-                })();
-                let released =
-                    self.mouse(app, to, CGEventType::LeftMouseUp, CGMouseButton::Left, 1);
-                movement?;
-                released?;
             }
             Action::PressKey { key } => Self::key(app, &key)?,
             Action::TypeText { text } => {
@@ -1911,13 +1898,7 @@ impl Desktop for MacDesktop {
                     None
                 };
                 let check_focus = || -> Result<()> {
-                    if !NSRunningApplication::runningApplicationWithProcessIdentifier(app.pid)
-                        .is_some_and(|running| running.isActive())
-                    {
-                        return Err(Error::action(
-                            "Target application lost activation during typing",
-                        ));
-                    }
+                    self.application(app)?;
                     if let Some(expected) = &focused {
                         let actual = application.element_checked("AXFocusedUIElement")?;
                         if !actual.is_some_and(|actual| unsafe {
@@ -2002,36 +1983,19 @@ impl Desktop for MacDesktop {
                 let position = self.location(app, &target)?;
                 let event = CGEvent::new_scroll_event(source()?, 0, 1, vertical, horizontal, 0)
                     .map_err(|_| Error::action("Cannot allocate scroll event"))?;
+                event.set_flags(CGEventFlags::empty());
                 event.set_location(CGPoint::new(position[0], position[1]));
-                if let Some(window_id) = context.window_id {
-                    event.set_integer_value_field(
-                        EventField::MOUSE_EVENT_WINDOW_UNDER_MOUSE_POINTER,
-                        window_id as i64,
-                    );
-                    event.set_integer_value_field(EventField::MOUSE_EVENT_WINDOW_UNDER_MOUSE_POINTER_THAT_CAN_HANDLE_THIS_EVENT, window_id as i64);
-                }
-                self.mouse(
-                    app,
-                    position,
-                    CGEventType::MouseMoved,
-                    CGMouseButton::Left,
-                    0,
-                )?;
-                self.check_pointer_target(app, position)?;
-                event.post(CGEventTapLocation::HID);
+                self.post_pointer(app, &context, &event, position)?;
             }
             Action::Paste { text, format } => {
-                let item = crate::rich_text::representations(&text, &format)?;
-                let mut board = MacPasteboard::new();
-                let mut transaction = clipboard::Transaction::begin(&mut board, &[item])?;
-                let operation = Self::key(app, "super+v")
-                    .and_then(|_| transaction.wait(Duration::from_secs(2)));
-                let restored = transaction.finish();
-                operation?;
-                restored?;
+                if format == "text" {
+                    return self.action(app, Action::TypeText { text });
+                }
+                return Err(Error::action(
+                    "Formatted background paste is unsupported without changing the shared clipboard; use typeText or setValue",
+                ));
             }
         }
-        pump(Duration::from_millis(50));
         self.ensure_monitor(app)
     }
     fn screenshot(&mut self, app: &App) -> Result<Image> {
@@ -2125,9 +2089,10 @@ impl super::keys::EventFactory for KeyEventFactory {
         Ok(event)
     }
     fn saved_flags(&mut self) -> Result<u64> {
-        // The original samples CombinedSessionState after key-up allocation,
-        // even though its one retained source is HIDSystemState.
-        Ok(unsafe { CGEventSourceFlagsState(CGEventSourceStateID::CombinedSessionState) })
+        // Background chords own a private source. End with no synthetic
+        // modifiers instead of importing the human's hardware modifier state
+        // into the addressed application.
+        Ok(0)
     }
 }
 
@@ -2169,16 +2134,6 @@ struct MacPasteboard {
     consumed: Arc<AtomicBool>,
     first: bool,
     providers: Vec<Retained<DataProvider>>,
-}
-impl MacPasteboard {
-    fn new() -> Self {
-        Self {
-            board: NSPasteboard::generalPasteboard(),
-            consumed: Arc::new(AtomicBool::new(false)),
-            first: true,
-            providers: vec![],
-        }
-    }
 }
 impl Pasteboard for MacPasteboard {
     fn generation(&self) -> i64 {
@@ -2298,7 +2253,6 @@ fn write_eager(board: &NSPasteboard, items: &[Item], expected: isize) -> bool {
 }
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    fn CGEventSourceFlagsState(state_id: CGEventSourceStateID) -> u64;
     pub(super) fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
 }
@@ -2523,7 +2477,7 @@ fn capture_window(
         },
     );
     unsafe {
-        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(true,true,&content_callback)
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(true,false,&content_callback)
     };
     let start = Instant::now();
     loop {
