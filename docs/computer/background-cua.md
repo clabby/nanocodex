@@ -80,7 +80,23 @@ test verified clicks, scrolling, Shift+middle drags and Unicode typing through
 MacDesktop while the foreground application stayed unchanged. It does not yet
 establish compatibility with Chromium/Electron, arbitrary menus, or every app.
 The original Sky private-input recipe was not completely recovered; do not claim
-binary-equivalent Sky behavior. Public CGEventPostToPid is still used. Native plain-text paste uses background
+binary-equivalent Sky behavior. Public CGEventPostToPid is still used.
+
+AppKit-active state alone does not make a window native-key: its first click can
+be consumed for focus instead of reaching the control. The Mac backend now sends
+exact-window key notifications before input without changing the WindowServer
+front process. A fresh-window regression verifies the first production click and
+subsequent text entry. Explicit PID lookup bypasses the cached NSWorkspace app
+list. All four owned Mac tests pass with foreground/cursor preservation checks.
+
+Install the Mac companion into a fresh version directory and switch the current
+version atomically, retaining the previous version. During live deployment,
+replacing the executable in an existing directory produced ScreenCaptureKit
+capture timeouts despite positive permission preflight; the identical binary in
+a fresh directory captured successfully. Existing CUA processes retain their
+loaded version until renewed. This is observed deployment behavior, not proof of
+the specific macOS caching mechanism.
+ Native plain-text paste uses background
 typing without changing the shared clipboard; Markdown and HTML paste are
 refused. Use `typeText` or `setValue` for native app text.
 
