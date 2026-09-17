@@ -22,7 +22,11 @@ if plugins:
         if status.get('abi', {}).get('match') and status.get('input', {}).get('transport_ready'): sys.exit(0)
     sys.exit('Existing plugins require explicit review; refusing module replacement')
 print(ctl('plugin', 'load', str(root / 'cua-hyprland-plugin.so')))
-print(ctl('keyword', 'plugin:cua:enabled', 'true'))
+configured = ctl('keyword', 'plugin:cua:enabled', 'true')
+if 'non-legacy parsers' in configured:
+    configured = ctl('eval', 'hl.config({ plugin = { cua = { enabled = true } } })')
+if configured.strip() != 'ok': sys.exit('Plugin configuration refused: ' + configured.strip())
+print(configured)
 status = json.loads(ctl('cua:refresh', '-j'))
 if not status.get('abi', {}).get('match') or not status.get('input', {}).get('transport_ready'):
     sys.exit('Plugin did not establish background input transport')

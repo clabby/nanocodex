@@ -20,7 +20,7 @@ install -m 440 "$root/sudoers" /etc/sudoers.d/nanocodex-background-cua
 # This acts only on the desktop user's sole compositor and refuses replacement.
 runuser -u gakonst -- "$root/activate-plugin.py"
 install -d -m 755 /etc/systemd/system/nanocodex-hand.service.d
-cat > /etc/systemd/system/nanocodex-hand.service.d/99-background-cua.conf <<'UNIT'
+cat > /etc/systemd/system/nanocodex-hand.service.d/zz-background-cua.conf <<'UNIT'
 [Service]
 Environment=NANOCODEX_COMPUTER=/opt/nanocodex/background-cua/hand-companion
 Environment=NANOCODEX_COMPUTER_BACKGROUND=hyprland

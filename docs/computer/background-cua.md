@@ -123,37 +123,44 @@ background input, or arbitrary subsurface/popup support. WoW may remain the huma
 foreground app, but this specific combination has **not yet been verified on the
 installed user compositor**.
 
-## Omarchy activation boundary
+## Omarchy installed deployment
 
-The current Hand service is deliberately configured `NANOCODEX_COMPUTER=off` and
-runs as `nanocodex` (UID 960), while the desktop is `gakonst` (UID 1000). SSH as
-`gakonst` works, but `sudo -n true` requires a password. No privileged installation,
-main-desktop plugin load, graphical-session restart, or existing Blender/WoW
-mutation was performed.
+The background companion and ABI-matched plugin are installed under
+`/opt/nanocodex/background-cua`. The Hand runs as `nanocodex` (UID 960) and
+launches only the fixed companion as desktop user `gakonst` (UID 1000), through
+a narrowly scoped sudo rule. The Hand service was restarted; the compositor
+and existing applications were not restarted.
 
-The reviewed bundle is staged at
-`/srv/nanocodex/workspace/background-cua/omarchy-install`, including SHA256SUMS.
-Its installer requires an explicit local administrator command:
-
-```sh
-sudo /srv/nanocodex/workspace/background-cua/omarchy-install/install-omarchy.sh --activate
-```
-
-It installs immutable paths under `/opt/nanocodex/background-cua`, a narrowly
-scoped sudo rule allowing the Hand to run only the fixed desktop companion as
-`gakonst`, and a Hand service override using the freshly built CLI. It loads the
-ABI-checked plugin once, applies its enable flag via `cua:refresh`, then restarts
-only the Hand service. It neither restarts the compositor nor bypasses screen
-ownership. The companion attests the desktop user's sole compositor, uses a
-sanitized environment, and serializes first activation after compositor restart.
-Existing unknown plugins or a changed compositor version refuse activation;
+Activation supports both legacy `hyprctl keyword` configuration and the live
+Lua configuration (`hl.config`). The systemd override is named
+`zz-background-cua.conf` so it sorts after the existing `omarchy-screen.conf`
+which otherwise disables the companion. Activation attests the desktop user's
+sole compositor, sanitizes its environment, and serializes plugin activation.
+Unknown loaded plugins or a changed compositor version refuse activation;
 loaded modules are never automatically replaced or unloaded.
 
-After that command, reselect the Omarchy Hand and verify the installed
-`cua_repl.js` route against owned windows while the user continues WoW. The
-privileged deployment and this final same-desktop WoW acceptance remain pending.
+The installed public app interface captured the existing Blender window and
+refused an input attempt with `primary_target_busy` while it was foreground.
+A temporary owned GTK window on the actual user compositor then received
+`background-live-proof` through `cua.getApp(...).typeText(...)`. The foreground
+terminal PID remained 463962 in the immediate post-input check; a subsequent
+exact-window screenshot showed the entered text. The transparent fixture used
+an exact-class no-focus rule and was removed afterward. By the later cleanup
+check the foreground was a different Blender PID, so that delayed check is not
+an assertion of uninterrupted foreground stability. The first capture showed
+the previous buffer; the next capture showed the updated text. Input completion
+does not guarantee that an application has painted a new frame.
 
-Rollback: remove `99-background-cua.conf` from the Hand's systemd drop-in directory
+This establishes installed background input and capture on the real desktop.
+The specific combination of agent Blender operations while the human plays
+WoW remains unverified. Full Blender transforms/orbit/pan and concurrent primary
+typing were verified in the isolated fixture described above.
+
+The reviewed installation bundle remains at
+`/srv/nanocodex/workspace/background-cua/omarchy-install`. To activate after a
+fresh desktop login, the fixed companion invokes the ABI-checked activator.
+
+Rollback: remove `zz-background-cua.conf` from the Hand's systemd drop-in directory
 and `/etc/sudoers.d/nanocodex-background-cua`, daemon-reload and restart the Hand.
 As `gakonst`, disable `plugin:cua:enabled` and call `cua:refresh`; the retired seat
 resources remain until the compositor naturally exits. Do not unload/replace a
