@@ -64,6 +64,12 @@ Use `Voice.create(agent)` from `nanocodex/browser` or `useVoice(agent)` from
 through WASM. The browser owns microphone permission, WebRTC media, device
 selection, and page lifecycle.
 
+Managed and Connect voice carry live commands and captions on the WebRTC data
+channel, directly alongside media. The client can handle conversation while
+durable startup completes; delegated tasks still wait for admission. Closing
+voice releases media immediately and preserves accepted coding work. Local
+Agents and explicit `sidebandUrl` overrides use the sideband transport.
+
 ```js
 const voice = Voice.create(agent);
 await voice.start();

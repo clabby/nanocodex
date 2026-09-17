@@ -175,8 +175,11 @@ workspace or MCP configuration to an Agent that already receives them through
 `Tools`.
 
 Browser consumers can attach Codex's ChatGPT Realtime voice lifecycle to the
-same retained Agent. The resource owns microphone, speaker, WebRTC, sideband,
+same retained Agent. The resource owns microphone, speaker, WebRTC control,
 and delegation cleanup; stopping voice does not cancel an active coding turn.
+Managed and Connect voice use the WebRTC data channel for live events and
+commands. Speech and captions can flow while durable startup completes;
+delegated work still waits for admission. Local Agents retain the sideband path.
 Snapshots update each speaker's transcript row as speech arrives, using a stable
 `id` and `isPartial` flag. Completion replaces that row. `transcript.delta` events
 carry the current partial text; `transcript` events retain completed-turn semantics.
@@ -231,15 +234,17 @@ subscription adapter (which treats all roles as context), and
 `appendContext(voice, text)` adds background commentary without
 requesting speech. Context and speech are split into provider-sized messages.
 These commands retain frames until sent and preserve them
-across a sideband reconnect. They are also methods on the resource and on
+across reconnects when using the sideband transport. They are also methods on
+the resource and on
 `useVoice` from `nanocodex-react`. These settings use ChatGPT subscription voice;
 custom voices and Platform audio configuration are not accepted.
 
 `Voice.create(...)` remains the equivalent namespaced resource constructor, and
 `Voice.voices` is the exact ChatGPT V3 voice catalog. The constructor accepts a
 normal browser Agent, an account-owned managed Agent, or a grant-scoped
-`ConnectAgent`. Authentication stays in the owning host routes; Connect uses a
-fresh one-use sideband ticket, and the browser binding never receives ChatGPT
+`ConnectAgent`. Authentication stays in the owning host routes. An explicit
+`sidebandUrl` override selects the sideband transport; Connect uses a fresh
+one-use ticket for that path. The browser binding never receives ChatGPT
 credentials or places its reusable grant bearer in a WebSocket URL.
 
 ### Durable Cloudflare Agent

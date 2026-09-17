@@ -640,6 +640,12 @@ during startup. `NANOCODEX_VOICE_TIMING=1` additionally records startup and clea
 stages, HTTP timings, event types, playback state, and audio transport statistics
 without SDP, transcripts, payloads, or credentials.
 It never captures microphone audio or claims to validate spoken interaction.
+`VoiceLatencyTests.testManagedStartupLatency` separately repeats three real
+receive-only connections with `NANOCODEX_VOICE_LATENCY=1` and `NC_API_KEY`.
+It reports time to the native active state, checks data-channel acknowledgements,
+and removes its validation agent. Enable `NANOCODEX_VOICE_TIMING=1` to split out
+call HTTP, peer, backend, and task-admission timing. These measurements exclude
+microphone capture and do not establish physical iPhone audio latency.
 `InboxUITests.testLiveVoiceConnectsMinimizesAndStops` checks two real voice
 connections, received test-phrase audio, minimizing, and ending on a signed-in
 iPhone with `NANOCODEX_VOICE_UI_LIVE=1`. The first call activates the microphone;
