@@ -283,6 +283,18 @@ impl Video {
                 webrtc::ice::udp_network::EphemeralUDP::new(min, max)?,
             ));
         }
+        if let Ok(address) = std::env::var("NANOCODEX_VIDEO_ADVERTISE_IP") {
+            // A VM/container can bind its private interface while advertising
+            // an administrator-configured, port-preserving NAT address.
+            let address: std::net::IpAddr = address.parse()?;
+            if address.is_unspecified() || address.is_multicast() {
+                return Err("video advertised address must be unicast".into());
+            }
+            settings.set_nat_1to1_ips(
+                vec![address.to_string()],
+                webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
+            );
+        }
         let api = APIBuilder::new()
             .with_setting_engine(settings)
             .with_media_engine(engine)

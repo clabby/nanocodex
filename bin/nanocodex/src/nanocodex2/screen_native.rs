@@ -43,14 +43,25 @@ impl NativeScreen {
         machine: &AttachmentMachine,
         directory: &Path,
     ) -> Result<Self, ManagedError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let _ = directory;
+            #[cfg(target_os = "windows")]
+            nanocodex_hand::ensure_interactive_session().map_err(configuration)?;
             let backend: ScreenBackend = std::sync::Arc::new(|input| {
                 Box::pin(async move {
-                    tokio::task::spawn_blocking(move || super::screen_macos::request(input))
-                        .await
-                        .map_err(configuration)?
+                    tokio::task::spawn_blocking(move || {
+                        #[cfg(target_os = "macos")]
+                        {
+                            super::screen_macos::request(input)
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            nanocodex_hand::request(input).map_err(configuration)
+                        }
+                    })
+                    .await
+                    .map_err(configuration)?
                 })
             });
             let publisher =
@@ -132,10 +143,12 @@ impl NativeScreen {
             }
             Ok(screen)
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             let _ = (target, machine, directory);
-            Err(configuration("native screens require macOS or Linux"))
+            Err(configuration(
+                "native screens require macOS, Windows, or Linux",
+            ))
         }
     }
     pub(crate) async fn shutdown(mut self) -> Result<(), ManagedError> {
@@ -307,6 +320,22 @@ fn native_video() -> super::screen_video::VideoSource {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()?;
+            super::screen_video::Capture::child(child)
+        })
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn native_video() -> super::screen_video::VideoSource {
+    std::sync::Arc::new(|| {
+        Box::pin(async {
+            let command = nanocodex_hand::video_command()?;
+            let child = tokio::process::Command::from(command)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
                 .kill_on_drop(true)
                 .spawn()?;
             super::screen_video::Capture::child(child)

@@ -7,7 +7,9 @@ param(
     [string]$Workspace,
 
     [Parameter(Mandatory = $true)]
-    [string]$DataDir
+    [string]$DataDir,
+
+    [switch]$Validate
 )
 
 Set-StrictMode -Version Latest
@@ -27,11 +29,14 @@ foreach ($path in @($binary, $computer)) {
 
 New-Item -ItemType Directory -Force -Path $Workspace, $DataDir, $state | Out-Null
 $env:NANOCODEX_ACCOUNT_FILE = $account
+# Resolve the bundled capture encoder without changing the machine PATH.
+$env:PATH = $InstallDir + [IO.Path]::PathSeparator + $env:PATH
 
-& $binary native-hand `
-    --workspace $Workspace `
-    --state-dir $state `
-    --machine-name $env:COMPUTERNAME `
-    --log-format json `
-    --log-file $log
+$arguments = @(
+    "hand", "--workspace", $Workspace, "--state-dir", $state,
+    "--machine-name", $env:COMPUTERNAME, "--log-format", "json", "--log-file", $log
+)
+# Exercise this exact startup contract without authenticating or attaching.
+if ($Validate) { $arguments += "--help" }
+& $binary @arguments
 exit $LASTEXITCODE
