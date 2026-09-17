@@ -12,7 +12,11 @@ mod driver;
 mod error;
 mod sse;
 mod types;
+#[cfg(feature = "voice")]
+mod voice;
 mod websocket;
+#[cfg(feature = "voice")]
+pub use voice::{ManagedVoiceCall, ManagedVoiceSocket};
 
 #[cfg(feature = "tools")]
 mod vm_host;

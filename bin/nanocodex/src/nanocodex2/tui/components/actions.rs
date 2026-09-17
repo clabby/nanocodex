@@ -20,7 +20,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 10] = [
+const ACTIONS: [Action; 11] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
@@ -31,6 +31,7 @@ const ACTIONS: [Action; 10] = [
     Action::Reflection,
     Action::Model,
     Action::AgentId,
+    Action::Voice,
 ];
 const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter/tab", "open"), ("esc", "close")];
 const SEARCH_LABEL: &str = "Search: ";
@@ -49,6 +50,7 @@ pub(super) struct ActionAvailability {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Action {
+    Voice,
     AgentId,
     Handoff,
     Review,
@@ -265,7 +267,7 @@ impl ActionsMenu {
 
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
-            Action::AgentId => true,
+            Action::AgentId | Action::Voice => true,
             Action::Handoff | Action::Review | Action::Reflection => self.availability.new_session,
             Action::Effort | Action::FastMode => true,
             Action::Model => self.availability.model,
@@ -308,6 +310,7 @@ impl ActionsMenu {
 impl Action {
     const fn label(self) -> &'static str {
         match self {
+            Self::Voice => "Start voice",
             Self::AgentId => "Show agent ID",
             Self::Handoff => "Prepare handoff",
             Self::Review => "Review changes",
@@ -328,6 +331,7 @@ impl Action {
 
     const fn alias(self) -> Option<&'static str> {
         match self {
+            Self::Voice => Some("voice"),
             Self::AgentId => Some("id"),
             Self::Handoff => Some("handoff"),
             Self::Review => Some("review"),

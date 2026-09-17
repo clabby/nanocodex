@@ -20,9 +20,11 @@ rustdoc-args = ["-D", "warnings"]
 [features]
 default = []
 tools = ["dep:nanocodex-tools"]
+voice = ["dep:nanocodex-voice-protocol"]
 
 [dependencies]
 futures-util.workspace = true
+nanocodex-voice-protocol = { workspace = true, optional = true }
 nanocodex-agent = { path = "../nanocodex-agent", version = "0.6.1", default-features = false }
 nanocodex-oai-api = { path = "../nanocodex-oai-api", version = "0.6.1", default-features = false, features = ["events", "native-tls"] }
 nanocodex-tools = { path = "../nanocodex-tools", version = "0.6.1", default-features = false, features = ["attachment"], optional = true }

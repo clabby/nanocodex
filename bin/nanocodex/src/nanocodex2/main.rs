@@ -45,6 +45,7 @@ mod vm_hand;
 mod vm_hand;
 mod vm_hand_config;
 mod vm_host;
+mod voice;
 
 use std::{
     io::{self, Write},
@@ -124,6 +125,8 @@ enum Command {
     Delete(AgentId),
     /// Submit one prompt and stream durable managed events as JSONL.
     Run(Run),
+    /// Talk to a managed agent using native microphone and speaker audio.
+    Voice(voice::Args),
     /// Stream an owned agent's durable events from a cursor.
     Watch(Watch),
     /// Read one backward page of retained events.
@@ -585,7 +588,10 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         _ => None,
     };
     let client = client_from_environment(managed_origin)?;
-    let mut device = if matches!(&command, None | Some(Command::Attach(_) | Command::Run(_))) {
+    let mut device = if matches!(
+        &command,
+        None | Some(Command::Attach(_) | Command::Run(_) | Command::Voice(_))
+    ) {
         Some(device_hand::BackgroundHand::start(&client)?)
     } else {
         None
@@ -594,6 +600,7 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::Login(_) | Command::Status(_) | Command::Logout(_) | Command::Account(_)) => {
             unreachable!("handled before managed client setup")
         }
+        Some(Command::Voice(command)) => voice::run(&client, command).await,
         Some(Command::Attach(command)) => {
             attach_tui(&client, command.agent.map(|agent| agent.agent_id)).await
         }

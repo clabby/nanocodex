@@ -140,6 +140,7 @@ impl Notification {
 }
 
 pub(crate) enum RootEvent {
+    VoiceStatus(Option<String>),
     ShowAgentId(String),
     Terminal(Event),
     PasteImage(String),
@@ -274,6 +275,7 @@ pub(crate) enum SessionListKind {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RootEffect {
+    Voice(crate::voice::Command),
     ShowAgentId,
     Submit(Submission),
     Reflect(Submission),
@@ -388,6 +390,7 @@ pub(crate) struct RootNode {
     thread: ThreadState,
     key_confirmation: Option<KeyConfirmation>,
     notification: Option<Notification>,
+    voice_status: Option<String>,
     discarded_draft: Option<ComposerDraft>,
     last_admitted_steer: Option<(QueueId, Submission)>,
     withdrawn_draft: Option<ComposerDraft>,
@@ -441,6 +444,7 @@ impl RootNode {
             thread: ThreadState::New,
             key_confirmation: None,
             notification: None,
+            voice_status: None,
             discarded_draft: None,
             last_admitted_steer: None,
             withdrawn_draft: None,
@@ -869,6 +873,21 @@ impl RootNode {
                     self.subagents.render_transcript(*id, frame, area, theme);
                 }
             }
+        }
+        if self.notification.is_none()
+            && self.overlay.is_none()
+            && let Some(status) = &self.voice_status
+        {
+            render_notification(
+                frame,
+                area,
+                theme,
+                &Line::from(format!(
+                    "{} · /voice mute · /voice stop",
+                    status.chars().take(160).collect::<String>()
+                )),
+                Color::Cyan,
+            );
         }
         if let Some(notification) = &self.notification {
             render_notification(
@@ -1673,6 +1692,11 @@ impl RootNode {
         let update = actions.update(ActionsEvent::Terminal(event));
         match update.effects.into_iter().next() {
             Some(ActionsEffect::Dismiss) => self.overlay = None,
+            Some(ActionsEffect::Trigger(Action::Voice)) => {
+                self.overlay = None;
+                return self
+                    .apply_settings_command(SettingsCommand::Voice(crate::voice::Command::Start));
+            }
             Some(ActionsEffect::Trigger(Action::AgentId)) => {
                 self.overlay = None;
                 return ComponentUpdate {
@@ -2473,6 +2497,10 @@ impl RootNode {
 
     fn apply_settings_command(&mut self, command: SettingsCommand) -> ComponentUpdate<RootEffect> {
         match command {
+            SettingsCommand::Voice(command) => ComponentUpdate {
+                effects: vec![RootEffect::Voice(command)],
+                render: RenderRequest::Immediate,
+            },
             SettingsCommand::OpenEffort => self.open_effort(),
             SettingsCommand::SetEffort(effort) => {
                 self.apply_effort(effort, self.preferred_reasoning_mode == ReasoningMode::Pro)
@@ -3416,6 +3444,10 @@ impl Component for RootNode {
             }
             RootEvent::ShowAgentId(id) => {
                 self.overlay = Some(Overlay::AgentId(id));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::VoiceStatus(status) => {
+                self.voice_status = status;
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::NotifyError(message) => {

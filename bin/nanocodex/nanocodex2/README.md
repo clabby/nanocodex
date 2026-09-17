@@ -60,6 +60,38 @@ selected server's saved key; environment credentials remain active until unset.
 To revoke a key remotely, remove it in the web account's API Keys menu. Logging
 in again replaces the saved key without revoking previous account keys.
 
+## Voice
+
+In the terminal, use `/voice` to start talking in the current conversation.
+`/voice mute`, `/voice unmute`, `/voice status`, and `/voice stop` control the
+call. Voice also appears in the Actions menu. Typed input suppresses stale
+spoken replies; stopping voice stops audio immediately and leaves agent work
+running. Switching conversations closes the previous conversation's audio.
+
+For a voice-only terminal session:
+
+```bash
+nanocodex2 voice                         # Creates a conversation
+nanocodex2 voice --agent AGENT_ID         # Resumes an existing conversation
+nanocodex2 voice --voice cove --muted     # Connects with the microphone muted
+nanocodex2 voice --muted --duration 10 --log-format json
+```
+
+Ctrl+C stops the call. The command prints the conversation ID and JSON status
+updates; timing logs separately report media startup, control-channel readiness,
+agent handoff, and speech delivery. A connection check does not prove speech
+recognition or audible playback. Voice needs a connected ChatGPT account and
+the matching native voice package beside the executable. Source builds can set
+`NANOCODEX_VOICE_PACKAGE` to a package directory and must use the helper's
+`STABLE_GIT_COMMIT` build identity. Availability is checked before opening audio
+hardware; an unavailable runtime produces a visible error.
+
+The managed service owns authentication and agent execution. The CLI uses the
+shared voice protocol and native audio helper, starts media and agent admission
+concurrently, and reads agent events independently of realtime audio events.
+The latter prevents frequent audio traffic from cancelling a pending event-stream
+connection and delaying spoken tool results.
+
 ## Working in a running session
 
 Use `/id` to open the agent ID popup. Press Enter to copy the full ID to the

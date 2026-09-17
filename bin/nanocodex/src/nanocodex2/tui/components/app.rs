@@ -202,6 +202,7 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         id: String,
     },
+    VoiceStatus(Option<String>),
     NotifyError {
         pane: PaneId,
         error: String,
@@ -502,6 +503,9 @@ impl AppNode {
             }
             AppEvent::ShowAgentId { pane, id } => {
                 self.update_root(pane, RootEvent::ShowAgentId(id))
+            }
+            AppEvent::VoiceStatus(status) => {
+                self.update_root(PaneId::Main, RootEvent::VoiceStatus(status))
             }
             AppEvent::NotifyError { pane, error } => {
                 self.update_root(pane, RootEvent::NotifyError(error))

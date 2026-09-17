@@ -968,7 +968,7 @@ impl ManagedClient {
         });
     }
 
-    async fn request(
+    pub(crate) async fn request(
         &self,
         method: Method,
         path: &str,
@@ -993,7 +993,7 @@ impl ManagedClient {
             .map_err(ManagedError::Transport)
     }
 
-    async fn send_with_access(
+    pub(crate) async fn send_with_access(
         &self,
         mut request: reqwest::RequestBuilder,
         url: &Url,

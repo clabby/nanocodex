@@ -159,6 +159,9 @@ pub(super) fn live_managed_projection(
     let (record, prompt) = match event.data {
         ManagedEventData::TurnAccepted { input, .. } => {
             let text = prompt_input_text(&input);
+            if text.is_empty() {
+                return Ok(None);
+            }
             let record = TranscriptRecord::from_local(
                 *next_sequence,
                 timestamp,
@@ -268,6 +271,9 @@ pub(super) fn history_projection_with_sequences(
             match &event.data {
                 ManagedEventData::TurnAccepted { input, .. } => {
                     let text = prompt_input_text(input);
+                    if text.is_empty() {
+                        return Ok(None);
+                    }
                     let record = TranscriptRecord::from_local(
                         sequence,
                         timestamp,
@@ -410,7 +416,7 @@ fn project_agent_record(
 }
 
 fn prompt_input_text(input: &PromptInput) -> String {
-    match input {
+    let text = match input {
         PromptInput::Text(text) => text.clone(),
         PromptInput::Content(content) => content
             .iter()
@@ -418,6 +424,22 @@ fn prompt_input_text(input: &PromptInput) -> String {
                 PromptContent::Text { text } => text.as_str(),
                 PromptContent::Image { .. } => "[image attachment]",
                 PromptContent::Audio { .. } => "[audio attachment]",
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    match nanocodex_voice_protocol::project_transcript(&text, false) {
+        None => text,
+        Some(entries) if entries.is_empty() => String::new(),
+        Some(entries) => entries
+            .into_iter()
+            .map(|entry| {
+                let speaker = if entry.role == "user" {
+                    "You"
+                } else {
+                    "Assistant"
+                };
+                format!("Voice · {speaker}: {}", entry.text)
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -449,6 +471,32 @@ mod tests {
     use super::{HistoryPrefetch, HistoryWindow};
     use nanocodex_managed::{EventHistoryPage, ManagedEvent, ManagedEventData};
     use serde_json::json;
+
+    #[test]
+    fn voice_history_projects_shared_transcript_without_internal_instructions() {
+        let text = nanocodex_voice_protocol::realtime_tail_delegation(&[
+            nanocodex_voice_protocol::TranscriptEntry::new("user", "check the desktop"),
+            nanocodex_voice_protocol::TranscriptEntry::new("assistant", "Linux"),
+        ])
+        .unwrap();
+        let display = super::prompt_input_text(&nanocodex_managed::PromptInput::Text(text));
+        assert_eq!(
+            display,
+            "Voice · You: check the desktop\nVoice · Assistant: Linux"
+        );
+        assert_eq!(
+            super::prompt_input_text(&nanocodex_managed::PromptInput::Text(
+                "ordinary <code>".into()
+            )),
+            "ordinary <code>"
+        );
+        assert_eq!(
+            super::prompt_input_text(&nanocodex_managed::PromptInput::Text(
+                "<realtime_conversation>internal</realtime_conversation>".into()
+            )),
+            ""
+        );
+    }
 
     #[test]
     fn durable_stop_projection_preserves_other_work_and_keeps_retries_active() {

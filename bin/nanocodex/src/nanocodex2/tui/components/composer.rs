@@ -61,6 +61,7 @@ pub(crate) enum ComposerEffect {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SettingsCommand {
+    Voice(crate::voice::Command),
     OpenEffort,
     SetEffort(ReasoningEffort),
     OpenModel,
@@ -73,6 +74,17 @@ impl SettingsCommand {
         let mut parts = input.split_whitespace();
         let command = parts.next()?;
         match command {
+            "/voice" => {
+                let argument = parts.next().unwrap_or_default();
+                Some(if parts.next().is_some() {
+                    Self::Invalid("Usage: /voice [start|stop|mute|unmute|status]".into())
+                } else {
+                    match crate::voice::Command::parse(argument) {
+                        Ok(command) => Self::Voice(command),
+                        Err(error) => Self::Invalid(error),
+                    }
+                })
+            }
             "/model" => {
                 let Some(argument) = parts.next() else {
                     return Some(Self::OpenModel);

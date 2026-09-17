@@ -483,6 +483,7 @@ impl SettingsMutation {
 }
 
 struct DriverRuntime {
+    voice: Option<crate::voice::Session>,
     client: ManagedClient,
     agent: Option<Nanocodex>,
     startup_attach: bool,
@@ -1030,6 +1031,7 @@ impl DriverRuntime {
     }
 
     fn start_new_session(&mut self, settings: AgentSettings) {
+        self.voice.take();
         // Stop routing input and events to the previous agent before exposing
         // the new composer. Creation then uses the same pending-input path as launch.
         if let Some(previous) = self.agent.take() {
@@ -1356,6 +1358,7 @@ async fn run_inner(
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
     let mut runtime = DriverRuntime {
         client: client.clone(),
+        voice: None,
         agent: None,
         startup_attach: matches!(attach, Some(Some(_))),
         pending_resume: None,
@@ -1550,6 +1553,19 @@ async fn run_inner(
         let render_deadline = scheduler.deadline();
         let animation_deadline = app.animation_deadline();
         tokio::select! {
+            changed = async { runtime.voice.as_mut().unwrap().status.changed().await }, if runtime.voice.is_some() => {
+                let voice = runtime.voice.as_ref().unwrap();
+                let mut status = voice.status.borrow().clone();
+                if voice.is_muted() && !status.finished && !status.text.contains("muted") { status.text.push_str(" · microphone muted"); }
+                let finished = changed.is_err() || status.finished;
+                if finished { runtime.voice.take(); }
+                let update = app.update(AppEvent::VoiceStatus((!finished).then_some(status.text.clone())));
+                request_render(update, &mut scheduler);
+                if finished {
+                    let event = if status.text.starts_with("Voice failed") || status.text.contains("cleanup unconfirmed") { AppEvent::NotifyError {pane: PaneId::Main, error: status.text} } else { AppEvent::NotifySuccess {pane: PaneId::Main, message: status.text} };
+                    request_render(app.update(event), &mut scheduler);
+                }
+            }
             input_event = input.next() => {
                 let event = input_event
                     .transpose()
@@ -1760,6 +1776,10 @@ async fn run_inner(
                     match result {
                         ConnectionResult::Recovered(Ok((agent, events, agent_id, workspace, history, _, settings, _, active_turns))) => {
                             runtime.agent = Some(agent);
+                            if runtime.agent_id != agent_id {
+                                runtime.voice.take();
+                                request_render(app.update(AppEvent::VoiceStatus(None)), &mut scheduler);
+                            }
                             runtime.agent_id = agent_id;
                             runtime.workspace = workspace;
                             runtime.settings = settings;
@@ -1867,6 +1887,10 @@ async fn run_inner(
                             runtime.withdrawals = JoinSet::new();
                             runtime.managed_events = Some(managed_events);
                             runtime.managed_events_open = true;
+                            if runtime.agent_id != agent_id {
+                                runtime.voice.take();
+                                request_render(app.update(AppEvent::VoiceStatus(None)), &mut scheduler);
+                            }
                             runtime.agent_id = agent_id;
                             runtime.settings = settings;
                             runtime.workspace = workspace;
@@ -2423,6 +2447,9 @@ async fn run_inner(
     }
 
     drop(terminal);
+    if let Some(voice) = runtime.voice.take() {
+        voice.finish().await;
+    }
     let Some(agent) = runtime.agent.take() else {
         return Ok(());
     };
@@ -2470,7 +2497,58 @@ async fn apply_update(
             AppEffect::Pane { pane, effect } => {
                 // Keep the hosted effect boundary visually separate from app-level routing.
                 match effect {
+                    RootEffect::Voice(command) => {
+                        use crate::voice::Command;
+                        let message = match command {
+                            Command::Start if runtime.voice.is_some() => {
+                                runtime.voice.as_ref().unwrap().status.borrow().text.clone()
+                            }
+                            Command::Start if runtime.agent_id.is_empty() => {
+                                "Agent is still connecting. Try /voice when connected.".into()
+                            }
+                            Command::Start => match crate::voice::Session::start(
+                                runtime.client.clone(),
+                                runtime.agent_id.clone(),
+                                "cove",
+                                false,
+                            ) {
+                                Ok(voice) => {
+                                    runtime.voice = Some(voice);
+                                    "Voice connecting…".into()
+                                }
+                                Err(error) => error.to_string(),
+                            },
+                            Command::Stop => {
+                                if let Some(voice) = &runtime.voice {
+                                    voice.stop();
+                                }
+                                "Voice stopping…".into()
+                            }
+                            Command::Mute | Command::Unmute => {
+                                if let Some(voice) = &runtime.voice {
+                                    voice.mute(command == Command::Mute);
+                                }
+                                if command == Command::Mute {
+                                    "Microphone muted".into()
+                                } else {
+                                    "Microphone on".into()
+                                }
+                            }
+                            Command::Status => runtime.voice.as_ref().map_or_else(
+                                || "Voice is off".into(),
+                                |voice| voice.status.borrow().text.clone(),
+                            ),
+                        };
+                        absorb(
+                            app.update(AppEvent::NotifySuccess { pane, message }),
+                            &mut effects,
+                            scheduler,
+                        );
+                    }
                     RootEffect::Submit(prompt) | RootEffect::ContinueSubagent(prompt) => {
+                        if let Some(voice) = &runtime.voice {
+                            voice.typed();
+                        }
                         let id = TurnId::new(runtime.next_turn);
                         runtime.next_turn = runtime.next_turn.saturating_add(1);
                         let record = runtime.record_submission(id, &prompt)?;
@@ -2531,6 +2609,9 @@ async fn apply_update(
                         });
                     }
                     RootEffect::Steer { id, prompt } => {
+                        if let Some(voice) = &runtime.voice {
+                            voice.typed();
+                        }
                         if !runtime.steers.is_empty() || runtime.unconfirmed_steer.is_some() {
                             runtime.waiting_steers.push_back((pane, id, prompt));
                             continue;
@@ -2937,6 +3018,7 @@ async fn apply_update(
                             reasoning_mode: managed_reasoning_mode(root.preferred_reasoning_mode()),
                             fast_mode: root.composer().fast_mode(),
                         };
+                        request_render(app.update(AppEvent::VoiceStatus(None)), scheduler);
                         runtime.start_new_session(settings);
                         absorb(
                             app.update(AppEvent::NewSessionReady {
@@ -3375,6 +3457,7 @@ mod tests {
             ManagedApiKey::parse(format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43)))
                 .unwrap();
         DriverRuntime {
+            voice: None,
             client: ManagedClient::new("http://127.0.0.1:9", api_key).unwrap(),
             agent: None,
             startup_attach: false,
