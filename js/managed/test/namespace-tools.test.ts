@@ -23,6 +23,23 @@ const context = (overrides: Partial<{
 });
 
 describe("cwd-root namespace execution", () => {
+  it("routes old identity paths through the same captured Hand as its readable name", async () => {
+    const execute = vi.fn(async () => ({ output: "ok", exit_code: 0 }));
+    const runtime = createNamespaceExecutionRuntime(
+      () => [{ id: "user:uuid", root: "/omarchy-desktop", aliases: ["/uuid"], workspace: "/srv/workspace" }],
+      (id, name) => id === "user:uuid" && name === "exec_command" ? { handler: execute } : undefined,
+    );
+    await runtime.tools.exec_command!.handler({ cmd: "pwd", workdir: "/uuid/src" }, context());
+    expect(execute).toHaveBeenLastCalledWith(expect.objectContaining({ workdir: "/srv/workspace/src" }), expect.anything());
+    await runtime.tools.exec_command!.handler({ cmd: "pwd", workdir: "/omarchy-desktop/src" }, context());
+    expect(execute).toHaveBeenCalledTimes(2);
+    await expect(runtime.tools.exec_command!.handler({ cmd: "pwd", workdir: "/uuid-other" }, context())).rejects.toThrow();
+    const ambiguous = createNamespaceExecutionRuntime(() => [
+      { id: "one", root: "/one", aliases: ["/two"], workspace: "/one" },
+      { id: "two", root: "/two", workspace: "/two" },
+    ]);
+    expect(() => ambiguous.capture(context())).toThrow("ambiguous");
+  });
   it("routes CUA to the explicitly selected Hand and pins its admitted connection", async () => {
     const original = vi.fn(async () => ({ content: [{ type: "text", text: "original" }] }));
     const replacement = vi.fn(async () => ({ content: [{ type: "text", text: "replacement" }] }));

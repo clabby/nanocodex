@@ -58,6 +58,8 @@ export type VaultEntry =
 export type AccountMachine = Readonly<HostedMachine & {
   /** Logical namespace root. Native host workspace paths are never projected. */
   mount: string;
+  /** Retained identity paths accepted by native execution for older prompts. */
+  aliases?: readonly string[];
   /** Current attachment presence for user hands; absent when not known. */
   online?: boolean;
   /** Exact mount provider advertised by this computer; allocation checks live capacity. */

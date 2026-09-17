@@ -35,7 +35,7 @@ export const MANAGED_MOUNT_PARAMETERS = Object.freeze({
     name: {
       type: "string",
       pattern: MOUNT_NAME.source,
-      description: "Stable lowercase name for this hand within the agent, such as repo-test or build.",
+      description: "Stable lowercase purpose name within this agent, such as demo or build. The returned path and display name include the host/provider automatically.",
     },
   },
   required: ["provider", "name"],
@@ -86,10 +86,23 @@ export function parseManagedMountRequest(input: unknown): ManagedMountRequest {
   return Object.freeze({ provider, name });
 }
 
-export function managedMountRoot(name: string, id: string): string {
+export function managedMountRoot(name: string, id: string, provider?: string, reserved: readonly string[] = []): string {
   const parsedName = portableName(name, "mount name");
   if (!/^[a-f0-9-]{36}$/.test(id)) throw new TypeError("mount id must be a lowercase UUID");
   const suffix = id.replaceAll("-", "").slice(-8);
+  if (provider !== undefined) {
+    const owner = managedMountProvider(provider);
+    const label = `${owner === MANAGED_CLOUDFLARE_PROVIDER ? "cloudflare" : `vm-${owner}`}-${parsedName}`;
+    const stem = label.length <= 63 ? `/${label}` : `/${label.slice(0, 54).replace(/[._-]+$/, "")}-${suffix}`;
+    const used = new Set(reserved);
+    let root = stem;
+    for (let n = 2; used.has(root); n += 1) {
+      const tail = `-${n}`;
+      root = `${stem.slice(0, 64 - tail.length).replace(/[._-]+$/, "")}${tail}`;
+    }
+    return root;
+  }
+  // Older persisted mounts and callers retain their UUID-derived spelling.
   const stem = parsedName.slice(0, 49).replace(/[._-]+$/, "") || "hand";
   return `/mnt-${stem}-${suffix}`;
 }

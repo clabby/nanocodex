@@ -96,7 +96,7 @@ describe("interactive hand signaling on a real Durable Object", () => {
 
   it("fences VM publishers by machine, route, role, and allocation lease", async () => {
     const stub = namespace().getByName(A);
-    const scope = { machineId: "vm:allocated", routeId: "vm-host:allocation:1", expiresAt: Date.now() + 20_000 };
+    const scope = { machineId: "vm:allocated", machineName: "omarchy-desktop / demo", routeId: "vm-host:allocation:1", expiresAt: Date.now() + 20_000 };
     const scopedHeaders = (value = scope) => ({ ...headers(), "x-nanocodex-capabilities": '["agents:write"]',
       "x-nanocodex-remote-vm": JSON.stringify(value) });
     const open = async () => {
@@ -114,6 +114,8 @@ describe("interactive hand signaling on a real Durable Object", () => {
     const published = next(vm.socket);
     vm.socket.send(JSON.stringify({ type: "catalog", machine_id: scope.machineId, machine_name: "VM", surfaces: [{ ...surface, kind: "vm" }] }));
     await published;
+    expect(await (await stub.fetch("https://account-tools.internal/hands/screens", { headers: headers() })).json())
+      .toMatchObject({ surfaces: [{ machine_name: "omarchy-desktop / demo", machine_id: scope.machineId }] });
     const ordinary = await host("personal-mac");
     const renew = (id: string, auth: Record<string, string>) => stub.fetch("https://account-tools.internal/hands/renew", {
       method: "POST", headers: auth, body: JSON.stringify({ connection_id: id }),
@@ -122,7 +124,9 @@ describe("interactive hand signaling on a real Durable Object", () => {
     expect((await renew(vm.state.connection_id, scopedHeaders({ ...scope, routeId: "vm-host:allocation:2" }))).status).toBe(403);
     expect((await renew(vm.state.connection_id, { ...headers(), "x-nanocodex-capabilities": '["agents:write"]' })).status).toBe(403);
     const renewed = next(vm.socket);
-    expect((await renew(vm.state.connection_id, scopedHeaders())).status).toBe(200); await renewed;
+    expect((await renew(vm.state.connection_id, scopedHeaders({ ...scope, machineName: "omarchy-desktop / updated" }))).status).toBe(200); await renewed;
+    const listed = await (await stub.fetch("https://account-tools.internal/hands/screens", { headers: headers() })).json<{ surfaces: { machine_id: string; machine_name: string }[] }>();
+    expect(listed.surfaces.find(surface => surface.machine_id === scope.machineId)?.machine_name).toBe("omarchy-desktop / updated");
     expect((await stub.fetch("https://account-tools.internal/hands/screens", { headers: scopedHeaders() })).status).toBe(403);
     vm.socket.close(); ordinary.socket.close();
   });

@@ -22,6 +22,11 @@ describe("caller attribution", () => {
     expect(projectCaller({ reported: { client: "web", hand: "user:other", cwd: "/other" } }, hands).hand).toBeNull();
     expect(projectCaller({ reported: { hand: "user:laptop", cwd: "/laptop-other" } }, hands).cwd).toBeNull();
   });
+  it("translates an authenticated Hand's legacy cwd to its readable path", () => {
+    const renamed = [{ ...hands[0]!, mount: "/omarchy-desktop", aliases: ["/laptop"] }];
+    expect(projectCaller({ reported: { hand: "user:laptop", cwd: "/laptop/src" } }, renamed).cwd).toBe("/omarchy-desktop/src");
+    expect(projectCaller({ reported: { hand: "user:laptop", cwd: "/laptop-other/src" } }, renamed).cwd).toBeNull();
+  });
   it("rejects malformed hints without turning them into principal assertions", () => {
     for (const value of [{ client: "bad\nclient" }, { cwd: "/laptop/../other" }, { timezone: "not/a/timezone" }, { user_id: "forged" }])
       expect(() => requestOriginContext(value)).toThrow();

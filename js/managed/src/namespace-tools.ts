@@ -26,6 +26,7 @@ export type RoutedTool = Readonly<{
 export type NamespaceMachine = Readonly<{
   id: string;
   root?: string;
+  aliases?: readonly string[];
   workspace: string;
 }>;
 
@@ -50,6 +51,7 @@ type MountedHand = Readonly<{
 type CellBinding = Readonly<{
   scope: NamespaceScope;
   hands: ReadonlyMap<string, MountedHand>;
+  aliases: ReadonlyMap<string, string>;
 }>;
 
 type ProcessBinding = Readonly<{
@@ -133,7 +135,7 @@ export function createNamespaceExecutionRuntime(
         const workdir = optionalString(value.workdir, "workdir");
         if (!workdir || Object.keys(value).some(key => key !== "workdir")) throw new Error("select_computer requires only an explicit Hand workdir");
         const binding = cell(context);
-        const route = routeNamespaceCwd(binding.scope, workdir, "namespace.discover");
+        const route = routeNamespaceCwd(binding.scope, canonicalCwd(binding, workdir), "namespace.discover");
         const hand = binding.hands.get(route.mount.mountId);
         if (!hand?.cua || !hand.cuaReset) throw new Error(`namespace mount ${route.mount.root} has no CUA runtime`);
         computers.set(context.sessionId, hand);
@@ -173,7 +175,7 @@ export function createNamespaceExecutionRuntime(
           }, context);
         }
         const binding = cell(context);
-        const route = routeNamespaceCwd(binding.scope, workdir);
+        const route = routeNamespaceCwd(binding.scope, canonicalCwd(binding, workdir));
         const hand = binding.hands.get(route.mount.mountId);
         if (hand?.exec === undefined) {
           throw new Error(`namespace mount ${route.mount.root} is not executable`);
@@ -249,7 +251,7 @@ export function createNamespaceExecutionRuntime(
         const binding = cell(context);
         const route = routeNamespaceCwd(
           binding.scope,
-          optionalString(value.workdir, "workdir"),
+          canonicalCwd(binding, optionalString(value.workdir, "workdir")),
           "network.preview",
         );
         const hand = binding.hands.get(route.mount.mountId);
@@ -292,6 +294,7 @@ function createCellBinding(
 ): CellBinding {
   const hands: MountedHand[] = [brain];
   const roots = new Set([brain.root]);
+  const aliases = new Map<string, string>();
   const keyHash = stableHash(key);
   for (const machine of sourceMachines) {
     const root = machine.root ?? machineMountRoot(machine.id);
@@ -320,11 +323,28 @@ function createCellBinding(
       rights: handRights(hand),
     })),
   });
+  for (const machine of sourceMachines) {
+    const root = machine.root ?? machineMountRoot(machine.id);
+    for (const alias of machine.aliases ?? []) {
+      if (alias === root) continue;
+      if (roots.has(alias) || aliases.has(alias) || !/^\/[a-z0-9][a-z0-9._-]*$/.test(alias))
+        throw new Error(`ambiguous or invalid namespace alias ${alias}`);
+      aliases.set(alias, root);
+    }
+  }
   const scope = createNamespaceScope(manifest, DEFAULT_CWD);
   return Object.freeze({
     scope,
     hands: new Map(hands.map((hand) => [hand.mountId, hand])),
+    aliases,
   });
+}
+
+function canonicalCwd(binding: CellBinding, workdir?: string): string {
+  const cwd = resolveNamespaceCwd(DEFAULT_CWD, workdir);
+  const root = `/${cwd.split("/")[1] ?? ""}`;
+  const canonical = binding.aliases.get(root);
+  return canonical === undefined ? cwd : canonical + cwd.slice(root.length);
 }
 
 function handRights(hand: MountedHand): readonly NamespaceRight[] {

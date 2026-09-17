@@ -1,4 +1,5 @@
 import { callerContext, type CallerContext } from "./request-origin";
+import { HandPaths } from "./hand-paths";
 import { memoryTarget, memoryVisibility, personalMemoryTeam, scopedMemoryOperation, type MemoryVisibility } from "./memory-target";
 import { projectEnvironment } from "nanocodex/tools/environment";
 import { transportObservation } from "./transport-observation";
@@ -588,6 +589,11 @@ function managedMountPublicProvider(mount: ManagedMountRow): string {
   const factoryName = vmHostFactoryName(mount);
   if (factoryName !== undefined) return factoryName;
   throw new Error("retained VM host mount has no valid factory name");
+}
+
+function managedMountDisplayName(mount: ManagedMountRow): string {
+  const provider = managedMountPublicProvider(mount);
+  return `${provider === MANAGED_CLOUDFLARE_PROVIDER ? "Cloudflare" : provider} / ${mount.name}`.slice(0, 128);
 }
 
 function vmHostMountAllocation(
@@ -1499,9 +1505,7 @@ async function managedFetchRoute(
       }
       const machines = await timeHandStage(request, "route", () =>
         env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).listMachines(principal.userId));
-      return json({ data: machines.map(machine => ({
-        ...machine, workspace: machineMountRoot(machine.id),
-      })) }, { headers: { "cache-control": "no-store" } });
+      return json({ data: machines }, { headers: { "cache-control": "no-store" } });
     }
     if (/^\/v1\/(agent-definitions|environment-templates)(?:\/|$)/.test(url.pathname)) {
       const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
@@ -2472,7 +2476,10 @@ async function routeVmHostToolAttachment(
   headers.set(SESSION_AUTHORIZATION_EPOCH_ASSERTION, String(grant.authorization_epoch));
   headers.set(SESSION_CAPABILITIES_ASSERTION, JSON.stringify(["agents:write", "tools:use"]));
   if (endpoint.startsWith("hands/")) {
+    const machineName = await env.NANOCODEX_SESSIONS.getByName(grant.agent_id)
+      .vmHostDisplayName(grant.owner_id, grant.machine_id);
     headers.set(REMOTE_VM_ASSERTION, JSON.stringify({ machineId: grant.machine_id,
+      ...(machineName ? { machineName } : {}),
       routeId: grant.route_id, expiresAt: grant.lease_expires_at } satisfies RemoteVMPublisher));
     return env.NANOCODEX_ACCOUNT_TOOLS.getByName(grant.owner_id).fetch(
       `https://account-tools.internal/${endpoint}`, new Request(request, { headers }),
@@ -2854,6 +2861,15 @@ const DurableComputerSession = withWorkspace(
 );
 
 export class DurableAgentSession extends DurableComputerSession {
+  #handPaths: HandPaths;
+
+  /** Internal RPC after allocation authentication; labels never select a machine. */
+  vmHostDisplayName(ownerId: string, machineId: string): string | undefined {
+    const session = this.#session();
+    if (!session || session.owner_id !== ownerId || this.#deleting || this.#deleted) return;
+    const mount = this.#managedMounts().find(mount => vmHostMountAllocation(mount)?.machine_id === machineId);
+    return mount ? managedMountDisplayName(mount) : undefined;
+  }
   #operations: SessionOperations;
   #brainStorage?: R2Bucket;
   #agent?: CloudflareAgent.Agent;
@@ -2925,6 +2941,7 @@ export class DurableAgentSession extends DurableComputerSession {
     initializeTurnInputs(ctx.storage, "managed_history_projection_chunks");
     this.#cronTriggers = new CronTriggers(ctx.storage);
     this.#startupContext = new ManagedStartupContext(ctx.storage);
+    this.#handPaths = new HandPaths(ctx.storage);
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS session_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -6642,6 +6659,7 @@ export class DurableAgentSession extends DurableComputerSession {
       this.ctx.storage.sql.exec("DELETE FROM managed_startup_environment");
       this.ctx.storage.sql.exec("DELETE FROM managed_startup_origin");
       this.ctx.storage.sql.exec("DELETE FROM managed_startup_caller");
+      this.ctx.storage.sql.exec("DELETE FROM managed_hand_paths");
       this.ctx.storage.sql.exec("DELETE FROM managed_prepared_personalization");
       this.ctx.storage.sql.exec("DELETE FROM managed_personalization_state");
       this.ctx.storage.sql.exec("DELETE FROM managed_subagent_authorizations");
@@ -7250,6 +7268,8 @@ export class DurableAgentSession extends DurableComputerSession {
     const namespaceMachines = (context: ToolContext) => {
       const authorization = this.#authorizationForToolContext(context);
       if (!this.#canUseExecutionNamespace(authorization)) return [];
+      const userHands = this.#hasFullAccountAuthority(authorization) ? this.#userHandMachines(context) : [];
+      const roots = this.#handPaths.assign(userHands, this.#managedMounts().map(mount => mount.root));
       return [
         ...this.#availableManagedMounts().map((mount) => ({
           id: `sandbox:${mount.id}`,
@@ -7258,11 +7278,10 @@ export class DurableAgentSession extends DurableComputerSession {
             ? this.#hostMachineForMount(mount)!.workspace
             : "/workspace",
         })),
-        ...(this.#hasFullAccountAuthority(authorization)
-          ? this.#userHandMachines(context)
-          : []).map((machine) => ({
+        ...userHands.map((machine) => ({
             id: `user:${machine.id}`,
-            root: machineMountRoot(machine.id),
+            root: roots.get(machine.id)!,
+            aliases: [machineMountRoot(machine.id)],
             workspace: machine.workspace,
           })),
       ];
@@ -7298,7 +7317,7 @@ export class DurableAgentSession extends DurableComputerSession {
             () => this.#cloudflareNamespaceMounts("mounted"),
             { resourceId: session.session_id },
             this.#credentialSubject(),
-            this.env.NANOCODEX_SANDBOX_DESKTOPS === "true" ? { owner: session.owner_id, name: mount.name } : undefined,
+            this.env.NANOCODEX_SANDBOX_DESKTOPS === "true" ? { owner: session.owner_id, name: managedMountDisplayName(mount) } : undefined,
           );
           sandboxToolsByMount.set(mount.id, tools);
         }
@@ -7887,7 +7906,9 @@ export class DurableAgentSession extends DurableComputerSession {
         id,
         storageProvider === "host" ? 1 : providerCount,
       );
-      const root = managedMountRoot(request.name, id);
+      const root = managedMountRoot(request.name, id, request.provider,
+        [...this.#handPaths.roots(), ...this.#managedMounts().map(mount => mount.root),
+          ...this.#userHandMachines().map(machine => machineMountRoot(machine.id))]);
       const configuration = storageProvider === "cloudflare"
         ? JSON.stringify({ namespace_slot: this.#nextCloudflareNamespaceSlot() })
         : JSON.stringify({ vm_factory_name: request.provider });
@@ -7983,7 +8004,7 @@ export class DurableAgentSession extends DurableComputerSession {
           this.env.NANOCODEX_SANDBOX_LOCAL === "true",
           { resourceId: session.session_id },
           this.#credentialSubject(),
-          this.env.NANOCODEX_SANDBOX_DESKTOPS === "true" ? { owner: session.owner_id, name: mount.name } : undefined,
+          this.env.NANOCODEX_SANDBOX_DESKTOPS === "true" ? { owner: session.owner_id, name: managedMountDisplayName(mount) } : undefined,
         );
         return;
       }
@@ -8416,12 +8437,14 @@ export class DurableAgentSession extends DurableComputerSession {
     context?: Pick<ToolContext, "sessionId" | "subagent">,
   ): readonly AccountMachine[] {
     if (!this.#canUseExecutionNamespace(authorization)) return [];
+    const userHands = this.#hasFullAccountAuthority(authorization) ? this.#userHandMachines(context) : [];
+    const roots = this.#handPaths.assign(userHands, this.#managedMounts().map(mount => mount.root));
     return Object.freeze(projectHandProviders([
       ...this.#availableManagedMounts().map((mount) => {
         const hostMachine = mount.provider === "host" ? this.#hostMachineForMount(mount) : undefined;
         return Object.freeze({
           id: `sandbox:${mount.id}`,
-          name: mount.name,
+          name: managedMountDisplayName(mount),
           kind: "sandbox" as const,
           provider: managedMountPublicProvider(mount),
           mount: mount.root,
@@ -8429,10 +8452,8 @@ export class DurableAgentSession extends DurableComputerSession {
           capabilities: hostMachine?.capabilities ?? SANDBOX_HAND_CAPABILITIES,
         });
       }),
-      ...(this.#hasFullAccountAuthority(authorization)
-        ? this.#userHandMachines(context)
-        : []).map((machine) => {
-          const mount = machineMountRoot(machine.id);
+      ...userHands.map((machine) => {
+          const mount = roots.get(machine.id)!;
           return Object.freeze({
             id: `user:${machine.id}`,
             name: machine.name,
@@ -8440,6 +8461,7 @@ export class DurableAgentSession extends DurableComputerSession {
             online: this.#hostedTools.machineOnline(machine.id)
               || this.#accountHostedTools?.machineOnline(machine.id, context) === true,
             mount,
+            aliases: [machineMountRoot(machine.id)],
             workspace: mount,
             capabilities: machine.capabilities,
           });

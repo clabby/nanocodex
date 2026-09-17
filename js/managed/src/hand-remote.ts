@@ -7,7 +7,7 @@ const LEASE_MS = 30_000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const noStore = { "cache-control": "no-store" };
 export const REMOTE_VM_ASSERTION = "x-nanocodex-remote-vm";
-export type RemoteVMPublisher = { machineId: string; routeId: string; expiresAt: number; surfaceKind?: "desktop" };
+export type RemoteVMPublisher = { machineId: string; machineName?: string; routeId: string; expiresAt: number; surfaceKind?: "desktop" };
 
 type Surface = { id: string; name: string; kind: "desktop" | "window" | "phone" | "vm"; width: number; height: number; controllable: boolean; agent_tools?: boolean; transport?: "frames-v1"; frame_window?: number };
 type Attachment = {
@@ -95,7 +95,11 @@ export class HandRemoteBroker {
     }
     const state: Attachment = { kind: TAG, role: "host", id: crypto.randomUUID(), generation: crypto.randomUUID(),
       expiresAt: Date.now() + LEASE_MS, rateWindow: Date.now(), rateCount: 0 };
-    if (vm) { state.vm = vm; state.expiresAt = Math.min(state.expiresAt, vm.expiresAt); }
+    if (vm) {
+      state.vm = vm;
+      state.expiresAt = Math.min(state.expiresAt, vm.expiresAt);
+      if (vm.machineName) state.machineName = vm.machineName;
+    }
     let host: WebSocket | undefined;
     if (url.pathname === "/hands/view") {
       const machineId = url.searchParams.get("machine_id"), surfaceId = url.searchParams.get("surface_id"), generation = url.searchParams.get("generation");
@@ -139,7 +143,11 @@ export class HandRemoteBroker {
     if (state.vm && !vm) return this.forbidden();
     if (state.role === "host" && !canPublish) return Response.json({ error: "forbidden" }, { status: 403, headers: noStore });
     state.expiresAt = Date.now() + LEASE_MS;
-    if (vm) { state.vm = vm; state.expiresAt = Math.min(state.expiresAt, vm.expiresAt); }
+    if (vm) {
+      state.vm = vm;
+      state.expiresAt = Math.min(state.expiresAt, vm.expiresAt);
+      if (vm.machineName) state.machineName = vm.machineName;
+    }
     socket.serializeAttachment(state);
     this.send(socket, { type: "renewed", expires_at: state.expiresAt });
     return Response.json({ expires_at: state.expiresAt }, { headers: noStore });
@@ -184,7 +192,7 @@ export class HandRemoteBroker {
         for (const old of this.hosts().filter(({ state: old }) => old.machineId === value.machine_id)) {
           this.close(old.socket, "Host replaced");
         }
-        Object.assign(state, { machineId: value.machine_id, machineName: value.machine_name, surfaces });
+        Object.assign(state, { machineId: value.machine_id, machineName: state.vm?.machineName ?? value.machine_name, surfaces });
         socket.serializeAttachment(state);
         this.send(socket, { type: "published", generation: state.generation });
         return;

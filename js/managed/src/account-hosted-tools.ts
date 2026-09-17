@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { HandPaths } from "./hand-paths";
 import { HandRemoteBroker, REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { HandHosts, boundedJSON } from "./hand-hosts";
 import { remoteICE, type RemoteICEEnv } from "./hand-remote-ice";
@@ -98,8 +99,10 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
   /** Discovery returns only its public projection in one RPC reply. */
   async listMachines(ownerId: string) {
     if (!isUserId(ownerId) || !await this.#owns(ownerId)) return [];
-    return this.#broker.machines().filter(machine => this.#broker.machineOnline(machine.id))
-      .map(machine => ({ id: machine.id, name: machine.name, capabilities: machine.capabilities }));
+    const machines = this.#broker.machines();
+    const roots = new HandPaths(this.ctx.storage).assign(machines);
+    return machines.filter(machine => this.#broker.machineOnline(machine.id))
+      .map(machine => ({ id: machine.id, name: machine.name, capabilities: machine.capabilities, workspace: roots.get(machine.id)! }));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -161,6 +164,8 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
         try {
           vm = JSON.parse(encodedVM);
           if (!vm || typeof vm.machineId !== "string" || typeof vm.routeId !== "string"
+            || (vm.machineName !== undefined && (typeof vm.machineName !== "string"
+              || !vm.machineName.trim() || new TextEncoder().encode(vm.machineName).length > 128))
             || !Number.isSafeInteger(vm.expiresAt) || vm.expiresAt <= Date.now()) throw new Error();
         } catch { return Response.json({ error: "forbidden" }, { status: 403 }); }
       }

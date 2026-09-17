@@ -24,8 +24,9 @@ export function callerContext(headers: Headers): CallerContext {
 export function projectCaller(context: CallerContext, hands: readonly AccountMachine[]) {
   const claimed = context.reported;
   const hand = claimed?.hand ? hands.find(hand => hand.id === claimed.hand) : undefined;
-  const cwd = hand && claimed?.cwd && (claimed.cwd === hand.mount || claimed.cwd.startsWith(`${hand.mount}/`))
-    ? claimed.cwd : null;
+  const originRoot = hand && claimed?.cwd && [hand.mount, ...(hand.aliases ?? [])]
+    .find(root => claimed.cwd === root || claimed.cwd!.startsWith(`${root}/`));
+  const cwd = originRoot && hand && claimed?.cwd ? hand.mount + claimed.cwd.slice(originRoot.length) : null;
   return {
     client: claimed?.client ? { name: claimed.client, attribution: "client_reported" as const } : null,
     hand: hand ? { key: hand.id, path: hand.mount, attribution: "client_reported_authorized_hand" as const } : null,
