@@ -141,7 +141,7 @@ async fn invalid_image_value_is_removed_before_durable_followup() -> Result<()> 
 }
 
 #[tokio::test]
-async fn persisted_invalid_image_is_removed_after_warmup_rejection() -> Result<()> {
+async fn malformed_stored_image_is_removed_before_provider_replay() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {
@@ -181,35 +181,8 @@ async fn persisted_invalid_image_is_removed_after_warmup_rejection() -> Result<(
         );
         assert!(image.get("detail").is_none());
 
-        // Persist image history successfully, then reject it on a new socket's warmup.
+        // Seed a completed image history; the test corrupts its persisted payload.
         send_final(&mut socket, "resp-seeded").await?;
-        let next = timeout(std::time::Duration::from_secs(5), socket.next()).await?;
-        assert!(!matches!(next, Some(Ok(Message::Text(_)))));
-        let (stream, _) = listener.accept().await?;
-        let mut socket = accept_async(stream).await?;
-        let warmup = next_json(&mut socket).await?;
-        assert_warmup(&warmup);
-        assert!(warmup.get("previous_response_id").is_none());
-        assert!(warmup.to_string().contains("input_image"));
-        assert!(warmup.to_string().contains("data:image/png;base64,"));
-        assert!(warmup.to_string().contains("retry persisted image"));
-
-        send_json(
-            &mut socket,
-            json!({
-                "type": "error",
-                "status": 400,
-                "error": {
-                    "type": "invalid_request_error",
-                    "code": "invalid_value",
-                    "message": "Invalid 'input[175].output[1].image_url'. Expected a base64-encoded data URL with an image MIME type, but got an invalid base64-encoded value.",
-                    "param": "input[175].output[1].image_url"
-                }
-            }),
-        )
-        .await?;
-
-        // The original turn fails; its durable follow-up must replay repaired history.
         let next = timeout(std::time::Duration::from_secs(5), socket.next()).await?;
         assert!(!matches!(next, Some(Ok(Message::Text(_)))));
         let (stream, _) = listener.accept().await?;
@@ -218,7 +191,7 @@ async fn persisted_invalid_image_is_removed_after_warmup_rejection() -> Result<(
         assert!(replay.get("previous_response_id").is_none());
         let encoded = replay.to_string();
         assert!(encoded.contains("inspect images"));
-        assert!(encoded.contains("continue after rejected image"));
+        assert!(encoded.contains("continue after malformed stored image"));
         let output = replay["input"]
             .as_array()
             .unwrap()
@@ -230,7 +203,7 @@ async fn persisted_invalid_image_is_removed_after_warmup_rejection() -> Result<(
         let encoded_output = output.to_string();
         assert!(!encoded_output.contains("input_image"));
         assert!(!encoded_output.contains("data:image/"));
-        assert!(encoded_output.contains("provider rejected its data"));
+        assert!(encoded_output.contains("malformed base64 image data"));
         send_final(&mut socket, "resp-final").await
     });
 
@@ -252,41 +225,22 @@ async fn persisted_invalid_image_is_removed_after_warmup_rejection() -> Result<(
     drop(agent);
 
     let durable = RolloutConfig::new(rollout_home.path()).load_session(TEST_SESSION_ID)?;
-    assert!(serde_json::to_string(durable.snapshot())?.contains("input_image"));
     let (thread_id, snapshot, rollout) = durable.into_parts();
-    let (agent, events) = Nanocodex::builder(openai()?)
-        .thinking(Thinking::Low)
-        .session_id(thread_id.parse()?)
-        .resume(snapshot)
-        .rollout(rollout)
-        .build()?;
-    drop(events);
-    let error = agent
-        .prompt("retry persisted image")
-        .await?
-        .await
-        .expect_err("invalid image must fail the original turn");
-    assert!(matches!(
-        error.responses_error(),
-        Some(ResponsesError::InvalidImageRequest { .. })
-    ));
-    agent.shutdown().await?;
-    drop(agent);
-
-    let durable = RolloutConfig::new(rollout_home.path()).load_session(TEST_SESSION_ID)?;
-    let snapshot = serde_json::to_value(durable.snapshot())?;
-    let output = snapshot["history"]
-        .as_array()
+    let mut encoded = serde_json::to_value(snapshot)?;
+    let output = encoded["history"]
+        .as_array_mut()
         .unwrap()
-        .iter()
+        .iter_mut()
         .find(|item| item["type"] == "custom_tool_call_output" && item["call_id"] == "call-image")
-        .expect("failed turn must persist the tool output");
-    let encoded_output = output.to_string();
-    assert!(!encoded_output.contains("input_image"));
-    assert!(!encoded_output.contains("data:image/"));
-    assert!(encoded_output.contains("provider rejected its data"));
-
-    let (thread_id, snapshot, rollout) = durable.into_parts();
+        .unwrap();
+    let image = output["output"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|part| part["type"] == "input_image")
+        .unwrap();
+    image["image_url"] = json!("data:image/png;base64,AAAA\n[output truncated]");
+    let snapshot: SessionSnapshot = serde_json::from_value(encoded)?;
     let (agent, events) = Nanocodex::builder(openai()?)
         .thinking(Thinking::Low)
         .session_id(thread_id.parse()?)
@@ -296,7 +250,7 @@ async fn persisted_invalid_image_is_removed_after_warmup_rejection() -> Result<(
     drop(events);
     assert_eq!(
         agent
-            .prompt("continue after rejected image")
+            .prompt("continue after malformed stored image")
             .await?
             .await?
             .final_message(),
