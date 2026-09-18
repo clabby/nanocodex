@@ -40,6 +40,7 @@ workspace-runtime = [
     "dep:thiserror",
     "dep:tokio",
     "dep:nix",
+    "dep:rustix",
 ]
 native = [
     "attachment",
@@ -90,6 +91,7 @@ uuid = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, optional = true }
+rustix = { workspace = true, features = ["process"], optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
