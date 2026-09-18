@@ -135,21 +135,45 @@ jobs:
           xcrun simctl bootstatus "$device" -b
           xcrun simctl status_bar "$device" override --time 9:41 --dataNetwork wifi --wifiMode active --wifiBars 3 --batteryState charged --batteryLevel 100
           mkdir -p apple/build/evidence
-          xcrun simctl io "$device" recordVideo --codec=h264 apple/build/evidence/inbox-journey.mp4 &
-          capture_pid=$!
-          trap 'kill -INT "$capture_pid" 2>/dev/null || true; wait "$capture_pid" || true' EXIT
+          # XCTest owns screen recording. Retain successful-test attachments in
+          # the generated specification and consume that same file below.
+          xctestrun=$(python3 - <<'PYTHON'
+          import pathlib, plistlib
+          paths = list(pathlib.Path("apple/build/ios/Build/Products").glob("NanocodexInbox_*.xctestrun"))
+          if len(paths) != 1:
+              raise SystemExit(f"Expected one generated Inbox xctestrun, found {len(paths)}")
+          path = paths[0]
+          with path.open("rb") as source:
+              run = plistlib.load(source)
+          if "TestConfigurations" in run:
+              targets = [target for config in run["TestConfigurations"] for target in config["TestTargets"]]
+          else:
+              targets = [target for name, target in run.items() if not name.startswith("__")]
+          ui_targets = [target for target in targets if target.get("IsUITestBundle")]
+          if not ui_targets:
+              raise SystemExit("Generated Inbox xctestrun contains no UI test targets")
+          for target in ui_targets:
+              target["PreferredScreenCaptureFormat"] = "screenRecording"
+              target["SystemAttachmentLifetime"] = "keepAlways"
+              target["UserAttachmentLifetime"] = "keepAlways"
+          # Keep the file beside the build products: __TESTROOT__ is relative to it.
+          with path.open("wb") as destination:
+              plistlib.dump(run, destination)
+          print(path)
+          PYTHON
+          )
           # Preserve the full XCTest transcript as evidence while keeping the
           # Actions log focused enough that late-suite failures are not cut off.
-          xcodebuild -project apple/NanocodexInbox.xcodeproj -scheme NanocodexInbox -configuration Debug -destination "platform=iOS Simulator,id=$device" -parallel-testing-enabled NO -retry-tests-on-failure -test-iterations 2 -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300 -derivedDataPath apple/build/ios -resultBundlePath apple/build/inbox.xcresult CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- test-without-building 2>&1 \
+          xcodebuild -xctestrun "$xctestrun" -destination "platform=iOS Simulator,id=$device" -parallel-testing-enabled NO -retry-tests-on-failure -test-iterations 2 -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300 -resultBundlePath apple/build/inbox.xcresult test-without-building 2>&1 \
             | tee apple/build/evidence/inbox-xcodebuild.log \
             | grep -E 'Test Case .* (started|passed|failed|skipped)|\.swift:[0-9]+: error:|Testing failed:|\*\* TEST (SUCCEEDED|FAILED) \*\*'
-      - name: Export native screenshots
+      - name: Export native XCTest recordings and screenshots
         if: always()
         run: |
           if [ -f apple/build/inbox.xcresult/Info.plist ]; then
-            xcrun xcresulttool export attachments --path apple/build/inbox.xcresult --output-path apple/build/evidence/screenshots
+            xcrun xcresulttool export attachments --path apple/build/inbox.xcresult --output-path apple/build/evidence/attachments
           else
-            echo "Skipping screenshot export because the result bundle is incomplete"
+            echo "Skipping attachment export because the result bundle is incomplete"
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
