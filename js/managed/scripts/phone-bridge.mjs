@@ -157,7 +157,7 @@ export function createPhoneBridge({ env = process.env, database = env.NANOCODEX_
     } while (cursor);
   };
   const read = id => { const row = db.prepare('SELECT record FROM calls WHERE id = ?').get(id); return row && JSON.parse(row.record); };
-  const snapshot = record => ({ call_id: record.call_id, status: record.status, transcript: record.transcript, transcript_truncated: record.transcript_truncated === true,
+  const snapshot = record => ({ call_id: record.call_id, ...(record.to ? { to: record.to } : {}), status: record.status, transcript: record.transcript, transcript_truncated: record.transcript_truncated === true,
     ...(record.error ? { error: record.error } : {}),
     ...(record.delegate_agent_id ? { call_agent_id: record.delegate_agent_id } : {}), max_duration_seconds: record.max_duration_seconds });
   const delegateCleanup = new Map();
@@ -231,11 +231,13 @@ export function createPhoneBridge({ env = process.env, database = env.NANOCODEX_
       if (typeof event.id !== 'string' || !/^[A-Za-z0-9_.:-]{1,256}$/.test(event.id)
         || typeof event.input !== 'string' || !event.input.trim() || Buffer.byteLength(event.input) > 8000
         || !Array.isArray(event.transcript) || Buffer.byteLength(JSON.stringify(event.transcript)) > 32768) return;
+      const revision = active.ownerRevision ?? 0;
       let text;
       try {
         text = await active.delegate.run({ id: event.id, input: event.input, transcript: event.transcript });
       } catch { text = "I couldn't complete that lookup. Do not guess or claim it succeeded."; }
       if (live.get(id) === active && typeof text === 'string') {
+        if (revision !== (active.ownerRevision ?? 0)) text = 'The owner updated the call instructions. Discard the earlier result and request work for the current goal.';
         active.voice.send({ type: 'tool_result', id: event.id, text: text.trim() ? text.slice(0, 4000) : 'The lookup returned no usable answer.' });
       }
     } else if (event.type === 'transcript') {
@@ -280,7 +282,7 @@ export function createPhoneBridge({ env = process.env, database = env.NANOCODEX_
     // Preparing and uncertain provider outcomes retain their slots until reconciled.
     if (atCapacity()) throw failure(409, 'phone_busy');
     const id = randomUUID();
-    const record = { call_id: id, status: 'preparing', transcript: [], max_duration_seconds: duration };
+    const record = { call_id: id, to: value.to, status: 'preparing', transcript: [], max_duration_seconds: duration };
     db.prepare('INSERT INTO calls VALUES (?, ?, ?, ?, ?)').run(id, value.agent_id, value.operation_id, fingerprint, JSON.stringify(record));
     await publish(id);
     if (read(id).stop_requested) return snapshot(read(id));
@@ -321,6 +323,51 @@ export function createPhoneBridge({ env = process.env, database = env.NANOCODEX_
     const row = db.prepare('SELECT record FROM calls WHERE id = ? AND agent = ?').get(id, agent);
     if (!row) throw failure(404, 'not_found');
     return JSON.parse(row.record);
+  };
+  const publicSteering = ({ operation_id, status }) => ({ operation_id, status });
+  const steering = new Map();
+  const steer = async (id, value) => {
+    if (!exact(value, ['agent_id', 'operation_id', 'instructions']) || !UUID.test(value?.operation_id ?? '')
+      || typeof value.instructions !== 'string' || !value.instructions.trim() || Buffer.byteLength(value.instructions) > 8000)
+      throw failure(400, 'invalid_steering');
+    const record = owned(id, value.agent_id);
+    const fingerprint = createHash('sha256').update(value.instructions).digest('hex');
+    const prior = record.steering?.find(item => item.operation_id === value.operation_id);
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) throw failure(409, 'operation_conflict');
+      const pending = steering.get(id);
+      if (pending) await pending;
+      return { ...snapshot(read(id)), steering: publicSteering(read(id).steering.find(item => item.operation_id === value.operation_id)) };
+    }
+    const active = live.get(id);
+    if (!active?.voice || !record.dial_requested || record.status === 'preparing' || record.stop_requested || TERMINAL.has(record.status) || finishing.has(id)) throw failure(409, 'call_not_active');
+    if (steering.has(id)) throw failure(409, 'steering_busy');
+    if ((record.steering?.length ?? 0) >= 16 || Buffer.byteLength(JSON.stringify([...(record.steering ?? []).map(item => item.instructions), value.instructions])) > 16_384) throw failure(409, 'steering_limit');
+    const receipt = { operation_id: value.operation_id, fingerprint, instructions: value.instructions, status: 'pending' };
+    record.steering ??= []; record.steering.push(receipt);
+    const task = (async () => {
+      await save(record);
+      // Stop and completion can win while durable admission is pending.
+      const current = read(id);
+      const update = current.steering.find(item => item.operation_id === value.operation_id);
+      if (live.get(id) !== active || current.stop_requested || TERMINAL.has(current.status)) update.status = 'not_applied';
+      else {
+        try {
+          active.ownerRevision = (active.ownerRevision ?? 0) + 1;
+          await active.delegate.steer(value.instructions);
+          if (live.get(id) !== active || read(id).stop_requested || TERMINAL.has(read(id).status)) throw new Error('Call ended during steering');
+          active.voice.send({ type: 'steer', operation_id: value.operation_id, instructions: value.instructions });
+          update.status = 'submitted'; // Pipe delivery is not proof of model acknowledgement.
+        } catch { update.status = 'unknown'; }
+      }
+      const latest = read(id);
+      latest.steering.find(item => item.operation_id === value.operation_id).status = update.status;
+      await save(latest);
+    })();
+    steering.set(id, task);
+    try { await task; } finally { steering.delete(id); }
+    const result = read(id);
+    return { ...snapshot(result), steering: publicSteering(result.steering.find(item => item.operation_id === value.operation_id)) };
   };
   const server = createServer(async (request, response) => {
     try {
@@ -367,8 +414,19 @@ export function createPhoneBridge({ env = process.env, database = env.NANOCODEX_
         if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw failure(415, 'invalid_content_type');
         let value; try { value = JSON.parse(await body(request)); } catch (error) { throw error.status ? error : failure(400, 'invalid_json'); }
         result = await create(value);
+      } else if (request.method === 'GET' && url.pathname === '/calls') {
+        if ([...url.searchParams.keys()].some(key => key !== 'agent_id') || url.searchParams.getAll('agent_id').length !== 1 || !UUID.test(url.searchParams.get('agent_id') ?? '')) throw failure(400, 'invalid_request');
+        result = { calls: db.prepare('SELECT record FROM calls WHERE agent = ? ORDER BY rowid DESC LIMIT 100').all(url.searchParams.get('agent_id')).map(row => {
+          const call = snapshot(JSON.parse(row.record));
+          // Keep the aggregate list below the tool's 1 MiB response budget.
+          let bytes = 0;
+          const transcript = [];
+          for (const entry of call.transcript) { bytes += Buffer.byteLength(JSON.stringify(entry)); if (bytes > 6000) break; transcript.push(entry); }
+          if (transcript.length < call.transcript.length) call.transcript_truncated = true;
+          return { ...call, transcript };
+        }) };
       } else {
-        const match = url.pathname.match(/^\/calls\/([0-9a-f-]{36})(\/hangup)?$/i);
+        const match = url.pathname.match(/^\/calls\/([0-9a-f-]{36})(\/(?:hangup|steer))?$/i);
         if (!match) throw failure(404, 'not_found');
         if (request.method === 'GET' && !match[2] && [...url.searchParams.keys()].every(key => key === 'agent_id') && url.searchParams.getAll('agent_id').length === 1) {
           let record = owned(match[1], url.searchParams.get('agent_id'));
@@ -379,8 +437,9 @@ export function createPhoneBridge({ env = process.env, database = env.NANOCODEX_
           result = snapshot(record);
         } else if (request.method === 'POST' && match[2] && !url.search) {
           let value; try { value = JSON.parse(await body(request)); } catch { throw failure(400, 'invalid_json'); }
+          if (match[2] === '/steer') { result = await steer(match[1], value); } else {
           if (!exact(value, ['agent_id'])) throw failure(400, 'invalid_request');
-          owned(match[1], value.agent_id); result = snapshot(await finish(match[1], undefined, true));
+          owned(match[1], value.agent_id); result = snapshot(await finish(match[1], undefined, true)); }
         } else throw failure(405, 'method_not_allowed');
       }
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result));

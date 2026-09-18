@@ -13,6 +13,9 @@ const mail = (suffix:string) => `From: person@example.net\r\nTo: agent@example.c
 describe("mailbox Worker boundaries", () => {
   beforeEach(async () => {
     await runInDurableObject(stub(), async (_, state) => {
+      await state.storage.deleteAlarm();
+      state.storage.sql.exec("DELETE FROM email_jobs");
+      state.storage.sql.exec("DELETE FROM email_watches");
       state.storage.sql.exec("DELETE FROM operations");
       state.storage.sql.exec("DELETE FROM messages");
     });
@@ -178,4 +181,104 @@ it.each([undefined, "", "other"])("rejects mailbox access and incoming routing w
   await worker.email(message as unknown as ForwardableEmailMessage, configured);
   expect(message.setReject).toHaveBeenCalledWith("Mailbox unavailable");
   expect(await (await worker.fetch(new Request("https://email/health"),configured)).json()).toEqual({ready:false,send_enabled:false});
+});
+
+
+describe("authorized follow-up watches", () => {
+  it.each(["reply", "duplicate", "revoked", "expired", "held", "pending", "automatic", "wrong-sender", "wrong-thread", "race-revoke", "ambiguous"])("handles %s without widening authorization", async mode => {
+    await runInDurableObject(stub(), async (_,state) => {
+      await state.storage.deleteAlarm();
+      for (const table of ["email_jobs","email_watches","operations","messages"]) state.storage.sql.exec(`DELETE FROM ${table}`);
+      const send = vi.fn().mockResolvedValue({messageId:"<root@example.com>"});
+      const resumeEmail = vi.fn().mockResolvedValue({state:"completed",turn_id:"turn",reply_text:mode === "held" ? undefined : "Authorized reply"});
+      const box = new Mailbox(state,{...bindings,EMAIL_SEND_ENABLED:"true",EMAIL:{send} as SendEmail,NANOCODEX_EMAIL_AGENT:{resumeEmail}});
+      const outgoing = sendInput();
+      expect(await box.execute(outgoing)).toMatchObject({status:"accepted"});
+      const watch = {...base,operation:"watch",watch_id:crypto.randomUUID(),message_id:outgoing.operation_id,expected_recipient:"person@example.net",goal:"Answer the scheduling question only",expires_at:Date.now()+60_000,max_replies:1};
+      const incoming = {id:crypto.randomUUID(),direction:"incoming" as const,from:mode === "wrong-sender" ? "stranger@example.net" : "person@example.net",to:["agent@example.com"],subject:"Hello",text:"What time?",created_at:new Date().toISOString(),message_id:"<incoming@example.net>",references:[mode === "wrong-thread" ? "<unrelated@example.com>" : "<root@example.com>"],auto_submitted:mode === "automatic",attachments:[]};
+      // Registration catches an already-stored reply.
+      await box.ingest("owner",incoming);
+      expect(await box.execute(watch)).toHaveProperty("watch");
+      if (mode === "duplicate") await box.ingest("owner",{...incoming,id:crypto.randomUUID(),text:"MIME changed"});
+      if (mode === "revoked") await box.execute({...base,operation:"unwatch",watch_id:watch.watch_id});
+      if (mode === "expired") {
+        const row = state.storage.sql.exec<{data:string}>("SELECT data FROM email_watches WHERE id=?",watch.watch_id).one();
+        state.storage.sql.exec("UPDATE email_watches SET data=? WHERE id=?",JSON.stringify({...JSON.parse(row.data),expires_at:Date.now()-1}),watch.watch_id);
+      }
+      if (mode === "race-revoke") resumeEmail.mockImplementation(async () => { await box.execute({...base,operation:"unwatch",watch_id:watch.watch_id}); return {state:"completed",turn_id:"turn",reply_text:"Late"}; });
+      if (mode === "pending") resumeEmail.mockResolvedValueOnce({state:"accepted",turn_id:"turn"});
+      if (mode === "ambiguous") send.mockRejectedValue(new Error("uncertain delivery"));
+      await box.alarm(); await box.alarm();
+      const sends = ["reply","duplicate","pending","ambiguous"].includes(mode) ? 2 : 1;
+      expect(send).toHaveBeenCalledTimes(sends);
+      if (sends === 2) {
+        expect(send.mock.calls[1][0]).toMatchObject({to:[watch.expected_recipient],text:"Authorized reply",headers:{"In-Reply-To":"<incoming@example.net>"}});
+        expect(resumeEmail.mock.calls[0][0]).toEqual({owner_id:base.owner_id,agent_id:base.agent_id,workflow_id:watch.watch_id,message_id:incoming.id,goal:watch.goal,message:{from:incoming.from,subject:incoming.subject,text:incoming.text},expires_at:watch.expires_at});
+      }
+      if (mode === "pending") expect(resumeEmail.mock.calls[0][0]).toEqual(resumeEmail.mock.calls[1][0]);
+      const visible:any=await box.execute({...base,operation:"listwatches"});
+      if (mode === "held") expect(visible.watches[0].jobs[0].state).toBe("held");
+      if (mode === "ambiguous") expect(visible.watches[0].jobs[0].state).toBe("unknown");
+      if (mode === "reply") expect(visible.watches[0].jobs[0].state).toBe("accepted");
+      if (["revoked","expired","automatic","wrong-sender","wrong-thread"].includes(mode)) expect(resumeEmail).not.toHaveBeenCalled();
+      await state.storage.deleteAlarm();
+    });
+  });
+  it("rejects unbounded watches, foreign agents, and overlapping watches", async () => {
+    await runInDurableObject(stub(), async (_,state) => {
+      for (const table of ["email_jobs","email_watches","operations","messages"]) state.storage.sql.exec(`DELETE FROM ${table}`);
+      const send = vi.fn().mockResolvedValue({messageId:"<root@example.com>"});
+      const box = new Mailbox(state,{...bindings,EMAIL_SEND_ENABLED:"true",EMAIL:{send} as SendEmail});
+      const outgoing=sendInput(); await box.execute(outgoing);
+      const watch={...base,operation:"watch",watch_id:crypto.randomUUID(),message_id:outgoing.operation_id,expected_recipient:"person@example.net",goal:"Schedule",expires_at:Date.now()+60_000,max_replies:1};
+      for (const invalid of [{goal:" \t\n"},{max_replies:11},{expires_at:Date.now()+8*86400000},{goal:"x".repeat(16385)},{agent_id:"other"},{expected_recipient:"stranger@example.net"}]) expect(await box.execute({...watch,...invalid})).toMatchObject({status:"error"});
+      expect(await box.execute(watch)).toHaveProperty("watch");
+      expect(await box.execute(watch)).toHaveProperty("watch");
+      expect(await box.execute({...watch,watch_id:crypto.randomUUID()})).toMatchObject({error:{code:"watch_overlap"}});
+      expect(await box.execute({...base,operation:"listwatches"})).toMatchObject({watches:[{id:watch.watch_id}]});
+    });
+  });
+});
+
+
+it("persists pending RPC payload across reconstruction and enforces exhausted reply budget", async () => {
+  await runInDurableObject(stub(), async (_,state) => {
+    await state.storage.deleteAlarm();
+    for (const table of ["email_jobs","email_watches","operations","messages"]) state.storage.sql.exec(`DELETE FROM ${table}`);
+    const send=vi.fn().mockResolvedValue({messageId:"<durable-root@example.com>"});
+    const resumeEmail=vi.fn().mockResolvedValueOnce({state:"accepted",turn_id:"stable"}).mockResolvedValue({state:"completed",turn_id:"stable",reply_text:"Authorized"});
+    const e={...bindings,EMAIL_SEND_ENABLED:"true",EMAIL:{send} as SendEmail,NANOCODEX_EMAIL_AGENT:{resumeEmail}};
+    const box=new Mailbox(state,e); const outgoing=sendInput(); await box.execute(outgoing);
+    const watch={...base,operation:"watch",watch_id:crypto.randomUUID(),message_id:outgoing.operation_id,expected_recipient:"person@example.net",goal:"Schedule",expires_at:Date.now()+60_000,max_replies:1};
+    expect(await box.execute({...watch,owner_id:"other"})).toMatchObject({error:{code:"owner_mismatch"}});
+    await box.execute(watch);
+    expect(await box.execute({...base,agent_id:"other",operation:"unwatch",watch_id:watch.watch_id})).toMatchObject({error:{code:"watch_not_found"}});
+    expect(await box.execute({...base,agent_id:"other",operation:"listwatches"})).toEqual({watches:[]});
+    const incoming={id:crypto.randomUUID(),direction:"incoming" as const,from:"person@example.net",to:["agent@example.com"],subject:"Schedule",text:"Tomorrow?",created_at:new Date().toISOString(),message_id:"<first@example.net>",references:["<durable-root@example.com>"],attachments:[]};
+    await Promise.all([box.ingest("owner",incoming),box.ingest("owner",{...incoming,id:crypto.randomUUID(),message_id:"<concurrent@example.net>"})]);
+    expect(state.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM email_jobs").one().n).toBe(1);
+    await box.alarm();
+    const saved=JSON.parse(state.storage.sql.exec<{data:string}>("SELECT data FROM email_jobs").one().data);
+    expect(saved.payload).toEqual(resumeEmail.mock.calls[0][0]);
+    const resumed=new Mailbox(state,e); await resumed.alarm();
+    expect(resumeEmail.mock.calls[1][0]).toEqual(saved.payload);
+    expect(send).toHaveBeenCalledTimes(2);
+    await resumed.ingest("owner",{...incoming,id:crypto.randomUUID(),message_id:"<second@example.net>"});
+    await resumed.alarm(); expect(send).toHaveBeenCalledTimes(2); expect(resumeEmail).toHaveBeenCalledTimes(2);
+    // Simulate a reserved dispatch interrupted before the send journal was created.
+    state.storage.sql.exec("DELETE FROM operations WHERE id=?",saved.operation_id);
+    const listed:any=await resumed.execute({...base,operation:"listwatches"});
+    expect(listed.watches[0].jobs[0].state).toBe("dispatch_unknown");
+    await state.storage.deleteAlarm();
+  });
+});
+
+it.each(["Auto-Submitted: auto-replied", "List-Id: list.example.net", "Precedence: bulk", "Content-Type: multipart/report; report-type=delivery-status"])("marks loop-prone MIME headers as suppressed: %s", async header => {
+  const message=inbound(`From: person@example.net\r\nTo: agent@example.com\r\nMessage-ID: <${crypto.randomUUID()}@example.net>\r\nSubject: automated\r\n${header}\r\n\r\nAutomated notice`);
+  await worker.email(message,bindings);
+  expect(message.setReject).not.toHaveBeenCalled();
+  const listed:any=await stub().execute({...base,operation:"list",limit:50});
+  const automated=listed.messages.filter((m:any) => m.subject === "automated");
+  expect(automated.length).toBeGreaterThan(0);
+  expect(automated.every((m:any) => m.auto_submitted === true)).toBe(true);
 });

@@ -24,7 +24,7 @@ async function setup(t, overrides = {}) {
   const input = [];
   const provider = { async create(_env, value) { creates++; return { sid, status: 'queued' }; },
     async status() { return { sid, status: 'in-progress' }; }, async hangup() { hangups++; return { sid, status: 'completed' }; }, ...overrides.provider };
-  const bridge = createPhoneBridge({ startDelegation: overrides.startDelegation ?? (() => ({ async prepare() {}, async run() { return 'Test lookup result'; }, async close() {} })), stopDelegate: overrides.stopDelegate ?? (async () => {}), env: { ...env, ...overrides.env }, database: overrides.database ?? ':memory:', provider,
+  const bridge = createPhoneBridge({ startDelegation: overrides.startDelegation ?? (() => ({ async prepare() {}, async run() { return 'Test lookup result'; }, steer() {}, async close() {} })), stopDelegate: overrides.stopDelegate ?? (async () => {}), env: { ...env, ...overrides.env }, database: overrides.database ?? ':memory:', provider,
     startVoice: overrides.startVoice ?? ((_binary, _instructions, event) => { voiceEvent = event; return { ready: Promise.resolve(), send(event) { input.push(event); }, close() {} }; }) });
   bridge.server.listen(0, '127.0.0.1'); await once(bridge.server, 'listening');
   const origin = `http://127.0.0.1:${bridge.server.address().port}`;
@@ -196,6 +196,9 @@ test('transcript persistence stays within the tool response byte budget', async 
   const snapshot = JSON.parse(text);
   assert.equal(snapshot.transcript_truncated, true);
   assert.ok(snapshot.transcript.length > 0);
+  const listed = await (await service.request(`/calls?agent_id=${agent}`)).json();
+  assert.equal(listed.calls[0].transcript_truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(listed)) < 8000);
 });
 
 test('silent cloud check starts voice without dialing', async t => {
@@ -461,4 +464,69 @@ test('restart retries unfinished delegated work cleanup even after the telephone
   const restart = await setup(t, { database, async stopDelegate(_env, id, session) { recovered.push([id, session]); } });
   assert.equal((await restart.request('/health')).status, 200);
   assert.deepEqual(recovered, [[delegateAgent, delegateSession]]);
+});
+
+
+test('list isolates ownership and includes destinations; steering is idempotent and never redials', async t => {
+  const service = await setup(t);
+  const call = await (await service.call()).json();
+  assert.deepEqual((await (await service.request(`/calls?agent_id=${agent}`)).json()).calls, [call]);
+  assert.equal(call.to, service.callBody.to);
+  assert.deepEqual(await (await service.request(`/calls?agent_id=${otherAgent}`)).json(), { calls: [] });
+  const body = { agent_id: agent, operation_id: randomUUID(), instructions: 'Ask about Saturday hours too.' };
+  const steer = value => service.request(`/calls/${call.call_id}/steer`, { method: 'POST', body: JSON.stringify(value) });
+  assert.equal((await steer({ ...body, agent_id: otherAgent })).status, 404);
+  const first = await (await steer(body)).json();
+  assert.deepEqual(first.steering, { operation_id: body.operation_id, status: 'submitted' });
+  assert.deepEqual((await (await steer(body)).json()).steering, first.steering);
+  assert.equal((await steer({ ...body, instructions: 'Different' })).status, 409);
+  assert.equal(service.input.filter(event => event.type === 'steer').length, 1);
+  assert.equal(service.creates(), 1);
+  await service.request(`/calls/${call.call_id}/hangup`, { method: 'POST', body: JSON.stringify({ agent_id: agent }) });
+  assert.equal((await steer({ ...body, operation_id: randomUUID() })).status, 409);
+  assert.deepEqual((await (await steer(body)).json()).steering, first.steering);
+});
+
+test('steering journals pending before delivery and submitted afterwards', async t => {
+  const originalFetch = globalThis.fetch;
+  const stateUrl = 'https://phone.example/internal/state';
+  const receipts = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).startsWith(stateUrl)) {
+      if (init.method === 'POST') { receipts.push(JSON.parse(JSON.parse(init.body).record)); return Response.json({ ok: true }); }
+      return Response.json({ calls: [] });
+    }
+    return originalFetch(url, init);
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let deliveries = 0;
+  const service = await setup(t, { env: { NANOCODEX_PHONE_STATE_URL: stateUrl }, startVoice() {
+    return { ready: Promise.resolve(), close() {}, send(event) {
+      if (event.type === 'steer') { deliveries++; assert.equal(receipts.at(-1).steering.at(-1).status, 'pending'); }
+    } };
+  } });
+  const call = await (await service.call()).json();
+  const body = { agent_id: agent, operation_id: randomUUID(), instructions: 'Ask about weekend hours.' };
+  const send = () => service.request(`/calls/${call.call_id}/steer`, { method: 'POST', body: JSON.stringify(body) });
+  const responses = await Promise.all([send(), send()]);
+  for (const response of responses) assert.equal((await response.json()).steering.status, 'submitted');
+  assert.equal(deliveries, 1);
+  assert.equal(receipts.at(-1).steering.at(-1).status, 'submitted');
+  await service.close();
+});
+
+
+test('bridge rejects cumulative amendment overflow before delivery and preserves replay', async t => {
+  const service = await setup(t);
+  const call = await (await service.call()).json();
+  const send = body => service.request(`/calls/${call.call_id}/steer`, { method: 'POST', body: JSON.stringify(body) });
+  const first = { agent_id: agent, operation_id: randomUUID(), instructions: 'a'.repeat(8000) };
+  assert.equal((await send(first)).status, 200);
+  assert.equal((await send({ ...first, operation_id: randomUUID(), instructions: 'b'.repeat(8000) })).status, 200);
+  const overflow = await send({ ...first, operation_id: randomUUID(), instructions: 'c'.repeat(400) });
+  assert.equal(overflow.status, 409);
+  assert.equal((await overflow.json()).error, 'steering_limit');
+  assert.equal((await send(first)).status, 200);
+  assert.equal(service.input.filter(event => event.type === 'steer').length, 2);
+  assert.equal(service.creates(), 1);
 });

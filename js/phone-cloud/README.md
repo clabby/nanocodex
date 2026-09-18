@@ -63,3 +63,23 @@ No new telephone calls were placed for this update.
 
 Current phone image:
 `sha256:5bbda5ce4cbd16199b4603d2fca6f2e62f8b9905b4f20c84144567b444615a16`.
+
+## Call coordination
+
+The browser chat groups calls made by the current parent agent. Each row shows
+its destination, lifecycle status, transcript, and retained call-agent link.
+Visible chats refresh the list every four seconds; hidden chats stop polling.
+The `phone` tool also supports `list` for the current parent.
+
+`steer` accepts `call_id`, a stable UUID `operation_id`, and owner instructions
+(up to 8,000 UTF-8 bytes). Instructions amend the original brief and preserve
+constraints unless explicitly changed. The bridge journals each request before
+delivery, rejects conflicting reuse, and fences stale delegated answers.
+A `submitted` receipt means the voice process received the update, not that
+the model acknowledged it. Reconcile uncertain requests with the same operation
+ID and instructions. Steering never starts or redials a call. Hangup remains
+available from the panel and tool.
+
+The authenticated `/v1/agents/:id/phone/calls` routes enforce the parent account
+and deployment-selected phone admin. These controls require the updated cloud
+phone container as well as the managed Worker and browser application.

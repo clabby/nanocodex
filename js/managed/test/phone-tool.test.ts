@@ -188,3 +188,51 @@ it("bridge admission requires an explicitly selected phone admin matching the co
   expect(phoneAdminConfigured({ NANOCODEX_PHONE_ADMIN_ID: "admin", NANOCODEX_PHONE_OWNER_ID: "owner" })).toBe(false);
   expect(phoneAdminConfigured({ NANOCODEX_PHONE_ADMIN_ID: "admin", NANOCODEX_PHONE_OWNER_ID: "admin" })).toBe(true);
 });
+
+it("projects agent-scoped call lists with safe destination and truncation fields", async () => {
+  const f = fixture();
+  f.fetcher.mockResolvedValue(Response.json({ calls: [{ ...snapshot, to: input.to, transcript_truncated: true,
+    transcript: [{ speaker: "user", text: token, private: token }], sid: "private" }], secret: token }));
+  expect(await f.tool.handler({ operation: "list" }, context())).toEqual({ calls: [{ ...snapshot, to: input.to,
+    transcript_truncated: true, transcript: [{ speaker: "user", text: "[redacted]" }] }] });
+  expect(f.fetcher.mock.calls[0]).toMatchObject(["https://phone.example/calls?agent_id=agent%2Fid", { method: "GET" }]);
+  expect(f.fetcher.mock.calls[0]![1].body).toBeUndefined();
+});
+it.each([{}, { calls: null }, { calls: [null] }, { calls: [{ ...snapshot, status: "bad" }] },
+  { calls: Array.from({ length: 101 }, () => snapshot) }])("rejects malformed or unbounded call lists", async result => {
+  const f = fixture(); f.fetcher.mockResolvedValue(Response.json(result));
+  await expect(f.tool.handler({ operation: "list" }, context())).rejects.toThrow();
+  expect(f.fetcher).toHaveBeenCalledOnce();
+});
+const steeringId = "22222222-2222-4222-8222-222222222222";
+const steeringInput = { operation: "steer", call_id: id, operation_id: steeringId, instructions: "Ask about Friday." };
+it("transports stable steering identity on explicit replay and projects only receipt fields", async () => {
+  const f = fixture();
+  const steering = { operation_id: steeringId, status: "submitted" };
+  f.fetcher.mockImplementation(async () => Response.json({ ...snapshot, steering: { ...steering, instructions: token } }));
+  for (let count = 0; count < 2; count++) expect(await f.tool.handler(steeringInput, context())).toEqual({ ...snapshot, steering });
+  expect(f.fetcher).toHaveBeenCalledTimes(2);
+  for (const [url, init] of f.fetcher.mock.calls) {
+    expect(url).toBe(`https://phone.example/calls/${id}/steer`);
+    expect(init).toMatchObject({ method: "POST", redirect: "manual" });
+    expect(JSON.parse(init.body)).toEqual({ agent_id: "agent/id", operation_id: steeringId, instructions: steeringInput.instructions });
+  }
+});
+it.each([{ ...steeringInput, operation_id: "bad" }, { ...steeringInput, call_id: undefined },
+  { ...steeringInput, instructions: " " }, { ...steeringInput, instructions: "界".repeat(2667) },
+  { ...steeringInput, to: input.to }, { ...steeringInput, agent_id: id }, { operation: "list", call_id: id }])("rejects invalid steering/list arguments before transport", async value => {
+  const f = fixture(); await expect(f.tool.handler(value, context())).rejects.toThrow(); expect(f.fetcher).not.toHaveBeenCalled();
+});
+it("does not retry uncertain steering writes and preserves their operation identity", async () => {
+  for (const outcome of [new Error(token), new Response(token, { status: 503 }), Response.json({ secret: token })]) {
+    const f = fixture();
+    if (outcome instanceof Error) f.fetcher.mockRejectedValue(outcome); else f.fetcher.mockResolvedValue(outcome);
+    let error: unknown;
+    try { await f.tool.handler(steeringInput, context()); } catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) throw new Error("Expected steering failure");
+    expect(error.message).toContain("outcome may be unknown"); expect(error.message).not.toContain(token);
+    expect(f.fetcher).toHaveBeenCalledOnce();
+    expect(JSON.parse(f.fetcher.mock.calls[0]![1].body).operation_id).toBe(steeringId);
+  }
+});
