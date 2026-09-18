@@ -1,3 +1,4 @@
+import { retiredProjectTools } from "./retired-projects";
 import { z } from "zod";
 
 const name = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
@@ -45,8 +46,8 @@ export function parseConfiguration(value: unknown): AgentConfiguration {
 }
 /** Apply tool aliases on both admission and reads of retained configurations. */
 export function normalizeToolNames(configuration: AgentConfiguration): AgentConfiguration {
-  if (!configuration.tools?.includes("accountInfo")) return configuration;
-  return { ...configuration, tools: [...new Set(configuration.tools.map(name => name === "accountInfo" ? "environment" : name))] };
+  if (!configuration.tools?.some(name => name === "accountInfo" || retiredProjectTools.has(name))) return configuration;
+  return { ...configuration, tools: [...new Set(configuration.tools.filter(name => !retiredProjectTools.has(name)).map(name => name === "accountInfo" ? "environment" : name))] };
 }
 /** Account discovery is unnecessary when policy excludes every account provider. */
 export function accountToolsEnabled(configuration: AgentConfiguration): boolean {

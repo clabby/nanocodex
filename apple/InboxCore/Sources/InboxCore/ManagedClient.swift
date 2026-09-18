@@ -140,16 +140,9 @@ public final class ManagedClient: @unchecked Sendable {
             let summary = body["summaries"][id]
             let count = summary["turn_count"].number
             guard count >= 0, count < Double(Int.max), count.rounded(.down) == count else { throw APIError.invalidResponse }
-            var card = AgentCard(id: id, title: summary["project_title"].string.isEmpty
-                             ? (summary["title"].string.isEmpty ? "Untitled agent" : summary["title"].string) : summary["project_title"].string,
+            return AgentCard(id: id, title: summary["title"].string.isEmpty ? "Untitled agent" : summary["title"].string,
                              updatedAt: summary["updated_at"].number, turnCount: Int(summary["turn_count"].number),
                              mayHaveScheduledJobs: summary["may_have_scheduled_jobs"] != .bool(false))
-            card.projectRootID = summary["project_root_id"].string.isEmpty ? nil : summary["project_root_id"].string
-            card.projectName = summary["project_name"].string.isEmpty ? nil : summary["project_name"].string
-            card.parentAgentID = summary["parent_agent_id"].string.isEmpty ? nil : summary["parent_agent_id"].string
-            card.originTurnID = summary["origin_turn_id"].string.isEmpty ? nil : summary["origin_turn_id"].string
-            card.projectTurnID = summary["project_turn_id"].string.isEmpty ? nil : summary["project_turn_id"].string
-            return card
         }
     }
     public static func agentPath(_ id: String) throws -> String {

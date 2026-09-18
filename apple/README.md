@@ -1,14 +1,11 @@
 # Nanocodex for iPhone and iPad
 
-A native SwiftUI app for iPhone and iPad. Projects organize persistent agent chats.
-The mobile shell has a searchable project drawer, compact project header, blue user
-bubbles, unboxed replies, and a single rounded composer. A task pill opens a native
-Tasks/Agents sheet, and messages link to their task details. Project names
-are device-local and account-scoped. The master can spawn durable task threads; server
-lineage groups those agents into the same project across devices. Existing queue and
-steering behavior remains, with explicit result-reading tools for the master.
-See [project-chat UX notes](../docs/ux/2026-09-17-project-chat.md) for behavior and scope.
-Earlier Muse validation below documents the previous navigation layout.
+A native SwiftUI app for iPhone and iPad. Each managed agent has an independent
+conversation in a searchable drawer. The compact conversation header, blue user
+bubbles, unboxed replies, and rounded composer keep the conversation in focus.
+Use the compose button to start another conversation. Back, per-conversation screens,
+and captured context are available in the app menu. Queue and steering controls
+remain with each conversation.
 Nanocodex retains per-agent drafts, steering, voice, and remote screens.
 Appearance follows the system light/dark setting, including conversations, the composer,
 and voice controls.

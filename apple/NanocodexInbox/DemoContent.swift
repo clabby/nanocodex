@@ -45,45 +45,8 @@ enum DemoContent {
     }
     #endif
 
-    #if DEBUG
-    static func projectCards() -> [AgentCard] {
-        let specs = [("inbox", "Orbit", "Ready"), ("auth", "Fix the Google sign-in loop", "Running"),
-                     ("offline", "Add offline saved trips", "Running"), ("layout", "Align the tab bar", "Ready"), ("ledger", "Ledger", "Idle")]
-        return specs.enumerated().map { index, spec in
-            var card = AgentCard(id: spec.0, title: spec.1, updatedAt: Date().timeIntervalSince1970 * 1000 - Double(index * 1000), turnCount: 1)
-            card.checked = true; card.status = spec.2
-            if !["inbox", "ledger"].contains(card.id) {
-                card.projectRootID = "inbox"; card.parentAgentID = "inbox"
-                card.originTurnID = "request-" + card.id; card.projectTurnID = "project:" + card.id
-                if spec.2 == "Running" { card.activeTurns = [card.projectTurnID!] }
-            }
-            return card
-        }
-    }
-    static func projectRows(_ id: String) -> [TranscriptRow] {
-        if id == "ledger" { return [] }
-        func row(_ key: String, _ role: String, _ text: String, _ turn: String) -> TranscriptRow {
-            var row = TranscriptRow(id: key, role: role, text: text)
-            row.turnID = turn; if role == "Agent" { row.phase = "final" }
-            return row
-        }
-        if id == "inbox" { return [
-            row("u-auth", "You", "Can you check the latest TestFlight build? After Google sign-in it drops me back on the welcome screen.", "request-auth"),
-            row("a-auth", "Agent", "I reproduced it. The auth guard runs before the refresh token finishes. I’ve started a task to fix that path.", "request-auth"),
-            row("u-offline", "You", "While that runs, can you add offline access to saved trips?", "request-offline"),
-            row("a-offline", "Agent", "That’s running in a separate thread. You can keep talking here while both tasks work.", "request-offline"),
-            row("u-layout", "You", "One more thing: the tab bar sits too high on smaller iPhones.", "request-layout"),
-            row("a-layout", "Agent", "The layout pass is ready. Open the task to review it; the sign-in and offline tasks are still running.", "request-layout"),
-        ] }
-        let prompt = id == "auth" ? "Reproduce and fix the Google sign-in loop." : id == "offline" ? "Add offline access to saved trips." : "Align the tab bar on smaller iPhones."
-        let answer = id == "auth" ? "The session refresh and auth guard race on launch. I’m checking the refresh boundary before changing the redirect." : id == "offline" ? "I’m adding a local store for saved trips and checking the empty-cache experience." : "The tab bar now follows the safe area on compact iPhones. The layout checks passed at three device sizes."
-        return [row("u-" + id, "You", prompt, "project:" + id), row("a-" + id, "Agent", answer, "project:" + id)]
-    }
-
-    #endif
     static func cards() -> [AgentCard] {
         #if DEBUG
-        if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_PROJECT_TASKS"] == "1" { return projectCards() }
         if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_EMPTY_AGENTS"] == "1" { return [] }
         #endif
         let values: [(String, String, String, String)] = [
@@ -197,9 +160,6 @@ enum DemoContent {
     }
 
     static func rows(_ id: String) -> [TranscriptRow] {
-        #if DEBUG
-        if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_PROJECT_TASKS"] == "1" { return projectRows(id) }
-        #endif
         guard let card = cards().first(where: { $0.id == id }) else { return [] }
         if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_GENERATED_OUTPUTS"] == "1" { return generatedOutputRows() }
         if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_RENDER_PROFILE"] == "1" {

@@ -22,11 +22,11 @@ final class InboxModel: ObservableObject {
     // App Intents and windows share the same account and Hand connection.
     static let shared = InboxModel()
     enum Filter: String, CaseIterable { case inbox = "Inbox", running = "Running", all = "All" }
-    @Published var cards: [AgentCard] = [] { didSet { invalidateRosterCaches(previous: oldValue); scheduleAgentNotifications() } }
+    @Published var cards: [AgentCard] = [] { didSet { scheduleAgentNotifications() } }
     @Published var deck = InboxDeck()
     @Published var filter: Filter = .all { didSet { reconcile() } }
     @Published var drafts: [String: String] = [:]
-    @Published var rows: [TranscriptRow] = [] { didSet { mediaProjection.update(rows); invalidateTaskCache(observedAgentID) } }
+    @Published var rows: [TranscriptRow] = [] { didSet { mediaProjection.update(rows) } }
     private var mediaProjection = InboxMediaProjection()
     var generatedOutputsByRow: [String: [ChatGeneratedOutput]] { mediaProjection.outputs }
     @Published var threadLoading = false
@@ -162,7 +162,7 @@ final class InboxModel: ObservableObject {
     private var streamReceivedFrame = false
     private var generation = UUID()
     private var observation = UUID() { didSet { cancelOlderHistoryPrefetch() } }
-    private var events: [AgentEvent] = [] { didSet { eventsRevision = UUID(); invalidateTaskCache(observedAgentID) } }
+    private var events: [AgentEvent] = [] { didSet { eventsRevision = UUID() } }
     private var eventsRevision = UUID()
     private var projectedFirstCursor: Cursor?
     private let preferences = InboxPreferencesWriter()
@@ -177,7 +177,7 @@ final class InboxModel: ObservableObject {
     }
     private var olderHistoryPrefetch: (id: String, before: Cursor, task: Task<(EventPage, [Int]), Error>)?
     private var seen: [String: String] = [:] { didSet { scheduleAgentNotifications() } }
-    private var scope = "" { didSet { restoreProjects(); scheduleAgentNotifications() } }
+    private var scope = "" { didSet { restoreThreadScreens(); scheduleAgentNotifications() } }
     private lazy var agentNotifications = AgentNotificationController(open: { [weak self] url in self?.openAgentActivity(url) })
     private var agentNotificationUpdate: Task<Void, Never>?
     private var pendingActivityURL: URL?
@@ -216,108 +216,7 @@ final class InboxModel: ObservableObject {
         select(id)
     }
 
-    private struct TaskCache {
-        var turns: [String]
-        var pending: [PendingMessage]
-        var result: [ProjectTask]
-    }
-    private var taskCache: [String: TaskCache] = [:]
     @Published private var threadScreens: [String: RemoteScreenSelection] = [:]
-    private var cachedProjectIndex: InboxProjectIndex?
-    private var projectIndex: InboxProjectIndex {
-        if let cachedProjectIndex { return cachedProjectIndex }
-        let index = InboxProjectIndex(cards: cards, savedProjects: savedProjects)
-        cachedProjectIndex = index
-        return index
-    }
-    private var projectTaskSummaryCache = ProjectTaskSummaryCache()
-    @Published private var savedProjects: [InboxProject] = [] { didSet { cachedProjectIndex = nil } }
-    func card(agentID: String) -> AgentCard? { projectIndex.cardsByID[agentID] }
-    func childAgents(parentAgentID: String, originTurnID: String) -> [AgentCard] {
-        projectIndex.children(parentAgentID: parentAgentID, originTurnID: originTurnID)
-    }
-    var projects: [InboxProject] { projectIndex.projects }
-    private func invalidateTaskCache(_ id: String?) {
-        guard let id else { return }
-        taskCache[id] = nil; projectTaskSummaryCache.invalidate(agentID: id)
-    }
-    private func invalidateRosterCaches(previous: [AgentCard]) {
-        cachedProjectIndex = nil
-        let old = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
-        let current = Set(cards.map(\.id))
-        for card in cards where old[card.id] != card { invalidateTaskCache(card.id) }
-        for id in old.keys where !current.contains(id) { invalidateTaskCache(id) }
-    }
-    var focusedProject: InboxProject? {
-        guard let id = focused?.id else { return nil }
-        return projects.first { $0.agentIDs.contains(id) }
-    }
-    var projectAgents: [AgentCard] {
-        let ids = Set(focusedProject?.agentIDs ?? [])
-        return cards.filter { ids.contains($0.id) }.sorted(by: AgentCard.mostRecentFirst)
-    }
-    var projectTasks: [ProjectTask] {
-        projectAgents.compactMap { card in
-            guard card.parentAgentID != nil, card.projectTurnID != nil else { return nil }
-            let pendingTasks = pending.filter { $0.agentID == card.id }
-            let summary = projectTaskSummaryCache.value(agentID: card.id, activeTurns: card.activeTurns, pending: pendingTasks) {
-                let history = card.id == focused?.id ? events : overviewEvents[card.id] ?? tabHistories[card.id]?.events ?? []
-                let transcript = card.id == focused?.id ? rows : (isDemo ? overviewRows(for: card.id) : overviewTranscripts[card.id] ?? tabHistories[card.id]?.rows ?? card.previewRows)
-                return ProjectTask.summary(agentID: card.id, rows: transcript, events: history,
-                                           activeTurns: card.activeTurns, pending: pendingTasks, isRunning: card.isRunning)
-                    ?? ProjectTask(agentID: card.id, turnID: card.projectTurnID!, title: card.title, status: "History", rows: [])
-            }
-            var task = summary
-            task.title = card.title
-            if card.isRunning { task.status = "Working" }
-            return task
-        }
-    }
-    func tasks(agentID: String) -> [ProjectTask] {
-        let card = cards.first { $0.id == agentID }
-        let active = card?.activeTurns ?? []
-        let pendingTasks = pending.filter { $0.agentID == agentID }
-        if let cached = taskCache[agentID], cached.turns == active, cached.pending == pendingTasks {
-            return cached.result
-        }
-        let history = agentID == focused?.id ? events : overviewEvents[agentID] ?? tabHistories[agentID]?.events ?? []
-        let transcript = agentID == focused?.id ? rows : (isDemo ? overviewRows(for: agentID) : overviewTranscripts[agentID] ?? tabHistories[agentID]?.rows ?? card?.previewRows ?? [])
-        var result = ProjectTask.project(agentID: agentID, rows: transcript, events: history,
-                                   activeTurns: active, pending: pendingTasks).map { task in
-            var task = task
-            let input = task.rows.first { $0.role == "You" }?.text
-                ?? pending.first { $0.agentID == agentID && $0.id == task.turnID }?.input ?? task.title
-            task.title = String((ContextPrompt.separate(input)?.request ?? input).prefix(180))
-            if task.title == "Task", card?.parentAgentID != nil { task.title = card?.title ?? "Task" }
-            return task
-        }
-        if let turn = card?.projectTurnID, !result.contains(where: { $0.turnID == turn }) {
-            result.append(ProjectTask(agentID: agentID, turnID: turn, title: card?.title ?? "Task", status: "History", rows: []))
-        }
-        // Detail rows are bounded independently of lightweight project summaries.
-        if taskCache.count >= 16, let evicted = taskCache.keys.first { taskCache[evicted] = nil }
-        taskCache[agentID] = TaskCache(turns: active, pending: pendingTasks, result: result)
-        return result
-    }
-    func selectProject(_ id: String) {
-        guard let project = projects.first(where: { $0.id == id }) else { return }
-        select(project.primaryAgentID)
-    }
-    func createProject(name: String) {
-        guard connected else { return }
-        newAgent()
-        guard let id = focused?.id else { return }
-        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        savedProjects.append(InboxProject(id: UUID().uuidString, name: name.isEmpty ? "New project" : name, primaryAgentID: id))
-        persistProjects()
-    }
-    func renameProject(_ id: String, name: String) {
-        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, var project = projects.first(where: { $0.id == id }) else { return }
-        project.name = name
-        savedProjects.removeAll { $0.id == id }; savedProjects.append(project)
-        persistProjects()
-    }
     var screenScope: String { scope }
     func screenSelection(agentID: String) -> RemoteScreenSelection? { threadScreens[agentID] }
     func selectScreen(_ selection: RemoteScreenSelection?, agentID: String) {
@@ -329,17 +228,9 @@ final class InboxModel: ObservableObject {
         let key = "inbox.threadScreens." + scope
         preferences.enqueue { $0.set(data, forKey: key) }
     }
-    private func restoreProjects() {
+    private func restoreThreadScreens() {
         threadScreens = UserDefaults.standard.data(forKey: "inbox.threadScreens." + scope)
             .flatMap { try? JSONDecoder().decode([String: RemoteScreenSelection].self, from: $0) } ?? [:]
-        taskCache.removeAll(); projectTaskSummaryCache.removeAll()
-        savedProjects = UserDefaults.standard.data(forKey: "inbox.projects." + scope)
-            .flatMap { try? JSONDecoder().decode([InboxProject].self, from: $0) } ?? []
-    }
-    private func persistProjects() {
-        guard !scope.isEmpty, let data = try? JSONEncoder().encode(savedProjects) else { return }
-        let key = "inbox.projects." + scope
-        preferences.enqueue { $0.set(data, forKey: key) }
     }
 
     var focused: AgentCard? {
@@ -933,7 +824,7 @@ final class InboxModel: ObservableObject {
     private func reset() {
         agentNotificationUpdate?.cancel(); agentNotificationUpdate = nil
         stopOverview()
-        overviewTranscripts = [:]; taskCache.removeAll(); projectTaskSummaryCache.removeAll(); tabHistories = [:]; recentTabs = []; tabOrder = []
+        overviewTranscripts = [:]; tabHistories = [:]; recentTabs = []; tabOrder = []
         openedConversations = []; closedConversationIDs = []; olderConversationLimit = 0
         handTasks.endAllObservations()
         schedulesTask?.cancel(); schedulesTask = nil; schedulesFailures = [:]
@@ -1153,8 +1044,6 @@ final class InboxModel: ObservableObject {
                 var card = retained[summary.id] ?? summary
                 card.title = summary.title; card.updatedAt = max(card.updatedAt, summary.updatedAt); card.turnCount = summary.turnCount
                 card.mayHaveScheduledJobs = summary.mayHaveScheduledJobs
-                card.projectName = summary.projectName
-                card.projectRootID = summary.projectRootID; card.parentAgentID = summary.parentAgentID; card.originTurnID = summary.originTurnID; card.projectTurnID = summary.projectTurnID
                 return card
             } + created
             if cards != merged { cards = merged }
@@ -1230,7 +1119,7 @@ final class InboxModel: ObservableObject {
         if voice.conversationID == id { voice.stop() }
         cards.removeAll { $0.id == id }
         setOverviewVisible(id, visible: false)
-        overviewTranscripts[id] = nil; invalidateTaskCache(id); tabHistories[id] = nil; recentTabs.removeAll { $0 == id }
+        overviewTranscripts[id] = nil; tabHistories[id] = nil; recentTabs.removeAll { $0 == id }
         if pinnedThreadID == id { pinnedThreadID = nil }
         reconcile()
     }
@@ -1437,17 +1326,16 @@ final class InboxModel: ObservableObject {
         let bytes = recentTabs.map { tabHistories[$0]?.retainedBytes ?? 0 }
         let removed = TranscriptRetention.cachedPrefixCount(byteCounts: bytes,
             byteLimit: 24 * 1024 * 1024, countLimit: 8)
-        for id in recentTabs.prefix(removed) { tabHistories[id] = nil; invalidateTaskCache(id) }
+        for id in recentTabs.prefix(removed) { tabHistories[id] = nil }
         recentTabs.removeFirst(removed)
     }
 
     func releaseInactiveHistory() {
         tabHistories = [:]; recentTabs = []
-        taskCache.removeAll(); projectTaskSummaryCache.removeAll()
         // Keep the visible conversation and its cursor. Evicted tabs reopen
         // from durable history; clearing a cache never clears service history.
         for id in Array(overviewTranscripts.keys) where !overviewVisible.contains(id) {
-            overviewTranscripts[id] = nil; invalidateTaskCache(id)
+            overviewTranscripts[id] = nil
         }
     }
 
@@ -1592,10 +1480,10 @@ final class InboxModel: ObservableObject {
     }
     func setOverviewVisible(_ id: String, visible: Bool) {
         if visible { overviewVisible.insert(id); startOverview(id) }
-        else { overviewVisible.remove(id); cancelOverview(id); overviewTranscripts[id] = nil; invalidateTaskCache(id); resumeOverview() }
+        else { overviewVisible.remove(id); cancelOverview(id); overviewTranscripts[id] = nil; resumeOverview() }
     }
     func stopOverview() {
-        overviewVisible.removeAll(); suspendOverview(); overviewTranscripts = [:]; taskCache.removeAll(); projectTaskSummaryCache.removeAll()
+        overviewVisible.removeAll(); suspendOverview(); overviewTranscripts = [:]
     }
     private func suspendOverview() {
         for id in Array(overviewTasks.keys) { cancelOverview(id) }
@@ -1618,7 +1506,7 @@ final class InboxModel: ObservableObject {
         overviewTasks.removeValue(forKey: id)?.cancel(); overviewTokens[id] = nil
         overviewProjections.removeValue(forKey: id)?.cancel()
         overviewProjectors[id] = nil
-        overviewEvents[id] = nil; invalidateTaskCache(id); overviewBytes[id] = nil; overviewByteCounts[id] = nil
+        overviewEvents[id] = nil; overviewBytes[id] = nil; overviewByteCounts[id] = nil
     }
     private func resumeOverview() {
         for id in overviewVisible { startOverview(id) }
@@ -1646,7 +1534,7 @@ final class InboxModel: ObservableObject {
                         guard self.generation == epoch, self.overviewTokens[id] == token, !Task.isCancelled else { return }
                         let bytes = try await TranscriptPreparation.byteCounts(page.events)
                         guard self.generation == epoch, self.overviewTokens[id] == token, !Task.isCancelled else { return }
-                        self.overviewEvents[id] = page.events; self.invalidateTaskCache(id)
+                        self.overviewEvents[id] = page.events
                         self.overviewBytes[id] = bytes
                         self.overviewByteCounts[id] = self.overviewBytes[id]?.reduce(0, +) ?? 0
                         self.trimOverview(id)
@@ -1676,7 +1564,7 @@ final class InboxModel: ObservableObject {
     private func receiveOverview(_ frame: SSEFrame, id: String, epoch: UUID, token: UUID) {
         guard generation == epoch, overviewTokens[id] == token,
               let event = frame.event, event.cursor > (overviewEvents[id]?.last?.cursor ?? .zero) else { return }
-        overviewEvents[id, default: []].append(event); invalidateTaskCache(id)
+        overviewEvents[id, default: []].append(event)
         overviewBytes[id, default: []].append(frame.payloadBytes)
         overviewByteCounts[id, default: 0] += frame.payloadBytes
         trimOverview(id)
@@ -1693,7 +1581,7 @@ final class InboxModel: ObservableObject {
         let removed = TranscriptRetention.removablePrefixCount(byteCounts: overviewBytes[id] ?? [],
             retainedBytes: overviewByteCounts[id] ?? 0, byteLimit: 8 * 1024 * 1024)
         overviewByteCounts[id, default: 0] -= overviewBytes[id]?.prefix(removed).reduce(0, +) ?? 0
-        overviewEvents[id]?.removeFirst(removed); invalidateTaskCache(id)
+        overviewEvents[id]?.removeFirst(removed)
         overviewBytes[id]?.removeFirst(removed)
     }
     private func projectOverview(_ id: String, epoch: UUID, token: UUID) async {
@@ -1702,7 +1590,7 @@ final class InboxModel: ObservableObject {
             let history = overviewEvents[id] ?? []
             guard let projected = try? await projector.rows(history),
                   generation == epoch, overviewTokens[id] == token, !Task.isCancelled else { return }
-            if overviewTranscripts[id] != projected { overviewTranscripts[id] = projected; invalidateTaskCache(id) }
+            if overviewTranscripts[id] != projected { overviewTranscripts[id] = projected }
             if let index = cards.firstIndex(where: { $0.id == id }) {
                 var card = cards[index]
                 card.apply(events: history, transcriptRows: projected); card.error = nil
@@ -2638,8 +2526,6 @@ final class InboxModel: ObservableObject {
         let wasFocused = deck.focusedID == localID
         createdAgentIDs[localID] = id
         if let screen = threadScreens.removeValue(forKey: localID) { threadScreens[id] = screen; persistThreadScreens() }
-        for index in savedProjects.indices { savedProjects[index].replaceAgent(localID, with: id) }
-        persistProjects()
         if closedConversationIDs.remove(localID) != nil { closedConversationIDs.insert(id) }
         if openedConversations.remove(localID) != nil { openedConversations.insert(id) }
         // A concurrent roster can list the real agent before create returns.
@@ -2730,10 +2616,6 @@ final class InboxModel: ObservableObject {
             if let turns = UserDefaults.standard.dictionary(forKey: "inbox.demoTurns." + scope) as? [String: [String]] {
                 for index in cards.indices { cards[index].activeTurns = turns[cards[index].id] ?? cards[index].activeTurns }
             }
-        }
-        for project in savedProjects where project.primaryAgentID.hasPrefix("demo-")
-            && !cards.contains(where: { $0.id == project.primaryAgentID }) && demoRows[project.primaryAgentID] != nil {
-            var card = newConversationCard(project.primaryAgentID); card.title = project.name; cards.append(card)
         }
         activateContext()
         restoreCreations()
