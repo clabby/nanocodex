@@ -150,3 +150,32 @@ fn linux_installed_screenshot_wire_is_jpeg_from_owned_synthetic_pixels() {
     let decoded = image::load_from_memory(&encoded).unwrap();
     assert_eq!((decoded.width(), decoded.height()), (3, 2));
 }
+
+#[test]
+fn linux_app_modified_drags_refuse_before_any_helper_or_focus_change() {
+    use skyre::native::{Action, App};
+    let dir = tempfile::tempdir().unwrap();
+    let helper = fixture(dir.path());
+    let mut desktop = LinuxDesktop::new(helper.clone(), helper);
+    let app = App {
+        id: "x11:123".into(),
+        name: "owned fixture".into(),
+        path: "x11:123".into(),
+        pid: 123,
+    };
+    for (button, modifiers) in [(2, vec![]), (0, vec!["shift".into()])] {
+        let error = desktop
+            .action(
+                &app,
+                Action::Drag {
+                    from: [1., 2.],
+                    to: [3., 4.],
+                    button,
+                    modifiers,
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("does not support modified"));
+        assert!(!dir.path().join("owned_logger.log").exists());
+    }
+}

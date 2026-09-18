@@ -16,6 +16,11 @@ struct State {
     bad_media: bool,
     observation_captures: usize,
     ordinary_captures: usize,
+    app_lists: usize,
+    app_validations: usize,
+    app_ended: bool,
+    snapshots: usize,
+    prepared_captures: usize,
 }
 struct Provider(Rc<RefCell<State>>);
 fn app() -> App {
@@ -32,7 +37,7 @@ fn image(state: &State) -> Image {
         data: if state.bad_media {
             "invalid-base64!"
         } else {
-            "AA=="
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
         }
         .into(),
     }
@@ -42,9 +47,16 @@ impl Desktop for Provider {
         true
     }
     fn apps(&mut self) -> Result<Vec<App>> {
+        self.0.borrow_mut().app_lists += 1;
         Ok(vec![app()])
     }
+    fn validate_app(&mut self, _: &App) -> Result<bool> {
+        let mut state = self.0.borrow_mut();
+        state.app_validations += 1;
+        Ok(!state.app_ended)
+    }
     fn snapshot(&mut self, _: &App) -> Result<Node> {
+        self.0.borrow_mut().snapshots += 1;
         if self.0.borrow().fail_snapshot {
             return Err(Error::action("owned snapshot failure"));
         }
@@ -54,6 +66,13 @@ impl Desktop for Provider {
             title: Some("Owned window".into()),
             ..Default::default()
         })
+    }
+    fn prepare_screenshot(&mut self, _: &App) -> Result<()> {
+        self.0.borrow_mut().prepared_captures += 1;
+        if self.0.borrow().fail_snapshot {
+            return Err(Error::action("owned snapshot failure"));
+        }
+        Ok(())
     }
     fn action(&mut self, _: &App, _: Action) -> Result<()> {
         Ok(())
@@ -193,7 +212,7 @@ fn optional_capture_preserves_ax_state_and_original_error_without_geometry() {
         !state.borrow().geometry,
         "failed optional capture grants no coordinate authority"
     );
-    assert_eq!(state.borrow().observation_captures, 4);
+    assert_eq!(state.borrow().observation_captures, 2);
     assert_eq!(state.borrow().ordinary_captures, 0);
 }
 
@@ -218,5 +237,90 @@ fn sky_optional_capture_keeps_error_and_ax_revision_but_explicit_capture_is_stri
     assert!(!state.borrow().geometry);
     let error = observe(&mut engine).unwrap_err();
     assert_eq!(error.message, "owned capture failure");
+    assert!(!state.borrow().geometry);
+}
+
+#[test]
+fn public_text_observation_skips_capture_but_visual_observation_keeps_geometry() {
+    use skyre::runtime::Host;
+    use std::time::Duration;
+    let (engine, state) = fixture();
+    let engine = Rc::new(RefCell::new(engine));
+    let mut host = Host::new(engine).unwrap();
+    for code in [
+        "var app = await cua.getApp('fixture://capture');",
+        "await app.getAXState();",
+    ] {
+        let result = host.evaluate(code, Duration::from_secs(3)).unwrap();
+        assert!(result.get("error").is_none(), "{result}");
+    }
+    assert_eq!(state.borrow().observation_captures, 0);
+    assert!(!state.borrow().geometry);
+    let result = host
+        .evaluate(
+            "await app.getAXStateAndScreenshot({emit:false});",
+            Duration::from_secs(3),
+        )
+        .unwrap();
+    assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(state.borrow().observation_captures, 1);
+    assert!(state.borrow().geometry);
+}
+
+#[test]
+fn cached_app_actions_validate_identity_without_relisting_and_reject_ended_process() {
+    let (mut engine, state) = fixture();
+    engine
+        .execute("bind_app", &json!({"app":app().path}))
+        .unwrap();
+    let lists = state.borrow().app_lists;
+    engine
+        .execute("press_key", &json!({"app":app().path,"key":"a"}))
+        .unwrap();
+    assert_eq!(state.borrow().app_lists, lists);
+    assert_eq!(state.borrow().app_validations, 1);
+    state.borrow_mut().app_ended = true;
+    let error = engine
+        .execute("press_key", &json!({"app":app().path,"key":"a"}))
+        .unwrap_err();
+    assert!(error.message.contains("session ended"), "{error}");
+    assert_eq!(state.borrow().app_lists, lists);
+}
+
+#[test]
+fn public_screenshot_skips_ax_tree_and_refreshes_geometry_each_time() {
+    use skyre::runtime::Host;
+    use std::time::Duration;
+    let (engine, state) = fixture();
+    let mut host = Host::new(Rc::new(RefCell::new(engine))).unwrap();
+    let result = host
+        .evaluate(
+            "var app = await cua.getApp('fixture://capture');",
+            Duration::from_secs(3),
+        )
+        .unwrap();
+    assert!(result.get("error").is_none(), "{result}");
+    let snapshots = state.borrow().snapshots;
+    for _ in 0..2 {
+        let result = host
+            .evaluate(
+                "await app.getScreenshot({emit:false});",
+                Duration::from_secs(3),
+            )
+            .unwrap();
+        assert!(result.get("error").is_none(), "{result}");
+        assert!(state.borrow().geometry);
+    }
+    assert_eq!(state.borrow().snapshots, snapshots);
+    assert_eq!(state.borrow().prepared_captures, 2);
+    assert_eq!(state.borrow().observation_captures, 2);
+    state.borrow_mut().fail_capture = true;
+    let result = host
+        .evaluate(
+            "await app.getScreenshot({emit:false});",
+            Duration::from_secs(3),
+        )
+        .unwrap();
+    assert!(result.get("error").is_some(), "{result}");
     assert!(!state.borrow().geometry);
 }

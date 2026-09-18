@@ -318,7 +318,8 @@ pub(super) async fn run_observed(
         .without_defaults()
         .add(WorkspaceTools::new(state.machine.workspace()));
     if let Some(mut config) = nanocodex_computer::ComputerConfig::discover() {
-        if cfg!(target_os = "linux") {
+        if cfg!(target_os = "linux") && std::env::var_os("NANOCODEX_COMPUTER_BACKGROUND").is_none()
+        {
             config.desktop_runtime = Some(state.directory.join("desktop"));
         }
         let computer = nanocodex_computer::ComputerTools::local(config);

@@ -92,11 +92,24 @@ would break already-created sessions.
 
 In production, the private `NANOCODEX_SESSION_MODEL_EGRESS` binding targets
 egress's `SessionModelEgress` entrypoint. New-strategy Sessions validate retained
-ownership locally for each model WebSocket connection and reconnect, avoiding
+ownership locally for each model WebSocket connection, reconnect, and HTTPS request, avoiding
 a broker callback into the originating Session. This binding is not exposed to
 tools. Credential selection remains live in the broker. Without the optional
 binding, the transport retains the usual broker ownership lookup; legacy
 directory subjects retain their existing authority.
+
+Hosted Responses requests can fall back from WebSockets to streaming HTTPS through
+that same private binding. Compaction permits the initial request plus two retries
+per transport, matching codex-rs; after WebSocket exhaustion it switches to HTTPS
+and replays the full retained history. The selected transport remains sticky for
+the live model session. If compaction still fails, its failure receipt is retained
+before the turn fails, so durable recovery replays the failure instead of starting
+another provider retry cycle. In-flight interruption and storage failures remain
+recoverable, and failed compaction preserves the conversation history.
+
+Deploy egress and the ChatGPT HTTP relay support before the managed runtime.
+Sponsored trial credentials currently reject HTTPS Responses before dispatch;
+the WebSocket admission and metering policy cannot be bypassed by fallback.
 
 Active clients call `POST /v1/agents/:id/prepare` (no body), or the managed SDK's
 `agent.prepare()`, when opening a conversation. The authenticated mutation
@@ -507,6 +520,24 @@ Swift does not make all `apple/` packages Linux compatible.
 These tools become available after the managed container image is built and
 rolled out. Existing running sandboxes need recreation with the updated image.
 When changing tool versions in CI, update the corresponding image pins too.
+
+### Opening files from another Hand
+
+`GET /v1/agents/:id/files?path=<logical absolute path>` serves private, uncached
+file bytes after checking account, organization, team, authorization epoch,
+`agents:read`, and `tools:use`. Connect grants cannot use this route. `/brain`
+reads stream from the conversation's R2 prefix. Hand paths resolve through the
+conversation's durable mount identities and use a captured execution route to
+read bounded binary chunks; filenames are quoted as data on POSIX and Windows.
+Missing or offline Hands fail explicitly. Only `file_path_unmapped` permits a
+client to try its own local filesystem.
+
+The terminal client downloads a complete file into a private temporary directory
+before invoking the local viewer, preserves the filename, and removes failed or
+cancelled downloads. Successful copies remain available to the viewer after the
+terminal exits. File links may include the documented `:line` or `:line:column`
+suffix. This behavior requires both the updated managed Worker and terminal
+client; no update to an existing Hand is required.
 
 ### Original media attachments
 

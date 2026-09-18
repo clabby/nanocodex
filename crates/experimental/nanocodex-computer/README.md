@@ -83,6 +83,16 @@ it does not provide the native `cua_repl` runtime.
 | Low-level desktop | Linux/X11 today; Windows provider implementation is experimental | screen capture, pointer movement/click/drag, scrolling and keyboard/text input |
 | Optional audio | Platform provider dependent | start, stop and return captured audio through the same multimodal result path |
 
+## Background app control
+
+See [background CUA implementation and validation](../../../docs/computer/background-cua.md).
+The experimental Hyprland backend is explicitly selected with
+`NANOCODEX_COMPUTER_BACKGROUND=hyprland`, a named Wayland/compositor session, and
+`NANOCODEX_HYPRLAND_CAPTURE=/absolute/path/to/nanocodex-hyprland-capture`.
+It exposes app-scoped CUA without moving the human cursor or activating the target.
+It requires the matching same-user plugin; it never falls back to global input
+or a private X11 desktop. `app.drag` accepts native mouse-button/modifier options.
+
 ## Tool contract
 
 The companion is an MCP stdio server exposing `js` and `js_reset`. Registering

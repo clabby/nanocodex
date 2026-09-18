@@ -837,6 +837,19 @@ impl crate::native::Desktop for LinuxDesktop {
     }
     fn action(&mut self, app: &crate::native::App, action: crate::native::Action) -> Result<()> {
         use crate::native::Action;
+        // This legacy provider only implements an unmodified left-button drag.
+        // Refuse before even looking up or activating the target: a rejected
+        // gesture must not steal the human's focus or mutate their input state.
+        if let Action::Drag {
+            button, modifiers, ..
+        } = &action
+        {
+            if *button != 0 || !modifiers.is_empty() {
+                return Err(Error::unsupported(
+                    "Linux X11 provider does not support modified or non-left-button app drags",
+                ));
+            }
+        }
         let window = Self::window(app)?;
         self.state(app)?;
         self.provider
@@ -859,7 +872,7 @@ impl crate::native::Desktop for LinuxDesktop {
                     json!({"x":x,"y":y,"mouse_button":button,"click_count":count}),
                 )
             }
-            Action::Drag { from, to } => {
+            Action::Drag { from, to, .. } => {
                 let frame = self.frame(app)?;
                 let [x, y] = crate::native::window_point(frame, from)?;
                 let [tx, ty] = crate::native::window_point(frame, to)?;

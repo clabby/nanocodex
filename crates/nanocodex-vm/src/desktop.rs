@@ -63,8 +63,8 @@ const RESPONSE_LIMIT: usize = 510_000;
 const FRAME_LIMIT: usize = 500_000;
 const OP_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-const WIDTH: u16 = 1280;
-const HEIGHT: u16 = 800;
+const WIDTH: u16 = 1920;
+const HEIGHT: u16 = 1080;
 
 fn invalid(message: impl Into<String>) -> Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into()).into()
@@ -374,7 +374,7 @@ fn start_x(
                 "1",
                 "-screen",
                 "0",
-                "1280x800x24",
+                &format!("{WIDTH}x{HEIGHT}x24"),
                 "-nolisten",
                 "tcp",
                 "-nolisten",
@@ -583,10 +583,11 @@ fn serve_blocking(workspace: &Path, runtime_path: &Path, stop: Arc<AtomicBool>) 
         json!(started.elapsed().as_secs_f64() * 1000.0),
     );
     children.alive()?;
+    let (width, height) = desktop.dimensions()?;
     runtime.write_private(
         "ready",
         &serde_json::to_vec(
-            &json!({"status":"ready", "display":display,"width":WIDTH,"height":HEIGHT,"startup_ms":startup_ms}),
+            &json!({"status":"ready", "display":display,"width":width,"height":height,"startup_ms":startup_ms}),
         )?,
     )?;
     runtime.ready = true;
@@ -708,9 +709,6 @@ struct Desktop {
 impl Desktop {
     fn new(connection: RustConnection<TimedStream>, stop: Arc<AtomicBool>) -> Result<Self> {
         let screen = &connection.setup().roots[0];
-        if screen.width_in_pixels != WIDTH || screen.height_in_pixels != HEIGHT {
-            return Err(invalid("unexpected desktop dimensions"));
-        }
         Ok(Self {
             root: screen.root,
             connection,
@@ -774,12 +772,17 @@ impl Desktop {
         }
         Ok(())
     }
+    fn dimensions(&self) -> Result<(u16, u16)> {
+        let geometry = self.connection.get_geometry(self.root)?.reply()?;
+        Ok((geometry.width, geometry.height))
+    }
     fn move_to(&self, x: f64, y: f64) -> Result<()> {
+        let (width, height) = self.dimensions()?;
         self.fake(
             xproto::MOTION_NOTIFY_EVENT,
             0,
-            (x * f64::from(WIDTH - 1)).round() as i16,
-            (y * f64::from(HEIGHT - 1)).round() as i16,
+            (x * f64::from(width - 1)).round() as i16,
+            (y * f64::from(height - 1)).round() as i16,
         )
     }
     fn hid(&mut self, usage: u16, down: bool) -> Result<()> {
@@ -1041,6 +1044,7 @@ impl Desktop {
     }
     fn capture(&self) -> Result<Value> {
         self.check_cancel()?;
+        let (width, height) = self.dimensions()?;
         let setup = self.connection.setup();
         let screen = &setup.roots[0];
         let visual = screen
@@ -1064,8 +1068,8 @@ impl Desktop {
                 self.root,
                 0,
                 0,
-                WIDTH,
-                HEIGHT,
+                width,
+                height,
                 u32::MAX,
             )?
             .reply()?;
@@ -1074,14 +1078,14 @@ impl Desktop {
         }
         let rgb = pixels::decode(
             &reply.data,
-            u32::from(WIDTH),
-            u32::from(HEIGHT),
+            u32::from(width),
+            u32::from(height),
             format.bits_per_pixel,
             format.scanline_pad,
             setup.image_byte_order == ImageOrder::LSB_FIRST,
             [visual.red_mask, visual.green_mask, visual.blue_mask],
         )?;
-        let mut frame = image::RgbImage::from_raw(u32::from(WIDTH), u32::from(HEIGHT), rgb)
+        let mut frame = image::RgbImage::from_raw(u32::from(width), u32::from(height), rgb)
             .ok_or_else(|| invalid("invalid RGB frame"))?;
         if frame.width().max(frame.height()) > 1280 {
             let scale = 1280.0 / f64::from(frame.width().max(frame.height()));
@@ -1136,6 +1140,49 @@ pub fn video_command(runtime: &Path) -> Result<Command> {
     {
         return Err(invalid("invalid desktop display"));
     }
+    // Read the live root geometry, including retained desktops created by older
+    // versions. Never claim quality by upscaling a smaller framebuffer.
+    let authority = fs::read(runtime.join("Xauthority"))?;
+    let cookie = authority
+        .get(
+            authority
+                .len()
+                .checked_sub(16)
+                .ok_or_else(|| invalid("invalid Xauthority"))?..,
+        )
+        .ok_or_else(|| invalid("invalid Xauthority"))?;
+    let socket = format!("/tmp/.X11-unix/X{}", &display[1..]);
+    let connection = RustConnection::connect_to_stream_with_auth_info(
+        TimedStream::new(UnixStream::connect(socket)?)?,
+        0,
+        b"MIT-MAGIC-COOKIE-1".to_vec(),
+        cookie.to_vec(),
+    )?;
+    let geometry = connection
+        .get_geometry(connection.setup().roots[0].root)?
+        .reply()?;
+    let settings = nanocodex_hand::VideoSettings::from_environment(
+        u32::from(geometry.width),
+        u32::from(geometry.height),
+        3840,
+        24000,
+    )?;
+    Ok(video_encoder_command(
+        runtime,
+        &display,
+        geometry.width,
+        geometry.height,
+        &settings,
+    ))
+}
+
+fn video_encoder_command(
+    runtime: &Path,
+    display: &str,
+    width: u16,
+    height: u16,
+    settings: &nanocodex_hand::VideoSettings,
+) -> Command {
     let mut command = Command::new("ffmpeg");
     command.env("XAUTHORITY", runtime.join("Xauthority")).args([
         "-hide_banner",
@@ -1147,11 +1194,16 @@ pub fn video_command(runtime: &Path) -> Result<Command> {
         "-framerate",
         "60",
         "-video_size",
-        "1280x800",
+        &format!("{width}x{height}"),
         "-draw_mouse",
         "1",
         "-i",
-        &display,
+        display,
+        "-vf",
+        &format!(
+            "scale={}:{}:flags=fast_bilinear",
+            settings.width, settings.height
+        ),
         "-an",
         "-c:v",
         "libx264",
@@ -1164,13 +1216,13 @@ pub fn video_command(runtime: &Path) -> Result<Command> {
         "-profile:v",
         "baseline",
         "-level",
-        "3.2",
+        settings.level,
         "-b:v",
-        "6M",
+        &format!("{}k", settings.bitrate_kbps),
         "-maxrate",
-        "6M",
+        &format!("{}k", settings.bitrate_kbps),
         "-bufsize",
-        "100k",
+        &format!("{}k", settings.bitrate_kbps / 10),
         "-g",
         "30",
         "-bf",
@@ -1183,7 +1235,7 @@ pub fn video_command(runtime: &Path) -> Result<Command> {
         "h264",
         "pipe:1",
     ]);
-    Ok(command)
+    command
 }
 
 #[cfg(test)]
@@ -1238,7 +1290,7 @@ mod tests {
         assert!(Runtime::claim(directory.path()).is_err());
     }
     #[test]
-    #[ignore = "requires Xvfb, openbox, and xterm on Linux"]
+    #[ignore = "requires Xvfb, openbox, xterm, ffmpeg, and ffprobe on Linux"]
     fn live_capture_unicode_raw_input_and_shutdown() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
@@ -1264,10 +1316,12 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !runtime.join("ready").exists() {
             assert!(Instant::now() < deadline, "desktop readiness timed out");
-            assert!(
-                !running.1.as_ref().unwrap().is_finished(),
-                "desktop exited before ready"
-            );
+            if running.1.as_ref().unwrap().is_finished() {
+                panic!(
+                    "desktop exited before ready: {:?}",
+                    running.1.take().unwrap().join()
+                );
+            }
             thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(fs::metadata(&runtime).unwrap().mode() & 0o777, 0o700);
@@ -1277,6 +1331,68 @@ mod tests {
         );
         let ready: Value =
             serde_json::from_slice(&fs::read(runtime.join("ready")).unwrap()).unwrap();
+        assert_eq!(
+            (ready["width"].as_u64(), ready["height"].as_u64()),
+            (Some(1920), Some(1080))
+        );
+        // Exercise the production X11 -> H.264 path, not a synthetic encoder
+        // source or duplicated output frames. x11grab must deliver 180 frames
+        // in close to three seconds at the native framebuffer resolution.
+        let capture = video_command(&runtime).unwrap();
+        let mut args: Vec<_> = capture.get_args().map(|arg| arg.to_os_string()).collect();
+        args.pop(); // Put the bounded frame count before the output URL.
+        args.extend(["-frames:v".into(), "180".into(), "pipe:1".into()]);
+        let encoded = directory.path().join("capture.h264");
+        let started = Instant::now();
+        let mut encoder = Command::new(capture.get_program())
+            .args(args)
+            .envs(
+                capture
+                    .get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key, value))),
+            )
+            .stdout(File::create(&encoded).unwrap())
+            .spawn()
+            .unwrap();
+        loop {
+            if let Some(status) = encoder.try_wait().unwrap() {
+                assert!(status.success(), "capture failed: {status}");
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(4) {
+                let _ = encoder.kill();
+                let _ = encoder.wait();
+                panic!("180 native X11 frames took more than four seconds");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-count_frames",
+                "-show_entries",
+                "stream=width,height,r_frame_rate,nb_read_frames,level",
+                "-of",
+                "json",
+            ])
+            .arg(&encoded)
+            .output()
+            .unwrap();
+        assert!(probe.status.success());
+        let probe: Value = serde_json::from_slice(&probe.stdout).unwrap();
+        let stream = &probe["streams"][0];
+        assert_eq!(
+            (stream["width"].as_u64(), stream["height"].as_u64()),
+            (Some(1920), Some(1080))
+        );
+        assert_eq!(stream["r_frame_rate"], "60/1");
+        assert_eq!(stream["nb_read_frames"], "180");
+        assert_eq!(stream["level"], 42);
+        eprintln!(
+            "native 1920x1080 capture: 180 encoded frames in {:?}",
+            started.elapsed()
+        );
         let display = ready["display"].as_str().unwrap();
         let number = display.trim_start_matches(':');
         let socket = format!("/tmp/.X11-unix/X{number}");
@@ -1321,7 +1437,7 @@ mod tests {
         let jpeg = frame["jpeg"].as_str().unwrap();
         assert!(jpeg.len() <= FRAME_LIMIT);
         let image = image::load_from_memory(&STANDARD.decode(jpeg).unwrap()).unwrap();
-        assert_eq!((image.width(), image.height()), (1280, 800));
+        assert_eq!((image.width(), image.height()), (1280, 720));
         assert!(image.to_rgb8().pixels().any(|p| p.0 != [0, 0, 0]));
         assert_eq!(
             request(
@@ -1383,7 +1499,7 @@ mod tests {
         )
         .unwrap();
         let pointer = connection.query_pointer(root).unwrap().reply().unwrap();
-        assert_eq!((pointer.root_x, pointer.root_y), (1279, 799));
+        assert_eq!((pointer.root_x, pointer.root_y), (1919, 1079));
         assert!(pointer.mask.contains(xproto::KeyButMask::BUTTON1));
         request(&runtime, json!({"action":"disconnect"})).unwrap();
         assert!(
@@ -1425,7 +1541,7 @@ mod tests {
         )
         .unwrap();
         let pointer = connection.query_pointer(root).unwrap().reply().unwrap();
-        assert_eq!(pointer.root_x, 1023);
+        assert_eq!(pointer.root_x, 1535);
         assert!(!pointer.mask.contains(xproto::KeyButMask::BUTTON1));
         request(&runtime, json!({"action":"shutdown"})).unwrap();
         running.1.take().unwrap().join().unwrap().unwrap();

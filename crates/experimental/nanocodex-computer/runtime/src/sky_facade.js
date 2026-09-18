@@ -62,7 +62,7 @@ globalThis.__skyreComputerFacade = ({rpc, bytes, getNodeRepl = () => globalThis.
       tool_params_display:[{name:"app",display_name:"App",value:target.displayName}],
     }});
     if (approval.action !== "accept") throw new Error("Computer Use was not approved to use " + target.displayName);
-    return suspended(()=>operation(appInput(input,target.appPath)));
+    return suspended(()=>operation(appInput(input,target.bindingIdentifier ?? target.appPath)));
   };
   const audioApproval = async () => {
     const approval=await callback("createElicitation")({message:"Allow Computer Use to record computer audio?",meta:{
@@ -133,7 +133,11 @@ globalThis.__skyreComputerFacade = ({rpc, bytes, getNodeRepl = () => globalThis.
       }));
     }
     if (method === "get_app_state") {
-      const request = {app:requireApp(input.app),disableDiff:input.disableDiff};
+      const request = {app:requireApp(input.app),disableDiff:input.disableDiff,
+        ...(input.screenshot === undefined ? {} : {screenshot:input.screenshot}),
+        ...(input.text === undefined ? {} : {text:input.text})};
+      if (input.screenshot !== undefined && typeof input.screenshot !== "boolean") throw new TypeError("screenshot must be a boolean");
+      if (input.text !== undefined && typeof input.text !== "boolean") throw new TypeError("text must be a boolean");
       return await execute(method,[request]);
     }
     let request;
@@ -148,7 +152,9 @@ globalThis.__skyreComputerFacade = ({rpc, bytes, getNodeRepl = () => globalThis.
       case "drag": {
         const from = point(input.from_x,input.from_y,"from");
         const to = point(input.to_x,input.to_y,"to");
-        request = {from_x:from[0],from_y:from[1],to_x:to[0],to_y:to[1]};
+        request = {from_x:from[0],from_y:from[1],to_x:to[0],to_y:to[1],
+          ...(input.mouse_button === undefined ? {} : {mouse_button:mouse(input.mouse_button)}),
+          ...(input.modifiers === undefined ? {} : {modifiers:input.modifiers})};
         break;
       }
       case "press_key": {
@@ -376,7 +382,7 @@ globalThis.__skyreComputerFacade = ({rpc, bytes, getNodeRepl = () => globalThis.
         const suspended=getNodeRepl()?.withSuspendedTimeout;
         return typeof suspended === "function" ? suspended(operation) : operation();
       }
-      if (computer.target === "mac") {
+      if (computer.target === "mac" || setup?.appInterface === true) {
         if (method === "get_desktop_screenshot") {
           responseMeta(null);
           return bytes(await execute(method,[]));

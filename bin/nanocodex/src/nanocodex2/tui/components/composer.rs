@@ -52,6 +52,7 @@ const DEVELOPMENT_BADGE: &str = " ◉ dev ";
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ComposerEffect {
     ShowAgentId,
+    Vault(crate::tui::vault::Command),
     Submit(Submission),
     Queue(Submission),
     RunShell(String),
@@ -61,6 +62,7 @@ pub(crate) enum ComposerEffect {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SettingsCommand {
+    Bug(String),
     Attach,
     Screen,
     Zoom,
@@ -77,6 +79,9 @@ impl SettingsCommand {
         let mut parts = input.split_whitespace();
         let command = parts.next()?;
         match command {
+            "/bug" => Some(Self::Bug(
+                input.trim_start()[command.len()..].trim().to_owned(),
+            )),
             "/attach" => Some(if parts.next().is_some() {
                 Self::Invalid("Usage: /attach".into())
             } else {
@@ -999,7 +1004,9 @@ impl Composer {
         if !self.images.is_empty() {
             return None;
         }
-        let effect = if self.draft.trim() == "/id" {
+        let effect = if let Some(command) = crate::tui::vault::Command::parse(self.draft.trim()) {
+            ComposerEffect::Vault(command)
+        } else if self.draft.trim() == "/id" {
             ComposerEffect::ShowAgentId
         } else {
             ComposerEffect::Settings(SettingsCommand::parse(self.draft.trim())?)
@@ -3205,6 +3212,29 @@ mod tests {
         assert_eq!(context_percent(0), 0);
         assert_eq!(context_percent(136_000), 50);
         assert_eq!(context_percent(1_400), 1);
+    }
+
+    #[test]
+    fn slash_bug_parses_optional_description_and_preserves_internal_whitespace() {
+        for (input, description) in [
+            ("/bug", ""),
+            ("  /bug  ", ""),
+            (
+                "/bug  rendering  breaks\non resize  ",
+                "rendering  breaks\non resize",
+            ),
+        ] {
+            let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+            composer.replace_draft(input.to_owned());
+            assert_eq!(
+                composer.submit().effect,
+                Some(ComposerEffect::Settings(SettingsCommand::Bug(
+                    description.to_owned()
+                )))
+            );
+            assert!(composer.draft().is_empty());
+        }
+        assert_eq!(SettingsCommand::parse("/bugfix rendering"), None);
     }
 
     #[test]

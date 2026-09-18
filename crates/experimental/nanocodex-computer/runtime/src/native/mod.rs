@@ -6,6 +6,8 @@ pub mod audio;
 #[cfg(any(target_os = "macos", test))]
 mod instructions;
 pub mod keys;
+#[cfg(target_os = "linux")]
+mod linux_background;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod render;
@@ -43,6 +45,10 @@ pub enum Action {
     Drag {
         from: [f64; 2],
         to: [f64; 2],
+        #[serde(default)]
+        button: u8,
+        #[serde(default)]
+        modifiers: Vec<String>,
     },
     PressKey {
         key: String,
@@ -93,6 +99,11 @@ pub trait Desktop {
     fn sky_target(&self) -> &'static str {
         "mac"
     }
+    /// App-scoped contracts are independent of the operating-system label.
+    /// A compositor backend may implement them without exposing global input.
+    fn app_interface(&self) -> bool {
+        self.sky_target() == "mac"
+    }
     fn sky_execute(
         &mut self,
         method: &str,
@@ -103,6 +114,17 @@ pub trait Desktop {
         )))
     }
     fn apps(&mut self) -> Result<Vec<App>>;
+    /// Stable window binding, separate from executable-based policy authorization.
+    fn session_key(&self, app: &App) -> String {
+        app.path.clone()
+    }
+    /// Validate a cached handle against its process identity without rediscovery.
+    /// Native backends may use a direct PID/window lookup on the input hot path.
+    fn validate_app(&mut self, app: &App) -> Result<bool> {
+        Ok(self.apps()?.iter().any(|current| {
+            current.pid == app.pid && current.path == app.path && current.id == app.id
+        }))
+    }
     /// Resolve policy metadata without opening or activating an application.
     fn app_policy_target(&mut self, identifier: &str) -> Result<App> {
         let mut matches = self.apps()?.into_iter().filter(|app| {
@@ -153,6 +175,11 @@ pub trait Desktop {
         None
     }
     fn snapshot(&mut self, app: &App) -> Result<Node>;
+    /// Refresh the target window for a visual observation without constructing
+    /// the accessibility tree. Backends without a separate path may snapshot.
+    fn prepare_screenshot(&mut self, app: &App) -> Result<()> {
+        self.snapshot(app).map(|_| ())
+    }
     fn action(&mut self, app: &App, action: Action) -> Result<()>;
     fn screenshot(&mut self, _app: &App) -> Result<Image> {
         Err(Error::unsupported("Screenshot backend unavailable"))
@@ -209,6 +236,12 @@ pub fn create() -> Result<Box<dyn Desktop>> {
     }
     #[cfg(target_os = "linux")]
     {
+        if let Some(mode) = std::env::var_os("NANOCODEX_COMPUTER_BACKGROUND") {
+            if mode != "hyprland" {
+                return Err(Error::invalid("Unsupported background CUA mode"));
+            }
+            return Ok(Box::new(linux_background::Hyprland::from_environment()?));
+        }
         Ok(Box::new(
             crate::platforms::linux::LinuxDesktop::from_environment()?,
         ))

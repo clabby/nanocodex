@@ -41,6 +41,8 @@ impl ScreenPublisher {
         audio: Option<VideoSource>,
         providers: Registry,
     ) -> Result<Self, ManagedError> {
+        // Broadcast capture remains available when the viewer uses frame fallback.
+        let broadcast_video = video.clone();
         // Explicit deployment fallback for networks where ICE cannot connect
         // (for example, nested NAT without an authenticated TURN relay).
         let video = if std::env::var("NANOCODEX_SCREEN_TRANSPORT").as_deref() == Ok("frames-v1") {
@@ -79,7 +81,7 @@ impl ScreenPublisher {
             #[cfg(target_os = "macos")]
             let native_broadcast = broadcast.is_some();
             let mut broadcast = super::screen_broadcast::Broadcast::new(broadcast, audio.clone())
-                .with_encoded(video.clone());
+                .with_encoded(broadcast_video);
             #[cfg(target_os = "macos")]
             if native_broadcast {
                 broadcast = broadcast.with_raw(super::screen_native::native_broadcast_frames());
