@@ -6,6 +6,20 @@ import ImageIO
 #endif
 
 final class RemoteProtocolTests: XCTestCase {
+    func testThreadScreenSelectionUsesStableIDsAcrossPublicationRestarts() throws {
+        func hand(_ machine: String, _ surface: String, _ generation: String) throws -> RemoteHand {
+            let json: [String: Any] = ["machine_id": machine, "id": surface, "generation": generation,
+                "machine_name": "Same display name", "name": "Desktop", "kind": "desktop",
+                "width": 1920, "height": 1080, "controllable": true]
+            return try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: json))
+        }
+        let chosen = RemoteScreenSelection(hand: try hand("vm-a", "desktop", "old"))
+        let restored = try JSONDecoder().decode(RemoteScreenSelection.self, from: JSONEncoder().encode(chosen))
+        XCTAssertTrue(restored.matches(try hand("vm-a", "desktop", "new")))
+        XCTAssertFalse(restored.matches(try hand("vm-b", "desktop", "old")))
+        XCTAssertFalse(restored.matches(try hand("vm-a", "phone", "old")))
+    }
+
 #if os(macOS)
     func testAgentObservationProducesDecodableBoundedJPEGAndClearsOnStop() throws {
         let observations = RemoteSnapshotBuffer()

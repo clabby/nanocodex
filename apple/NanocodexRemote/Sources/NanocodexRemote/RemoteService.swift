@@ -22,6 +22,21 @@ public struct RemoteHand: Decodable, Identifiable, Sendable {
     }
 }
 
+/// A user-selected desktop for a conversation. Resolve the current publication
+/// generation from discovery each time; never persist a signaling lease.
+public struct RemoteScreenSelection: Codable, Equatable, Sendable {
+    public let machineID: String
+    public let surfaceID: String
+    public let name: String
+    public init(hand: RemoteHand) {
+        machineID = hand.machineID; surfaceID = hand.id
+        name = hand.machineName + " · " + hand.name
+    }
+    public func matches(_ hand: RemoteHand) -> Bool {
+        machineID == hand.machineID && surfaceID == hand.id
+    }
+}
+
 final class RemoteNoRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }

@@ -42,3 +42,13 @@ Runtime integration checks exercise actual managed child admission, replay after
 ## Expandable sidebar follow-up
 
 The updated simulator run passed the existing child/origin-link and Tasks/Agents draft journeys. The new sidebar journey verified expansion, child selection, selected state, and separate drafts before an immediate collapse-disappearance assertion failed. That assertion now checks the collapsed disclosure state and waits for removal from accessibility. Its rerun was blocked by an overloaded Mac (load average approximately 790); child-title search and the final flat sheet-row background change remain unverified in that rerun. The screenshots and recording below show the captured sidebar and compact sheet before that final background-only polish.
+
+## Watching a thread's desktop
+
+Choose **Screen** from the conversation's top-right **⋯** menu. A compact panel opens above the transcript; the header stays uncluttered and the composer remains available. Choose a desktop once for that thread. The choice is saved locally per account and thread using machine/surface IDs, never a display-name guess or a saved signaling generation. A restarted desktop is resolved through current discovery. An unavailable selection stays saved and is shown offline rather than switching to another desktop.
+
+The panel header shows the chosen desktop, screen options, expand/collapse, and close. Expanding fills the transcript area while retaining the composer. Switching threads closes the previous stream and restores the other thread's chosen desktop when its panel is open. Viewing sends no input. **Screen options → Screen controls** opens the existing full viewer on the selected desktop, where **Take control** remains explicit. The passive connection closes while those controls are open; returning recreates it without retaining control. Backgrounding suspends viewing.
+
+Screen discovery currently exposes account-wide desktops without reliable project-thread ownership, so this change uses explicit per-thread selection. It does not claim to automatically follow every desktop the agent chooses. The existing RemoteViewer/RemoteCanvas transports carry the live desktop pixels and agent cursor activity; this UI does not synthesize playback.
+
+Screen validation: the native Remote package builds and its new desktop-identity test passes (including after the final lifecycle guards). The simulator app/test build passed. The new dock/draft UI journey and sidebar rerun could not start reliably: the simulator service died with Mach error -308 during launch. No live-screen UX recording or real desktop connection is claimed for this change; the earlier recording remains evidence for the sidebar only.

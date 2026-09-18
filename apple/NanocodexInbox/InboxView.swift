@@ -45,6 +45,10 @@ struct InboxView: View {
     @State private var showConnectors = false
     @State private var showSettings = false
     @State private var showScreens = false
+    @State private var screenThreads: Set<String> = []
+    @State private var screenExpanded = false
+    @State private var controlsScreen: RemoteScreenSelection?
+    @State private var screenViewerRevision = UUID()
     @State private var showTasks = false
     @State private var showProjectName = false
     @State private var projectName = ""
@@ -110,7 +114,7 @@ struct InboxView: View {
         .sheet(isPresented: $showScreens) {
             if let service = model.remoteService {
                 NavigationStack {
-                    RemoteDashboard(service: service, onClose: { showScreens = false })
+                    RemoteDashboard(service: service, initialSelection: controlsScreen, onClose: { showScreens = false })
                 }
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
@@ -118,6 +122,14 @@ struct InboxView: View {
             }
         }
         .sheet(isPresented: $model.showContext) { ContextInboxView(model: model).tint(Ink.accent) }
+        .onChange(of: model.screenScope) { _, _ in
+            screenThreads.removeAll(); screenExpanded = false; showScreens = false; controlsScreen = nil
+        }
+        .onChange(of: model.focused?.id) { _, _ in screenExpanded = false }
+        .onChange(of: showScreens) { _, visible in
+            // Recreate the passive panel after full controls release their lease.
+            if !visible { screenViewerRevision = UUID() }
+        }
         .onChange(of: model.focused?.activeTurns ?? []) { _, turns in
             if !turns.contains(model.selectedTurn) { model.selectedTurn = turns.first ?? "" }
         }
@@ -130,7 +142,7 @@ struct InboxView: View {
         }
         .onChange(of: model.connected) { _, connected in
             if connected && model.musicConnectorToOpen != nil { showConnectors = true }
-            if !connected { showConversations = false; showScreens = false; showScheduledJobs = false; showConnectors = false; showSettings = false; readingPositions.values.removeAll() }
+            if !connected { screenThreads.removeAll(); screenExpanded = false; showConversations = false; showScreens = false; showScheduledJobs = false; showConnectors = false; showSettings = false; readingPositions.values.removeAll() }
         }
 
     }
@@ -222,11 +234,29 @@ struct InboxView: View {
             // Scrolled content can retain offscreen hit regions at large text
             // sizes. Keep navigation above those regions as well as visually.
             conversationHeader.zIndex(1)
+            if let card = model.focused, let identity = model.focusedConversationIdentity,
+               screenThreads.contains(identity), let service = model.remoteService, !showScreens {
+                RemoteThreadScreen(service: service,
+                    selection: Binding(get: { model.screenSelection(agentID: card.id) },
+                                       set: { model.selectScreen($0, agentID: card.id) }),
+                    expanded: $screenExpanded,
+                    onClose: { screenThreads.remove(identity); screenExpanded = false },
+                    onControls: { controlsScreen = $0; composerFocused = false; showScreens = true })
+                    .id(model.screenScope + identity + screenViewerRevision.uuidString)
+                    .frame(height: screenExpanded ? nil : 220)
+                    .frame(maxHeight: screenExpanded ? .infinity : nil)
+                    .padding(.horizontal, 12).padding(.bottom, 8)
+                    .zIndex(1)
+            }
             Group {
                     if let identity = model.focusedConversationIdentity {
                         ConversationView(model: model, identity: identity, readingPositions: readingPositions).id(identity)
                     } else { emptyState.frame(maxWidth: .infinity, maxHeight: .infinity) }
             }
+            .frame(maxHeight: screenExpanded && screenThreads.contains(model.focusedConversationIdentity ?? "") ? 0 : .infinity)
+            .clipped()
+            .accessibilityHidden(screenExpanded && screenThreads.contains(model.focusedConversationIdentity ?? ""))
+            .allowsHitTesting(!(screenExpanded && screenThreads.contains(model.focusedConversationIdentity ?? "")))
             .overlay(alignment: .topTrailing) {
                 // A delayed reconnect must not push the transcript down while
                 // the reader is moving through history.
@@ -328,9 +358,13 @@ struct InboxView: View {
             Button { composerFocused = false; model.back() } label: {
                 Label("Back", systemImage: "chevron.left")
             }.disabled(!model.canGoBack).accessibilityIdentifier("conversation-back")
-            Button { composerFocused = false; showScreens = true } label: {
-                Label("Remote screens", systemImage: "display")
-            }.disabled(model.remoteService == nil).accessibilityIdentifier("conversation-remote-screens")
+            Button {
+                guard let id = model.focusedConversationIdentity else { return }
+                composerFocused = false; screenExpanded = false
+                if screenThreads.contains(id) { screenThreads.remove(id) } else { screenThreads.insert(id) }
+            } label: {
+                Label(screenThreads.contains(model.focusedConversationIdentity ?? "") ? "Hide screen" : "Screen", systemImage: "display")
+            }.disabled(model.remoteService == nil || model.focused == nil).accessibilityIdentifier("conversation-remote-screens")
             Button { composerFocused = false; model.showContext = true } label: {
                 Label("Context from other apps", systemImage: "tray")
             }.accessibilityIdentifier("conversation-context")

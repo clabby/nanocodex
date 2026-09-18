@@ -96,6 +96,31 @@ final class InboxUITests: XCTestCase {
         XCTAssertEqual(composer(app).value as? String, "Durable child draft")
     }
 
+    func testThreadScreenDockPreservesDraftAndThreadNavigation() {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString,
+                          "NANOCODEX_DEMO_PROJECT_TASKS": "1", "NANOCODEX_DEMO_SCREENS": "1"])
+        switchConversation(app, id: "inbox")
+        composer(app).tap(); composer(app).typeText("Keep talking while watching")
+        navigationAction(app, "conversation-remote-screens").tap()
+        let panel = app.descendants(matching: .any)["thread-screen-panel"].firstMatch
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        XCTAssertTrue(composer(app).isHittable)
+        XCTAssertEqual(composer(app).value as? String, "Keep talking while watching")
+        capture(app, "thread-screen-docked")
+        app.buttons["thread-screen-expand"].tap()
+        XCTAssertTrue(composer(app).isHittable)
+        app.buttons["thread-screen-expand"].tap()
+        app.buttons["conversation-drawer-open"].tap()
+        app.buttons["project-expand:inbox"].tap()
+        app.buttons["conversation-row:auth"].tap()
+        XCTAssertFalse(panel.exists, "Each thread owns its screen panel")
+        app.buttons["conversation-drawer-open"].tap()
+        app.buttons["conversation-row:inbox"].tap()
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        app.buttons["thread-screen-close"].tap()
+        XCTAssertEqual(composer(app).value as? String, "Keep talking while watching")
+    }
+
     func testNamedProjectSurvivesRelaunch() {
         let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString])
         app.buttons["conversation-drawer-open"].tap()
@@ -580,6 +605,8 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.scrollViews["conversation"].waitForExistence(timeout: 5))
         let chatScreens = navigationAction(app, "conversation-remote-screens")
         XCTAssertTrue(chatScreens.waitForExistence(timeout: 5)); chatScreens.tap()
+        XCTAssertTrue(app.buttons["thread-screen-options"].waitForExistence(timeout: 5))
+        app.buttons["thread-screen-options"].tap(); app.buttons["Screen controls"].tap()
         XCTAssertTrue(desktop.waitForExistence(timeout: 15)); desktop.tap()
         XCTAssertTrue(control.waitForExistence(timeout: 10))
         waitForConnection()

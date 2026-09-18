@@ -221,6 +221,7 @@ final class InboxModel: ObservableObject {
         var result: [ProjectTask]
     }
     private var taskCache: [String: TaskCache] = [:]
+    @Published private var threadScreens: [String: RemoteScreenSelection] = [:]
     @Published private var savedProjects: [InboxProject] = []
     var projects: [InboxProject] {
         let available = Set(cards.map(\.id))
@@ -302,7 +303,20 @@ final class InboxModel: ObservableObject {
         savedProjects.removeAll { $0.id == id }; savedProjects.append(project)
         persistProjects()
     }
+    var screenScope: String { scope }
+    func screenSelection(agentID: String) -> RemoteScreenSelection? { threadScreens[agentID] }
+    func selectScreen(_ selection: RemoteScreenSelection?, agentID: String) {
+        threadScreens[agentID] = selection
+        persistThreadScreens()
+    }
+    private func persistThreadScreens() {
+        guard !scope.isEmpty, let data = try? JSONEncoder().encode(threadScreens) else { return }
+        let key = "inbox.threadScreens." + scope
+        preferences.enqueue { $0.set(data, forKey: key) }
+    }
     private func restoreProjects() {
+        threadScreens = UserDefaults.standard.data(forKey: "inbox.threadScreens." + scope)
+            .flatMap { try? JSONDecoder().decode([String: RemoteScreenSelection].self, from: $0) } ?? [:]
         taskCache.removeAll()
         savedProjects = UserDefaults.standard.data(forKey: "inbox.projects." + scope)
             .flatMap { try? JSONDecoder().decode([InboxProject].self, from: $0) } ?? []
@@ -2573,6 +2587,7 @@ final class InboxModel: ObservableObject {
     private func bindCreatedAgent(_ localID: String, to id: String) {
         let wasFocused = deck.focusedID == localID
         createdAgentIDs[localID] = id
+        if let screen = threadScreens.removeValue(forKey: localID) { threadScreens[id] = screen; persistThreadScreens() }
         for index in savedProjects.indices { savedProjects[index].replaceAgent(localID, with: id) }
         persistProjects()
         if closedConversationIDs.remove(localID) != nil { closedConversationIDs.insert(id) }
