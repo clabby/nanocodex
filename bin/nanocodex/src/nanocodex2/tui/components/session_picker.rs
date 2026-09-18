@@ -219,7 +219,8 @@ impl SessionPicker {
         match result {
             Err(error) => self.search_error = Some(error),
             Ok(hits) => {
-                // Keep title results stable while appending distinct content matches.
+                // Preserve the selected thread when merging content matches by recency.
+                let selected = self.matches.get(self.selected).copied();
                 // Only owned, attachable threads from the list belong in this picker.
                 let indices: HashMap<_, _> = self
                     .sessions
@@ -241,6 +242,14 @@ impl SessionPicker {
                         self.matches.push(index);
                     }
                 }
+                self.matches.sort_unstable();
+                if let Some(selected) = selected {
+                    self.selected = self
+                        .matches
+                        .iter()
+                        .position(|&index| index == selected)
+                        .unwrap_or(0);
+                }
             }
         }
         ComponentUpdate::render(RenderRequest::Immediate)
@@ -248,15 +257,13 @@ impl SessionPicker {
 
     fn refresh_matches(&mut self) {
         let query = self.query.to_lowercase();
-        let mut ranked: Vec<_> = self
+        // Sessions are already newest first; fuzzy matching only filters them.
+        self.matches = self
             .sessions
             .iter()
             .enumerate()
-            .filter_map(|(index, session)| session.match_score(&query).map(|score| (index, score)))
+            .filter_map(|(index, session)| session.match_score(&query).map(|_| index))
             .collect();
-        // Stable sorting preserves recency when relevance is tied.
-        ranked.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
-        self.matches = ranked.into_iter().map(|(index, _)| index).collect();
         self.selected = 0;
     }
 
@@ -821,6 +828,27 @@ mod tests {
     }
 
     #[test]
+    fn recent_content_match_sorts_before_title_match_and_preserves_selection() {
+        let mut recent = summary("recent", "Other title");
+        recent.updated_at_unix_ms = 20;
+        let mut picker = SessionPicker::new(
+            vec![summary("old", "database"), recent],
+            SessionPickerMode::Resume,
+        );
+        picker.insert_paste("database");
+        picker.search_results(
+            1,
+            "database".into(),
+            Ok(vec![hit("recent", "database content")]),
+        );
+        assert_eq!(picker.matches, [0, 1]);
+        assert_eq!(
+            picker.select().effects,
+            [SessionPickerEffect::Resume("old".into())]
+        );
+    }
+
+    #[test]
     fn recent_threads_first_and_clearing_restores_recency() {
         let mut recent = summary("recent", "fix parser");
         recent.updated_at_unix_ms = 20;
@@ -845,12 +873,11 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_terms_match_in_any_order_and_rank_tight_matches_first() {
+    fn fuzzy_terms_match_in_any_order_and_keep_recent_matches_first() {
+        let mut recent = summary("one", "docs for the parser");
+        recent.updated_at_unix_ms = 20;
         let mut picker = SessionPicker::new(
-            vec![
-                summary("one", "docs for the parser"),
-                summary("two", "parser docs"),
-            ],
+            vec![summary("two", "parser docs"), recent],
             SessionPickerMode::Resume,
         );
         picker.insert_paste("dcs prsr");
@@ -859,7 +886,7 @@ mod tests {
         picker.refresh_matches();
         assert_eq!(
             picker.select().effects,
-            [SessionPickerEffect::Resume("two".into())]
+            [SessionPickerEffect::Resume("one".into())]
         );
         picker.insert_paste(" zzz");
         assert!(picker.select().effects.is_empty());
