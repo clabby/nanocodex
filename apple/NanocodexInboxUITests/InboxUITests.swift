@@ -45,7 +45,7 @@ final class InboxUITests: XCTestCase {
         composer(app).tap(); composer(app).typeText("Child follow-up")
         app.buttons["conversation-drawer-open"].tap()
         XCTAssertTrue(app.buttons["conversation-row:inbox"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["conversation-row:auth"].exists, "Child belongs inside its project")
+        XCTAssertTrue(app.buttons["conversation-row:auth"].exists, "The selected child is visible inside its expanded project")
         app.buttons["conversation-row:inbox"].tap()
         XCTAssertEqual(composer(app).value as? String, "Master follow-up")
         let linked = app.buttons["message-thread:layout"]
@@ -58,6 +58,42 @@ final class InboxUITests: XCTestCase {
         app.segmentedControls["project-activity-segments"].buttons["Agents"].tap()
         app.buttons["project-agent:auth"].tap()
         XCTAssertEqual(composer(app).value as? String, "Child follow-up")
+    }
+
+    func testExpandableProjectThreadsPreserveDraftsAndSearch() {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString, "NANOCODEX_DEMO_PROJECT_TASKS": "1"])
+        switchConversation(app, id: "inbox")
+        composer(app).tap(); composer(app).typeText("Main project draft")
+        app.buttons["conversation-drawer-open"].tap()
+        XCTAssertFalse(app.buttons["conversation-row:auth"].exists)
+        app.buttons["project-expand:inbox"].tap()
+        XCTAssertTrue(app.buttons["conversation-row:auth"].waitForExistence(timeout: 5))
+        capture(app, "project-expanded-sidebar")
+        app.buttons["conversation-row:auth"].tap()
+        XCTAssertTrue(app.buttons["conversation-title:auth"].waitForExistence(timeout: 5))
+        composer(app).tap(); composer(app).typeText("Durable child draft")
+        app.buttons["conversation-drawer-open"].tap()
+        XCTAssertTrue(app.buttons["conversation-row:auth"].isSelected)
+        app.buttons["conversation-row:inbox"].tap()
+        XCTAssertEqual(composer(app).value as? String, "Main project draft")
+        app.buttons["conversation-drawer-open"].tap()
+        app.buttons["project-expand:inbox"].tap()
+        XCTAssertEqual(app.buttons["project-expand:inbox"].value as? String, "Collapsed")
+        let collapsed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.buttons["conversation-row:auth"])
+        XCTAssertEqual(XCTWaiter.wait(for: [collapsed], timeout: 5), .completed)
+        let search = app.textFields["conversation-search"]
+        search.tap(); search.typeText("Google")
+        XCTAssertTrue(app.buttons["conversation-row:auth"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["conversation-row:offline"].exists)
+        app.buttons["conversation-row:auth"].tap()
+        XCTAssertEqual(composer(app).value as? String, "Durable child draft")
+        capture(app, "project-durable-child")
+        app.buttons["project-tasks"].tap()
+        capture(app, "project-minimal-tasks")
+        app.segmentedControls["project-activity-segments"].buttons["Agents"].tap()
+        capture(app, "project-minimal-agents")
+        app.buttons["project-activity-close"].tap()
+        XCTAssertEqual(composer(app).value as? String, "Durable child draft")
     }
 
     func testNamedProjectSurvivesRelaunch() {

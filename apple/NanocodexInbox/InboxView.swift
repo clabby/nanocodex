@@ -38,6 +38,7 @@ private enum Ink {
 struct InboxView: View {
     @ObservedObject var model: InboxModel
     @State private var showConversations = false
+    @State private var expandedProjects: Set<String> = []
     @State private var drawerTranslation: CGFloat = 0
     @State private var readingPositions = ConversationReadingPositions()
     @State private var showScheduledJobs = false
@@ -150,8 +151,8 @@ struct InboxView: View {
             let reveal = showConversations ? width + drawerTranslation : drawerTranslation
             ZStack(alignment: .leading) {
                 if showConversations || drawerTranslation > 0 {
-                    ConversationDrawer(model: model, select: { id in
-                        model.selectProject(id)
+                    ConversationDrawer(model: model, expandedProjects: $expandedProjects, select: { id in
+                        model.select(id)
                         setConversationsVisible(false)
                     }, close: { setConversationsVisible(false) }, create: beginProject,
                     settings: { showSettings = true })
@@ -460,11 +461,18 @@ private struct InboxHeaderGlass: ViewModifier {
 /// Navigation uses roster summaries only, without parsing Markdown or starting preview streams.
 private struct ConversationDrawer: View {
     @ObservedObject var model: InboxModel
+    @Binding var expandedProjects: Set<String>
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let select: (String) -> Void
     let close: () -> Void
     let create: () -> Void
     let settings: () -> Void
     @State private var query = ""
+
+    private func matches(_ project: InboxProject) -> Bool {
+        query.isEmpty || project.name.localizedCaseInsensitiveContains(query)
+            || model.cards.contains { project.agentIDs.contains($0.id) && $0.title.localizedCaseInsensitiveContains(query) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -487,22 +495,59 @@ private struct ConversationDrawer: View {
             Text("Projects").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             ScrollView {
                 LazyVStack(spacing: 4) {
-                    ForEach(model.projects.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) || $0.agentIDs.contains(where: { $0.localizedCaseInsensitiveContains(query) }) }) { project in
-                        HStack(spacing: 10) {
-                            Text(project.name).font(.subheadline).lineLimit(2)
-                            Spacer()
-                            if model.cards.contains(where: { project.agentIDs.contains($0.id) && $0.isRunning }) {
-                                Circle().fill(Ink.running).frame(width: 6, height: 6)
+                    ForEach(model.projects.filter(matches)) { project in
+                        let children = model.cards.filter { project.agentIDs.contains($0.id) && $0.id != project.primaryAgentID }
+                            .sorted(by: AgentCard.mostRecentFirst)
+                        let expanded = expandedProjects.contains(project.id) || !query.isEmpty
+                        HStack(spacing: 0) {
+                            Button { select(project.primaryAgentID) } label: {
+                                HStack(spacing: 10) {
+                                    Text(project.name).font(.subheadline).lineLimit(2)
+                                    Spacer(minLength: 4)
+                                    if model.cards.contains(where: { project.agentIDs.contains($0.id) && $0.isRunning }) {
+                                        Circle().fill(Ink.running).frame(width: 6, height: 6)
+                                    }
+                                }.padding(.leading, 14).padding(.vertical, 14)
+                                    .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                                    .contentShape(Rectangle())
                             }
+                            .accessibilityAddTraits(model.focused?.id == project.primaryAgentID ? [.isSelected] : [])
+                            .accessibilityIdentifier("conversation-row:" + project.primaryAgentID)
+                            if !children.isEmpty {
+                                Button {
+                                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                                        if expandedProjects.contains(project.id) { expandedProjects.remove(project.id) }
+                                        else { expandedProjects.insert(project.id) }
+                                    }
+                                } label: {
+                                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                        .frame(width: 44, height: 48).contentShape(Rectangle())
+                                }
+                                .accessibilityLabel((expanded ? "Collapse " : "Expand ") + project.name)
+                                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+                                .accessibilityIdentifier("project-expand:" + project.primaryAgentID)
+                            } else { Spacer().frame(width: 14) }
                         }
-                        .padding(14).frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-                        .background(model.focusedProject?.id == project.id ? Ink.surface : Color.clear, in: RoundedRectangle(cornerRadius: 14))
-                        .contentShape(Rectangle()).onTapGesture { select(project.id) }
-                        .accessibilityRepresentation {
-                            Button(project.name) { select(project.id) }
-                                .accessibilityValue("\(model.cards.filter { project.agentIDs.contains($0.id) && $0.isRunning }.count) active agents")
-                                .accessibilityAddTraits(model.focusedProject?.id == project.id ? [.isSelected] : [])
-                                .accessibilityIdentifier("conversation-row:" + project.primaryAgentID)
+                        .background(model.focused?.id == project.primaryAgentID ? Ink.surface : Color.clear, in: RoundedRectangle(cornerRadius: 12))
+                        if expanded {
+                            ForEach(children.filter { query.isEmpty || project.name.localizedCaseInsensitiveContains(query) || $0.title.localizedCaseInsensitiveContains(query) }) { child in
+                                Button { select(child.id) } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "bubble.left").font(.caption).foregroundStyle(.secondary)
+                                        Text(child.title).font(.subheadline).lineLimit(2)
+                                        Spacer(minLength: 4)
+                                        if child.isRunning { Circle().fill(Ink.running).frame(width: 6, height: 6) }
+                                    }
+                                    .padding(.leading, 28).padding(.trailing, 14).padding(.vertical, 12)
+                                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                    .background(model.focused?.id == child.id ? Ink.surface : Color.clear, in: RoundedRectangle(cornerRadius: 12))
+                                    .contentShape(Rectangle())
+                                }
+                                .accessibilityValue(child.isRunning ? "Working" : child.status)
+                                .accessibilityAddTraits(model.focused?.id == child.id ? [.isSelected] : [])
+                                .accessibilityIdentifier("conversation-row:" + child.id)
+                            }
                         }
                     }
                 }
@@ -515,6 +560,11 @@ private struct ConversationDrawer: View {
                     .accessibilityLabel("Account settings")
             }
         }.padding(16).background(Ink.background).buttonStyle(.plain)
+            .onAppear {
+                if let project = model.focusedProject, model.focused?.id != project.primaryAgentID {
+                    expandedProjects.insert(project.id)
+                }
+            }
             .accessibilityAction(.escape, close)
     }
 }
@@ -551,13 +601,13 @@ private struct ProjectActivitySheet: View {
                                                     Text(task.title).font(.subheadline).lineLimit(2)
                                                     Text(task.status).font(.caption).foregroundStyle(.secondary)
                                                 }
-                                            }.padding(.vertical, 5)
+                                            }.padding(.vertical, 2)
                                         }.accessibilityIdentifier("project-task:" + task.id)
+                                            .listRowBackground(Ink.card).listRowSeparator(.hidden)
                                     }
                                 }
                             }
                         }
-                        Text("Tasks from loaded history").font(.caption).foregroundStyle(.secondary).listRowBackground(Color.clear)
                     } else {
                         ForEach(model.projectAgents) { agent in
                             Button {
@@ -571,13 +621,13 @@ private struct ProjectActivitySheet: View {
                                     }
                                     Spacer()
                                     Image(systemName: "chevron.right").font(.caption)
-                                }.padding(.vertical, 6)
+                                }.font(.subheadline).padding(.vertical, 2)
                             }.foregroundStyle(.primary).accessibilityIdentifier("project-agent:" + agent.id)
+                                .listRowBackground(Ink.card).listRowSeparator(.hidden)
                         }
-                        Text("The project chat creates task agents as it delegates work.")
-                            .font(.caption).foregroundStyle(.secondary).listRowBackground(Color.clear)
                     }
-                }.listStyle(.insetGrouped).scrollContentBackground(.hidden)
+                }.listStyle(.plain).scrollContentBackground(.hidden)
+                    .environment(\.defaultMinListRowHeight, 48)
             }
             .background(Ink.card)
             .navigationTitle(model.focusedProject?.name ?? "Project")

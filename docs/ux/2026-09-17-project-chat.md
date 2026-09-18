@@ -4,9 +4,11 @@ Reference: [0xDesigner’s project chat](https://x.com/0xDesigner/status/2100679
 
 The mobile shell uses a project sidebar, a persistent master chat, compact project header, blue user bubbles, unboxed replies, and one composer. A live-task pill opens a native Tasks/Agents sheet. Tasks are durable child threads, with status and drill-down to their messages. Links beside the originating message open delegated work. Back, screens, captured context, connectors and scheduled jobs remain in the header menu.
 
-New project creates a named home backed by a managed agent. Existing conversations remain project homes. Rename changes the navigation name; names persist locally per account. Server-owned parent/root/turn metadata groups spawned agents under their actual master across devices. Selecting a project returns to its master chat. Selecting an agent opens that member conversation. Sheets retain the master conversation and its draft; task detail subscribes to bounded background history while visible.
+New project creates a named home backed by a managed agent. Existing conversations remain project homes. Rename changes the navigation name; names persist locally per account. Server-owned parent/root/turn metadata groups spawned agents under their actual master across devices. Tapping a project name opens its main chat. Its separate chevron expands durable child threads in the sidebar; selecting a child opens its normal conversation. Expansion survives closing the drawer, and opening navigation from a child reveals its project automatically. Search matches thread titles and reveals matching children under their project. Ordinary subagents remain within their owning thread rather than becoming project entries. Selecting an agent in the activity sheet also opens that member conversation. Sheets retain the master conversation and its draft; task detail subscribes to bounded background history while visible.
 
 ## Simulator recording
+
+Updated sidebar and sheet: [recording](media/project-tree-ios.mp4), [expanded project](media/project-expanded-sidebar.png), [Tasks](media/project-minimal-tasks.png), [Agents](media/project-minimal-agents.png). See the follow-up validation note below for the remaining simulator check.
 
 [Watch the iPhone simulator walkthrough](media/project-threads-ios.mp4) (iPhone 16 Pro, iOS 18.2).
 
@@ -27,12 +29,16 @@ The master handles small requests directly, uses ordinary subagents for bounded 
 
 Automatic return applies to turns delegated with the project tools, including follow-ups. Messages sent directly inside a child chat are not automatically reported back to its parent. Completion events are explicitly labelled as internal task outcomes, never new human instructions. The coordinator’s final wording and delegation decisions remain model behavior.
 
-The task sheet describes its loaded-history scope. Unknown historical outcomes are labelled History, never assumed successful. Task projections are cached across composer edits. Generated outputs remain in the full conversation; the detail sheet displays task messages.
+The Tasks/Agents sheet uses compact plain rows, a segmented switcher, and minimal status text. It projects loaded task history. Unknown historical outcomes are labelled History, never assumed successful. Task projections are cached across composer edits. Generated outputs remain in the full conversation; the detail sheet displays task messages.
 
 ## Validation
 
 The full InboxCore suite passes (186 tests, five expected skips); five focused project tests cover server lineage parsing, real task identities/statuses, partial history, and local-to-server ID migration. Backend tests cover durable project membership, nested roots, account boundaries, changed-input conflicts, retry after failed admission, and rejection of tool authority overrides. Type checking and a Worker-only Wrangler dry run pass. The broader CI also has failures in unchanged Rust code (redundant clone, Windows screen cfg, voice timing). The unrelated connector-provider catalog test fails because its expected list omits Link; the same failure was reproduced against unchanged HEAD.
 
-Seven simulator tests pass (three project journeys and four drawer/menu/back-navigation regressions). The new tests verify: Tasks/Agents navigation retains the draft, and a named project survives app relaunch. The simulator journey uses explicitly opted-in Debug fixtures with representative master/child conversations. It verifies navigation and draft preservation; it does not claim a live model chose to delegate. Signed-device delivery and production deployment are not part of this PR.
+The prior seven simulator tests passed (three project journeys and four drawer/menu/back-navigation regressions). The expandable sidebar adds a journey covering disclosure, direct child navigation, selected state, independent drafts, child-title search, and both minimal sheet tabs. The new tests verify: Tasks/Agents navigation retains the draft, and a named project survives app relaunch. The simulator journey uses explicitly opted-in Debug fixtures with representative master/child conversations. It verifies navigation and draft preservation; it does not claim a live model chose to delegate. Signed-device delivery and production deployment are not part of this PR.
 
 Runtime integration checks exercise actual managed child admission, replay after lost acknowledgment, parent eviction, success/failure/cancellation wakeups, duplicate-result deduplication, retained authority, revocation, and the pending-work bound. Model execution is held at the durable retry boundary in these tests; no production model or deployment is used.
+
+## Expandable sidebar follow-up
+
+The updated simulator run passed the existing child/origin-link and Tasks/Agents draft journeys. The new sidebar journey verified expansion, child selection, selected state, and separate drafts before an immediate collapse-disappearance assertion failed. That assertion now checks the collapsed disclosure state and waits for removal from accessibility. Its rerun was blocked by an overloaded Mac (load average approximately 790); child-title search and the final flat sheet-row background change remain unverified in that rerun. The screenshots and recording below show the captured sidebar and compact sheet before that final background-only polish.
