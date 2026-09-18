@@ -355,6 +355,15 @@ impl ManagedSessionState {
         self.history_revision = self.history_revision.saturating_add(1);
     }
 
+    /// Installs image-prepared replay history and marks its durable baseline changed.
+    #[doc(hidden)]
+    pub fn replace_prepared_history(&mut self, history: Vec<ResponseItem>) {
+        self.context.replace_and_recompute(history, &[]);
+        self.context.commit_tail();
+        self.reset_for_full_request();
+        self.history_revision = self.history_revision.saturating_add(1);
+    }
+
     /// Returns the monotonic number of installed history replacements.
     #[must_use]
     pub const fn history_revision(&self) -> u64 {

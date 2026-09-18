@@ -1073,7 +1073,7 @@ test("browser host passes session context and emits generated images", async () 
       makeImage: {
         handler: (_input, received) => {
           context = received;
-          return { image_url: "data:image/png;base64,a" };
+          return { image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=" };
         },
       },
     },
