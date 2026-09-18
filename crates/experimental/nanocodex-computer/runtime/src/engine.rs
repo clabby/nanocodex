@@ -216,29 +216,28 @@ impl Engine {
             }
         }
         if let Some(app) = self.apps.get(identifier).cloned() {
-            if self
-                .desktop
-                .apps()?
-                .iter()
-                .any(|a| a.pid == app.pid && a.path == app.path && a.id == app.id)
-            {
+            if self.desktop.validate_app(&app)? {
                 return Ok(app);
             }
-            self.apps.retain(|_, a| a.path != app.path);
-            self.sessions.revisions.remove(&app.path);
+            self.apps.retain(|_, a| a.id != app.id || a.pid != app.pid);
+            self.sessions
+                .revisions
+                .remove(&self.desktop.session_key(&app));
             return Err(Error::action(
                 "Application session ended; bind it again before acting",
             ));
         }
         let app = self.desktop.bind(identifier)?;
         self.apps.insert(identifier.into(), app.clone());
-        self.apps.insert(app.path.clone(), app.clone());
+        self.apps
+            .insert(self.desktop.session_key(&app), app.clone());
         Ok(app)
     }
     fn node(&mut self, app: &App, args: &Value) -> Result<Node> {
         let id = index(args)?;
         let root = self.desktop.snapshot(app)?;
-        self.sessions.resolve(&app.path, id, root, false)
+        self.sessions
+            .resolve(&self.desktop.session_key(app), id, root, false)
     }
     fn target(&mut self, app: &App, args: &Value) -> Result<Target> {
         if args
@@ -652,7 +651,12 @@ impl Engine {
     ) -> Result<Value> {
         if method == "sky.app_policy" {
             let app = self.desktop.app_policy_target(string(args, "app")?)?;
-            return Ok(self.approvals.policy(app, &self.security));
+            let binding = self.desktop.session_key(&app);
+            let mut policy = self.approvals.policy(app, &self.security);
+            if self.desktop.sky_target() != "mac" && self.desktop.app_interface() {
+                policy["target"]["bindingIdentifier"] = json!(binding);
+            }
+            return Ok(policy);
         }
         if method == "sky.windows_policy" {
             if self.desktop.sky_target() != "windows" {
@@ -861,6 +865,15 @@ impl Engine {
             // geometry. Preview captures and failed observations cannot replace it.
             self.desktop.invalidate_screenshot(&app);
             let result = (|| {
+                if args["text"].as_bool() == Some(false) {
+                    self.desktop.prepare_screenshot(&app)?;
+                    let image = self.desktop.screenshot_for_observation(&app)?;
+                    return Ok(
+                        json!({"app":self.desktop.session_key(&app),"pid":app.pid,"bundleIdentifier":app.id,
+                        "name":app.name,"state":"","screenshot":image,
+                        "observationDiagnostics":self.desktop.diagnostics(&app)}),
+                    );
+                }
                 let root = self.desktop.snapshot(&app)?;
                 let title = root.title.clone().unwrap_or_else(|| app.name.clone());
                 let full = args
@@ -883,10 +896,12 @@ impl Engine {
                 } else {
                     None
                 };
-                let (description, revision) = self.sessions.observe(&app.path, root, full)?;
+                let (description, revision) =
+                    self.sessions
+                        .observe(&self.desktop.session_key(&app), root, full)?;
                 let state = crate::ax::format_state(&title, &app.name, &description, &revision);
                 let instructions = self.desktop.app_specific_instructions(&app);
-                let mut result = json!({"app":app.path,"pid":app.pid,"bundleIdentifier":app.id,"name":app.name,"state":state,"tree":revision.root,"focusTree":revision.focus,"focusState":revision.focus_text(),"revision":revision.generation,"screenshot":screenshot,"observationDiagnostics":self.desktop.diagnostics(&app)});
+                let mut result = json!({"app":self.desktop.session_key(&app),"pid":app.pid,"bundleIdentifier":app.id,"name":app.name,"state":state,"tree":revision.root,"focusTree":revision.focus,"focusState":revision.focus_text(),"revision":revision.generation,"screenshot":screenshot,"observationDiagnostics":self.desktop.diagnostics(&app)});
                 if let Some(error) = screenshot_error {
                     result["screenshotError"] = error;
                 }
@@ -941,6 +956,8 @@ impl Engine {
             "drag" => Action::Drag {
                 from: point(args, "from", "from_x", "from_y")?,
                 to: point(args, "to", "to_x", "to_y")?,
+                button: drag_button(args)?,
+                modifiers: drag_modifiers(args)?,
             },
             "press_key" => Action::PressKey {
                 key: string(args, "key")?.into(),
@@ -1042,13 +1059,17 @@ impl Engine {
         if validate_after {
             let fresh = self.desktop.snapshot(&app)?;
             self.sessions
-                .resolve(&app.path, index(args)?, fresh, true)?;
+                .resolve(&self.desktop.session_key(&app), index(args)?, fresh, true)?;
         }
         Ok(Value::Null)
     }
     fn sky_setup(&self) -> Value {
         let target = self.desktop.sky_target();
-        let mut methods = match target {
+        let mut methods = match if self.desktop.app_interface() {
+            "mac"
+        } else {
+            target
+        } {
             "mac" => vec![
                 "list_apps",
                 "get_desktop_screenshot",
@@ -1093,7 +1114,11 @@ impl Engine {
         if std::env::var("SKY_ENABLE_AUDIO").as_deref() == Ok("1") {
             methods.extend(["start_audio_recording", "stop_audio_recording"]);
         }
-        json!({"target":target,"methods":methods})
+        let mut result = json!({"target":target,"methods":methods});
+        if target != "mac" && self.desktop.app_interface() {
+            result["appInterface"] = json!(true);
+        }
+        result
     }
     fn sky_execute(&mut self, request: &Value) -> Result<Value> {
         let method = string(request, "method")?;
@@ -1130,7 +1155,7 @@ impl Engine {
             let file = self.media.write(string(&audio, "data")?, "audio/wav")?;
             return Ok(json!({"filepath":file["filepath"],"data_url":file["data_url"]}));
         }
-        if self.desktop.sky_target() != "mac" {
+        if !self.desktop.app_interface() {
             if self.desktop.sky_target() == "windows"
                 && !["list_apps", "list_windows"].contains(&method)
             {
@@ -1163,10 +1188,14 @@ impl Engine {
             let image = self.desktop.desktop_screenshot()?;
             return Ok(serde_json::to_value(image)?);
         }
-        self.approvals.authorize_app(string(&params, "app")?)?;
+        let target = self.desktop.app_policy_target(string(&params, "app")?)?;
+        self.approvals.authorize_app(&target.path)?;
         if method == "get_app_state" {
             let mut capture = params.clone();
-            capture["screenshot"] = json!(self.desktop.capabilities().contains(&"get_screenshot"));
+            capture["screenshot"] = json!(
+                params["screenshot"].as_bool().unwrap_or(true)
+                    && self.desktop.capabilities().contains(&"get_screenshot")
+            );
             // AX state remains useful when this opportunistic image cannot be captured.
             capture["screenshotOptional"] = json!(true);
             let state = self.execute_inner("get_app_state", &capture)?;
@@ -1318,4 +1347,51 @@ impl Drop for Engine {
     fn drop(&mut self) {
         self.end_session();
     }
+}
+
+// Drag modifiers are event-local. Backends must release only their own state,
+// and must never emulate them by borrowing the user's global keyboard state.
+fn drag_button(args: &Value) -> Result<u8> {
+    match args.get("mouse_button").or_else(|| args.get("mouseButton")) {
+        None => Ok(0),
+        Some(Value::String(button)) => match button.trim().to_ascii_lowercase().as_str() {
+            "left" | "l" => Ok(0),
+            "right" | "r" => Ok(1),
+            "middle" | "m" => Ok(2),
+            _ => Err(Error::invalid("Invalid drag mouse button")),
+        },
+        Some(Value::Number(button)) => button
+            .as_u64()
+            .filter(|value| *value <= 2)
+            .map(|value| value as u8)
+            .ok_or_else(|| Error::invalid("Invalid drag mouse button")),
+        _ => Err(Error::invalid("Invalid drag mouse button")),
+    }
+}
+fn drag_modifiers(args: &Value) -> Result<Vec<String>> {
+    let Some(value) = args.get("modifiers") else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .filter(|values| values.len() <= 4)
+        .ok_or_else(|| {
+            Error::invalid("Drag modifiers must be an array of up to four modifier names")
+        })?;
+    let mut result = Vec::new();
+    for value in values {
+        let modifier = match value.as_str().map(str::to_ascii_lowercase).as_deref() {
+            Some("shift") => "shift",
+            Some("control" | "ctrl") => "ctrl",
+            Some("alt" | "option") => "alt",
+            Some("meta" | "super" | "cmd" | "command") => "super",
+            _ => return Err(Error::invalid("Invalid drag modifier")),
+        }
+        .to_owned();
+        if result.contains(&modifier) {
+            return Err(Error::invalid("Duplicate drag modifier"));
+        }
+        result.push(modifier);
+    }
+    Ok(result)
 }

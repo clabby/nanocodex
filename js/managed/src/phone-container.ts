@@ -1,9 +1,11 @@
+import { phoneAdminConfigured } from "./phone-admin";
 import { Container } from "@cloudflare/containers";
 import { verifyTwilioWebhookSignature, type TwilioVoiceEnv } from "./twilio-voice";
 
 export interface PhoneContainerEnv extends TwilioVoiceEnv {
   NANOCODEX_PHONE_BRIDGE_TOKEN?: string;
   NANOCODEX_PHONE_OWNER_ID?: string;
+  NANOCODEX_PHONE_ADMIN_ID?: string;
   NANOCODEX_PHONE_MANAGED_API_KEY?: string;
   NANOCODEX_PHONE_PUBLIC_ORIGIN?: string;
 }
@@ -12,7 +14,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const MAX_ROW = 1024 * 1024;
 const MAX_STORE = 32 * MAX_ROW;
 const statuses = new Set(["preparing", "unknown", "queued", "initiated", "ringing", "in-progress", "completed", "busy", "failed", "no-answer", "canceled"]);
-const recordKeys = new Set(["call_id", "status", "transcript", "transcript_truncated", "transcript_bytes", "max_duration_seconds", "error", "sid", "stop_requested", "hangup_attempted", "dial_requested", "callback_sequence"]);
+const recordKeys = new Set(["call_id", "status", "transcript", "transcript_truncated", "transcript_bytes", "max_duration_seconds", "error", "sid", "stop_requested", "hangup_attempted", "dial_requested", "callback_sequence", "delegate_agent_id", "delegate_session_id", "delegate_cleaned", "to", "steering"]);
 type CallRow = { id: string; agent: string; operation: string; fingerprint: string; record: string };
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 export function validPhoneCheckpoint(value: unknown): value is CallRow {
@@ -24,13 +26,28 @@ export function validPhoneCheckpoint(value: unknown): value is CallRow {
   if (Object.keys(r).some(key => !recordKeys.has(key)) || r.call_id !== value.id || typeof r.status !== "string" || !statuses.has(r.status)
     || !Number.isInteger(r.max_duration_seconds) || Number(r.max_duration_seconds) < 30 || Number(r.max_duration_seconds) > 600
     || !Array.isArray(r.transcript) || r.transcript.length > 200) return false;
+  if ("to" in r && (typeof r.to !== "string" || !/^\+[1-9][0-9]{1,14}$/.test(r.to))) return false;
+  if ("steering" in r) {
+    if (!Array.isArray(r.steering) || r.steering.length > 16) return false;
+    const ids = new Set();
+    for (const item of r.steering) {
+      if (!object(item) || Object.keys(item).length !== 4 || typeof item.operation_id !== "string" || !UUID.test(item.operation_id)
+        || ids.has(item.operation_id) || typeof item.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(item.fingerprint)
+        || typeof item.instructions !== "string" || !item.instructions.trim() || new TextEncoder().encode(item.instructions).length > 8000
+        || !["pending", "submitted", "not_applied", "unknown"].includes(String(item.status))) return false;
+      ids.add(item.operation_id);
+    }
+  }
   for (const entry of r.transcript) {
     if (!object(entry) || Object.keys(entry).some(key => !["speaker", "text"].includes(key))
       || !["user", "assistant"].includes(String(entry.speaker)) || typeof entry.text !== "string" || entry.text.length > 4000) return false;
   }
-  for (const key of ["stop_requested", "hangup_attempted", "dial_requested", "transcript_truncated"]) if (key in r && typeof r[key] !== "boolean") return false;
+  for (const key of ["stop_requested", "hangup_attempted", "dial_requested", "transcript_truncated", "delegate_cleaned"]) if (key in r && typeof r[key] !== "boolean") return false;
   for (const key of ["transcript_bytes", "callback_sequence"]) if (key in r && (!Number.isSafeInteger(r[key]) || Number(r[key]) < 0)) return false;
   if ("error" in r && (typeof r.error !== "string" || !/^[a-z_]{1,100}$/.test(r.error))) return false;
+  if ("delegate_session_id" in r && (typeof r.delegate_session_id !== "string" || !UUID.test(r.delegate_session_id))) return false;
+  if (("delegate_agent_id" in r) !== ("delegate_session_id" in r)) return false;
+  if ("delegate_agent_id" in r && (typeof r.delegate_agent_id !== "string" || !UUID.test(r.delegate_agent_id) || r.delegate_agent_id === value.agent)) return false;
   if ("sid" in r && (typeof r.sid !== "string" || !/^CA[0-9a-f]{32}$/i.test(r.sid))) return false;
   return new TextEncoder().encode(JSON.stringify(value)).length <= MAX_ROW;
 }
@@ -178,6 +195,7 @@ export class PhoneContainer extends Container<PhoneContainerEnv> {
   }
 
   async fetch(request: Request): Promise<Response> {
+    if (!phoneAdminConfigured(this.env)) return json({ error: "phone_not_configured" }, 503);
     const url = new URL(request.url);
     if (url.pathname.startsWith("/internal/")) {
       if (!await authorized(request, this.env.NANOCODEX_PHONE_BRIDGE_TOKEN)) return json({ error: "unauthorized" }, 401);

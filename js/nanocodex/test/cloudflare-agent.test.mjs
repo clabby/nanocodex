@@ -471,7 +471,7 @@ test("a failed speculative connection does not authorize a later managed text tu
       requests += 1;
       assert.equal(init.headers.get("x-nanocodex-subject"), FIRST_OBJECT_ID);
       assert.equal(init.headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
-      return { status: 403, headers: new Headers() };
+      return new Response("credential_broker_rejected", { status: 403 });
     },
   });
   const agent = await create(module, owner, {
@@ -485,7 +485,7 @@ test("a failed speculative connection does not authorize a later managed text tu
     assert.equal(requests, 1);
     await assert.rejects(
       agent.turn.prompt({ input: "Check transport authorization" }).result(),
-      /WebSocket handshake was rejected with HTTP 403: credential_broker_rejected/,
+      /HTTP 403: credential_broker_rejected/,
     );
     assert.ok(requests > 1, "A model turn must still cross the credential broker");
   } finally {

@@ -479,6 +479,9 @@ pub(crate) fn prepare_resumed_checkpoint(
     session_id: &str,
     context_source: ContextSource,
 ) -> Result<PreparedCheckpoint> {
+    if checkpoint.conversation.prepare_replay_images() {
+        checkpoint.preserve_inherited_delta = false;
+    }
     // Unstored response IDs are scoped to the live transport connection. A fork
     // owns a fresh client, so it must replay client-owned history instead.
     if !config.store_responses {

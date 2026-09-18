@@ -1,0 +1,694 @@
+//! Explicit same-user Hyprland app control. Never falls back to global input.
+use super::{Action, App, Desktop, Image, Target};
+use crate::{Error, Result, ax::Node};
+use base64::Engine;
+use serde::Deserialize;
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    io::Read,
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::net::UnixStream,
+    },
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
+
+fn failure(e: impl std::fmt::Display) -> Error {
+    Error::action(format!("Hyprland background: {e}"))
+}
+fn env(name: &str) -> Result<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| failure(format!("missing {name}")))
+}
+fn peer(fd: i32) -> Result<i32> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut size = std::mem::size_of_val(&cred) as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut size,
+        )
+    } != 0
+        || size as usize != std::mem::size_of_val(&cred)
+        || cred.uid != unsafe { libc::geteuid() }
+        || cred.pid <= 0
+    {
+        return Err(failure("untrusted compositor peer"));
+    }
+    Ok(cred.pid)
+}
+fn output(command: &mut Command, limit: u64) -> Result<Vec<u8>> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(failure)?;
+    let stream = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stream
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(failure("helper timed out or failed; no retry"));
+            }
+        }
+    };
+    let bytes = reader
+        .join()
+        .map_err(|_| failure("helper reader failed"))?
+        .map_err(failure)?;
+    if !status?.success() || bytes.len() as u64 > limit {
+        return Err(failure("helper failed or exceeded output limit"));
+    }
+    Ok(bytes)
+}
+#[derive(Clone, Debug, Deserialize)]
+struct Window {
+    address: String,
+    #[serde(rename = "stableId")]
+    stable_id: String,
+    pid: i32,
+    class: String,
+    title: String,
+    size: [f64; 2],
+    mapped: bool,
+    hidden: bool,
+    xwayland: bool,
+}
+#[derive(Clone)]
+struct Identity {
+    window: Window,
+    start: String,
+    executable: String,
+}
+fn identity(window: Window) -> Result<Identity> {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", window.pid)).map_err(failure)?;
+    let start = stat
+        .rsplit_once(") ")
+        .and_then(|(_, s)| s.split_whitespace().nth(19))
+        .ok_or_else(|| failure("invalid process identity"))?
+        .to_owned();
+    let executable = std::fs::read_link(format!("/proc/{}/exe", window.pid))
+        .map_err(failure)?
+        .to_string_lossy()
+        .into_owned();
+    Ok(Identity {
+        window,
+        start,
+        executable,
+    })
+}
+struct Connection {
+    fd: OwnedFd,
+    sequence: u64,
+    drag_options: bool,
+}
+impl Connection {
+    fn connect(path: &std::path::Path, expected: i32) -> Result<Self> {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        if bytes.len() >= addr.sun_path.len() {
+            return Err(failure("input socket path too long"));
+        }
+        addr.sun_family = libc::AF_UNIX as _;
+        for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
+            *dst = *src as _;
+        }
+        let raw =
+            unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
+        if raw < 0 {
+            return Err(failure(std::io::Error::last_os_error()));
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let timeout = libc::timeval {
+            tv_sec: 3,
+            tv_usec: 0,
+        };
+        for option in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
+            if unsafe {
+                libc::setsockopt(
+                    raw,
+                    libc::SOL_SOCKET,
+                    option,
+                    (&timeout as *const libc::timeval).cast(),
+                    std::mem::size_of_val(&timeout) as _,
+                )
+            } != 0
+            {
+                return Err(failure("cannot bound input transport"));
+            }
+        }
+        if unsafe {
+            libc::connect(
+                raw,
+                (&addr as *const libc::sockaddr_un).cast(),
+                std::mem::size_of_val(&addr) as _,
+            )
+        } != 0
+        {
+            return Err(failure(std::io::Error::last_os_error()));
+        }
+        if peer(raw)? != expected {
+            return Err(failure("input and capture compositor mismatch"));
+        }
+        let mut c = Self {
+            fd,
+            sequence: 0,
+            drag_options: false,
+        };
+        let hello = c.request("HELLO")?;
+        if hello["protocol"] != 3 {
+            return Err(failure("unsupported input protocol"));
+        }
+        c.drag_options = hello["background_drag_options"] == true;
+        c.request("CLAIM")?;
+        Ok(c)
+    }
+    fn request(&mut self, message: &str) -> Result<Value> {
+        let sent = unsafe {
+            libc::send(
+                self.fd.as_raw_fd(),
+                message.as_ptr().cast(),
+                message.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        };
+        if sent != message.len() as isize {
+            return Err(failure("input send failed; outcome unknown, no retry"));
+        }
+        self.receive()
+    }
+    fn receive(&mut self) -> Result<Value> {
+        let mut buffer = [0u8; 16384];
+        let n = unsafe {
+            libc::recv(
+                self.fd.as_raw_fd(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                libc::MSG_TRUNC,
+            )
+        };
+        if n <= 0 || n as usize > buffer.len() {
+            return Err(failure("input receipt missing; outcome unknown, no retry"));
+        }
+        let response: Value = serde_json::from_slice(&buffer[..n as usize]).map_err(failure)?;
+        if response["ok"] != true {
+            return Err(failure(format!("input refused: {}", response["code"])));
+        }
+        Ok(response)
+    }
+}
+pub struct Hyprland {
+    signature: String,
+    directory: PathBuf,
+    capture: PathBuf,
+    compositor: i32,
+    bound: HashMap<String, Identity>,
+    observed: HashMap<String, [f64; 2]>,
+    connection: Option<Connection>,
+}
+impl Hyprland {
+    pub fn from_environment() -> Result<Self> {
+        let signature = env("HYPRLAND_INSTANCE_SIGNATURE")?;
+        if !signature
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err(failure("invalid instance signature"));
+        }
+        let runtime = PathBuf::from(env("XDG_RUNTIME_DIR")?);
+        let display = PathBuf::from(env("WAYLAND_DISPLAY")?);
+        let capture = PathBuf::from(env("NANOCODEX_HYPRLAND_CAPTURE")?);
+        if !runtime.is_absolute()
+            || !capture.is_absolute()
+            || !capture.is_file()
+            || std::env::var_os("WAYLAND_SOCKET").is_some()
+        {
+            return Err(failure(
+                "explicit local runtime and capture executable required",
+            ));
+        }
+        let display = if display.is_absolute() {
+            display
+        } else {
+            if display.components().count() != 1 {
+                return Err(failure("invalid Wayland display"));
+            }
+            runtime.join(display)
+        };
+        let directory = runtime.join("hypr").join(&signature);
+        let ipc = UnixStream::connect(directory.join(".socket.sock")).map_err(failure)?;
+        let wayland = UnixStream::connect(display).map_err(failure)?;
+        let compositor = peer(ipc.as_raw_fd())?;
+        if peer(wayland.as_raw_fd())? != compositor {
+            return Err(failure(
+                "Wayland and Hyprland belong to different compositors",
+            ));
+        }
+        Ok(Self {
+            signature,
+            directory,
+            capture,
+            compositor,
+            bound: HashMap::new(),
+            observed: HashMap::new(),
+            connection: None,
+        })
+    }
+    fn windows(&self) -> Result<Vec<Window>> {
+        let data = output(
+            Command::new("hyprctl").args(["-i", &self.signature, "clients", "-j"]),
+            2 * 1024 * 1024,
+        )?;
+        let windows: Vec<Window> = serde_json::from_slice(&data).map_err(failure)?;
+        Ok(windows
+            .into_iter()
+            .filter(|w| {
+                w.pid > 0
+                    && w.mapped
+                    && !w.hidden
+                    && !w.xwayland
+                    && w.size.iter().all(|x| x.is_finite() && *x > 0.)
+            })
+            .collect())
+    }
+    fn checked(&self, app: &App) -> Result<Identity> {
+        let previous = self
+            .bound
+            .get(&app.id)
+            .ok_or_else(|| failure("unbound application"))?;
+        let window = self
+            .windows()?
+            .into_iter()
+            .find(|w| {
+                w.address == previous.window.address
+                    && w.stable_id == previous.window.stable_id
+                    && w.pid == app.pid
+            })
+            .ok_or_else(|| failure("target window closed"))?;
+        let current = identity(window)?;
+        if current.start != previous.start || current.executable != app.path {
+            return Err(failure("target process changed"));
+        }
+        Ok(current)
+    }
+    fn operation(
+        &mut self,
+        app: &App,
+        cap: u8,
+        command: &str,
+        args: String,
+        points: &[[f64; 2]],
+    ) -> Result<()> {
+        let current = self.checked(app)?;
+        if !points.is_empty() && self.observed.get(&app.id) != Some(&current.window.size) {
+            return Err(failure(
+                "take a fresh app screenshot before coordinate input",
+            ));
+        }
+        for point in points {
+            super::window_point(
+                [0., 0., current.window.size[0], current.window.size[1]],
+                *point,
+            )?;
+        }
+        if self.connection.is_none() {
+            self.connection = Some(Connection::connect(
+                &self.directory.join("cua-input-v3.sock"),
+                self.compositor,
+            )?);
+        }
+        let connection = self.connection.as_mut().unwrap();
+        let result = (|| {
+            if command == "DRAG" && args.split_whitespace().count() == 7 && !connection.drag_options
+            {
+                return Err(Error::unsupported(
+                    "Plugin does not advertise background drag options",
+                ));
+            }
+            let target = connection.request(&format!(
+                "TARGET {} {} {cap}",
+                app.pid,
+                current.window.address.trim_start_matches("0x")
+            ))?;
+            if target["width"].as_f64() != Some(current.window.size[0])
+                || target["height"].as_f64() != Some(current.window.size[1])
+            {
+                return Err(failure("target resized before input"));
+            }
+            let token = target["target"]
+                .as_str()
+                .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(|| failure("invalid target token"))?;
+            let revision = target["revision"]
+                .as_u64()
+                .ok_or_else(|| failure("invalid target revision"))?;
+            connection.sequence = connection
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| failure("sequence exhausted"))?;
+            let receipt = connection.request(&format!(
+                "{command} {} {token} {revision} {args}",
+                connection.sequence
+            ))?;
+            if command == "DRAG" {
+                if receipt["phase"] != "started" {
+                    return Err(failure("invalid drag start receipt"));
+                }
+                connection.receive()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.connection = None;
+        }
+        result
+    }
+}
+fn key(character: char) -> Result<(u16, u8)> {
+    let lower = character.to_ascii_lowercase();
+    let code = match lower {
+        'a' => 30,
+        'b' => 48,
+        'c' => 46,
+        'd' => 32,
+        'e' => 18,
+        'f' => 33,
+        'g' => 34,
+        'h' => 35,
+        'i' => 23,
+        'j' => 36,
+        'k' => 37,
+        'l' => 38,
+        'm' => 50,
+        'n' => 49,
+        'o' => 24,
+        'p' => 25,
+        'q' => 16,
+        'r' => 19,
+        's' => 31,
+        't' => 20,
+        'u' => 22,
+        'v' => 47,
+        'w' => 17,
+        'x' => 45,
+        'y' => 21,
+        'z' => 44,
+        '1'..='9' => 2 + (lower as u16 - '1' as u16),
+        '0' => 11,
+        ' ' => 57,
+        '\n' => 28,
+        '\t' => 15,
+        '-' => 12,
+        '=' => 13,
+        '[' => 26,
+        ']' => 27,
+        ';' => 39,
+        '\'' => 40,
+        '`' => 41,
+        '\\' => 43,
+        ',' => 51,
+        '.' => 52,
+        '/' => 53,
+        _ => {
+            return Err(Error::unsupported(
+                "Background text currently supports US ASCII letters, digits and unshifted punctuation",
+            ));
+        }
+    };
+    Ok((code, u8::from(character.is_ascii_uppercase())))
+}
+fn chord(value: &str) -> Result<(u16, u8)> {
+    let parts: Vec<_> = value.split('+').collect();
+    let mut modifiers = 0;
+    for part in &parts[..parts.len() - 1] {
+        let bit = match part.to_ascii_lowercase().as_str() {
+            "shift" => 1,
+            "ctrl" | "control" => 2,
+            "alt" | "option" => 4,
+            "super" | "cmd" | "command" | "meta" => 8,
+            _ => return Err(Error::invalid("Unsupported background modifier")),
+        };
+        if modifiers & bit != 0 {
+            return Err(Error::invalid("Duplicate modifier"));
+        }
+        modifiers |= bit;
+    }
+    let last = parts.last().unwrap().to_ascii_lowercase();
+    let code = match last.as_str() {
+        "enter" | "return" => 28,
+        "escape" | "esc" => 1,
+        "backspace" => 14,
+        "tab" => 15,
+        "space" => 57,
+        "left" => 105,
+        "right" => 106,
+        "up" => 103,
+        "down" => 108,
+        "delete" => 111,
+        "home" => 102,
+        "end" => 107,
+        _ => {
+            let mut chars = last.chars();
+            let c = chars.next().ok_or_else(|| Error::invalid("Empty key"))?;
+            if chars.next().is_some() {
+                return Err(Error::unsupported("Unsupported background key"));
+            }
+            let (k, m) = key(c)?;
+            modifiers |= m;
+            k
+        }
+    };
+    Ok((code, modifiers))
+}
+impl Desktop for Hyprland {
+    fn session_key(&self, app: &App) -> String {
+        app.id.clone()
+    }
+    fn sky_target(&self) -> &'static str {
+        "linux"
+    }
+    fn app_interface(&self) -> bool {
+        true
+    }
+    fn apps(&mut self) -> Result<Vec<App>> {
+        let mut apps = Vec::new();
+        for window in self.windows()? {
+            let Ok(i) = identity(window) else { continue };
+            let id = format!(
+                "hyprland:{}:{}:{}:{}",
+                i.window.pid, i.start, i.window.address, i.window.stable_id
+            );
+            apps.push(App {
+                id: id.clone(),
+                name: i.window.class.clone(),
+                path: i.executable.clone(),
+                pid: i.window.pid,
+            });
+            self.bound.entry(id).or_insert(i);
+        }
+        Ok(apps)
+    }
+    fn validate_app(&mut self, app: &App) -> Result<bool> {
+        Ok(self.checked(app).is_ok())
+    }
+    fn snapshot(&mut self, app: &App) -> Result<Node> {
+        let i = self.checked(app)?;
+        Ok(Node{identity:app.id.clone(),role:"AXWindow".into(),title:Some(i.window.title),frame:Some([0.,0.,i.window.size[0],i.window.size[1]]),detail:Some("Background Wayland window; use app screenshot coordinates. Accessibility elements unavailable.".into()),..Default::default()})
+    }
+    fn prepare_screenshot(&mut self, app: &App) -> Result<()> {
+        self.checked(app).map(|_| ())
+    }
+    fn screenshot(&mut self, app: &App) -> Result<Image> {
+        let i = self.checked(app)?;
+        let mut bytes = output(
+            Command::new(&self.capture).arg(&i.window.address),
+            32 * 1024 * 1024,
+        )?;
+        if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err(failure("capture did not return PNG"));
+        }
+        if bytes.len() < 24 {
+            return Err(failure("truncated PNG"));
+        }
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        if width == 0 || height == 0 || width as u64 * height as u64 > 64 * 1024 * 1024 {
+            return Err(failure("invalid capture dimensions"));
+        }
+        let logical = [i.window.size[0] as u32, i.window.size[1] as u32];
+        if [width, height] != logical {
+            let image = image::load_from_memory(&bytes)
+                .map_err(failure)?
+                .resize_exact(
+                    logical[0],
+                    logical[1],
+                    image::imageops::FilterType::Triangle,
+                );
+            bytes.clear();
+            image
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .map_err(failure)?;
+        }
+        let after = self.checked(app)?;
+        if after.window.size != i.window.size {
+            return Err(failure("window resized during capture"));
+        }
+        Ok(Image {
+            mime_type: "image/png".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    }
+    fn screenshot_for_observation(&mut self, app: &App) -> Result<Image> {
+        self.observed.remove(&app.id);
+        let image = self.screenshot(app)?;
+        self.observed
+            .insert(app.id.clone(), self.checked(app)?.window.size);
+        Ok(image)
+    }
+    fn invalidate_screenshot(&mut self, app: &App) {
+        self.observed.remove(&app.id);
+    }
+    fn action(&mut self, app: &App, action: Action) -> Result<()> {
+        match action {
+            Action::Click {
+                target: Target::Point { point },
+                button,
+                count,
+            } => {
+                if button > 2 || !(1..=2).contains(&count) {
+                    return Err(Error::invalid("Unsupported click"));
+                }
+                let button = [272, 273, 274][button as usize];
+                self.operation(
+                    app,
+                    1,
+                    "CLICK",
+                    format!("{} {} {button} {count}", point[0], point[1]),
+                    &[point],
+                )
+            }
+            Action::PressKey { key: value } => {
+                let (k, m) = chord(&value)?;
+                self.operation(app, 2, "KEY", format!("{k} {m}"), &[])
+            }
+            Action::TypeText { text } => {
+                let keys = text.chars().map(key).collect::<Result<Vec<_>>>()?;
+                if keys.len() > 4096 {
+                    return Err(Error::invalid("Background text limit is 4096 characters"));
+                }
+                for (k, m) in keys {
+                    self.operation(app, 2, "KEY", format!("{k} {m}"), &[])?;
+                }
+                Ok(())
+            }
+            Action::Drag {
+                from,
+                to,
+                button,
+                modifiers,
+            } => {
+                if button > 2 {
+                    return Err(Error::invalid("Invalid drag button"));
+                }
+                let mut bits = 0;
+                for m in modifiers {
+                    let bit = match m.as_str() {
+                        "shift" => 1,
+                        "ctrl" => 2,
+                        "alt" => 4,
+                        "super" => 8,
+                        _ => return Err(Error::invalid("Invalid drag modifier")),
+                    };
+                    if bits & bit != 0 {
+                        return Err(Error::invalid("Duplicate modifier"));
+                    }
+                    bits |= bit;
+                }
+                let mut args = format!("{} {} {} {} 250", from[0], from[1], to[0], to[1]);
+                if button != 0 || bits != 0 {
+                    args.push_str(&format!(" {} {bits}", [272, 273, 274][button as usize]));
+                }
+                self.operation(app, 8, "DRAG", args, &[from, to])
+            }
+            Action::Scroll {
+                target: Target::Point { point },
+                direction,
+                pages,
+            } => {
+                if !pages.is_finite() || pages <= 0. || pages > 10. {
+                    return Err(Error::invalid("Invalid scroll pages"));
+                }
+                let (axis, sign) = match direction.as_str() {
+                    "up" => (0, -1.),
+                    "down" => (0, 1.),
+                    "left" => (1, -1.),
+                    "right" => (1, 1.),
+                    _ => return Err(Error::invalid("Invalid scroll direction")),
+                };
+                self.operation(
+                    app,
+                    4,
+                    "SCROLL",
+                    format!("{} {} {axis} {}", point[0], point[1], sign * pages * 100.),
+                    &[point],
+                )
+            }
+            _ => Err(Error::unsupported(
+                "Operation is unavailable for background Wayland windows",
+            )),
+        }
+    }
+    fn capabilities(&self) -> Vec<&'static str> {
+        vec!["background-app-input", "get_screenshot"]
+    }
+    fn end_session(&mut self, _: &str) -> Result<()> {
+        self.connection = None;
+        self.observed.clear();
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reject_text_before_any_delivery() {
+        assert!(
+            "hello🧪"
+                .chars()
+                .map(key)
+                .collect::<Result<Vec<_>>>()
+                .is_err()
+        );
+        assert_eq!(key('W').unwrap(), (17, 1));
+    }
+    #[test]
+    fn chords_do_not_silently_drop_modifiers() {
+        assert_eq!(chord("ctrl+shift+a").unwrap(), (30, 3));
+        assert!(chord("ctrl+ctrl+a").is_err());
+        assert!(chord("hyper+a").is_err());
+    }
+}

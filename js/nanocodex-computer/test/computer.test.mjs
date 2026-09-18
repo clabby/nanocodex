@@ -163,3 +163,11 @@ test("releasing an executing conversation interrupts its owned process", async t
   await rejected;
   assert.equal((await js.handler({ code: "nodeRepl.write(typeof marker);" }, context("released"))).output.at(-1).text, "undefined");
 });
+
+
+test("background mode refuses private desktop routing before spawning", async () => {
+  const computer = createComputerTools({ executable: "/does/not/exist", desktopRuntime: "/does/not/exist", environment: { NANOCODEX_COMPUTER_BACKGROUND: "hyprland" } });
+  try {
+    await assert.rejects(computer.tools[0].handler({ code: "await cua.getState()" }, context("conflicting-desktops")), /Background CUA cannot be combined/);
+  } finally { await computer.close(); }
+});

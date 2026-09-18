@@ -65,7 +65,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time", "signal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nanocodex-hand = { path = "../nanocodex-hand", optional = true }
+nanocodex-hand = { version = "0.6.1", path = "../nanocodex-hand", optional = true }
 x11rb = { version = "0.13.2", optional = true, features = ["xtest"] }
 image = { version = "0.25.9", default-features = false, features = ["jpeg"], optional = true }
 

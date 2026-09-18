@@ -239,7 +239,13 @@ where
                     } else {
                         None
                     };
-                    let (result, persist_result) = if let Some(completed) = recovered {
+                    let (result, persist_result) = if let Some(mut completed) = recovered {
+                        // Legacy effect receipts bypass fresh tool execution. Prepare
+                        // their media before those response items enter history too.
+                        prepare_output_images(&mut completed.output).await;
+                        nanocodex_tools::image::prepare_history_images(
+                            &mut completed.response_items,
+                        );
                         (Ok(completed), false)
                     } else {
                         let dispatch = async {

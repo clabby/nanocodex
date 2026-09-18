@@ -27,6 +27,7 @@ import {
 } from "./modelSession";
 import { VaultIntakeCard } from "./VaultIntakeCard";
 import { ArtifactDock } from "./ArtifactDock";
+import { PhoneCallsPanel } from "./PhoneCallsPanel";
 import { ManagedAgentSchedules } from "./ManagedAgentSchedules";
 import {
   ACCOUNT_MCP_CATALOG_CHANGED,
@@ -324,6 +325,8 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   // optional hand does not block the managed brain or subsequent reconnects.
   const startupReady = browserHandSettledFor === managed || (settingsReady && conversationStarted);
   return (
+    <>
+    <PhoneCallsPanel key={`${accountId}:${agentId}`} parentAgentId={agentId} enabled={Boolean(accountId) && mode !== "hidden"} />
     <AgentTerminalView
       agent={startupReady ? agent : undefined}
       agentError={stateQuery.error?.message}
@@ -371,6 +374,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
         />
       ) : null}
     />
+    </>
   );
 });
 

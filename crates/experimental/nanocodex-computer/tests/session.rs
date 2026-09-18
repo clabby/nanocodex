@@ -239,3 +239,27 @@ async fn cancellation_stops_the_process_and_requires_an_explicit_reset() {
             .success
     );
 }
+
+#[tokio::test]
+async fn background_mode_cannot_be_retargeted_to_a_private_desktop() {
+    let mut config = ComputerConfig::new("/does/not/exist");
+    config.desktop_runtime = Some("/does/not/exist".into());
+    config
+        .environment
+        .insert("NANOCODEX_COMPUTER_BACKGROUND".into(), "hyprland".into());
+    let computer = ComputerTools::local(config);
+    let error = computer
+        .js()
+        .execute(
+            input("await cua.getState()"),
+            context("conflicting-desktops"),
+        )
+        .await
+        .err()
+        .expect("conflicting routing must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("Background CUA cannot be combined")
+    );
+}

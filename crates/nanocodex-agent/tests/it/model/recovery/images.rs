@@ -142,6 +142,26 @@ async fn invalid_image_value_is_removed_before_durable_followup() -> Result<()> 
 
 #[tokio::test]
 async fn malformed_stored_image_is_removed_before_provider_replay() -> Result<()> {
+    stored_image_is_prepared(
+        "data:image/png;base64,AAAA\n[output truncated]",
+        "malformed base64 image data",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn undecodable_stored_image_is_removed_before_provider_replay() -> Result<()> {
+    stored_image_is_prepared(
+        "data:image/png;base64,YQ==",
+        "image content omitted because it could not be processed",
+    )
+    .await
+}
+
+async fn stored_image_is_prepared(
+    image_url: &'static str,
+    placeholder: &'static str,
+) -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {
@@ -203,7 +223,7 @@ async fn malformed_stored_image_is_removed_before_provider_replay() -> Result<()
         let encoded_output = output.to_string();
         assert!(!encoded_output.contains("input_image"));
         assert!(!encoded_output.contains("data:image/"));
-        assert!(encoded_output.contains("malformed base64 image data"));
+        assert!(encoded_output.contains(placeholder));
         send_final(&mut socket, "resp-final").await
     });
 
@@ -239,7 +259,7 @@ async fn malformed_stored_image_is_removed_before_provider_replay() -> Result<()
         .iter_mut()
         .find(|part| part["type"] == "input_image")
         .unwrap();
-    image["image_url"] = json!("data:image/png;base64,AAAA\n[output truncated]");
+    image["image_url"] = json!(image_url);
     let snapshot: SessionSnapshot = serde_json::from_value(encoded)?;
     let (agent, events) = Nanocodex::builder(openai()?)
         .thinking(Thinking::Low)
@@ -258,6 +278,18 @@ async fn malformed_stored_image_is_removed_before_provider_replay() -> Result<()
     );
     agent.shutdown().await?;
     drop(agent);
+    // Repair must replace the committed rollout, not merely the in-memory request.
+    let repaired = RolloutConfig::new(rollout_home.path()).load_session(TEST_SESSION_ID)?;
+    let persisted = serde_json::to_value(repaired.snapshot())?;
+    let output = persisted["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "custom_tool_call_output" && item["call_id"] == "call-image")
+        .expect("repaired tool output must survive another reload");
+    let encoded_output = output.to_string();
+    assert!(!encoded_output.contains("input_image"));
+    assert!(encoded_output.contains(placeholder));
     timeout(std::time::Duration::from_secs(5), server)
         .await
         .map_err(|_| eyre!("mock Responses server did not finish"))???;
