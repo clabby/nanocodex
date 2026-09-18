@@ -299,7 +299,7 @@ lane. Both cases have causal scheduler regressions.
 The staged Omarchy bundle and the active desktop are distinct. The staged
 `nanocodex-computer` was refreshed after `concurrency-staged/README.md` was
 written; its reviewed SHA-256 is
-`fb4c5ba0fc639ed113b7f04b2fe81d61c47c842b431fbcc39619d4142a2c0b4d`.
+`66da0d5959f4d61b3893e5c92ec67de210e286edd79441626d0f697005a92421`.
 The existing desktop compositor still owns its older process-lifetime module;
 copying a candidate does not increase that session's lane capacity. The fixed
 companion wrapper and activation marker pin the plugin hash for that compositor

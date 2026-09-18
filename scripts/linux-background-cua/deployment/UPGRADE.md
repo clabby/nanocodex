@@ -32,7 +32,7 @@ plugin's own ABI/transport readiness checks still apply.
 On the reviewed Omarchy host, the prepared bundle and code are at:
 
 ```
-/srv/nanocodex/workspace/background-cua/safe-upgrade-review/
+/srv/nanocodex/workspace/background-cua/safe-upgrade-final/
   code/upgrade-omarchy.py
   code/activate-plugin.py
   code/test_upgrade.py
@@ -43,22 +43,22 @@ On the reviewed Omarchy host, the prepared bundle and code are at:
 ```
 
 Reviewed manifest SHA-256:
-`a70e349bf8fc34dc39fcc70ac366089d542c335793e395784197eb22fddc0a20`.
+`7c95c54c71dfd7e0f40db633d1abbe1e9a0e14fe3008fbdb454151ce54c64a06`.
 Candidate companion SHA-256:
-`fb4c5ba0fc639ed113b7f04b2fe81d61c47c842b431fbcc39619d4142a2c0b4d`.
+`66da0d5959f4d61b3893e5c92ec67de210e286edd79441626d0f697005a92421`.
 Candidate plugin SHA-256:
-`c6d8a6f3d169a79f3bc379237798f360e00201c8e9ffcd36b1362024b253e7ef`.
+`774e1212996021d553d07076a1b03c100f682cbc8e4e231ce38f2b73637ef194`.
 The bundle contains the reviewed stricter activator, so it has a different
 activator hash than the original staging folder.
 
 After the operator has logged out and prevented competing graphical login:
 
 ```sh
-cd /srv/nanocodex/workspace/background-cua/safe-upgrade-review
+cd /srv/nanocodex/workspace/background-cua/safe-upgrade-final
 sudo python3 code/upgrade-omarchy.py --stage bundle --manifest manifest.json \
-  --manifest-sha256 a70e349bf8fc34dc39fcc70ac366089d542c335793e395784197eb22fddc0a20 --dry-run
+  --manifest-sha256 7c95c54c71dfd7e0f40db633d1abbe1e9a0e14fe3008fbdb454151ce54c64a06 --dry-run
 sudo python3 code/upgrade-omarchy.py --stage bundle --manifest manifest.json \
-  --manifest-sha256 a70e349bf8fc34dc39fcc70ac366089d542c335793e395784197eb22fddc0a20
+  --manifest-sha256 7c95c54c71dfd7e0f40db633d1abbe1e9a0e14fe3008fbdb454151ce54c64a06
 ```
 
 Inspect the reviewed script before running it through sudo. Existing paths may
