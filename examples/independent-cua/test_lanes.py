@@ -98,7 +98,7 @@ class Scheduling(unittest.IsolatedAsyncioTestCase):
                 journal.close()
             reopened = Journal(path)
             try:
-                self.assertEqual(reopened.unresolved, {0})
+                self.assertEqual(reopened.unresolved, {'0'})
             finally:
                 reopened.close()
 
@@ -123,6 +123,73 @@ class Scheduling(unittest.IsolatedAsyncioTestCase):
                     journal.close()
                 self.assertEqual(result[0]['completed'], 0)
             self.assertEqual(fake.writes, 1)
+
+    async def test_legacy_unresolved_identity_blocks_numeric_and_string_aliases(self):
+        class NoCalls:
+            async def call(self, *args, **kwargs):
+                raise AssertionError('unreconciled lane must not reach transport')
+        async def no_decision(*args):
+            raise AssertionError('unreconciled lane must not reach decision')
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root)/'journal'
+            for stored, resumed in ((0, '0'), ('0', 0)):
+                with self.subTest(stored=stored, resumed=resumed):
+                    path.write_text(json.dumps(dict(event='prepared', lane=stored))+'\n')
+                    journal = Journal(path)
+                    try:
+                        result = await run_lanes(NoCalls(), [resumed], no_decision, journal, steps=1)
+                        self.assertEqual(result[0]['status'], 'stopped')
+                        self.assertIn('unreconciled prior write', result[0]['error'])
+                    finally:
+                        journal.close()
+
+    async def test_mixed_type_aliases_rejected_before_admission(self):
+        # Both IDs route to the same host lane, even though Python sets differ.
+        with self.assertRaisesRegex(ValueError, 'distinct lanes'):
+            await run_lanes(None, [0, '0'], None, None, steps=1)
+
+    async def test_numeric_callbacks_and_canonical_journal_receipts(self):
+        class Fake:
+            async def call(self, lane, operation, **args):
+                return dict(revision=0)
+        seen = []
+        async def decide(lane, observation):
+            seen.append(lane)
+            return 'advance'
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root)/'journal'
+            journal = Journal(path)
+            try:
+                result = await run_lanes(Fake(), [0], decide, journal, steps=1)
+                self.assertEqual(result[0]['status'], 'complete')
+                self.assertFalse(journal.unresolved)
+                await journal.record('prepared', 0)
+                self.assertEqual(journal.unresolved, {'0'})
+                await journal.record('committed', '0')
+                self.assertFalse(journal.unresolved)
+            finally:
+                journal.close()
+            self.assertEqual(seen, [0])
+            self.assertIs(type(seen[0]), int)
+            events = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual({event['lane'] for event in events}, {'0'})
+            reopened = Journal(path)
+            try:
+                self.assertFalse(reopened.unresolved)
+            finally:
+                reopened.close()
+
+    async def test_legacy_mixed_type_commit_resolves_only_matching_lane(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root)/'journal'
+            events = [dict(event='prepared', lane=0), dict(event='prepared', lane=1),
+                      dict(event='committed', lane='0')]
+            path.write_text(''.join(json.dumps(event)+'\n' for event in events))
+            journal = Journal(path)
+            try:
+                self.assertEqual(journal.unresolved, {'1'})
+            finally:
+                journal.close()
 
     async def test_transport_demultiplexes_without_waiting_for_slow_reply(self):
         code = '''import sys,json,threading,time

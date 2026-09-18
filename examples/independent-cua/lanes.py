@@ -98,14 +98,16 @@ class Journal:
             for line in self.file.read().splitlines():
                 event = json.loads(line)
                 if event['event'] == 'prepared':
-                    self.unresolved.add(event['lane'])
+                    self.unresolved.add(str(event['lane']))
                 elif event['event'] == 'committed':
-                    self.unresolved.discard(event['lane'])
+                    self.unresolved.discard(str(event['lane']))
         except BaseException:
             self.file.close()
             raise
 
     def append(self, event, lane, **fields):
+        # Match host routing, including numeric IDs in journals from older runs.
+        lane = str(lane)
         with self.lock:
             self.file.write(json.dumps(dict(event=event, lane=lane, at=time.time(), **fields))+'\n')
             self.file.flush()
@@ -136,8 +138,9 @@ async def run_lanes(transport, lanes, decide, journal, *, steps=10, decision_tim
     decide(lane, observation) is async; blocking model SDKs must use to_thread.
     No write failure is retried. Restart requires reconciliation of journal
     entries without a committed receipt. Lanes represent distinct native clients.
+    Host and journal identities use strings; callbacks retain the supplied IDs.
     """
-    if not 1 <= len(lanes) <= 8 or len(set(lanes)) != len(lanes):
+    if not 1 <= len(lanes) <= 8 or len({str(lane) for lane in lanes}) != len(lanes):
         raise ValueError('one to eight distinct lanes required')
     if not 1 <= steps <= 10000:
         raise ValueError('steps must be bounded')
@@ -145,7 +148,7 @@ async def run_lanes(transport, lanes, decide, journal, *, steps=10, decision_tim
     async def lane_loop(lane):
         result = dict(lane=lane, completed=0, timings=[], status='running')
         try:
-            if lane in journal.unresolved:
+            if str(lane) in journal.unresolved:
                 raise RemoteError('unreconciled prior write; manual observation required')
             for _ in range(steps):
                 start = time.monotonic()
