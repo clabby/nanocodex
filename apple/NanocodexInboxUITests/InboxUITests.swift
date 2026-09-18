@@ -223,7 +223,7 @@ final class InboxUITests: XCTestCase {
     }
 
     #if DEBUG && targetEnvironment(simulator)
-    private func startupFixture(reject: Bool = false, historyWindow: Bool = false, warmTabs: Bool = false, historyMedia: Bool = false, historyDelay: Int = 3000) -> XCUIApplication {
+    private func startupFixture(reject: Bool = false, historyWindow: Bool = false, warmTabs: Bool = false, historyMedia: Bool = false, historyDelay: Int = 3000, liveReading: Bool = false) -> XCUIApplication {
         addUIInterruptionMonitor(withDescription: "Isolated simulator notifications") { alert in
             guard alert.buttons["Don’t Allow"].exists || alert.buttons["Don't Allow"].exists else { return false }
             let button = alert.buttons["Don’t Allow"].exists ? alert.buttons["Don’t Allow"] : alert.buttons["Don't Allow"]
@@ -233,7 +233,8 @@ final class InboxUITests: XCTestCase {
         app.launchEnvironment = ["NANOCODEX_STARTUP_FIXTURE": "1", "NANOCODEX_STARTUP_PROFILE": UUID().uuidString.lowercased(),
                                  "NANOCODEX_STARTUP_REJECT": reject ? "1" : "0", "NANOCODEX_STARTUP_HISTORY_WINDOW": historyWindow ? "1" : "0",
                                  "NANOCODEX_STARTUP_WARM_TABS": warmTabs ? "1" : "0", "NANOCODEX_STARTUP_HISTORY_MEDIA": historyMedia ? "1" : "0",
-                                 "NANOCODEX_STARTUP_HISTORY_DELAY_MS": String(historyDelay)]
+                                 "NANOCODEX_STARTUP_HISTORY_DELAY_MS": String(historyDelay),
+                                 "NANOCODEX_STARTUP_LIVE_READING": liveReading ? "1" : "0"]
         app.launch()
         return app
     }
@@ -372,6 +373,40 @@ final class InboxUITests: XCTestCase {
         XCTAssertEqual(composer(app).value as? String, "Preserve this swipe draft")
         XCTAssertLessThanOrEqual(app.otherElements["composer-input"].frame.height, 54)
         capture(app, "compact-composer-after-drawer-swipe")
+    }
+
+    func testLiveArrivalAppearsWhileReadingHistoryWithoutMovingReader() {
+        let app = startupFixture(historyWindow: true, liveReading: true)
+        let conversation = app.scrollViews["conversation"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 15))
+        let first = conversation.staticTexts["History page 1 of 3"]
+        for _ in 0..<12 {
+            if first.exists && first.isHittable { break }
+            conversation.swipeDown(velocity: .slow)
+        }
+        XCTAssertTrue(first.isHittable)
+        let y = first.frame.minY
+        let live = conversation.staticTexts["Fixture live arrival beyond history window."]
+        let moved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !first.isHittable || abs(first.frame.minY - y) >= 8
+        }, object: nil)
+        moved.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 7), .completed,
+                       "Incoming text must preserve the older message's reading position")
+        XCTAssertTrue(live.waitForExistence(timeout: 5),
+                      "Incoming agent text must enter the transcript without requesting newer messages")
+        XCTAssertFalse(app.buttons["load-newer"].exists)
+        XCTAssertTrue(first.isHittable)
+        XCTAssertEqual(first.frame.minY, y, accuracy: 8)
+        let latest = app.buttons["latest-messages"]
+        XCTAssertTrue(latest.isHittable)
+        capture(app, "live-arrival-preserves-history-reader")
+        latest.tap()
+        let visible = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: live)
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed,
+                       "The down arrow must reach the incoming bubble without corrective swipes")
+        gone(latest)
+        capture(app, "live-arrival-arrow-reaches-bubble")
     }
 
     func testNativeHistoryWindowCrossesEventAndByteBudgetsAndReturnsToLiveTail() {

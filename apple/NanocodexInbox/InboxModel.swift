@@ -41,6 +41,7 @@ final class InboxModel: ObservableObject {
         var cursor: Cursor
         var hasOlder: Bool
         var hasNewer: Bool = false
+        var newerAfter: Cursor?
         var bytes: [Int]
         var rows: [TranscriptRow]
         var retainedBytes: Int
@@ -81,6 +82,9 @@ final class InboxModel: ObservableObject {
     @Published var hasNewer = false
     @Published var loadingNewer = false
     private var followingLatest = true
+    private(set) var historyMutationRevision = UUID()
+    private(set) var newerAfter: Cursor?
+    private var latestJumpEvents: [(event: AgentEvent, bytes: Int)]?
     private var protectedHistoryCursors: ClosedRange<Cursor>?
     private var protectedHistorySelection: (ids: Set<String>, revision: UUID)?
     @Published var selectedTurn = ""
@@ -959,6 +963,7 @@ final class InboxModel: ObservableObject {
         isDemo = false; cards = []; deck = InboxDeck(); rows = []; events = []; drafts = [:]; seen = [:]
         attachmentDrafts = [:]; attachmentURLs = [:]; attachmentMovieURLs = [:]; attachmentImports = []; attachmentErrors = [:]
         scope = ""; error = nil; notice = nil; busy = []; retries = [:]; refreshing = false
+        newerAfter = nil; latestJumpEvents = nil
         hasOlder = false; hasNewer = false; loadingOlder = false; loadingNewer = false; followingLatest = true; connection = "Disconnected"; pending = []; pinnedThreadID = nil; demoRows = [:]; demoFaults = []
     }
     func setActive(_ active: Bool) {
@@ -1450,7 +1455,7 @@ final class InboxModel: ObservableObject {
         guard changed || restart else { return }
         if changed, let previous = observedAgentID, !isDemo, focusedHistoryLoaded {
             // Preserve loaded history along with each tab's draft.
-            tabHistories[previous] = TabHistory(events: events, cursor: cursor, hasOlder: hasOlder, hasNewer: hasNewer,
+            tabHistories[previous] = TabHistory(events: events, cursor: cursor, hasOlder: hasOlder, hasNewer: hasNewer, newerAfter: newerAfter,
                                                 bytes: eventBytes, rows: rows, retainedBytes: retainedBytes, projector: streamProjector, media: mediaProjection)
             recentTabs.removeAll { $0 == previous }; recentTabs.append(previous)
             trimTabCache()
@@ -1459,7 +1464,7 @@ final class InboxModel: ObservableObject {
         if let id = observedAgentID { cancelOverview(id) }
         focusedState?.cancel(); focusedState = nil
         focusedHistoryRequest?.cancel(); focusedHistoryRequest = nil
-        streaming?.cancel(); streaming = nil; projection?.cancel(); projection = nil; observation = UUID(); projectedFirstCursor = nil; loadingOlder = false; loadingNewer = false
+        streaming?.cancel(); streaming = nil; projection?.cancel(); projection = nil; observation = UUID(); projectedFirstCursor = nil; loadingOlder = false; loadingNewer = false; latestJumpEvents = nil
         threadError = nil
         if changed {
             // Each cached reading window keeps its incremental projection. Tab
@@ -1467,7 +1472,7 @@ final class InboxModel: ObservableObject {
             streamProjector = deck.focusedID.flatMap { tabHistories[$0]?.projector } ?? TranscriptStreamProjection()
             focusedHistoryLoaded = false
             rows = []; events = []; eventBytes = []; retainedBytes = 0; cursor = .zero
-            olderBefore = nil; hasOlder = false; hasNewer = false; followingLatest = true; protectedHistoryCursors = nil; selectedTurn = ""
+            olderBefore = nil; newerAfter = nil; hasOlder = false; hasNewer = false; followingLatest = true; protectedHistoryCursors = nil; selectedTurn = ""
         }
         resumeOverview()
         guard let id = deck.focusedID else {
@@ -1484,7 +1489,7 @@ final class InboxModel: ObservableObject {
         if changed, let cached = tabHistories.removeValue(forKey: id) {
             recentTabs.removeAll { $0 == id }
             focusedHistoryLoaded = true
-            events = cached.events; cursor = cached.cursor; hasOlder = cached.hasOlder; hasNewer = cached.hasNewer
+            events = cached.events; cursor = cached.cursor; hasOlder = cached.hasOlder; newerAfter = cached.newerAfter; hasNewer = cached.hasNewer
             eventBytes = cached.bytes; retainedBytes = cached.retainedBytes
             olderBefore = events.first?.cursor; mediaProjection = cached.media; rows = cached.rows
         }
@@ -1536,7 +1541,7 @@ final class InboxModel: ObservableObject {
                         }
                         guard self.generation == epoch, self.observation == token, !Task.isCancelled else { return }
                         self.focusedHistoryRequest = nil
-                        self.events = prepared.events; self.hasOlder = prepared.hasMore; self.hasNewer = prepared.hasNewer
+                        self.events = prepared.events; self.newerAfter = prepared.hasNewer ? prepared.events.last?.cursor : nil; self.hasOlder = prepared.hasMore; self.hasNewer = prepared.hasNewer
                         self.eventBytes = prepared.byteCounts; self.retainedBytes = prepared.byteCounts.reduce(0, +)
                         self.cursor = prepared.latest; self.olderBefore = self.events.first?.cursor
                         let media = await self.prepareMedia(prepared.rows)
@@ -1713,22 +1718,15 @@ final class InboxModel: ObservableObject {
         guard generation == epoch, observation == token else { return }
         if let event = frame.event, event.cursor > cursor {
             reconcilePending(id: id, events: [event])
-            if hasNewer || !followingLatest || loadingOlder || loadingNewer {
-                // Keep the reader's window stationary. The live cursor advances
-                // independently; forward paging recovers every skipped event.
-                hasNewer = true
-                if let index = cards.firstIndex(where: { $0.id == id }) {
-                    var card = cards[index]; card.apply(events: [event])
-                    if cards[index] != card { cards[index] = card }
-                }
-            } else {
-                protectedHistoryCursors = nil
-                events.append(event)
-                eventBytes.append(frame.payloadBytes); retainedBytes += frame.payloadBytes
-                trimMeasuredEvents(towardOlder: false)
-                olderBefore = events.first?.cursor
-                scheduleProjection(id: id, epoch: epoch, token: token)
-            }
+            latestJumpEvents?.append((event, frame.payloadBytes))
+            // Reading older messages affects scrolling, never live admission.
+            // newerAfter separately tracks any omitted historical range.
+            if followingLatest { protectedHistoryCursors = nil }
+            events.append(event)
+            eventBytes.append(frame.payloadBytes); retainedBytes += frame.payloadBytes
+            trimMeasuredEvents(towardOlder: false)
+            olderBefore = events.first?.cursor
+            scheduleProjection(id: id, epoch: epoch, token: token)
         }
         if let position = frame.cursor { cursor = max(cursor, position) }
         // After a failure, the initial cursor alone does not establish a healthy
@@ -1782,7 +1780,10 @@ final class InboxModel: ObservableObject {
         }
         return revision != eventsRevision
     }
-    func setHistoryAtLatest(_ atLatest: Bool) { followingLatest = atLatest && !hasNewer }
+    var newerHistoryBoundary: Cursor? { hasNewer ? newerAfter : nil }
+    var needsLatestHistory: Bool { hasNewer && events.last?.cursor == newerAfter }
+
+    func setHistoryAtLatest(_ atLatest: Bool) { followingLatest = atLatest && !needsLatestHistory }
 
     func protectHistoryRows(_ ids: Set<String>) {
         if let previous = protectedHistorySelection, previous.ids == ids, previous.revision == eventsRevision { return }
@@ -1816,7 +1817,8 @@ final class InboxModel: ObservableObject {
         guard removed > 0 else { return }
         if towardOlder {
             retainedBytes -= eventBytes.suffix(removed).reduce(0, +)
-            events.removeLast(removed); eventBytes.removeLast(removed); hasNewer = true
+            events.removeLast(removed); eventBytes.removeLast(removed)
+            newerAfter = min(newerAfter ?? events.last!.cursor, events.last!.cursor); hasNewer = true
         } else {
             retainedBytes -= eventBytes.prefix(removed).reduce(0, +)
             events.removeFirst(removed); eventBytes.removeFirst(removed); hasOlder = true
@@ -1825,36 +1827,64 @@ final class InboxModel: ObservableObject {
 
     func loadNewer(latest: Bool = false) async {
         guard let client, let id = focused?.id, !loadingOlder, !loadingNewer,
-              latest || hasNewer, let after = events.last?.cursor else { return }
+              latest || hasNewer, let after = newerAfter ?? events.last?.cursor else { return }
         cancelOlderHistoryPrefetch()
         let token = observation, epoch = generation
         loadingNewer = true
-        defer { if token == observation { loadingNewer = false } }
+        latestJumpEvents = latest ? [] : nil
+        defer {
+            if token == observation {
+                loadingNewer = false
+                latestJumpEvents = nil
+            }
+        }
         do {
+            // Keep readable context, then fetch the actual tail: opening-history
+            // recovery can retain an older readable window when its tail is large.
             let opening = latest ? try await client.conversationHistory(id) : nil
-            let page = latest ? nil : try await client.history(id, after: after)
-            let loadedEvents = opening?.events ?? page!.events
-            let loadedLatest = opening?.latest ?? page!.latest
-            let loadedMore = opening?.hasMore ?? page!.hasMore
+            let page = try await client.history(id, after: latest ? nil : after)
+            let loadedEvents = page.events
+            let loadedLatest = page.latest
+            let loadedMore = page.hasMore
             let bytes = try await TranscriptPreparation.byteCounts(loadedEvents)
             guard token == observation, generation == epoch, !Task.isCancelled else { return }
+            historyMutationRevision = UUID()
             if latest {
-                events = loadedEvents; eventBytes = bytes; hasOlder = loadedMore
-                hasNewer = opening!.hasNewer || loadedLatest < cursor
-                followingLatest = !hasNewer
+                let context = opening!
+                let existing = Set(context.events.map { $0.cursor.rawValue })
+                let added = loadedEvents.indices.filter { !existing.contains(loadedEvents[$0].cursor.rawValue) }
+                let merged = (Array(zip(context.events, context.byteCounts)) + added.map { (loadedEvents[$0], bytes[$0]) })
+                    .sorted { $0.0.cursor < $1.0.cursor }
+                events = merged.map { $0.0 }; eventBytes = merged.map { $0.1 }; hasOlder = context.hasMore
+                // The snapshot covers events through loadedLatest. Preserve SSE
+                // events received after it while the request was in flight.
+                let tail = (latestJumpEvents ?? []).filter { $0.event.cursor > loadedLatest }
+                events.append(contentsOf: tail.map(\.event))
+                eventBytes.append(contentsOf: tail.map(\.bytes))
+                let gap = context.hasNewer || (page.hasMore && loadedEvents.first.map { $0.cursor > context.latest } == true)
+                newerAfter = gap ? context.events.last?.cursor : nil
+                hasNewer = gap
+                followingLatest = true
+                protectedHistoryCursors = nil
+                protectedHistorySelection = nil
             } else {
                 guard !loadedMore || loadedEvents.last.map({ $0.cursor > after }) == true else { throw APIError.invalidResponse }
-                let added = loadedEvents.indices.filter { loadedEvents[$0].cursor > after }
-                let overlap = min(1, events.count)
-                events.append(contentsOf: added.map { loadedEvents[$0] })
-                eventBytes.append(contentsOf: added.map { bytes[$0] })
-                retainedBytes += added.reduce(0) { $0 + bytes[$1] }
-                hasNewer = loadedMore || (events.last?.cursor ?? .zero) < max(cursor, loadedLatest)
-                trimMeasuredEvents(towardOlder: false, keeping: added.count + overlap)
+                let existing = Set(events.map { $0.cursor.rawValue })
+                let added = loadedEvents.indices.filter { !existing.contains(loadedEvents[$0].cursor.rawValue) }
+                let merged = (Array(zip(events, eventBytes)) + added.map { (loadedEvents[$0], bytes[$0]) })
+                    .sorted { $0.0.cursor < $1.0.cursor }
+                events = merged.map { $0.0 }; eventBytes = merged.map { $0.1 }
+                newerAfter = loadedMore ? loadedEvents.last?.cursor : nil
+                // Live events are already rendered. A terminal page closes the
+                // historical gap even when its event array is empty.
+                hasNewer = loadedMore
             }
-            cursor = max(cursor, latest ? loadedLatest : (events.last?.cursor ?? .zero))
+
+            latestJumpEvents = nil
+            cursor = max(cursor, loadedMore && !latest ? (events.last?.cursor ?? .zero) : loadedLatest)
             reconcilePending(id: id, events: loadedEvents)
             retainedBytes = eventBytes.reduce(0, +)
+            trimMeasuredEvents(towardOlder: false)
             olderBefore = events.first?.cursor
             scheduleProjection(id: id, epoch: epoch, token: token, delay: .zero)
             repeat { await projection?.value }
@@ -1916,6 +1946,7 @@ final class InboxModel: ObservableObject {
             }
             guard token == observation, generation == epoch, !Task.isCancelled else { return }
             guard !page.hasMore || page.events.first.map({ $0.cursor < before }) == true else { throw APIError.invalidResponse }
+            historyMutationRevision = UUID()
             let inserted = page.events.indices.filter { page.events[$0].cursor < before }
             let overlap = min(1, events.count)
             events.insert(contentsOf: inserted.map { page.events[$0] }, at: 0)

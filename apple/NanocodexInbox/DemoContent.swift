@@ -293,7 +293,7 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
     private static let queue = DispatchQueue(label: "nanocodex.startup-fixture")
     private static var historyLive = false
     private static var historyStreams: [String: StartupFixtureProtocol] = [:]
-    private static var historyPages: Int { historyMedia ? 6 : 20 }
+    private static var historyPages: Int { ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_LIVE_READING"] == "1" ? 3 : historyMedia ? 6 : 20 }
     private static let historyPageSize = 128
     private static let historyPadding = String(repeating: "p", count: 1_200_000)
     private static var warmTabs: Bool { ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_WARM_TABS"] == "1" }
@@ -438,7 +438,8 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
                                   "has_more": after == nil ? first > 1 : last < head]
         if let before, before <= historyPageSize + 1, !historyLive {
             historyLive = true
-            queue.asyncAfter(deadline: .now() + 2) {
+            let liveDelay: Double = ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_LIVE_READING"] == "1" ? 5 : 2
+            queue.asyncAfter(deadline: .now() + liveDelay) {
                 let encoded = try! JSONSerialization.data(withJSONObject: historyEvent(historyLatest))
                 let frame = Data("id: \(historyLatest)\ndata: ".utf8) + encoded + Data("\n\n".utf8)
                 for stream in historyStreams.values where !stream.stopped {
