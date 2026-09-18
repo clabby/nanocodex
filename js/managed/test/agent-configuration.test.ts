@@ -178,3 +178,9 @@ it("accepts immutable template retries after discovery tool renaming", () => ins
   }
   expect((await configurationCatalog(req("/agent-definitions/legacy", "PUT", { tools: ["exec_command"] }), state.storage)).status).toBe(409);
 }));
+
+it("removes retired durable-thread tools when admitting old saved definitions without broadening an allowlist", () => {
+  expect(parseConfiguration({ tools: ["spawn_project_thread", "exec_command", "send_project_thread"] }).tools).toEqual(["exec_command"]);
+  expect(parseConfiguration({ tools: ["read_project_thread", "list_project_threads"] }).tools).toEqual([]);
+  expect(parseConfiguration({ instructions: "Retained instructions" })).toEqual({ instructions: "Retained instructions" });
+});
