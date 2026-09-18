@@ -1,4 +1,5 @@
 mod connection_output;
+mod native_lanes;
 
 use clap::{Parser, Subcommand};
 use connection_output::{ConnectionOutput, OwnedOutput};
@@ -24,6 +25,25 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+// Native overlays and AX observers belong to the main run loop. Channel waits
+// do not service it: pump without sleeping before every dispatch/idle wait so
+// cursor animation and expiry continue even when JavaScript is not making calls.
+fn pump_native_run_loop() {
+    #[cfg(target_os = "macos")]
+    if objc2::MainThreadMarker::new().is_some() {
+        unsafe {
+            core_foundation::runloop::CFRunLoop::run_in_mode(
+                core_foundation::runloop::kCFRunLoopDefaultMode,
+                Duration::ZERO,
+                true,
+            );
+        }
+    }
+}
+fn native_idle_interval() -> Duration {
+    Duration::from_millis(if cfg!(target_os = "macos") { 16 } else { 50 })
+}
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -159,6 +179,7 @@ impl skyre::security::DownloadApproval for DownloadApproval {
     }
 }
 struct Server {
+    native_lanes: native_lanes::Lanes,
     engine: Rc<RefCell<Engine>>,
     host: Option<Worker>,
     host_options: skyre::runtime::HostOptions,
@@ -261,6 +282,7 @@ impl Server {
         }
         let mut failure = None;
         for scope in self.pending_kernel_cleanup.clone() {
+            self.native_lanes.reset_scope(&scope);
             match self
                 .engine
                 .borrow_mut()
@@ -311,7 +333,10 @@ impl Server {
         if self.host.is_none() {
             let executable = std::env::current_exe().map_err(Error::from)?;
             #[cfg(test)]
-            let executable = executable.parent().unwrap().parent().unwrap().join("skyre");
+            let executable = executable.parent().unwrap().parent().unwrap().join(format!(
+                "nanocodex-computer{}",
+                std::env::consts::EXE_SUFFIX
+            ));
             self.host = Some(Worker::with_options_and_executable(
                 self.host_options.clone(),
                 executable,
@@ -357,11 +382,17 @@ impl Server {
         let chooser_scope = self.engine.borrow_mut().begin_chooser_cell(ticket);
         let result = (|| {
             loop {
+                pump_native_run_loop();
                 self.check_connection_output()?;
                 // A parked kernel can fail while this cell runs. Failed cleanup
                 // stays pending; dispatch below must not bypass that failure.
                 let _ = self.reap_kernel_losses();
                 self.engine.borrow_mut().tick();
+                self.native_lanes.poll(&mut self.engine.borrow_mut());
+                if self.host.as_ref().is_some_and(Worker::cancelled) {
+                    self.native_lanes
+                        .reset_scope(self.engine.borrow().selected_kernel_scope());
+                }
                 if let Some(input) = &self.input {
                     // Keep reading only while bounded space remains; cancellation does not
                     // jump over an unbounded flood of ordinary requests.
@@ -420,6 +451,30 @@ impl Server {
                             let _ = reply.send(Err(error.clone()));
                             return Err(error);
                         }
+                        // Admission remains on the owning parent engine. Only
+                        // exact-window native requests leave this trust boundary.
+                        if !self.host.as_ref().unwrap().cancelled() {
+                            let admission = self.reap_kernel_losses().and_then(|()| {
+                                self.engine
+                                    .borrow_mut()
+                                    .prepare_window_lane(&method, &args, &control)
+                            });
+                            match admission {
+                                Ok(Some(call)) => {
+                                    if let Err(error) =
+                                        self.native_lanes.submit(call, control, reply.clone())
+                                    {
+                                        let _ = reply.send(Err(error));
+                                    }
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
+                                    continue;
+                                }
+                                Ok(None) => (),
+                            }
+                        }
                         let result = if let Err(error) = self.reap_kernel_losses() {
                             Err(error)
                         } else if self.host.as_ref().unwrap().cancelled() {
@@ -461,6 +516,9 @@ impl Server {
             }
         })();
         let cancelled = self.host.as_ref().is_some_and(Worker::cancelled) || result.is_err();
+        if cancelled {
+            self.native_lanes.reset_scope(&chooser_scope);
+        }
         self.engine
             .borrow_mut()
             .finish_chooser_cell(&chooser_scope, ticket, cancelled);
@@ -530,6 +588,7 @@ impl Server {
         }
         emit(&json!({"jsonrpc":"2.0","id":id,"method":"elicitation/create","params":params}))?;
         loop {
+            pump_native_run_loop();
             self.check_connection_output()?;
             self.reap_kernel_losses()?;
             if self.host.as_ref().is_some_and(Worker::cancelled) {
@@ -543,6 +602,8 @@ impl Server {
                 return Err(Error::new(-32002, "Elicitation response timed out"));
             }
             self.engine.borrow_mut().tick();
+            // Approval waits must keep already admitted native work alive.
+            self.native_lanes.poll(&mut self.engine.borrow_mut());
             let incoming = self
                 .input
                 .as_ref()
@@ -855,6 +916,7 @@ impl Server {
             broker.disconnect();
         }
         self.pending.clear();
+        self.native_lanes.clear();
         self.host = None;
         self.host_kernel_route = None;
         self.inactive_route_hosts.clear();
@@ -975,17 +1037,20 @@ impl Server {
         self.input = Some(receiver);
         self.pending.clear();
         while !self.shutdown {
+            pump_native_run_loop();
             output.status()?;
             // Idle failures have no tool response to attach to. Keep retryable
             // cleanup pending and surface any failure on the next request.
             let _ = self.reap_kernel_losses();
+            self.engine.borrow_mut().tick();
+            self.native_lanes.poll(&mut self.engine.borrow_mut());
             let message = match self.pending.pop_front() {
                 Some(value) => value,
                 None => match self
                     .input
                     .as_ref()
                     .unwrap()
-                    .recv_timeout(Duration::from_millis(50))
+                    .recv_timeout(native_idle_interval())
                 {
                     Ok(value) => value,
                     Err(mpsc::RecvTimeoutError::Disconnected) => Ok(None),
@@ -1303,6 +1368,7 @@ fn run() -> Result<()> {
         .transpose()?
         .unwrap_or_default();
     let mut server = Server {
+        native_lanes: Default::default(),
         engine: Rc::new(RefCell::new(engine)),
         host: None,
         request_metadata_baseline: host_options.request_meta.clone(),
@@ -1504,6 +1570,15 @@ fn serve_socket(_: &mut Server, _: PathBuf) -> Result<()> {
 fn main() {
     if std::env::args_os()
         .nth(1)
+        .is_some_and(|arg| arg == native_lanes::CHILD_ARGUMENT)
+    {
+        if native_lanes::run_child().is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::args_os()
+        .nth(1)
         .is_some_and(|arg| arg == connection_output::CHILD_ARGUMENT)
     {
         // stderr is the private acknowledgement pipe in this child. Never put
@@ -1672,8 +1747,9 @@ mod elicitation_tests {
         assert_eq!(recovered["value"], json!(["undefined", 42]));
         assert_eq!(cancelled.get(), 1);
     }
-    fn server() -> Server {
+    pub(super) fn server() -> Server {
         Server {
+            native_lanes: Default::default(),
             engine: Rc::new(RefCell::new(Engine::new(Box::new(Fixture::default())))),
             host: None,
             host_options: skyre::runtime::HostOptions::default(),

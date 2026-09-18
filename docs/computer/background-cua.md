@@ -183,3 +183,115 @@ and `/etc/sudoers.d/nanocodex-background-cua`, daemon-reload and restart the Han
 As `gakonst`, disable `plugin:cua:enabled` and call `cua:refresh`; the retired seat
 resources remain until the compositor naturally exits. Do not unload/replace a
 live input plugin or reboot the desktop merely to complete rollback.
+
+## Concurrent window bindings and agent cursors
+
+On a provider that exposes native window discovery, initialize CUA, discover the
+window IDs, then retain a separate handle for each target:
+
+```javascript
+const windows = await cua.listWindows("Example App");
+const first = await cua.getApp("Example App", { windowId: windows[0].windowId });
+const second = await cua.getApp("Example App", { windowId: windows[1].windowId });
+```
+
+Choose windows from their observed titles and IDs. Never infer an ID or reuse an
+old binding after its window closes. Native executable authorization remains
+separate from the exact-window session identity. AX handles, screenshot geometry
+and observation history must remain valid independently for each bound window.
+
+Mac applications share keyboard focus across their own windows. A cooperative
+cross-process lock covers each synthetic-focus/input transaction for a PID;
+other applications use different locks. This lock is local to the application process. Captures and operations in other
+applications do not need it. Two input sequences aimed at windows in one process
+still require coordination because the application owns a single keyboard focus.
+The background route refuses keyboard/pointer input into the human's foreground
+process. Separate calls are separate transactions; inspect the resulting state
+before depending on a sequence another agent could also modify.
+
+Independent operations should be submitted together when their results do not
+depend on each other:
+
+```javascript
+const frames = await Promise.all([
+  first.getScreenshot({ emit: false }),
+  second.getScreenshot({ emit: false }),
+]);
+```
+
+Each exact-window worker preserves its own request order and observation state.
+The JavaScript bridge admits requests without waiting for earlier replies, and
+correlates each completion with its original promise. Native workers own their
+platform state on their own main threads. On macOS, workers delegate screenshots
+to concurrent ScreenCaptureKit requests in the parent process: multi-process
+capture requests hung during live testing on macOS 26. The parent starts each
+request asynchronously, validates its approved PID and window, and returns the
+image to that worker for final geometry checks. Input workers remain independent
+of capture completion. A stalled capture must not hold up another window. Request queues and worker counts are
+bounded; saturation returns an error. Cancellation invalidates pending work and
+allows already-held synthetic input to unwind before the worker exits. An
+uncertain delivery is never automatically replayed. Native operation time counts
+toward the caller’s execution timeout; only trusted human approval waits receive
+timeout credit. Already admitted native work can progress during another call’s
+approval wait. JavaScript continuations and timers wait until the clock resumes;
+approval credit must never become unlimited JavaScript execution time.
+
+The agent cursor is an independent visual indicator. It must never move, hide or
+replace the human's hardware pointer. Its panels ignore mouse events, cannot
+become key/main, and are ordered relative to their target windows. Cursor state
+is per target; movement interpolation, click feedback and fading do not delay
+input delivery. Native run-loop servicing continues while the companion waits
+for the next request. Foreign window ordering and Spaces remain OS constraints
+that require live verification; there is no unconditional floating overlay over
+the human's foreground app.
+
+Sky evidence supports per-controller virtual cursors, window-relative ordering,
+main-thread view ownership, spring/scoot animation states and separate input
+readiness from visual completion. It does not establish exact animation timings,
+colors or artwork. Nanocodex's visual design and timings are independent choices.
+Sky also explicitly composes virtual cursor windows into target screenshots;
+Nanocodex's Mac exact-window screenshots currently remain clean target captures.
+The human-facing desktop view displays the separate agent overlay.
+
+The Hyprland candidate provides eight independent native Wayland lanes, with a
+window decoration for each agent cursor. Decorations are clipped to their
+window and participate in its normal stacking/occlusion. Each lane has its own
+color, click pulse and idle fade. The runtime retains a connection per target
+and discovers the plugin's advertised capacity; legacy plugins without a
+capacity field retain the two-lane behavior. Only an explicit `lane_busy`
+receipt permits trying the next lane. Unknown transport outcomes are never
+retried. Windows that share a Wayland client cannot occupy competing lanes.
+
+An isolated Hyprland 0.56.2 test verified eight simultaneous 800 ms drags in eight
+GTK clients while a ninth foreground client received primary keyboard events.
+Target destruction and transport cleanup released the corresponding input
+state; cursor render artifacts showed eight indicators and their idle fade.
+This is not a live WoW acceptance test. A changed compositor plugin must wait
+for a fresh desktop session: existing process-lifetime Wayland seat callbacks
+make hot replacement/unloading unsafe. Keep the installed plugin active until
+that transition; staging a candidate is not activation.
+
+
+A single-companion Linux acceptance run drove four native Wayland windows with
+`Promise.all` through the public JavaScript tool. All four drag states overlapped;
+completion times were 328–348 ms, with exact input receipts, unchanged foreground
+focus and primary pointer, and concurrent exact-window captures. Disconnect
+mid-drag released every reservation and held button within the 300 ms check.
+This run used an isolated compositor; the candidate remains staged for a fresh
+user desktop session. The installed process-lifetime plugin is not hot replaced.
+
+On macOS, the release four-window workload (two application processes, one
+companion and one `Promise.all` eval) completed in 8.815 seconds versus 29.890
+seconds for the serial baseline. All 16 screenshot dimensions and four isolated
+Unicode text receipts matched; sampled foreground and pointer were unchanged.
+These workload timings supplement causal scheduler tests and do not prove that
+every native operation overlapped. A separate render/lifecycle test observed two
+colored arrow panels, idle fading, and no panels after reset; warm two-click time
+was 174 ms. Freshness checks decoded 12 alternating red/blue captures correctly
+with a 176 ms warm median. The strict pointer assertion in that separate run
+failed during physical pointer movement, so it is not a pointer-isolation proof.
+
+Approval waits continue polling and renewing previously admitted lanes. Ordinary
+capture failures return to the child as screenshot errors, preserving optional
+AX-only observations and queued work. Invalid capture bindings still revoke the
+lane. Both cases have causal scheduler regressions.
