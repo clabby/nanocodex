@@ -2,6 +2,27 @@ import XCTest
 
 final class RemoteScreenLifecycleUITests: XCTestCase {
     @MainActor
+    private func openScreenControls(_ app: XCUIApplication) {
+        let options = app.buttons["thread-screen-options"]
+        // Closing the controls sheet returns to the existing thread dock.
+        if !options.waitForExistence(timeout: 2) {
+            let menu = app.buttons["app-menu"]
+            XCTAssertTrue(menu.waitForExistence(timeout: 20))
+            menu.tap()
+            let screen = app.buttons["conversation-remote-screens"]
+            XCTAssertTrue(screen.waitForExistence(timeout: 5))
+            XCTAssertTrue(screen.isEnabled)
+            screen.tap()
+        }
+        XCTAssertTrue(options.waitForExistence(timeout: 10))
+        options.tap()
+        let controls = app.buttons["Screen controls"]
+        XCTAssertTrue(controls.waitForExistence(timeout: 5))
+        controls.tap()
+        XCTAssertTrue(app.buttons["close-screen-pane"].waitForExistence(timeout: 10))
+    }
+
+    @MainActor
     func testScreenCardZoomDismissalAndDraftRestoration() throws {
         guard ProcessInfo.processInfo.environment["NANOCODEX_SCREEN_FIXTURE"] == "1" else {
             throw XCTSkip("Run fixtures/remote-screen.mjs on loopback port 18965")
@@ -12,12 +33,11 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         app.launchEnvironment["NANOCODEX_DEMO_SCREENS"] = "1"
         app.launchEnvironment["NANOCODEX_DEMO_PROFILE"] = "screen-card-" + UUID().uuidString
         app.launch()
-        let screens = app.buttons["conversation-remote-screens"]
-        XCTAssertTrue(screens.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["app-menu"].waitForExistence(timeout: 15))
         let composer = app.textFields["composer"].exists ? app.textFields["composer"] : app.textViews["composer"]
         let draft = "Keep my draft while I view a screen"
         composer.tap(); composer.typeText(draft)
-        screens.tap()
+        openScreenControls(app)
         let desktop = app.buttons["remote-screen:fixture:desktop"]
         XCTAssertTrue(desktop.waitForExistence(timeout: 10))
         XCTAssertFalse(app.descendants(matching: .any)["screen-pane-divider"].exists)
@@ -52,14 +72,14 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         app.buttons["close-screen-pane"].tap()
         XCTAssertFalse(canvas.exists)
         XCTAssertEqual(composer.value as? String, draft)
-        screens.tap(); XCTAssertTrue(desktop.waitForExistence(timeout: 10)); desktop.tap(); requireWatching()
+        openScreenControls(app); XCTAssertTrue(desktop.waitForExistence(timeout: 10)); desktop.tap(); requireWatching()
         let card = XCTAttachment(screenshot: app.screenshot())
         card.name = "native-screen-card-medium"; card.lifetime = .keepAlways; add(card)
         let dismissHandle = app.navigationBars.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
         dismissHandle.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
         XCTAssertTrue(canvas.waitForNonExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, draft)
-        screens.tap(); XCTAssertTrue(desktop.waitForExistence(timeout: 10)); desktop.tap(); requireWatching()
+        openScreenControls(app); XCTAssertTrue(desktop.waitForExistence(timeout: 10)); desktop.tap(); requireWatching()
         app.buttons["close-screen-pane"].tap()
     }
 
@@ -78,8 +98,7 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["NANOCODEX_REMOTE_DIAGNOSTICS"] = "1"
         app.launch()
-        let screens = app.buttons["conversation-remote-screens"]
-        XCTAssertTrue(screens.waitForExistence(timeout: 20)); screens.tap()
+        openScreenControls(app)
         let desktop = app.buttons["remote-screen:\(machine):desktop"]
         XCTAssertTrue(desktop.waitForExistence(timeout: 20)); desktop.tap()
         let status = app.staticTexts["remote-status"]
@@ -154,7 +173,7 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         XCTAssertTrue(desktop.waitForExistence(timeout: 10)); desktop.tap()
         _ = try requireDecodedFrame(app, status: status, label: "reselection")
         app.buttons["close-screen-pane"].tap()
-        XCTAssertTrue(screens.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["thread-screen-options"].waitForExistence(timeout: 10))
     }
 
     @MainActor
@@ -168,8 +187,7 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["NANOCODEX_REMOTE_DIAGNOSTICS"] = "1"
         app.launch()
-        let screens = app.buttons["conversation-remote-screens"]
-        XCTAssertTrue(screens.waitForExistence(timeout: 20)); screens.tap()
+        openScreenControls(app)
         let desktop = app.buttons["remote-screen:\(machine):\(surface)"]
         for sample in 1...3 {
             XCTAssertTrue(desktop.waitForExistence(timeout: 20)); desktop.tap()
@@ -219,7 +237,6 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launch()
-        let screens = app.buttons["conversation-remote-screens"]
         let desktop = app.buttons["remote-screen:\(machine):\(surface)"]
         let status = app.staticTexts["remote-status"]
 
@@ -235,9 +252,7 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
         // Use the saved account without changing its credentials, conversations,
         // drafts, or the remote machine. Each path destroys a live UIKit canvas.
         for cycle in 0..<4 {
-            XCTAssertTrue(screens.waitForExistence(timeout: 20))
-            XCTAssertTrue(screens.isEnabled)
-            screens.tap()
+            openScreenControls(app)
             XCTAssertTrue(desktop.waitForExistence(timeout: 20))
             desktop.tap()
             requireWatching()
@@ -260,7 +275,7 @@ final class RemoteScreenLifecycleUITests: XCTestCase {
                 add(evidence)
             }
             app.buttons["close-screen-pane"].tap()
-            XCTAssertTrue(screens.waitForExistence(timeout: 10))
+            XCTAssertTrue(app.buttons["thread-screen-options"].waitForExistence(timeout: 10))
             XCTAssertEqual(app.state, .runningForeground)
         }
     }
