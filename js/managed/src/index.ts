@@ -22,6 +22,8 @@ import { REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { serverHandTool } from "./ssh-hand-setup";
 import { parseEmailResume, resumeEmailWorkflow, type EmailResumeResult } from "./email-resume";
 import { phoneControlInput } from "./phone-control";
+import { accountAdmin } from "./account-admin";
+import { accountCommunication } from "./account-communication";
 import { phoneAdminConfigured } from "./phone-admin";
 import { phoneTools } from "./phone-tool";
 import { emailTools, type EmailConfig } from "./email-tool";
@@ -392,6 +394,7 @@ export interface Env extends
   NANOCODEX_HISTORY: R2Bucket;
   NANOCODEX_WORKSPACES: R2Bucket;
   NANOCODEX_ADMIN_TOKEN: string;
+  NANOCODEX_ADMIN_USER_ID?: string;
   NANOCODEX_SYSTEM_HOST_TOKEN?: string;
   HISTORY_AI_SEARCH?: AiSearchInstance;
   BROWSER?: import("agents/browser").BrowserBinding;
@@ -1575,6 +1578,23 @@ async function managedFetchRoute(
         "https://account-tools.internal/tool-host",
         new Request(request, { headers }),
       );
+    }
+    if (url.pathname === "/v1/account/admin") {
+      const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
+      return accountAdmin(request, env, principal ?? undefined);
+    }
+    if (url.pathname === "/v1/account/communication") {
+      if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
+      if (request.method !== "GET") return json({ error: "method_not_allowed" }, { status: 405 });
+      const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
+      if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+      if (principal.kind === "connect_grant" || principal.connectGrant || !principal.capabilities.includes("agents:read")
+        || !principal.capabilities.includes("tools:use")) return json({ error: "forbidden" }, { status: 403 });
+      try {
+        return json(await accountCommunication(env, principal.userId), { headers: { "cache-control": "no-store" } });
+      } catch {
+        return json({ error: "communication_unavailable" }, { status: 503, headers: { "cache-control": "no-store" } });
+      }
     }
     if (url.pathname === "/v1/account/hands") {
       if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });

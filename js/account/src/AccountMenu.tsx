@@ -1,3 +1,5 @@
+import { AdminPanel } from "./AdminPanel";
+import { AccountCommunication } from "./AccountCommunication";
 import { ChatGptAccounts } from "./ChatGptAccounts";
 import { decodeCredentialStatus, decodeChatGptLogin, type CredentialStatus } from "./modelCredentials";
 import { useAccountQuery } from "./useAccountQuery";
@@ -561,6 +563,8 @@ function AccountMenuContent({ inline }: { inline: boolean }) {
               ) : null}
 
               <div className={inline ? "account-profile-content wizard-sections" : "api-key-panel account-profile-content"}>
+                <AccountCommunication inline={inline} />
+                <AdminPanel inline={inline} />
                 <section className={inline ? "wizard-section" : undefined} aria-labelledby="connections-heading">
                 <div className={inline ? "wizard-section-title api-key-heading" : "api-key-heading"}>
                   <div>
