@@ -62,3 +62,15 @@ it.each([undefined, "", "other"])("requires the deployment email admin and reche
   await expect(f.tool.handler({operation:"status"},context())).rejects.toThrow("unavailable");
   expect(f.execute).not.toHaveBeenCalled();
 });
+
+
+it.each([
+  {operation:"watch",watch_id:"11111111-1111-4111-8111-111111111111",message_id:"outgoing",expected_recipient:"test@example.com",goal:"Schedule only",expires_at:1234567890000,max_replies:2},
+  {operation:"unwatch",watch_id:"11111111-1111-4111-8111-111111111111"},
+  {operation:"listwatches"},
+])("pins session identity for watch controls", async input => {
+  const f=fixture();
+  await f.tool.handler(input,context());
+  expect(f.execute).toHaveBeenCalledWith({...input,owner_id:"owner",agent_id:"agent"});
+  await expect(f.tool.handler({...input,owner_id:"other"},context())).rejects.toThrow();
+});

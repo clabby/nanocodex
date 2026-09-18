@@ -18,6 +18,8 @@ import { managedCredentialSubject, scopedManagedModelEgress, sessionCredentialOw
 import { remoteICE } from "./hand-remote-ice";
 import { REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { serverHandTool } from "./ssh-hand-setup";
+import { parseEmailResume, resumeEmailWorkflow, type EmailResumeResult } from "./email-resume";
+import { phoneControlInput } from "./phone-control";
 import { phoneAdminConfigured } from "./phone-admin";
 import { phoneTools } from "./phone-tool";
 import { emailTools, type EmailConfig } from "./email-tool";
@@ -2459,6 +2461,15 @@ async function managedFetchRoute(
         },
       );
     }
+    if (/^phone\/calls(?:\/[0-9a-f-]{36}\/(?:steer|hangup))?$/.test(resource)) {
+      if (url.search || principal.connectGrant || !principal.capabilities.includes("agents:read")
+        || !principal.capabilities.includes("tools:use") || !principal.capabilities.includes("agents:write"))
+        return json({error:"forbidden"},{status:403});
+      const method = resource === "phone/calls" ? "GET" : "POST";
+      if (request.method !== method) return json({error:"method_not_allowed"},{status:405});
+      if (method === "POST") { const failure = requireSameOriginMutation(request,url,principal); if (failure) return failure; }
+      return stub.fetch(`https://session.internal/${resource}`, {method,headers:sessionHeaders,...(method === "GET" ? {} : {body:request.body})});
+    }
     const turnMatch = resource.match(
       /^turns\/([^/]+)(?:\/(steer|withdraw-steer|cancel))?$/,
     );
@@ -2828,6 +2839,16 @@ export class ManagedAgentOwnership extends WorkerEntrypoint<Env> {
     return this.env.NANOCODEX_SESSIONS.get(id).fetch(
       `https://session.internal/credential-owner?subject=${subject}`,
     );
+  }
+}
+
+/** Private mailbox service binding; no public HTTP route exposes this capability. */
+export class EmailAgentBackend extends WorkerEntrypoint<Env> {
+  async resumeEmail(value: unknown): Promise<EmailResumeResult> {
+    const input = parseEmailResume(value);
+    if (!this.env.NANOCODEX_EMAIL_ADMIN_ID || input.owner_id !== this.env.NANOCODEX_EMAIL_ADMIN_ID
+      || input.owner_id !== this.env.NANOCODEX_EMAIL_OWNER_ID) throw new Error("email_owner_forbidden");
+    return this.env.NANOCODEX_SESSIONS.getByName(input.agent_id).resumeEmail(input);
   }
 }
 
@@ -3306,6 +3327,42 @@ export class DurableAgentSession extends DurableComputerSession {
     });
   }
 
+  /** Called only by the private EmailAgentBackend binding, never by fetch routing. */
+  async resumeEmail(value: unknown): Promise<EmailResumeResult> {
+    const input = parseEmailResume(value);
+    const session = this.#session();
+    if (!session || this.#deleting || this.#deleted || session.runtime_profile !== "managed"
+      || session.session_id !== input.agent_id || session.owner_id !== input.owner_id
+      || input.owner_id !== this.env.NANOCODEX_EMAIL_ADMIN_ID
+      || input.owner_id !== this.env.NANOCODEX_EMAIL_OWNER_ID) throw new Error("email_owner_forbidden");
+    const epoch = session.authorization_epoch;
+    const principal: Principal = {
+      kind: "service", userId: session.owner_id, organizationId: session.organization_id,
+      teamId: session.team_id, authorizationEpoch: epoch, role: "writer",
+      subjectId: `user:${session.owner_id}`, credentialId: `email:${input.workflow_id}`,
+      capabilities: ["agents:read", "agents:write", "tools:use"],
+    };
+    return resumeEmailWorkflow(input, {
+      request: (path, method = "GET", body, idempotencyKey) => {
+        if (this.#deleting || this.#deleted || this.#session()?.authorization_epoch !== epoch) throw new Error("email_parent_unavailable");
+        const headers = new Headers();
+        if (body !== undefined) headers.set("content-type", "application/json");
+        if (idempotencyKey) headers.set("idempotency-key", idempotencyKey);
+        return managedFetch(new Request(new URL(path, session.public_origin), {
+          method, headers, ...(body === undefined ? {} : {body:JSON.stringify(body)}),
+        }), this.env, this.ctx, principal);
+      },
+      activity: activity => {
+        this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS email_activity_receipts (id TEXT PRIMARY KEY)");
+        const key = `${activity.turn_id}:${activity.state}`;
+        const inserted = this.ctx.storage.sql.exec("INSERT OR IGNORE INTO email_activity_receipts(id) VALUES (?) RETURNING id", key).toArray();
+        if (inserted.length) this.#recordAndBroadcast({type:"event",event:{
+          protocol_version:1,request_id:`email:${input.workflow_id}`,seq:0,type:"managed.email.activity",payload:activity,
+        }}, null);
+      },
+    });
+  }
+
   async fetch(request: Request): Promise<Response> {
     return performanceScope(this.ctx.id.toString(), `session.${request.method} ${new URL(request.url).pathname}`,
       () => this.#measuredFetch(request));
@@ -3379,6 +3436,22 @@ export class DurableAgentSession extends DurableComputerSession {
         return json({ error: "not_found" }, { status: 404 });
       }
       turnAuthorization = asserted.authorization;
+    }
+    if (/^\/phone\/calls(?:\/[0-9a-f-]{36}\/(?:steer|hangup))?$/.test(url.pathname)) {
+      if (!ownerAssertion || !this.#hasFullAccountAuthority(turnAuthorization)
+        || !["agents:read","agents:write","tools:use"].every(capability => turnAuthorization.capabilities.includes(capability as OrganizationCapability)))
+        return json({error:"forbidden"},{status:403});
+      const session = this.#session();
+      if (!session || session.runtime_profile !== "managed") return json({error:"not_found"},{status:404});
+      const tool = phoneTools({config:this.env,owner:session.owner_id,agentId:session.session_id,authorize(){}})[0];
+      if (!tool) return json({error:"phone_unavailable"},{status:404});
+      const action = url.pathname.match(/^\/phone\/calls\/([0-9a-f-]{36})\/(steer|hangup)$/);
+      if (request.method !== (action ? "POST" : "GET")) return json({error:"method_not_allowed"},{status:405});
+      try {
+        const input = await phoneControlInput(request);
+        const result = await tool.handler(input,{callId:crypto.randomUUID(),parentCallId:"",sessionId:session.session_id,model:this.#settings().model,signal:request.signal});
+        return json(result, {headers:{"cache-control":"no-store"}});
+      } catch (error) { return json({error:error instanceof TypeError ? "invalid_request" : "phone_request_failed"},{status:error instanceof TypeError ? 400 : 502}); }
     }
     if (request.method === "GET" && url.pathname === "/credential-subject") {
       // This public-worker-to-Session lookup still requires the caller's full
