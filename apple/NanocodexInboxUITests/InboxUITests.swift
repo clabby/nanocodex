@@ -104,11 +104,20 @@ final class InboxUITests: XCTestCase {
         navigationAction(app, "conversation-remote-screens").tap()
         let panel = app.descendants(matching: .any)["thread-screen-panel"].firstMatch
         XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        if ProcessInfo.processInfo.environment["NANOCODEX_SCREEN_FIXTURE"] == "1" {
+            let desktop = app.buttons["thread-screen:fixture:desktop"]
+            XCTAssertTrue(desktop.waitForExistence(timeout: 10))
+            desktop.tap()
+            XCTAssertTrue(app.staticTexts["Watching"].waitForExistence(timeout: 15))
+            XCTAssertTrue(app.descendants(matching: .any)["thread-screen-canvas"].firstMatch.exists)
+            XCTAssertTrue(app.staticTexts["View only"].exists)
+        }
         XCTAssertTrue(composer(app).isHittable)
         XCTAssertEqual(composer(app).value as? String, "Keep talking while watching")
         capture(app, "thread-screen-docked")
         app.buttons["thread-screen-expand"].tap()
         XCTAssertTrue(composer(app).isHittable)
+        capture(app, "thread-screen-expanded")
         app.buttons["thread-screen-expand"].tap()
         app.buttons["conversation-drawer-open"].tap()
         app.buttons["project-expand:inbox"].tap()

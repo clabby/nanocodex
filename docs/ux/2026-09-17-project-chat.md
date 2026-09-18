@@ -8,7 +8,7 @@ New project creates a named home backed by a managed agent. Existing conversatio
 
 ## Simulator recording
 
-Updated sidebar and sheet: [recording](media/project-tree-ios.mp4), [expanded project](media/project-expanded-sidebar.png), [Tasks](media/project-minimal-tasks.png), [Agents](media/project-minimal-agents.png). See the follow-up validation note below for the remaining simulator check.
+Updated sidebar and sheet: [recording](media/project-tree-ios.mp4), [expanded project](media/project-expanded-sidebar.png), [Tasks](media/project-minimal-tasks.png), [Agents](media/project-minimal-agents.png). Recorded from the passing iOS 26.5 sidebar journey after simulator recovery.
 
 [Watch the iPhone simulator walkthrough](media/project-threads-ios.mp4) (iPhone 16 Pro, iOS 18.2).
 
@@ -41,7 +41,7 @@ Runtime integration checks exercise actual managed child admission, replay after
 
 ## Expandable sidebar follow-up
 
-The updated simulator run passed the existing child/origin-link and Tasks/Agents draft journeys. The new sidebar journey verified expansion, child selection, selected state, and separate drafts before an immediate collapse-disappearance assertion failed. That assertion now checks the collapsed disclosure state and waits for removal from accessibility. Its rerun was blocked by an overloaded Mac (load average approximately 790); child-title search and the final flat sheet-row background change remain unverified in that rerun. The screenshots and recording below show the captured sidebar and compact sheet before that final background-only polish.
+The final iOS 26.5 sidebar journey passes: expansion, child selection, selected state, separate drafts, collapse, child-title search, and both compact sheet tabs. The current screenshots and XCTest recording include the final flat row backgrounds. Earlier launch failures were recovered by restarting CoreSimulatorService without erasing device data; the passing run uses XCTest as the sole recording owner.
 
 ## Watching a thread's desktop
 
@@ -51,4 +51,10 @@ The panel header shows the chosen desktop, screen options, expand/collapse, and 
 
 Screen discovery currently exposes account-wide desktops without reliable project-thread ownership, so this change uses explicit per-thread selection. It does not claim to automatically follow every desktop the agent chooses. The existing RemoteViewer/RemoteCanvas transports carry the live desktop pixels and agent cursor activity; this UI does not synthesize playback.
 
-Screen validation: the native Remote package builds and its new desktop-identity test passes (including after the final lifecycle guards). The simulator app/test build passed. The new dock/draft UI journey and sidebar rerun could not start reliably: the simulator service died with Mach error -308 during launch. No live-screen UX recording or real desktop connection is claimed for this change; the earlier recording remains evidence for the sidebar only.
+Screen validation: the native Remote package builds and its desktop-identity test passes. The final integrated simulator app/test build passes. The dock journey now passes menu entry, desktop selection, Watching state, view-only display, expansion/collapse, per-thread panel restoration, and draft preservation. It caught and fixed a SwiftUI accessibility issue where the panel identifier propagated to its controls; the panel now contains distinct accessible buttons.
+
+[Watch the Screen journey](media/thread-screen-ios.mp4), [docked viewer](media/thread-screen-docked.png), [expanded viewer](media/thread-screen-expanded.png). The explicitly labelled local fixture uses real discovery, WebSocket JPEG delivery, and canvas rendering. It does not demonstrate a production remote desktop or an agent executing remote input. XCTest owns and retains these recordings; no parallel simctl recorder is used.
+
+After integration with master, managed type checking and 15 focused project-thread, thread-run, and file-download tests pass. Simulator/process reliability follow-up: [PR #382](https://github.com/gakonst/nanocodex/pull/382).
+
+The full-controls fixture journey also passes through **⋯ → Screen → Screen options → Screen controls**, including sheet expansion, canvas zoom, repeated selection, swipe dismissal, and draft restoration. It was rebuilt after adapting the older direct-button test entry point.

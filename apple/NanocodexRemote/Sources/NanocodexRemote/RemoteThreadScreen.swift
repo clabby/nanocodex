@@ -112,6 +112,7 @@ public struct RemoteThreadScreen: View {
         .buttonStyle(.plain)
         .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 14))
         .clipShape(RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread-screen-panel")
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
