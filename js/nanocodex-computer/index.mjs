@@ -73,6 +73,7 @@ export function createComputerTools({ executable, args = [], environment = {}, d
         if (!session.process) {
           let desktopEnvironment = {};
           if (desktopRuntime) {
+            if (environment.NANOCODEX_COMPUTER_BACKGROUND !== undefined || process.env.NANOCODEX_COMPUTER_BACKGROUND !== undefined) throw new Error("Background CUA cannot be combined with a private X11 desktop");
             const ready = JSON.parse(await readFile(join(desktopRuntime, "ready"), "utf8")
               .catch(() => { throw new Error("This Hand's desktop is unavailable; start its screen before using CUA."); }));
             if (typeof ready.display !== "string" || !ready.display.startsWith(":")) throw new Error("Hand desktop did not publish a local X display");
@@ -137,7 +138,7 @@ function scheduleDeadline(callback, milliseconds) {
 
 class ComputerProcess {
   constructor(executable, args, environment) {
-    const env = Object.fromEntries(["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TEMP", "SystemRoot", "LOCALAPPDATA", "DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG", "SKY_ENABLE_AUDIO"]
+    const env = Object.fromEntries(["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TEMP", "SystemRoot", "LOCALAPPDATA", "DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "NANOCODEX_COMPUTER_BACKGROUND", "NANOCODEX_HYPRLAND_CAPTURE", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG", "SKY_ENABLE_AUDIO"]
       .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
     this.child = spawn(executable, [...args, "--allow-native-control", "serve"], { env: { ...env, ...environment }, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
     this.pending = new Map(); this.sequence = 0; this.lines = new LineBuffer();

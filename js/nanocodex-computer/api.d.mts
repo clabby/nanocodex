@@ -10,6 +10,7 @@ export type ObservationOptions = { emit?: boolean };
 export type StateOptions = ObservationOptions & { disableDiffing?: boolean };
 export type StateAndScreenshot = { state: string; screenshot?: Uint8Array };
 export type PasteOptions = { format?: "text" | "md" | "html" };
+export type CuaDragOptions = { mouseButton?: MouseButton; modifiers?: ("shift" | "ctrl" | "control" | "alt" | "option" | "super" | "meta" | "cmd" | "command")[] };
 export type CuaClickOptions = { mouseButton?: MouseButton; clickCount?: number };
 export type SelectTextOptions = {
   prefix?: string;
@@ -42,7 +43,10 @@ export type AppInfo = {
   useCount?: number;
   isRunning?: boolean;
 };
-export interface App extends Target {}
+export interface App extends Target {
+  /** Native gesture; unsupported backends refuse before input. */
+  drag(from: Vec2, to: Vec2, options?: CuaDragOptions): Promise<void>;
+}
 
 export type BrowserInfo = {
   id: string;
