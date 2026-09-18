@@ -22,12 +22,11 @@ final class InboxModel: ObservableObject {
     // App Intents and windows share the same account and Hand connection.
     static let shared = InboxModel()
     enum Filter: String, CaseIterable { case inbox = "Inbox", running = "Running", all = "All" }
-    @Published var cards: [AgentCard] = [] { didSet { taskCache.removeAll(keepingCapacity: true); scheduleAgentNotifications() } }
+    @Published var cards: [AgentCard] = [] { didSet { invalidateRosterCaches(previous: oldValue); scheduleAgentNotifications() } }
     @Published var deck = InboxDeck()
     @Published var filter: Filter = .all { didSet { reconcile() } }
     @Published var drafts: [String: String] = [:]
-    @Published var rows: [TranscriptRow] = [] { didSet { mediaProjection.update(rows); taskRowsRevision = UUID(); taskCache.removeAll(keepingCapacity: true) } }
-    private var taskRowsRevision = UUID()
+    @Published var rows: [TranscriptRow] = [] { didSet { mediaProjection.update(rows); invalidateTaskCache(observedAgentID) } }
     private var mediaProjection = InboxMediaProjection()
     var generatedOutputsByRow: [String: [ChatGeneratedOutput]] { mediaProjection.outputs }
     @Published var threadLoading = false
@@ -50,7 +49,7 @@ final class InboxModel: ObservableObject {
     }
     private var tabHistories: [String: TabHistory] = [:]
     private var recentTabs: [String] = []
-    @Published private var overviewTranscripts: [String: [TranscriptRow]] = [:] { didSet { taskRowsRevision = UUID(); taskCache.removeAll(keepingCapacity: true) } }
+    @Published private var overviewTranscripts: [String: [TranscriptRow]] = [:]
     private var overviewVisible = Set<String>()
     private var overviewTasks: [String: Task<Void, Never>] = [:]
     private var overviewTokens: [String: UUID] = [:]
@@ -159,7 +158,7 @@ final class InboxModel: ObservableObject {
     private var streamReceivedFrame = false
     private var generation = UUID()
     private var observation = UUID() { didSet { cancelOlderHistoryPrefetch() } }
-    private var events: [AgentEvent] = [] { didSet { eventsRevision = UUID(); taskCache.removeAll(keepingCapacity: true) } }
+    private var events: [AgentEvent] = [] { didSet { eventsRevision = UUID(); invalidateTaskCache(observedAgentID) } }
     private var eventsRevision = UUID()
     private var projectedFirstCursor: Cursor?
     private let preferences = InboxPreferencesWriter()
@@ -214,30 +213,36 @@ final class InboxModel: ObservableObject {
     }
 
     private struct TaskCache {
-        var events: UUID
-        var rows: UUID
         var turns: [String]
         var pending: [PendingMessage]
         var result: [ProjectTask]
     }
     private var taskCache: [String: TaskCache] = [:]
     @Published private var threadScreens: [String: RemoteScreenSelection] = [:]
-    @Published private var savedProjects: [InboxProject] = []
-    var projects: [InboxProject] {
-        let available = Set(cards.map(\.id))
-        func members(_ root: String) -> [String] {
-            [root] + cards.filter { $0.projectRootID == root && $0.id != root }.map(\.id)
-        }
-        let saved = savedProjects.filter { available.contains($0.primaryAgentID) }.map { project in
-            InboxProject(id: project.id, name: project.name, primaryAgentID: project.primaryAgentID,
-                         agentIDs: members(project.primaryAgentID))
-        }
-        let assigned = Set(saved.flatMap(\.agentIDs))
-        return saved + cards.filter { !assigned.contains($0.id)
-            && ($0.projectRootID == nil || !available.contains($0.projectRootID!) || $0.projectRootID == $0.id)
-        }.sorted(by: AgentCard.mostRecentFirst).map {
-            InboxProject(id: "project-" + $0.id, name: $0.title, primaryAgentID: $0.id, agentIDs: members($0.id))
-        }
+    private var cachedProjectIndex: InboxProjectIndex?
+    private var projectIndex: InboxProjectIndex {
+        if let cachedProjectIndex { return cachedProjectIndex }
+        let index = InboxProjectIndex(cards: cards, savedProjects: savedProjects)
+        cachedProjectIndex = index
+        return index
+    }
+    private var projectTaskSummaryCache = ProjectTaskSummaryCache()
+    @Published private var savedProjects: [InboxProject] = [] { didSet { cachedProjectIndex = nil } }
+    func card(agentID: String) -> AgentCard? { projectIndex.cardsByID[agentID] }
+    func childAgents(parentAgentID: String, originTurnID: String) -> [AgentCard] {
+        projectIndex.children(parentAgentID: parentAgentID, originTurnID: originTurnID)
+    }
+    var projects: [InboxProject] { projectIndex.projects }
+    private func invalidateTaskCache(_ id: String?) {
+        guard let id else { return }
+        taskCache[id] = nil; projectTaskSummaryCache.invalidate(agentID: id)
+    }
+    private func invalidateRosterCaches(previous: [AgentCard]) {
+        cachedProjectIndex = nil
+        let old = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        let current = Set(cards.map(\.id))
+        for card in cards where old[card.id] != card { invalidateTaskCache(card.id) }
+        for id in old.keys where !current.contains(id) { invalidateTaskCache(id) }
     }
     var focusedProject: InboxProject? {
         guard let id = focused?.id else { return nil }
@@ -250,9 +255,15 @@ final class InboxModel: ObservableObject {
     var projectTasks: [ProjectTask] {
         projectAgents.compactMap { card in
             guard card.parentAgentID != nil, card.projectTurnID != nil else { return nil }
-            let history = tasks(agentID: card.id)
-            let active = card.activeTurns.first.flatMap { turn in history.first { $0.turnID == turn } }
-            guard var task = active ?? history.first else { return nil }
+            let pendingTasks = pending.filter { $0.agentID == card.id }
+            let summary = projectTaskSummaryCache.value(agentID: card.id, activeTurns: card.activeTurns, pending: pendingTasks) {
+                let history = card.id == focused?.id ? events : overviewEvents[card.id] ?? tabHistories[card.id]?.events ?? []
+                let transcript = card.id == focused?.id ? rows : (isDemo ? overviewRows(for: card.id) : overviewTranscripts[card.id] ?? tabHistories[card.id]?.rows ?? card.previewRows)
+                return ProjectTask.summary(agentID: card.id, rows: transcript, events: history,
+                                           activeTurns: card.activeTurns, pending: pendingTasks, isRunning: card.isRunning)
+                    ?? ProjectTask(agentID: card.id, turnID: card.projectTurnID!, title: card.title, status: "History", rows: [])
+            }
+            var task = summary
             task.title = card.title
             if card.isRunning { task.status = "Working" }
             return task
@@ -262,8 +273,7 @@ final class InboxModel: ObservableObject {
         let card = cards.first { $0.id == agentID }
         let active = card?.activeTurns ?? []
         let pendingTasks = pending.filter { $0.agentID == agentID }
-        if let cached = taskCache[agentID], cached.events == eventsRevision,
-           cached.rows == taskRowsRevision, cached.turns == active, cached.pending == pendingTasks {
+        if let cached = taskCache[agentID], cached.turns == active, cached.pending == pendingTasks {
             return cached.result
         }
         let history = agentID == focused?.id ? events : overviewEvents[agentID] ?? tabHistories[agentID]?.events ?? []
@@ -280,8 +290,9 @@ final class InboxModel: ObservableObject {
         if let turn = card?.projectTurnID, !result.contains(where: { $0.turnID == turn }) {
             result.append(ProjectTask(agentID: agentID, turnID: turn, title: card?.title ?? "Task", status: "History", rows: []))
         }
-        if taskCache.count > 16 { taskCache.removeAll(keepingCapacity: true) }
-        taskCache[agentID] = TaskCache(events: eventsRevision, rows: taskRowsRevision, turns: active, pending: pendingTasks, result: result)
+        // Detail rows are bounded independently of lightweight project summaries.
+        if taskCache.count >= 16, let evicted = taskCache.keys.first { taskCache[evicted] = nil }
+        taskCache[agentID] = TaskCache(turns: active, pending: pendingTasks, result: result)
         return result
     }
     func selectProject(_ id: String) {
@@ -317,7 +328,7 @@ final class InboxModel: ObservableObject {
     private func restoreProjects() {
         threadScreens = UserDefaults.standard.data(forKey: "inbox.threadScreens." + scope)
             .flatMap { try? JSONDecoder().decode([String: RemoteScreenSelection].self, from: $0) } ?? [:]
-        taskCache.removeAll()
+        taskCache.removeAll(); projectTaskSummaryCache.removeAll()
         savedProjects = UserDefaults.standard.data(forKey: "inbox.projects." + scope)
             .flatMap { try? JSONDecoder().decode([InboxProject].self, from: $0) } ?? []
     }
@@ -918,7 +929,7 @@ final class InboxModel: ObservableObject {
     private func reset() {
         agentNotificationUpdate?.cancel(); agentNotificationUpdate = nil
         stopOverview()
-        overviewTranscripts = [:]; tabHistories = [:]; recentTabs = []; tabOrder = []
+        overviewTranscripts = [:]; taskCache.removeAll(); projectTaskSummaryCache.removeAll(); tabHistories = [:]; recentTabs = []; tabOrder = []
         openedConversations = []; closedConversationIDs = []; olderConversationLimit = 0
         handTasks.endAllObservations()
         schedulesTask?.cancel(); schedulesTask = nil; schedulesFailures = [:]
@@ -1213,7 +1224,7 @@ final class InboxModel: ObservableObject {
         if voice.conversationID == id { voice.stop() }
         cards.removeAll { $0.id == id }
         setOverviewVisible(id, visible: false)
-        overviewTranscripts[id] = nil; tabHistories[id] = nil; recentTabs.removeAll { $0 == id }
+        overviewTranscripts[id] = nil; invalidateTaskCache(id); tabHistories[id] = nil; recentTabs.removeAll { $0 == id }
         if pinnedThreadID == id { pinnedThreadID = nil }
         reconcile()
     }
@@ -1420,16 +1431,17 @@ final class InboxModel: ObservableObject {
         let bytes = recentTabs.map { tabHistories[$0]?.retainedBytes ?? 0 }
         let removed = TranscriptRetention.cachedPrefixCount(byteCounts: bytes,
             byteLimit: 24 * 1024 * 1024, countLimit: 8)
-        for id in recentTabs.prefix(removed) { tabHistories[id] = nil }
+        for id in recentTabs.prefix(removed) { tabHistories[id] = nil; invalidateTaskCache(id) }
         recentTabs.removeFirst(removed)
     }
 
     func releaseInactiveHistory() {
         tabHistories = [:]; recentTabs = []
+        taskCache.removeAll(); projectTaskSummaryCache.removeAll()
         // Keep the visible conversation and its cursor. Evicted tabs reopen
         // from durable history; clearing a cache never clears service history.
         for id in Array(overviewTranscripts.keys) where !overviewVisible.contains(id) {
-            overviewTranscripts[id] = nil
+            overviewTranscripts[id] = nil; invalidateTaskCache(id)
         }
     }
 
@@ -1574,10 +1586,10 @@ final class InboxModel: ObservableObject {
     }
     func setOverviewVisible(_ id: String, visible: Bool) {
         if visible { overviewVisible.insert(id); startOverview(id) }
-        else { overviewVisible.remove(id); cancelOverview(id); overviewTranscripts[id] = nil; resumeOverview() }
+        else { overviewVisible.remove(id); cancelOverview(id); overviewTranscripts[id] = nil; invalidateTaskCache(id); resumeOverview() }
     }
     func stopOverview() {
-        overviewVisible.removeAll(); suspendOverview(); overviewTranscripts = [:]
+        overviewVisible.removeAll(); suspendOverview(); overviewTranscripts = [:]; taskCache.removeAll(); projectTaskSummaryCache.removeAll()
     }
     private func suspendOverview() {
         for id in Array(overviewTasks.keys) { cancelOverview(id) }
@@ -1600,7 +1612,7 @@ final class InboxModel: ObservableObject {
         overviewTasks.removeValue(forKey: id)?.cancel(); overviewTokens[id] = nil
         overviewProjections.removeValue(forKey: id)?.cancel()
         overviewProjectors[id] = nil
-        overviewEvents[id] = nil; overviewBytes[id] = nil; overviewByteCounts[id] = nil
+        overviewEvents[id] = nil; invalidateTaskCache(id); overviewBytes[id] = nil; overviewByteCounts[id] = nil
     }
     private func resumeOverview() {
         for id in overviewVisible { startOverview(id) }
@@ -1628,7 +1640,7 @@ final class InboxModel: ObservableObject {
                         guard self.generation == epoch, self.overviewTokens[id] == token, !Task.isCancelled else { return }
                         let bytes = try await TranscriptPreparation.byteCounts(page.events)
                         guard self.generation == epoch, self.overviewTokens[id] == token, !Task.isCancelled else { return }
-                        self.overviewEvents[id] = page.events
+                        self.overviewEvents[id] = page.events; self.invalidateTaskCache(id)
                         self.overviewBytes[id] = bytes
                         self.overviewByteCounts[id] = self.overviewBytes[id]?.reduce(0, +) ?? 0
                         self.trimOverview(id)
@@ -1658,7 +1670,7 @@ final class InboxModel: ObservableObject {
     private func receiveOverview(_ frame: SSEFrame, id: String, epoch: UUID, token: UUID) {
         guard generation == epoch, overviewTokens[id] == token,
               let event = frame.event, event.cursor > (overviewEvents[id]?.last?.cursor ?? .zero) else { return }
-        overviewEvents[id, default: []].append(event)
+        overviewEvents[id, default: []].append(event); invalidateTaskCache(id)
         overviewBytes[id, default: []].append(frame.payloadBytes)
         overviewByteCounts[id, default: 0] += frame.payloadBytes
         trimOverview(id)
@@ -1675,7 +1687,7 @@ final class InboxModel: ObservableObject {
         let removed = TranscriptRetention.removablePrefixCount(byteCounts: overviewBytes[id] ?? [],
             retainedBytes: overviewByteCounts[id] ?? 0, byteLimit: 8 * 1024 * 1024)
         overviewByteCounts[id, default: 0] -= overviewBytes[id]?.prefix(removed).reduce(0, +) ?? 0
-        overviewEvents[id]?.removeFirst(removed)
+        overviewEvents[id]?.removeFirst(removed); invalidateTaskCache(id)
         overviewBytes[id]?.removeFirst(removed)
     }
     private func projectOverview(_ id: String, epoch: UUID, token: UUID) async {
@@ -1684,7 +1696,7 @@ final class InboxModel: ObservableObject {
             let history = overviewEvents[id] ?? []
             guard let projected = try? await projector.rows(history),
                   generation == epoch, overviewTokens[id] == token, !Task.isCancelled else { return }
-            if overviewTranscripts[id] != projected { overviewTranscripts[id] = projected }
+            if overviewTranscripts[id] != projected { overviewTranscripts[id] = projected; invalidateTaskCache(id) }
             if let index = cards.firstIndex(where: { $0.id == id }) {
                 var card = cards[index]
                 card.apply(events: history, transcriptRows: projected); card.error = nil

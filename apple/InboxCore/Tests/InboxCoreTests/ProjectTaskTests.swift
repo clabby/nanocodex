@@ -49,4 +49,140 @@ final class ProjectTaskTests: XCTestCase {
         XCTAssertEqual(project.agentIDs, ["server", "other"])
         XCTAssertEqual(try JSONDecoder().decode(InboxProject.self, from: JSONEncoder().encode(project)), project)
     }
+    func testProjectIndexPreservesMembershipOrphansSavedNamesAndLinkOrder() {
+        let root = AgentCard(id: "root", title: "Root", updatedAt: 1)
+        var child = AgentCard(id: "child", title: "Child", updatedAt: 3)
+        child.projectRootID = "root"; child.parentAgentID = "root"; child.originTurnID = "request"
+        var nested = AgentCard(id: "nested", title: "Nested", updatedAt: 4)
+        nested.projectRootID = "root"; nested.parentAgentID = "child"; nested.originTurnID = "request"
+        var orphan = AgentCard(id: "orphan", title: "Orphan", updatedAt: 5)
+        orphan.projectRootID = "missing"
+        let cards = [root, child, nested, orphan]
+        let index = InboxProjectIndex(cards: cards, savedProjects: [
+            InboxProject(id: "saved", name: "Renamed", primaryAgentID: "root"),
+            InboxProject(id: "deleted", name: "Deleted", primaryAgentID: "gone")
+        ])
+        XCTAssertEqual(index.projects.map(\.name), ["Renamed", "Orphan"])
+        XCTAssertEqual(index.projects.first?.agentIDs, ["root", "child", "nested"])
+        XCTAssertEqual(index.children(parentAgentID: "root", originTurnID: "request").map(\.id), ["child"])
+        XCTAssertEqual(index.children(parentAgentID: "child", originTurnID: "request").map(\.id), ["nested"])
+        XCTAssertTrue(index.children(parentAgentID: "root", originTurnID: "other").isEmpty)
+        XCTAssertEqual(index.cardsByID["nested"], nested)
+    }
+
+    func testLargeProjectIndexKeepsEveryChildAndRebuildsChangedLinks() {
+        let root = AgentCard(id: "root", title: "Root")
+        var children = (0..<40).map { index -> AgentCard in
+            var card = AgentCard(id: "child-\(index)", title: "Child")
+            card.projectRootID = "root"; card.parentAgentID = "root"; card.originTurnID = "request"
+            return card
+        }
+        let first = InboxProjectIndex(cards: [root] + children, savedProjects: [])
+        XCTAssertEqual(first.projects.first?.agentIDs.count, 41)
+        XCTAssertEqual(first.children(parentAgentID: "root", originTurnID: "request").count, 40)
+        children[0].originTurnID = "new-request"
+        let updated = InboxProjectIndex(cards: [root] + children, savedProjects: [])
+        XCTAssertEqual(updated.children(parentAgentID: "root", originTurnID: "request").count, 39)
+        XCTAssertEqual(updated.children(parentAgentID: "root", originTurnID: "new-request").map(\.id), ["child-0"])
+        XCTAssertEqual(first.children(parentAgentID: "root", originTurnID: "request").count, 40)
+    }
+
+    func testSummaryMatchesFullProjectionWithRepeatedRowsAndTerminalPrecedence() throws {
+        var first = TranscriptRow(id: "first", role: "You", text: "First")
+        first.turnID = "one"
+        var second = TranscriptRow(id: "second", role: "Agent", text: "Done")
+        second.turnID = "two"; second.phase = "final"
+        var repeated = TranscriptRow(id: "repeat", role: "Agent", text: "Earlier turn")
+        repeated.turnID = "one"
+        let rows = [first, second, repeated]
+        let events = try ["turn_completed", "turn_failed", "turn_cancelled"].enumerated().map { index, type in
+            try AgentEvent(.object(["type": .string(type), "turn_id": .string("one")]), cursor: "\(index + 1)")
+        }
+        for active in [[], ["one"], ["three", "four"], ["", "two"]] {
+            for history in [[], events] {
+                let full = ProjectTask.project(agentID: "child", rows: rows, events: history, activeTurns: active, pending: [])
+                let expected = active.first.flatMap { id in full.first { $0.turnID == id } } ?? full.first
+                let summary = ProjectTask.summary(agentID: "child", rows: rows, events: history, activeTurns: active, pending: [])
+                XCTAssertEqual(summary?.id, expected?.id)
+                XCTAssertEqual(summary?.status, expected?.status)
+                XCTAssertEqual(summary?.isLive, expected?.isLive)
+                XCTAssertEqual(summary?.rows.count, 0)
+            }
+        }
+        XCTAssertNil(ProjectTask.summary(agentID: "child", rows: [], events: [], activeTurns: [], pending: []))
+    }
+
+    func testSummaryMatchesPendingOrderFailureAndOtherAgentIsolation() {
+        var row = TranscriptRow(id: "old", role: "You", text: "Loaded")
+        row.turnID = "loaded"
+        let queued = PendingMessage(agentID: "child", input: "Queued", predecessor: "", id: "queued")
+        var failed = PendingMessage(agentID: "child", input: "Retry", predecessor: "", id: "failed")
+        failed.phase = .failed
+        let other = PendingMessage(agentID: "other", input: "Unrelated", predecessor: "", id: "other")
+        let duplicate = PendingMessage(agentID: "child", input: "Loaded", predecessor: "", id: "loaded")
+        for pending in [[queued], [queued, failed, other], [queued, duplicate], [other]] {
+            for active in [[], ["queued"]] {
+                let full = ProjectTask.project(agentID: "child", rows: [row], events: [], activeTurns: active, pending: pending)
+                let expected = active.first.flatMap { id in full.first { $0.turnID == id } } ?? full.first
+                let summary = ProjectTask.summary(agentID: "child", rows: [row], events: [], activeTurns: active, pending: pending)
+                XCTAssertEqual(summary?.id, expected?.id)
+                XCTAssertEqual(summary?.status, expected?.status)
+                XCTAssertTrue(summary?.rows.isEmpty == true)
+            }
+        }
+    }
+
+    func testFortyChildSummaryCacheReusesDraftReadsAndInvalidatesOnlyChangedChild() {
+        var cache = ProjectTaskSummaryCache()
+        var computations: [String: Int] = [:]
+        let rows = (0..<500).map { index -> TranscriptRow in
+            var row = TranscriptRow(id: "row-\(index)", role: "You", text: "Loaded history")
+            row.turnID = "turn-\(index)"
+            return row
+        }
+        func read(_ id: String, active: [String] = [], pending: [PendingMessage] = []) -> ProjectTask {
+            cache.value(agentID: id, activeTurns: active, pending: pending) {
+                computations[id, default: 0] += 1
+                return ProjectTask.summary(agentID: id, rows: rows, events: [], activeTurns: active, pending: pending)!
+            }
+        }
+        for _ in 0..<10 {
+            for index in 0..<40 {
+                let summary = read("child-\(index)")
+                XCTAssertEqual(summary.turnID, "turn-499")
+                XCTAssertTrue(summary.rows.isEmpty)
+            }
+        }
+        XCTAssertEqual(computations.count, 40)
+        XCTAssertTrue(computations.values.allSatisfy { $0 == 1 }, "Draft-like reads must reuse every child, including children beyond the old 16-entry limit")
+        cache.invalidate(agentID: "child-17")
+        for index in 0..<40 { _ = read("child-\(index)") }
+        XCTAssertEqual(computations["child-17"], 2)
+        XCTAssertEqual(computations.values.reduce(0, +), 41, "One child's history revision must not recompute other children")
+        XCTAssertEqual(read("child-17", active: ["new-turn"]).status, "Working")
+        XCTAssertEqual(computations["child-17"], 3)
+        let pending = [PendingMessage(agentID: "child-18", input: "Queued", predecessor: "", id: "pending")]
+        XCTAssertEqual(read("child-18", pending: pending).status, "Sending")
+        XCTAssertEqual(computations["child-18"], 2)
+        cache.removeAll()
+        _ = read("child-0")
+        XCTAssertEqual(computations["child-0"], 2, "Account/history reset must discard summaries")
+    }
+
+    func testRunningSummaryKeepsProjectStatusOverrideAndActiveIdentity() throws {
+        var old = TranscriptRow(id: "old", role: "Agent", text: "Prior history")
+        old.turnID = "old"; old.phase = "final"
+        let completed = try AgentEvent(.object(["type": .string("turn_completed"), "turn_id": .string("active")]), cursor: "1")
+        let summary = ProjectTask.summary(agentID: "child", rows: [old], events: [completed],
+                                          activeTurns: ["active", "queued"], pending: [], isRunning: true)
+        XCTAssertEqual(summary?.turnID, "active")
+        XCTAssertEqual(summary?.status, "Working", "Match projectTasks' existing running-card override even with a terminal event")
+        XCTAssertTrue(summary?.rows.isEmpty == true)
+        let historical = ProjectTask.summary(agentID: "child", rows: [old], events: [completed],
+                                             activeTurns: ["active"], pending: [])
+        XCTAssertEqual(historical?.status, "Completed", "Non-running summaries must retain terminal precedence")
+        let noActive = ProjectTask.summary(agentID: "child", rows: [old], events: [], activeTurns: [], pending: [], isRunning: true)
+        XCTAssertEqual(noActive?.turnID, "old", "A running card without an active ID still uses history selection")
+    }
+
 }

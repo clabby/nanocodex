@@ -281,8 +281,9 @@ struct InboxView: View {
                     Button { composerFocused = false; showTasks = true } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "circle.dotted")
-                            Text("\(model.projectTasks.count) tasks")
-                            let live = model.projectTasks.filter(\.isLive).count
+                            let tasks = model.projectTasks
+                            Text("\(tasks.count) tasks")
+                            let live = tasks.filter(\.isLive).count
                             if live > 0 { Text("\(live) live").foregroundStyle(Ink.muted) }
                         }
                         .font(.caption.weight(.medium))
@@ -1431,14 +1432,14 @@ private struct ConversationMessageView: View {
             ConversationMessageContent(row: row, model: model, agentID: agentID, steering: steering, canWithdraw: canWithdraw,
                                        delivery: delivery, canRetry: model.connected && !model.busy.contains(agentID)).equatable()
             if showsTaskLink, row.role == "You", let turn = row.turnID {
-                ForEach(model.cards.filter { $0.parentAgentID == agentID && $0.originTurnID == turn }) { child in
+                ForEach(model.childAgents(parentAgentID: agentID, originTurnID: turn)) { child in
                     Button { taskAgent = child; showTask = true } label: {
                         Label(child.title, systemImage: child.isRunning ? "circle.dotted" : "arrow.turn.down.right")
                             .font(.caption).lineLimit(2).padding(.horizontal, 12).frame(minHeight: 44)
                             .background(Ink.surface, in: Capsule())
                     }.buttonStyle(.plain).accessibilityIdentifier("message-thread:" + child.id)
                 }
-                if model.cards.first(where: { $0.id == agentID })?.parentAgentID != nil {
+                if model.card(agentID: agentID)?.parentAgentID != nil {
                 Button { taskAgent = nil; showTask = true } label: {
                     Label("View task", systemImage: "arrow.turn.down.right")
                         .font(.caption).foregroundStyle(.secondary).frame(minHeight: 44)
@@ -1770,7 +1771,12 @@ private struct ConversationContentView: View {
                     }
 
                     if let agentID = model.focused?.id {
-                        NanocodexVoiceTranscript(session: model.voice, conversationID: agentID, durableRows: model.rows) {
+                        NanocodexVoiceTranscript(session: model.voice, conversationID: agentID, durableRows: revision.rows, rowContent: { transcript in
+                            let row = TranscriptRow(id: "voice-" + transcript.id.uuidString,
+                                                    role: transcript.speaker == "user" ? "You" : "Agent", text: transcript.text)
+                            return AnyView(ConversationMessageView(row: row, model: model, agentID: agentID, showsTaskLink: false)
+                                .accessibilityIdentifier("voice-transcript-" + transcript.speaker))
+                        }) {
                             if followsLatest { scroll.scrollTo("latest", anchor: .bottom) }
                         }
                     }
