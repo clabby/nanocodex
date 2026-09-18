@@ -15,6 +15,8 @@ enum RemoteHostIdentity {
 
 public struct RemoteDashboard: View {
     private let service: RemoteService
+    private var initialSelection: RemoteScreenSelection? = nil
+    @State private var restoredSelection = false
     private let onClose: (() -> Void)?
     private var embedded: Bool { onClose != nil }
     @StateObject private var viewer = RemoteViewer()
@@ -45,8 +47,8 @@ public struct RemoteDashboard: View {
     // default changed the machine identity on every new dashboard/relaunch.
     private let machineID = RemoteHostIdentity.load()
 #endif
-    public init(service: RemoteService, onClose: (() -> Void)? = nil) {
-        self.service = service; self.onClose = onClose
+    public init(service: RemoteService, initialSelection: RemoteScreenSelection? = nil, onClose: (() -> Void)? = nil) {
+        self.service = service; self.onClose = onClose; self.initialSelection = initialSelection
 #if os(macOS)
         _host = StateObject(wrappedValue: RemoteMacHost()); _phoneHost = StateObject(wrappedValue: RemoteMacHost()); ownsHosts = true
 #endif
@@ -382,7 +384,7 @@ public struct RemoteDashboard: View {
         }
     }
     private func screenRow(_ hand: RemoteHand) -> some View {
-        Button { Task { await viewer.connect(service: service, hand: hand) } } label: {
+        Button { restoredSelection = true; Task { await viewer.connect(service: service, hand: hand) } } label: {
             HStack(spacing: 12) {
                 Image(systemName: hand.kind == .phone ? "iphone" : "display")
                     .frame(width: 28)
@@ -407,7 +409,15 @@ public struct RemoteDashboard: View {
     }
 
     private func refresh() async {
-        do { let values = try await service.list(); guard !Task.isCancelled else { return }; hands = values; discoveryError = nil; discoveryLoaded = true }
+        do {
+            let values = try await service.list(); guard !Task.isCancelled else { return }
+            hands = values; discoveryError = nil; discoveryLoaded = true
+            if !restoredSelection, let initialSelection,
+               let hand = values.first(where: initialSelection.matches) {
+                restoredSelection = true
+                await viewer.connect(service: service, hand: hand)
+            }
+        }
         catch { if !Task.isCancelled { discoveryError = error.localizedDescription; discoveryLoaded = true } }
     }
     private func key(_ code: UInt16) { for down in [true, false] { viewer.input(kind: .key, down: down, key: code) } }

@@ -1,3 +1,4 @@
+import { initializeProjectThreads, projectThreadRegistry } from "./project-threads";
 import { recordHandTiming } from "./hand-timing";
 import { configurationCatalog } from "./agent-configuration";
 import { performanceState } from "./performance";
@@ -274,6 +275,11 @@ export type AgentSummary = Readonly<{
   updatedAt: number;
   turnCount: number;
   mayHaveScheduledJobs: boolean;
+  projectRootId?: string;
+  parentAgentId?: string;
+  originTurnId?: string;
+  projectTitle?: string;
+  projectTurnId?: string;
 }>;
 
 type AgentRegistryRow = Readonly<{
@@ -284,6 +290,7 @@ type AgentRegistryRow = Readonly<{
   turn_count: number;
   deleted_at: number | null;
   cron_candidate: number | null;
+  project_root_id?: string; parent_agent_id?: string; origin_turn_id?: string; project_title?: string; project_turn_id?: string;
 }>;
 
 export async function routeAccountRequest(
@@ -1734,6 +1741,7 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
       CREATE INDEX IF NOT EXISTS agent_registry_active_created
         ON agent_registry (created_at, id) WHERE deleted_at IS NULL;
     `);
+    initializeProjectThreads(ctx.storage);
     // Existing agents stay candidates until their first schedule read. New
     // registrations supply their actual presence; omitted legacy values stay unknown.
     const columns = new Set(ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(agent_registry)").toArray().map(({ name }) => name));
@@ -1746,6 +1754,9 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
     const url = new URL(request.url);
     if (/^\/(agent-definitions|environment-templates)(?:\/|$)/.test(url.pathname)) {
       return configurationCatalog(request, this.ctx.storage);
+    }
+    if (/^\/project-threads\/[0-9a-f-]{36}$/.test(url.pathname)) {
+      return projectThreadRegistry(request, this.ctx.storage);
     }
     if (url.pathname === "/authorization" && request.method === "GET") {
       const account = await this.ctx.storage.get<UserRecord>("account");
@@ -1838,10 +1849,11 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
     if (url.pathname === "/agents") {
       if (request.method === "GET") {
         return json(this.ctx.storage.sql.exec<AgentRegistryRow>(
-          `SELECT id, title, created_at, updated_at, turn_count, deleted_at, cron_candidate
-           FROM agent_registry
-           WHERE deleted_at IS NULL
-           ORDER BY created_at, id`,
+          `SELECT a.id, a.title, a.created_at, a.updated_at, a.turn_count, a.deleted_at, a.cron_candidate,
+                  p.project_root_id, p.parent_agent_id, p.origin_turn_id, p.title AS project_title, p.turn_id AS project_turn_id
+           FROM agent_registry a LEFT JOIN project_threads p ON p.agent_id=a.id
+           WHERE a.deleted_at IS NULL
+           ORDER BY a.created_at, a.id`,
         ).toArray().map(agentSummary));
       }
       if (request.method === "POST") {
@@ -1939,6 +1951,8 @@ function agentSummary(row: AgentRegistryRow): AgentSummary {
     updatedAt: row.updated_at,
     turnCount: row.turn_count,
     mayHaveScheduledJobs: row.cron_candidate !== 0,
+    ...(row.project_root_id ? { projectRootId: row.project_root_id, parentAgentId: row.parent_agent_id,
+      originTurnId: row.origin_turn_id, projectTitle: row.project_title, projectTurnId: row.project_turn_id } : {}),
   };
 }
 
