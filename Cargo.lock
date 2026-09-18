@@ -6184,6 +6184,7 @@ dependencies = [
  "reqwest",
  "rmcp",
  "rquickjs",
+ "rustix 1.1.4",
  "rustls",
  "schemars 0.8.22",
  "serde",
