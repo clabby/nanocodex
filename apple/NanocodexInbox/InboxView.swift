@@ -38,7 +38,6 @@ private enum Ink {
 struct InboxView: View {
     @ObservedObject var model: InboxModel
     @State private var showConversations = false
-    @State private var expandedProjects: Set<String> = []
     @State private var drawerTranslation: CGFloat = 0
     @State private var readingPositions = ConversationReadingPositions()
     @State private var showScheduledJobs = false
@@ -49,10 +48,6 @@ struct InboxView: View {
     @State private var screenExpanded = false
     @State private var controlsScreen: RemoteScreenSelection?
     @State private var screenViewerRevision = UUID()
-    @State private var showTasks = false
-    @State private var showProjectName = false
-    @State private var projectName = ""
-    @State private var renamingProject: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var composerFocused = false
 
@@ -84,20 +79,6 @@ struct InboxView: View {
         }
         .foregroundStyle(Ink.text)
         .tint(Ink.accent)
-        .sheet(isPresented: $showTasks) {
-            ProjectActivitySheet(model: model)
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-                .presentationCornerRadius(28)
-        }
-        .alert(renamingProject == nil ? "New project" : "Rename project", isPresented: $showProjectName) {
-            TextField("Project name", text: $projectName)
-            Button("Cancel", role: .cancel) {}
-            Button("Save") {
-                if let id = renamingProject { model.renameProject(id, name: projectName) }
-                else { model.createProject(name: projectName); setConversationsVisible(false) }
-            }.disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        }
         .sheet(isPresented: $showSettings) {
             NavigationStack {
                 settings
@@ -163,10 +144,10 @@ struct InboxView: View {
             let reveal = showConversations ? width + drawerTranslation : drawerTranslation
             ZStack(alignment: .leading) {
                 if showConversations || drawerTranslation > 0 {
-                    ConversationDrawer(model: model, expandedProjects: $expandedProjects, select: { id in
-                        model.select(id)
+                    ConversationDrawer(model: model, select: { id in
+                        selectConversation(id)
                         setConversationsVisible(false)
-                    }, close: { setConversationsVisible(false) }, create: beginProject,
+                    }, close: { setConversationsVisible(false) }, create: createAgent,
                     settings: { showSettings = true })
                     .frame(width: width, height: geometry.size.height)
                     // Slide the conversation above a stationary list. Moving
@@ -278,19 +259,6 @@ struct InboxView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 if model.focused != nil {
-                    Button { composerFocused = false; showTasks = true } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "circle.dotted")
-                            let tasks = model.projectTasks
-                            Text("\(tasks.count) tasks")
-                            let live = tasks.filter(\.isLive).count
-                            if live > 0 { Text("\(live) live").foregroundStyle(Ink.muted) }
-                        }
-                        .font(.caption.weight(.medium))
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(Ink.surface, in: Capsule())
-                        .frame(minHeight: 44)
-                    }.buttonStyle(.plain).accessibilityIdentifier("project-tasks")
                     AgentComposerView(model: model, focused: $composerFocused, onVoiceChat: {
                         composerFocused = false
                     }).frame(maxWidth: 620)
@@ -318,13 +286,9 @@ struct InboxView: View {
                         if card?.isRunning == true {
                             Circle().fill(Ink.running).frame(width: 6, height: 6).accessibilityHidden(true)
                         }
-                        Text(model.focusedProject?.name ?? card?.title ?? "New project")
+                        Text(card?.title ?? "New conversation")
                             .font(.subheadline.weight(.semibold)).lineLimit(1)
                     }
-                    Text(card?.id == model.focusedProject?.primaryAgentID
-                         ? "Project · \(model.projectTasks.filter(\.isLive).count) active"
-                         : "Agent · " + (card?.title ?? ""))
-                        .font(.caption2).foregroundStyle(Ink.muted)
                 }
                 .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .contentShape(Rectangle())
@@ -336,7 +300,7 @@ struct InboxView: View {
             HStack(spacing: 0) {
                 Button(action: createAgent) {
                     Image(systemName: "square.and.pencil").frame(width: 44, height: 44)
-                }.accessibilityLabel("New project").accessibilityIdentifier("new-conversation")
+                }.accessibilityLabel("New conversation").accessibilityIdentifier("new-conversation")
                     .keyboardShortcut("n", modifiers: .command)
                 appMenu
             }.modifier(InboxHeaderGlass())
@@ -348,14 +312,6 @@ struct InboxView: View {
 
     private var appMenu: some View {
         Menu {
-            Button {
-                renamingProject = model.focusedProject?.id
-                projectName = model.focusedProject?.name ?? ""
-                showProjectName = true
-            } label: { Label("Rename project", systemImage: "pencil") }
-            Button { composerFocused = false; showTasks = true } label: {
-                Label("Tasks and agents", systemImage: "checklist")
-            }
             Button { composerFocused = false; model.back() } label: {
                 Label("Back", systemImage: "chevron.left")
             }.disabled(!model.canGoBack).accessibilityIdentifier("conversation-back")
@@ -386,9 +342,6 @@ struct InboxView: View {
         }.accessibilityLabel("App menu").accessibilityIdentifier("app-menu")
     }
 
-    private func beginProject() {
-        composerFocused = false; renamingProject = nil; projectName = ""; showProjectName = true
-    }
     private func selectConversation(_ id: String) {
         composerFocused = false
         model.select(id)
@@ -413,9 +366,9 @@ struct InboxView: View {
     private var emptyState: some View {
         VStack(spacing: 18) {
             Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 46, weight: .ultraLight)).foregroundStyle(Ink.accent)
-            Text("No projects yet").font(.title2.weight(.medium))
-            Text("Create a project and start with a message.").font(.subheadline).foregroundStyle(Ink.muted).multilineTextAlignment(.center)
-            Button("New project") { beginProject() }.buttonStyle(.borderedProminent).foregroundStyle(Ink.background)
+            Text("No conversations").font(.title2.weight(.medium))
+            Text("Create a conversation and start with a message.").font(.subheadline).foregroundStyle(Ink.muted).multilineTextAlignment(.center)
+            Button("New conversation") { createAgent() }.buttonStyle(.borderedProminent).foregroundStyle(Ink.background)
             Button("Context from other apps") { model.showContext = true }
         }.padding(24).accessibilityElement(children: .contain).accessibilityIdentifier("inbox-empty")
     }
@@ -460,8 +413,8 @@ struct InboxView: View {
                 }
             }
             Section("Controls") {
-                Text("Open the menu at the top to switch projects. The compose button creates a project. Back, Screens, and captured context are in the more menu.")
-                Text("The sidebar lists your projects. The task pill opens Tasks and Agents. Drafts and reading positions stay with each conversation.").font(.caption)
+                Text("Open Conversations at the top to switch agents. The compose button creates a conversation. Back, Screens, and captured context are in the more menu.")
+                Text("The sidebar lists your conversations. Green identifies running agents. Drafts and reading positions stay with each conversation.").font(.caption)
                 Text("Scroll up to read earlier messages. Send queues a message; Steer now updates the current turn without stopping it. ⌘Return sends your message.").font(.caption)
             }
         }
@@ -496,208 +449,126 @@ private struct InboxHeaderGlass: ViewModifier {
 /// Navigation uses roster summaries only, without parsing Markdown or starting preview streams.
 private struct ConversationDrawer: View {
     @ObservedObject var model: InboxModel
-    @Binding var expandedProjects: Set<String>
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let select: (String) -> Void
     let close: () -> Void
     let create: () -> Void
     let settings: () -> Void
     @State private var query = ""
+    @State private var order: [String]
 
-    private func matches(_ project: InboxProject) -> Bool {
-        query.isEmpty || project.name.localizedCaseInsensitiveContains(query)
-            || model.cards.contains { project.agentIDs.contains($0.id) && $0.title.localizedCaseInsensitiveContains(query) }
+    init(model: InboxModel, select: @escaping (String) -> Void, close: @escaping () -> Void,
+         create: @escaping () -> Void, settings: @escaping () -> Void) {
+        self.model = model; self.select = select; self.close = close
+        self.create = create; self.settings = settings
+        _order = State(initialValue: model.cards.sorted(by: AgentCard.mostRecentFirst).map(\.id))
+    }
+
+    private var visibleCards: [AgentCard] {
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Include previously hidden tabs: navigation no longer has a hidden state.
+        let byID = Dictionary(uniqueKeysWithValues: model.cards.map { ($0.id, $0) })
+        let cards = order.compactMap { byID[$0] }
+        return cards.filter { card in
+            search.isEmpty
+                || card.title.localizedCaseInsensitiveContains(search)
+                || card.id.localizedCaseInsensitiveContains(search)
+                || card.preview.localizedCaseInsensitiveContains(search)
+        }
+    }
+
+    private func conversationRow(_ card: AgentCard) -> some View {
+        let preview = String(card.preview.prefix(160))
+        // A roster entry has no activity state yet. Do not present the model's
+        // initial "Checking" value as ongoing work in every conversation.
+        let knownStatus = card.isRunning ? "Running" : card.status == "Checking" ? "" : card.status
+        let subtitle = card.error != nil ? "Couldn’t refresh" : card.isRunning ? card.activitySummary : (preview.isEmpty ? knownStatus : preview)
+        let status = [knownStatus, preview, card.error ?? ""].filter { !$0.isEmpty }.joined(separator: ". ")
+        return HStack(alignment: .top, spacing: 10) {
+            Image(systemName: card.isRunning ? "circle.fill" : card.error != nil ? "exclamationmark.circle" : "bubble.left")
+                .font(.system(size: card.isRunning ? 8 : 15))
+                .foregroundStyle(card.isRunning ? Ink.running : Ink.muted)
+                .frame(width: 18, height: 22).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(card.title).font(.subheadline.weight(model.focused?.id == card.id ? .semibold : .regular))
+                    .lineLimit(2).foregroundStyle(card.isRunning ? Ink.running : Ink.text)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption).foregroundStyle(Ink.muted).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12).frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+        .background(model.focused?.id == card.id ? Ink.surface : Color.clear, in: RoundedRectangle(cornerRadius: 18))
+        .contentShape(Rectangle())
+        // Tap recognition must fail when dragging. A plain Button can fire
+        // on release after the drawer's simultaneous swipe gesture.
+        .onTapGesture { select(card.id) }
+        .accessibilityRepresentation {
+            Button(card.title) { select(card.id) }
+                .accessibilityValue(status)
+                .accessibilityAddTraits(model.focused?.id == card.id ? [.isSelected] : [])
+                .accessibilityIdentifier("conversation-row:" + card.id)
+        }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(spacing: 16) {
             HStack {
-                Text("Nanocodex").font(.headline)
+                Button(action: settings) { Image(systemName: "gearshape").frame(width: 44, height: 44) }
+                    .modifier(InboxHeaderGlass()).accessibilityLabel("Account settings")
                 Spacer()
-                Button(action: close) { Image(systemName: "xmark").frame(width: 44, height: 44) }
-                    .accessibilityLabel("Return to conversation").accessibilityIdentifier("conversation-drawer-close")
+                Text("Conversations").font(.subheadline.weight(.semibold))
+                Spacer()
+                Button(action: close) { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
+                    .modifier(InboxHeaderGlass()).accessibilityLabel("Return to conversation")
+                    .accessibilityIdentifier("conversation-drawer-close")
             }
-            HStack {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search projects", text: $query)
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(visibleCards) { card in
+                        conversationRow(card)
+                    }
+                    if visibleCards.isEmpty {
+                        ContentUnavailableView("No matching conversations", systemImage: "bubble.left.and.bubble.right",
+                                               description: Text("Try another search."))
+                    }
+                }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .accessibilityIdentifier("conversation-list")
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(Ink.muted)
+                TextField("Search conversations", text: $query)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .accessibilityIdentifier("conversation-search")
                 if !query.isEmpty {
-                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                        .accessibilityLabel("Clear search")
+                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
+                        .foregroundStyle(Ink.muted).accessibilityLabel("Clear search")
                 }
-            }.padding(12).background(Ink.surface, in: RoundedRectangle(cornerRadius: 14))
-            Text("Projects").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            ScrollView {
-                LazyVStack(spacing: 4) {
-                    ForEach(model.projects.filter(matches)) { project in
-                        let children = model.cards.filter { project.agentIDs.contains($0.id) && $0.id != project.primaryAgentID }
-                            .sorted(by: AgentCard.mostRecentFirst)
-                        let expanded = expandedProjects.contains(project.id) || !query.isEmpty
-                        HStack(spacing: 0) {
-                            Button { select(project.primaryAgentID) } label: {
-                                HStack(spacing: 10) {
-                                    Text(project.name).font(.subheadline).lineLimit(2)
-                                    Spacer(minLength: 4)
-                                    if model.cards.contains(where: { project.agentIDs.contains($0.id) && $0.isRunning }) {
-                                        Circle().fill(Ink.running).frame(width: 6, height: 6)
-                                    }
-                                }.padding(.leading, 14).padding(.vertical, 14)
-                                    .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-                                    .contentShape(Rectangle())
-                            }
-                            .accessibilityAddTraits(model.focused?.id == project.primaryAgentID ? [.isSelected] : [])
-                            .accessibilityIdentifier("conversation-row:" + project.primaryAgentID)
-                            if !children.isEmpty {
-                                Button {
-                                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                                        if expandedProjects.contains(project.id) { expandedProjects.remove(project.id) }
-                                        else { expandedProjects.insert(project.id) }
-                                    }
-                                } label: {
-                                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                                        .frame(width: 44, height: 48).contentShape(Rectangle())
-                                }
-                                .accessibilityLabel((expanded ? "Collapse " : "Expand ") + project.name)
-                                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
-                                .accessibilityIdentifier("project-expand:" + project.primaryAgentID)
-                            } else { Spacer().frame(width: 14) }
-                        }
-                        .background(model.focused?.id == project.primaryAgentID ? Ink.surface : Color.clear, in: RoundedRectangle(cornerRadius: 12))
-                        if expanded {
-                            ForEach(children.filter { query.isEmpty || project.name.localizedCaseInsensitiveContains(query) || $0.title.localizedCaseInsensitiveContains(query) }) { child in
-                                Button { select(child.id) } label: {
-                                    HStack(spacing: 10) {
-                                        Image(systemName: "bubble.left").font(.caption).foregroundStyle(.secondary)
-                                        Text(child.title).font(.subheadline).lineLimit(2)
-                                        Spacer(minLength: 4)
-                                        if child.isRunning { Circle().fill(Ink.running).frame(width: 6, height: 6) }
-                                    }
-                                    .padding(.leading, 28).padding(.trailing, 14).padding(.vertical, 12)
-                                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                                    .background(model.focused?.id == child.id ? Ink.surface : Color.clear, in: RoundedRectangle(cornerRadius: 12))
-                                    .contentShape(Rectangle())
-                                }
-                                .accessibilityValue(child.isRunning ? "Working" : child.status)
-                                .accessibilityAddTraits(model.focused?.id == child.id ? [.isSelected] : [])
-                                .accessibilityIdentifier("conversation-row:" + child.id)
-                            }
-                        }
-                    }
-                }
-            }.scrollDismissesKeyboard(.interactively).accessibilityIdentifier("conversation-list")
+            }
+            .font(.subheadline).padding(.horizontal, 14).frame(minHeight: 48)
+            .modifier(InboxHeaderGlass())
             HStack {
-                Button(action: create) { Label("New project", systemImage: "square.and.pencil").padding(12) }
-                    .background(Ink.userMessage, in: Capsule()).accessibilityIdentifier("drawer-new-conversation")
                 Spacer()
-                Button(action: settings) { Image(systemName: "gearshape").frame(width: 44, height: 44) }
-                    .accessibilityLabel("Account settings")
+                Button(action: create) { Image(systemName: "square.and.pencil").frame(width: 44, height: 44) }
+                    .modifier(InboxHeaderGlass()).accessibilityLabel("New conversation")
+                    .accessibilityIdentifier("drawer-new-conversation")
             }
-        }.padding(16).background(Ink.background).buttonStyle(.plain)
-            .onAppear {
-                if let project = model.focusedProject, model.focused?.id != project.primaryAgentID {
-                    expandedProjects.insert(project.id)
-                }
-            }
-            .accessibilityAction(.escape, close)
-    }
-}
-
-private struct ProjectActivitySheet: View {
-    @ObservedObject var model: InboxModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var section = "Tasks"
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 12) {
-                Picker("Activity", selection: $section) {
-                    Text("Tasks").tag("Tasks")
-                    Text("Agents").tag("Agents")
-                }.pickerStyle(.segmented).accessibilityIdentifier("project-activity-segments").padding(.horizontal, 20)
-                List {
-                    if section == "Tasks" {
-                        let tasks = model.projectTasks
-                        if tasks.isEmpty {
-                            ContentUnavailableView("No tasks yet", systemImage: "checklist", description: Text("Send a message to start working in this project."))
-                        }
-                        ForEach([true, false], id: \.self) { live in
-                            let group = tasks.filter { $0.isLive == live }
-                            if !group.isEmpty {
-                                Section(live ? "Active" : "Recent") {
-                                    ForEach(group) { task in
-                                        NavigationLink {
-                                            ProjectTaskDetail(model: model, agentID: task.agentID, turnID: task.turnID)
-                                        } label: {
-                                            HStack(spacing: 12) {
-                                                Image(systemName: task.isLive ? "circle.dotted" : task.status == "Completed" ? "checkmark.circle" : "circle")
-                                                    .foregroundStyle(task.isLive ? Ink.running : Ink.muted)
-                                                VStack(alignment: .leading, spacing: 4) {
-                                                    Text(task.title).font(.subheadline).lineLimit(2)
-                                                    Text(task.status).font(.caption).foregroundStyle(.secondary)
-                                                }
-                                            }.padding(.vertical, 2)
-                                        }.accessibilityIdentifier("project-task:" + task.id)
-                                            .listRowBackground(Ink.card).listRowSeparator(.hidden)
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        ForEach(model.projectAgents) { agent in
-                            Button {
-                                model.select(agent.id); dismiss()
-                            } label: {
-                                HStack {
-                                    Image(systemName: "person.crop.circle")
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(agent.id == model.focusedProject?.primaryAgentID ? "Project chat" : agent.title)
-                                        Text(agent.isRunning ? agent.activitySummary : agent.status).font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    Image(systemName: "chevron.right").font(.caption)
-                                }.font(.subheadline).padding(.vertical, 2)
-                            }.foregroundStyle(.primary).accessibilityIdentifier("project-agent:" + agent.id)
-                                .listRowBackground(Ink.card).listRowSeparator(.hidden)
-                        }
-                    }
-                }.listStyle(.plain).scrollContentBackground(.hidden)
-                    .environment(\.defaultMinListRowHeight, 48)
-            }
-            .background(Ink.card)
-            .navigationTitle(model.focusedProject?.name ?? "Project")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) {
-                Button("Done") { dismiss() }.accessibilityIdentifier("project-activity-close")
-            } }
         }
-    }
-}
-
-private struct ProjectTaskDetail: View {
-    @ObservedObject var model: InboxModel
-    let agentID: String
-    let turnID: String
-    private var task: ProjectTask? { model.tasks(agentID: agentID).first { $0.turnID == turnID } }
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if let task {
-                    Text(task.title).font(.title3.weight(.semibold))
-                    Text(task.status).font(.caption).foregroundStyle(.secondary)
-                    ForEach(task.rows.filter { $0.role == "You" || $0.role == "Agent" }) { row in
-                        ConversationMessageView(row: row, model: model, agentID: agentID, showsTaskLink: false)
-                    }
-                    if task.rows.isEmpty {
-                        Text(task.status == "Queued" || task.status == "Sending" ? "Waiting to begin." : "Open the agent to load this task’s conversation.")
-                            .foregroundStyle(.secondary)
-                    }
-                } else { Text("This task is outside the loaded history.").foregroundStyle(.secondary) }
-            }.padding(20)
-        }.navigationTitle("Task").navigationBarTitleDisplayMode(.inline)
-            .accessibilityIdentifier("project-task-detail")
-            .onAppear { model.setOverviewVisible(agentID, visible: true) }
-            .onDisappear { model.setOverviewVisible(agentID, visible: false) }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
+        .background(Ink.background)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("conversation-drawer")
+        .accessibilityAction(.escape, close)
+        .onChange(of: model.cards.map(\.id)) { _, ids in
+            // Streaming updates must not move a different row beneath a finger.
+            let available = Set(ids)
+            order.removeAll { !available.contains($0) }
+            let known = Set(order)
+            order.append(contentsOf: ids.filter { !known.contains($0) })
+        }
     }
 }
 
@@ -892,7 +763,7 @@ private struct AgentComposerView: View {
                     .accessibilityIdentifier("composer")
                     .overlay(alignment: .topLeading) {
                         if model.draft.isEmpty {
-                            Text("Message " + (model.focused?.parentAgentID == nil ? model.focusedProject?.name ?? "Nanocodex" : model.focused?.title ?? "agent")).lineLimit(1).font(.body).foregroundStyle(.tertiary)
+                            Text("Ask Nanocodex").font(.body).foregroundStyle(.tertiary)
                                 .padding(.top, 8).allowsHitTesting(false).accessibilityHidden(true)
                         }
                     }
@@ -1419,40 +1290,14 @@ private struct ConversationMessageView: View {
     let row: TranscriptRow
     @ObservedObject var model: InboxModel
     let agentID: String
-    var showsTaskLink = true
-    @State private var showTask = false
-    @State private var taskAgent: AgentCard?
     var body: some View {
         let steering = model.steeringTransfer(row.turnID ?? row.id)
         let canWithdraw = steering.map { transfer in
             model.cards.first(where: { $0.id == agentID })?.activeTurns.contains(transfer.targetTurnID) == true
         } ?? false
         let delivery = model.pending.first { $0.agentID == agentID && $0.id == (row.turnID ?? row.id) }
-        VStack(alignment: .trailing, spacing: 4) {
-            ConversationMessageContent(row: row, model: model, agentID: agentID, steering: steering, canWithdraw: canWithdraw,
-                                       delivery: delivery, canRetry: model.connected && !model.busy.contains(agentID)).equatable()
-            if showsTaskLink, row.role == "You", let turn = row.turnID {
-                ForEach(model.childAgents(parentAgentID: agentID, originTurnID: turn)) { child in
-                    Button { taskAgent = child; showTask = true } label: {
-                        Label(child.title, systemImage: child.isRunning ? "circle.dotted" : "arrow.turn.down.right")
-                            .font(.caption).lineLimit(2).padding(.horizontal, 12).frame(minHeight: 44)
-                            .background(Ink.surface, in: Capsule())
-                    }.buttonStyle(.plain).accessibilityIdentifier("message-thread:" + child.id)
-                }
-                if model.card(agentID: agentID)?.parentAgentID != nil {
-                Button { taskAgent = nil; showTask = true } label: {
-                    Label("View task", systemImage: "arrow.turn.down.right")
-                        .font(.caption).foregroundStyle(.secondary).frame(minHeight: 44)
-                }.buttonStyle(.plain).accessibilityIdentifier("message-task:" + turn)
-                }
-            }
-        }
-        .sheet(isPresented: $showTask) {
-            NavigationStack {
-                ProjectTaskDetail(model: model, agentID: taskAgent?.id ?? agentID, turnID: taskAgent?.projectTurnID ?? row.turnID ?? row.id)
-                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showTask = false } } }
-            }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
-        }
+        ConversationMessageContent(row: row, model: model, agentID: agentID, steering: steering, canWithdraw: canWithdraw,
+                                   delivery: delivery, canRetry: model.connected && !model.busy.contains(agentID)).equatable()
     }
 }
 
@@ -1812,7 +1657,7 @@ private struct ConversationContentView: View {
                         NanocodexVoiceTranscript(session: model.voice, conversationID: agentID, durableRows: revision.rows, rowContent: { transcript in
                             let row = TranscriptRow(id: "voice-" + transcript.id.uuidString,
                                                     role: transcript.speaker == "user" ? "You" : "Agent", text: transcript.text)
-                            return AnyView(ConversationMessageView(row: row, model: model, agentID: agentID, showsTaskLink: false)
+                            return AnyView(ConversationMessageView(row: row, model: model, agentID: agentID)
                                 .accessibilityIdentifier("voice-transcript-" + transcript.speaker))
                         }) {
                             if followsLatest { scroll.scrollTo("latest", anchor: .bottom) }

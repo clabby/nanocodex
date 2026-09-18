@@ -2,11 +2,6 @@ import Foundation
 
 public struct AgentCard: Identifiable, Equatable, Sendable {
     public let id: String
-    public var projectRootID: String?
-    public var projectName: String?
-    public var parentAgentID: String?
-    public var originTurnID: String?
-    public var projectTurnID: String?
     public var title: String
     public var updatedAt: Double
     public var turnCount: Int
