@@ -3088,6 +3088,9 @@ final class InboxUITests: XCTestCase {
         }
         let app = XCUIApplication(); app.launch()
         XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 30))
+        let conversation = app.scrollViews["conversation"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 15))
+        gone(app.descendants(matching: .any)["conversation-loading"].firstMatch, timeout: 30)
         let original = selectedConversationTab(app).identifier
         let draft = composer(app).value as? String
         for _ in 0..<3 {
@@ -3112,11 +3115,11 @@ final class InboxUITests: XCTestCase {
         if let agentID = environment["NANOCODEX_PERFORMANCE_AGENT_ID"], !agentID.isEmpty {
             selectAgentFromDrawer(app, title: "", id: agentID)
         }
-        let original = selectedConversationTab(app).identifier
-        let originalDraft = composer(app).value as? String
         let conversation = app.scrollViews["conversation"]
         XCTAssertTrue(conversation.waitForExistence(timeout: 15))
         gone(app.descendants(matching: .any)["conversation-loading"].firstMatch, timeout: 30)
+        let original = selectedConversationTab(app).identifier
+        let originalDraft = composer(app).value as? String
         capture(app, "device-muse-conversation")
         let options = XCTMeasureOptions()
         options.iterationCount = 3
