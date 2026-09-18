@@ -309,3 +309,9 @@ after logging out, through an administrator's SSH/text console. The procedure
 refuses active Hyprland sessions, retains a complete rollback installation, and
 never restarts the desktop or Hand. A fresh session and fresh companion binding
 must pass runtime ABI and input/capture checks before reporting activation.
+For long-lived independent observe/decide/act loops, see the runnable
+[`examples/independent-cua`](../../examples/independent-cua/README.md) example.
+It retains a single remote transport, uses one companion JS session per owned
+window to avoid separate-eval serialization, bounds per-window admission, and
+journals uncertain writes without replay. Its deterministic-delay acceptance
+uses a private compositor and native GTK fixtures; it is not a model benchmark.
