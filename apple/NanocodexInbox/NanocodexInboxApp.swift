@@ -41,6 +41,7 @@ struct NanocodexInboxApp: App {
                         model.voice.stop()
                         model.setActive(false)
                     } else if phase == .active {
+                        model.configureAgentNotifications()
                         model.setActive(true)
                     } else if phase == .inactive {
                         model.prepareHandForBackground()

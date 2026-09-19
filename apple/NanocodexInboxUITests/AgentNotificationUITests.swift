@@ -5,9 +5,6 @@ final class AgentNotificationUITests: XCTestCase {
     private func thread(_ title: String) -> XCUIElement {
         springboard.buttons.matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "ShortLook.Platter.Content.Seamless", title)).firstMatch
     }
-    private func notificationRow(_ title: String) -> XCUIElement {
-        springboard.buttons.matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "ListCell", title)).firstMatch
-    }
     private func openNotifications() {
         XCUIDevice.shared.press(.home)
         springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.001))
@@ -20,7 +17,7 @@ final class AgentNotificationUITests: XCTestCase {
         let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         screenshot.name = name; screenshot.lifetime = .keepAlways; add(screenshot)
     }
-    func testSeparateRunningThreadsSwipeClearAndColdLink() {
+    func testRunningThreadsStaySilentAndActivityLinksStillOpen() {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["--demo"]
@@ -32,42 +29,16 @@ final class AgentNotificationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 20))
         openNotifications()
         let inbox = thread("Build the agent inbox"), data = thread("Tighten the fuel forecast")
-        capture("agent-thread-notifications-initial")
-        XCTAssertTrue(inbox.waitForExistence(timeout: 10), springboard.debugDescription)
-        XCTAssertTrue(data.waitForExistence(timeout: 10), springboard.debugDescription)
-        capture("agent-thread-notifications")
-
-        // Same-app notifications arrive as a stack. The rear card is clipped
-        // and does not accept an individual swipe until the front card expands
-        // the stack.
-        if data.frame.width - inbox.frame.width > 8 {
-            data.tap()
-            let expanded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                inbox.exists && abs(data.frame.width - inbox.frame.width) < 8
-            }, object: nil)
-            XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed, springboard.debugDescription)
-        }
-
-        let row = notificationRow("Build the agent inbox")
-        XCTAssertTrue(row.waitForExistence(timeout: 5), springboard.debugDescription)
-        let clear = springboard.buttons["Clear"].firstMatch
-        for _ in 0..<2 {
-            row.swipeLeft(velocity: .fast)
-            if clear.waitForExistence(timeout: 5) { break }
-        }
-        XCTAssertTrue(clear.exists, springboard.debugDescription)
-        clear.tap()
-        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: inbox)
-        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 10), .completed, springboard.debugDescription)
-        XCTAssertTrue(data.exists)
-        // A foreground refresh must not reinsert the cleared thread.
+        capture("agent-running-threads-stay-silent")
+        XCTAssertFalse(inbox.waitForExistence(timeout: 5), springboard.debugDescription)
+        XCTAssertFalse(data.exists, springboard.debugDescription)
+        // Refreshing and backgrounding again must remain silent.
         app.activate()
         XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 10))
         openNotifications()
         XCTAssertFalse(inbox.exists)
-        XCTAssertTrue(data.exists)
-        // iOS 26's simulator drops synthesized notification taps. Exercise
-        // the exact destination here; native activation is checked manually.
+        XCTAssertFalse(data.exists)
+        // Activity links remain valid independently of notification delivery.
         app.open(URL(string: "nanocodex://activity?account=demo.\(profile)&agent=data")!)
         XCTAssertTrue(app.buttons["conversation-title:data"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.buttons["conversation-title:data"].isSelected)

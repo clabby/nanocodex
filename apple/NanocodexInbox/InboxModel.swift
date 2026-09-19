@@ -259,7 +259,10 @@ final class InboxModel: ObservableObject {
             self.agentNotificationPreparation = nil
         }
     }
-    func configureAgentNotifications() { _ = agentNotifications }
+    func configureAgentNotifications() {
+        let notifications = agentNotifications
+        Task { await notifications.removeLegacyActivities() }
+    }
     func openAgentActivity(_ url: URL) {
         guard url.scheme == "nanocodex", url.host == "activity" else { return }
         if restoringAccount { pendingActivityURL = url; return }
