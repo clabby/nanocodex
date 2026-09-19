@@ -221,6 +221,13 @@ private struct VoiceSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Picker("Speech provider", selection: $draft.outputProvider) {
+                    Text("OpenAI").tag(Optional(VoiceSettings.OutputProvider.openai))
+                    Text("ElevenLabs").tag(Optional(VoiceSettings.OutputProvider.elevenlabs))
+                }
+                if draft.outputProvider == .elevenlabs {
+                    ElevenLabsSettingsView(settings: $draft, configuration: onStart)
+                }
                 Picker("Voice", selection: $draft.voice) {
                     ForEach(ManagedVoiceProtocol.voices, id: \.self) { Text($0.capitalized).tag($0) }
                 }.accessibilityIdentifier("voice-selection")
@@ -287,7 +294,7 @@ private struct VoiceSettingsView: View {
                 }
             }
         }
-        .onAppear { draft = session.settings }
+        .onAppear { draft = session.settings; if draft.outputProvider == nil { draft.outputProvider = .openai } }
         .onChange(of: session.outputLevel) { _, level in
             if testingAudio, level > 0.015 { receivedTestAudio = true }
         }
