@@ -1,8 +1,9 @@
 //! Local, bounded microphone capture. Audio never leaves this module over a network.
 use std::{
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -17,6 +18,7 @@ pub(crate) struct Recorder {
     child: Option<Child>,
     output: Option<NamedTempFile>,
     started_at: Instant,
+    diagnostics: Arc<Mutex<Vec<u8>>>,
 }
 
 /// Keeps the validated WAV alive until its consumer has finished uploading it.
@@ -61,6 +63,32 @@ impl Recorder {
             .min(Duration::from_secs(MAX_SECONDS))
     }
 
+    /// Read only the newest local PCM window for a visible microphone meter.
+    pub(crate) fn peak(&self) -> u16 {
+        let Some(output) = &self.output else {
+            return 0;
+        };
+        let Ok(mut file) = std::fs::File::open(output.path()) else {
+            return 0;
+        };
+        let Ok(metadata) = file.metadata() else {
+            return 0;
+        };
+        let len = metadata.len();
+        if len < 128 {
+            return 0;
+        }
+        let start = len.saturating_sub(6400).max(128) & !1;
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return 0;
+        }
+        let mut bytes = [0_u8; 6400];
+        let Ok(n) = file.read(&mut bytes) else {
+            return 0;
+        };
+        pcm_peak(&bytes[..n])
+    }
+
     /// The caller should stop/collect the sample when this returns true.
     pub(crate) fn is_finished(&mut self) -> Result<bool, String> {
         self.child
@@ -72,7 +100,26 @@ impl Recorder {
     }
 
     pub(crate) async fn start() -> Result<Self, String> {
-        let input = microphone_input()?;
+        Self::start_input(microphone_input()?).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn synthetic() -> Result<Self, String> {
+        Self::start_input(
+            [
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=16000",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        )
+        .await
+    }
+
+    async fn start_input(input: Vec<String>) -> Result<Self, String> {
         let output = tempfile::Builder::new()
             .prefix("nanocodex-voice-")
             .suffix(".wav")
@@ -100,6 +147,8 @@ impl Recorder {
             &MAX_SECONDS.to_string(),
             "-fs",
             &MAX_BYTES.to_string(),
+            "-flush_packets",
+            "1",
             "-f",
             "wav",
         ]);
@@ -107,14 +156,41 @@ impl Recorder {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let child = command.spawn().map_err(|e| {
-            format!("Cannot start microphone recording: {e}. Install ffmpeg and make it available on PATH.")
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "Recording needs ffmpeg. On macOS run `brew install ffmpeg`, then retry R. Homebrew installations are detected automatically.".to_owned()
+            } else {
+                format!("Cannot launch the microphone recorder: {e}")
+            }
         })?;
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let captured = diagnostics.clone();
+        if let Some(mut stderr) = child.stderr.take() {
+            // Drain continuously so a noisy device never blocks capture. Retain
+            // only a bounded diagnostic tail; no credentials reach this child.
+            std::thread::spawn(move || {
+                let mut bytes = [0; 1024];
+                while let Ok(n) = stderr.read(&mut bytes) {
+                    if n == 0 {
+                        break;
+                    }
+                    let mut tail = captured
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    tail.extend_from_slice(&bytes[..n]);
+                    if tail.len() > 4096 {
+                        let trim = tail.len() - 4096;
+                        tail.drain(..trim);
+                    }
+                }
+            });
+        }
         let mut recorder = Self {
             child: Some(child),
             output: Some(output),
             started_at: Instant::now(),
+            diagnostics,
         };
         // Catch missing input backends/devices before telling the user capture started.
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -126,9 +202,25 @@ impl Recorder {
             .map_err(|e| format!("Cannot inspect microphone recorder: {e}"))?
             .is_some()
         {
-            return Err("Microphone capture could not start. Check microphone permission, the default input device, and ffmpeg audio input support.".into());
+            return Err(recorder.failure("Microphone capture could not start"));
         }
         Ok(recorder)
+    }
+
+    fn failure(&self, context: &str) -> String {
+        let bytes = self
+            .diagnostics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let detail: String = String::from_utf8_lossy(&bytes)
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\n')
+            .take(1200)
+            .collect();
+        format!(
+            "{context}. Check System Settings → Privacy & Security → Microphone and your default input device.\n{}",
+            detail.trim()
+        )
     }
 
     pub(crate) async fn stop(mut self) -> Result<RecordedSample, String> {
@@ -160,7 +252,7 @@ impl Recorder {
             }
         };
         if !status.success() {
-            return Err("Microphone recording failed. Check microphone permission and the default input device.".into());
+            return Err(self.failure("Microphone recording failed"));
         }
         let mut output = self.output.take().expect("capture output");
         validate_wav(output.as_file_mut())
@@ -236,8 +328,57 @@ fn sanitized_command() -> Command {
     sanitized_program("ffmpeg")
 }
 
-fn sanitized_program(program: &str) -> Command {
-    let mut command = Command::new(program);
+// GUI-launched terminals often omit Homebrew from PATH. Resolve the binary
+// before clearing the child environment, including packaged and standard installs.
+fn audio_program(program: &str) -> PathBuf {
+    if Path::new(program).is_absolute() {
+        return program.into();
+    }
+    let mut directories = Vec::new();
+    if let Some(package) = std::env::var_os("NANOCODEX_VOICE_PACKAGE") {
+        directories.push(PathBuf::from(package).join("nanocodex-resources/voice/bin"));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            directories.push(parent.join("nanocodex-resources/voice/bin"));
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        directories.extend(std::env::split_paths(&path));
+    }
+    if cfg!(target_os = "macos") {
+        directories.extend([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ]);
+    }
+    find_program(program, &directories).unwrap_or_else(|| program.into())
+}
+
+fn find_program(program: &str, directories: &[PathBuf]) -> Option<PathBuf> {
+    directories
+        .iter()
+        .map(|directory| directory.join(program))
+        .find(|path| {
+            let Ok(metadata) = std::fs::metadata(path) else {
+                return false;
+            };
+            if !metadata.is_file() {
+                return false;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    return false;
+                }
+            }
+            true
+        })
+}
+
+pub(crate) fn sanitized_program(program: &str) -> Command {
+    let mut command = Command::new(audio_program(program));
     command.env_clear();
     // Pass only runtime/device discovery settings, never API keys, account
     // credentials, proxy settings, FFREPORT, or dynamic loader overrides.
@@ -256,6 +397,14 @@ fn sanitized_program(program: &str) -> Command {
         }
     }
     command
+}
+
+fn pcm_peak(bytes: &[u8]) -> u16 {
+    bytes
+        .chunks_exact(2)
+        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs())
+        .max()
+        .unwrap_or(0)
 }
 
 fn validate_wav(file: &mut std::fs::File) -> Result<(), String> {
@@ -322,6 +471,13 @@ mod tests {
     }
 
     #[test]
+    fn microphone_meter_uses_actual_pcm_magnitude() {
+        assert_eq!(pcm_peak(&[0, 0, 0, 0]), 0);
+        assert_eq!(pcm_peak(&[0, 32, 0, 128]), 32768);
+        assert_eq!(pcm_peak(&[0, 16, 0]), 4096);
+    }
+
+    #[test]
     fn validates_pcm_and_rejects_empty_truncated_or_excess_duration() {
         assert!(validate_wav(wav(16000).as_file_mut()).is_ok());
         assert!(validate_wav(wav(0).as_file_mut()).is_err());
@@ -343,6 +499,7 @@ mod tests {
             child: None,
             output: Some(output),
             started_at: Instant::now(),
+            diagnostics: Arc::default(),
         });
         assert!(!path.exists());
     }
@@ -358,6 +515,7 @@ mod tests {
             child: Some(child),
             output: Some(output),
             started_at: Instant::now(),
+            diagnostics: Arc::default(),
         });
         assert!(!path.exists());
         assert!(
@@ -405,6 +563,24 @@ mod tests {
             assert!(Instant::now() < deadline, "cancelled player remains alive");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_packaged_or_homebrew_recorder_without_shell_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let installed = tempfile::tempdir().unwrap();
+        let binary = installed.path().join("ffmpeg");
+        std::fs::write(&binary, b"test executable").unwrap();
+        assert!(find_program("ffmpeg", &[installed.path().into()]).is_none());
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            find_program(
+                "ffmpeg",
+                &[installed.path().join("missing"), installed.path().into()]
+            ),
+            Some(binary)
+        );
     }
 
     #[test]

@@ -3,12 +3,12 @@ use std::path::PathBuf;
 
 pub(crate) const HELP: &str = concat!(
     "Voice controls\n\n",
-    "/voice — toggle voice\n",
+    "/voice [menu] — open the voice menu\n",
     "/voice on|off|mute|unmute|status\n\n",
-    "List voices: /voice voices [chatgpt|elevenlabs]\n",
+    "Choose a provider: /voice voices\nList voices: /voice voices chatgpt|elevenlabs\n",
     "Switch: /voice chatgpt NAME or /voice elevenlabs VOICE_ID\n",
     "Legacy ChatGPT shortcut: /voice NAME\n\n",
-    "Record a clone: /voice clone \"NAME\" opens a local recording panel.\n",
+    "Record a clone: /voice clone [\"NAME\"] opens a local recording panel.\n",
     "/voice clone record · stop · review · submit --consent · cancel\n",
     "File clone: /voice clone \"NAME\" \"AUDIO_PATH\" --consent\n",
     "--consent confirms you own the voice or have permission to clone it.\n",
@@ -74,13 +74,14 @@ impl Command {
                 .ok_or_else(|| format!("Unknown ChatGPT voice. Use /voice voices chatgpt. {HELP}"))
         };
         match args.as_slice() {
-            [] => Ok(Self::Toggle),
+            [] | ["menu"] => Ok(Self::Toggle),
             ["start" | "on"] => Ok(Self::Start(None)),
             ["voices"] => Ok(Self::List),
             ["voices", "chatgpt"] => Ok(Self::ListProvider(Provider::Chatgpt)),
             ["voices", "elevenlabs"] => Ok(Self::ListProvider(Provider::ElevenLabs)),
             ["chatgpt", name] => Ok(Self::Select(Selection::Chatgpt(voice(*name)?))),
             ["elevenlabs", id] if !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') => Ok(Self::Select(Selection::ElevenLabs((*id).into()))),
+            ["clone"] => Ok(Self::CloneOpen("My voice".into())),
             ["clone", "stop"] => Ok(Self::CloneStop),
             ["clone", "cancel"] => Ok(Self::CloneCancel),
             ["clone", "play"] => Ok(Self::ClonePlay),
@@ -151,6 +152,12 @@ mod tests {
     #[test]
     fn recording_commands_keep_upload_consent_explicit() {
         assert_eq!(
+            Command::parse("clone").unwrap(),
+            Command::CloneOpen("My voice".into())
+        );
+        assert_eq!(Command::parse("on").unwrap(), Command::Start(None));
+        assert_eq!(Command::parse("off").unwrap(), Command::Stop);
+        assert_eq!(
             Command::parse("clone \"Synthetic voice\"").unwrap(),
             Command::CloneOpen("Synthetic voice".into())
         );
@@ -193,6 +200,7 @@ mod tests {
     }
     #[test]
     fn parses_providers_and_legacy_controls() {
+        assert_eq!(Command::parse("menu").unwrap(), Command::parse("").unwrap());
         assert_eq!(
             Command::parse("chatgpt cove").unwrap(),
             Command::Select(Selection::Chatgpt("cove"))

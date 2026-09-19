@@ -360,6 +360,7 @@ enum Overlay {
     VaultReview(crate::tui::vault::Review),
     AgentId(String),
     VoiceOutput { text: String, scroll: u16 },
+    VoiceMenu(Node<super::voice_menu::VoiceMenu>),
     VoiceClone(String, bool),
     Actions(Node<ActionsMenu>),
     ContextDiagnostics(Node<ContextDiagnosticsPanel>),
@@ -917,7 +918,7 @@ impl RootNode {
                     let layout = Floating::new(
                         "Record a voice clone",
                         96,
-                        18,
+                        area.height.saturating_sub(4).min(28),
                         &[
                             ("R", "record"),
                             ("S", "stop"),
@@ -927,13 +928,44 @@ impl RootNode {
                         ],
                     )
                     .render(frame, area, theme);
-                    let paragraph = Paragraph::new(text.as_str()).wrap(Wrap { trim: false });
+                    let lines: Vec<Line<'_>> = text
+                        .lines()
+                        .map(|line| {
+                            if line.starts_with("● RECORDING") {
+                                Line::styled(
+                                    line,
+                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                                )
+                            } else {
+                                Line::raw(line)
+                            }
+                        })
+                        .collect();
+                    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
                     *consent_visible =
                         paragraph.line_count(layout.body.width) <= usize::from(layout.body.height);
                     if *consent_visible {
                         frame.render_widget(paragraph, layout.body);
                     } else {
-                        frame.render_widget(Paragraph::new("Enlarge terminal to review recording controls and consent. Upload disabled. Esc cancels.").wrap(Wrap { trim: false }), layout.body);
+                        // Preserve useful recorder diagnostics even when all consent
+                        // text cannot fit. Upload stays disabled until it is visible.
+                        let error = text
+                            .split_once("No automatic upload.\n")
+                            .map(|(_, error)| error.trim())
+                            .unwrap_or("");
+                        let fallback = if error.is_empty() {
+                            format!(
+                                "Upload disabled: enlarge terminal to review consent. Esc cancels.\n\n{text}"
+                            )
+                        } else {
+                            format!(
+                                "{error}\n\nUpload disabled: enlarge terminal to review consent. R retries; Esc cancels."
+                            )
+                        };
+                        frame.render_widget(
+                            Paragraph::new(fallback).wrap(Wrap { trim: false }),
+                            layout.body,
+                        );
                     }
                 }
                 Overlay::VoiceOutput { text, scroll } => {
@@ -966,6 +998,7 @@ impl RootNode {
                         layout.body,
                     );
                 }
+                Overlay::VoiceMenu(menu) => menu.render(frame, area, theme),
                 Overlay::Actions(actions) => actions.render(frame, area, theme),
                 Overlay::ContextDiagnostics(panel) => panel.render(frame, area, theme),
                 Overlay::Effort(selector) => selector.render(frame, area, theme),
@@ -1080,6 +1113,13 @@ impl RootNode {
         &mut self,
         mut event: Event,
     ) -> ComponentUpdate<RootEffect> {
+        // Voice controls remain local and navigable during a managed reconnect.
+        if matches!(
+            self.overlay,
+            Some(Overlay::VoiceMenu(_) | Overlay::VoiceOutput { .. } | Overlay::VoiceClone(_, _))
+        ) {
+            return self.update_overlay(event, Instant::now());
+        }
         if self.resuming_session {
             return ComponentUpdate::none();
         }
@@ -1612,6 +1652,7 @@ impl RootNode {
                     render: RenderRequest::Immediate,
                 })
             }
+            Some(Overlay::VoiceMenu(_)) => self.update_voice_menu(event),
             Some(Overlay::VoiceOutput { .. }) => self.update_voice_output(event),
             Some(Overlay::Actions(_)) => self.update_actions(event),
             Some(Overlay::ContextDiagnostics(_)) => self.update_context_diagnostics(event),
@@ -2376,6 +2417,32 @@ impl RootNode {
         }
     }
 
+    fn update_voice_menu(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::VoiceMenu(menu)) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let update = menu.update(event);
+        if let Some(command) = update.effects.into_iter().next() {
+            self.overlay = None;
+            if let Some(command) = command {
+                let starts_voice = matches!(
+                    command,
+                    crate::voice::Command::Start(_) | crate::voice::Command::Select(_)
+                );
+                let mut update = self.apply_settings_command(SettingsCommand::Voice(command));
+                if starts_voice && self.reconnecting == Some(false) {
+                    self.reconnecting = Some(true);
+                    update.render = update
+                        .render
+                        .max(self.reconnection_status("Reconnecting…").render);
+                    update.effects.push(RootEffect::Reconnect);
+                }
+                return update;
+            }
+        }
+        ComponentUpdate::render(update.render)
+    }
+
     fn update_voice_output(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
         if is_escape(&event) {
             self.overlay = None;
@@ -2792,6 +2859,20 @@ impl RootNode {
                 }],
                 render: RenderRequest::Immediate,
             },
+            SettingsCommand::Voice(crate::voice::Command::Toggle | crate::voice::Command::List) => {
+                self.overlay = Some(Overlay::VoiceMenu(Node::new(
+                    super::voice_menu::VoiceMenu::new(self.voice_status.is_some()),
+                )));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            SettingsCommand::Voice(crate::voice::Command::ListProvider(
+                crate::voice::Provider::Chatgpt,
+            )) => {
+                self.overlay = Some(Overlay::VoiceMenu(Node::new(
+                    super::voice_menu::VoiceMenu::chatgpt(),
+                )));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             SettingsCommand::Voice(command) => ComponentUpdate {
                 effects: vec![RootEffect::Voice(command)],
                 render: RenderRequest::Immediate,
@@ -3783,7 +3864,13 @@ impl Component for RootNode {
                 if matches!(self.overlay, Some(Overlay::VoiceClone(_, _))) {
                     return ComponentUpdate::render(RenderRequest::Immediate);
                 }
-                self.overlay = Some(Overlay::VoiceOutput { text, scroll: 0 });
+                self.overlay = Some(
+                    if let Some(menu) = super::voice_menu::VoiceMenu::elevenlabs_catalog(&text) {
+                        Overlay::VoiceMenu(Node::new(menu))
+                    } else {
+                        Overlay::VoiceOutput { text, scroll: 0 }
+                    },
+                );
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::VoiceStatus(status) => {
@@ -4164,7 +4251,9 @@ fn is_plain_key(event: &Event, character: char) -> bool {
 
 #[cfg(test)]
 mod history_tests {
-    use super::{Component, RenderRequest, RootEffect, RootEvent, RootNode};
+    use super::{
+        Component, Overlay, RenderRequest, RootEffect, RootEvent, RootNode, SettingsCommand,
+    };
     use crate::config::ReasoningEffort;
     use crate::tui::{
         theme::Theme,
@@ -4173,6 +4262,85 @@ mod history_tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     use std::sync::Arc;
+
+    #[test]
+    fn bare_voice_opens_visible_menu_and_routes_clone_without_starting_audio() {
+        use crate::voice::Command;
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        root.reconnecting = Some(false);
+        let update =
+            root.apply_settings_command(SettingsCommand::Voice(Command::parse("").unwrap()));
+        assert!(update.effects.is_empty());
+        assert!(matches!(root.overlay, Some(Overlay::VoiceMenu(_))));
+        let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
+        terminal
+            .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Record a voice clone"));
+        assert!(screen.contains("ChatGPT voices"));
+        assert!(screen.contains("ElevenLabs voices"));
+        for _ in 0..3 {
+            root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            ))));
+        }
+        let update = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert!(
+            matches!(update.effects.as_slice(), [RootEffect::Voice(Command::CloneOpen(name))] if name == "My voice")
+        );
+    }
+
+    #[test]
+    fn bare_voices_opens_provider_menu_without_catalog_fetch() {
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        let update = root.apply_settings_command(SettingsCommand::Voice(
+            crate::voice::Command::parse("voices").unwrap(),
+        ));
+        assert!(update.effects.is_empty());
+        assert!(matches!(root.overlay, Some(Overlay::VoiceMenu(_))));
+    }
+
+    #[test]
+    fn voice_menu_chatgpt_selection_and_escape_are_local() {
+        use crate::voice::{Command, Selection};
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        root.apply_settings_command(SettingsCommand::Voice(Command::Toggle));
+        root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        ))));
+        let update = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert!(update.effects.is_empty());
+        let update = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert!(matches!(
+            update.effects.as_slice(),
+            [RootEffect::Voice(Command::Select(Selection::Chatgpt(_)))]
+        ));
+        root.apply_settings_command(SettingsCommand::Voice(Command::Toggle));
+        let update = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))));
+        assert!(update.effects.is_empty());
+        assert!(root.overlay.is_none());
+    }
 
     #[test]
     fn voice_clone_modal_routes_keys_locally_and_escape_cancels() {
@@ -4224,6 +4392,36 @@ mod history_tests {
                 ),
                 allowed
             );
+        }
+    }
+
+    #[test]
+    fn clone_diagnostics_remain_visible_when_consent_does_not_fit() {
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        let mut panel = crate::tui::voice_clone::Panel::new("Synthetic voice".into());
+        panel.error = Some(format!("Microphone failed: {}", "diagnostic ".repeat(30)));
+        root.update(RootEvent::VoiceStatus(Some(crate::voice_state::Status {
+            text: panel.text(),
+            ..Default::default()
+        })));
+        for (width, height) in [(40, 10), (100, 30)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
+                .unwrap();
+            let screen = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(screen.contains("Microphone failed:"), "{screen}");
+            if width == 40 {
+                assert!(matches!(root.overlay, Some(Overlay::VoiceClone(_, false))));
+            } else {
+                assert!(matches!(root.overlay, Some(Overlay::VoiceClone(_, true))));
+            }
         }
     }
 

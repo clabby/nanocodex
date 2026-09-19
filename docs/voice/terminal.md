@@ -5,9 +5,10 @@ the directory containing your `.env` (or a child directory); startup loads that
 file automatically. Set `ELEVENLABS_API_KEY` there or in your environment. Keep
 `.env` untracked. Never paste a key into the composer.
 
-- `/voice` toggles voice; `/voice on` and `/voice off` start and stop it.
-- `/voice voices` lists ChatGPT voices and your ElevenLabs catalog.
-- `/voice voices chatgpt` or `/voice voices elevenlabs` lists one provider.
+- `/voice` opens the voice menu with start/stop, provider voices, and recording a clone.
+- `/voice on` and `/voice off` explicitly start and stop voice.
+- `/voice voices` opens the provider menu.
+- `/voice voices chatgpt` or `/voice voices elevenlabs` opens a selectable provider catalog.
 - `/voice chatgpt cove` selects ChatGPT; `/voice cove` remains supported.
 - `/voice elevenlabs VOICE_ID` selects an ElevenLabs catalog or cloned voice.
 - `/voice mute`, `/voice unmute`, and Ctrl-X control the microphone.
@@ -42,3 +43,11 @@ verification, complete it there before selecting the clone. Audio is uploaded
 directly to ElevenLabs using your local key. The sample, key, and command do not
 enter the chat/model prompt. Voice transcription still follows the normal voice
 conversation flow.
+
+ElevenLabs output streams PCM audio directly to the local player instead of
+waiting for an entire MP3 download. The microphone pauses while this output
+plays, followed by a short echo tail; the voice strip shows that pause. Your
+explicit mute preference is preserved. Typing, stopping voice, or switching
+voices cancels pending speech. Captions from a stopped session are discarded.
+The current TUI requires ffplay (included with ffmpeg) for ElevenLabs output;
+standard Homebrew locations are detected even with a minimal launch PATH.

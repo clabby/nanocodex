@@ -729,6 +729,7 @@ impl DriverRuntime {
         if let Some(panel) = &self.clone_panel {
             return Some(crate::voice_state::Status {
                 text: panel.text(),
+                microphone: panel.microphone_peak(),
                 ..Default::default()
             });
         }
@@ -879,9 +880,7 @@ impl DriverRuntime {
                 if let Some(voice) = &self.voice {
                     voice.stop();
                 }
-                Ok(Some(
-                    "Waiting for realtime voice to stop before local recording…".into(),
-                ))
+                Ok(None)
             }
             Command::CloneStop => {
                 self.clone_panel
@@ -915,6 +914,8 @@ impl DriverRuntime {
                 {
                     return Err("Stop and review a local recording before submitting.".into());
                 }
+                // Keep the recording available if local credentials are missing.
+                crate::voice::elevenlabs::Client::from_env().map_err(|error| error.to_string())?;
                 let mut panel = self.clone_panel.take().unwrap();
                 let name = panel.name.clone();
                 let voice_clone::State::Review(sample) =
@@ -1829,7 +1830,7 @@ async fn run_inner(
             );
         }
     }
-    let mut clone_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut clone_tick = tokio::time::interval(std::time::Duration::from_millis(200));
     clone_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut stopping = false;
 
@@ -1996,8 +1997,12 @@ async fn run_inner(
                         panel.review().unwrap_or_else(|_| panel.text())
                     }
                     result => {
-                        runtime.clone_panel = None;
-                        match result { Ok(Err(error)) => error, _ => "Local recording task failed; recording discarded.".into() }
+                        let message = match result { Ok(Err(error)) => error, _ => "Local recording task failed; recording discarded.".into() };
+                        if let Some(panel) = &mut runtime.clone_panel {
+                            panel.state = voice_clone::State::Ready;
+                            panel.error = Some(format!("{message}\nPress R to retry, or Esc to cancel."));
+                        }
+                        message
                     }
                 };
                 request_render(app.update(AppEvent::VoiceStatus(runtime.voice_status())), &mut scheduler);
@@ -2032,8 +2037,12 @@ async fn run_inner(
                 }
             }
             Some(transcript) = async { match &mut voice_transcripts { Some(receiver) => receiver.recv().await, None => pending().await } } => {
-                let record = runtime.local_record(LocalEvent::VoiceTranscript(transcript))?;
-                request_render(app.update(AppEvent::Transcript { pane: PaneId::Main, record }), &mut scheduler);
+                // A stopped/replaced session may still have queued final captions.
+                // Do not present them as speech from the newly selected voice.
+                if runtime.voice.as_ref().is_some_and(crate::voice::Session::accepting_transcripts) {
+                    let record = runtime.local_record(LocalEvent::VoiceTranscript(transcript))?;
+                    request_render(app.update(AppEvent::Transcript { pane: PaneId::Main, record }), &mut scheduler);
+                }
             }
             changed = async { match &mut voice_status { Some(receiver) => receiver.changed().await, None => pending().await } } => {
                 let voice = runtime.voice.as_mut().unwrap();
@@ -2046,8 +2055,10 @@ async fn run_inner(
                     }
                     let mut voice = runtime.voice.take().unwrap();
                     while let Ok(transcript) = voice.transcripts.try_recv() {
-                        let record = runtime.local_record(LocalEvent::VoiceTranscript(transcript))?;
-                        request_render(app.update(AppEvent::Transcript { pane: PaneId::Main, record }), &mut scheduler);
+                        if voice.accepting_transcripts() {
+                            let record = runtime.local_record(LocalEvent::VoiceTranscript(transcript))?;
+                            request_render(app.update(AppEvent::Transcript { pane: PaneId::Main, record }), &mut scheduler);
+                        }
                     }
                 }
                 let update = app.update(AppEvent::VoiceStatus(runtime.voice_status()));

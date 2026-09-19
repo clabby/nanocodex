@@ -6,6 +6,9 @@ pub(super) enum State {
     Ready,
     Waiting,
     Busy,
+    Starting,
+    Stopping,
+    Playing,
     Recording(Recorder),
     Review(RecordedSample),
     PlaybackFailed(RecordedSample, String),
@@ -29,7 +32,10 @@ impl Panel {
         let detail = match &self.state {
             State::Ready => "Ready · /voice clone record to start microphone",
             State::Waiting => "Waiting for realtime voice cleanup · /voice clone cancel",
-            State::Busy => "Processing local audio… · /voice clone cancel",
+            State::Busy => "Uploading recording…",
+            State::Starting => "Opening your microphone… · Esc cancels",
+            State::Stopping => "Saving your recording… · Esc cancels",
+            State::Playing => "Playing your recording locally… · Esc cancels",
             State::Recording(_) => {
                 "RECORDING MICROPHONE LOCALLY · /voice clone stop · /voice clone cancel"
             }
@@ -39,7 +45,20 @@ impl Panel {
         };
         let elapsed = match &self.state {
             State::Recording(recorder) => {
-                format!(" · {}s / 120s maximum", recorder.elapsed().as_secs())
+                let seconds = recorder.elapsed().as_secs();
+                let peak = recorder.peak();
+                let bars = if peak < 128 {
+                    0
+                } else {
+                    (usize::from(peak.min(8192)) * 12 / 8192).clamp(1, 12)
+                };
+                format!(
+                    "\n● RECORDING  {:02}:{:02} / 02:00   mic [{}{}]",
+                    seconds / 60,
+                    seconds % 60,
+                    "▮".repeat(bars),
+                    "·".repeat(12 - bars)
+                )
             }
             _ => String::new(),
         };
@@ -49,9 +68,15 @@ impl Panel {
             self.name
         )
     }
+    pub fn microphone_peak(&self) -> u16 {
+        match &self.state {
+            State::Recording(recorder) => recorder.peak(),
+            _ => 0,
+        }
+    }
     pub fn start_if_ready(&mut self) {
         if matches!(self.state, State::Waiting) {
-            self.state = State::Busy;
+            self.state = State::Starting;
             self.tasks
                 .spawn(async { Recorder::start().await.map(State::Recording) });
         }
@@ -60,6 +85,7 @@ impl Panel {
         if !matches!(self.state, State::Ready) {
             return Err("Cancel the current recording before starting another.".into());
         }
+        self.error = None;
         self.state = State::Waiting;
         Ok(())
     }
@@ -67,7 +93,7 @@ impl Panel {
         if !matches!(self.state, State::Recording(_)) {
             return Err("No microphone recording is running.".into());
         }
-        let State::Recording(recorder) = std::mem::replace(&mut self.state, State::Busy) else {
+        let State::Recording(recorder) = std::mem::replace(&mut self.state, State::Stopping) else {
             unreachable!()
         };
         self.tasks
@@ -78,7 +104,7 @@ impl Panel {
         if !matches!(self.state, State::Review(_)) {
             return Err("Stop recording before playback.".into());
         }
-        let State::Review(sample) = std::mem::replace(&mut self.state, State::Busy) else {
+        let State::Review(sample) = std::mem::replace(&mut self.state, State::Playing) else {
             unreachable!()
         };
         self.error = None;

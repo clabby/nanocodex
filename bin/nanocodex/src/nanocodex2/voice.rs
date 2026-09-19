@@ -57,10 +57,31 @@ struct MediaControl {
     media: Option<RealtimeWebrtcSessionHandle>,
     ready: bool,
     muted: bool,
+    external_playback: bool,
+    playback_tail: Option<Instant>,
+    stopped: bool,
 }
 impl MediaControl {
     fn microphone_muted(&self) -> bool {
-        !self.ready || self.muted
+        !self.ready
+            || self.muted
+            || self.external_playback
+            || self.playback_tail.is_some()
+            || self.stopped
+    }
+    fn set_external_playback(&mut self, active: bool) -> Result<(), ManagedError> {
+        self.external_playback = active;
+        // External players bypass WebRTC's echo reference. Retain suppression
+        // while their final samples and room reverberation decay.
+        self.playback_tail = (!active).then(|| Instant::now() + Duration::from_millis(300));
+        self.apply_microphone()
+    }
+    fn refresh_playback_tail(&mut self, now: Instant) -> Result<(), ManagedError> {
+        if self.playback_tail.is_some_and(|deadline| now >= deadline) {
+            self.playback_tail = None;
+            self.apply_microphone()?;
+        }
+        Ok(())
     }
     fn apply_microphone(&self) -> Result<(), ManagedError> {
         if let Some(media) = &self.media {
@@ -119,11 +140,45 @@ impl Session {
             ..Status::default()
         });
         let (transcript_tx, transcripts) = mpsc::channel(128);
+        let control = Arc::new(Mutex::new(MediaControl {
+            muted: *microphone.borrow(),
+            ..Default::default()
+        }));
+        let playback_control = control.clone();
+        let playback_status = status_tx.clone();
         let playback = eleven.map(|client| {
+            let voice = settings.eleven_labs_voice_id.clone().unwrap();
+            let speaking_text = format!("ElevenLabs voice {voice} speaking");
+            let output_label = format!("ElevenLabs {voice}");
             Arc::new(playback::Playback::new(
                 client,
                 settings.eleven_labs_voice_id.clone().unwrap(),
                 status_tx.clone(),
+                Arc::new(move |active| {
+                    let mut control = playback_control
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    control
+                        .set_external_playback(active)
+                        .map_err(|error| error.to_string())?;
+                    playback_status.send_modify(|status| {
+                        status.speaking = active && !control.stopped;
+                        // Only replace our own transient playback label; retain
+                        // transport failures and other actionable status text.
+                        if !active && !control.stopped && status.text == speaking_text {
+                            status.text = output_status(
+                                if control.muted {
+                                    "Voice active · microphone muted"
+                                } else {
+                                    "Voice active · listening"
+                                }
+                                .into(),
+                                &output_label,
+                            );
+                        }
+                    });
+                    Ok(())
+                }),
             ))
         });
         let output_label = if settings.output_provider == VoiceOutputProvider::Elevenlabs {
@@ -136,10 +191,6 @@ impl Session {
         };
         let actor_playback = playback.clone();
         let presentation = status_tx.clone();
-        let control = Arc::new(Mutex::new(MediaControl {
-            muted: *microphone.borrow(),
-            ..Default::default()
-        }));
         let actor_control = control.clone();
         let owner_stop = stop.clone();
         let owner_native_stop = native_stop.clone();
@@ -166,6 +217,15 @@ impl Session {
                 () = owner_stop.cancelled() => Ok(()),
                 result = actor.run(native_registration, commands, microphone) => result,
             };
+            // Fence restoration callbacks before terminating native media.
+            {
+                let mut control = actor
+                    .control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                control.stopped = true;
+                let _ = control.apply_microphone();
+            }
             // Native capture/playback stops before any network cleanup.
             owner_native_stop.abort();
             if let Some(playback) = &actor.playback {
@@ -189,6 +249,7 @@ impl Session {
                 status.phase = Phase::Stopping;
                 status.microphone = 0;
                 status.speaker = 0;
+                status.speaking = false;
             });
             // Cleanup uses stable identities and remains bounded even when a call was
             // cancelled during admission. A stale stop cannot close a newer session.
@@ -216,6 +277,14 @@ impl Session {
         })
     }
     pub(crate) fn stop(&self) {
+        {
+            let mut control = self
+                .control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            control.stopped = true;
+            let _ = control.apply_microphone();
+        }
         if let Some(playback) = &self.playback {
             playback.cancel();
         }
@@ -225,7 +294,11 @@ impl Session {
             status.phase = Phase::Stopping;
             status.microphone = 0;
             status.speaker = 0;
+            status.speaking = false;
         });
+    }
+    pub(crate) fn accepting_transcripts(&self) -> bool {
+        !self.stop.is_cancelled()
     }
     pub(crate) fn is_muted(&self) -> bool {
         *self.muted.borrow()
@@ -240,7 +313,9 @@ impl Session {
             status.muted = muted;
         });
         control.muted = muted;
-        if control.apply_microphone().is_err() {
+        let failed = control.apply_microphone().is_err();
+        drop(control);
+        if failed {
             self.stop();
         }
     }
@@ -520,12 +595,15 @@ impl Actor {
                     }
                 }
                 _ = flush.tick() => {
+                    self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .refresh_playback_tail(Instant::now())?;
                     let media = self.media.as_ref().unwrap();
                     if let Some(error_text) = media.take_error() { return Err(error(error_text)); }
                     let microphone = media.take_microphone_peak();
                     let speaker = media.take_speaker_peak();
                     if speaker >= 512 { last_speech = Some(Instant::now()); }
-                    let speaking = last_speech.is_some_and(|last| last.elapsed() < Duration::from_millis(500));
+                    let external_speaking = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner).external_playback;
+                    let speaking = external_speaking || last_speech.is_some_and(|last| last.elapsed() < Duration::from_millis(500));
                     self.status.send_if_modified(|status| {
                         let changed = status.microphone != microphone || status.speaker != speaker || status.speaking != speaking;
                         status.microphone = microphone; status.speaker = speaker; status.speaking = speaking; changed
@@ -569,19 +647,29 @@ impl Actor {
             self.status(status);
         }
         for transcript in effects.transcripts {
-            if !stale_speech
-                && self.captions.consume(
-                    &transcript.speaker,
-                    transcript.id,
-                    &transcript.text,
-                    transcript.is_partial,
-                )
-            {
+            if stale_speech {
+                continue;
+            }
+            if self.captions.consume(
+                &transcript.speaker,
+                transcript.id,
+                &transcript.text,
+                transcript.is_partial,
+            ) {
                 if let Some(playback) = &self.playback {
                     if let Err(error) = playback.enqueue(transcript.text.clone()) {
                         self.status(error.to_string());
                     }
                 }
+            }
+            if transcript.speaker == "assistant"
+                && (!self.captions.enabled
+                    || self
+                        .captions
+                        .suppressed
+                        .is_some_and(|id| transcript.id <= id))
+            {
+                continue;
             }
             self.transcripts
                 .send(super::voice_state::Transcript {
@@ -912,6 +1000,65 @@ mod tests {
         );
         control.muted = false;
         assert!(!control.microphone_muted());
+    }
+
+    #[test]
+    fn external_playback_restores_capture_only_after_tail_and_preserves_user_mute() {
+        let mut control = MediaControl {
+            ready: true,
+            ..Default::default()
+        };
+        assert!(!control.microphone_muted());
+        control.set_external_playback(true).unwrap();
+        assert!(control.microphone_muted());
+        control.muted = true;
+        control.set_external_playback(false).unwrap();
+        let deadline = control.playback_tail.unwrap();
+        control.refresh_playback_tail(deadline).unwrap();
+        assert!(
+            control.microphone_muted(),
+            "playback cannot override user mute"
+        );
+        control.muted = false;
+        assert!(!control.microphone_muted());
+        // Completion, cancellation and failure share this restoration path.
+        for _ in 0..3 {
+            control.set_external_playback(true).unwrap();
+            control.set_external_playback(false).unwrap();
+            assert!(control.microphone_muted());
+            let deadline = control.playback_tail.unwrap();
+            control
+                .refresh_playback_tail(deadline - Duration::from_millis(1))
+                .unwrap();
+            assert!(control.microphone_muted());
+            control.refresh_playback_tail(deadline).unwrap();
+            assert!(!control.microphone_muted());
+        }
+        control.set_external_playback(true).unwrap();
+        control.stopped = true;
+        control.set_external_playback(false).unwrap();
+        control
+            .refresh_playback_tail(control.playback_tail.unwrap())
+            .unwrap();
+        assert!(
+            control.microphone_muted(),
+            "stop fences late playback restoration"
+        );
+    }
+
+    #[test]
+    fn next_playback_clears_previous_tail_without_unmuting() {
+        let mut control = MediaControl {
+            ready: true,
+            ..Default::default()
+        };
+        control.set_external_playback(true).unwrap();
+        control.set_external_playback(false).unwrap();
+        let old_deadline = control.playback_tail.unwrap();
+        control.set_external_playback(true).unwrap();
+        control.refresh_playback_tail(old_deadline).unwrap();
+        assert!(control.microphone_muted());
+        assert!(control.playback_tail.is_none());
     }
 
     #[test]

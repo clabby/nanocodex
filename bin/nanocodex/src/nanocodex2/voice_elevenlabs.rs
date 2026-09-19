@@ -162,26 +162,9 @@ impl Client {
         voice.name = name.to_owned();
         Ok(voice)
     }
+    #[cfg(test)]
     pub(super) async fn speech(&self, voice: &str, text: &str) -> Result<Vec<u8>, ManagedError> {
-        if voice.is_empty()
-            || voice.len() > 128
-            || !voice
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
-        {
-            return Err(error("Invalid ElevenLabs voice ID"));
-        }
-        if text.trim().is_empty() || text.len() > 16000 {
-            return Err(error("Speech must contain 1–16000 bytes"));
-        }
-        let mut response = Self::checked(
-            self.request(
-                reqwest::Method::POST,
-                &format!("text-to-speech/{voice}?output_format=mp3_44100_128"),
-            )
-            .json(&serde_json::json!({"text":text,"model_id":"eleven_flash_v2_5"})),
-        )
-        .await?;
+        let mut response = self.speech_response(voice, text, false).await?;
         let mut audio = Vec::new();
         while let Some(chunk) = response
             .chunk()
@@ -197,6 +180,44 @@ impl Client {
             return Err(error("ElevenLabs returned empty audio"));
         }
         Ok(audio)
+    }
+
+    /// Raw mono 24 kHz signed 16-bit PCM; response is consumed incrementally.
+    pub(super) async fn speech_stream(
+        &self,
+        voice: &str,
+        text: &str,
+    ) -> Result<reqwest::Response, ManagedError> {
+        self.speech_response(voice, text, true).await
+    }
+
+    async fn speech_response(
+        &self,
+        voice: &str,
+        text: &str,
+        streaming: bool,
+    ) -> Result<reqwest::Response, ManagedError> {
+        if voice.is_empty()
+            || voice.len() > 128
+            || !voice
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        {
+            return Err(error("Invalid ElevenLabs voice ID"));
+        }
+        if text.trim().is_empty() || text.len() > 16000 {
+            return Err(error("Speech must contain 1–16000 bytes"));
+        }
+        let path = if streaming {
+            format!("text-to-speech/{voice}/stream?output_format=pcm_24000")
+        } else {
+            format!("text-to-speech/{voice}?output_format=mp3_44100_128")
+        };
+        Self::checked(
+            self.request(reqwest::Method::POST, &path)
+                .json(&serde_json::json!({"text":text,"model_id":"eleven_flash_v2_5"})),
+        )
+        .await
     }
 }
 
@@ -219,9 +240,9 @@ fn sample_format(path: &std::path::Path) -> Result<(&'static str, &'static str),
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    fn client(endpoint: String) -> Client {
+    pub(crate) fn client(endpoint: String) -> Client {
         nanocodex::oai::transport::install_default_rustls_crypto_provider();
         Client {
             endpoint,
@@ -311,6 +332,44 @@ mod tests {
             .await;
         assert!(result.unwrap_err().to_string().contains("consent"));
     }
+    #[tokio::test]
+    #[ignore = "requires local ffmpeg; records a synthetic tone, never a microphone"]
+    async fn recorded_wav_uploads_as_multipart_and_cleans_up() {
+        use axum::{Json, Router, extract::Request, routing::post};
+        let app = Router::new().route("/voices/add", post(|request: Request| async move {
+            assert_eq!(request.headers()["xi-api-key"], "synthetic-test-key");
+            assert!(request.headers()["content-type"].to_str().unwrap().starts_with("multipart/form-data; boundary="));
+            let body = axum::body::to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
+            let text = String::from_utf8_lossy(&body);
+            assert!(text.contains("name=\"name\""));
+            assert!(text.contains("Synthetic test clone"));
+            assert!(text.contains("filename=\"sample-1.wav\""));
+            assert!(body.windows(4).any(|bytes| bytes == b"RIFF"));
+            Json(serde_json::json!({"voice_id":"synthetic_clone", "requires_verification":false}))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = client(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let recorder = crate::voice_recording::Recorder::synthetic().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        assert!(
+            recorder.peak() > 0,
+            "live meter must read the recorded tone before stop"
+        );
+        let sample = recorder.stop().await.unwrap();
+        let path = sample.path().to_owned();
+        assert!(std::fs::metadata(&path).unwrap().len() > 1000);
+        let voice = client
+            .clone_voice("Synthetic test clone", &[path.clone()], true)
+            .await
+            .unwrap();
+        assert_eq!(voice.voice_id, "synthetic_clone");
+        assert!(!voice.requires_verification);
+        drop(sample);
+        assert!(!path.exists());
+        server.abort();
+    }
+
     #[tokio::test]
     async fn speech_uses_direct_provider_contract_and_redacts_error_bodies() {
         use axum::{
