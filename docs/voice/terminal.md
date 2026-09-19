@@ -21,7 +21,14 @@ background and leave the composer responsive. Catalogs, help, and clone results
 open a persistent local panel: use arrows, Page Up/Down, or the mouse wheel to
 scroll, `c` to copy its text, and Esc to return to your draft.
 
-To create an instant clone from a local audio sample:
+To record a new sample in place, enter `/voice clone "My voice"`. The recording
+modal uses **R** to start, **S** or **Space** to stop, **P** to listen locally,
+**U** to upload with the displayed ownership/permission consent, and **Esc** to
+cancel and delete. Realtime voice stops and completes cleanup before capture.
+Recording is capped at two minutes; audio stays local until you explicitly upload.
+See [recording and cloning](tui-cloning.md) for prerequisites and details.
+
+To create an instant clone from an existing local audio sample:
 
 ```text
 /voice clone "My voice" "recordings/my sample.wav" --consent

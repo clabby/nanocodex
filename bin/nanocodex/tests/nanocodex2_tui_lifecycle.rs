@@ -3291,3 +3291,24 @@ async fn terminal_vault_approval_cancel_then_explicit_approve_sends_one_safe_rec
         );
     }
 }
+
+#[tokio::test]
+async fn terminal_voice_clone_recording_panel_cancels_without_model_input() {
+    let mut fixture = Fixture::start_with_active(true).await;
+    fixture
+        .terminal
+        .prompt("/voice clone \"Sample speaker\"", "\r");
+    fixture.terminal.wait_text("Sample speaker").await;
+    fixture.terminal.input("\x1b");
+    fixture.terminal.wait_no_text("Sample speaker").await;
+    fixture.terminal.wait_text("Enter steer").await;
+    assert!(fixture.submissions.try_recv().is_err());
+    assert!(fixture.steers.try_recv().is_err());
+    // Opening/canceling the local panel must leave the normal composer usable.
+    fixture.terminal.prompt("/voice voices chatgpt", "\r");
+    fixture.terminal.wait_text("ChatGPT voices:").await;
+    fixture.terminal.input("\x1b");
+    fixture.terminal.wait_no_text("ChatGPT voices:").await;
+    assert!(fixture.submissions.try_recv().is_err());
+    assert!(fixture.steers.try_recv().is_err());
+}

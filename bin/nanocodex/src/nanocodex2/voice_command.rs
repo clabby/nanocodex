@@ -8,7 +8,9 @@ pub(crate) const HELP: &str = concat!(
     "List voices: /voice voices [chatgpt|elevenlabs]\n",
     "Switch: /voice chatgpt NAME or /voice elevenlabs VOICE_ID\n",
     "Legacy ChatGPT shortcut: /voice NAME\n\n",
-    "Clone: /voice clone \"NAME\" \"AUDIO_PATH\" --consent\n",
+    "Record a clone: /voice clone \"NAME\" opens a local recording panel.\n",
+    "/voice clone record · stop · review · submit --consent · cancel\n",
+    "File clone: /voice clone \"NAME\" \"AUDIO_PATH\" --consent\n",
     "--consent confirms you own the voice or have permission to clone it.\n",
     "Audio uploads directly to ElevenLabs using local ELEVENLABS_API_KEY; it never goes to chat.\n",
     "Quote names and paths containing spaces. Cloning does not switch the active voice.\n\n",
@@ -47,6 +49,13 @@ pub(crate) enum Command {
     List,
     ListProvider(Provider),
     Clone { name: String, path: PathBuf },
+    CloneOpen(String),
+    CloneRecord(Option<String>),
+    CloneStop,
+    CloneSubmit,
+    CloneCancel,
+    CloneReview,
+    ClonePlay,
     Stop,
     ToggleMute,
     Unmute,
@@ -72,6 +81,15 @@ impl Command {
             ["voices", "elevenlabs"] => Ok(Self::ListProvider(Provider::ElevenLabs)),
             ["chatgpt", name] => Ok(Self::Select(Selection::Chatgpt(voice(*name)?))),
             ["elevenlabs", id] if !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') => Ok(Self::Select(Selection::ElevenLabs((*id).into()))),
+            ["clone", "stop"] => Ok(Self::CloneStop),
+            ["clone", "cancel"] => Ok(Self::CloneCancel),
+            ["clone", "play"] => Ok(Self::ClonePlay),
+            ["clone", "review"] => Ok(Self::CloneReview),
+            ["clone", "submit", "--consent"] => Ok(Self::CloneSubmit),
+            ["clone", "submit"] => Err("Upload requires /voice clone submit --consent. This confirms you own the voice or have permission to clone it.".into()),
+            ["clone", "record"] => Ok(Self::CloneRecord(None)),
+            ["clone", "record", name] if !name.trim().is_empty() => Ok(Self::CloneRecord(Some((*name).into()))),
+            ["clone", name] if !name.trim().is_empty() => Ok(Self::CloneOpen((*name).into())),
             ["clone", name, path, "--consent"] if !name.trim().is_empty() && !path.is_empty() => Ok(Self::Clone { name: (*name).into(), path: (*path).into() }),
             ["clone", ..] => Err("Usage: /voice clone \"NAME\" \"AUDIO_PATH\" --consent. --consent confirms you own the voice or have permission to clone it; audio is uploaded directly to ElevenLabs.".into()),
             ["stop" | "off"] => Ok(Self::Stop),
@@ -130,6 +148,36 @@ fn words(input: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recording_commands_keep_upload_consent_explicit() {
+        assert_eq!(
+            Command::parse("clone \"Synthetic voice\"").unwrap(),
+            Command::CloneOpen("Synthetic voice".into())
+        );
+        assert_eq!(
+            Command::parse("clone record").unwrap(),
+            Command::CloneRecord(None)
+        );
+        assert_eq!(
+            Command::parse("clone record \"Synthetic voice\"").unwrap(),
+            Command::CloneRecord(Some("Synthetic voice".into()))
+        );
+        assert_eq!(Command::parse("clone stop").unwrap(), Command::CloneStop);
+        assert_eq!(
+            Command::parse("clone review").unwrap(),
+            Command::CloneReview
+        );
+        assert_eq!(
+            Command::parse("clone cancel").unwrap(),
+            Command::CloneCancel
+        );
+        assert!(Command::parse("clone submit").is_err());
+        assert!(Command::parse("clone submit --consent extra").is_err());
+        assert_eq!(
+            Command::parse("clone submit --consent").unwrap(),
+            Command::CloneSubmit
+        );
+    }
     #[test]
     fn parses_quoted_clone_and_requires_consent() {
         assert_eq!(

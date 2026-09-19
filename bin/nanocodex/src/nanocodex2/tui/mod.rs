@@ -25,6 +25,7 @@ mod terminal;
 mod theme;
 mod transcript;
 mod vault;
+mod voice_clone;
 
 use self::{
     components::{
@@ -506,6 +507,7 @@ struct DriverRuntime {
     screen: screen::Controller,
     pending_voice: Option<PendingVoice>,
     voice_selection: crate::voice::Selection,
+    clone_panel: Option<voice_clone::Panel>,
     voice_tasks: JoinSet<(PaneId, Result<String, String>)>,
     voice: Option<crate::voice::Session>,
     client: ManagedClient,
@@ -724,6 +726,12 @@ async fn clone_elevenlabs_voice(name: String, path: PathBuf) -> Result<String, S
 
 impl DriverRuntime {
     fn voice_status(&self) -> Option<crate::voice_state::Status> {
+        if let Some(panel) = &self.clone_panel {
+            return Some(crate::voice_state::Status {
+                text: panel.text(),
+                ..Default::default()
+            });
+        }
         self.voice
             .as_ref()
             .map(|voice| voice.status.borrow().clone())
@@ -756,6 +764,17 @@ impl DriverRuntime {
         command: crate::voice::Command,
     ) -> Result<Option<String>, String> {
         use crate::voice::Command;
+        if self.clone_panel.is_some()
+            && matches!(
+                command,
+                Command::Toggle | Command::Start(_) | Command::Select(_) | Command::Clone { .. }
+            )
+        {
+            return Err(
+                "Finish or cancel /voice clone before starting realtime voice or another clone."
+                    .into(),
+            );
+        }
         let command = match command {
             Command::Toggle if self.voice.is_some() || self.pending_voice.is_some() => {
                 Command::Stop
@@ -837,6 +856,80 @@ impl DriverRuntime {
                     (pane, result)
                 });
                 Ok(Some("Loading voice catalog…".into()))
+            }
+            Command::CloneOpen(name) => {
+                if self.clone_panel.is_some() {
+                    return Err("Cancel the current clone first.".into());
+                }
+                self.clone_panel = Some(voice_clone::Panel::new(name));
+                Ok(None)
+            }
+            Command::CloneRecord(name) => {
+                if let Some(name) = name {
+                    if self.clone_panel.is_some() {
+                        return Err("Cancel the current clone first.".into());
+                    }
+                    self.clone_panel = Some(voice_clone::Panel::new(name));
+                }
+                self.clone_panel
+                    .as_mut()
+                    .ok_or("Open /voice clone NAME first.")?
+                    .record()?;
+                self.pending_voice = None;
+                if let Some(voice) = &self.voice {
+                    voice.stop();
+                }
+                Ok(Some(
+                    "Waiting for realtime voice to stop before local recording…".into(),
+                ))
+            }
+            Command::CloneStop => {
+                self.clone_panel
+                    .as_mut()
+                    .ok_or("No clone recording is open.")?
+                    .stop()?;
+                Ok(None)
+            }
+            Command::ClonePlay => {
+                self.clone_panel
+                    .as_mut()
+                    .ok_or("No clone recording is open.")?
+                    .play()?;
+                Ok(None)
+            }
+            Command::CloneReview => Ok(Some(
+                self.clone_panel
+                    .as_ref()
+                    .ok_or("No clone recording is open.")?
+                    .review()?,
+            )),
+            Command::CloneCancel => {
+                self.clone_panel = None;
+                Ok(Some("Clone cancelled; local recording discarded.".into()))
+            }
+            Command::CloneSubmit => {
+                if !self
+                    .clone_panel
+                    .as_ref()
+                    .is_some_and(|panel| matches!(panel.state, voice_clone::State::Review(_)))
+                {
+                    return Err("Stop and review a local recording before submitting.".into());
+                }
+                let mut panel = self.clone_panel.take().unwrap();
+                let name = panel.name.clone();
+                let voice_clone::State::Review(sample) =
+                    std::mem::replace(&mut panel.state, voice_clone::State::Busy)
+                else {
+                    unreachable!()
+                };
+                self.voice_tasks.spawn(async move {
+                    let result = clone_elevenlabs_voice(name, sample.path().to_owned()).await;
+                    drop(sample);
+                    (pane, result)
+                });
+                Ok(Some(
+                    "Uploading consented recording directly to ElevenLabs…".into(),
+                ))
             }
             Command::Clone { name, path } => {
                 let path = resolve_voice_sample_path(
@@ -1293,6 +1386,7 @@ impl DriverRuntime {
         self.unconfirmed_steer = None;
         self.pending_submission = None;
         self.pending_voice = None;
+        self.clone_panel = None;
         self.recovery = None;
         self.recovery_events.clear();
         // Discard any queued recovery result for the old agent as well.
@@ -1306,6 +1400,7 @@ impl DriverRuntime {
 
     fn start_new_session(&mut self, settings: AgentSettings) {
         self.voice.take();
+        self.clone_panel = None;
         self.pending_voice = None;
         // Stop routing input and events to the previous agent before exposing
         // the new composer. Creation then uses the same pending-input path as launch.
@@ -1637,6 +1732,7 @@ async fn run_inner(
         pending_voice: None,
         voice_selection: Default::default(),
         voice_tasks: JoinSet::new(),
+        clone_panel: None,
         voice: None,
         agent: None,
         startup_attach: matches!(attach, Some(Some(_))),
@@ -1733,6 +1829,8 @@ async fn run_inner(
             );
         }
     }
+    let mut clone_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    clone_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut stopping = false;
 
     while !stopping {
@@ -1827,6 +1925,11 @@ async fn run_inner(
                 break;
             }
         }
+        if runtime.voice.is_none() {
+            if let Some(panel) = &mut runtime.clone_panel {
+                panel.start_if_ready();
+            }
+        }
         if let Some(pending) = runtime.take_ready_voice() {
             match crate::voice::Session::start_with_settings(
                 runtime.client.clone(),
@@ -1871,6 +1974,35 @@ async fn run_inner(
                 (Some(&mut voice.status), Some(&mut voice.transcripts))
             });
         tokio::select! {
+            _ = clone_tick.tick(), if runtime.clone_panel.as_ref().is_some_and(|panel| matches!(panel.state, voice_clone::State::Recording(_))) => {
+                let panel = runtime.clone_panel.as_mut().unwrap();
+                let finished = match &mut panel.state { voice_clone::State::Recording(recorder) => recorder.is_finished().unwrap_or(true) || recorder.elapsed().as_secs() >= 120, _ => false };
+                if finished { let _ = panel.stop(); }
+                request_render(app.update(AppEvent::VoiceStatus(runtime.voice_status())), &mut scheduler);
+            }
+            Some(completion) = async {
+                match runtime.clone_panel.as_mut() {
+                    Some(panel) if !panel.tasks.is_empty() => panel.tasks.join_next().await,
+                    _ => pending().await,
+                }
+            } => {
+                let message = match completion {
+                    Ok(Ok(state)) => {
+                        let panel = runtime.clone_panel.as_mut().unwrap();
+                        panel.state = match state {
+                            voice_clone::State::PlaybackFailed(sample, error) => { panel.error = Some(error); voice_clone::State::Review(sample) }
+                            other => other,
+                        };
+                        panel.review().unwrap_or_else(|_| panel.text())
+                    }
+                    result => {
+                        runtime.clone_panel = None;
+                        match result { Ok(Err(error)) => error, _ => "Local recording task failed; recording discarded.".into() }
+                    }
+                };
+                request_render(app.update(AppEvent::VoiceStatus(runtime.voice_status())), &mut scheduler);
+                request_render(app.update(AppEvent::VoiceOutput { pane: PaneId::Main, text: message }), &mut scheduler);
+            }
             Some(completion) = runtime.voice_tasks.join_next(), if !runtime.voice_tasks.is_empty() => {
                 let event = match completion {
                     Ok((pane, Ok(text))) => AppEvent::VoiceOutput { pane, text },
@@ -1908,7 +2040,8 @@ async fn run_inner(
                 let status = voice.status.borrow_and_update().clone();
                 let finished = changed.is_err() || status.finished;
                 if finished {
-                    if status.text.contains("cleanup unconfirmed") {
+                    if status.text.contains("cleanup unconfirmed") || changed.is_err() && !status.finished {
+                        runtime.clone_panel = None;
                         runtime.pending_voice = None;
                     }
                     let mut voice = runtime.voice.take().unwrap();
@@ -1917,7 +2050,7 @@ async fn run_inner(
                         request_render(app.update(AppEvent::Transcript { pane: PaneId::Main, record }), &mut scheduler);
                     }
                 }
-                let update = app.update(AppEvent::VoiceStatus((!finished).then_some(status.clone())));
+                let update = app.update(AppEvent::VoiceStatus(runtime.voice_status()));
                 request_render(update, &mut scheduler);
                 if finished {
                     let event = if status.text.starts_with("Voice failed") || status.text.contains("cleanup unconfirmed") { AppEvent::NotifyError {pane: PaneId::Main, error: status.text} } else { AppEvent::NotifySuccess {pane: PaneId::Main, message: status.text} };
@@ -2156,6 +2289,7 @@ async fn run_inner(
                             runtime.agent = Some(agent);
                             if runtime.agent_id != agent_id {
                                 runtime.voice.take();
+                                runtime.clone_panel = None;
                                 request_render(app.update(AppEvent::VoiceStatus(None)), &mut scheduler);
                             }
                             runtime.agent_id = agent_id;
@@ -2272,6 +2406,7 @@ async fn run_inner(
                             runtime.managed_events_open = true;
                             if runtime.agent_id != agent_id {
                                 runtime.voice.take();
+                                runtime.clone_panel = None;
                                 request_render(app.update(AppEvent::VoiceStatus(None)), &mut scheduler);
                             }
                             runtime.agent_id = agent_id;
@@ -4027,6 +4162,38 @@ mod tests {
         assert!(runtime.take_ready_voice().is_none());
     }
 
+    #[tokio::test]
+    async fn clone_panel_never_starts_or_uploads_implicitly() {
+        use crate::voice::Command;
+        let mut runtime = history_runtime(HistoryWindow::default());
+        runtime
+            .voice_command(PaneId::Main, Command::CloneOpen("Synthetic voice".into()))
+            .unwrap();
+        assert!(runtime.voice_tasks.is_empty());
+        assert!(runtime.clone_panel.as_ref().unwrap().tasks.is_empty());
+        assert!(
+            runtime
+                .voice_command(PaneId::Main, Command::CloneSubmit)
+                .is_err()
+        );
+        assert!(
+            runtime
+                .voice_command(PaneId::Main, Command::Start(None))
+                .is_err()
+        );
+        assert!(runtime.voice_status().unwrap().text.contains("Ready"));
+        runtime
+            .voice_command(PaneId::Main, Command::CloneRecord(None))
+            .unwrap();
+        assert!(runtime.pending_voice.is_none());
+        assert!(runtime.clone_panel.as_ref().unwrap().tasks.is_empty());
+        runtime
+            .voice_command(PaneId::Main, Command::CloneCancel)
+            .unwrap();
+        assert!(runtime.clone_panel.is_none());
+        assert!(runtime.voice_tasks.is_empty());
+    }
+
     #[test]
     fn voice_sample_paths_expand_home_without_shell_expansion() {
         use std::path::PathBuf;
@@ -4166,6 +4333,7 @@ mod tests {
             pending_voice: None,
             voice_selection: Default::default(),
             voice_tasks: JoinSet::new(),
+            clone_panel: None,
             voice: None,
             client: ManagedClient::new("http://127.0.0.1:9", api_key).unwrap(),
             agent: None,

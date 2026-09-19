@@ -18,6 +18,13 @@ fn meter(peak: u16) -> String {
 }
 
 pub(super) fn render(frame: &mut Frame<'_>, state: &Status, area: Rect) {
+    if state.text.starts_with("Voice clone:") {
+        frame.render_widget(
+            Paragraph::new(state.text.clone()).style(Style::default().fg(Color::Yellow)),
+            area,
+        );
+        return;
+    }
     let phase = match state.phase {
         Phase::Connecting => "Connecting",
         Phase::Stopping => "Stopping",

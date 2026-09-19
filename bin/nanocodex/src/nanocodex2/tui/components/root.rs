@@ -360,6 +360,7 @@ enum Overlay {
     VaultReview(crate::tui::vault::Review),
     AgentId(String),
     VoiceOutput { text: String, scroll: u16 },
+    VoiceClone(String, bool),
     Actions(Node<ActionsMenu>),
     ContextDiagnostics(Node<ContextDiagnosticsPanel>),
     Effort(Node<EffortSelector>),
@@ -910,6 +911,29 @@ impl RootNode {
                         frame.render_widget(Paragraph::new(lines.join("\n")), layout.body);
                     } else {
                         frame.render_widget(Paragraph::new("Enlarge the terminal to review the complete website approval. Approval is disabled until all details fit. Esc cancels.").wrap(Wrap { trim: false }), layout.body);
+                    }
+                }
+                Overlay::VoiceClone(text, consent_visible) => {
+                    let layout = Floating::new(
+                        "Record a voice clone",
+                        96,
+                        18,
+                        &[
+                            ("R", "record"),
+                            ("S", "stop"),
+                            ("P", "play"),
+                            ("U", "consent + upload"),
+                            ("esc", "cancel"),
+                        ],
+                    )
+                    .render(frame, area, theme);
+                    let paragraph = Paragraph::new(text.as_str()).wrap(Wrap { trim: false });
+                    *consent_visible =
+                        paragraph.line_count(layout.body.width) <= usize::from(layout.body.height);
+                    if *consent_visible {
+                        frame.render_widget(paragraph, layout.body);
+                    } else {
+                        frame.render_widget(Paragraph::new("Enlarge terminal to review recording controls and consent. Upload disabled. Esc cancels.").wrap(Wrap { trim: false }), layout.body);
                     }
                 }
                 Overlay::VoiceOutput { text, scroll } => {
@@ -1561,6 +1585,33 @@ impl RootNode {
         match &self.overlay {
             Some(Overlay::VaultReview(_)) => self.update_vault_review(event),
             Some(Overlay::AgentId(_)) => self.update_agent_id(event),
+            Some(Overlay::VoiceClone(_, consent_visible)) => {
+                let command = match event {
+                    Event::Key(key)
+                        if key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
+                    {
+                        match key.code {
+                            KeyCode::Esc => Some(crate::voice::Command::CloneCancel),
+                            KeyCode::Char('r' | 'R') => {
+                                Some(crate::voice::Command::CloneRecord(None))
+                            }
+                            KeyCode::Char('s' | 'S' | ' ') => {
+                                Some(crate::voice::Command::CloneStop)
+                            }
+                            KeyCode::Char('p' | 'P') => Some(crate::voice::Command::ClonePlay),
+                            KeyCode::Char('u' | 'U') if *consent_visible => {
+                                Some(crate::voice::Command::CloneSubmit)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                command.map_or_else(ComponentUpdate::none, |command| ComponentUpdate {
+                    effects: vec![RootEffect::Voice(command)],
+                    render: RenderRequest::Immediate,
+                })
+            }
             Some(Overlay::VoiceOutput { .. }) => self.update_voice_output(event),
             Some(Overlay::Actions(_)) => self.update_actions(event),
             Some(Overlay::ContextDiagnostics(_)) => self.update_context_diagnostics(event),
@@ -3729,10 +3780,21 @@ impl Component for RootNode {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::VoiceOutput(text) => {
+                if matches!(self.overlay, Some(Overlay::VoiceClone(_, _))) {
+                    return ComponentUpdate::render(RenderRequest::Immediate);
+                }
                 self.overlay = Some(Overlay::VoiceOutput { text, scroll: 0 });
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::VoiceStatus(status) => {
+                if let Some(status) = status
+                    .as_ref()
+                    .filter(|status| status.text.starts_with("Voice clone:"))
+                {
+                    self.overlay = Some(Overlay::VoiceClone(status.text.clone(), false));
+                } else if matches!(self.overlay, Some(Overlay::VoiceClone(_, _))) {
+                    self.overlay = None;
+                }
                 self.voice_status = status;
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
@@ -4111,6 +4173,59 @@ mod history_tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     use std::sync::Arc;
+
+    #[test]
+    fn voice_clone_modal_routes_keys_locally_and_escape_cancels() {
+        use crate::voice::Command;
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        root.update(RootEvent::VoiceStatus(Some(crate::voice_state::Status {
+            text: "Voice clone: Synthetic voice".into(),
+            ..Default::default()
+        })));
+        for (key, expected) in [
+            (KeyCode::Char('r'), Command::CloneRecord(None)),
+            (KeyCode::Char(' '), Command::CloneStop),
+            (KeyCode::Char('p'), Command::ClonePlay),
+            (KeyCode::Esc, Command::CloneCancel),
+        ] {
+            let update = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+                key,
+                KeyModifiers::NONE,
+            ))));
+            assert!(
+                matches!(update.effects.as_slice(), [RootEffect::Voice(command)] if *command == expected)
+            );
+        }
+        root.update(RootEvent::VoiceStatus(None));
+        assert!(root.overlay.is_none());
+    }
+
+    #[test]
+    fn voice_clone_upload_requires_visible_consent() {
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        let panel = crate::tui::voice_clone::Panel::new("Synthetic voice".into());
+        root.update(RootEvent::VoiceStatus(Some(crate::voice_state::Status {
+            text: panel.text(),
+            ..Default::default()
+        })));
+        for (width, height, allowed) in [(40, 10, false), (120, 35, true)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
+                .unwrap();
+            let update = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::Char('u'),
+                KeyModifiers::NONE,
+            ))));
+            assert_eq!(
+                matches!(
+                    update.effects.as_slice(),
+                    [RootEffect::Voice(crate::voice::Command::CloneSubmit)]
+                ),
+                allowed
+            );
+        }
+    }
 
     #[test]
     fn voice_output_panel_scrolls_copies_and_preserves_draft() {
