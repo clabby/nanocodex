@@ -9,6 +9,7 @@
     "node-rsa": "../nanocodex/tools/browser/unsupportedNodeRsa.mjs"
   },
   "workers_dev": false,
+  "ai": { "binding": "AI" },
   "minify": true,
   "upload_source_maps": true,
   "observability": {

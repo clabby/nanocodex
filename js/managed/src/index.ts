@@ -1,3 +1,4 @@
+import { resolveThreadRoute, ThreadRoutePin, type ThreadRoute, type RoutingAi } from "./thread-model-routing";
 import { retireSessionProjects, isRetiredProjectCompletion } from "./retired-projects";
 import { downloadPath, downloadBrainFile, downloadHandFile, fileDownloadFailure, FileDownloadError } from "./file-download";
 import { callerContext, type CallerContext } from "./request-origin";
@@ -223,7 +224,7 @@ import {
   parseAgentSettingsPatch,
   parseAgentSettingsQuery,
   parseCompleteAgentSettings,
-  validateAgentSettings,
+  validateAgentAdmissionSettings,
   type ManagedAgentSettings,
   type ManagedAgentSettingsPatch,
 } from "./agent-settings";
@@ -369,6 +370,9 @@ export interface Env extends
   AccountAuthEnv,
   ChiefOfStaffPrincipalEnv,
   HostPrincipalEnv {
+  AI?: RoutingAi;
+  /** Opt-in paid inference PoC; absent/false preserves current routing. */
+  NANOCODEX_THREAD_ROUTING?: string;
   NANOCODEX_PERFORMANCE_TRACE?: string;
   NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
   NANOCODEX_ACCOUNT_TOOLS: DurableObjectNamespace<AccountHostedTools>;
@@ -1898,7 +1902,11 @@ async function managedFetchRoute(
           if (body.durability !== undefined) throw new TypeError("configuration cannot be combined with durability import");
           if (creationConfiguration.environment && !principal.capabilities.includes("tools:use")) return json({ error: "forbidden" }, { status: 403 });
           if (!settingsProvided && creationConfiguration.settings) creationSettings = creationConfiguration.settings;
+          if (settingsProvided && creationConfiguration.model_routing) {
+            throw new TypeError("model_routing owns model and thinking; omit settings");
+          }
         }
+        validateAgentAdmissionSettings(creationSettings);
 
       } catch (error) {
         return json({ error: "invalid_request", message: errorMessage(error) }, { status: 400 });
@@ -1925,7 +1933,7 @@ async function managedFetchRoute(
                 message: "settings must match the imported managed agent",
               }, { status: 400 });
             }
-            creationSettings = importedSettings;
+            creationSettings = validateAgentAdmissionSettings(importedSettings);
           } else {
             durabilityStateId = portableDurabilityStateId(durabilityArchive);
           }
@@ -3070,6 +3078,14 @@ export class DurableAgentSession extends DurableComputerSession {
   readonly #startupContext: ManagedStartupContext;
   readonly #personalization = new PreparedPersonalizationCache();
   #settingsMutationTail: Promise<void> = Promise.resolve();
+  #threadRoutePin = new ThreadRoutePin({
+    read: () => this.#threadRoute(),
+    commit: (route) => this.ctx.storage.transactionSync(() => {
+      this.#assertDurabilityAdmissionActive();
+      this.ctx.storage.sql.exec("INSERT INTO managed_thread_route (singleton, route_json) VALUES (1, ?)", JSON.stringify(route));
+      this.#storeSettings(route);
+    }),
+  });
   #attachments?: SessionAttachments;
   readonly #settingsRequests = new Set<Promise<Response>>();
   #recoveryTask?: Promise<void>;
@@ -3139,6 +3155,16 @@ export class DurableAgentSession extends DurableComputerSession {
         created INTEGER NOT NULL CHECK (created IN (0, 1)),
         created_at INTEGER NOT NULL,
         PRIMARY KEY (tool_session_id, tool_call_id)
+      );
+      CREATE TABLE IF NOT EXISTS managed_thread_route (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1), route_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS managed_routing_observations (
+        turn_id TEXT PRIMARY KEY, backend TEXT NOT NULL, model TEXT NOT NULL,
+        thinking TEXT NOT NULL, terminal_type TEXT NOT NULL,
+        elapsed_ms INTEGER NOT NULL, usage_json TEXT,
+        verified_success INTEGER CHECK (verified_success IN (0, 1)),
+        verification_source TEXT
       );
       CREATE TABLE IF NOT EXISTS managed_turns (
         id TEXT PRIMARY KEY,
@@ -3516,6 +3542,9 @@ export class DurableAgentSession extends DurableComputerSession {
       return this.#commitPreparedCredential();
     }
     if (request.method === "POST" && url.pathname === "/durability/import") {
+      if (this.#configuration().model_routing || this.#threadRoute() || this.#settings().model === "@cf/zai-org/glm-5.3") {
+        return json({ error: "routed_session_not_portable", message: "Thread-routed sessions cannot import durability state." }, { status: 409 });
+      }
       if (this.#settingsRequests.size > 0) {
         return json({ error: "durability_import_conflict" }, { status: 409 });
       }
@@ -3568,6 +3597,9 @@ export class DurableAgentSession extends DurableComputerSession {
       }
     }
     if (request.method === "POST" && url.pathname === "/durability/export") {
+      if (this.#configuration().model_routing || this.#threadRoute() || this.#settings().model === "@cf/zai-org/glm-5.3") {
+        return json({ error: "routed_session_not_portable", message: "Thread-routed sessions are not yet portable." }, { status: 409 });
+      }
       if (Object.keys(this.#configuration()).length || this.ctx.storage.sql.exec("SELECT singleton FROM managed_webhook").toArray().length
         || this.ctx.storage.sql.exec("SELECT id FROM managed_artifacts LIMIT 1").toArray().length)
         return json({ error: "session_resources_not_portable", message: "Configured sessions, webhooks and published artifacts are not yet portable." }, { status: 409 });
@@ -4059,6 +4091,8 @@ export class DurableAgentSession extends DurableComputerSession {
         latest_event_cursor: this.#eventArchive.latestCursor(this.#eventLog),
         stream_error: session.stream_error,
         settings: this.#settings(),
+        model_route: this.#threadRoute() ?? null,
+        routing_observations: this.ctx.storage.sql.exec("SELECT * FROM managed_routing_observations ORDER BY rowid DESC LIMIT 20").toArray(),
       });
     }
     if (request.method === "DELETE" && url.pathname === "/session") {
@@ -4495,7 +4529,7 @@ export class DurableAgentSession extends DurableComputerSession {
     catch { return json({ error: "invalid_configuration" }, { status: 400 }); }
     let settings: ManagedAgentSettings;
     try {
-      settings = parseCompleteAgentSettings(initialization.settings);
+      settings = validateAgentAdmissionSettings(parseCompleteAgentSettings(initialization.settings));
     } catch {
       return new Response(null, { status: 400 });
     }
@@ -6552,6 +6586,8 @@ export class DurableAgentSession extends DurableComputerSession {
         }
       };
       const session = this.#session()!;
+      await this.#ensureThreadRoute(row, assertActive);
+      assertActive();
       this.#pinPersonalization(row.id, parseTurnAuthorization(row.authorization_json), session.accepted_turns <= 1);
       const catalog = dispatchInputJson === undefined && row.state !== "cancelling"
         && session.runtime_profile === "managed" && accountToolsEnabled(this.#configuration())
@@ -7036,6 +7072,8 @@ export class DurableAgentSession extends DurableComputerSession {
       this.ctx.storage.sql.exec("DELETE FROM managed_cron_triggers");
       this.ctx.storage.sql.exec("DELETE FROM managed_cron_deliveries");
       this.ctx.storage.sql.exec("DELETE FROM managed_turns");
+      this.ctx.storage.sql.exec("DELETE FROM managed_thread_route");
+      this.ctx.storage.sql.exec("DELETE FROM managed_routing_observations");
       this.ctx.storage.sql.exec("DELETE FROM managed_turn_cancel_intents");
       this.ctx.storage.sql.exec("DELETE FROM history_projection_outbox");
       this.ctx.storage.sql.exec("DELETE FROM turn_history_citations");
@@ -7273,6 +7311,9 @@ export class DurableAgentSession extends DurableComputerSession {
   ): Promise<CloudflareAgent.Agent> {
     if (this.#durabilityExported) throw new Error("durability state was exported");
     if (this.#deleting || this.#deleted) throw retryableError("agent is being deleted");
+    if (this.#configuration().model_routing && !this.#threadRoute()) {
+      throw retryableError("thread route is pending the first admitted text task");
+    }
     if (options.reuseReady && this.#agent && !this.#agentShutdownPromise) return this.#agent;
     const session = this.#session();
     let accountMcpRefreshMs = 0;
@@ -7978,9 +8019,21 @@ export class DurableAgentSession extends DurableComputerSession {
       };
       Object.defineProperty(agentOptions, internalRuntime, { value: {
         ...hostedRuntime,
+        ...(this.#threadRoute()?.backend === "workers_ai" ? {
+          workersAi: {
+            ai: { run: async (model: string, input: unknown) => {
+              this.#assertDurabilityAdmissionActive();
+              if (this.env.NANOCODEX_THREAD_ROUTING !== "true" || !this.env.AI
+                || this.#session()?.authorization_epoch !== session.authorization_epoch
+                || this.#threadRoute()?.model !== model) throw new Error("Workers AI route ownership is no longer active");
+              return this.env.AI.run(model, input);
+            } },
+            model: this.#threadRoute()!.model, thinking: this.#threadRoute()!.thinking,
+          },
+        } : {}),
         // Voice and session control can start while the owned Responses relay warms up.
         waitForPreconnect: false,
-        subagentsEnabled: configuration.multi_agent?.enabled,
+        subagentsEnabled: configuration.model_routing ? false : configuration.multi_agent?.enabled,
         subagentMaxConcurrency: configuration.multi_agent?.enabled
           ? configuration.multi_agent.max_concurrent_subagents ?? 6 : undefined,
         responseControls: {
@@ -9183,6 +9236,7 @@ export class DurableAgentSession extends DurableComputerSession {
         : { type: "turn_retryable", id, error: "recovering an unsettled durable operation" };
       event = this.#eventLog.append(message, id);
       this.ctx.storage.sql.exec("DELETE FROM managed_turn_terminal_chunks WHERE turn_id = ?", id);
+      this.ctx.storage.sql.exec("DELETE FROM managed_routing_observations WHERE turn_id = ?", id);
       this.ctx.storage.sql.exec(
         `UPDATE managed_turns SET state = ?, terminal_json = NULL, terminal_cursor = NULL,
            error = NULL, retry_at = NULL, updated_at = ? WHERE id = ?`,
@@ -9214,6 +9268,19 @@ export class DurableAgentSession extends DurableComputerSession {
       }
       const result = commitManagedTransition(this.ctx.storage, this.#eventLog, id, requested);
       if (result.event && isTerminalState(result.committed.state)) {
+        const route = this.#threadRoute();
+        if (route) {
+          // Commit every terminal outcome atomically, including admission failures.
+          // Null usage means unavailable, never zero cost; elapsed includes admission/retries.
+          this.ctx.storage.sql.exec(
+            `INSERT OR IGNORE INTO managed_routing_observations
+             (turn_id, backend, model, thinking, terminal_type, elapsed_ms, usage_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            id, route.backend, route.model, route.thinking, requested.type,
+            Math.max(0, Date.now() - result.committed.created_at),
+            JSON.stringify(requested.type === "turn_completed" ? requested.usage ?? null : null),
+          );
+        }
         this.#goalRuntime.finish(id, result.committed.state === "completed",
           requested.type === "turn_completed" && requested.final_message.trim().length > 0,
           result.committed.state === "cancelled" ? "paused"
@@ -9831,6 +9898,42 @@ export class DurableAgentSession extends DurableComputerSession {
       .toArray()[0]);
   }
 
+  #threadRoute(): ThreadRoute | undefined {
+    const row = this.ctx.storage.sql.exec<{ route_json: string }>(
+      "SELECT route_json FROM managed_thread_route WHERE singleton = 1",
+    ).toArray()[0];
+    return row ? JSON.parse(row.route_json) as ThreadRoute : undefined;
+  }
+
+  async #ensureThreadRoute(row: ManagedTurnRow, assertActive: () => void): Promise<void> {
+    const policy = this.#configuration().model_routing;
+    if (!policy) return;
+    if (this.env.NANOCODEX_THREAD_ROUTING !== "true" || !this.env.AI) {
+      throw new ManagedRequestError(503, "routing_unavailable", "thread routing requires enabled Workers AI binding");
+    }
+    if (!this.#hasFullAccountAuthority(parseTurnAuthorization(row.authorization_json))) {
+      throw new ManagedRequestError(403, "routing_forbidden", "thread routing PoC requires full account authority");
+    }
+    if (this.#threadRoute()) return;
+    const session = this.#session()!;
+    if (session.runtime_profile !== "managed" || session.completed_turns > 0 || this.#sessionStatus()?.has_snapshot) {
+      throw new ManagedRequestError(409, "routing_requires_new_thread", "routing can only initialize a new managed thread");
+    }
+    await this.#threadRoutePin.resolve(async () => {
+      // Always classify the first accepted task even if later admission races it.
+      const first = this.ctx.storage.sql.exec<{ id: string }>(
+        "SELECT id FROM managed_turns ORDER BY accepted_cursor ASC LIMIT 1",
+      ).one();
+      const opening = this.#managedTurn(first.id);
+      if (!opening) throw new Error("first routing task is unavailable");
+      const route = await resolveThreadRoute(this.env.AI!, JSON.parse(opening.input_json), policy);
+      assertActive();
+      await this.#shutdownAgent(true);
+      assertActive();
+      return route;
+    });
+  }
+
   #settings(): ManagedAgentSettings {
     const row = this.ctx.storage.sql.exec<AgentSettingsRow>(
       `SELECT model, thinking, reasoning_mode, fast_mode
@@ -9863,9 +9966,12 @@ export class DurableAgentSession extends DurableComputerSession {
     const session = this.#session();
     if (!session) throw new ManagedRequestError(404, "not_found", "agent is not initialized");
     const current = this.#settings();
+    if (this.#configuration().model_routing) {
+      throw new ManagedRequestError(409, "settings_locked", "routed thread model and thinking are fixed by its creation policy");
+    }
     let settings: ManagedAgentSettings;
     try {
-      settings = validateAgentSettings({ ...current, ...patch });
+      settings = validateAgentAdmissionSettings({ ...current, ...patch });
     } catch (error) {
       throw new ManagedRequestError(400, "invalid_request", errorMessage(error));
     }
@@ -10870,6 +10976,7 @@ function validManagedSessionPortability(value: unknown): value is ManagedSession
     && nonnegativeSafeInteger(value.last_active)
     && (value.stream_error === null || typeof value.stream_error === "string")
     && validAgentSettings(value.settings)
+    && value.settings.model !== "@cf/zai-org/glm-5.3"
     && typeof value.title === "string"
     && value.title === conversationTitle(value.first_prompt);
 }

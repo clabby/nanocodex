@@ -407,7 +407,7 @@ fn spawn_agent_parameters() -> Value {
             },
             "model": {
                 "type": "string",
-                "enum": ["sol", "terra", "luna", "astra"],
+                "enum": ["sol", "terra", "luna", "astra", "glm-5.3"],
                 "description": "Model override for the new agent. Omit to inherit the parent's current model."
             },
             "thinking": {
@@ -868,7 +868,7 @@ mod tests {
 
         assert_eq!(
             parameters["properties"]["model"]["enum"],
-            json!(["sol", "terra", "luna", "astra"])
+            json!(["sol", "terra", "luna", "astra", "glm-5.3"])
         );
         assert_eq!(
             parameters["properties"]["thinking"]["enum"],

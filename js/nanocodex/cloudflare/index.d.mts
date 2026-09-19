@@ -5,3 +5,4 @@ export type {
   CloudflareEgressOptions,
   CloudflareEgressTransportOptions,
 } from "./egress.mjs";
+export { createWorkersAiResponses } from "./workers-ai-responses.mjs";

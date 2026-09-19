@@ -1,3 +1,4 @@
+import { createWorkersAiResponses } from "./workers-ai-responses.mjs";
 import { responseControlsBody, responseControlsSocket } from "../runtime/response-controls.mjs";
 import * as HostAgent from "../host/Agent.mjs";
 import {
@@ -309,13 +310,21 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
   if (eventPersistence === "caller") clearCloudflareEventSocket(context);
   const durability = createCloudflareDurabilityStore(context.storage);
   const { sessionId, stateId } = durableIdentity(context.storage, durabilityId);
-  const endpoint = cloudflareEgress({
+  const workersAi = internalRuntime?.workersAi;
+  if (workersAi !== undefined && (internalConfiguration?.model !== "@cf/zai-org/glm-5.3"
+    || workersAi.model !== internalConfiguration.model || workersAi.thinking !== internalConfiguration.thinking)) {
+    throw new TypeError("Workers AI profile must match the pinned model and thinking");
+  }
+  if (internalConfiguration?.model === "@cf/zai-org/glm-5.3" && workersAi === undefined) {
+    throw new TypeError("GLM-5.3 requires a Workers AI transport binding");
+  }
+  const endpoint = workersAi === undefined ? cloudflareEgress({
     binding: scopeCloudflareEgress(egress, subject),
-  });
+  }) : createWorkersAiResponses(workersAi.ai);
   const startup = deferred();
   const transport = Transport.hostManaged({
     ...endpoint,
-    websocketPreconnect: true,
+    websocketPreconnect: workersAi === undefined,
     createResponse(url, id, request) {
       return endpoint.createResponse(url, id, {
         ...request,
@@ -323,6 +332,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
       });
     },
     async createWebSocket(url, id, request) {
+      if (workersAi !== undefined) throw new Error("Workers AI threads require HTTP Responses transport");
       try {
         const opened = await endpoint.createWebSocket(url, id, request);
         if (request.authorization === "preconnect") startup.resolve();
@@ -370,7 +380,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
     // Managed voice needs the durable session before the separate Responses
     // relay is ready. Its preconnection remains owned by the host and a later
     // text turn consumes it through the same credential-checked transport.
-    if (internalRuntime?.waitForPreconnect !== false) {
+    if (workersAi === undefined && internalRuntime?.waitForPreconnect !== false) {
       await withTimeout(
         startup.promise,
         STARTUP_TIMEOUT_MS,
@@ -554,11 +564,13 @@ function validateInternalConfiguration(configuration) {
       "reasoning_mode",
       "fast_mode",
     ].includes(key))
-    || !["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra"]
+    || !["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra", "@cf/zai-org/glm-5.3"]
       .includes(configuration.model)
     || !["none", "low", "medium", "high", "xhigh", "max"].includes(configuration.thinking)
     || !["standard", "pro"].includes(configuration.reasoning_mode)
     || typeof configuration.fast_mode !== "boolean"
+    || (configuration.model === "@cf/zai-org/glm-5.3"
+      && (!["low", "medium", "high"].includes(configuration.thinking) || configuration.reasoning_mode !== "standard"))
     || (configuration.model === "gpt-6-astra" && configuration.thinking === "none")) {
     throw new TypeError("Cloudflare Agent internal configuration is invalid");
   }

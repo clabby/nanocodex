@@ -285,7 +285,12 @@ pub(super) fn validate_model_thinking(model: Model, thinking: Thinking) -> Resul
         Ok(())
     } else {
         Err(NanocodexError::InvalidRequest(
-            "GPT-6 Astra requires low, medium, high, xhigh, or max reasoning effort".to_owned(),
+            (if model == Model::Glm53 {
+                "GLM-5.3 requires low, medium, or high reasoning effort"
+            } else {
+                "GPT-6 Astra requires low, medium, high, xhigh, or max reasoning effort"
+            })
+            .to_owned(),
         ))
     }
 }
@@ -298,7 +303,12 @@ pub(super) fn validate_model_reasoning_mode(
         Ok(())
     } else {
         Err(NanocodexError::InvalidRequest(
-            "GPT-6 Astra does not support pro reasoning mode".to_owned(),
+            (if model == Model::Glm53 {
+                "GLM-5.3 does not support pro reasoning mode"
+            } else {
+                "GPT-6 Astra does not support pro reasoning mode"
+            })
+            .to_owned(),
         ))
     }
 }

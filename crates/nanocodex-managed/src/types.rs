@@ -423,12 +423,22 @@ impl AgentSettings {
     pub(crate) fn validate(self) -> Result<Self, ManagedError> {
         if !self.model.supports_thinking(self.thinking) {
             return Err(ManagedError::Configuration(
-                "GPT-6 Astra requires low, medium, high, xhigh, or max reasoning effort".to_owned(),
+                (if self.model == Model::Glm53 {
+                    "GLM-5.3 requires low, medium, or high reasoning effort"
+                } else {
+                    "GPT-6 Astra requires low, medium, high, xhigh, or max reasoning effort"
+                })
+                .to_owned(),
             ));
         }
         if !self.model.supports_reasoning_mode(self.reasoning_mode) {
             return Err(ManagedError::Configuration(
-                "GPT-6 Astra does not support pro reasoning mode".to_owned(),
+                (if self.model == Model::Glm53 {
+                    "GLM-5.3 does not support pro reasoning mode"
+                } else {
+                    "GPT-6 Astra does not support pro reasoning mode"
+                })
+                .to_owned(),
             ));
         }
         Ok(self)
@@ -526,6 +536,7 @@ mod model_serde {
             "gpt-5.6-terra" => Ok(Model::Terra),
             "gpt-5.6-luna" => Ok(Model::Luna),
             "gpt-6-astra" => Ok(Model::Astra),
+            "@cf/zai-org/glm-5.3" => Ok(Model::Glm53),
             value => Err(de::Error::unknown_variant(
                 value,
                 &[
@@ -533,6 +544,7 @@ mod model_serde {
                     "gpt-5.6-terra",
                     "gpt-5.6-luna",
                     "gpt-6-astra",
+                    "@cf/zai-org/glm-5.3",
                 ],
             )),
         }
@@ -724,6 +736,34 @@ mod settings_tests {
     use serde_json::json;
 
     use super::{AgentSettings, AgentSettingsPatch};
+
+    #[test]
+    fn glm53_settings_round_trip_with_canonical_identity() {
+        let settings = AgentSettings {
+            model: Model::Glm53,
+            thinking: Thinking::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+        };
+        let value = serde_json::to_value(settings).unwrap();
+        assert_eq!(value["model"], "@cf/zai-org/glm-5.3");
+        assert_eq!(
+            serde_json::from_value::<AgentSettings>(value).unwrap(),
+            settings
+        );
+        assert!(settings.validate().is_ok());
+        let invalid = AgentSettings {
+            thinking: Thinking::Max,
+            ..settings
+        };
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("GLM-5.3")
+        );
+    }
 
     #[test]
     fn settings_use_canonical_managed_protocol_values() {
