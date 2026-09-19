@@ -94,17 +94,12 @@ impl SettingsCommand {
             } else {
                 Self::Zoom
             }),
-            "/voice" => {
-                let argument = parts.next().unwrap_or_default();
-                Some(if parts.next().is_some() {
-                    Self::Invalid("Usage: /voice [on|off|mute|unmute|status|voices|VOICE]".into())
-                } else {
-                    match crate::voice::Command::parse(argument) {
-                        Ok(command) => Self::Voice(command),
-                        Err(error) => Self::Invalid(error),
-                    }
-                })
-            }
+            "/voice" => Some(
+                match crate::voice::Command::parse(input.trim_start()[command.len()..].trim()) {
+                    Ok(command) => Self::Voice(command),
+                    Err(error) => Self::Invalid(error),
+                },
+            ),
             "/model" => {
                 let Some(argument) = parts.next() else {
                     return Some(Self::OpenModel);
@@ -1002,6 +997,11 @@ impl Composer {
 
     fn take_local_command(&mut self) -> Option<ComposerUpdate> {
         if !self.images.is_empty() {
+            if self.draft.split_whitespace().next() == Some("/voice") {
+                return Some(ComposerUpdate::effect(ComposerEffect::Settings(SettingsCommand::Invalid(
+                    "Voice commands use local audio paths. Remove image attachments before running /voice.".into()
+                )), false));
+            }
             return None;
         }
         let effect = if let Some(command) = crate::tui::vault::Command::parse(self.draft.trim()) {
@@ -3235,6 +3235,47 @@ mod tests {
             assert!(composer.draft().is_empty());
         }
         assert_eq!(SettingsCommand::parse("/bugfix rendering"), None);
+    }
+
+    #[test]
+    fn voice_commands_with_attachments_never_become_model_submissions() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("/voice clone me sample.wav --consent ".into());
+        composer.update(ComposerEvent::PasteImage(
+            "data:image/png;base64,fixture".into(),
+        ));
+        assert!(matches!(
+            composer.submit().effect,
+            Some(ComposerEffect::Settings(SettingsCommand::Invalid(_)))
+        ));
+        assert!(matches!(
+            composer.queue().effect,
+            Some(ComposerEffect::Settings(SettingsCommand::Invalid(_)))
+        ));
+        assert!(!composer.images.is_empty());
+    }
+
+    #[test]
+    fn voice_clone_is_a_local_settings_command_with_quoted_arguments() {
+        assert_eq!(
+            SettingsCommand::parse(
+                "/voice clone \"Sample speaker\" \"audio/my sample.wav\" --consent"
+            ),
+            Some(SettingsCommand::Voice(crate::voice::Command::Clone {
+                name: "Sample speaker".into(),
+                path: "audio/my sample.wav".into()
+            }))
+        );
+        assert!(matches!(
+            SettingsCommand::parse("/voice clone me audio.wav"),
+            Some(SettingsCommand::Invalid(_))
+        ));
+        assert!(matches!(
+            SettingsCommand::parse("/voice voices elevenlabs"),
+            Some(SettingsCommand::Voice(crate::voice::Command::ListProvider(
+                crate::voice::Provider::ElevenLabs
+            )))
+        ));
     }
 
     #[test]

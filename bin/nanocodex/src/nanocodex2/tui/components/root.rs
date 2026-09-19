@@ -219,6 +219,7 @@ pub(crate) enum RootEvent {
     },
     NotifyError(String),
     NotifySuccess(String),
+    VoiceOutput(String),
     ConfirmReviewDownload,
     UpdateAvailable(Version),
     SteerAdmitted(QueueId),
@@ -358,6 +359,7 @@ pub(crate) enum RootEffect {
 enum Overlay {
     VaultReview(crate::tui::vault::Review),
     AgentId(String),
+    VoiceOutput { text: String, scroll: u16 },
     Actions(Node<ActionsMenu>),
     ContextDiagnostics(Node<ContextDiagnosticsPanel>),
     Effort(Node<EffortSelector>),
@@ -910,6 +912,25 @@ impl RootNode {
                         frame.render_widget(Paragraph::new("Enlarge the terminal to review the complete website approval. Approval is disabled until all details fit. Esc cancels.").wrap(Wrap { trim: false }), layout.body);
                     }
                 }
+                Overlay::VoiceOutput { text, scroll } => {
+                    let layout = Floating::new(
+                        "Voice · local controls",
+                        100,
+                        area.height.saturating_sub(4),
+                        &[
+                            ("↑↓ pgup/pgdn", "scroll"),
+                            ("c", "copy all"),
+                            ("esc", "close"),
+                        ],
+                    )
+                    .render(frame, area, theme);
+                    let paragraph = Paragraph::new(text.as_str()).wrap(Wrap { trim: false });
+                    let max_scroll = paragraph
+                        .line_count(layout.body.width)
+                        .saturating_sub(usize::from(layout.body.height));
+                    *scroll = (*scroll).min(u16::try_from(max_scroll).unwrap_or(u16::MAX));
+                    frame.render_widget(paragraph.scroll((*scroll, 0)), layout.body);
+                }
                 Overlay::AgentId(id) => {
                     let layout =
                         Floating::new("Agent ID", 58, 7, &[("enter", "copy"), ("esc", "close")])
@@ -1082,6 +1103,7 @@ impl RootNode {
                         .update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
                     if !connecting && update.effects.iter().any(|effect| matches!(effect,
                         RootEffect::Voice(crate::voice::Command::Start(_))
+                        | RootEffect::Voice(crate::voice::Command::Select(_))
                         | RootEffect::Voice(crate::voice::Command::Toggle) if self.voice_status.is_none()))
                     {
                         self.reconnecting = Some(true);
@@ -1539,6 +1561,7 @@ impl RootNode {
         match &self.overlay {
             Some(Overlay::VaultReview(_)) => self.update_vault_review(event),
             Some(Overlay::AgentId(_)) => self.update_agent_id(event),
+            Some(Overlay::VoiceOutput { .. }) => self.update_voice_output(event),
             Some(Overlay::Actions(_)) => self.update_actions(event),
             Some(Overlay::ContextDiagnostics(_)) => self.update_context_diagnostics(event),
             Some(Overlay::Effort(_)) => self.update_effort(EffortEvent::Terminal { event, now }),
@@ -2300,6 +2323,42 @@ impl RootNode {
             },
             render: RenderRequest::Immediate,
         }
+    }
+
+    fn update_voice_output(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        if is_escape(&event) {
+            self.overlay = None;
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
+        let Some(Overlay::VoiceOutput { text, scroll }) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        match event {
+            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                match key.code {
+                    KeyCode::Char('c') => {
+                        return ComponentUpdate {
+                            effects: vec![RootEffect::Copy(text.clone())],
+                            render: RenderRequest::Immediate,
+                        };
+                    }
+                    KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                    KeyCode::Down => *scroll = scroll.saturating_add(1),
+                    KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                    KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+                    KeyCode::Home => *scroll = 0,
+                    KeyCode::End => *scroll = u16::MAX,
+                    _ => return ComponentUpdate::none(),
+                }
+            }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown => *scroll = scroll.saturating_add(3),
+                _ => return ComponentUpdate::none(),
+            },
+            _ => return ComponentUpdate::none(),
+        }
+        ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn update_agent_id(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
@@ -3669,6 +3728,10 @@ impl Component for RootNode {
                 self.overlay = Some(Overlay::AgentId(id));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
+            RootEvent::VoiceOutput(text) => {
+                self.overlay = Some(Overlay::VoiceOutput { text, scroll: 0 });
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             RootEvent::VoiceStatus(status) => {
                 self.voice_status = status;
                 ComponentUpdate::render(RenderRequest::Immediate)
@@ -4048,6 +4111,48 @@ mod history_tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     use std::sync::Arc;
+
+    #[test]
+    fn voice_output_panel_scrolls_copies_and_preserves_draft() {
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        root.composer
+            .component_mut()
+            .replace_draft("keep my draft".into());
+        let text = (0..40)
+            .map(|index| format!("voice_{index:02} — Speaker {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let update = root.update(RootEvent::VoiceOutput(text.clone()));
+        assert!(update.effects.is_empty());
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+        terminal
+            .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
+            .unwrap();
+        root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::NONE,
+        ))));
+        terminal
+            .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..20)
+            .map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("voice_39"), "{rendered}");
+        let copy = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE,
+        ))));
+        assert!(matches!(copy.effects.as_slice(), [RootEffect::Copy(value)] if value == &text));
+        root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))));
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer.component().draft(), "keep my draft");
+    }
 
     #[test]
     fn live_voice_is_inline_and_mute_preserves_the_draft() {

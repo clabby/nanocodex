@@ -22,6 +22,12 @@ pub(crate) struct Args {
     /// Realtime voice.
     #[arg(long, default_value = "cove", value_parser = clap::builder::PossibleValuesParser::new(nanocodex_voice_protocol::CHATGPT_REALTIME_VOICES.iter().copied()))]
     pub voice: String,
+    /// Output provider; microphone and conversation remain on ChatGPT realtime.
+    #[arg(long, default_value = "chatgpt", value_parser = ["chatgpt", "elevenlabs"])]
+    pub provider: String,
+    /// ElevenLabs output voice ID.
+    #[arg(long)]
+    pub elevenlabs_voice: Option<String>,
     /// Start with microphone muted.
     #[arg(long)]
     pub muted: bool,
@@ -34,7 +40,12 @@ pub(crate) struct Args {
 
 #[path = "voice_command.rs"]
 mod command;
-pub(crate) use command::Command;
+pub(crate) use command::{Command, HELP, Provider, Selection};
+#[path = "voice_elevenlabs.rs"]
+pub(crate) mod elevenlabs;
+#[path = "voice_playback.rs"]
+mod playback;
+use nanocodex_voice_protocol::{VoiceOutputProvider, VoiceSettings};
 
 enum Input {
     Typed,
@@ -64,6 +75,7 @@ impl MediaControl {
 pub(crate) struct Session {
     stop: CancellationToken,
     native_stop: AbortHandle,
+    playback: Option<Arc<playback::Playback>>,
     control: Arc<Mutex<MediaControl>>,
     input: mpsc::Sender<Input>,
     muted: watch::Sender<bool>,
@@ -73,18 +85,27 @@ pub(crate) struct Session {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 impl Session {
-    pub(crate) fn start(
+    pub(crate) fn start_with_settings(
         client: ManagedClient,
         agent: String,
-        voice: &str,
+        settings: VoiceSettings,
         muted: bool,
     ) -> Result<Self, ManagedError> {
+        settings.validate_chatgpt().map_err(error)?;
+        let eleven = if settings.output_provider == VoiceOutputProvider::Elevenlabs {
+            Some(elevenlabs::Client::from_env()?)
+        } else {
+            None
+        };
         if !RealtimeWebrtcSession::is_supported() {
             return Err(error(
                 "Voice runtime missing. Install the matching nightly voice package beside nanocodex2.",
             ));
         }
-        let mut protocol = ManagedVoiceProtocol::new(voice).map_err(error)?;
+        let mut protocol = ManagedVoiceProtocol::new(&settings.voice).map_err(error)?;
+        protocol
+            .dispatch(&json!({"op":"configure","settings":settings}))
+            .map_err(error)?;
         protocol.enable_client_managed_handoffs();
         let session = uuid::Uuid::now_v7().to_string();
         protocol.bind_session(&session);
@@ -98,6 +119,22 @@ impl Session {
             ..Status::default()
         });
         let (transcript_tx, transcripts) = mpsc::channel(128);
+        let playback = eleven.map(|client| {
+            Arc::new(playback::Playback::new(
+                client,
+                settings.eleven_labs_voice_id.clone().unwrap(),
+                status_tx.clone(),
+            ))
+        });
+        let output_label = if settings.output_provider == VoiceOutputProvider::Elevenlabs {
+            format!(
+                "ElevenLabs {}",
+                settings.eleven_labs_voice_id.as_deref().unwrap()
+            )
+        } else {
+            format!("ChatGPT {}", settings.voice)
+        };
+        let actor_playback = playback.clone();
         let presentation = status_tx.clone();
         let control = Arc::new(Mutex::new(MediaControl {
             muted: *microphone.borrow(),
@@ -108,6 +145,9 @@ impl Session {
         let owner_native_stop = native_stop.clone();
         let task = tokio::spawn(async move {
             let mut actor = Actor {
+                output_label,
+                playback: actor_playback,
+                captions: SpeechCaptions::default(),
                 client,
                 agent,
                 session,
@@ -128,6 +168,9 @@ impl Session {
             };
             // Native capture/playback stops before any network cleanup.
             owner_native_stop.abort();
+            if let Some(playback) = &actor.playback {
+                playback.cancel();
+            }
             if let Some(media) = actor.media.take() {
                 media.close();
             }
@@ -162,6 +205,7 @@ impl Session {
         Ok(Self {
             stop,
             native_stop,
+            playback,
             control,
             input,
             muted,
@@ -172,6 +216,9 @@ impl Session {
         })
     }
     pub(crate) fn stop(&self) {
+        if let Some(playback) = &self.playback {
+            playback.cancel();
+        }
         self.native_stop.abort();
         self.stop.cancel();
         self.presentation.send_modify(|status| {
@@ -198,6 +245,9 @@ impl Session {
         }
     }
     pub(crate) fn typed(&self) {
+        if let Some(playback) = &self.playback {
+            playback.cancel();
+        }
         if let Some(media) = self
             .control
             .lock()
@@ -223,7 +273,71 @@ impl Drop for Session {
         self.stop();
     }
 }
+// Caption IDs are monotonic for a session. An interrupted caption stays suppressed
+// even if its delayed final arrives after playback is enabled again.
+struct SpeechCaptions {
+    generation: u64,
+    caption: Option<u64>,
+    suppressed: Option<u64>,
+    completed: Option<u64>,
+    enabled: bool,
+}
+impl Default for SpeechCaptions {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            caption: None,
+            suppressed: None,
+            completed: None,
+            enabled: true,
+        }
+    }
+}
+impl SpeechCaptions {
+    fn update(&mut self, generation: Option<u64>, enabled: Option<bool>) -> bool {
+        if generation.is_some_and(|g| g < self.generation) {
+            return false;
+        }
+        let changed = generation.is_some_and(|g| g > self.generation);
+        if let Some(g) = generation {
+            self.generation = g;
+        }
+        let interrupted = changed || enabled == Some(false);
+        if interrupted {
+            self.suppressed = self.suppressed.max(self.caption);
+        }
+        if let Some(enabled) = enabled {
+            self.enabled = enabled;
+        }
+        interrupted
+    }
+    fn consume(&mut self, speaker: &str, id: u64, text: &str, is_partial: bool) -> bool {
+        if speaker != "assistant" {
+            return false;
+        }
+        if self.caption.is_some_and(|previous| id < previous) {
+            return false;
+        }
+        self.caption = Some(id);
+        if !self.enabled {
+            self.suppressed = self.suppressed.max(Some(id));
+            return false;
+        }
+        if self.suppressed.is_some_and(|previous| id <= previous)
+            || self.completed.is_some_and(|previous| id <= previous)
+            || is_partial
+            || text.trim().is_empty()
+        {
+            return false;
+        }
+        self.completed = Some(id);
+        true
+    }
+}
 struct Actor {
+    output_label: String,
+    captions: SpeechCaptions,
+    playback: Option<Arc<playback::Playback>>,
     client: ManagedClient,
     agent: String,
     session: String,
@@ -239,8 +353,9 @@ struct Actor {
 }
 impl Actor {
     fn status(&self, text: impl Into<String>) {
+        let text = output_status(text.into(), &self.output_label);
         self.status.send_modify(|status| {
-            status.text = text.into();
+            status.text = text;
         });
     }
     fn timing(&self, stage: &str) {
@@ -279,6 +394,9 @@ impl Actor {
                     .control
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                started
+                    .handle
+                    .set_speaker_suppressed(self.playback.is_some());
                 control.media = Some(started.handle.clone());
                 control.apply_microphone()?;
             }
@@ -430,15 +548,41 @@ impl Actor {
         socket: &mut ManagedVoiceSocket,
         effects: BrowserVoiceEffects,
     ) -> Result<(), ManagedError> {
-        if let Some(enabled) = effects.playback_enabled
+        let stale_speech = effects
+            .input_generation
+            .is_some_and(|g| g < self.captions.generation);
+        if !stale_speech
+            && let Some(enabled) = effects.playback_enabled
             && let Some(media) = &self.media
         {
-            media.set_speaker_suppressed(!enabled);
+            media.set_speaker_suppressed(self.playback.is_some() || !enabled);
+        }
+        if self
+            .captions
+            .update(effects.input_generation, effects.playback_enabled)
+        {
+            if let Some(playback) = &self.playback {
+                playback.cancel();
+            }
         }
         if let Some(status) = effects.status {
             self.status(status);
         }
         for transcript in effects.transcripts {
+            if !stale_speech
+                && self.captions.consume(
+                    &transcript.speaker,
+                    transcript.id,
+                    &transcript.text,
+                    transcript.is_partial,
+                )
+            {
+                if let Some(playback) = &self.playback {
+                    if let Err(error) = playback.enqueue(transcript.text.clone()) {
+                        self.status(error.to_string());
+                    }
+                }
+            }
             self.transcripts
                 .send(super::voice_state::Transcript {
                     session: self.session.clone(),
@@ -516,6 +660,18 @@ impl Actor {
         Ok(())
     }
 }
+fn output_status(text: String, output_label: &str) -> String {
+    if text.starts_with("Voice active") {
+        let detail = text.split_once('·').map(|(_, detail)| detail.trim());
+        match detail {
+            Some(detail) => format!("Voice active · {output_label} · {detail}"),
+            None => format!("Voice active · {output_label}"),
+        }
+    } else {
+        text
+    }
+}
+
 fn initial_call_settings(
     protocol: &mut ManagedVoiceProtocol,
     context: &serde_json::Value,
@@ -546,6 +702,9 @@ fn spawn_event_reader(
 }
 impl Drop for Actor {
     fn drop(&mut self) {
+        if let Some(playback) = &self.playback {
+            playback.cancel();
+        }
         if let Some(task) = &self.event_reader {
             task.abort();
         }
@@ -572,10 +731,24 @@ pub(crate) async fn run(client: &ManagedClient, args: Args) -> Result<(), Manage
             nanocodex_observability::LogOutput::Stderr,
         )
         .map_err(|e| error(e.to_string()))?;
+    let settings = VoiceSettings {
+        voice: args.voice,
+        output_provider: if args.provider == "elevenlabs" {
+            VoiceOutputProvider::Elevenlabs
+        } else {
+            VoiceOutputProvider::Openai
+        },
+        eleven_labs_voice_id: args.elevenlabs_voice,
+        ..Default::default()
+    };
+    settings.validate_chatgpt().map_err(error)?;
+    if settings.output_provider == VoiceOutputProvider::Elevenlabs {
+        elevenlabs::Client::from_env()?;
+    }
     let (agent, mut workspace_events, id, _) =
         super::open_workspace_agent_from(client, args.agent, None, None).await?;
     eprintln!("Managed agent: {id}");
-    let mut session = Session::start(client.clone(), id, &args.voice, args.muted)?;
+    let mut session = Session::start_with_settings(client.clone(), id, settings, args.muted)?;
     let mut status = session.status.clone();
     let deadline = tokio::time::sleep(Duration::from_secs(args.duration.unwrap_or(86400)));
     tokio::pin!(deadline);
@@ -619,6 +792,45 @@ pub(crate) async fn run(client: &ManagedClient, args: Args) -> Result<(), Manage
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn active_status_names_selected_output_provider_and_voice() {
+        assert_eq!(
+            output_status("Voice active (cove)".into(), "ElevenLabs synthetic_voice"),
+            "Voice active · ElevenLabs synthetic_voice"
+        );
+        assert_eq!(
+            output_status("Voice active · microphone muted".into(), "ChatGPT maple"),
+            "Voice active · ChatGPT maple · microphone muted"
+        );
+        assert_eq!(
+            output_status("Voice reconnecting…".into(), "ElevenLabs synthetic_voice"),
+            "Voice reconnecting…"
+        );
+    }
+    #[test]
+    fn captions_dedupe_finals_and_permanently_suppress_interrupted_ids() {
+        let mut captions = SpeechCaptions::default();
+        let mut id = 1;
+        let mut partial = true;
+        assert!(!captions.consume("assistant", id, "hello", partial));
+        assert!(captions.update(Some(1), Some(false)));
+        assert!(!captions.update(Some(0), Some(true)));
+        assert!(!captions.enabled);
+        captions.update(Some(1), Some(true));
+        partial = false;
+        assert!(!captions.consume("assistant", id, "hello", partial));
+        id = 2;
+        assert!(captions.consume("assistant", id, "hello", partial));
+        assert!(!captions.consume("assistant", id, "hello", partial));
+        id = 3;
+        partial = true;
+        assert!(!captions.consume("assistant", id, "hello", partial));
+        assert!(captions.update(Some(2), None));
+        partial = false;
+        assert!(!captions.consume("assistant", id, "hello", partial));
+        id = 4;
+        assert!(captions.consume("assistant", id, "hello", partial));
+    }
     #[tokio::test]
     async fn busy_realtime_events_do_not_cancel_agent_stream_connection() {
         use axum::{Router, http::header, routing::get};

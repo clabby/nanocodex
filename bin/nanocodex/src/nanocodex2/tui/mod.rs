@@ -495,16 +495,18 @@ impl SettingsMutation {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingVoice {
     pane: PaneId,
-    name: &'static str,
+    selection: crate::voice::Selection,
     muted: bool,
 }
 
 struct DriverRuntime {
     screen: screen::Controller,
     pending_voice: Option<PendingVoice>,
+    voice_selection: crate::voice::Selection,
+    voice_tasks: JoinSet<(PaneId, Result<String, String>)>,
     voice: Option<crate::voice::Session>,
     client: ManagedClient,
     agent: Option<Nanocodex>,
@@ -644,6 +646,82 @@ fn history_replay_matches(
         && runtime_before == Some(requested_before)
 }
 
+fn voice_settings(selection: &crate::voice::Selection) -> nanocodex_voice_protocol::VoiceSettings {
+    use nanocodex_voice_protocol::{VoiceOutputProvider, VoiceSettings};
+    match selection {
+        crate::voice::Selection::Chatgpt(name) => VoiceSettings {
+            voice: (*name).into(),
+            ..Default::default()
+        },
+        crate::voice::Selection::ElevenLabs(id) => VoiceSettings {
+            output_provider: VoiceOutputProvider::Elevenlabs,
+            eleven_labs_voice_id: Some(id.clone()),
+            ..Default::default()
+        },
+    }
+}
+
+async fn list_elevenlabs_voices() -> Result<String, String> {
+    let client = crate::voice::elevenlabs::Client::from_env().map_err(|e| e.to_string())?;
+    let voices = client.voices().await.map_err(|e| e.to_string())?;
+    let mut lines = vec!["ElevenLabs voices (use /voice elevenlabs VOICE_ID):".to_owned()];
+    for voice in voices {
+        lines.push(format!(
+            "{} — {}{}",
+            voice.voice_id,
+            voice.name,
+            if voice.category.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", voice.category)
+            }
+        ));
+    }
+    if lines.len() == 1 {
+        lines.push("No voices found. Use /voice clone NAME PATH --consent.".into());
+    }
+    Ok(lines.join("\n"))
+}
+
+fn resolve_voice_sample_path(
+    workspace: &Path,
+    path: PathBuf,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Ok(relative) = path.strip_prefix("~") {
+        return home.map(|home| home.join(relative)).ok_or_else(|| {
+            "Cannot expand ~/ audio path: HOME is not set. Use an absolute path.".into()
+        });
+    }
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        workspace.join(path)
+    })
+}
+
+async fn clone_elevenlabs_voice(name: String, path: PathBuf) -> Result<String, String> {
+    // The provider currently reads samples synchronously. Keep even slow local files
+    // off the terminal's executor; the transport itself remains asynchronous.
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        handle.block_on(async move {
+            let client = crate::voice::elevenlabs::Client::from_env().map_err(|e| e.to_string())?;
+            let voice = client
+                .clone_voice(&name, &[path], true)
+                .await
+                .map_err(|e| e.to_string())?;
+            if voice.requires_verification {
+                Ok(format!("Voice created ({}). Complete verification in ElevenLabs before using this voice.", voice.voice_id))
+            } else {
+                Ok(format!("Voice cloned. Select it with /voice elevenlabs {}", voice.voice_id))
+            }
+        })
+    })
+    .await
+    .map_err(|_| "Voice clone task failed".to_owned())?
+}
+
 impl DriverRuntime {
     fn voice_status(&self) -> Option<crate::voice_state::Status> {
         self.voice
@@ -651,6 +729,7 @@ impl DriverRuntime {
             .map(|voice| voice.status.borrow().clone())
             .or_else(|| {
                 self.pending_voice
+                    .as_ref()
                     .map(|pending| crate::voice_state::Status {
                         text: "Voice connecting…".into(),
                         muted: pending.muted,
@@ -685,18 +764,29 @@ impl DriverRuntime {
             other => other,
         };
         match command {
-            Command::Start(Some(_)) if self.voice.is_some() => {
-                Err("Stop /voice before changing the voice.".into())
-            }
             Command::Start(None) if self.voice.is_some() => Ok(None),
             Command::Start(name) => {
-                let pending = self.pending_voice.get_or_insert(PendingVoice {
+                let selection = name
+                    .map(crate::voice::Selection::Chatgpt)
+                    .unwrap_or_else(|| self.voice_selection.clone());
+                self.voice_command(pane, Command::Select(selection))
+            }
+            Command::Select(selection) => {
+                self.voice_selection = selection.clone();
+                let muted = self
+                    .voice
+                    .as_ref()
+                    .map(|voice| voice.is_muted())
+                    .or_else(|| self.pending_voice.as_ref().map(|pending| pending.muted))
+                    .unwrap_or(false);
+                self.pending_voice = Some(PendingVoice {
                     pane,
-                    name: "cove",
-                    muted: false,
+                    selection,
+                    muted,
                 });
-                if let Some(name) = name {
-                    pending.name = name;
+                // Wait for the old session's finished status before starting new media.
+                if let Some(voice) = &self.voice {
+                    voice.stop();
                 }
                 Ok(None)
             }
@@ -708,21 +798,58 @@ impl DriverRuntime {
                 Ok(None)
             }
             Command::ToggleMute | Command::Unmute => {
+                let current = self
+                    .pending_voice
+                    .as_ref()
+                    .map(|pending| pending.muted)
+                    .or_else(|| self.voice.as_ref().map(|voice| voice.is_muted()))
+                    .ok_or_else(|| "Start /voice before muting.".to_owned())?;
+                let muted = command == Command::ToggleMute && !current;
                 if let Some(voice) = &self.voice {
-                    voice.mute(command == Command::ToggleMute && !voice.is_muted());
-                } else if let Some(pending) = &mut self.pending_voice {
-                    pending.muted = command == Command::ToggleMute && !pending.muted;
-                } else {
-                    return Err("Start /voice before muting.".into());
+                    voice.mute(muted);
+                }
+                if let Some(pending) = &mut self.pending_voice {
+                    pending.muted = muted;
                 }
                 Ok(None)
             }
-            Command::List => Ok(Some(format!(
-                "Voices: {}. Use /voice NAME.",
+            Command::Help => Ok(Some(crate::voice::HELP.into())),
+            Command::ListProvider(crate::voice::Provider::Chatgpt) => Ok(Some(format!(
+                "ChatGPT voices: {}. Use /voice chatgpt NAME.",
                 nanocodex_voice_protocol::CHATGPT_REALTIME_VOICES.join(", ")
             ))),
+            Command::List | Command::ListProvider(crate::voice::Provider::ElevenLabs) => {
+                let all = command == Command::List;
+                self.voice_tasks.spawn(async move {
+                    let result = list_elevenlabs_voices().await;
+                    let result = if all {
+                        let chatgpt = format!(
+                            "ChatGPT voices: {}. Use /voice chatgpt NAME.",
+                            nanocodex_voice_protocol::CHATGPT_REALTIME_VOICES.join(", ")
+                        );
+                        Ok(format!(
+                            "{chatgpt}\n{}",
+                            result.unwrap_or_else(|error| format!("ElevenLabs: {error}"))
+                        ))
+                    } else {
+                        result
+                    };
+                    (pane, result)
+                });
+                Ok(Some("Loading voice catalog…".into()))
+            }
+            Command::Clone { name, path } => {
+                let path = resolve_voice_sample_path(
+                    &self.workspace,
+                    path,
+                    std::env::var_os("HOME").map(PathBuf::from),
+                )?;
+                self.voice_tasks
+                    .spawn(async move { (pane, clone_elevenlabs_voice(name, path).await) });
+                Ok(Some("Cloning voice with ElevenLabs…".into()))
+            }
             Command::Status => Ok(Some(self.voice_status().map_or_else(
-                || "Voice is off".into(),
+                || format!("Voice is off · selected {}", self.voice_selection.label()),
                 |status| {
                     if status.muted {
                         format!("{} · microphone muted", status.text)
@@ -1508,6 +1635,8 @@ async fn run_inner(
         screen: screen::Controller::new(components::video_picker()),
         client: client.clone(),
         pending_voice: None,
+        voice_selection: Default::default(),
+        voice_tasks: JoinSet::new(),
         voice: None,
         agent: None,
         startup_attach: matches!(attach, Some(Some(_))),
@@ -1699,10 +1828,10 @@ async fn run_inner(
             }
         }
         if let Some(pending) = runtime.take_ready_voice() {
-            match crate::voice::Session::start(
+            match crate::voice::Session::start_with_settings(
                 runtime.client.clone(),
                 runtime.agent_id.clone(),
-                pending.name,
+                voice_settings(&pending.selection),
                 pending.muted,
             ) {
                 Ok(voice) => runtime.voice = Some(voice),
@@ -1742,6 +1871,14 @@ async fn run_inner(
                 (Some(&mut voice.status), Some(&mut voice.transcripts))
             });
         tokio::select! {
+            Some(completion) = runtime.voice_tasks.join_next(), if !runtime.voice_tasks.is_empty() => {
+                let event = match completion {
+                    Ok((pane, Ok(text))) => AppEvent::VoiceOutput { pane, text },
+                    Ok((pane, Err(text))) => AppEvent::VoiceOutput { pane, text },
+                    Err(_) => AppEvent::NotifyError { pane: PaneId::Main, error: "Voice operation failed".into() },
+                };
+                request_render(app.update(event), &mut scheduler);
+            }
             Some(completion) = runtime.vault_tasks.join_next(), if !runtime.vault_tasks.is_empty() => {
                 if let Ok((pane, agent_id, generation, result)) = completion {
                     if !vault::scope_matches(&agent_id, generation, &runtime.agent_id, runtime.connection_generation) {
@@ -1771,6 +1908,9 @@ async fn run_inner(
                 let status = voice.status.borrow_and_update().clone();
                 let finished = changed.is_err() || status.finished;
                 if finished {
+                    if status.text.contains("cleanup unconfirmed") {
+                        runtime.pending_voice = None;
+                    }
                     let mut voice = runtime.voice.take().unwrap();
                     while let Ok(transcript) = voice.transcripts.try_recv() {
                         let record = runtime.local_record(LocalEvent::VoiceTranscript(transcript))?;
@@ -2765,6 +2905,7 @@ async fn apply_update(
                         unreachable!("workspace commands are handled by AppNode")
                     }
                     RootEffect::Voice(command) => {
+                        let persistent = matches!(command, crate::voice::Command::Help | crate::voice::Command::ListProvider(crate::voice::Provider::Chatgpt));
                         let outcome = runtime.voice_command(pane, command);
                         absorb(
                             app.update(AppEvent::VoiceStatus(runtime.voice_status())),
@@ -2773,7 +2914,7 @@ async fn apply_update(
                         );
                         match outcome {
                             Ok(Some(message)) => absorb(
-                                app.update(AppEvent::NotifySuccess { pane, message }),
+                                app.update(if persistent { AppEvent::VoiceOutput { pane, text: message } } else { AppEvent::NotifySuccess { pane, message } }),
                                 &mut effects,
                                 scheduler,
                             ),
@@ -3881,9 +4022,85 @@ mod tests {
         assert!(runtime.take_ready_voice().is_none());
         runtime.managed_events_open = true;
         let ready = runtime.take_ready_voice().unwrap();
-        assert_eq!(ready.name, "ember");
+        assert_eq!(ready.selection, crate::voice::Selection::Chatgpt("ember"));
         assert!(ready.muted);
         assert!(runtime.take_ready_voice().is_none());
+    }
+
+    #[test]
+    fn voice_sample_paths_expand_home_without_shell_expansion() {
+        use std::path::PathBuf;
+        let workspace = Path::new("/workspace");
+        let home = Some(PathBuf::from("/home/speaker"));
+        assert_eq!(
+            super::resolve_voice_sample_path(workspace, "~/audio sample.wav".into(), home.clone())
+                .unwrap(),
+            PathBuf::from("/home/speaker/audio sample.wav")
+        );
+        assert_eq!(
+            super::resolve_voice_sample_path(workspace, "samples/voice.wav".into(), home.clone())
+                .unwrap(),
+            PathBuf::from("/workspace/samples/voice.wav")
+        );
+        assert_eq!(
+            super::resolve_voice_sample_path(workspace, "/audio/voice.wav".into(), home.clone())
+                .unwrap(),
+            PathBuf::from("/audio/voice.wav")
+        );
+        assert_eq!(
+            super::resolve_voice_sample_path(workspace, "~other/$(example).wav".into(), home)
+                .unwrap(),
+            PathBuf::from("/workspace/~other/$(example).wav")
+        );
+        assert!(super::resolve_voice_sample_path(workspace, "~/audio.wav".into(), None).is_err());
+    }
+
+    #[test]
+    fn voice_provider_settings_keep_valid_realtime_input() {
+        use crate::voice::Selection;
+        use nanocodex_voice_protocol::VoiceOutputProvider;
+        let eleven = super::voice_settings(&Selection::ElevenLabs("sample_voice".into()));
+        assert_eq!(eleven.output_provider, VoiceOutputProvider::Elevenlabs);
+        assert_eq!(eleven.eleven_labs_voice_id.as_deref(), Some("sample_voice"));
+        eleven.validate_chatgpt().unwrap();
+        let chatgpt = super::voice_settings(&Selection::Chatgpt("ember"));
+        assert_eq!(chatgpt.output_provider, VoiceOutputProvider::Openai);
+        assert_eq!(chatgpt.voice, "ember");
+        assert!(chatgpt.eleven_labs_voice_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn voice_provider_selection_survives_stop_and_replaces_pending_start() {
+        use crate::voice::{Command, Selection};
+        let mut runtime = history_runtime(HistoryWindow::default());
+        runtime
+            .voice_command(
+                PaneId::Main,
+                Command::Select(Selection::ElevenLabs("sample_voice".into())),
+            )
+            .unwrap();
+        runtime.voice_command(PaneId::Main, Command::Stop).unwrap();
+        runtime
+            .voice_command(PaneId::Main, Command::Start(None))
+            .unwrap();
+        runtime.managed_events_open = true;
+        assert_eq!(
+            runtime.take_ready_voice().unwrap().selection,
+            Selection::ElevenLabs("sample_voice".into())
+        );
+        runtime
+            .voice_command(
+                PaneId::Main,
+                Command::Select(Selection::ElevenLabs("second".into())),
+            )
+            .unwrap();
+        runtime
+            .voice_command(PaneId::Main, Command::Start(Some("ember")))
+            .unwrap();
+        assert_eq!(
+            runtime.take_ready_voice().unwrap().selection,
+            Selection::Chatgpt("ember")
+        );
     }
 
     #[tokio::test]
@@ -3947,6 +4164,8 @@ mod tests {
         DriverRuntime {
             screen: crate::tui::screen::Controller::new(ratatui_image::picker::Picker::halfblocks()),
             pending_voice: None,
+            voice_selection: Default::default(),
+            voice_tasks: JoinSet::new(),
             voice: None,
             client: ManagedClient::new("http://127.0.0.1:9", api_key).unwrap(),
             agent: None,

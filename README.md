@@ -694,6 +694,9 @@ cargo run -p nanocodex-examples --bin realtime-pipe \
 Runnable sources: [`examples/voice.rs`](examples/voice.rs) and
 [`examples/realtime_pipe.rs`](examples/realtime_pipe.rs).
 
+The managed terminal UI also supports [ChatGPT and ElevenLabs voice switching
+and instant cloning](docs/voice/terminal.md) through `/voice` commands.
+
 ## Evaluation is a product boundary
 
 Evals are not a score pasted onto the end of development. They are how the
