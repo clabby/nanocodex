@@ -1977,8 +1977,17 @@ async fn run_inner(
         tokio::select! {
             _ = clone_tick.tick(), if runtime.clone_panel.as_ref().is_some_and(|panel| matches!(panel.state, voice_clone::State::Recording(_))) => {
                 let panel = runtime.clone_panel.as_mut().unwrap();
-                let finished = match &mut panel.state { voice_clone::State::Recording(recorder) => recorder.is_finished().unwrap_or(true) || recorder.elapsed().as_secs() >= 120, _ => false };
-                if finished { let _ = panel.stop(); }
+                let stop_reason = match &mut panel.state {
+                    voice_clone::State::Recording(recorder) if recorder.elapsed().as_secs() >= crate::voice_recording::MAX_SECONDS => Some("Reached the 2-minute recording limit"),
+                    voice_clone::State::Recording(recorder) => match recorder.is_finished() {
+                        Ok(true) if recorder.elapsed().as_secs() >= crate::voice_recording::MAX_SECONDS - 1 => Some("Reached the 2-minute recording limit"),
+                        Ok(true) => Some("Microphone recorder ended early; R records a new sample"),
+                        Err(_) => Some("Microphone recorder stopped unexpectedly; R retries"),
+                        Ok(false) => None,
+                    },
+                    _ => None,
+                };
+                if let Some(reason) = stop_reason { let _ = panel.stop_with_reason(reason); }
                 request_render(app.update(AppEvent::VoiceStatus(runtime.voice_status())), &mut scheduler);
             }
             Some(completion) = async {

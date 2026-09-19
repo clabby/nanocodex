@@ -24,9 +24,14 @@ pub(crate) struct Recorder {
 /// Keeps the validated WAV alive until its consumer has finished uploading it.
 pub(crate) struct RecordedSample {
     output: NamedTempFile,
+    duration: Duration,
 }
 
 impl RecordedSample {
+    pub(crate) fn duration(&self) -> Duration {
+        self.duration
+    }
+
     pub(crate) fn path(&self) -> &Path {
         self.output.path()
     }
@@ -255,9 +260,12 @@ impl Recorder {
             return Err(self.failure("Microphone recording failed"));
         }
         let mut output = self.output.take().expect("capture output");
-        validate_wav(output.as_file_mut())
+        let frames = validate_wav(output.as_file_mut())
             .map_err(|e| format!("Invalid microphone recording: {e}"))?;
-        Ok(RecordedSample { output })
+        Ok(RecordedSample {
+            output,
+            duration: Duration::from_secs_f64(frames as f64 / 16000.0),
+        })
     }
 }
 
@@ -407,7 +415,7 @@ fn pcm_peak(bytes: &[u8]) -> u16 {
         .unwrap_or(0)
 }
 
-fn validate_wav(file: &mut std::fs::File) -> Result<(), String> {
+fn validate_wav(file: &mut std::fs::File) -> Result<u64, String> {
     let len = file.metadata().map_err(|e| e.to_string())?.len();
     if !(44..=MAX_BYTES).contains(&len) {
         return Err("empty or oversized WAV".into());
@@ -449,7 +457,7 @@ fn validate_wav(file: &mut std::fs::File) -> Result<(), String> {
     if !pcm || !data.is_some_and(|n| n > 0 && n % 2 == 0 && n <= MAX_SECONDS * 16000 * 2) {
         return Err("expected nonempty mono 16 kHz PCM within the 120 second limit".into());
     }
-    Ok(())
+    Ok(data.unwrap() / 2)
 }
 
 #[cfg(test)]
@@ -479,7 +487,7 @@ mod tests {
 
     #[test]
     fn validates_pcm_and_rejects_empty_truncated_or_excess_duration() {
-        assert!(validate_wav(wav(16000).as_file_mut()).is_ok());
+        assert_eq!(validate_wav(wav(16000).as_file_mut()).unwrap(), 16000);
         assert!(validate_wav(wav(0).as_file_mut()).is_err());
         assert!(validate_wav(wav(16000 * 121).as_file_mut()).is_err());
         let mut truncated = wav(10);
@@ -489,7 +497,10 @@ mod tests {
 
     #[test]
     fn sample_and_cancelled_recorder_remove_audio() {
-        let sample = RecordedSample { output: wav(10) };
+        let sample = RecordedSample {
+            output: wav(10),
+            duration: Duration::from_secs_f64(10.0 / 16000.0),
+        };
         let path = sample.path().to_owned();
         drop(sample);
         assert!(!path.exists());

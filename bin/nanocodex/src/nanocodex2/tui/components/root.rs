@@ -361,7 +361,7 @@ enum Overlay {
     AgentId(String),
     VoiceOutput { text: String, scroll: u16 },
     VoiceMenu(Node<super::voice_menu::VoiceMenu>),
-    VoiceClone(String, bool),
+    VoiceClone(String, bool, u16, bool),
     Actions(Node<ActionsMenu>),
     ContextDiagnostics(Node<ContextDiagnosticsPanel>),
     Effort(Node<EffortSelector>),
@@ -914,7 +914,7 @@ impl RootNode {
                         frame.render_widget(Paragraph::new("Enlarge the terminal to review the complete website approval. Approval is disabled until all details fit. Esc cancels.").wrap(Wrap { trim: false }), layout.body);
                     }
                 }
-                Overlay::VoiceClone(text, consent_visible) => {
+                Overlay::VoiceClone(text, consent_visible, scroll, script) => {
                     let layout = Floating::new(
                         "Record a voice clone",
                         96,
@@ -928,44 +928,81 @@ impl RootNode {
                         ],
                     )
                     .render(frame, area, theme);
-                    let lines: Vec<Line<'_>> = text
-                        .lines()
-                        .map(|line| {
-                            if line.starts_with("● RECORDING") {
-                                Line::styled(
-                                    line,
-                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    if *script {
+                        *consent_visible = false;
+                        let meter = text.lines().find(|line| line.starts_with("● RECORDING"));
+                        let header = vec![
+                            Line::raw("Read naturally; keep talking until 60–90s. Cap: 120s."),
+                            Line::styled(
+                                meter.unwrap_or_else(|| {
+                                    text.lines().nth(1).unwrap_or("R starts recording")
+                                }),
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            ),
+                            Line::raw("↑↓ / PgUp/PgDn: scroll · H: back · S: stop · Esc: cancel"),
+                        ];
+                        let header_height = 3.min(layout.body.height);
+                        frame.render_widget(
+                            Paragraph::new(header),
+                            Rect {
+                                height: header_height,
+                                ..layout.body
+                            },
+                        );
+                        let body = Rect {
+                            y: layout.body.y + header_height,
+                            height: layout.body.height.saturating_sub(header_height),
+                            ..layout.body
+                        };
+                        let paragraph = Paragraph::new(crate::tui::voice_clone::READ_ALOUD)
+                            .wrap(Wrap { trim: false });
+                        let max_scroll = paragraph
+                            .line_count(body.width)
+                            .saturating_sub(usize::from(body.height));
+                        *scroll = (*scroll).min(u16::try_from(max_scroll).unwrap_or(u16::MAX));
+                        frame.render_widget(paragraph.scroll((*scroll, 0)), body);
+                    } else {
+                        let lines: Vec<Line<'_>> = text
+                            .lines()
+                            .map(|line| {
+                                if line.starts_with("● RECORDING") {
+                                    Line::styled(
+                                        line,
+                                        Style::default()
+                                            .fg(Color::Red)
+                                            .add_modifier(Modifier::BOLD),
+                                    )
+                                } else {
+                                    Line::raw(line)
+                                }
+                            })
+                            .collect();
+                        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+                        *consent_visible = paragraph.line_count(layout.body.width)
+                            <= usize::from(layout.body.height);
+                        if *consent_visible {
+                            frame.render_widget(paragraph, layout.body);
+                        } else {
+                            // Preserve useful recorder diagnostics even when all consent
+                            // text cannot fit. Upload stays disabled until it is visible.
+                            let error = text
+                                .split_once("No automatic upload.\n")
+                                .map(|(_, error)| error.trim())
+                                .unwrap_or("");
+                            let fallback = if error.is_empty() {
+                                format!(
+                                    "Upload disabled: enlarge terminal to review consent. Esc cancels.\n\n{text}"
                                 )
                             } else {
-                                Line::raw(line)
-                            }
-                        })
-                        .collect();
-                    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-                    *consent_visible =
-                        paragraph.line_count(layout.body.width) <= usize::from(layout.body.height);
-                    if *consent_visible {
-                        frame.render_widget(paragraph, layout.body);
-                    } else {
-                        // Preserve useful recorder diagnostics even when all consent
-                        // text cannot fit. Upload stays disabled until it is visible.
-                        let error = text
-                            .split_once("No automatic upload.\n")
-                            .map(|(_, error)| error.trim())
-                            .unwrap_or("");
-                        let fallback = if error.is_empty() {
-                            format!(
-                                "Upload disabled: enlarge terminal to review consent. Esc cancels.\n\n{text}"
-                            )
-                        } else {
-                            format!(
-                                "{error}\n\nUpload disabled: enlarge terminal to review consent. R retries; Esc cancels."
-                            )
-                        };
-                        frame.render_widget(
-                            Paragraph::new(fallback).wrap(Wrap { trim: false }),
-                            layout.body,
-                        );
+                                format!(
+                                    "{error}\n\nUpload disabled: enlarge terminal to review consent. R retries; Esc cancels."
+                                )
+                            };
+                            frame.render_widget(
+                                Paragraph::new(fallback).wrap(Wrap { trim: false }),
+                                layout.body,
+                            );
+                        }
                     }
                 }
                 Overlay::VoiceOutput { text, scroll } => {
@@ -1116,7 +1153,11 @@ impl RootNode {
         // Voice controls remain local and navigable during a managed reconnect.
         if matches!(
             self.overlay,
-            Some(Overlay::VoiceMenu(_) | Overlay::VoiceOutput { .. } | Overlay::VoiceClone(_, _))
+            Some(
+                Overlay::VoiceMenu(_)
+                    | Overlay::VoiceOutput { .. }
+                    | Overlay::VoiceClone(_, _, _, _)
+            )
         ) {
             return self.update_overlay(event, Instant::now());
         }
@@ -1625,7 +1666,44 @@ impl RootNode {
         match &self.overlay {
             Some(Overlay::VaultReview(_)) => self.update_vault_review(event),
             Some(Overlay::AgentId(_)) => self.update_agent_id(event),
-            Some(Overlay::VoiceClone(_, consent_visible)) => {
+            Some(Overlay::VoiceClone(_, consent_visible, _, _)) => {
+                let consent_visible = *consent_visible;
+                if let Event::Key(key) = &event {
+                    if key.kind == KeyEventKind::Press && key.modifiers.is_empty() {
+                        if let Some(Overlay::VoiceClone(text, visible, scroll, script)) =
+                            &mut self.overlay
+                        {
+                            match key.code {
+                                KeyCode::Char('h' | 'H')
+                                    if text.contains("H: read-aloud script")
+                                        || text.contains("Opening your microphone")
+                                        || text.contains("Waiting for realtime") =>
+                                {
+                                    *script = !*script;
+                                    *visible = false;
+                                    return ComponentUpdate::render(RenderRequest::Immediate);
+                                }
+                                KeyCode::Down | KeyCode::PageDown if *script => {
+                                    *scroll = scroll.saturating_add(if key.code == KeyCode::Down {
+                                        1
+                                    } else {
+                                        8
+                                    });
+                                    return ComponentUpdate::render(RenderRequest::Immediate);
+                                }
+                                KeyCode::Up | KeyCode::PageUp if *script => {
+                                    *scroll = scroll.saturating_sub(if key.code == KeyCode::Up {
+                                        1
+                                    } else {
+                                        8
+                                    });
+                                    return ComponentUpdate::render(RenderRequest::Immediate);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
                 let command = match event {
                     Event::Key(key)
                         if key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
@@ -1639,7 +1717,7 @@ impl RootNode {
                                 Some(crate::voice::Command::CloneStop)
                             }
                             KeyCode::Char('p' | 'P') => Some(crate::voice::Command::ClonePlay),
-                            KeyCode::Char('u' | 'U') if *consent_visible => {
+                            KeyCode::Char('u' | 'U') if consent_visible => {
                                 Some(crate::voice::Command::CloneSubmit)
                             }
                             _ => None,
@@ -3861,7 +3939,7 @@ impl Component for RootNode {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::VoiceOutput(text) => {
-                if matches!(self.overlay, Some(Overlay::VoiceClone(_, _))) {
+                if matches!(self.overlay, Some(Overlay::VoiceClone(_, _, _, _))) {
                     return ComponentUpdate::render(RenderRequest::Immediate);
                 }
                 self.overlay = Some(
@@ -3878,8 +3956,21 @@ impl Component for RootNode {
                     .as_ref()
                     .filter(|status| status.text.starts_with("Voice clone:"))
                 {
-                    self.overlay = Some(Overlay::VoiceClone(status.text.clone(), false));
-                } else if matches!(self.overlay, Some(Overlay::VoiceClone(_, _))) {
+                    let (scroll, script) = match &self.overlay {
+                        Some(Overlay::VoiceClone(_, _, scroll, script)) => (*scroll, *script),
+                        _ => (0, false),
+                    };
+                    let script = script
+                        && (status.text.contains("H: read-aloud script")
+                            || status.text.contains("Opening your microphone")
+                            || status.text.contains("Waiting for realtime"));
+                    self.overlay = Some(Overlay::VoiceClone(
+                        status.text.clone(),
+                        false,
+                        scroll,
+                        script,
+                    ));
+                } else if matches!(self.overlay, Some(Overlay::VoiceClone(_, _, _, _))) {
                     self.overlay = None;
                 }
                 self.voice_status = status;
@@ -4376,7 +4467,7 @@ mod history_tests {
             text: panel.text(),
             ..Default::default()
         })));
-        for (width, height, allowed) in [(40, 10, false), (120, 35, true)] {
+        for (width, height, allowed) in [(40, 10, false), (80, 24, true), (120, 35, true)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
@@ -4393,6 +4484,77 @@ mod history_tests {
                 allowed
             );
         }
+    }
+
+    #[test]
+    fn clone_script_scroll_survives_ticks_and_escape_cancels() {
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        let panel = crate::tui::voice_clone::Panel::new("Synthetic voice".into());
+        let text = format!(
+            "{}\n● RECORDING  00:30 / 02:00   mic [▮▮··········]",
+            panel.text()
+        );
+        let tick = |text: String| {
+            RootEvent::VoiceStatus(Some(crate::voice_state::Status {
+                text,
+                ..Default::default()
+            }))
+        };
+        root.update(tick(text.clone()));
+        for key in [KeyCode::Char('h'), KeyCode::PageDown] {
+            root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+                key,
+                KeyModifiers::NONE,
+            ))));
+        }
+        for status in [
+            "Waiting for realtime voice cleanup",
+            "Opening your microphone…",
+        ] {
+            root.update(tick(format!("Voice clone: Synthetic voice\n{status}")));
+            assert!(matches!(
+                root.overlay,
+                Some(Overlay::VoiceClone(_, false, 8, true))
+            ));
+        }
+        root.update(tick(text));
+        assert!(matches!(
+            root.overlay,
+            Some(Overlay::VoiceClone(_, false, 8, true))
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("00:30 / 02:00"), "{screen}");
+        assert!(screen.contains("mic [▮▮"), "{screen}");
+        let upload = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::NONE,
+        ))));
+        assert!(upload.effects.is_empty());
+        let cancel = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))));
+        assert!(matches!(
+            cancel.effects.as_slice(),
+            [RootEffect::Voice(crate::voice::Command::CloneCancel)]
+        ));
+        root.update(tick(
+            "Voice clone: Synthetic voice\nRecording stopped".into(),
+        ));
+        assert!(matches!(
+            root.overlay,
+            Some(Overlay::VoiceClone(_, false, _, false))
+        ));
     }
 
     #[test]
@@ -4418,9 +4580,15 @@ mod history_tests {
                 .collect::<String>();
             assert!(screen.contains("Microphone failed:"), "{screen}");
             if width == 40 {
-                assert!(matches!(root.overlay, Some(Overlay::VoiceClone(_, false))));
+                assert!(matches!(
+                    root.overlay,
+                    Some(Overlay::VoiceClone(_, false, _, _))
+                ));
             } else {
-                assert!(matches!(root.overlay, Some(Overlay::VoiceClone(_, true))));
+                assert!(matches!(
+                    root.overlay,
+                    Some(Overlay::VoiceClone(_, true, _, _))
+                ));
             }
         }
     }

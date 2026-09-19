@@ -3322,7 +3322,11 @@ async fn terminal_voice_menu_exposes_clone_and_chatgpt_picker_without_model_inpu
     fixture.terminal.wait_text("ElevenLabs voices").await;
     fixture.terminal.input("\x1b[B\x1b[B\x1b[B\r");
     fixture.terminal.wait_text("Voice clone: My voice").await;
-    fixture.terminal.wait_text("R: start recording").await;
+    fixture.terminal.wait_text("R: record/re-record").await;
+    fixture.terminal.wait_text("H: read-aloud script").await;
+    fixture.terminal.input("h");
+    fixture.terminal.wait_text("Read naturally").await;
+    fixture.terminal.wait_text("This morning").await;
     fixture.terminal.input("\x1b");
     fixture.terminal.wait_no_text("Voice clone:").await;
     fixture.terminal.prompt("/voice", "\r");
