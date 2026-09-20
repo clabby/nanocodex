@@ -115,3 +115,17 @@ describe("eval-informed thread routing", () => {
     db.close();
   });
 });
+
+
+describe("live Unified Billing Jev envelopes", () => {
+  it("reads completed wrapped answers and usage", async () => {
+    const route = await resolveThreadRoute({run:async()=>({state:"Completed",result:{answers:{family:{choice:"terminal",confidence:.99}},usage:{input_tokens:333,output_tokens:38}},gatewayMetadata:{keySource:"Unified"}})}, "Fix build", policy());
+    expect(route.backend).toBe("workers_ai");
+    expect(route.confidence).toBe(.99);
+    expect(route.router_usage).toEqual({input_tokens:333,output_tokens:38});
+  });
+  it.each(["Pending", "Failed"])("does not accept %s answers", async state => {
+    const route = await resolveThreadRoute({run:async()=>({state,result:{answers:{family:{choice:"terminal",confidence:1}}}})}, "Fix build", policy());
+    expect(route.selection).toBe("fallback"); expect(route.backend).toBe("chatgpt");
+  });
+});
