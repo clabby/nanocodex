@@ -193,7 +193,16 @@ function toResponse(result, registry) {
   }
   const callIds = new Set();
   for (const call of message.tool_calls ?? []) {
-    const entry = registry.get(call.function?.name);
+    const returnedName = call.function?.name;
+    let entry = registry.get(returnedName);
+    if (!entry && typeof returnedName === "string") {
+      // GLM sometimes returns the original name shown in the description instead
+      // of the advertised alias. Resolve only an exact, unambiguous registered
+      // identity; never guess among namespaces or dispatch an undeclared tool.
+      const matches = [...registry.values()].filter(candidate => returnedName === candidate.name
+        || returnedName === (candidate.namespace ? `${candidate.namespace}.${candidate.name}` : candidate.name));
+      if (matches.length === 1) entry = matches[0];
+    }
     if (!entry) fail("model returned an unknown tool alias");
     const argumentsText = json(call.function.arguments);
     let args;
