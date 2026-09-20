@@ -1682,6 +1682,7 @@ async function managedFetchRoute(
           created_at: summary.createdAt,
           updated_at: summary.updatedAt,
           turn_count: summary.turnCount,
+          last_user_message_at: summary.presentation?.lastUserMessageAt ?? (summary.turnCount > 0 ? summary.updatedAt : 0),
           ...(summary.presentation ? { presentation: summary.presentation } : {}),
           ...(principal.connectGrant ? {} : { may_have_scheduled_jobs: summary.mayHaveScheduledJobs }),
         }])),
@@ -5293,7 +5294,7 @@ export class DurableAgentSession extends DurableComputerSession {
               throw new ManagedRequestError(409, "cron_trigger_changed", "trigger changed before admission");
             }
           },
-          undefined, "schedule",
+          undefined, "schedule", {}, false,
         );
       } catch (error) {
         if (error instanceof ManagedRequestError && error.code === "cron_trigger_changed") continue;
@@ -5904,6 +5905,7 @@ export class DurableAgentSession extends DurableComputerSession {
             "steered realtime input has no active managed turn attribution",
           );
         }
+        this.#sidebarPresentation().recordUserMessage(`voice:${request.voiceSessionId}:${request.operationId}`, Date.now());
         return {
           operation_id: request.operationId,
           route: "steered",
@@ -6019,11 +6021,13 @@ export class DurableAgentSession extends DurableComputerSession {
         const turn = await this.#steerableManagedTurn(id, authorization);
         await turn.steer({ input: goalContinuation(this.#goals.get())!, messageId });
       }
+      this.#sidebarPresentation().recordUserMessage(`steer:${messageId ?? crypto.randomUUID()}`, Date.now());
       await this.#scheduleNextAlarm();
       return;
     }
     const turn = await this.#steerableManagedTurn(id, authorization);
     await turn.steer({ input, messageId });
+    this.#sidebarPresentation().recordUserMessage(`steer:${messageId ?? crypto.randomUUID()}`, Date.now());
   }
 
   async #withdrawSteerHttpTurn(id: string, request: Request, authorization: TurnAuthorization): Promise<Response> {
@@ -6215,6 +6219,7 @@ export class DurableAgentSession extends DurableComputerSession {
       );
     });
     this.#publish(event!);
+    this.#sidebarPresentation().recordUserMessage(`turn:${id}`, now);
     this.#observe("managed.turn.accepted", {
       turn_id: id,
       transport: "realtime",
@@ -6266,6 +6271,7 @@ export class DurableAgentSession extends DurableComputerSession {
     voiceSessionId?: string,
     transport: import("./startup-context").StartupTransport = "unknown",
     caller: CallerContext = {},
+    userInitiated = true,
   ): Promise<ManagedTurnSubmission> {
     await this.#settingsMutationTail;
     if (this.#deleting || this.#deleted) {
@@ -6398,6 +6404,7 @@ export class DurableAgentSession extends DurableComputerSession {
       );
     });
     this.#publish(event!);
+    if (userInitiated) this.#sidebarPresentation().recordUserMessage(`turn:${id}`, now);
     if (cancellingEvent) this.#publish(cancellingEvent);
     this.#observe("managed.turn.accepted", {
       turn_id: id,
@@ -8384,7 +8391,7 @@ export class DurableAgentSession extends DurableComputerSession {
         throw new ManagedRequestError(409, "goal_changed", "goal changed before continuation admission");
       }
       this.#goalRuntime.discardPending();
-    });
+    }, undefined, "unknown", {}, false);
   }
 
   #activeTurnAuthorization(): TurnAuthorization | undefined {
