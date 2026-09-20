@@ -1,3 +1,4 @@
+import { createManagedNamespaceTools } from "../src/index";
 import { describe, expect, it, vi } from "vitest";
 import type { ToolMap } from "nanocodex";
 import { CUA_JS_NAME, CUA_RESET_NAME } from "nanocodex-computer/contract";
@@ -6,6 +7,7 @@ import { ToolRouter, toolMapSource } from "nanocodex-tools/runtime/tool-router";
 
 import {
   createNamespaceExecutionRuntime,
+  prepareNamespaceHostMounts,
   createNamespaceExecutionTools as createRuntimeNamespaceExecutionTools,
   machineMountRoot,
 } from "../src/namespace-tools";
@@ -609,3 +611,87 @@ function createNamespaceExecutionTools(
       : resolveMachineTool(machineId, name, context),
   );
 }
+
+describe("independent VM readiness at cell capture", () => {
+  function fixture() {
+    const machines = ["native", "vm-a", "vm-b", "offline"].map(id => ({ id, root: `/${id}`, workspace: "/workspace" }));
+    let offlineReady = false;
+    const execute = vi.fn(async () => ({ output: "ready", exit_code: 0 }));
+    const cua = vi.fn(async () => ({}));
+    const probe = vi.fn(async ({ id }: { id: string }) => {
+      if (id === "offline" && !offlineReady) throw new Error("host_not_ready");
+      return () => true;
+    });
+    const prepare = vi.fn(() => prepareNamespaceHostMounts(machines.filter(m => m.id !== "native"), probe));
+    const tools = createManagedNamespaceTools(
+      () => true, () => machines,
+      (_id, name) => name === "exec_command" ? { handler: execute }
+        : name === CUA_JS_NAME || name === CUA_RESET_NAME ? cuaTool(name, cua) : undefined,
+      prepare,
+    );
+    const tool = (name: string) => tools.find(tool => tool.name === name)!;
+    return { tool, execute, cua, prepare, probe, recover: () => { offlineReady = true; } };
+  }
+
+  it("isolates an offline first request from parallel native and healthy VM requests", async () => {
+    const f = fixture();
+    const results = await Promise.allSettled(["offline", "native", "vm-a", "vm-b"].map(id =>
+      f.tool("exec_command").handler({ cmd: "pwd", workdir: `/${id}` }, context()),
+    ));
+    expect(results.map(result => result.status)).toEqual(["rejected", "fulfilled", "fulfilled", "fulfilled"]);
+    expect(f.prepare).toHaveBeenCalledTimes(1);
+    expect(f.probe).toHaveBeenCalledTimes(3);
+    expect(f.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("captures every ready VM for native-first cells and only recovers offline VMs in a new cell", async () => {
+    const f = fixture();
+    for (const id of ["native", "vm-a", "vm-b"]) {
+      await f.tool("exec_command").handler({ cmd: "pwd", workdir: `/${id}/src` }, context());
+    }
+    expect(f.prepare).toHaveBeenCalledTimes(1);
+    f.recover();
+    await expect(f.tool("exec_command").handler({ cmd: "pwd", workdir: "/offline" }, context())).rejects.toThrow();
+    await expect(f.tool("exec_command").handler(
+      { cmd: "pwd", workdir: "/offline" }, context({ parentCallId: "next-cell" }),
+    )).resolves.toMatchObject({ output: "ready" });
+    expect(f.prepare).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps pinned CUA provider arguments opaque", async () => {
+    const f = fixture();
+    await f.tool("select_computer").handler({ workdir: "/native" }, context());
+    const input = { code: "provider-owned", workdir: "/offline" };
+    await f.tool(CUA_JS_NAME).handler(input, context({ parentCallId: "cua-cell" }));
+    expect(f.cua).toHaveBeenCalledWith(input, expect.anything());
+  });
+
+  it("excludes a negative or invalidated receipt even when an old broker route exists", async () => {
+    const machines = [{ id: "negative", workspace: "/workspace" }, { id: "changed", workspace: "/workspace" }];
+    let identityStillMatches = true;
+    const filter = await prepareNamespaceHostMounts(machines, async ({ id }) =>
+      id === "negative" ? undefined : () => identityStillMatches,
+    );
+    identityStillMatches = false;
+    const execute = vi.fn();
+    const runtime = createNamespaceExecutionRuntime(() => machines, () => ({ handler: execute }));
+    runtime.capture(context(), filter);
+    for (const id of ["negative", "changed"]) {
+      await expect(runtime.tools.exec_command!.handler({ cmd: "pwd", workdir: `/${id}` }, context())).rejects.toThrow();
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not capture or dispatch after cancellation during readiness", async () => {
+    const controller = new AbortController();
+    const execute = vi.fn();
+    const tools = createManagedNamespaceTools(
+      () => true, () => [{ id: "native", workspace: "/workspace" }], () => ({ handler: execute }),
+      async () => { controller.abort(); },
+    );
+    await expect(tools.find(tool => tool.name === "exec_command")!.handler(
+      { cmd: "pwd", workdir: "/native" }, { ...context(), signal: controller.signal },
+    )).rejects.toThrow();
+    expect(execute).not.toHaveBeenCalled();
+  });
+});
