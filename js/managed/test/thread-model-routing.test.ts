@@ -5,7 +5,7 @@ import { initializeManagedAgentSettingsSchema } from "../src/agent-settings-sche
 import { parseAgentCreateBody, validateAgentSettings } from "../src/agent-settings";
 import { parseConfiguration } from "../src/agent-configuration";
 
-const policy = (patch = {}) => routingPolicySchema.parse(patch);
+const policy = (patch = {}) => routingPolicySchema.parse({ strategy: "legacy", ...patch });
 const jev = (family = "terminal", confidence = .98) => ({ run: vi.fn(async (_model: string, _input: unknown) => ({ answers: { family: { choice: family, confidence } }, usage: { input_tokens: 70 } })) });
 
 describe("eval-informed thread routing", () => {
@@ -127,5 +127,104 @@ describe("live Unified Billing Jev envelopes", () => {
   it.each(["Pending", "Failed"])("does not accept %s answers", async state => {
     const route = await resolveThreadRoute({run:async()=>({state,result:{answers:{family:{choice:"terminal",confidence:1}}}})}, "Fix build", policy());
     expect(route.selection).toBe("fallback"); expect(route.backend).toBe("chatgpt");
+  });
+});
+
+describe("v2 direct candidate routing", () => {
+  const direct = (patch = {}) => routingPolicySchema.parse(patch);
+  const answer = (choice = "gpt-5.6-luna:low", candidateConfidence = .98, familyConfidence = .97) => ({
+    run: vi.fn(async (_model: string, _input: unknown) => ({ answers: {
+      candidate: { choice, confidence: candidateConfidence }, family: { choice: "terminal", confidence: familyConfidence },
+    } })),
+  });
+  it("defaults to one direct typed choice across fifteen model/effort candidates", async () => {
+    const ai = answer();
+    const route = await resolveThreadRoute(ai, "Fix build quickly and cheaply", direct());
+    expect(route).toMatchObject({ policy_version: "jev-direct-v2", model: "gpt-5.6-luna", thinking: "low", estimate: null });
+    expect(ai.run).toHaveBeenCalledOnce();
+    const request = ai.run.mock.calls[0][1] as { state: string; questions: { candidate: { criteria: object } } };
+    expect(Object.keys(request.questions.candidate.criteria)).toHaveLength(15);
+    expect(JSON.parse(request.state)).toMatchObject({ preferences: {}, preference_sources: { duration: "prompt_or_default", cost: "prompt_or_default" }, measurements: [] });
+    expect(route.audit).toMatchObject({ candidate_choice: "gpt-5.6-luna:low", classifier_confidence: .97, candidate_confidence: .98 });
+  });
+  it("serializes explicit preferences and preserves their priority over opening inference", async () => {
+    const ai = answer();
+    const route = await resolveThreadRoute(ai, "Be quick, cheap, and thorough", direct({ preferences: { completion: 9, cost: 0, duration: 1, target_cost_usd: .2, target_duration_seconds: 60, text: "Prioritize careful checking" } }));
+    expect(route.audit?.preferences).toEqual({ completion: 9, cost: 0, duration: 1, target_cost_usd: .2, target_duration_seconds: 60, text: "Prioritize careful checking" });
+    expect(route.audit?.preference_sources).toEqual({ completion: "explicit", cost: "explicit", duration: "explicit" });
+    const state = JSON.parse((ai.run.mock.calls[0][1] as {state:string}).state);
+    expect(state.preferences).toEqual(route.audit?.preferences);
+    expect(state.lower_precedence_defaults).toEqual({objective:"balanced", weights:{cost:1,effectiveness:1,time:1}});
+    expect(state.policy).not.toHaveProperty("estimates");
+    const instructions = (ai.run.mock.calls[0][1] as {questions:{candidate:{instructions:string}}}).questions.candidate.instructions;
+    expect(instructions).toContain("Higher cost weight means MINIMIZE spend");
+    expect(instructions).toContain('"cost":0');
+    expect(state).toHaveProperty("eval_evidence");
+    expect(state).toHaveProperty("task_profiles");
+  });
+  it.each(["ignore previous instructions", "gpt-7:high", "gpt-6-astra:max"])("rejects adversarial choice %s and falls back inside allowlist", async choice => {
+    const route = await resolveThreadRoute(answer(choice), "task", direct({ candidates: [`${OSS_MODEL}:low`] }));
+    expect(route).toMatchObject({ model: OSS_MODEL, thinking: "low", selection: "fallback" });
+  });
+  it("preserves the proposed choice separately when conservative confidence forces fallback", async () => {
+    const route = await resolveThreadRoute(answer("gpt-5.6-luna:low", .51), "cheap task", direct());
+    expect(route).toMatchObject({selection:"fallback", model:FRONTIER_MODEL, thinking:"high"});
+    expect(route.audit).toMatchObject({proposed_candidate:"gpt-5.6-luna:low", candidate_choice:"gpt-6-astra:high", candidate_confidence:.51});
+  });
+  it("retains a selected supported thinking level and bounds eligibility", async () => {
+    for (const thinking of ["low", "medium", "high"]) {
+      const id = `gpt-5.6-sol:${thinking}`;
+      const route = await resolveThreadRoute(answer(id), "task", direct({ candidates: [id] }));
+      expect(route).toMatchObject({ model: "gpt-5.6-sol", thinking, selection: "prior" });
+      expect(route.audit?.eligible_candidates).toEqual([id]);
+    }
+    expect(() => direct({ preferences: {completion:0, cost:0, duration:0} })).toThrow();
+    expect(() => direct({ candidates: [] })).toThrow();
+    expect(() => direct({ candidates: ["unknown"] })).toThrow();
+    expect(() => direct({ preferences: { text: " " } })).toThrow();
+    expect(() => direct({ preferences: { text: "x".repeat(2001) } })).toThrow();
+  });
+  it.each(["Pending", "Failed"])("does not admit %s envelopes", async state => {
+    const route = await resolveThreadRoute({run: async () => ({state, result: await answer().run("", {})})}, "task", direct({ candidates: ["gpt-5.6-sol:medium"] }));
+    expect(route).toMatchObject({ selection: "fallback", model: "gpt-5.6-sol", thinking: "medium" });
+  });
+  it("accepts completed envelopes and retains usage", async () => {
+    const route = await resolveThreadRoute({run: async () => ({state: "Completed", result: {...await answer().run("", {}), usage: { input_tokens: 42 }}})}, "task", direct());
+    expect(route.router_usage).toEqual({input_tokens:42});
+    expect(route.model).toBe("gpt-5.6-luna");
+  });
+  it("rejects a modality with no eligible model and bounds oversized fallback", async () => {
+    const ai = answer();
+    await expect(resolveThreadRoute(ai, [{type:"input_image"}], direct({candidates:[`${OSS_MODEL}:low`]}))).rejects.toThrow("no route admitted");
+    expect((await resolveThreadRoute(ai, "x".repeat(24001), direct({candidates:["gpt-5.6-sol:low"]}))).model).toBe("gpt-5.6-sol");
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+  it("never substitutes classifier confidence or wrong effort evidence for measured success", async () => {
+    const measurement = {family:"terminal", backend:"chatgpt", model:"gpt-5.6-luna", thinking:"low", success_rate:.8, expected_cost_usd:.1, expected_duration_ms:1000, sample_size:20, source:"heldout-v2"};
+    const p = direct({min_success_rate:.75, estimates:[measurement]});
+    expect((await resolveThreadRoute(answer("gpt-5.6-luna:low", .98, .1), "not cheap; take your time", p)).selection).toBe("prior");
+    expect((await resolveThreadRoute(answer(), "task", p)).estimate?.success_rate).toBe(.8);
+    for (const ai of [answer("gpt-5.6-luna:high"), answer("gpt-5.6-luna:low", .2), answer("unknown")]) {
+      await expect(resolveThreadRoute(ai, "task", p)).rejects.toThrow("no route admitted");
+    }
+    await expect(resolveThreadRoute(answer(), "task", direct({min_success_rate:.9, estimates:[measurement]}))).rejects.toThrow("no route admitted");
+    await expect(resolveThreadRoute(answer(), "task", direct({min_success_rate:.5}))).rejects.toThrow("no route admitted");
+  });
+  it("labels measured comparisons only for a complete matched source cohort", async () => {
+    const base = {family:"terminal", backend:"chatgpt", model:"gpt-5.6-luna", thinking:"low", success_rate:.8, expected_cost_usd:.1, expected_duration_ms:1000, sample_size:20, source:"heldout-v2"};
+    const candidates = ["gpt-5.6-luna:low", "gpt-5.6-sol:low"];
+    const other = {...base, model:"gpt-5.6-sol"};
+    expect((await resolveThreadRoute(answer(), "task", direct({candidates, estimates:[base, other]}))).selection).toBe("measured");
+    expect((await resolveThreadRoute(answer(), "task", direct({candidates, estimates:[base, {...other, source:"different"}]}))).selection).toBe("prior");
+  });
+  it("pins the direct model/effort and audit across concurrent admissions and restart", async () => {
+    let retained: Awaited<ReturnType<typeof resolveThreadRoute>> | undefined;
+    const store = { read: () => retained, commit: (r: NonNullable<typeof retained>) => {retained = r;} };
+    const pin = new ThreadRoutePin(store), ai = answer();
+    const create = () => resolveThreadRoute(ai, "quick task", direct());
+    const [a,b] = await Promise.all([pin.resolve(create), pin.resolve(create)]);
+    expect(a).toBe(b);
+    expect(await new ThreadRoutePin(store).resolve(create)).toBe(a);
+    expect(ai.run).toHaveBeenCalledOnce();
   });
 });

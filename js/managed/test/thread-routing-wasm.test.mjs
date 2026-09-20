@@ -46,8 +46,8 @@ test("Jev -> committed route -> real WASM GLM tool loop -> second turn retains m
   const binding = { async run(model, input) {
     if (model === "typesafe/jev") {
       jevCalls++;
-      assert.equal(input.state, opening);
-      return { answers: { family: { choice: "terminal", confidence: .99 } }, usage: { input_tokens: 20 } };
+      assert.equal(JSON.parse(input.state).opening_prompt, opening);
+      return { answers: { candidate: { choice: `${OSS_MODEL}:low`, confidence: .99 }, family: { choice: "terminal", confidence: .99 } }, usage: { input_tokens: 20 } };
     }
     assert.equal(model, OSS_MODEL);
     assert.equal(input.reasoning_effort, "low");
@@ -69,7 +69,7 @@ test("Jev -> committed route -> real WASM GLM tool loop -> second turn retains m
     assert.match(output.content, /local-routing-fixture/);
     return { choices: [{ finish_reason: "stop", message: { content: `TURN_${glmCalls / 2}_OK` } }] };
   } };
-  const route = await store.pin.resolve(() => resolveThreadRoute(binding, opening, routingPolicySchema.parse({ oss_thinking: "low" })));
+  const route = await store.pin.resolve(() => resolveThreadRoute(binding, opening, routingPolicySchema.parse({ preferences: { cost: 80, duration: 15, completion: 5 } })));
   assert.equal(route.backend, "workers_ai");
   assert.equal(route.model, OSS_MODEL);
   assert.equal(route.thinking, "low");

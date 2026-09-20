@@ -1,5 +1,7 @@
 # Thread model routing PoC
 
+The default now uses direct Jev model-and-thinking selection. See [Preference-aware thread routing](THREAD_ROUTING_PREFERENCES.md) for the current API. The family policy described below is retained as `strategy: "legacy"`; historical validation reports remain unchanged.
+
 This opt-in hosted API path classifies the first admitted task with Jev, persists a model and thinking level in the thread's Durable Object, and runs the existing Rust `nanocodex-agent` loop through either Workers AI or the existing ChatGPT transport. Later turns reuse the persisted choice. There is no automatic mid-thread escalation.
 
 The implementation is on `poc/thread-model-routing`. It is not deployed or enabled by default.
@@ -12,6 +14,7 @@ The managed Worker has an `AI` binding. Set `NANOCODEX_THREAD_ROUTING="true"` in
 {
   "configuration": {
     "model_routing": {
+      "strategy": "legacy",
       "objective": "balanced",
       "frontier_model": "gpt-6-astra",
       "oss_thinking": "medium",
