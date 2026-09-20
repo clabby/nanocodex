@@ -1501,16 +1501,43 @@ private final class ConversationRenderProjection: ObservableObject {
     @Published private(set) var value: Value?
     private(set) var rebuildCount: UInt64 = 0
 
-    func prepare(_ model: InboxModel, identity: String) async {
+    private var preparation: Task<Void, Never>?
+    private var preparationID = UUID()
+
+    func request(_ model: InboxModel, identity: String) {
+        guard preparation == nil else { return }
+        // Revision changes coalesce behind one worker instead of cancelling
+        // expensive grouping on every incoming tool event.
+        let requestID = UUID()
+        preparationID = requestID
+        preparation = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.preparationID == requestID { self.preparation = nil } }
+            while !Task.isCancelled, model.focusedConversationIdentity == identity {
+                await self.prepare(model, identity: identity)
+                if self.value?.revision == model.focusedTranscriptRevision { return }
+                await Task.yield()
+            }
+        }
+    }
+
+    func cancel() {
+        preparation?.cancel()
+        preparation = nil
+        preparationID = UUID()
+    }
+
+    private func prepare(_ model: InboxModel, identity: String) async {
         let revision = model.focusedTranscriptRevision
         if value?.revision == revision, value?.identity == identity { return }
-        guard let queue = await model.prepareFocusedQueue(),
-              !Task.isCancelled, model.focusedTranscriptRevision == revision,
-              model.focusedConversationIdentity == identity else { return }
-        let rows = queue.rows
-        let pending = queue.messages
+        // Capture all inputs before suspension, so a completed older snapshot
+        // never mixes its rows with a newer revision's turns or media.
         let turns = model.focused?.activeTurns ?? []
         let outputs = model.generatedOutputsByRow
+        guard let queue = await model.prepareFocusedQueue(),
+              !Task.isCancelled, model.focusedConversationIdentity == identity else { return }
+        let rows = queue.rows
+        let pending = queue.messages
         rebuildCount = rebuildCount == .max ? .max : rebuildCount + 1
         let worker = Task.detached(priority: .userInitiated) { () -> Value? in
             guard !Task.isCancelled else { return nil }
@@ -1531,7 +1558,6 @@ private final class ConversationRenderProjection: ObservableObject {
             worker.cancel()
         }
         guard !Task.isCancelled, let prepared,
-              model.focusedTranscriptRevision == revision,
               model.focusedConversationIdentity == identity else { return }
         value = prepared
     }
@@ -1558,7 +1584,8 @@ private struct ConversationView: View {
                                                 loading: model.threadLoading || (rendered == nil && preparing), error: model.threadError,
                                                 hasOlder: model.hasOlder, loadingOlder: model.loadingOlder || preparing,
                                                 hasNewer: model.hasNewer, loadingNewer: model.loadingNewer || preparing))
-            .task(id: revision) { await projection.prepare(model, identity: identity) }
+            .task(id: revision) { projection.request(model, identity: identity) }
+            .onDisappear { projection.cancel() }
             #if DEBUG
             .overlay(alignment: .topTrailing) {
                 if ProcessInfo.processInfo.environment["NANOCODEX_RENDER_COUNTER"] == "1" {
@@ -1722,6 +1749,8 @@ private struct ConversationContentView: View {
             let boundaryItemID = historyBoundaryItemID
             ZStack(alignment: .top) {
             ScrollView {
+                // Restoration uses measured row offsets. Lazy height estimates
+                // feed back into scrollTo while prepending variable-height tools.
                 VStack(alignment: .leading, spacing: 18) {
                     if revision.rows.isEmpty, revision.pending.isEmpty, !revision.loading, revision.error == nil {
                         VStack(alignment: .leading, spacing: 8) {
@@ -2035,6 +2064,7 @@ private struct ConversationCodeModeBatch: View {
     var onToggle: () -> Void
     @State private var expanded = true
     @State private var showsJavaScript = false
+    @State private var sourceSheet: ToolSourceDocument?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -2070,33 +2100,50 @@ private struct ConversationCodeModeBatch: View {
                     ForEach(Array(item.activity.dropFirst())) { row in
                         ConversationToolCard(row: row, live: item.isRunning && row.running, onToggle: onToggle)
                     }
-                    DisclosureGroup(isExpanded: Binding(
-                        get: { showsJavaScript },
-                        set: { value in onToggle(); showsJavaScript = value }
-                    )) {
-                        if let source = parent.tool?.input.first(where: { $0.label == "Code" })?.value {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button {
+                            onToggle()
+                            showsJavaScript.toggle()
+                        } label: {
                             HStack {
+                                Text("JavaScript and batch output")
                                 Spacer()
-                                Button("Copy code", systemImage: "doc.on.doc") { UIPasteboard.general.string = source }
-                                    .buttonStyle(.plain).font(.caption).frame(minHeight: 44)
-                                    .accessibilityIdentifier("code-mode-copy-" + parent.id)
+                                Image(systemName: showsJavaScript ? "chevron.up" : "chevron.down")
+                            }.font(.caption).foregroundStyle(Ink.muted)
+                                .frame(minHeight: 44).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                            .accessibilityIdentifier("code-mode-javascript-" + parent.id)
+                            .accessibilityValue(showsJavaScript ? "Expanded" : "Collapsed")
+                        if showsJavaScript {
+                            if let source = parent.tool?.input.first(where: { $0.label == "Code" })?.value {
+                                HStack {
+                                    Spacer()
+                                    Button("Copy code", systemImage: "doc.on.doc") { UIPasteboard.general.string = source }
+                                        .buttonStyle(.plain).font(.caption).frame(minHeight: 44)
+                                        .accessibilityIdentifier("code-mode-copy-" + parent.id)
+                                }
+                                if ChatCodePreview(source, maximumCharacters: 16_384, maximumLines: 120).isTruncated {
+                                    Button("View full code") { sourceSheet = .init(title: "Code", source: source) }
+                                        .frame(minHeight: 44)
+                                        .accessibilityIdentifier("code-mode-full-source-" + parent.id)
+                                } else {
+                                    ScrollView(.horizontal) {
+                                        ChatCodeText(source: source, language: "javascript")
+                                            .font(.system(.footnote, design: .monospaced))
+                                            .textSelection(.enabled).fixedSize(horizontal: true, vertical: true)
+                                            .accessibilityIdentifier("code-mode-source-" + parent.id)
+                                    }
+                                }
                             }
-                            ScrollView(.horizontal) {
-                                ChatCodeText(source: source, language: "javascript")
-                                    .font(.system(.footnote, design: .monospaced))
-                                    .textSelection(.enabled).fixedSize(horizontal: true, vertical: true)
-                                    .accessibilityIdentifier("code-mode-source-" + parent.id)
-                            }
+                            ToolActivityView(row: parent, hidesCode: true).padding(.vertical, 12)
+                                .accessibilityIdentifier("tool-detail-" + parent.id)
                         }
-                        ToolActivityView(row: parent, hidesCode: true).padding(.vertical, 12)
-                            .accessibilityIdentifier("tool-detail-" + parent.id)
-                    } label: {
-                        Text("JavaScript and batch output").font(.caption).foregroundStyle(Ink.muted)
-                    }.accessibilityIdentifier("code-mode-javascript-" + parent.id)
+                    }
                 }
             }.padding(12)
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Ink.border, lineWidth: 0.5))
                 .accessibilityElement(children: .contain)
+                .sheet(item: $sourceSheet) { document in ToolSourceSheet(document: document) }
         }
     }
 }
@@ -2106,6 +2153,7 @@ private struct ConversationToolCard: View {
     let live: Bool
     var onToggle: () -> Void
     @State private var expanded = false
+    @State private var sourceSheet: ToolSourceDocument?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var failed: Bool { row.tool?.status == "Failed" }
     private var title: String { row.tool?.title ?? row.text }
@@ -2173,13 +2221,18 @@ private struct ConversationToolCard: View {
                             statusIndicator
                             disclosure
                         }
-                        ChatCodeText(source: command, language: "bash")
+                        let preview = ChatCodePreview(command)
+                        ChatCodeText(source: preview.text, language: "bash")
                             .font(.system(.footnote, design: .monospaced))
                             .foregroundStyle(Ink.text)
                             .multilineTextAlignment(.leading)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .lineLimit(preview.isTruncated ? 3 : nil)
                             .accessibilityIdentifier("command-source-" + row.id)
+                        if preview.isTruncated {
+                            Text("Show command and results").font(.caption2).foregroundStyle(Ink.muted)
+                        }
                         if let shell {
                             Text(shell).font(.caption2.monospaced()).foregroundStyle(Ink.muted)
                         }
@@ -2193,7 +2246,9 @@ private struct ConversationToolCard: View {
                             disclosure
                         }
                         if !expanded {
-                            ChatCodeText(source: source, language: "javascript")
+                            // The disclosure preview must not highlight an entire
+                            // program that is clipped to three visible lines.
+                            ChatCodeText(source: ChatCodePreview(source).text, language: "javascript")
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(Ink.text)
                                 .multilineTextAlignment(.leading)
@@ -2236,6 +2291,11 @@ private struct ConversationToolCard: View {
                     }
                 }
             if expanded {
+                if let command, ChatCodePreview(command).isTruncated {
+                    Button("View full command") { sourceSheet = .init(title: "Command", source: command) }
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("command-full-source-" + row.id)
+                }
                 if let source = codeModeSource {
                     Divider()
                     HStack {
@@ -2251,25 +2311,83 @@ private struct ConversationToolCard: View {
                         .frame(minHeight: 44)
                         .accessibilityIdentifier("code-mode-copy-" + row.id)
                     }
-                    ScrollView(.horizontal) {
-                        ChatCodeText(source: source, language: "javascript")
-                            .font(.system(.footnote, design: .monospaced))
-                            .foregroundStyle(Ink.text)
-                            .lineSpacing(4)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: true, vertical: true)
-                            .padding(.bottom, 12)
-                            .accessibilityIdentifier("code-mode-source-" + row.id)
+                    if ChatCodePreview(source, maximumCharacters: 16_384, maximumLines: 120).isTruncated {
+                        Button("View full code") { sourceSheet = .init(title: "Code", source: source) }
+                            .frame(minHeight: 44)
+                            .accessibilityIdentifier("code-mode-full-source-" + row.id)
+                    } else {
+                        ScrollView(.horizontal) {
+                            ChatCodeText(source: source, language: "javascript")
+                                .font(.system(.footnote, design: .monospaced))
+                                .foregroundStyle(Ink.text)
+                                .lineSpacing(4)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: true, vertical: true)
+                                .padding(.bottom, 12)
+                                .accessibilityIdentifier("code-mode-source-" + row.id)
+                        }
+                        .accessibilityIdentifier("code-mode-scroll-" + row.id)
                     }
-                    .accessibilityIdentifier("code-mode-scroll-" + row.id)
                 }
                 Divider()
                 ToolActivityView(row: row, hidesCommand: command != nil, hidesCode: codeModeSource != nil).padding(.vertical, 12)
                     .accessibilityIdentifier("tool-detail-" + row.id)
             }
         }.padding(.horizontal, 12)
+            .sheet(item: $sourceSheet) { document in ToolSourceSheet(document: document) }
             .background(Ink.surface, in: RoundedRectangle(cornerRadius: 12))
             .accessibilityElement(children: .contain)
+    }
+}
+
+private struct ToolSourceDocument: Identifiable {
+    let id = UUID()
+    let title: String
+    let source: String
+}
+
+/// A viewport-sized native text view owns scrolling for large source payloads.
+/// Never ask the transcript to measure the full document's intrinsic height.
+private struct ToolSourceSheet: View {
+    let document: ToolSourceDocument
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            ToolSourceTextView(source: document.source)
+                .navigationTitle(document.title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Copy source") { UIPasteboard.general.string = document.source }
+                            .accessibilityIdentifier("tool-source-copy")
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { dismiss() }.accessibilityIdentifier("tool-source-done")
+                    }
+                }
+        }
+    }
+}
+
+private struct ToolSourceTextView: UIViewRepresentable {
+    let source: String
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView(usingTextLayoutManager: true)
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = true
+        view.alwaysBounceVertical = true
+        view.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        view.adjustsFontForContentSizeCategory = true
+        view.textColor = .label
+        view.backgroundColor = .systemBackground
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        view.accessibilityIdentifier = "tool-source-text"
+        view.text = source
+        return view
+    }
+    func updateUIView(_ view: UITextView, context: Context) {
+        if view.text != source { view.text = source }
     }
 }
 

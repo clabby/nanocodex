@@ -344,6 +344,7 @@ final class InboxModel: ObservableObject {
     /// run on the main actor. Synchronous action handlers retain focusedQueue.
     func prepareFocusedQueue() async -> MessageQueuePresentation? {
         let card = focused, revision = queueProjection.revision, epoch = generation
+        let identity = focusedConversationIdentity
         let cached = queueProjection, history = events, transcript = rows
         let messages = pending, transfers = steeringTransfers, demo = isDemo
         let task = Task.detached(priority: .userInitiated) {
@@ -353,8 +354,10 @@ final class InboxModel: ObservableObject {
             return (prepared, value)
         }
         let (prepared, value) = await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
-        guard !Task.isCancelled, generation == epoch, queueProjection.revision == revision else { return nil }
-        queueProjection = prepared
+        guard !Task.isCancelled, generation == epoch, focusedConversationIdentity == identity else { return nil }
+        // A renderer may publish this coherent snapshot while a newer revision
+        // is arriving. Never overwrite the newer revision's queue cache.
+        if queueProjection.revision == revision { queueProjection = prepared }
         return value
     }
     private func retainQueuedMessage(_ id: String) {
@@ -2087,6 +2090,7 @@ final class InboxModel: ObservableObject {
             let delay = Int(ProcessInfo.processInfo.environment["NANOCODEX_DEMO_HISTORY_DELAY_MS"] ?? "600") ?? 600
             try? await Task.sleep(for: .milliseconds(max(0, delay)))
             guard focused?.id == id else { return }
+            historyMutationRevision = UUID()
             rows.insert(contentsOf: (-12..<0).map { .init(id: "older-\($0)", role: "Agent", text: "Earlier note \($0 + 13). Context retained before the current work.") }, at: 0)
             demoRows[id] = rows; hasOlder = false; loadingOlder = false
             return
@@ -2952,6 +2956,24 @@ final class InboxModel: ObservableObject {
             ]))
             demoRows["inbox"] = [.init(id: "demo-command-card", role: "Tool", text: activity.title, tool: activity)]
         }
+        if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_OVERSIZED_COMMAND"] == "1" {
+            // Presentation-only fixture: the synthetic base64 and shell source never execute.
+            let command = "printf '%s' '"
+                + String(repeating: "QUJD", count: 47_279)
+                + "' | base64 -d > /workspace/synthetic.png"
+            var activity = ToolPresentation(name: "exec_command", arguments: .object([
+                "cmd": .string(command)
+            ]))
+            activity.finish(.object([
+                "stdout": .string("Synthetic oversized command completed. No command was executed."),
+                "exit_code": .number(0)
+            ]))
+            demoRows["inbox"] = [
+                .init(id: "demo-oversized-command", role: "Tool", text: activity.title, tool: activity),
+                .init(id: "demo-after-oversized-command", role: "Agent",
+                      text: "The oversized command is complete. This message stays reachable.")
+            ]
+        }
         if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_CODE_MODE_CARD"] == "1"
             || ProcessInfo.processInfo.environment["NANOCODEX_DEMO_CODE_MODE_OBJECT_CARD"] == "1" {
             // Presentation-only fixture: this JavaScript and its result never execute.
@@ -2962,7 +2984,7 @@ final class InboxModel: ObservableObject {
               workdir: '/workspace/demo'
             });
             text(result.output);
-            """
+            """ + "\n// " + String(repeating: "Preserve full source. ", count: 20)
             let objectArguments = ProcessInfo.processInfo.environment["NANOCODEX_DEMO_CODE_MODE_OBJECT_CARD"] == "1"
             var activity = ToolPresentation(name: "exec", arguments: objectArguments
                 ? .object(["code": .string(source)]) : .string(source))
