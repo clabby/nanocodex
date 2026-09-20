@@ -36,7 +36,6 @@ struct Identity {
 
 pub(super) struct NativeState {
     pub(super) machine: AttachmentMachine,
-    directory: PathBuf,
     _lock: NativeStateLock,
 }
 
@@ -177,7 +176,6 @@ impl NativeState {
         .map_err(configuration)?;
         Ok(Self {
             machine,
-            directory: directory.to_path_buf(),
             _lock: lock,
         })
     }
@@ -325,10 +323,6 @@ pub(super) async fn run_observed(
         super::computer_elicitation::configure(&mut config);
         #[cfg(windows)]
         super::computer_elicitation_windows::configure(&mut config);
-        if cfg!(target_os = "linux") && std::env::var_os("NANOCODEX_COMPUTER_BACKGROUND").is_none()
-        {
-            config.desktop_runtime = Some(state.directory.join("desktop"));
-        }
         let computer = nanocodex_computer::ComputerTools::connect(config)
             .await
             .map_err(|error| ManagedError::Configuration(error.to_string()))?;
