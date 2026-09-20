@@ -101,3 +101,9 @@ The [Cloudflare catalog](https://developers.cloudflare.com/ai/models/) lists Kim
 - Worker deployment dry-run passed with `--containers-rollout=none`. The ordinary build bundled the Worker but could not build unrelated container images because this Hand lacks the Docker CLI.
 
 No production settings were changed. Run the targeted test scripts again after changing model schemas or routing policy.
+
+## Local follow-up (2026-09-20)
+
+`pnpm --dir js/managed test:routing` also runs the combined SQLite/Rust-WASM regression test. The two-turn fixture calls Jev once, dispatches four GLM requests through the adapter, executes two real tool handlers, and checks conversation replay. Closing and reopening SQLite preserves the selected model and thinking despite a changed proposed policy. A second case checks persisted ChatGPT fallback after classifier failure. Only model responses are mocked; this combined fixture mirrors the Durable Object transaction rather than driving HTTP admission. Separate workerd admission tests cover that boundary.
+
+Local verification: 19 policy tests, two combined runtime tests, 30 workerd settings/admission/configuration/schema tests, and 16 adapter/identity/WASM tests passed (overlapping coverage, not independent model evaluations). A local managed Worker returned HTTP 200 from `/health` and HTTP 401 for unauthenticated agent creation. The temporary server was stopped afterward. `wrangler whoami` reports no authentication on the test Hand, so real Jev/GLM inference, model quality and actual billing remain untested.
