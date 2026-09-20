@@ -2491,6 +2491,26 @@ final class InboxUITests: XCTestCase {
         capture(app, "command-card-expanded-failure")
     }
 
+    func testCodeModeBatchKeepsCommandsTogether() {
+        let app = launch(["NANOCODEX_DEMO_CODE_MODE_BATCH": "1", "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        selectInbox(app)
+        let conversation = app.scrollViews["conversation"]
+        let batch = conversation.buttons["code-mode-batch-demo-code-mode-batch"]
+        XCTAssertTrue(batch.waitForExistence(timeout: 10))
+        XCTAssertEqual(batch.value as? String, "Expanded")
+        XCTAssertEqual(conversation.buttons.matching(identifier: "tool-disclosure-demo-code-mode-batch/code-1").count, 1)
+        XCTAssertTrue(conversation.buttons["tool-disclosure-demo-code-mode-batch/code-2"].isHittable)
+        capture(app, "code-mode-batch-expanded")
+        batch.tap()
+        XCTAssertEqual(batch.value as? String, "Collapsed")
+        XCTAssertFalse(conversation.buttons["tool-disclosure-demo-code-mode-batch/code-1"].exists)
+        capture(app, "code-mode-batch-collapsed")
+        batch.tap()
+        conversation.descendants(matching: .any)["code-mode-javascript-demo-code-mode-batch"].tap()
+        XCTAssertTrue(conversation.descendants(matching: .any)["code-mode-source-demo-code-mode-batch"].exists)
+        capture(app, "code-mode-batch-javascript")
+    }
+
     func testCodeModeCardShowsFullMultilineSourceAndOutput() {
         assertCodeModeCardShowsFullMultilineSourceAndOutput(environment: "NANOCODEX_DEMO_CODE_MODE_CARD")
     }
@@ -2504,7 +2524,7 @@ final class InboxUITests: XCTestCase {
                           "NANOCODEX_DEMO_PROFILE": UUID().uuidString]); selectInbox(app)
         let conversation = app.scrollViews["conversation"]
         XCTAssertTrue(conversation.waitForExistence(timeout: 5))
-        let card = conversation.buttons["tool-disclosure-demo-code-mode-card"]
+        let card = conversation.buttons["code-mode-batch-demo-code-mode-card"]
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         let expectedSource = """
         // Inspect the complete synthetic JavaScript source, preserving every newline beyond the old 140 character preview boundary.
@@ -2515,13 +2535,12 @@ final class InboxUITests: XCTestCase {
         text(result.output);
         """
         XCTAssertGreaterThan(expectedSource.count, 140)
-        let preview = card.descendants(matching: .any)["code-mode-preview-demo-code-mode-card"]
-        XCTAssertTrue(preview.isHittable, "Collapsed cards show a compact preview")
-        XCTAssertLessThan(preview.frame.height, 65, "Preview stays within three caption lines")
+        XCTAssertEqual(card.value as? String, "Expanded")
         XCTAssertTrue(card.staticTexts["Code Mode"].exists)
         XCTAssertFalse(conversation.staticTexts["Run code"].exists)
-        capture(app, "code-mode-card-compact-preview")
-        card.tap()
+        XCTAssertFalse(conversation.descendants(matching: .any)["code-mode-source-demo-code-mode-card"].exists)
+        capture(app, "code-mode-batch-expanded")
+        conversation.descendants(matching: .any)["code-mode-javascript-demo-code-mode-card"].tap()
         let source = conversation.descendants(matching: .any)["code-mode-source-demo-code-mode-card"]
         XCTAssertTrue(source.waitForExistence(timeout: 5))
         XCTAssertEqual(source.label, expectedSource, "Expanded source preserves every character and newline")
