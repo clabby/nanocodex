@@ -44,10 +44,16 @@ directly to ElevenLabs using your local key. The sample, key, and command do not
 enter the chat/model prompt. Voice transcription still follows the normal voice
 conversation flow.
 
-ElevenLabs output streams PCM audio directly to the local player instead of
-waiting for an entire MP3 download. The microphone pauses while this output
-plays, followed by a short echo tail; the voice strip shows that pause. Your
-explicit mute preference is preserved. Typing, stopping voice, or switching
-voices cancels pending speech. Captions from a stopped session are discarded.
-The current TUI requires ffplay (included with ffmpeg) for ElevenLabs output;
-standard Homebrew locations are detected even with a minimal launch PATH.
+On macOS, ElevenLabs output streams PCM into the same libWebRTC mixer,
+speaker device, and echo-cancellation reference used by ChatGPT voice. The
+microphone stays available for interruption unless you explicitly mute it.
+Both providers use the native microphone and speaker meters. ElevenLabs speech
+output no longer requires ffplay. Completed sentences can begin synthesis before
+the final caption arrives; repeated and interrupted caption segments are fenced.
+Typing, stopping voice, or switching voices
+cancels pending synthesis and native PCM. Captions from a stopped session are
+discarded. This requires the matching native helper shipped with the build.
+
+Voice-clone sample recording and local sample preview remain separate from
+conversation audio: recording still uses ffmpeg, and macOS sample preview uses
+afplay. The clone workflow never uploads without explicit consent.

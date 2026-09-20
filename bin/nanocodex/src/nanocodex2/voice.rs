@@ -57,31 +57,11 @@ struct MediaControl {
     media: Option<RealtimeWebrtcSessionHandle>,
     ready: bool,
     muted: bool,
-    external_playback: bool,
-    playback_tail: Option<Instant>,
     stopped: bool,
 }
 impl MediaControl {
     fn microphone_muted(&self) -> bool {
-        !self.ready
-            || self.muted
-            || self.external_playback
-            || self.playback_tail.is_some()
-            || self.stopped
-    }
-    fn set_external_playback(&mut self, active: bool) -> Result<(), ManagedError> {
-        self.external_playback = active;
-        // External players bypass WebRTC's echo reference. Retain suppression
-        // while their final samples and room reverberation decay.
-        self.playback_tail = (!active).then(|| Instant::now() + Duration::from_millis(300));
-        self.apply_microphone()
-    }
-    fn refresh_playback_tail(&mut self, now: Instant) -> Result<(), ManagedError> {
-        if self.playback_tail.is_some_and(|deadline| now >= deadline) {
-            self.playback_tail = None;
-            self.apply_microphone()?;
-        }
-        Ok(())
+        !self.ready || self.muted || self.stopped
     }
     fn apply_microphone(&self) -> Result<(), ManagedError> {
         if let Some(media) = &self.media {
@@ -145,39 +125,22 @@ impl Session {
             ..Default::default()
         }));
         let playback_control = control.clone();
-        let playback_status = status_tx.clone();
         let playback = eleven.map(|client| {
-            let voice = settings.eleven_labs_voice_id.clone().unwrap();
-            let speaking_text = format!("ElevenLabs voice {voice} speaking");
-            let output_label = format!("ElevenLabs {voice}");
             Arc::new(playback::Playback::new(
                 client,
                 settings.eleven_labs_voice_id.clone().unwrap(),
                 status_tx.clone(),
-                Arc::new(move |active| {
-                    let mut control = playback_control
+                Arc::new(move || {
+                    let control = playback_control
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if control.stopped || !control.ready {
+                        return Err(error("Native voice output is not ready"));
+                    }
                     control
-                        .set_external_playback(active)
-                        .map_err(|error| error.to_string())?;
-                    playback_status.send_modify(|status| {
-                        status.speaking = active && !control.stopped;
-                        // Only replace our own transient playback label; retain
-                        // transport failures and other actionable status text.
-                        if !active && !control.stopped && status.text == speaking_text {
-                            status.text = output_status(
-                                if control.muted {
-                                    "Voice active · microphone muted"
-                                } else {
-                                    "Voice active · listening"
-                                }
-                                .into(),
-                                &output_label,
-                            );
-                        }
-                    });
-                    Ok(())
+                        .media
+                        .clone()
+                        .ok_or_else(|| error("Native voice output is unavailable"))
                 }),
             ))
         });
@@ -355,6 +318,8 @@ struct SpeechCaptions {
     caption: Option<u64>,
     suppressed: Option<u64>,
     completed: Option<u64>,
+    emitted: String,
+    speech_error: Option<&'static str>,
     enabled: bool,
 }
 impl Default for SpeechCaptions {
@@ -364,6 +329,8 @@ impl Default for SpeechCaptions {
             caption: None,
             suppressed: None,
             completed: None,
+            emitted: String::new(),
+            speech_error: None,
             enabled: true,
         }
     }
@@ -386,27 +353,64 @@ impl SpeechCaptions {
         }
         interrupted
     }
-    fn consume(&mut self, speaker: &str, id: u64, text: &str, is_partial: bool) -> bool {
-        if speaker != "assistant" {
-            return false;
+    /// Suppress audio only; the complete caption remains visible.
+    fn suppress_remainder(&mut self, id: u64) {
+        self.completed = self.completed.max(Some(id));
+        self.emitted.clear();
+    }
+
+    fn consume(&mut self, speaker: &str, id: u64, text: &str, is_partial: bool) -> Option<String> {
+        if speaker != "assistant" || self.caption.is_some_and(|previous| id < previous) {
+            return None;
         }
-        if self.caption.is_some_and(|previous| id < previous) {
-            return false;
+        if self.caption != Some(id) {
+            self.emitted.clear();
         }
         self.caption = Some(id);
         if !self.enabled {
             self.suppressed = self.suppressed.max(Some(id));
-            return false;
+            return None;
         }
         if self.suppressed.is_some_and(|previous| id <= previous)
             || self.completed.is_some_and(|previous| id <= previous)
-            || is_partial
-            || text.trim().is_empty()
         {
-            return false;
+            return None;
         }
-        self.completed = Some(id);
-        true
+        // Corrected snapshots cannot safely reuse an already spoken byte offset.
+        if !text.starts_with(&self.emitted) {
+            self.suppress_remainder(id);
+            return None;
+        }
+        // Bound retained state and requests without truncating the visible text.
+        if text.len() > 16000 {
+            self.suppress_remainder(id);
+            self.speech_error = Some(
+                "ElevenLabs caption exceeds 16000 bytes; remaining reply is available as text",
+            );
+            return None;
+        }
+        let suffix = &text[self.emitted.len()..];
+        let end = if is_partial {
+            let mut boundary = 0;
+            let mut chars = suffix.char_indices().peekable();
+            while let Some((offset, ch)) = chars.next() {
+                if matches!(ch, '.' | '!' | '?')
+                    && chars.peek().is_some_and(|(_, next)| next.is_whitespace())
+                {
+                    boundary = offset + ch.len_utf8();
+                }
+            }
+            boundary
+        } else {
+            self.completed = Some(id);
+            suffix.len()
+        };
+        let segment = suffix[..end].trim().to_owned();
+        if segment.is_empty() {
+            return None;
+        }
+        self.emitted.push_str(&suffix[..end]);
+        Some(segment)
     }
 }
 struct Actor {
@@ -595,15 +599,12 @@ impl Actor {
                     }
                 }
                 _ = flush.tick() => {
-                    self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .refresh_playback_tail(Instant::now())?;
                     let media = self.media.as_ref().unwrap();
                     if let Some(error_text) = media.take_error() { return Err(error(error_text)); }
                     let microphone = media.take_microphone_peak();
                     let speaker = media.take_speaker_peak();
                     if speaker >= 512 { last_speech = Some(Instant::now()); }
-                    let external_speaking = self.control.lock().unwrap_or_else(std::sync::PoisonError::into_inner).external_playback;
-                    let speaking = external_speaking || last_speech.is_some_and(|last| last.elapsed() < Duration::from_millis(500));
+                    let speaking = last_speech.is_some_and(|last| last.elapsed() < Duration::from_millis(500));
                     self.status.send_if_modified(|status| {
                         let changed = status.microphone != microphone || status.speaker != speaker || status.speaking != speaking;
                         status.microphone = microphone; status.speaker = speaker; status.speaking = speaking; changed
@@ -650,17 +651,23 @@ impl Actor {
             if stale_speech {
                 continue;
             }
-            if self.captions.consume(
+            if let Some(segment) = self.captions.consume(
                 &transcript.speaker,
                 transcript.id,
                 &transcript.text,
                 transcript.is_partial,
             ) {
                 if let Some(playback) = &self.playback {
-                    if let Err(error) = playback.enqueue(transcript.text.clone()) {
+                    if let Err(error) = playback.enqueue(segment) {
+                        self.captions.suppress_remainder(transcript.id);
                         self.status(error.to_string());
                     }
                 }
+            }
+            if let Some(message) = self.captions.speech_error.take()
+                && self.playback.is_some()
+            {
+                self.status(message.to_owned());
             }
             if transcript.speaker == "assistant"
                 && (!self.captions.enabled
@@ -900,25 +907,173 @@ mod tests {
         let mut captions = SpeechCaptions::default();
         let mut id = 1;
         let mut partial = true;
-        assert!(!captions.consume("assistant", id, "hello", partial));
+        assert!(
+            captions
+                .consume("assistant", id, "hello", partial)
+                .is_none()
+        );
         assert!(captions.update(Some(1), Some(false)));
         assert!(!captions.update(Some(0), Some(true)));
         assert!(!captions.enabled);
         captions.update(Some(1), Some(true));
         partial = false;
-        assert!(!captions.consume("assistant", id, "hello", partial));
+        assert!(
+            captions
+                .consume("assistant", id, "hello", partial)
+                .is_none()
+        );
         id = 2;
-        assert!(captions.consume("assistant", id, "hello", partial));
-        assert!(!captions.consume("assistant", id, "hello", partial));
+        assert!(
+            captions
+                .consume("assistant", id, "hello", partial)
+                .is_some()
+        );
+        assert!(
+            captions
+                .consume("assistant", id, "hello", partial)
+                .is_none()
+        );
         id = 3;
         partial = true;
-        assert!(!captions.consume("assistant", id, "hello", partial));
+        assert!(
+            captions
+                .consume("assistant", id, "hello", partial)
+                .is_none()
+        );
         assert!(captions.update(Some(2), None));
         partial = false;
-        assert!(!captions.consume("assistant", id, "hello", partial));
+        assert!(
+            captions
+                .consume("assistant", id, "hello", partial)
+                .is_none()
+        );
         id = 4;
-        assert!(captions.consume("assistant", id, "hello", partial));
+        assert!(
+            captions
+                .consume("assistant", id, "hello", partial)
+                .is_some()
+        );
     }
+    #[test]
+    fn captions_stream_cumulative_sentences_and_flush_final_once() {
+        let mut captions = SpeechCaptions::default();
+        assert_eq!(captions.consume("assistant", 1, "Hello.", true), None);
+        assert_eq!(
+            captions
+                .consume("assistant", 1, "Hello. Wor", true)
+                .as_deref(),
+            Some("Hello.")
+        );
+        assert_eq!(captions.consume("assistant", 1, "Hello. Wor", true), None);
+        assert_eq!(
+            captions
+                .consume("assistant", 1, "Hello. World! Next? tail", true)
+                .as_deref(),
+            Some("World! Next?")
+        );
+        assert_eq!(
+            captions
+                .consume("assistant", 1, "Hello. World! Next? tail", false)
+                .as_deref(),
+            Some("tail")
+        );
+        assert_eq!(
+            captions.consume("assistant", 1, "Hello. World! Next? tail", false),
+            None
+        );
+        assert_eq!(
+            captions
+                .consume("assistant", 2, "No punctuation", false)
+                .as_deref(),
+            Some("No punctuation")
+        );
+    }
+
+    #[test]
+    fn captions_stream_utf8_and_suppress_corrected_spoken_prefix() {
+        let mut captions = SpeechCaptions::default();
+        assert_eq!(
+            captions
+                .consume("assistant", 1, "Café! 世界", true)
+                .as_deref(),
+            Some("Café!")
+        );
+        assert_eq!(
+            captions
+                .consume("assistant", 1, "Café! 世界", false)
+                .as_deref(),
+            Some("世界")
+        );
+        assert_eq!(
+            captions
+                .consume("assistant", 2, "Old. More", true)
+                .as_deref(),
+            Some("Old.")
+        );
+        assert_eq!(
+            captions.consume("assistant", 2, "Corrected. More", false),
+            None
+        );
+        assert_eq!(captions.consume("assistant", 2, "Old. More", false), None);
+        assert_eq!(captions.consume("assistant", 3, "unfinished", true), None);
+        assert_eq!(
+            captions
+                .consume("assistant", 3, "corrected before speech", false)
+                .as_deref(),
+            Some("corrected before speech")
+        );
+    }
+
+    #[test]
+    fn captions_interrupt_and_queue_failure_fence_remaining_chunks() {
+        let mut captions = SpeechCaptions::default();
+        assert!(
+            captions
+                .consume("assistant", 1, "First. tail", true)
+                .is_some()
+        );
+        assert!(captions.update(Some(1), Some(false)));
+        captions.update(Some(1), Some(true));
+        assert_eq!(captions.consume("assistant", 1, "First. tail", false), None);
+        assert!(
+            captions
+                .consume("assistant", 2, "Next. tail", true)
+                .is_some()
+        );
+        captions.suppress_remainder(2);
+        assert_eq!(captions.consume("assistant", 2, "Next. tail", false), None);
+        assert!(captions.enabled);
+        assert_eq!(
+            captions.suppressed,
+            Some(1),
+            "queue failure must not hide UI captions"
+        );
+        assert_eq!(
+            captions.consume("assistant", 3, "Fresh", false).as_deref(),
+            Some("Fresh")
+        );
+        assert_eq!(captions.consume("user", 4, "User.", false), None);
+    }
+
+    #[test]
+    fn captions_bound_retained_prefix_and_report_oversized_speech() {
+        let mut captions = SpeechCaptions::default();
+        assert_eq!(
+            captions.consume("assistant", 1, &"é".repeat(8001), true),
+            None
+        );
+        assert!(captions.emitted.is_empty());
+        assert!(captions.speech_error.take().unwrap().contains("16000"));
+        assert_eq!(
+            captions.consume("assistant", 1, "shorter final", false),
+            None
+        );
+        assert_eq!(
+            captions.consume("assistant", 2, "Fine", false).as_deref(),
+            Some("Fine")
+        );
+    }
+
     #[tokio::test]
     async fn busy_realtime_events_do_not_cancel_agent_stream_connection() {
         use axum::{Router, http::header, routing::get};
@@ -1003,62 +1158,24 @@ mod tests {
     }
 
     #[test]
-    fn external_playback_restores_capture_only_after_tail_and_preserves_user_mute() {
+    fn native_playback_preserves_user_mute_and_stop_fence() {
         let mut control = MediaControl {
             ready: true,
             ..Default::default()
         };
-        assert!(!control.microphone_muted());
-        control.set_external_playback(true).unwrap();
-        assert!(control.microphone_muted());
-        control.muted = true;
-        control.set_external_playback(false).unwrap();
-        let deadline = control.playback_tail.unwrap();
-        control.refresh_playback_tail(deadline).unwrap();
         assert!(
-            control.microphone_muted(),
-            "playback cannot override user mute"
+            !control.microphone_muted(),
+            "native echo cancellation allows barge-in"
         );
+        control.muted = true;
+        assert!(control.microphone_muted());
         control.muted = false;
         assert!(!control.microphone_muted());
-        // Completion, cancellation and failure share this restoration path.
-        for _ in 0..3 {
-            control.set_external_playback(true).unwrap();
-            control.set_external_playback(false).unwrap();
-            assert!(control.microphone_muted());
-            let deadline = control.playback_tail.unwrap();
-            control
-                .refresh_playback_tail(deadline - Duration::from_millis(1))
-                .unwrap();
-            assert!(control.microphone_muted());
-            control.refresh_playback_tail(deadline).unwrap();
-            assert!(!control.microphone_muted());
-        }
-        control.set_external_playback(true).unwrap();
         control.stopped = true;
-        control.set_external_playback(false).unwrap();
-        control
-            .refresh_playback_tail(control.playback_tail.unwrap())
-            .unwrap();
         assert!(
             control.microphone_muted(),
-            "stop fences late playback restoration"
+            "late playback cannot reopen capture"
         );
-    }
-
-    #[test]
-    fn next_playback_clears_previous_tail_without_unmuting() {
-        let mut control = MediaControl {
-            ready: true,
-            ..Default::default()
-        };
-        control.set_external_playback(true).unwrap();
-        control.set_external_playback(false).unwrap();
-        let old_deadline = control.playback_tail.unwrap();
-        control.set_external_playback(true).unwrap();
-        control.refresh_playback_tail(old_deadline).unwrap();
-        assert!(control.microphone_muted());
-        assert!(control.playback_tail.is_none());
     }
 
     #[test]

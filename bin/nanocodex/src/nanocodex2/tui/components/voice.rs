@@ -45,17 +45,8 @@ pub(super) fn render(frame: &mut Frame<'_>, state: &Status, area: Rect) {
         Phase::Active => "Listening",
     };
     let binding = if state.muted { "unmute" } else { "mute" };
-    let external = state.text.contains("ElevenLabs");
-    let microphone = if external && state.speaking {
-        "paused while ElevenLabs speaks".to_owned()
-    } else {
-        meter(if state.muted { 0 } else { state.microphone })
-    };
-    let speaker = if external && state.speaking {
-        "streaming".to_owned()
-    } else {
-        meter(state.speaker)
-    };
+    let microphone = meter(if state.muted { 0 } else { state.microphone });
+    let speaker = meter(state.speaker);
     let lines = vec![Line::from(vec![
         Span::styled(format!(" {phase}  "), Style::default().fg(Color::Cyan)),
         Span::raw(format!(
@@ -72,12 +63,13 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
-    fn external_speech_displays_microphone_pause_instead_of_listening() {
+    fn elevenlabs_uses_native_microphone_and_speaker_meters() {
         let state = Status {
             text: "ElevenLabs test_voice speaking".into(),
             phase: Phase::Active,
             speaking: true,
             microphone: 8192,
+            speaker: 8192,
             ..Default::default()
         };
         let mut terminal = Terminal::new(TestBackend::new(120, 1)).unwrap();
@@ -88,8 +80,8 @@ mod tests {
             .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
             .collect();
         assert!(line.contains("Speaking"));
-        assert!(line.contains("mic paused while ElevenLabs speaks"));
-        assert!(line.contains("speaker streaming"));
+        assert!(line.contains("mic ▮▮▮▮▮"));
+        assert!(line.contains("speaker ▮▮▮▮▮"));
         assert!(!line.contains("Listening"));
     }
 
