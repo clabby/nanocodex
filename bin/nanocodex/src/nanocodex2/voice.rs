@@ -625,10 +625,9 @@ impl Actor {
         if self
             .captions
             .update(effects.input_generation, effects.playback_enabled)
+            && let Some(playback) = &self.playback
         {
-            if let Some(playback) = &self.playback {
-                playback.cancel();
-            }
+            playback.cancel();
         }
         if let Some(status) = effects.status {
             self.status(status);
@@ -642,13 +641,11 @@ impl Actor {
                 transcript.id,
                 &transcript.text,
                 transcript.is_partial,
-            ) {
-                if let Some(playback) = &self.playback {
-                    if let Err(error) = playback.enqueue(segment) {
-                        self.captions.suppress_remainder(transcript.id);
-                        self.status(error.to_string());
-                    }
-                }
+            ) && let Some(playback) = &self.playback
+                && let Err(error) = playback.enqueue(segment)
+            {
+                self.captions.suppress_remainder(transcript.id);
+                self.status(error.to_string());
             }
             if let Some(message) = self.captions.speech_error.take()
                 && self.playback.is_some()

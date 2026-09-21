@@ -360,7 +360,7 @@ pub(super) mod tests {
         let path = sample.path().to_owned();
         assert!(std::fs::metadata(&path).unwrap().len() > 1000);
         let voice = client
-            .clone_voice("Synthetic test clone", &[path.clone()], true)
+            .clone_voice("Synthetic test clone", std::slice::from_ref(&path), true)
             .await
             .unwrap();
         assert_eq!(voice.voice_id, "synthetic_clone");
