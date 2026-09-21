@@ -6,13 +6,17 @@ import SwiftUI
 @MainActor final class VoiceCloneRecording: NSObject, ObservableObject, AVAudioRecorderDelegate, AVAudioPlayerDelegate {
     @Published private(set) var preparing = false
     @Published private(set) var recording = false
+    @Published private(set) var saving = false
+    @Published private(set) var permissionDenied = false
     @Published private(set) var playing = false
     @Published private(set) var sample: URL?
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
+    @Published private(set) var playbackElapsed: TimeInterval = 0
     @Published private(set) var level: Float = 0
     @Published var error: String?
     private var meterTask: Task<Void, Never>?
+    private var playbackTask: Task<Void, Never>?
     private var recorder: AVAudioRecorder?
     private var player: AVAudioPlayer?
     private var pendingURL: URL?
@@ -22,8 +26,18 @@ import SwiftUI
     override init() {
         super.init()
         NotificationCenter.default.addObserver(self, selector: #selector(audioInterrupted), name: AVAudioSession.interruptionNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChanged), name: AVAudioSession.routeChangeNotification, object: nil)
     }
-    deinit { meterTask?.cancel(); NotificationCenter.default.removeObserver(self) }
+    deinit {
+        meterTask?.cancel()
+        playbackTask?.cancel()
+        NotificationCenter.default.removeObserver(self)
+    }
+    @objc nonisolated private func audioRouteChanged(_ notification: Notification) {
+        guard let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue else { return }
+        Task { @MainActor [weak self] in self?.suspend() }
+    }
     @objc nonisolated private func audioInterrupted(_ notification: Notification) {
         guard let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
               type == AVAudioSession.InterruptionType.began.rawValue else { return }
@@ -34,9 +48,11 @@ import SwiftUI
         discard()
         let token = generation
         preparing = true
+        permissionDenied = false
         let granted = await AVAudioApplication.requestRecordPermission()
         guard token == generation else { return }
         preparing = false
+        permissionDenied = !granted
         guard granted else { error = "Allow microphone access in Settings to record a voice sample."; return }
         do {
             let audio = AVAudioSession.sharedInstance()
@@ -66,15 +82,18 @@ import SwiftUI
         level = min(1, max(0, pow(10, recorder.averagePower(forChannel: 0) / 20)))
     }
     func stop() {
+        guard recording, let recorder else { return }
         updateMeter()
-        recorder?.stop()
+        recording = false
+        saving = true
         meterTask?.cancel(); meterTask = nil; level = 0
+        recorder.stop()
     }
     nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
         Task { @MainActor in
             guard self.recorder === recorder else { return }
             self.meterTask?.cancel(); self.meterTask = nil; self.level = 0
-            self.recording = false; self.recorder = nil
+            self.recording = false; self.saving = false; self.recorder = nil
             if flag {
                 self.sample = self.pendingURL; self.pendingURL = nil
                 if let sample = self.sample { self.duration = (try? AVAudioPlayer(contentsOf: sample).duration) ?? self.elapsed }
@@ -84,7 +103,8 @@ import SwiftUI
         }
     }
     func play() {
-        guard let sample else { return }
+        guard !preparing, !recording, !saving, !playing, let sample else { return }
+        playbackElapsed = 0
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
             try AVAudioSession.sharedInstance().setActive(true)
@@ -93,9 +113,27 @@ import SwiftUI
             player.delegate = self; self.player = player
             guard player.play() else { throw CocoaError(.fileReadCorruptFile) }
             playing = true
+            playbackTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    self?.updatePlaybackProgress()
+                    do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                }
+            }
         } catch { stopPlayback(); self.error = "Could not play this sample. Please record again." }
     }
-    func stopPlayback() { player?.stop(); player = nil; playing = false; releaseAudio() }
+    private func updatePlaybackProgress() {
+        guard playing, let player else { return }
+        playbackElapsed = player.currentTime
+    }
+    func stopPlayback() {
+        playbackTask?.cancel(); playbackTask = nil
+        let old = player
+        player = nil
+        old?.stop()
+        playing = false
+        playbackElapsed = 0
+        if recorder == nil { releaseAudio() }
+    }
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor in guard self.player === player else { return }; self.stopPlayback() }
     }
@@ -115,14 +153,15 @@ import SwiftUI
         generation = UUID()
         meterTask?.cancel(); meterTask = nil
         elapsed = 0; duration = 0; level = 0
-        preparing = false
+        preparing = false; saving = false
         let old = recorder; recorder = nil; old?.stop(); recording = false
         stopPlayback()
         for url in [sample, pendingURL].compactMap({ $0 }) { try? FileManager.default.removeItem(at: url) }
         sample = nil; pendingURL = nil; error = nil
     }
     func suspend() {
-        if preparing { generation = UUID(); preparing = false }
+        generation = UUID()
+        preparing = false
         if recording { stop() }
         if playing { stopPlayback() }
     }
