@@ -955,8 +955,9 @@ impl RootNode {
                             height: layout.body.height.saturating_sub(header_height),
                             ..layout.body
                         };
-                        let paragraph = Paragraph::new(crate::tui::voice_clone::READ_ALOUD)
-                            .wrap(Wrap { trim: false });
+                        let paragraph =
+                            Paragraph::new(include_str!("../voice_clone_script.txt").trim())
+                                .wrap(Wrap { trim: false });
                         let max_scroll = paragraph
                             .line_count(body.width)
                             .saturating_sub(usize::from(body.height));
@@ -1669,40 +1670,36 @@ impl RootNode {
             Some(Overlay::AgentId(_)) => self.update_agent_id(event),
             Some(Overlay::VoiceClone(_, consent_visible, _, _)) => {
                 let consent_visible = *consent_visible;
-                if let Event::Key(key) = &event {
-                    if key.kind == KeyEventKind::Press && key.modifiers.is_empty() {
-                        if let Some(Overlay::VoiceClone(text, visible, scroll, script)) =
-                            &mut self.overlay
+                if let Event::Key(key) = &event
+                    && key.kind == KeyEventKind::Press
+                    && key.modifiers.is_empty()
+                    && let Some(Overlay::VoiceClone(text, visible, scroll, script)) =
+                        &mut self.overlay
+                {
+                    match key.code {
+                        KeyCode::Char('h' | 'H')
+                            if text.contains("H: read-aloud script")
+                                || text.contains("Opening your microphone")
+                                || text.contains("Waiting for realtime") =>
                         {
-                            match key.code {
-                                KeyCode::Char('h' | 'H')
-                                    if text.contains("H: read-aloud script")
-                                        || text.contains("Opening your microphone")
-                                        || text.contains("Waiting for realtime") =>
-                                {
-                                    *script = !*script;
-                                    *visible = false;
-                                    return ComponentUpdate::render(RenderRequest::Immediate);
-                                }
-                                KeyCode::Down | KeyCode::PageDown if *script => {
-                                    *scroll = scroll.saturating_add(if key.code == KeyCode::Down {
-                                        1
-                                    } else {
-                                        8
-                                    });
-                                    return ComponentUpdate::render(RenderRequest::Immediate);
-                                }
-                                KeyCode::Up | KeyCode::PageUp if *script => {
-                                    *scroll = scroll.saturating_sub(if key.code == KeyCode::Up {
-                                        1
-                                    } else {
-                                        8
-                                    });
-                                    return ComponentUpdate::render(RenderRequest::Immediate);
-                                }
-                                _ => {}
-                            }
+                            *script = !*script;
+                            *visible = false;
+                            return ComponentUpdate::render(RenderRequest::Immediate);
                         }
+                        KeyCode::Down | KeyCode::PageDown if *script => {
+                            *scroll = scroll.saturating_add(if key.code == KeyCode::Down {
+                                1
+                            } else {
+                                8
+                            });
+                            return ComponentUpdate::render(RenderRequest::Immediate);
+                        }
+                        KeyCode::Up | KeyCode::PageUp if *script => {
+                            *scroll =
+                                scroll.saturating_sub(if key.code == KeyCode::Up { 1 } else { 8 });
+                            return ComponentUpdate::render(RenderRequest::Immediate);
+                        }
+                        _ => {}
                     }
                 }
                 let command = match event {
