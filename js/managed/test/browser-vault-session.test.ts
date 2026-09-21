@@ -99,3 +99,79 @@ describe("private target attachment lifecycle", () => {
     await expect(cdp.attachTarget("two")).rejects.toThrow("disconnected");
   });
 });
+
+describe("private browser upgrade cancellation", () => {
+  it("keeps a retained socket alive past the handshake deadline and completed call cancellation", async () => {
+    vi.useFakeTimers();
+    const call = new AbortController();
+    let upgradeSignal: AbortSignal | undefined;
+    const socket = { accept() {}, addEventListener() {}, close: vi.fn() };
+    const browser = { fetch: vi.fn(async (_url: string, options: RequestInit) => {
+      upgradeSignal = options.signal as AbortSignal;
+      upgradeSignal.addEventListener("abort", () => socket.close());
+      return { webSocket: socket };
+    }) };
+    const cdp = await PrivateBrowserCdp.connect(browser as never, "browser", call.signal);
+    call.abort();
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(upgradeSignal!.aborted).toBe(false);
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(cdp.closed).toBe(false);
+    cdp.close();
+  });
+  it("still cancels outstanding upgrades on timeout and caller abort", async () => {
+    vi.useFakeTimers();
+    for (const cancel of ["timeout", "caller"] as const) {
+      const call = new AbortController();
+      const browser = { fetch: vi.fn((_url: string, options: RequestInit) => new Promise((_resolve, reject) => {
+        options.signal!.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+      })) };
+      const pending = expect(PrivateBrowserCdp.connect(browser as never, "browser", call.signal)).rejects.toThrow("cancelled");
+      if (cancel === "caller") call.abort();
+      else await vi.advanceTimersByTimeAsync(10_000);
+      await pending;
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  });
+});
+
+// Exercise actual transport sanitization; a raw-error mock misses this boundary.
+describe("private touch cancellation error classification", () => {
+  it("allows recovery through the sanitizing CDP transport", async () => {
+    const listeners = new Map<string, (event: any) => void>();
+    const socket = {
+      accept() {}, close() {},
+      addEventListener(type: string, listener: (event: any) => void) { listeners.set(type, listener); },
+      send(raw: string) {
+        const { id, method } = JSON.parse(raw);
+        let result: unknown = {};
+        if (method === "Target.getTargetInfo") result = { targetInfo: { type: "page", targetId: "target", url: identity.expected_origin } };
+        if (method === "Target.attachToTarget") result = { sessionId: "private" };
+        if (method === "Page.getFrameTree") result = { frameTree: { frame: { id: "top", url: identity.expected_origin } } };
+        if (method === "Page.getLayoutMetrics") result = { cssLayoutViewport: { clientWidth: 390, clientHeight: 700 } };
+        if (method === "Page.captureScreenshot") result = { data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1X8AAAAASUVORK5CYII=" };
+        listeners.get("message")!({ data: JSON.stringify(method === "Input.dispatchTouchEvent"
+          ? { id, error: { code: -32602, message: "Must send a TouchStart first to start a new touch." } } : { id, result }) });
+      },
+    };
+    const cdp = new PrivateBrowserCdp(socket as unknown as WebSocket);
+    const { privateVaultTakeover } = await import("../src/browser-vault-takeover");
+    const touch = { active: false, uncertain: true };
+    expect((await privateVaultTakeover(cdp, identity, { action: "observe" }, touch)).status).toBe("active");
+    expect(touch).toEqual({ active: false, uncertain: false });
+    cdp.close();
+  });
+  it.each([
+    ["Input.dispatchTouchEvent", "touchStart", -32602, "Must send a TouchStart first to start a new touch."],
+    ["Input.insertText", "touchCancel", -32602, "Must send a TouchStart first to start a new touch."],
+    ["Input.dispatchTouchEvent", "touchCancel", -32601, "Must send a TouchStart first to start a new touch."],
+    ["Input.dispatchTouchEvent", "touchCancel", -32602, "private text https://provider.invalid"],
+  ])("does not classify unrelated provider failures (%s %s)", async (method, type, code, message) => {
+    let receive: (event: any) => void = () => {};
+    const socket = { accept() {}, close() {}, addEventListener(event: string, listener: typeof receive) { if (event === "message") receive = listener; },
+      send(raw: string) { receive({ data: JSON.stringify({ id: JSON.parse(raw).id, error: { code, message } }) }); } };
+    const cdp = new PrivateBrowserCdp(socket as unknown as WebSocket);
+    await expect(cdp.send(method, { type })).rejects.toThrow(/^Private browser operation failed$/);
+    cdp.close();
+  });
+});

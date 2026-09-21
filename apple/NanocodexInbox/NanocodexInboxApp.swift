@@ -4,6 +4,7 @@ import InboxCore
 @main
 struct NanocodexInboxApp: App {
     init() { InboxModel.shared.configureAgentNotifications() }
+    @State private var showQuickVoice = false
     @StateObject private var model = InboxModel.shared
     @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
@@ -14,7 +15,7 @@ struct NanocodexInboxApp: App {
             } else if ProcessInfo.processInfo.arguments.contains("--spotify-loopback-smoke") {
                 SpotifyLoopbackSmokeView()
             } else {
-                content
+                content.preferredColorScheme(demoColorScheme)
             }
             #else
             content
@@ -25,13 +26,26 @@ struct NanocodexInboxApp: App {
         }
     }
 
+    #if DEBUG
+    private var demoColorScheme: ColorScheme? {
+        guard ProcessInfo.processInfo.arguments.contains("--demo") else { return nil }
+        return ["light": ColorScheme.light, "dark": ColorScheme.dark][ProcessInfo.processInfo.environment["NANOCODEX_DEMO_APPEARANCE"] ?? ""]
+    }
+    #endif
+
     private var content: some View {
         InboxView(model: model)
                 .onAppear { Task { await model.start() } }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
                     model.releaseInactiveHistory()
                 }
+                .sheet(isPresented: $showQuickVoice) { QuickVoiceView(model: model) }
                 .onOpenURL { url in
+                    if url.scheme == "nanocodex", url.host == "voice", url.path == "/recovery", url.query == nil, url.fragment == nil {
+                        Task { await model.openLockedVoiceRecovery() }
+                        return
+                    }
+                    if QuickVoiceInput.matches(url) { showQuickVoice = true; return }
                     if url.scheme == "nanocodex", url.host == "connect", ["/spotify", "/soundcloud"].contains(url.path), url.query == nil, url.fragment == nil {
                         model.musicConnectorToOpen = MusicLoopbackProvider(rawValue: String(url.path.dropFirst()))
                     } else { model.openAgentActivity(url) }

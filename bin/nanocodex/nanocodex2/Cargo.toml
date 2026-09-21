@@ -12,7 +12,9 @@ repository.workspace = true
 description = "Small managed-agent client with local workspace tools"
 
 [dependencies]
+nanocodex-remote = { path = "../../../crates/nanocodex-remote", version = "0.6.4" }
 anyhow.workspace = true
+async-trait.workspace = true
 nanocodex-computer.workspace = true
 arboard.workspace = true
 base64.workspace = true
@@ -74,7 +76,7 @@ kvm-ioctls = "0.24.0"
 nanocodex-vm = { workspace = true, features = ["desktop"] }
 
 [target.'cfg(unix)'.dependencies]
-nix.workspace = true
+nix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 vt100.workspace = true
@@ -107,5 +109,16 @@ path = "../tests/account_auth.rs"
 name = "nanocodex2_tui_lifecycle"
 path = "../tests/nanocodex2_tui_lifecycle.rs"
 
-[lints]
-workspace = true
+# Native host boundaries below use narrowly scoped unsafe allowances, as in
+# nanocodex-hand. Cargo cannot override one inherited workspace lint, so retain
+# the remaining workspace lint settings explicitly here.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+missing-const-for-fn = "warn"
+use-self = "warn"
+redundant-clone = "warn"
+large-enum-variant = "allow"
+result-large-err = "allow"

@@ -36,7 +36,6 @@ struct Identity {
 
 pub(super) struct NativeState {
     pub(super) machine: AttachmentMachine,
-    directory: PathBuf,
     _lock: NativeStateLock,
 }
 
@@ -177,7 +176,6 @@ impl NativeState {
         .map_err(configuration)?;
         Ok(Self {
             machine,
-            directory: directory.to_path_buf(),
             _lock: lock,
         })
     }
@@ -317,14 +315,10 @@ pub(super) async fn run_observed(
     let mut tools = Tools::builder()
         .without_defaults()
         .add(WorkspaceTools::new(state.machine.workspace()));
-    if let Some(mut config) = nanocodex_computer::ComputerConfig::discover_or_install()
+    if let Some(config) = nanocodex_computer::ComputerConfig::discover_or_install()
         .await
         .map_err(ManagedError::Configuration)?
     {
-        if cfg!(target_os = "linux") && std::env::var_os("NANOCODEX_COMPUTER_BACKGROUND").is_none()
-        {
-            config.desktop_runtime = Some(state.directory.join("desktop"));
-        }
         let computer = nanocodex_computer::ComputerTools::connect(config)
             .await
             .map_err(|error| ManagedError::Configuration(error.to_string()))?;

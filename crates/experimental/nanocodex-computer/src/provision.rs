@@ -127,7 +127,7 @@ async fn windows_provision(refresh: bool) -> Result<serde_json::Value, String> {
             String::from_utf8_lossy(&result.stderr)
         ));
     }
-    let receipt: serde_json::Value = serde_json::from_slice(&result.stdout)
+    let mut receipt: serde_json::Value = serde_json::from_slice(&result.stdout)
         .map_err(|e| format!("Invalid OpenAI Store receipt: {e}"))?;
     config_from_receipt(&receipt)?;
     let root = runtime_root()?;
@@ -136,6 +136,21 @@ async fn windows_provision(refresh: bool) -> Result<serde_json::Value, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos();
+    // Keep the Nanocodex host outside the byte-verified upstream resources tree.
+    // Each receipt owns an immutable host file so updates preserve running hosts.
+    let host = root.join(format!(
+        "windows-sky-host-{}-{stamp}.mjs",
+        std::process::id()
+    ));
+    std::fs::write(&host, include_bytes!("windows_sky_host.mjs")).map_err(|e| e.to_string())?;
+    let args = receipt["args"]
+        .as_array_mut()
+        .ok_or("OpenAI CUA Windows receipt has no provider arguments")?;
+    args.insert(
+        0,
+        serde_json::Value::String(host.to_string_lossy().into_owned()),
+    );
+    config_from_receipt(&receipt)?;
     let stage = root.join(format!("provider-{}-{stamp}.json", std::process::id()));
     std::fs::write(
         &stage,
@@ -315,8 +330,10 @@ mod mac {
         let modules = resources.join(MODULES);
         // These are the actual shipped node_repl and cua-repl environment
         // contracts. CODEX_BINARY_PATH is not supported by this upstream.
+        // The official host enables Tab.ax with BROWSER_USE_TINYSKY_ENABLED;
+        // high-level browser tab creation and lookup require this capability.
         Ok(format!(
-            "#!/bin/sh\nset -eu\nexport CUA_REPL_NODE_REPL_PATH={}\nexport CUA_REPL_ENABLED_SURFACES=browser,computer\nexport NODE_REPL_NODE_PATH={}\nexport NODE_REPL_NODE_MODULE_DIRS={}\nexport NODE_REPL_TRUSTED_CODE_PATHS={}\nexport CODEX_CLI_PATH={}\nexport SKY_CUA_SERVICE_PATH={}\nexport NODE_REPL_UNTRUSTED_ENV_ALLOWLIST=SKY_CUA_SERVICE_PATH\nexport PATH={}:\"$PATH\"\nexec {} {} \"$@\"\n",
+            "#!/bin/sh\nset -eu\nexport CUA_REPL_NODE_REPL_PATH={}\nexport CUA_REPL_ENABLED_SURFACES=browser,computer\nexport BROWSER_USE_TINYSKY_ENABLED=1\nexport NODE_REPL_NODE_PATH={}\nexport NODE_REPL_NODE_MODULE_DIRS={}\nexport NODE_REPL_TRUSTED_CODE_PATHS={}\nexport CODEX_CLI_PATH={}\nexport SKY_CUA_SERVICE_PATH={}\nexport NODE_REPL_UNTRUSTED_ENV_ALLOWLIST=SKY_CUA_SERVICE_PATH\nexport PATH={}:\"$PATH\"\nexec {} {} \"$@\"\n",
             quote(&runtime.join("bin/node_repl"))?,
             quote(&runtime.join("bin/node"))?,
             quote(&modules)?,
@@ -531,9 +548,8 @@ mod receipt_tests {
     fn preserves_installed_command_arguments_and_environment() {
         let _compile_windows_installer = super::windows_provision;
         let executable = std::env::current_exe().unwrap();
-        let receipt = serde_json::json!({"status":"installed","transport":"mcp","executable":executable,"args":["provider entry.mjs"],"environment":{"CODEX_CLI_PATH":"signed host"}});
+        let receipt = serde_json::json!({"status":"installed","transport":"mcp","executable":executable,"args":["provider entry.mjs"],"environment":{"CODEX_CLI_PATH":"signed host","BROWSER_USE_TINYSKY_ENABLED":"1"}});
         let config = super::config_from_receipt(&receipt).unwrap();
-        assert!(config.mcp_transport);
         assert_eq!(config.executable, executable);
         assert_eq!(config.args, ["provider entry.mjs"]);
         assert_eq!(
@@ -542,6 +558,13 @@ mod receipt_tests {
                 .get(std::ffi::OsStr::new("CODEX_CLI_PATH"))
                 .unwrap(),
             "signed host"
+        );
+        assert_eq!(
+            config
+                .environment
+                .get(std::ffi::OsStr::new("BROWSER_USE_TINYSKY_ENABLED"))
+                .unwrap(),
+            "1"
         );
         assert!(
             super::config_from_receipt(

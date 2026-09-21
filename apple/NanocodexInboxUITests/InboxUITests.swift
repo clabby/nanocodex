@@ -6,6 +6,27 @@ final class InboxUITests: XCTestCase {
     }
     override func setUp() { super.setUp(); continueAfterFailure = false }
 
+    func testSidebarShowsStatusAndGeneratedCurrentWork() {
+        let originalAppearance = XCUIDevice.shared.appearance
+        addTeardownBlock { XCUIDevice.shared.appearance = originalAppearance }
+        for appearance in ["Light", "Dark"] {
+            XCUIDevice.shared.appearance = appearance == "Dark" ? .dark : .light
+            let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString, "NANOCODEX_DEMO_SIDEBAR": "1",
+                              "NANOCODEX_DEMO_APPEARANCE": appearance.lowercased()])
+            app.buttons["conversation-drawer-open"].tap()
+            let running = app.buttons["conversation-row:inbox"]
+            XCTAssertTrue(running.waitForExistence(timeout: 5))
+            let value = running.value as? String ?? ""
+            XCTAssertTrue(value.contains("Running"))
+            XCTAssertTrue(value.contains("I'm checking inbox state"))
+            XCTAssertTrue((app.buttons["conversation-row:hands"].value as? String ?? "").contains("Failed"))
+            XCTAssertTrue(app.textFields["conversation-search"].isHittable)
+            XCTAssertTrue(app.buttons["drawer-new-conversation"].isHittable)
+            capture(app, "sidebar-redesign-" + appearance.lowercased())
+            app.terminate()
+        }
+    }
+
     func testFlatConversationDrawerPreservesSeparateDrafts() {
         let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString])
         switchConversation(app, id: "inbox")
@@ -2241,6 +2262,35 @@ final class InboxUITests: XCTestCase {
         XCTAssertEqual(composer(app).value as? String, "Keep the latest reply in view")
     }
 
+    func testMultipleLocalPhotoHistoryThumbnailsSurvivePreviewAndRelaunch() {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString, "NANOCODEX_DEMO_LOCAL_PHOTOS": "1"])
+        func verifyPhotos() {
+            let conversation = app.scrollViews["conversation"]
+            XCTAssertTrue(conversation.waitForExistence(timeout: 10))
+            let photos = conversation.descendants(matching: .any).matching(identifier: "message-image")
+            XCTAssertEqual(photos.count, 2, "Project both phone path references into separate thumbnails")
+            for index in 1...2 {
+                let photo = photos.matching(NSPredicate(format: "label == %@", "Open Phone photo \(index).png")).firstMatch
+                for _ in 0..<4 { if photo.isHittable { break }; conversation.swipeDown() }
+                let loaded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Image loaded"), object: photo)
+                XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: 10), .completed, "Decode photo \(index) from its retained local original")
+                photo.tap()
+                let done = app.buttons["Done"]
+                XCTAssertTrue(done.waitForExistence(timeout: 10))
+                done.tap()
+                XCTAssertTrue(conversation.waitForExistence(timeout: 5))
+            }
+            XCTAssertFalse(conversation.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "[Image attachment]")).firstMatch.exists)
+        }
+        verifyPhotos()
+        verifyPhotos()
+        capture(app, "local-photos-before-relaunch")
+        app.terminate()
+        app.launch()
+        verifyPhotos()
+        capture(app, "local-photos-after-relaunch")
+    }
+
     func testNativeMediaPreviewZoomPlaybackAndDraftRestoration() throws {
         let clip = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "VideoAudioCheck", withExtension: "mp4"))
         let app = launch(["NANOCODEX_DEMO_GENERATED_OUTPUTS": "1", "NANOCODEX_DEMO_VIDEO_BASE64": try Data(contentsOf: clip).base64EncodedString()])
@@ -2470,6 +2520,121 @@ final class InboxUITests: XCTestCase {
         capture(app, "command-card-expanded-failure")
     }
 
+    func testOversizedCommandStaysCompactAndOpensCompleteNativeSourceViewer() {
+        let app = launch(["NANOCODEX_DEMO_OVERSIZED_COMMAND": "1",
+                          "NANOCODEX_DEMO_PROFILE": UUID().uuidString]); selectInbox(app)
+        let conversation = app.scrollViews["conversation"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 5))
+        let card = conversation.buttons["tool-disclosure-demo-oversized-command"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        print("OVERSIZED_COMMAND_CARD_HEIGHT=\(card.frame.height)")
+        XCTAssertEqual(card.descendants(matching: .any)["command-directory-demo-oversized-command"].label, "Default directory")
+        XCTAssertGreaterThan(card.frame.height, 0)
+        XCTAssertLessThanOrEqual(card.frame.height, 300, "Oversized source must not create screens of blank command card")
+        let followingMessage = conversation.staticTexts["The oversized command is complete. This message stays reachable."]
+        XCTAssertTrue(followingMessage.waitForExistence(timeout: 5))
+        XCTAssertTrue(followingMessage.isHittable, "The next assistant message stays accessible below the collapsed card")
+        capture(app, "oversized-command-collapsed")
+
+        card.tap()
+        let fullSource = conversation.buttons["command-full-source-demo-oversized-command"]
+        XCTAssertTrue(fullSource.waitForExistence(timeout: 5))
+        XCTAssertEqual(fullSource.label, "View full command")
+        for _ in 0..<3 { if fullSource.isHittable { break }; conversation.swipeUp() }
+        XCTAssertTrue(fullSource.isHittable)
+        fullSource.tap()
+        XCTAssertTrue(app.navigationBars["Command"].waitForExistence(timeout: 5))
+        let source = app.textViews["tool-source-text"]
+        XCTAssertTrue(source.waitForExistence(timeout: 5), "Full source uses a native text view")
+        let expectedSource = "printf '%s' '"
+            + String(repeating: "QUJD", count: 47_279)
+            + "' | base64 -d > /workspace/synthetic.png"
+        XCTAssertGreaterThan(expectedSource.utf8.count, 189_000)
+        XCTAssertEqual(source.value as? String, expectedSource, "The viewer preserves all source characters and newlines")
+        source.tap()
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "Source is read-only")
+        let copy = app.buttons["tool-source-copy"]
+        XCTAssertTrue(copy.isHittable)
+        XCTAssertEqual(copy.label, "Copy source")
+        copy.tap()
+        capture(app, "oversized-command-full-source")
+        let done = app.buttons["tool-source-done"]
+        XCTAssertTrue(done.isHittable)
+        XCTAssertEqual(done.label, "Done")
+        done.tap()
+        gone(source, timeout: 3)
+        XCTAssertTrue(conversation.isHittable, "Dismissing the source viewer promptly returns to the conversation")
+    }
+
+    func testUserNavigationReleasesControlsAfterHistoryWithoutUserMessages() {
+        let app = launch(["NANOCODEX_DEMO_LONG_THREAD": "1", "NANOCODEX_DEMO_HISTORY_DELAY_MS": "50",
+                          "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        selectInbox(app)
+        let previous = app.buttons["previous-user-message"]
+        XCTAssertTrue(previous.waitForExistence(timeout: 10))
+        XCTAssertTrue(previous.isEnabled)
+        previous.tap()
+        let collapse = app.buttons["collapse-all-tools"]
+        let finished = NSPredicate { _, _ in collapse.isEnabled && !previous.isEnabled }
+        expectation(for: finished, evaluatedWith: nil)
+        waitForExpectations(timeout: 10)
+        XCTAssertFalse(app.buttons["next-user-message"].isEnabled)
+    }
+
+    func testThreadControlsCollapseAndNavigateUserMessages() {
+        let app = launch(["NANOCODEX_DEMO_CODE_MODE_BATCH": "1", "NANOCODEX_DEMO_THREAD_CONTROLS": "1",
+                          "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        selectInbox(app)
+        let collapse = app.buttons["collapse-all-tools"]
+        XCTAssertTrue(collapse.waitForExistence(timeout: 10))
+        collapse.tap()
+        let batch = app.buttons["code-mode-batch-demo-code-mode-batch"]
+        XCTAssertEqual(batch.value as? String, "Collapsed")
+        capture(app, "thread-controls-collapsed")
+        let previous = app.buttons["previous-user-message"]
+        let next = app.buttons["next-user-message"]
+        previous.tap()
+        if previous.isEnabled { previous.tap() }
+        XCTAssertFalse(previous.isEnabled)
+        XCTAssertTrue(next.isEnabled)
+        capture(app, "thread-controls-first-user-message")
+        next.tap()
+        XCTAssertFalse(next.isEnabled)
+        XCTAssertTrue(previous.isEnabled)
+        capture(app, "thread-controls-next-user-message")
+        previous.tap()
+        batch.tap()
+        let child = app.buttons["tool-disclosure-demo-code-mode-batch/code-1"]
+        XCTAssertEqual(child.value as? String, "Collapsed")
+        child.tap()
+        collapse.tap()
+        batch.tap()
+        XCTAssertEqual(child.value as? String, "Collapsed", "Collapse all also clears nested disclosure state")
+        switchConversation(app, id: "durability")
+        switchConversation(app, id: "inbox")
+        XCTAssertEqual(batch.value as? String, "Expanded", "Thread disclosure choices survive switching threads")
+    }
+
+    func testCodeModeBatchKeepsCommandsTogether() {
+        let app = launch(["NANOCODEX_DEMO_CODE_MODE_BATCH": "1", "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        selectInbox(app)
+        let conversation = app.scrollViews["conversation"]
+        let batch = conversation.buttons["code-mode-batch-demo-code-mode-batch"]
+        XCTAssertTrue(batch.waitForExistence(timeout: 10))
+        XCTAssertEqual(batch.value as? String, "Expanded")
+        XCTAssertEqual(conversation.buttons.matching(identifier: "tool-disclosure-demo-code-mode-batch/code-1").count, 1)
+        XCTAssertTrue(conversation.buttons["tool-disclosure-demo-code-mode-batch/code-2"].isHittable)
+        capture(app, "code-mode-batch-expanded")
+        batch.tap()
+        XCTAssertEqual(batch.value as? String, "Collapsed")
+        XCTAssertFalse(conversation.buttons["tool-disclosure-demo-code-mode-batch/code-1"].exists)
+        capture(app, "code-mode-batch-collapsed")
+        batch.tap()
+        conversation.descendants(matching: .any)["code-mode-javascript-demo-code-mode-batch"].tap()
+        XCTAssertTrue(conversation.descendants(matching: .any)["code-mode-source-demo-code-mode-batch"].exists)
+        capture(app, "code-mode-batch-javascript")
+    }
+
     func testCodeModeCardShowsFullMultilineSourceAndOutput() {
         assertCodeModeCardShowsFullMultilineSourceAndOutput(environment: "NANOCODEX_DEMO_CODE_MODE_CARD")
     }
@@ -2483,7 +2648,7 @@ final class InboxUITests: XCTestCase {
                           "NANOCODEX_DEMO_PROFILE": UUID().uuidString]); selectInbox(app)
         let conversation = app.scrollViews["conversation"]
         XCTAssertTrue(conversation.waitForExistence(timeout: 5))
-        let card = conversation.buttons["tool-disclosure-demo-code-mode-card"]
+        let card = conversation.buttons["code-mode-batch-demo-code-mode-card"]
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         let expectedSource = """
         // Inspect the complete synthetic JavaScript source, preserving every newline beyond the old 140 character preview boundary.
@@ -2492,21 +2657,20 @@ final class InboxUITests: XCTestCase {
           workdir: '/workspace/demo'
         });
         text(result.output);
-        """
-        XCTAssertGreaterThan(expectedSource.count, 140)
-        let source = card.descendants(matching: .any)["code-mode-source-demo-code-mode-card"]
-        XCTAssertTrue(source.exists, "The collapsed card exposes the complete JavaScript")
-        XCTAssertTrue(source.isHittable, "The source is visible before expanding details")
-        XCTAssertEqual(source.label, expectedSource, "JavaScript preserves every character and newline")
+        """ + "\n// " + String(repeating: "Preserve full source. ", count: 20)
+        XCTAssertGreaterThan(expectedSource.count, 512)
+        XCTAssertEqual(card.value as? String, "Expanded")
         XCTAssertTrue(card.staticTexts["Code Mode"].exists)
         XCTAssertFalse(conversation.staticTexts["Run code"].exists)
-        XCTAssertFalse(card.buttons["Copy code"].exists, "Copy is available through the context menu")
-        capture(app, "code-mode-card-full-source")
-        card.press(forDuration: 1)
-        let copy = app.buttons["Copy code"]
-        XCTAssertTrue(copy.waitForExistence(timeout: 5))
+        XCTAssertFalse(conversation.descendants(matching: .any)["code-mode-source-demo-code-mode-card"].exists)
+        capture(app, "code-mode-batch-expanded")
+        conversation.descendants(matching: .any)["code-mode-javascript-demo-code-mode-card"].tap()
+        let source = conversation.descendants(matching: .any)["code-mode-source-demo-code-mode-card"]
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+        XCTAssertEqual(source.label, expectedSource, "Expanded source preserves every character and newline")
+        let copy = conversation.buttons["code-mode-copy-demo-code-mode-card"]
+        XCTAssertTrue(copy.isHittable, "Copy is directly accessible outside the disclosure button")
         copy.tap()
-        card.tap()
         let detail = conversation.descendants(matching: .any)["tool-detail-demo-code-mode-card"]
         XCTAssertTrue(detail.waitForExistence(timeout: 5))
         XCTAssertFalse(detail.staticTexts["Code"].exists, "Expanded details do not repeat the Code input")
@@ -2921,7 +3085,7 @@ final class InboxUITests: XCTestCase {
         capture(app, "accessibility-text-sidebar-and-settings")
     }
 
-    func testBrowserBackRestoresDraftAndOverviewUsesLatestActivity() {
+    func testBrowserBackRestoresDraftAndOverviewUsesLastSentMessage() {
         let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString])
         selectTab(app, id: "durability", title: "Make long sessions bulletproof")
         composer(app).tap(); composer(app).typeText("Retain my draft when going back")
@@ -2943,7 +3107,7 @@ final class InboxUITests: XCTestCase {
         let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "conversation-row:"))
         XCTAssertTrue(cards.firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(cards.element(boundBy: 0).identifier, "conversation-row:hands")
-        capture(app, "overview-sorted-by-latest-activity")
+        capture(app, "overview-sorted-by-last-sent-message")
         app.buttons["conversation-drawer-close"].tap()
         capture(app, "top-tabs-bottom-browser-controls")
     }

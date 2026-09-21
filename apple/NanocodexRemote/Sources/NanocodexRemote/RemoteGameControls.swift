@@ -88,19 +88,125 @@ struct RemoteNativeGameInputState {
 struct RemoteNativeGameLayout {
     let width: CGFloat
     let height: CGFloat
-    var stickSize: CGFloat { 112 }
+    var stickSize: CGFloat { 104 }
     var buttonSize: CGFloat { 44 }
-    var controlY: CGFloat { height - 86 }
-    var leftStick: CGPoint { CGPoint(x: 64, y: controlY) }
-    var rightStick: CGPoint { CGPoint(x: width - 64, y: controlY) }
-    var dpad: CGPoint { CGPoint(x: width / 2 - 72, y: controlY) }
-    var face: CGPoint { CGPoint(x: width / 2 + 72, y: controlY) }
+    var controlY: CGFloat { height - 78 }
+    var leftStick: CGPoint { CGPoint(x: 58, y: controlY) }
+    var rightStick: CGPoint { CGPoint(x: width - 188, y: controlY - 20) }
+    // Thumb zones stay at the edges instead of drifting into gameplay on iPad.
+    var dpad: CGPoint { CGPoint(x: 188, y: controlY) }
+    // Xbox face buttons sit outside the right stick, matching the host device.
+    var face: CGPoint { CGPoint(x: width - 68, y: controlY) }
+    static let diamondOffsets = [CGPoint(x: 0, y: -46), CGPoint(x: 0, y: 46),
+                                 CGPoint(x: -46, y: 0), CGPoint(x: 46, y: 0)]
     var fits: Bool { width >= 536 && height >= 218 }
+    func utilityCenter(_ name: String) -> CGPoint {
+        switch name {
+        case "leftTrigger": CGPoint(x: 38, y: 24)
+        case "leftShoulder": CGPoint(x: 112, y: 24)
+        case "rightTrigger": CGPoint(x: width - 38, y: 24)
+        case "rightShoulder": CGPoint(x: width - 112, y: 24)
+        case "back": CGPoint(x: width / 2 - 25, y: 24)
+        case "start": CGPoint(x: width / 2 + 25, y: 24)
+        case "leftStick": CGPoint(x: 138, y: height - 22)
+        default: CGPoint(x: width - 188, y: height - 22)
+        }
+    }
+    static let utilityNames = ["leftTrigger", "leftShoulder", "rightTrigger", "rightShoulder",
+                               "back", "start", "leftStick", "rightStick"]
+    static func utilityWidth(_ name: String) -> CGFloat {
+        name.contains("Trigger") || name.contains("Shoulder") ? 64 : 44
+    }
+    /// Actual interactive bounds, shared with the geometry contract tests.
+    var controlFrames: [CGRect] {
+        func frame(_ point: CGPoint, _ width: CGFloat, _ height: CGFloat) -> CGRect {
+            CGRect(x: point.x - width / 2, y: point.y - height / 2, width: width, height: height)
+        }
+        return [frame(leftStick, stickSize, stickSize), frame(rightStick, stickSize, stickSize)]
+            + [dpad, face].flatMap { center in
+                Self.diamondOffsets.map { frame(CGPoint(x: center.x + $0.x, y: center.y + $0.y), buttonSize, buttonSize) }
+            }
+            + Self.utilityNames.map { frame(utilityCenter($0), Self.utilityWidth($0), buttonSize) }
+    }
+}
+
+/// Physical identity is stable; actions belong to the connected game's configuration.
+/// Blizzard's exported SharedConstants.lua maps the Xbox glyphs to these PAD keys.
+/// See docs/wow-gamepad-controls.md for the source and contextual-binding limits.
+struct RemoteNativeGameControl: Identifiable {
+    let id: String // Existing standardized wire name, never a WoW action.
+    let title: String
+    let detail: String
+    let wowKey: String
+
+    static let all: [Self] = [
+        .init(id: "a", title: "A", detail: "PAD1", wowKey: "PAD1"),
+        .init(id: "b", title: "B", detail: "PAD2", wowKey: "PAD2"),
+        .init(id: "x", title: "X", detail: "PAD3", wowKey: "PAD3"),
+        .init(id: "y", title: "Y", detail: "PAD4", wowKey: "PAD4"),
+        .init(id: "dpadUp", title: "↑", detail: "D-pad up", wowKey: "PADDUP"),
+        .init(id: "dpadDown", title: "↓", detail: "D-pad down", wowKey: "PADDDOWN"),
+        .init(id: "dpadLeft", title: "←", detail: "D-pad left", wowKey: "PADDLEFT"),
+        .init(id: "dpadRight", title: "→", detail: "D-pad right", wowKey: "PADDRIGHT"),
+        .init(id: "leftShoulder", title: "LB", detail: "Shoulder", wowKey: "PADLSHOULDER"),
+        .init(id: "rightShoulder", title: "RB", detail: "Shoulder", wowKey: "PADRSHOULDER"),
+        .init(id: "leftTrigger", title: "LT", detail: "Trigger", wowKey: "PADLTRIGGER"),
+        .init(id: "rightTrigger", title: "RT", detail: "Trigger", wowKey: "PADRTRIGGER"),
+        .init(id: "leftStick", title: "L3", detail: "Stick click", wowKey: "PADLSTICK"),
+        .init(id: "rightStick", title: "R3", detail: "Stick click", wowKey: "PADRSTICK"),
+        .init(id: "back", title: "View", detail: "Back", wowKey: "PADBACK"),
+        .init(id: "start", title: "Menu", detail: "Start", wowKey: "PADFORWARD"),
+    ]
+
+    static func named(_ name: String) -> Self? { all.first { $0.id == name } }
+}
+
+struct RemoteNativeGameContext {
+    let input: RemoteNativeGameInputState
+    static func presentsNative(capable: Bool, controlling: Bool, handID: String?, rememberedHandID: String?) -> Bool {
+        capable || (!controlling && handID != nil && handID == rememberedHandID)
+    }
+
+    // Touch state cannot establish WoW's bank, toggled modifiers, HUD focus,
+    // target, active page, or overrides. Report only what the phone holds.
+    var heldControlsLabel: String {
+        let names = ["leftTrigger", "rightTrigger", "leftShoulder", "rightShoulder"]
+            .filter { input.triggers.contains($0) || input.buttons.contains($0) }
+            .map { nativeTitle($0) }
+        return names.isEmpty ? "Use WoW’s on-screen prompts" : "Holding " + names.joined(separator: " + ")
+    }
+
+    func nativeTitle(_ name: String) -> String { RemoteNativeGameControl.named(name)?.title ?? name }
+    func nativeHint(_ name: String) -> String { RemoteNativeGameControl.named(name)?.detail ?? "" }
+    func nativeAccessibilityHint(_ name: String) -> String {
+        guard let control = RemoteNativeGameControl.named(name) else { return "Uses your in-game binding." }
+        return "WoW button \(control.wowKey). Uses your in-game binding."
+    }
 }
 
 #if os(iOS)
 import SwiftUI
 import UIKit
+
+/// Apply glass to the complete control so text and thumb indicators remain
+/// foreground content; a glass-only background can sample and blur those labels.
+private struct RemoteGameGlass<S: Shape>: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    let shape: S
+    let tint: Color
+    let held: Bool
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if reduceTransparency {
+            content.background(shape.fill(Color(white: held ? 0.24 : 0.12)))
+        } else if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.tint(tint.opacity(held ? 0.5 : 0.06)).interactive(), in: shape)
+        } else {
+            content.background(.ultraThinMaterial, in: shape)
+                .background(shape.fill(held ? tint.opacity(0.35) : .black.opacity(0.25)))
+        }
+    }
+}
 
 /// Transport-only state: a heartbeat never publishes a SwiftUI update.
 @MainActor private final class RemoteNativeGameTransportPump: ObservableObject {
@@ -161,10 +267,14 @@ import UIKit
     @ObservedObject private var viewer: RemoteViewer
     private let onClose: () -> Void
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var input = RemoteGameInputState()
     @State private var nativeInput = RemoteNativeGameInputState()
     @StateObject private var nativePump = RemoteNativeGameTransportPump()
     @State private var paused = false
+    @State private var showingBindingGuide = false
+    @State private var nativePresentationHandID: String?
     @State private var epoch = 0
     @State private var stick = CGSize.zero
     @State private var cameraPoint: CGPoint?
@@ -180,13 +290,26 @@ import UIKit
 
     public var body: some View {
         Group {
-            if viewer.supportsGamepad { nativeBody } else { keyboardBody }
+            if RemoteNativeGameContext.presentsNative(capable: viewer.supportsGamepad, controlling: viewer.controlling,
+                                                     handID: viewer.hand?.id, rememberedHandID: nativePresentationHandID) {
+                nativeBody
+            } else { keyboardBody }
         }
-        .onChange(of: viewer.supportsGamepad) { _, _ in stop() }
-        .onChange(of: viewer.controlling) { _, value in if !value { stop() } }
+        .onAppear { rememberNativePresentation() }
+        .onChange(of: viewer.hand?.id) { _, _ in stop(); rememberNativePresentation(reset: true) }
+        .onChange(of: viewer.supportsGamepad) { _, _ in stop(); rememberNativePresentation() }
+        .onChange(of: viewer.controlling) { _, value in
+            if !value { stop() }
+            rememberNativePresentation()
+        }
         .onChange(of: viewer.connected) { _, value in if !value { stop() } }
         .onChange(of: scenePhase) { _, value in if value != .active { stop() } }
         .onDisappear { stop() }
+    }
+
+    private func rememberNativePresentation(reset: Bool = false) {
+        if reset || (viewer.controlling && !viewer.supportsGamepad) { nativePresentationHandID = nil }
+        if viewer.supportsGamepad { nativePresentationHandID = viewer.hand?.id }
     }
 
     private var keyboardBody: some View {
@@ -201,6 +324,7 @@ import UIKit
                             .font(.caption2).foregroundStyle(.white.opacity(0.75))
                     }
                     Spacer(minLength: 0)
+                    gameplayAudioControls
                     Button(paused ? "Resume" : "Stop", systemImage: paused ? "play.fill" : "stop.fill") {
                         if paused { paused = false; epoch += 1 } else { stop(); paused = true }
                     }
@@ -263,45 +387,63 @@ import UIKit
         GeometryReader { geometry in
             VStack(spacing: 6) {
                 HStack(spacing: 8) {
-                    Text("Native gamepad").font(.caption.bold())
-                        .accessibilityIdentifier("remote-native-gamepad")
-                    if paused { Text("Paused").font(.caption2) }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("WoW · Gamepad").font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .accessibilityIdentifier("remote-native-gamepad")
+                        Text(paused ? "Input paused" : !viewer.connected ? "Disconnected" : "Actions follow your WoW bindings")
+                            .font(.system(size: 9)).foregroundStyle(.white.opacity(0.7))
+                    }
                     Spacer(minLength: 0)
                     if viewer.connected && !viewer.controlling {
-                        Button("Take control") { viewer.takeControl() }
+                        Button("Take control") { viewer.takeControl() }.font(.caption.bold()).frame(minHeight: 44)
                     }
-                    if !viewer.connected { Text("Disconnected").font(.caption2) }
-                    Button(paused ? "Resume" : "Stop") {
+                    gameplayAudioControls
+                    Button {
+                        stop(); paused = true; showingBindingGuide = true
+                    } label: {
+                        Image(systemName: "info.circle").frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel("WoW button guide")
+                    .accessibilityIdentifier("remote-gamepad-guide")
+                    Button {
                         if paused { paused = false; epoch += 1 } else { stop(); paused = true }
+                    } label: {
+                        Image(systemName: paused ? "play.fill" : "pause.fill").frame(width: 44, height: 44)
                     }
-                    .tint(paused ? .mint : .red)
+                    .accessibilityLabel(paused ? "Resume game input" : "Pause game input")
+                    .accessibilityHint("Releases all held controls")
                     .accessibilityIdentifier("remote-game-stop")
                     Button { stop(); onClose() } label: {
-                        Image(systemName: "xmark").frame(width: 24, height: 24)
+                        Image(systemName: "xmark").frame(width: 44, height: 44)
                     }
                     .accessibilityLabel("Close game controls")
                     .accessibilityIdentifier("remote-game-close")
                 }
-                .buttonStyle(.bordered).frame(height: 44)
-                .padding(.horizontal, 8)
-                .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 14))
+                .buttonStyle(.plain).frame(height: 44).padding(.horizontal, 8)
                 GeometryReader { content in
                     let layout = RemoteNativeGameLayout(width: content.size.width, height: content.size.height)
                     if layout.fits {
-                        ZStack(alignment: .topLeading) {
-                            nativeStick("left", size: layout.stickSize).position(layout.leftStick)
-                            nativeStick("right", size: layout.stickSize).position(layout.rightStick)
-                            nativeDiamond(center: layout.dpad, labels: ["↑", "↓", "←", "→"],
-                                          names: ["dpadUp", "dpadDown", "dpadLeft", "dpadRight"])
-                            nativeDiamond(center: layout.face, labels: ["Y", "A", "X", "B"], names: ["y", "a", "x", "b"])
-                            nativeButton("LT", name: "leftTrigger", trigger: true).position(x: 34, y: 24)
-                            nativeButton("LB", name: "leftShoulder").position(x: 90, y: 24)
-                            nativeButton("RT", name: "rightTrigger", trigger: true).position(x: layout.width - 34, y: 24)
-                            nativeButton("RB", name: "rightShoulder").position(x: layout.width - 90, y: 24)
-                            nativeButton("Back", name: "back").position(x: layout.width / 2 - 30, y: 24)
-                            nativeButton("Start", name: "start").position(x: layout.width / 2 + 30, y: 24)
-                            nativeButton("L3", name: "leftStick").position(x: 146, y: layout.height - 22)
-                            nativeButton("R3", name: "rightStick").position(x: layout.width - 146, y: layout.height - 22)
+                        nativeGlassContainer {
+                            ZStack(alignment: .topLeading) {
+                                nativeStick("left", size: layout.stickSize).position(layout.leftStick)
+                                nativeStick("right", size: layout.stickSize).position(layout.rightStick)
+                                nativeDiamond(center: layout.dpad, names: ["dpadUp", "dpadDown", "dpadLeft", "dpadRight"])
+                                nativeDiamond(center: layout.face, names: ["y", "a", "x", "b"])
+                                ForEach(RemoteNativeGameLayout.utilityNames, id: \.self) { name in
+                                    nativeButton(name: name, trigger: name.contains("Trigger"),
+                                                 width: RemoteNativeGameLayout.utilityWidth(name))
+                                        .position(layout.utilityCenter(name))
+                                }
+                                Text(nativeContext.heldControlsLabel)
+                                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .padding(.horizontal, 8).padding(.vertical, 3)
+                                    .background(.black.opacity(0.6), in: Capsule())
+                                    .position(x: layout.width / 2, y: 65)
+                                    .allowsHitTesting(false)
+                                    .accessibilityIdentifier("remote-gamepad-held-controls")
+                            }
+                            .frame(width: layout.width, height: layout.height)
                         }
                     } else {
                         Text("Rotate to landscape for gamepad controls")
@@ -311,26 +453,117 @@ import UIKit
                 }
             }
             .padding(8).foregroundStyle(.white)
+            // Analog updates must never inherit an enclosing view's animation.
+            .transaction { transaction in
+                transaction.animation = nil
+                if reduceMotion { transaction.disablesAnimations = true }
+            }
             .onChange(of: geometry.size) { _, _ in stop() }
         }
+        .sheet(isPresented: $showingBindingGuide) { nativeBindingGuide }
     }
 
-    private func nativeDiamond(center: CGPoint, labels: [String], names: [String]) -> some View {
-        let offsets = [CGPoint(x: 0, y: -46), CGPoint(x: 0, y: 46), CGPoint(x: -46, y: 0), CGPoint(x: 46, y: 0)]
-        return ForEach(0..<4, id: \.self) { index in
-            nativeButton(labels[index], name: names[index])
-                .position(x: center.x + offsets[index].x, y: center.y + offsets[index].y)
+    private var gameplayAudioControls: some View {
+        Group {
+            Button {
+                viewer.setMicrophoneEnabled(!(viewer.microphoneEnabled || viewer.microphonePending))
+            } label: {
+                Image(systemName: viewer.microphonePending ? "hourglass" : viewer.microphoneEnabled ? "mic.fill" : "mic.slash.fill")
+                    .foregroundStyle(viewer.microphonePending ? Color.orange : viewer.microphoneEnabled ? Color.mint : Color.white)
+                    .frame(width: 44, height: 44)
+            }
+            .disabled(!viewer.controlling || !viewer.supportsMicrophone)
+            .accessibilityLabel(viewer.microphonePending ? "Cancel microphone request" : viewer.microphoneEnabled ? "Mute microphone" : "Enable microphone")
+            .accessibilityValue(viewer.microphonePending ? "Pending" : viewer.microphoneEnabled ? "On" : "Off")
+            .accessibilityHint(viewer.microphoneError ?? viewer.microphoneSetupHint)
+            .accessibilityIdentifier("remote-microphone")
+
+            Button {
+                viewer.setSpeakersEnabled(!viewer.speakersEnabled)
+            } label: {
+                Image(systemName: viewer.speakersEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel(viewer.speakersEnabled ? "Mute speakers" : "Enable speakers")
+            .accessibilityValue(viewer.speakersEnabled ? "On" : "Off")
+            .accessibilityIdentifier("remote-speakers")
+            .disabled(!viewer.connected || !viewer.supportsSpeakers)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var nativeBindingGuide: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("These are Xbox button labels. Match them to WoW’s on-screen prompts and controller bindings.")
+                    Text("Actions can change with your bindings, game version, menus, and modifiers. The phone does not read your current WoW actions.")
+                }
+                Section("Controller button → WoW button") {
+                    ForEach(RemoteNativeGameControl.all) { control in
+                        HStack {
+                            Text(control.title).fontWeight(.semibold)
+                            Spacer()
+                            Text(control.wowKey).foregroundStyle(.secondary)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+                Section {
+                    Text("Drag each stick for analog input. L3 and R3 press the sticks. Hold LT, RT, LB, or RB together with other buttons as your game requires.")
+                    Text("Input is paused. Close this guide and tap Resume to play.")
+                }
+                if viewer.supportsMicrophone {
+                    Section("Voice input") { Text(viewer.microphoneSetupHint) }
+                }
+            }
+            .navigationTitle("WoW button guide")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { showingBindingGuide = false }
+                }
+            }
         }
     }
 
-    private func nativeButton(_ label: String, name: String, trigger: Bool = false) -> some View {
+    @ViewBuilder private func nativeGlassContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: 4) { content() }.environment(\.colorScheme, .dark)
+        } else {
+            content()
+        }
+    }
+
+    private var nativeContext: RemoteNativeGameContext { RemoteNativeGameContext(input: nativeInput) }
+    private func nativeTitle(_ name: String) -> String { nativeContext.nativeTitle(name) }
+    private func nativeHint(_ name: String) -> String { nativeContext.nativeHint(name) }
+    private func nativeAccessibilityHint(_ name: String) -> String { nativeContext.nativeAccessibilityHint(name) }
+
+    private func nativeDiamond(center: CGPoint, names: [String]) -> some View {
+        ForEach(0..<4, id: \.self) { index in
+            let offset = RemoteNativeGameLayout.diamondOffsets[index]
+            nativeButton(name: names[index])
+                .position(x: center.x + offset.x, y: center.y + offset.y)
+        }
+    }
+
+    private func nativeButton(name: String, trigger: Bool = false, width: CGFloat = 44) -> some View {
+        let label = nativeTitle(name)
         let held = trigger ? nativeInput.triggers.contains(name) : nativeInput.buttons.contains(name)
-        return Text(label).font(.system(size: 13, weight: .bold, design: .rounded))
-            .foregroundStyle((["a": Color.green, "b": .red, "x": .cyan, "y": .yellow][name] ?? .white))
-            .frame(width: 44, height: 44)
-            .background(held ? Color.mint.opacity(0.65) : Color.black.opacity(0.3), in: Circle())
-            .background(.ultraThinMaterial, in: Circle())
-            .overlay(Circle().stroke(.white.opacity(0.35)))
+        let tint = ["a": Color.green, "b": .red, "x": .cyan, "y": .yellow][name] ?? .white
+        let shape = RoundedRectangle(cornerRadius: width > 44 ? 16 : 18, style: .continuous)
+        return VStack(spacing: 1) {
+            Text(label).font(.system(size: 14, weight: .bold, design: .rounded)).foregroundStyle(tint)
+            if !name.hasPrefix("dpad") {
+                Text(nativeHint(name)).font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85)).lineLimit(name == "b" ? 2 : 1)
+                    .multilineTextAlignment(.center).minimumScaleFactor(0.8)
+            }
+        }
+            .frame(width: width, height: 44)
+            .modifier(RemoteGameGlass(shape: shape, tint: tint, held: held))
+            .overlay(shape.stroke(held ? tint.opacity(0.9) : .white.opacity(0.25), lineWidth: held ? 1.5 : 0.5))
             .overlay {
                 RemoteGameTouchSurface(enabled: enabled, epoch: epoch) { phase, _ in
                     guard enabled, phase != .moved else { return }
@@ -340,7 +573,10 @@ import UIKit
                 }
             }
             .opacity(enabled ? 1 : 0.45)
-            .accessibilityElement(children: .ignore).accessibilityLabel(label)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(label + ", " + nativeHint(name))
+            .accessibilityValue(held ? "Held" : "Released")
+            .accessibilityHint(nativeAccessibilityHint(name))
             .accessibilityAddTraits(.isButton)
             .accessibilityIdentifier("remote-gamepad-\(name)")
             .accessibilityAction {
@@ -358,12 +594,18 @@ import UIKit
         let point = nativeInput.sticks[name] ?? .zero
         let travel = (size - 44) / 2
         return ZStack {
-            Circle().fill(.black.opacity(0.22)).background(.ultraThinMaterial, in: Circle())
-                .overlay(Circle().stroke(.white.opacity(0.35)))
-            Circle().fill(.white.opacity(0.3)).frame(width: 44, height: 44)
+            VStack {
+                Text(name == "left" ? "LEFT STICK" : "RIGHT STICK")
+                    .font(.system(size: 8, weight: .semibold, design: .rounded)).tracking(1.5)
+                Spacer()
+            }.padding(.top, 10).foregroundStyle(.white.opacity(0.6))
+            Circle().fill(.white.opacity(0.25)).frame(width: 44, height: 44)
+                .overlay(Circle().stroke(.white.opacity(0.45), lineWidth: 0.5))
                 .offset(x: point.x * travel, y: point.y * travel)
         }
         .frame(width: size, height: size)
+        .modifier(RemoteGameGlass(shape: Circle(), tint: .white, held: point != .zero))
+        .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 0.5))
         .overlay {
             RemoteGameTouchSurface(enabled: enabled, epoch: epoch) { phase, location in
                 guard enabled else { return }
@@ -381,6 +623,7 @@ import UIKit
         .opacity(enabled ? 1 : 0.45)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(name == "left" ? "Left analog joystick" : "Right analog joystick")
+        .accessibilityHint("Hold and drag from the center. Release to stop.")
         .accessibilityIdentifier("remote-gamepad-\(name)-analog")
     }
 

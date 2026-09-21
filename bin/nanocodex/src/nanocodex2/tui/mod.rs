@@ -1443,6 +1443,27 @@ impl DriverRuntime {
         self.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Create(settings));
     }
 
+    /// Local mutations must settle before replacing the client; accepted remote
+    /// turns need not finish. Local shell commands also retain their terminal.
+    fn ready_for_reload(&self) -> bool {
+        self.pending_resume.is_none()
+            && self.connection.is_empty()
+            && self.admissions.is_empty()
+            && self.pending_submission.is_none()
+            && self.steers.is_empty()
+            && self.waiting_steers.is_empty()
+            && self.unconfirmed_steer.is_none()
+            && self.withdrawals.is_empty()
+            && self.cancellations.is_empty()
+            && self.settings_updates.is_empty()
+            && self.settings_queue.is_empty()
+            && self.vault_tasks.is_empty()
+            && self.voice_tasks.is_empty()
+            // Keep local recordings and samples until explicitly submitted or discarded.
+            && self.clone_panel.is_none()
+            && self.active_shells == 0
+    }
+
     fn idle(&self) -> bool {
         self.pending_resume.is_none()
             && self.recovery.is_none()
@@ -1724,6 +1745,14 @@ async fn run_inner(
         theme.set_system_scheme(scheme);
     }
     let mut app = AppNode::new(theme, workspace.clone(), root);
+    let mut reload = match crate::reload::register() {
+        Ok(registration) => Some(registration),
+        Err(error) => {
+            tracing::warn!(%error, "local reload unavailable");
+            None
+        }
+    };
+    let mut reload_requested = false;
     let mut terminal = TerminalSession::enter().map_err(terminal_error)?;
     let mut input = EventStream::new();
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
@@ -1835,6 +1864,23 @@ async fn run_inner(
     let mut stopping = false;
 
     while !stopping {
+        // Finish thread selection and prompt admission before detaching. The durable
+        // managed turn itself continues independently of this terminal.
+        if reload_requested && runtime.ready_for_reload() {
+            match reload.as_ref().expect("registered reload").preflight() {
+                Ok(()) => break,
+                Err(error) => {
+                    reload_requested = false;
+                    request_render(
+                        app.update(AppEvent::NotifyError {
+                            pane: PaneId::Main,
+                            error,
+                        }),
+                        &mut scheduler,
+                    );
+                }
+            }
+        }
         if runtime.recovery == Some(RecoveryPhase::Replaying) && runtime.recovery_events.is_empty()
         {
             runtime.recovery = None;
@@ -2024,6 +2070,21 @@ async fn run_inner(
                     Err(_) => AppEvent::NotifyError { pane: PaneId::Main, error: "Voice operation failed".into() },
                 };
                 request_render(app.update(event), &mut scheduler);
+            }
+            result = async { match &mut reload {
+                Some(registration) => registration.requested().await,
+                None => pending().await,
+            } }, if !reload_requested => {
+                if let Err(error) = result {
+                    reload = None;
+                    request_render(app.update(AppEvent::NotifyError { pane: PaneId::Main, error }), &mut scheduler);
+                    continue;
+                }
+                reload_requested = true;
+                request_render(app.update(AppEvent::NotifySuccess {
+                    pane: PaneId::Main,
+                    message: "Reloading after pending local operations finish…".into(),
+                }), &mut scheduler);
             }
             Some(completion) = runtime.vault_tasks.join_next(), if !runtime.vault_tasks.is_empty() => {
                 if let Ok((pane, agent_id, generation, result)) = completion {
@@ -3008,6 +3069,15 @@ async fn run_inner(
     if let Some(voice) = runtime.voice.take() {
         voice.finish().await;
     }
+    if reload_requested {
+        if let Some(agent) = runtime.agent.take() {
+            agent.disconnect().await.map_err(super::agent_error)?;
+        }
+        return reload
+            .expect("reload request requires a registration")
+            .restart(&runtime.agent_id)
+            .map_err(ManagedError::Configuration);
+    }
     let Some(agent) = runtime.agent.take() else {
         return Ok(());
     };
@@ -3056,6 +3126,13 @@ async fn apply_update(
             AppEffect::Pane { pane, effect } => {
                 // Keep the hosted effect boundary visually separate from app-level routing.
                 match effect {
+                    RootEffect::Reload => {
+                        let update = match crate::reload::request_all() {
+                            Ok(count) => app.update(AppEvent::NotifySuccess { pane, message: format!("Reload requested for {count} local terminal(s)…") }),
+                            Err(error) => app.update(AppEvent::NotifyError { pane, error }),
+                        };
+                        absorb(update, &mut effects, scheduler);
+                    }
                     RootEffect::Screen | RootEffect::Zoom => {
                         unreachable!("workspace commands are handled by AppNode")
                     }
@@ -4091,6 +4168,33 @@ mod tests {
         assert_eq!(runtime.active_shells, 0);
         assert_eq!(runtime.agent_id, source_id);
         assert!(runtime.cancellations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reload_waits_for_local_work_but_not_durable_turns() {
+        let mut runtime = history_runtime(HistoryWindow::default());
+        runtime
+            .managed_active_turns
+            .ids
+            .insert("remote-turn".into());
+        assert!(runtime.ready_for_reload());
+        runtime.active_shells = 1;
+        assert!(!runtime.ready_for_reload());
+        runtime.active_shells = 0;
+        runtime.connection.spawn(std::future::pending());
+        assert!(!runtime.ready_for_reload());
+        runtime.connection.abort_all();
+        while runtime.connection.join_next().await.is_some() {}
+        assert!(runtime.ready_for_reload());
+        runtime.voice_tasks.spawn(std::future::pending());
+        assert!(!runtime.ready_for_reload());
+        runtime.voice_tasks.abort_all();
+        while runtime.voice_tasks.join_next().await.is_some() {}
+        assert!(runtime.ready_for_reload());
+        runtime.clone_panel = Some(super::voice_clone::Panel::new("Synthetic speaker".into()));
+        assert!(!runtime.ready_for_reload());
+        runtime.clone_panel = None;
+        assert!(runtime.ready_for_reload());
     }
 
     #[test]
