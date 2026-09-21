@@ -51,6 +51,7 @@ struct InboxView: View {
     @ObservedObject var model: InboxModel
     @State private var showConversations = false
     @State private var drawerTranslation: CGFloat = 0
+    @GestureState private var drawerDragIsHorizontal: Bool?
     @State private var readingPositions = ConversationReadingPositions()
     @State private var showScheduledJobs = false
     @State private var showConnectors = false
@@ -223,11 +224,18 @@ struct InboxView: View {
             .clipped()
             .contentShape(Rectangle())
             .simultaneousGesture(DragGesture(minimumDistance: 16)
+                .updating($drawerDragIsHorizontal) { value, direction, _ in
+                    // Decide once: diagonal drift during a vertical list scroll
+                    // must never turn that same touch into drawer navigation.
+                    // GestureState also releases the decision on cancellation.
+                    if direction == nil {
+                        direction = (showConversations || value.startLocation.x <= 28)
+                            && abs(value.translation.width) > abs(value.translation.height) * 1.5
+                            && (showConversations || value.translation.width > 0)
+                    }
+                }
                 .onChanged { value in
-                    // Reserve navigation for a rightward pull from the left
-                    // edge. Code blocks and transcript swipes keep their input.
-                    guard showConversations || value.startLocation.x <= 28,
-                          abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
+                    guard drawerDragIsHorizontal == true else { return }
                     if showConversations {
                         drawerTranslation = max(-width, min(0, value.translation.width))
                     } else if value.translation.width > 0 {
@@ -236,8 +244,8 @@ struct InboxView: View {
                     }
                 }
                 .onEnded { value in
-                    guard showConversations || value.startLocation.x <= 28 else { return }
-                    let horizontal = abs(value.translation.width) > abs(value.translation.height) * 1.5
+                    let horizontal = drawerDragIsHorizontal == true
+                    guard horizontal else { return }
                     let visible: Bool
                     if showConversations {
                         visible = !(horizontal && (value.translation.width < -width * 0.25
@@ -498,13 +506,53 @@ private struct InboxHeaderGlass: ViewModifier {
 }
 
 /// Navigation uses roster summaries only, without parsing Markdown or starting preview streams.
-private struct SidebarRecency: Equatable {
+private struct SidebarCard: Identifiable, Equatable {
     let id: String
-    let sentAt: Double
+    let title: String
+    let lastUserMessageAt: Double
+    let sidebarStatus: String
+    let sidebarActivity: String
+    let error: String?
+
+    init(_ card: AgentCard) {
+        id = card.id; title = card.title; lastUserMessageAt = card.lastUserMessageAt
+        sidebarStatus = card.sidebarStatus
+        sidebarActivity = card.sidebarActivity; error = card.error
+    }
 }
 
 private struct ConversationDrawer: View {
-    @ObservedObject var model: InboxModel
+    let model: InboxModel
+    let select: (String) -> Void
+    let close: () -> Void
+    let create: () -> Void
+    let settings: () -> Void
+    @State private var query = ""
+
+    var body: some View {
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Preview is search input, not rendered state. Streaming preview changes
+        // only cross the equality boundary if they change search membership.
+        let cards = model.cards.filter { card in
+            search.isEmpty
+                || card.title.localizedCaseInsensitiveContains(search)
+                || card.id.localizedCaseInsensitiveContains(search)
+                || card.preview.localizedCaseInsensitiveContains(search)
+        }.map(SidebarCard.init)
+        ConversationDrawerContent(cards: cards, focusedID: model.focused?.id,
+                                  query: query, queryChanged: { query = $0 },
+                                  select: select, close: close, create: create, settings: settings)
+            .equatable()
+    }
+}
+
+private struct ConversationDrawerContent: View, Equatable {
+    // Deliberately omit transcript rows, previews, cursors, drafts, and connection
+    // state so model publications cannot rebuild an unchanged native scroll view.
+    let cards: [SidebarCard]
+    let focusedID: String?
+    let query: String
+    let queryChanged: (String) -> Void
     let select: (String) -> Void
     let close: () -> Void
     let create: () -> Void
@@ -512,37 +560,27 @@ private struct ConversationDrawer: View {
     @ScaledMetric(relativeTo: .subheadline) private var titleSize = 15
     @ScaledMetric(relativeTo: .footnote) private var detailSize = 13
     @ScaledMetric(relativeTo: .caption) private var statusSize = 12
-    @State private var query = ""
-    @State private var order: [String]
 
-    init(model: InboxModel, select: @escaping (String) -> Void, close: @escaping () -> Void,
-         create: @escaping () -> Void, settings: @escaping () -> Void) {
-        self.model = model; self.select = select; self.close = close
-        self.create = create; self.settings = settings
-        _order = State(initialValue: model.cards.sorted(by: AgentCard.mostRecentlyMessagedFirst).map(\.id))
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.cards == rhs.cards && lhs.focusedID == rhs.focusedID && lhs.query == rhs.query
     }
 
-    private var visibleCards: [AgentCard] {
-        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Include previously hidden tabs: navigation no longer has a hidden state.
-        let byID = Dictionary(uniqueKeysWithValues: model.cards.map { ($0.id, $0) })
-        let cards = order.compactMap { byID[$0] }
-        return cards.filter { card in
-            search.isEmpty
-                || card.title.localizedCaseInsensitiveContains(search)
-                || card.id.localizedCaseInsensitiveContains(search)
-                || card.preview.localizedCaseInsensitiveContains(search)
+    private var visibleCards: [SidebarCard] {
+        // Match AgentCard.mostRecentlyMessagedFirst, including its ID tie break.
+        cards.sorted {
+            $0.lastUserMessageAt != $1.lastUserMessageAt
+                ? $0.lastUserMessageAt > $1.lastUserMessageAt : $0.id < $1.id
         }
     }
 
-    private func conversationRow(_ card: AgentCard) -> some View {
+    private func conversationRow(_ card: SidebarCard) -> some View {
         let knownStatus = card.sidebarStatus
         let running = ["Running", "Stopping"].contains(knownStatus)
         let subtitle = card.error != nil ? "Couldn’t refresh" : card.sidebarActivity
         let status = [knownStatus, subtitle, card.error ?? ""].filter { !$0.isEmpty }.joined(separator: ". ")
         return VStack(alignment: .leading, spacing: 6) {
             Text(card.title)
-                .font(.system(size: titleSize, weight: model.focused?.id == card.id ? .medium : .regular))
+                .font(.system(size: titleSize, weight: focusedID == card.id ? .medium : .regular))
                 .foregroundStyle(Ink.text).lineLimit(2)
             HStack(spacing: 6) {
                 Circle().fill(running ? Ink.running : Ink.muted.opacity(0.65))
@@ -556,7 +594,7 @@ private struct ConversationDrawer: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 11)
         .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-        .background(model.focused?.id == card.id ? Ink.surface : Color.clear,
+        .background(focusedID == card.id ? Ink.surface : Color.clear,
                     in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .contentShape(Rectangle())
         // Tap recognition must fail when dragging. A plain Button can fire
@@ -565,12 +603,13 @@ private struct ConversationDrawer: View {
         .accessibilityRepresentation {
             Button(card.title) { select(card.id) }
                 .accessibilityValue(status)
-                .accessibilityAddTraits(model.focused?.id == card.id ? [.isSelected] : [])
+                .accessibilityAddTraits(focusedID == card.id ? [.isSelected] : [])
                 .accessibilityIdentifier("conversation-row:" + card.id)
         }
     }
 
     var body: some View {
+        let visibleCards = visibleCards
         VStack(spacing: 12) {
             HStack(spacing: 4) {
                 Text("Agents").font(.headline.weight(.medium)).foregroundStyle(Ink.text)
@@ -588,11 +627,11 @@ private struct ConversationDrawer: View {
             .font(.system(size: 17, weight: .regular))
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Ink.muted)
-                TextField("Search agents", text: $query)
+                TextField("Search agents", text: Binding(get: { query }, set: queryChanged))
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .accessibilityIdentifier("conversation-search")
                 if !query.isEmpty {
-                    Button { query = "" } label: {
+                    Button { queryChanged("") } label: {
                         Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44)
                     }.foregroundStyle(Ink.muted).accessibilityLabel("Clear search")
                 }
@@ -629,10 +668,6 @@ private struct ConversationDrawer: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation-drawer")
         .accessibilityAction(.escape, close)
-        .onChange(of: model.cards.map { SidebarRecency(id: $0.id, sentAt: $0.lastUserMessageAt) }) { _, _ in
-            // Only user messages can move an existing conversation.
-            order = model.cards.sorted(by: AgentCard.mostRecentlyMessagedFirst).map(\.id)
-        }
     }
 }
 
@@ -1394,18 +1429,35 @@ private struct ConnectView: View {
     }
 }
 
+// Capture model-derived presentation when the conversation updates. Individual
+// historical rows must not subscribe to every InboxModel publication.
 private struct ConversationMessageView: View {
     let row: TranscriptRow
-    @ObservedObject var model: InboxModel
+    let model: InboxModel
     let agentID: String
-    var body: some View {
+    let steering: SteeringTransfer?
+    let canWithdraw: Bool
+    let delivery: PendingMessage?
+    let connected: Bool
+    let canRetry: Bool
+
+    init(row: TranscriptRow, model: InboxModel, agentID: String) {
+        self.row = row
+        self.model = model
+        self.agentID = agentID
         let steering = model.steeringTransfer(row.turnID ?? row.id)
-        let canWithdraw = steering.map { transfer in
+        self.steering = steering
+        canWithdraw = steering.map { transfer in
             model.cards.first(where: { $0.id == agentID })?.activeTurns.contains(transfer.targetTurnID) == true
         } ?? false
-        let delivery = model.pending.first { $0.agentID == agentID && $0.id == (row.turnID ?? row.id) }
+        delivery = model.pending.first { $0.agentID == agentID && $0.id == (row.turnID ?? row.id) }
+        connected = model.connected
+        canRetry = model.connected && !model.busy.contains(agentID)
+    }
+
+    var body: some View {
         ConversationMessageContent(row: row, model: model, agentID: agentID, steering: steering, canWithdraw: canWithdraw,
-                                   delivery: delivery, canRetry: model.connected && !model.busy.contains(agentID)).equatable()
+                                   delivery: delivery, connected: connected, canRetry: canRetry).equatable()
     }
 }
 
@@ -1416,10 +1468,11 @@ private struct ConversationMessageContent: View, Equatable {
     let steering: SteeringTransfer?
     let canWithdraw: Bool
     let delivery: PendingMessage?
+    let connected: Bool
     let canRetry: Bool
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.row == rhs.row && lhs.agentID == rhs.agentID && lhs.steering == rhs.steering && lhs.canWithdraw == rhs.canWithdraw
-            && lhs.delivery == rhs.delivery && lhs.canRetry == rhs.canRetry
+            && lhs.delivery == rhs.delivery && lhs.connected == rhs.connected && lhs.canRetry == rhs.canRetry
             && lhs.model === rhs.model
     }
     var body: some View {
@@ -1459,12 +1512,12 @@ private struct ConversationMessageContent: View, Equatable {
                 if let transfer = steering, transfer.direct == true, transfer.error != nil, transfer.canResume {
                     Button("Retry sending") { model.steerNow(transfer.id) }
                         .font(.caption).accessibilityIdentifier("retry-steering")
-                        .disabled(!model.connected)
+                        .disabled(!connected)
                 }
                 if let transfer = steering, canWithdraw, (transfer.wasAccepted || transfer.phase == .unconfirmed), transfer.phase != .withdrawn {
                     Button(transfer.phase == .withdrawing ? "Withdrawing…" : "Withdraw steering") { model.withdrawSteering(transfer.id) }
                         .font(.caption).accessibilityIdentifier("withdraw-steering")
-                        .disabled(!model.connected || (transfer.phase == .withdrawing && transfer.error == nil))
+                        .disabled(!connected || (transfer.phase == .withdrawing && transfer.error == nil))
                 }
                 if let images = row.images {
                     ForEach(Array(images.enumerated()), id: \.offset) { _, image in
@@ -1668,6 +1721,8 @@ private struct ConversationView: View {
                                                 itemsByID: rendered?.itemsByID ?? [:], pending: rendered?.pending ?? [],
                                                 title: model.focused?.title ?? "Conversation",
                                                 activeTurns: model.focused?.activeTurns ?? [],
+                                                connected: model.connected,
+                                                canRetry: model.connected && !model.busy.contains(model.focused?.id ?? ""),
                                                 loading: model.threadLoading || (rendered == nil && preparing), error: model.threadError,
                                                 hasOlder: model.hasOlder, loadingOlder: model.loadingOlder || preparing,
                                                 hasNewer: model.hasNewer, loadingNewer: model.loadingNewer || preparing))
@@ -1697,6 +1752,9 @@ private struct ConversationContentView: View {
         var pending: [PendingMessage]
         var title: String
         var activeTurns: [String]
+        // These controls can change without a transcript projection revision.
+        var connected: Bool
+        var canRetry: Bool
         var loading: Bool
         var error: String?
         var hasOlder: Bool
@@ -1736,6 +1794,9 @@ private struct ConversationContentView: View {
     @State private var hasInitialPosition = false
     @State private var pendingReadingRestore: ConversationReadingPositions.Position?
     @State private var rowGeometry = ConversationRowGeometry()
+    #if DEBUG
+    @State private var rowMeasurementCount: UInt64 = 0
+    #endif
     private var historyRestore: (id: String, offsetY: CGFloat, childID: String?)? {
         get { rowGeometry.historyRestore }
         nonmutating set { rowGeometry.historyRestore = newValue }
@@ -1747,7 +1808,7 @@ private struct ConversationContentView: View {
     @State private var historyRequestInFlight = false
     @State private var historyRequestRevision: UUID?
     private func rememberHistoryPosition(in viewport: GeometryProxy) {
-        let visible = rowGeometry.frames.filter { revision.itemsByID[$0.key] != nil && $0.value.maxY > 0 && $0.value.minY < viewport.size.height }
+        let visible = rowGeometry.visibleFrames(height: viewport.size.height).filter { revision.itemsByID[$0.key] != nil }
         let sourceRows = visible.keys.flatMap { key -> [String] in
             guard let item = revision.itemsByID[key] else { return [] }
             return (item.content?.activity.map(\.id) ?? []) + (item.sourceRowID.map { [$0] } ?? [])
@@ -1800,7 +1861,7 @@ private struct ConversationContentView: View {
         // direction may load a page, so trimming cannot undo their navigation.
         if historyDirection == .older, historyContent.nearTop { loadHistory(.older, in: viewport) }
         else if historyDirection == .newer,
-                historyContent.atLatest || rowGeometry.frames["history-gap"].map({ $0.minY < viewport.size.height + 240 }) == true {
+                historyContent.atLatest || rowGeometry["history-gap"].map({ $0.minY < viewport.size.height + 240 }) == true {
             loadHistory(.newer, in: viewport)
         }
     }
@@ -1809,9 +1870,7 @@ private struct ConversationContentView: View {
               pendingReadingRestore == nil, historyReady, historyContent.isMeasured,
               !historyRequestInFlight, !revision.preparing, !navigationActive else { return }
         if !followsLatest {
-            let visible = rowGeometry.frames.filter {
-                revision.itemsByID[$0.key] != nil && $0.value.maxY > 0 && $0.value.minY < viewport.size.height
-            }
+            let visible = rowGeometry.visibleFrames(height: viewport.size.height).filter { revision.itemsByID[$0.key] != nil }
             let sourceRows = visible.keys.flatMap { key -> [String] in
             guard let item = revision.itemsByID[key] else { return [] }
             return (item.content?.activity.map(\.id) ?? []) + (item.sourceRowID.map { [$0] } ?? [])
@@ -1820,7 +1879,7 @@ private struct ConversationContentView: View {
         }
         if followsLatest && !model.needsLatestHistory {
             readingPositions.values[identity] = .init(atLatest: true)
-        } else if let first = rowGeometry.frames.filter({ revision.itemsByID[$0.key] != nil && $0.value.maxY > 0 && $0.value.minY < viewport.size.height })
+        } else if let first = rowGeometry.visibleFrames(height: viewport.size.height).filter({ revision.itemsByID[$0.key] != nil })
             .min(by: {
                 let leftFull = $0.value.minY >= 0 && $0.value.maxY <= viewport.size.height
                 let rightFull = $1.value.minY >= 0 && $1.value.maxY <= viewport.size.height
@@ -1904,12 +1963,42 @@ private struct ConversationContentView: View {
             fetchUserHistory(direction)
         } else { pendingUserDirection = nil }
     }
+    private func updateRowPositions(in viewport: GeometryProxy, using scroll: ScrollViewProxy) {
+        let frames = rowGeometry
+        let users = revision.items.lazy.filter { $0.message?.role == "You" }
+        let targets = UserNavigationTargets(
+            previous: users.last { (frames[$0.id]?.minY ?? .infinity) < -1 }?.id,
+            next: users.first { (frames[$0.id]?.minY ?? -.infinity) > 1 }?.id)
+        if userNavigationTargets != targets { userNavigationTargets = targets }
+        if !navigationActive, !isInteractingTranscript, let target = pendingReadingRestore, let id = target.rowID, let parent = frames[id] {
+            let frame = target.childID.flatMap { frames[$0] } ?? parent
+            if abs(frame.minY - target.offsetY) < 1 {
+                // Retain the semantic position through keyboard/viewport
+                // changes. The next touch or explicit jump releases it.
+                historyReady = true
+            } else {
+                let available = viewport.size.height - parent.height
+                if abs(available) > 0.5 {
+                    // The timeline can grow while loading older steps.
+                    // Preserve the step's screen position within its parent.
+                    let origin = parent.minY + target.offsetY - frame.minY
+                    scroll.scrollTo(id, anchor: UnitPoint(x: 0, y: origin / available))
+                }
+            }
+        }
+        saveReadingPosition(in: viewport)
+        updateHistoryPosition(in: viewport)
+        // Continue following the reader during a slow history request,
+        // until the insertion changes the coordinate space.
+        if historyRequestInFlight, model.historyMutationRevision == historyRequestRevision {
+            rememberHistoryPosition(in: viewport)
+        }
+    }
     private func threadControls(using scroll: ScrollViewProxy) -> some View {
         HStack(spacing: 0) {
             Button {
                 followsLatest = false
-                if let first = rowGeometry.frames.filter({ revision.itemsByID[$0.key] != nil && $0.value.maxY > 0 })
-                    .min(by: { $0.value.minY < $1.value.minY }) {
+                if let first = rowGeometry.firstFrame(where: { revision.itemsByID[$0] != nil }) {
                     pendingReadingRestore = .init(atLatest: false, rowID: first.key,
                         offsetY: revision.itemsByID[first.key]?.message == nil ? max(0, first.value.minY) : first.value.minY)
                 }
@@ -1975,7 +2064,7 @@ private struct ConversationContentView: View {
                             }
                             let onToggle = {
                                 followsLatest = false
-                                pendingReadingRestore = rowGeometry.frames[item.id].map {
+                                pendingReadingRestore = rowGeometry[item.id].map {
                                     .init(atLatest: false, rowID: item.id, offsetY: $0.minY)
                                 }
                                 if historyRequestInFlight { rememberHistoryPosition(in: viewport) }
@@ -1990,7 +2079,7 @@ private struct ConversationContentView: View {
                         }
                         }.id(item.id)
                             .background(GeometryReader { geometry in
-                                Color.clear.preference(key: ConversationRowFrames.self, value: [item.id: geometry.frame(in: .named("conversation-viewport"))])
+                                Color.clear.preference(key: ConversationRowFrames.self, value: [item.id: geometry.frame(in: .named("conversation-content"))])
                             })
                             .accessibilityElement(children: .contain)
                             .accessibilityIdentifier((item.message?.role == "You" ? "message-user-" : item.message?.role == "Agent" ? "message-assistant-" : "message-") + item.id)
@@ -1998,7 +2087,7 @@ private struct ConversationContentView: View {
                             Color.clear.frame(height: 1).accessibilityHidden(true)
                                 .background(GeometryReader { geometry in
                                     Color.clear.preference(key: ConversationRowFrames.self,
-                                        value: ["history-gap": geometry.frame(in: .named("conversation-viewport"))])
+                                        value: ["history-gap": geometry.frame(in: .named("conversation-content"))])
                                 })
                         }
                     }
@@ -2015,6 +2104,7 @@ private struct ConversationContentView: View {
                     }
                     Color.clear.frame(height: 1).id("latest")
                 }.padding(.horizontal, 20).padding(.vertical, verticalPadding).frame(maxWidth: 780).frame(maxWidth: .infinity)
+                    .coordinateSpace(name: "conversation-content")
 
             }
             // Clip hit testing as well as drawing: offscreen disclosure buttons
@@ -2027,36 +2117,23 @@ private struct ConversationContentView: View {
             .scrollDismissesKeyboard(.interactively)
             .scrollBounceBehavior(.always, axes: .vertical)
             .coordinateSpace(name: "conversation-viewport")
+            #if DEBUG
+            .overlay(alignment: .topLeading) {
+                if ProcessInfo.processInfo.environment["NANOCODEX_RENDER_COUNTER"] == "1" {
+                    Text(String(rowMeasurementCount)).font(.caption2)
+                        .accessibilityIdentifier("conversation-row-measurement-count")
+                        .allowsHitTesting(false)
+                }
+            }
+            #endif
             .onPreferenceChange(ConversationRowFrames.self) { frames in
-                rowGeometry.frames = frames
-                let users = userMessages
-                let targets = UserNavigationTargets(
-                    previous: users.last { (frames[$0.id]?.minY ?? .infinity) < -1 }?.id,
-                    next: users.first { (frames[$0.id]?.minY ?? -.infinity) > 1 }?.id)
-                if userNavigationTargets != targets { userNavigationTargets = targets }
-                if !navigationActive, !isInteractingTranscript, let target = pendingReadingRestore, let id = target.rowID, let parent = frames[id] {
-                    let frame = target.childID.flatMap { frames[$0] } ?? parent
-                    if abs(frame.minY - target.offsetY) < 1 {
-                        // Retain the semantic position through keyboard/viewport
-                        // changes. The next touch or explicit jump releases it.
-                        historyReady = true
-                    } else {
-                        let available = viewport.size.height - parent.height
-                        if abs(available) > 0.5 {
-                            // The timeline can grow while loading older steps.
-                            // Preserve the step's screen position within its parent.
-                            let origin = parent.minY + target.offsetY - frame.minY
-                            scroll.scrollTo(id, anchor: UnitPoint(x: 0, y: origin / available))
-                        }
-                    }
+                rowGeometry.updateContentFrames(frames)
+                #if DEBUG
+                if ProcessInfo.processInfo.environment["NANOCODEX_RENDER_COUNTER"] == "1" {
+                    rowMeasurementCount += 1
                 }
-                saveReadingPosition(in: viewport)
-                updateHistoryPosition(in: viewport)
-                // Continue following the reader during a slow history request,
-                // until the insertion changes the coordinate space.
-                if historyRequestInFlight, model.historyMutationRevision == historyRequestRevision {
-                    rememberHistoryPosition(in: viewport)
-                }
+                #endif
+                updateRowPositions(in: viewport, using: scroll)
             }
             .onScrollGeometryChange(for: ConversationContentPosition.self) { geometry in
                 ConversationContentPosition(
@@ -2104,7 +2181,7 @@ private struct ConversationContentView: View {
                 guard active, !followsLatest, pendingReadingRestore == nil else { return }
                 // Capture before keyboard dismissal / drawer animation can resize
                 // the viewport. Keep the same row and point offset on close too.
-                if let first = rowGeometry.frames.filter({ revision.itemsByID[$0.key] != nil && $0.value.maxY > 0 && $0.value.minY < viewport.size.height })
+                if let first = rowGeometry.visibleFrames(height: viewport.size.height).filter({ revision.itemsByID[$0.key] != nil })
                     .min(by: { $0.value.minY < $1.value.minY }) {
                     pendingReadingRestore = .init(atLatest: false, rowID: first.key, offsetY: first.value.minY)
                 }
@@ -2131,6 +2208,10 @@ private struct ConversationContentView: View {
                 updateHistoryPosition(in: viewport)
             }
             .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { previous, offset in
+                // Row preferences are measured in stable content coordinates.
+                // Scrolling changes one offset instead of every row's preference.
+                rowGeometry.updateOffset(offset)
+                updateRowPositions(in: viewport, using: scroll)
                 // Deceleration, bounce-back and restoration change offsets too.
                 // Only direct interaction establishes a new paging direction.
                 // A prefetched page can arrive while the finger is still down.
@@ -2253,7 +2334,47 @@ private struct InboxGeneratedOutputView: View, Equatable {
 // Geometry is reading-position bookkeeping, not rendered state. Updating each
 // pixel must not invalidate the conversation's SwiftUI body.
 private final class ConversationRowGeometry {
-    var frames: [String: CGRect] = [:]
+    private var contentFrames: [String: CGRect] = [:]
+    private var orderedFrames: [(key: String, value: CGRect)] = []
+    private var offsetY: CGFloat = 0
+
+    func updateContentFrames(_ value: [String: CGRect]) {
+        contentFrames = value
+        // These are non-overlapping siblings in the measured vertical stack.
+        // Index only when layout changes, never for a native scroll offset.
+        orderedFrames = value.sorted { $0.value.minY < $1.value.minY }
+    }
+
+    func updateOffset(_ value: CGFloat) { offsetY = value }
+
+    subscript(_ id: String) -> CGRect? {
+        contentFrames[id]?.offsetBy(dx: 0, dy: -offsetY)
+    }
+
+    private var firstVisibleIndex: Int {
+        var lower = 0, upper = orderedFrames.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if orderedFrames[middle].value.maxY <= offsetY { lower = middle + 1 }
+            else { upper = middle }
+        }
+        return lower
+    }
+
+    func visibleFrames(height: CGFloat) -> [String: CGRect] {
+        var visible: [String: CGRect] = [:]
+        for entry in orderedFrames.dropFirst(firstVisibleIndex) {
+            guard entry.value.minY < offsetY + height else { break }
+            visible[entry.key] = entry.value.offsetBy(dx: 0, dy: -offsetY)
+        }
+        return visible
+    }
+
+    func firstFrame(where matches: (String) -> Bool) -> (key: String, value: CGRect)? {
+        guard let entry = orderedFrames.dropFirst(firstVisibleIndex).first(where: { matches($0.key) }) else { return nil }
+        return (entry.key, entry.value.offsetBy(dx: 0, dy: -offsetY))
+    }
+
     var historyRestore: (id: String, offsetY: CGFloat, childID: String?)?
 }
 

@@ -313,6 +313,27 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Loaded saved conversation."].waitForExistence(timeout: 20))
     }
 
+    func testLongActiveTranscriptDrawerScrollPreservesSelectionAndSearch() {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString,
+                          "NANOCODEX_DEMO_LONG_THREAD": "1",
+                          "NANOCODEX_DEMO_SIDEBAR": "1"])
+        selectInbox(app)
+        app.buttons["conversation-drawer-open"].tap()
+        let list = app.scrollViews["conversation-list"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        for _ in 0..<3 { list.swipeUp(); list.swipeDown() }
+        XCTAssertTrue(list.exists, "Vertical browsing must keep the drawer open")
+        let search = app.textFields["conversation-search"]
+        search.tap(); search.typeText("inbox")
+        XCTAssertTrue(app.buttons["conversation-row:inbox"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["conversation-row:hands"].exists)
+        app.buttons["Clear search"].tap()
+        XCTAssertTrue(app.buttons["conversation-row:hands"].waitForExistence(timeout: 5))
+        list.swipeLeft()
+        gone(list)
+        XCTAssertTrue(app.buttons["conversation-title:inbox"].isSelected)
+    }
+
     func testDrawerLeftSwipeKeepsDraftAndSingleConversationList() {
         let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString])
         selectInbox(app)
@@ -3423,6 +3444,26 @@ final class InboxUITests: XCTestCase {
             XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "identifier == %@ AND label == %@", "connection", "Demo")).firstMatch.exists)
         }
         app.terminate()
+    }
+
+    func testScrollingDoesNotRemeasureEveryTranscriptRow() {
+        let app = launch(["NANOCODEX_DEMO_RENDER_PROFILE": "1",
+                          "NANOCODEX_DEMO_PROFILE": "scroll-geometry-" + UUID().uuidString,
+                          "NANOCODEX_DEMO_RENDER_ROWS": "500",
+                          "NANOCODEX_RENDER_COUNTER": "1"])
+        let conversation = app.scrollViews["conversation"]
+        let counter = app.staticTexts["conversation-row-measurement-count"]
+        XCTAssertTrue(counter.waitForExistence(timeout: 10))
+        XCTAssertTrue(conversation.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Review note ")).firstMatch.waitForExistence(timeout: 10))
+        // Settle initial bottom positioning before counting native scroll updates.
+        conversation.swipeDown()
+        let initial = counter.label
+        XCTAssertGreaterThan(UInt64(initial) ?? 0, 0)
+        conversation.swipeDown(); conversation.swipeDown(); conversation.swipeUp()
+        XCTAssertTrue(app.buttons["latest-messages"].exists, "The gestures must actually leave the live tail")
+        XCTAssertEqual(counter.label, initial,
+                       "Scroll offsets must not republish the full retained transcript's row geometry")
     }
 
     func testDraftTypingDoesNotRebuildConversationProjection() {
