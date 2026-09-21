@@ -152,10 +152,10 @@ pub fn decode_frame(frame: &[u8]) -> io::Result<Option<Message>> {
 }
 
 fn validate_pcm(message: &Message) -> io::Result<()> {
-    if let Message::WritePcm { samples, .. } = message {
-        if samples.is_empty() || samples.len() > MAX_PCM_SAMPLES {
-            return Err(io::Error::other("invalid PCM chunk size"));
-        }
+    if let Message::WritePcm { samples, .. } = message
+        && (samples.is_empty() || samples.len() > MAX_PCM_SAMPLES)
+    {
+        return Err(io::Error::other("invalid PCM chunk size"));
     }
     Ok(())
 }

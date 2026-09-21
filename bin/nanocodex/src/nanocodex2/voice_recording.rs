@@ -274,11 +274,10 @@ impl Recorder {
             .try_wait()
             .map_err(|e| format!("Cannot inspect microphone recorder: {e}"))?
             .is_none()
+            && let Some(mut stdin) = child.stdin.take()
         {
-            if let Some(mut stdin) = child.stdin.take() {
-                // A broken pipe can mean the duration/size limit already ended capture.
-                let _ = stdin.write_all(b"q\n");
-            }
+            // A broken pipe can mean the duration/size limit already ended capture.
+            let _ = stdin.write_all(b"q\n");
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         let status = loop {
@@ -379,10 +378,10 @@ fn audio_program(program: &str) -> PathBuf {
     if let Some(package) = std::env::var_os("NANOCODEX_VOICE_PACKAGE") {
         directories.push(PathBuf::from(package).join("nanocodex-resources/voice/bin"));
     }
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(parent) = executable.parent() {
-            directories.push(parent.join("nanocodex-resources/voice/bin"));
-        }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(parent) = executable.parent()
+    {
+        directories.push(parent.join("nanocodex-resources/voice/bin"));
     }
     if let Some(path) = std::env::var_os("PATH") {
         directories.extend(std::env::split_paths(&path));
@@ -487,7 +486,7 @@ fn validate_wav(file: &mut std::fs::File) -> Result<u64, String> {
         }
         offset += 8 + size + (size % 2);
     }
-    if !pcm || !data.is_some_and(|n| n > 0 && n % 2 == 0 && n <= MAX_SECONDS * 16000 * 2) {
+    if !pcm || !data.is_some_and(|n| n > 0 && n.is_multiple_of(2) && n <= MAX_SECONDS * 16000 * 2) {
         return Err("expected nonempty mono 16 kHz PCM within the 120 second limit".into());
     }
     Ok(data.unwrap() / 2)

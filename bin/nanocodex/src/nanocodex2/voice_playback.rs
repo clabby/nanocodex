@@ -183,7 +183,7 @@ impl PcmFrames {
         if self.total == 0 {
             return Err(error("ElevenLabs returned empty audio"));
         }
-        if self.total % 2 != 0 {
+        if !self.total.is_multiple_of(2) {
             return Err(error("ElevenLabs returned incomplete PCM audio"));
         }
         Ok(())
