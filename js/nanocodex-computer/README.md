@@ -22,7 +22,10 @@ read-only. Both honor `NANOCODEX_COMPUTER` as an explicit provider executable,
 and `off`, `none`, or `0` disable CUA. Neither searches for the retired companion
 in PATH, Cargo directories, source builds, or adjacent installations. Unsupported
 platforms return no provider unless an explicit MCP executable is configured.
-The Windows managed receipt supplies its exact arguments and environment.
+The managed receipt supplies its exact arguments and environment on both platforms.
+Mac setup selects immutable host assets separately from the signed bundle. CUA
+then starts the official app server and isolated GUI automatically; see the
+[managed Mac host](../../docs/computer/official-app-server-bridge.md).
 
 `connectComputerTools` discovers the full paginated MCP catalog before exposing
 an attachment. `definitions` and each tool's `providerDefinition` preserve the

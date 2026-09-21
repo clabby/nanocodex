@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { access, stat } from "node:fs/promises";
 import { constants, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { namedTool } from "nanocodex-tools/named-tool";
@@ -11,23 +11,24 @@ const runSetup = promisify(execFile);
 const preparations = new Map();
 const supportsManagedComputer = () => ["darwin", "win32"].includes(process.platform);
 const managedRoot = () => join(process.env.NANOCODEX_DIR || join(process.env.HOME || process.env.USERPROFILE || homedir(), ".nanocodex"), "runtimes", "openai-cua");
-function windowsProvider() {
-  if (process.platform !== "win32") return undefined;
+function managedProvider() {
+  if (!supportsManagedComputer()) return undefined;
   let source;
   try { source = readFileSync(join(managedRoot(), "provider.json"), "utf8"); }
   catch (error) { if (error.code === "ENOENT") return undefined; throw error; }
   if (source.length > 65536) throw new Error("Invalid managed CUA receipt; run nanocodex2 computer setup");
   const value = JSON.parse(source);
-  if (value.status !== "installed" || value.transport !== "mcp" || typeof value.executable !== "string"
+  if (value?.status !== "installed" || value.transport !== "mcp" || typeof value.executable !== "string" || !isAbsolute(value.executable)
     || !Array.isArray(value.args) || !value.args.every(arg => typeof arg === "string")
-    || !value.environment || typeof value.environment !== "object" || !Object.values(value.environment).every(v => typeof v === "string")) {
+    || !value.environment || typeof value.environment !== "object" || Array.isArray(value.environment) || !Object.values(value.environment).every(v => typeof v === "string")) {
     throw new Error("Invalid managed CUA receipt; run nanocodex2 computer setup");
   }
   return value;
 }
-const managedComputer = () => process.platform === "win32" ? windowsProvider()?.executable : join(managedRoot(), "current", "cua-provider");
+const managedComputer = () => managedProvider()?.executable;
 function managedOptions(options) {
-  const managed = windowsProvider();
+  if (process.env.NANOCODEX_COMPUTER) return options;
+  const managed = managedProvider();
   if (!managed || resolve(options.executable) !== resolve(managed.executable)) return options;
   return { ...options, args: options.args ?? managed.args, environment: { ...managed.environment, ...options.environment } };
 }
@@ -35,13 +36,15 @@ async function executableExists(path) {
   try { if (!path) return false; await access(path, constants.X_OK); return (await stat(path)).isFile(); } catch { return false; }
 }
 
-/** Provision the managed provider only when missing, using a trusted native CLI. */
+/** Select the installed helper’s current host once per process and install root. */
 export async function ensureComputer({ binary } = {}) {
   if (process.env.NANOCODEX_COMPUTER || !supportsManagedComputer()) return discoverComputer({ binary });
-  const executable = managedComputer();
-  if (await executableExists(executable)) return executable;
   const retry = "Run nanocodex2 computer setup to retry, or set NANOCODEX_COMPUTER to an explicit provider (off disables CUA).";
-  if (!binary) throw new Error(`OpenAI CUA setup requires the installed Nanocodex native helper. Reinstall Nanocodex. ${retry}`);
+  if (!binary) {
+    const executable = managedComputer();
+    if (await executableExists(executable)) return executable;
+    throw new Error(`OpenAI CUA setup requires the installed Nanocodex native helper. Reinstall Nanocodex. ${retry}`);
+  }
   const identity = JSON.stringify([resolve(binary), resolve(managedRoot())]);
   if (preparations.has(identity)) return preparations.get(identity);
   const preparation = (async () => {
@@ -62,7 +65,7 @@ export async function ensureComputer({ binary } = {}) {
     }
   })();
   preparations.set(identity, preparation);
-  try { return await preparation; } finally { preparations.delete(identity); }
+  try { return await preparation; } catch (error) { preparations.delete(identity); throw error; }
 }
 
 /** Read-only discovery of trusted installed providers; no app or browser starts. */

@@ -7,8 +7,8 @@ Production Code Mode remains QuickJS; the provider uses its own bundled Node.
 
 Browser-enabled launchers set upstream `BROWSER_USE_TINYSKY_ENABLED=1`, matching
 the official desktop host. This exposes `Tab.ax`, which upstream `cua.getTab()`
-and `cua.createBrowserTab()` use to return accessibility state. Existing managed
-copies need `computer setup --refresh` after upgrading to regenerate the launcher.
+and `cua.createBrowserTab()` use to return accessibility state. Mac setup regenerates Nanocodex host assets independently of the cached signed
+bundle; a launcher update does not require `--refresh`.
 
 ```sh
 nanocodex2 computer setup           # provision once or verify/reuse the cache
@@ -16,11 +16,12 @@ nanocodex2 computer setup --refresh # check/download the current upstream releas
 # Both commands are also available as nanocodex computer setup.
 ```
 
-The native installers refresh the upstream runtime. Direct binary/source installs
-provision it on first CUA use. Older published CLIs that lack this command keep
-working with the installer, but require an updated Nanocodex release before this
-behavior becomes available. Installation does not launch the ChatGPT GUI or sign
-in to a ChatGPT account. OS permissions and provider access policies still apply.
+Direct binary/source installs provision the runtime on first CUA use. Installation
+does not sign in to an account. On macOS, CUA starts an isolated official app server
+and desktop GUI, waits for the supported GUI readiness event, and delegates
+application access and approvals to that host. Build 9922 is currently supported;
+setup rejects other builds before publication. Official sign-in and OS permissions
+still apply. See [managed macOS host](official-app-server-bridge.md).
 
 ## Distribution
 
@@ -89,7 +90,9 @@ to the official OpenAI runtime. Nanocodex does not display consent forms, rememb
 application permissions, or expose an embedding callback that makes approval
 decisions. Installing a provider does not grant consent.
 
-The adapters advertise no MCP elicitation capability. Unsupported provider
+The adapters advertise no MCP elicitation capability. On macOS, the managed bridge
+leaves app-server requests for the official GUI to handle; it never races the GUI
+with a reply. Direct provider-to-adapter requests use the following MCP behavior. Unsupported provider
 requests, including `elicitation/create` and `openai/elicitation/create`, receive
 a JSON-RPC method-not-found error (`-32601`), never an approval response. Operations
 that require this host capability can therefore fail; discovery or a successful
