@@ -461,13 +461,16 @@ impl Actor {
         // Match the desktop app: context belongs in call creation, before
         // speech starts. Appending startup fragments to a running conversation
         // can provoke unsolicited responses while the user begins speaking.
-        let ((state, admitted), started) = tokio::try_join!(start, prepare_media)?;
+        let ((state, admitted), started) =
+            tokio::try_join!(connection_step("agent admission", start), prepare_media)?;
         self.timing("agent.ready");
         let settings = initial_call_settings(&mut self.protocol, &admitted["context"])?;
-        let call = self
-            .client
-            .voice_call(&self.agent, &self.session, &started.offer_sdp, settings)
-            .await?;
+        let call = connection_step(
+            "realtime call creation",
+            self.client
+                .voice_call(&self.agent, &self.session, &started.offer_sdp, settings),
+        )
+        .await?;
         self.timing("call.answer");
         let handle = started.handle;
         let answer = async {
@@ -506,17 +509,25 @@ impl Actor {
         let mut first_audio = false;
         let mut first_input = false;
         let mut last_speech: Option<Instant> = None;
-        self.status(if *muted.borrow() {
-            "Voice active · microphone muted"
-        } else {
-            "Voice active · listening"
-        });
+        self.status("Voice connecting · waiting for realtime session…");
+        let ready_deadline = tokio::time::sleep(Duration::from_secs(30));
+        tokio::pin!(ready_deadline);
         loop {
             tokio::select! {
                 biased;
+                () = &mut ready_deadline, if self.status.borrow().phase == Phase::Connecting => {
+                    return Err(error("Timed out waiting for realtime session readiness; stop and retry voice"));
+                }
                 changed = muted.changed() => {
                     changed.map_err(|_| error("Voice controls closed"))?;
-                    self.status(if *muted.borrow() { "Voice active · microphone muted" } else { "Voice active · listening" });
+                    let connecting = self.status.borrow().phase == Phase::Connecting;
+                    self.status(if connecting {
+                        "Voice connecting · waiting for realtime session…"
+                    } else if *muted.borrow() {
+                        "Voice active · microphone muted"
+                    } else {
+                        "Voice active · listening"
+                    });
                 }
                 command = commands.recv() => match command {
                     Some(Input::Typed) => { active_turn = None; let effects = self.protocol.note_typed_input(); self.apply(&mut socket, effects).await?; }
@@ -786,6 +797,17 @@ impl Drop for Actor {
         }
     }
 }
+// Bound admission including retries and call creation including authentication.
+// Native offer/answer and sideband transport have their own deadlines.
+async fn connection_step<T>(
+    stage: &str,
+    future: impl std::future::Future<Output = Result<T, ManagedError>>,
+) -> Result<T, ManagedError> {
+    tokio::time::timeout(Duration::from_secs(30), future)
+        .await
+        .map_err(|_| error(format!("Timed out during {stage}; stop and retry voice")))?
+}
+
 fn error(message: impl Into<String>) -> ManagedError {
     ManagedError::Configuration(message.into())
 }
@@ -862,6 +884,33 @@ pub(crate) async fn run(client: &ManagedClient, args: Args) -> Result<(), Manage
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stalled_connection_reports_stage_and_allows_retry() {
+        let failure = connection_step::<()>("agent admission", std::future::pending())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains("Timed out during agent admission"));
+        assert!(failure.contains("retry voice"));
+        assert_eq!(
+            connection_step("agent admission", async { Ok(42) })
+                .await
+                .unwrap(),
+            42
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_preserves_underlying_errors() {
+        let failure = connection_step::<()>("realtime sideband", async { Err(error("denied")) })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains("denied"));
+        assert!(!failure.contains("Timed out"));
+    }
+
     #[test]
     fn active_status_names_selected_output_provider_and_voice() {
         assert_eq!(

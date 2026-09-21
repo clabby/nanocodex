@@ -600,7 +600,13 @@ impl Fixture {
         let terminal = Terminal::start_with_reload_dir(&origin, attach, reload_dir);
         let events = tokio::time::timeout(TIMEOUT, connections.recv())
             .await
-            .unwrap()
+            .unwrap_or_else(|_| {
+                panic!(
+                    "initial connection missing: {}\nRaw output: {:?}",
+                    terminal.screen.lock().unwrap().screen().contents(),
+                    String::from_utf8_lossy(&terminal.output.lock().unwrap())
+                )
+            })
             .unwrap();
         Self {
             socket_paths,
