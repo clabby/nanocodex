@@ -38,7 +38,7 @@ export const configurationSchema = z.object({
   output_schema: z.record(z.string(), z.unknown()).optional(),
   prompt_cache: z.enum(["implicit", "explicit"]).optional(),
   environment: environmentSchema.optional(),
-}).strict().refine(c => !c.model_routing || !c.multi_agent?.enabled, "thread routing PoC requires multi_agent disabled")
+}).strict()
   .refine(c => !c.model_routing || c.settings === undefined, "model_routing owns model and thinking; omit settings");
 export type AgentConfiguration = z.infer<typeof configurationSchema>;
 export type AgentEnvironment = z.infer<typeof environmentSchema>;

@@ -83,8 +83,18 @@ describe("eval-informed thread routing", () => {
     expect(() => policy({ weights: { cost: 0, time: 0, effectiveness: 0 } })).toThrow();
     expect(() => policy({ estimates: [{ ...estimates[0], success_rate: 0 }] })).toThrow();
     expect(() => parseAgentCreateBody(JSON.stringify({ settings: {}, configuration: { model_routing: {} } }))).toThrow();
-    expect(() => parseConfiguration({ model_routing: {}, multi_agent: { enabled: true } })).toThrow();
     expect(() => validateAgentSettings({ model: OSS_MODEL, thinking: "max", fast_mode: false, reasoning_mode: "standard" })).toThrow();
+  });
+  it("admits routed roots with bounded child agents through public creation", () => {
+    const configuration = {
+      model_routing: { candidates: [`${OSS_MODEL}:low`, `${OSS_MODEL}:medium`] },
+      multi_agent: { enabled: true, max_concurrent_subagents: 1 },
+    };
+    const admitted = parseAgentCreateBody(JSON.stringify({ configuration }));
+    expect(admitted.configuration?.multi_agent).toEqual(configuration.multi_agent);
+    expect(admitted.configuration?.model_routing?.candidates).toEqual(configuration.model_routing.candidates);
+    expect(() => parseConfiguration({ ...configuration,
+      multi_agent: { enabled: true, max_concurrent_subagents: 0 } })).toThrow();
   });
   it("singleflights concurrent admissions and retains route across restart", async () => {
     let retained: Awaited<ReturnType<typeof resolveThreadRoute>> | undefined;

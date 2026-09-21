@@ -69,7 +69,8 @@ pub(super) fn completion_instructions(schema: &str, turn_token: u64) -> String {
         "Your contractual result is not prose. Before finishing, call `submit_result` exactly \
          once with `{{ turn_token: {turn_token}, output: ... }}` and a JSON value matching the \
          output schema below. The tool may be exposed directly or through Code Mode as \
-         `tools.submit_result`. If validation rejects the value, correct it and retry. A turn \
+         `tools.submit_result`. Pass objects and arrays directly as JSON values; do not \
+         serialize them into JSON strings. If validation rejects the value, correct it and retry. A turn \
          that ends without an accepted result fails.\n\nOutput schema:\n{schema}"
     )
 }

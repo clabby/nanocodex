@@ -375,16 +375,16 @@ async fn start_agent_with_host_context(
             host_context.as_ref().map(Arc::clone),
         )
         .await?;
-    if let (Some(router), Some(route)) = (&router, &route) {
-        if let Err(error) = router.bind(
+    if let (Some(router), Some(route)) = (&router, &route)
+        && let Err(error) = router.bind(
             session_id,
             child.session_id(),
             &route.reference,
             host_context.as_deref(),
-        ) {
-            let _ = child.shutdown().await;
-            return Err(error.into());
-        }
+        )
+    {
+        let _ = child.shutdown().await;
+        return Err(error.into());
     }
     let session_id = child.session_id().to_string();
     let descriptor = AgentDescriptor {
@@ -514,7 +514,8 @@ fn spawn_agent_parameters() -> Value {
                 "description": "Reasoning effort override for the new agent. Omit to inherit the parent's current thinking level."
             },
             "output_schema": {
-                "description": "The JSON Schema that every successful result from this agent must satisfy. Use an object with one string field for a free-form report."
+                "anyOf": [{ "type": "object" }, { "type": "boolean" }],
+                "description": "The JSON Schema that every successful result from this agent must satisfy. Pass a schema object (not a JSON-encoded string), or a boolean schema. For a free-form report, use an object schema with one string property."
             }
         },
         "required": ["role", "task", "output_schema"],
@@ -543,7 +544,12 @@ impl Tool for SubmitResult {
                 "type": "object",
                 "properties": {
                     "output": {
-                        "description": "The final JSON value required by this agent's output schema."
+                        "anyOf": [
+                            { "type": "object" }, { "type": "array", "items": {} },
+                            { "type": "string" }, { "type": "number" },
+                            { "type": "boolean" }, { "type": "null" }
+                        ],
+                        "description": "The final JSON value required by this agent's output schema. Pass objects and arrays directly, not as JSON-encoded strings. Use a string only when the output schema permits a string."
                     },
                     "turn_token": {
                         "type": "integer",
@@ -961,6 +967,26 @@ mod tests {
     }
 
     #[test]
+    fn spawn_agent_advertises_schema_values_instead_of_encoded_json() {
+        let validator = jsonschema::validator_for(&spawn_agent_parameters()).unwrap();
+        for schema in [json!({ "type": "object" }), json!(true), json!(false)] {
+            assert!(validator.is_valid(&json!({
+                "role": "reader", "task": "read the fixture", "output_schema": schema,
+            })));
+        }
+        for schema in [
+            json!("{\"type\":\"object\"}"),
+            json!(null),
+            json!(42),
+            json!([]),
+        ] {
+            assert!(!validator.is_valid(&json!({
+                "role": "reader", "task": "read the fixture", "output_schema": schema,
+            })));
+        }
+    }
+
+    #[test]
     fn spawn_agent_exposes_optional_model_and_thinking_overrides() {
         let parameters = spawn_agent_parameters();
 
@@ -1040,6 +1066,24 @@ mod tests {
         .definition();
         let parameters = definition.parameters().unwrap().as_value();
 
+        let validator = jsonschema::validator_for(parameters).unwrap();
+        for output in [
+            json!({ "report": "done" }),
+            json!([1, "two"]),
+            json!("text"),
+            json!(2.5),
+            json!(true),
+            json!(null),
+        ] {
+            assert!(validator.is_valid(&json!({ "turn_token": 1, "output": output })));
+        }
+        assert_eq!(
+            parameters["properties"]["output"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
         assert_eq!(parameters["required"], json!(["turn_token", "output"]));
         assert_eq!(parameters["additionalProperties"], json!(false));
         assert_eq!(parameters["properties"].as_object().unwrap().len(), 2);

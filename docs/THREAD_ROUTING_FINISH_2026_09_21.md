@@ -1,6 +1,6 @@
 # Thread routing completion and verification — 2026-09-21
 
-This revision completes the unfinished provider/child routing work in PR #436 and merges current master. The feature remains opt-in; nothing was deployed and no recurring probes were enabled.
+This revision implements the provider/child routing work in PR #436 and merges current master. Later actual-CLI verification found remaining live child-result and idle-reconstruction failures; see the follow-up below. The feature remains opt-in; nothing was deployed and no recurring probes were enabled.
 
 ## Resulting behavior
 
@@ -38,6 +38,10 @@ Four reused synthetic development tasks ran against live Jev and GLM-5.3 through
 Wrangler emitted remote internal-error diagnostics during the last task, but the task returned a valid result and all verification checks passed. These are development regressions, not held-out model comparisons; no cost or speed superiority is established.
 
 A separate [12-call Jev preference smoke](THREAD_ROUTING_PREFERENCE_EVAL_2026_09_21.md) covers prompt preferences, conflicting explicit weights, negation, soft targets and 15/45-candidate catalogs. All responses were valid and pinned. One 45-candidate explicit-completion case proposed GLM-medium with confidence 0.07 despite completion-heavy weights. It remains a failed preference-alignment example, not a success. Gateway availability was simulated for this selection-only probe; no authenticated OpenRouter/Vercel generation was tested.
+
+## Actual CLI follow-up
+
+A subsequent [verification with the PR-built native and managed CLI binaries](THREAD_ROUTING_CLI_VERIFICATION_2026_09_21.md) tests live inference, tools and continuation. It also caught and removes a stale public-admission restriction that prevented routed multi-agent creation, plus a CI Clippy warning. Native and managed root journeys pass. Live GLM object results and child continuation after managed idle shutdown remain failing; the earlier unit/SDK checks do not establish those guarantees.
 
 ## Remaining PoC limits
 
