@@ -48,12 +48,15 @@ On macOS, ElevenLabs output streams PCM into the same libWebRTC mixer,
 speaker device, and echo-cancellation reference used by ChatGPT voice. The
 microphone stays available for interruption unless you explicitly mute it.
 Both providers use the native microphone and speaker meters. ElevenLabs speech
-output no longer requires ffplay. Completed sentences can begin synthesis before
-the final caption arrives; repeated and interrupted caption segments are fenced.
+output no longer requires ffplay. Each complete assistant reply uses one synthesis
+request, then streams its PCM audio. Waiting for the final caption avoids per-sentence pauses, delivery resets,
+and fragment queue overflow; it can delay the first spoken word. Repeated and
+interrupted captions remain fenced. Native playback buffers up to 60 ms before
+starting and smooths audio boundaries to reduce gaps and clicks from uneven delivery.
 Typing, stopping voice, or switching voices
 cancels pending synthesis and native PCM. Captions from a stopped session are
 discarded. This requires the matching native helper shipped with the build.
 
 Voice-clone sample recording and local sample preview remain separate from
-conversation audio: recording still uses ffmpeg, and macOS sample preview uses
-afplay. The clone workflow never uploads without explicit consent.
+conversation audio: macOS recording uses the bundled native recorder and sample
+preview uses afplay. Linux recording uses ffmpeg. The clone workflow never uploads without explicit consent.

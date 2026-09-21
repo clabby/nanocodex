@@ -1,6 +1,6 @@
 # Record and clone a voice in the terminal
 
-Set `ELEVENLABS_API_KEY` locally before uploading. Recording requires ffmpeg on macOS or Linux. Homebrew installations in `/opt/homebrew/bin` and `/usr/local/bin` are found even when the launching terminal omits them from PATH; Linux also needs a local PulseAudio/PipeWire server. Recording stops after 120 seconds. In the TUI:
+Set `ELEVENLABS_API_KEY` locally before uploading. macOS recording uses the bundled native microphone recorder; no ffmpeg installation is needed. Linux recording requires ffmpeg and a local PulseAudio/PipeWire server. If the macOS recorder is missing, install a complete build with its `nanocodex-resources` directory. Recording stops after 120 seconds. In the TUI:
 
 1. Open `/voice` and select **Record a voice clone**, or enter `/voice clone "My voice"`. The local recording panel opens; opening it does not start the microphone.
 2. Press **R** (equivalent to `/voice clone record`). Any realtime voice session stops first. Recording starts only after its cleanup is confirmed. The panel and composer strip display a red **● RECORDING**, an elapsed timer, and a live microphone signal meter updated five times per second. The sample never enters chat or realtime input.

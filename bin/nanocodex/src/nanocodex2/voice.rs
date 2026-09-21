@@ -318,7 +318,6 @@ struct SpeechCaptions {
     caption: Option<u64>,
     suppressed: Option<u64>,
     completed: Option<u64>,
-    emitted: String,
     speech_error: Option<&'static str>,
     enabled: bool,
 }
@@ -329,7 +328,6 @@ impl Default for SpeechCaptions {
             caption: None,
             suppressed: None,
             completed: None,
-            emitted: String::new(),
             speech_error: None,
             enabled: true,
         }
@@ -356,15 +354,11 @@ impl SpeechCaptions {
     /// Suppress audio only; the complete caption remains visible.
     fn suppress_remainder(&mut self, id: u64) {
         self.completed = self.completed.max(Some(id));
-        self.emitted.clear();
     }
 
     fn consume(&mut self, speaker: &str, id: u64, text: &str, is_partial: bool) -> Option<String> {
         if speaker != "assistant" || self.caption.is_some_and(|previous| id < previous) {
             return None;
-        }
-        if self.caption != Some(id) {
-            self.emitted.clear();
         }
         self.caption = Some(id);
         if !self.enabled {
@@ -376,11 +370,6 @@ impl SpeechCaptions {
         {
             return None;
         }
-        // Corrected snapshots cannot safely reuse an already spoken byte offset.
-        if !text.starts_with(&self.emitted) {
-            self.suppress_remainder(id);
-            return None;
-        }
         // Bound retained state and requests without truncating the visible text.
         if text.len() > 16000 {
             self.suppress_remainder(id);
@@ -389,28 +378,14 @@ impl SpeechCaptions {
             );
             return None;
         }
-        let suffix = &text[self.emitted.len()..];
-        let end = if is_partial {
-            let mut boundary = 0;
-            let mut chars = suffix.char_indices().peekable();
-            while let Some((offset, ch)) = chars.next() {
-                if matches!(ch, '.' | '!' | '?')
-                    && chars.peek().is_some_and(|(_, next)| next.is_whitespace())
-                {
-                    boundary = offset + ch.len_utf8();
-                }
-            }
-            boundary
-        } else {
-            self.completed = Some(id);
-            suffix.len()
-        };
-        let segment = suffix[..end].trim().to_owned();
-        if segment.is_empty() {
+        // Keep each reply in one synthesis request so sentence boundaries do not
+        // restart the provider's prosody and native audio stream.
+        if is_partial {
             return None;
         }
-        self.emitted.push_str(&suffix[..end]);
-        Some(segment)
+        self.completed = Some(id);
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_owned())
     }
 }
 struct Actor {
@@ -955,32 +930,19 @@ mod tests {
         );
     }
     #[test]
-    fn captions_stream_cumulative_sentences_and_flush_final_once() {
+    fn captions_emit_one_complete_reply_after_long_partial_burst() {
         let mut captions = SpeechCaptions::default();
-        assert_eq!(captions.consume("assistant", 1, "Hello.", true), None);
+        let mut text = String::new();
+        for sentence in 0..100 {
+            text.push_str(&format!("Sentence {sentence}. More detail! Next? "));
+            assert_eq!(captions.consume("assistant", 1, &text, true), None);
+        }
         assert_eq!(
-            captions
-                .consume("assistant", 1, "Hello. Wor", true)
-                .as_deref(),
-            Some("Hello.")
+            captions.consume("assistant", 1, &text, false).as_deref(),
+            Some(text.trim())
         );
-        assert_eq!(captions.consume("assistant", 1, "Hello. Wor", true), None);
-        assert_eq!(
-            captions
-                .consume("assistant", 1, "Hello. World! Next? tail", true)
-                .as_deref(),
-            Some("World! Next?")
-        );
-        assert_eq!(
-            captions
-                .consume("assistant", 1, "Hello. World! Next? tail", false)
-                .as_deref(),
-            Some("tail")
-        );
-        assert_eq!(
-            captions.consume("assistant", 1, "Hello. World! Next? tail", false),
-            None
-        );
+        assert_eq!(captions.consume("assistant", 1, &text, false), None);
+        assert_eq!(captions.consume("assistant", 1, &text, true), None);
         assert_eq!(
             captions
                 .consume("assistant", 2, "No punctuation", false)
@@ -990,55 +952,31 @@ mod tests {
     }
 
     #[test]
-    fn captions_stream_utf8_and_suppress_corrected_spoken_prefix() {
+    fn captions_accept_corrected_partials_and_preserve_utf8_final() {
         let mut captions = SpeechCaptions::default();
-        assert_eq!(
-            captions
-                .consume("assistant", 1, "Café! 世界", true)
-                .as_deref(),
-            Some("Café!")
-        );
+        assert_eq!(captions.consume("assistant", 1, "Old. More", true), None);
+        assert_eq!(captions.consume("assistant", 1, "Café! 世界", true), None);
         assert_eq!(
             captions
                 .consume("assistant", 1, "Café! 世界", false)
                 .as_deref(),
-            Some("世界")
+            Some("Café! 世界")
         );
-        assert_eq!(
-            captions
-                .consume("assistant", 2, "Old. More", true)
-                .as_deref(),
-            Some("Old.")
-        );
-        assert_eq!(
-            captions.consume("assistant", 2, "Corrected. More", false),
-            None
-        );
-        assert_eq!(captions.consume("assistant", 2, "Old. More", false), None);
-        assert_eq!(captions.consume("assistant", 3, "unfinished", true), None);
-        assert_eq!(
-            captions
-                .consume("assistant", 3, "corrected before speech", false)
-                .as_deref(),
-            Some("corrected before speech")
-        );
+        assert_eq!(captions.consume("assistant", 1, "Old. More", false), None);
     }
 
     #[test]
-    fn captions_interrupt_and_queue_failure_fence_remaining_chunks() {
+    fn captions_interrupt_and_queue_failure_fence_finals() {
         let mut captions = SpeechCaptions::default();
-        assert!(
-            captions
-                .consume("assistant", 1, "First. tail", true)
-                .is_some()
-        );
+        assert_eq!(captions.consume("assistant", 1, "First. tail", true), None);
         assert!(captions.update(Some(1), Some(false)));
         captions.update(Some(1), Some(true));
         assert_eq!(captions.consume("assistant", 1, "First. tail", false), None);
-        assert!(
+        assert_eq!(
             captions
-                .consume("assistant", 2, "Next. tail", true)
-                .is_some()
+                .consume("assistant", 2, "Next. tail", false)
+                .as_deref(),
+            Some("Next. tail")
         );
         captions.suppress_remainder(2);
         assert_eq!(captions.consume("assistant", 2, "Next. tail", false), None);
@@ -1056,22 +994,27 @@ mod tests {
     }
 
     #[test]
-    fn captions_bound_retained_prefix_and_report_oversized_speech() {
+    fn captions_bound_requests_and_report_oversized_speech() {
         let mut captions = SpeechCaptions::default();
         assert_eq!(
             captions.consume("assistant", 1, &"é".repeat(8001), true),
             None
         );
-        assert!(captions.emitted.is_empty());
         assert!(captions.speech_error.take().unwrap().contains("16000"));
         assert_eq!(
             captions.consume("assistant", 1, "shorter final", false),
             None
         );
+        let limit = "é".repeat(8000);
         assert_eq!(
-            captions.consume("assistant", 2, "Fine", false).as_deref(),
-            Some("Fine")
+            captions.consume("assistant", 2, &limit, false).as_deref(),
+            Some(limit.as_str())
         );
+        assert_eq!(
+            captions.consume("assistant", 3, &"x".repeat(16001), false),
+            None
+        );
+        assert!(captions.speech_error.take().unwrap().contains("16000"));
     }
 
     #[tokio::test]

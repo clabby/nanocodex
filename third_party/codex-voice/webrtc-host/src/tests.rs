@@ -484,6 +484,7 @@ async fn external_pcm_uses_factory_device_while_provider_suppressed_and_mic_acti
     let mut max_peak = 0;
     let mut clock = tokio::time::interval(Duration::from_millis(10));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut external_sample = 0usize;
     for frame in 0..400 {
         clock.tick().await;
         // Provider keeps producing throughout. The output must be silent except
@@ -494,13 +495,16 @@ async fn external_pcm_uses_factory_device_while_provider_suppressed_and_mic_acti
                 * 10000.0) as i16;
         }
         source.capture_frame(&provider).await?;
-        if (50..350).contains(&frame) {
-            let external: Vec<_> = (0..240)
+        // HTTP-like 40ms bursts with alternating 80/10/60/10ms stalls.
+        // Keep the waveform phase continuous independently of arrival time.
+        if (50..350).contains(&frame) && [0, 8, 9, 15].contains(&((frame - 50) % 16)) {
+            let external: Vec<_> = (0..960)
                 .map(|i| {
-                    (((frame * 240 + i) as f64 * 440.0 * std::f64::consts::TAU / 24000.0).sin()
+                    (((external_sample + i) as f64 * 440.0 * std::f64::consts::TAU / 24000.0).sin()
                         * 10000.0) as i16
                 })
                 .collect();
+            external_sample += external.len();
             ensure!(
                 media.pcm.write(123, &external) == PcmStatus::Ready,
                 "PCM backpressure while paced"
@@ -583,7 +587,7 @@ async fn external_pcm_uses_factory_device_while_provider_suppressed_and_mic_acti
         "audio continued after cancel"
     );
     eprintln!(
-        "external PCM BlackHole: audible_blocks={} silent_blocks={} peak={} mic_samples={}",
+        "jittered external PCM BlackHole: audible_blocks={} silent_blocks={} peak={} mic_samples={}",
         230 - silent,
         silent,
         max_peak,

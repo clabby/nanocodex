@@ -105,7 +105,13 @@ impl Recorder {
     }
 
     pub(crate) async fn start() -> Result<Self, String> {
-        Self::start_input(microphone_input()?).await
+        if cfg!(target_os = "macos") {
+            let mut command = sanitized_program("nanocodex-voice-recorder");
+            command.args(["--max-seconds", &MAX_SECONDS.to_string()]);
+            Self::start_command(command, true).await
+        } else {
+            Self::start_input(microphone_input()?).await
+        }
     }
 
     #[cfg(test)]
@@ -125,11 +131,6 @@ impl Recorder {
     }
 
     async fn start_input(input: Vec<String>) -> Result<Self, String> {
-        let output = tempfile::Builder::new()
-            .prefix("nanocodex-voice-")
-            .suffix(".wav")
-            .tempfile()
-            .map_err(|e| format!("Cannot create microphone recording: {e}"))?;
         let mut command = sanitized_command();
         command.args([
             "-hide_banner",
@@ -157,13 +158,24 @@ impl Recorder {
             "-f",
             "wav",
         ]);
+        Self::start_command(command, false).await
+    }
+
+    async fn start_command(mut command: Command, native: bool) -> Result<Self, String> {
+        let output = tempfile::Builder::new()
+            .prefix("nanocodex-voice-")
+            .suffix(".wav")
+            .tempfile()
+            .map_err(|e| format!("Cannot create microphone recording: {e}"))?;
         command.arg(output.path());
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let mut child = command.spawn().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
+            if e.kind() == std::io::ErrorKind::NotFound && native {
+                "The packaged microphone recorder is missing. Reinstall Nanocodex, or rebuild its native voice resources with scripts/build-voice-native.py.".to_owned()
+            } else if e.kind() == std::io::ErrorKind::NotFound {
                 "Recording needs ffmpeg. On macOS run `brew install ffmpeg`, then retry R. Homebrew installations are detected automatically.".to_owned()
             } else {
                 format!("Cannot launch the microphone recorder: {e}")
@@ -197,17 +209,44 @@ impl Recorder {
             started_at: Instant::now(),
             diagnostics,
         };
-        // Catch missing input backends/devices before telling the user capture started.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        if recorder
-            .child
-            .as_mut()
-            .expect("capture child")
-            .try_wait()
-            .map_err(|e| format!("Cannot inspect microphone recorder: {e}"))?
-            .is_some()
-        {
-            return Err(recorder.failure("Microphone capture could not start"));
+        // The native helper confirms that its engine has started. Keep the UI in
+        // Starting until then, so opening the device does not consume recording time.
+        if native {
+            let opened = Instant::now();
+            loop {
+                if recorder.is_finished()? {
+                    return Err(recorder.failure("Microphone capture could not start"));
+                }
+                if recorder
+                    .diagnostics
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .windows(b"nanocodex-recorder ready\n".len())
+                    .any(|bytes| bytes == b"nanocodex-recorder ready\n")
+                {
+                    recorder.started_at = Instant::now();
+                    break;
+                }
+                // First use can display the macOS consent dialog. Keep the
+                // cancellable Starting state while the user responds to it.
+                let permission_pending = recorder
+                    .diagnostics
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .windows(b"nanocodex-recorder permission\n".len())
+                    .any(|bytes| bytes == b"nanocodex-recorder permission\n");
+                let timeout = Duration::from_secs(if permission_pending { 120 } else { 10 });
+                if opened.elapsed() >= timeout {
+                    return Err(recorder.failure("Microphone capture did not become ready"));
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        } else {
+            // Catch missing FFmpeg input backends/devices before reporting success.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if recorder.is_finished()? {
+                return Err(recorder.failure("Microphone capture could not start"));
+            }
         }
         Ok(recorder)
     }
@@ -230,7 +269,7 @@ impl Recorder {
 
     pub(crate) async fn stop(mut self) -> Result<RecordedSample, String> {
         let child = self.child.as_mut().expect("capture child");
-        // ffmpeg's interactive quit flushes the WAV header; killing it does not.
+        // Both capture backends finalize the WAV header on q; killing does not.
         if child
             .try_wait()
             .map_err(|e| format!("Cannot inspect microphone recorder: {e}"))?
@@ -281,13 +320,7 @@ impl Drop for Recorder {
 }
 
 fn microphone_input() -> Result<Vec<String>, String> {
-    // AVFoundation resolves "default" through the OS default audio device. Never
-    // select an arbitrary enumerated device (which could be loopback/system audio).
-    if cfg!(target_os = "macos") {
-        Ok(["-f", "avfoundation", "-i", ":default"]
-            .map(str::to_owned)
-            .to_vec())
-    } else if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") {
         // Pin PulseAudio to a local socket rather than honoring a user config
         // that could redirect the default server to another machine.
         Ok(vec![
@@ -299,7 +332,7 @@ fn microphone_input() -> Result<Vec<String>, String> {
             "default".into(),
         ])
     } else {
-        Err("Microphone recording is supported on macOS (AVFoundation) and Linux (PulseAudio/PipeWire) with ffmpeg. On this platform, use /voice clone with an existing audio file.".into())
+        Err("Microphone recording is supported on macOS (native audio) and Linux (PulseAudio/PipeWire) with ffmpeg. On this platform, use /voice clone with an existing audio file.".into())
     }
 }
 
@@ -592,6 +625,39 @@ mod tests {
             ),
             Some(binary)
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_readiness_starts_clock_and_quit_collects_valid_wav() {
+        // Exercise the child protocol without opening a real microphone. The
+        // fixture is not complete until q, just like the native WAV header.
+        let fixture = wav(16000);
+        let mut command = sanitized_program("/bin/sh");
+        command.args([
+            "-c",
+            "sleep 0.2; echo 'nanocodex-recorder ready' >&2; read action; [ \"$action\" = q ] && cp \"$1\" \"$2\"",
+            "test-recorder",
+        ]);
+        command.arg(fixture.path());
+        let began = Instant::now();
+        let recorder = Recorder::start_command(command, true).await.unwrap();
+        assert!(began.elapsed() >= Duration::from_millis(200));
+        assert!(recorder.elapsed() < Duration::from_millis(150));
+        let sample = recorder.stop().await.unwrap();
+        assert_eq!(sample.duration(), Duration::from_secs(1));
+        let path = sample.path().to_owned();
+        drop(sample);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_failure_before_ready_is_not_recording_success() {
+        let mut command = sanitized_program("/bin/sh");
+        command.args(["-c", "echo 'device unavailable' >&2; exit 3"]);
+        let result = Recorder::start_command(command, true).await;
+        assert!(matches!(result, Err(error) if error.contains("could not start")));
     }
 
     #[test]
