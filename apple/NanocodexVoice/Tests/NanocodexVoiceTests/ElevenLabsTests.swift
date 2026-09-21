@@ -46,16 +46,39 @@ final class ElevenLabsTests: XCTestCase {
         XCTAssertEqual(encoded["outputProvider"].string, "elevenlabs")
         XCTAssertThrowsError(try ManagedVoiceProtocol(settings: VoiceSettings(outputProvider: .elevenlabs)))
     }
-    func testCaptionSegmentsAndInterruptedFinalStaySuppressed() {
+    func testOnlyFinalCaptionSynthesizesOnceWithWholeResponse() {
         var captions = VoiceSpeechCaptions()
         XCTAssertNil(captions.consume(.init(speaker: "assistant", text: "Hello", isFinal: false, id: 1)))
-        XCTAssertEqual(captions.consume(.init(speaker: "assistant", text: "Hello. More", isFinal: false, id: 1)), "Hello.")
-        XCTAssertEqual(captions.consume(.init(speaker: "assistant", text: "Hello. More words.", id: 1)), "More words.")
-        XCTAssertNil(captions.consume(.init(speaker: "assistant", text: "Hello. More words.", id: 1)))
-        captions.interrupt()
-        XCTAssertNil(captions.consume(.init(speaker: "assistant", text: "Hello. More words. Late final", id: 1)))
-        XCTAssertEqual(captions.consume(.init(speaker: "assistant", text: "New response", id: 2)), "New response")
+        XCTAssertNil(captions.consume(.init(speaker: "assistant", text: "Hello. More", isFinal: false, id: 1)))
+        let complete = "Hello. More words. Another sentence!"
+        XCTAssertEqual(captions.consume(.init(speaker: "assistant", text: complete, id: 1)), complete)
+        XCTAssertNil(captions.consume(.init(speaker: "assistant", text: complete, id: 1)))
+        XCTAssertNil(captions.consume(.init(speaker: "assistant", text: complete + " Late revision.", id: 1)))
+        XCTAssertNil(captions.consume(.init(speaker: "user", text: "User speech", id: 2)))
+        XCTAssertEqual(captions.consume(.init(speaker: "assistant", text: " Next response ", id: 2)), "Next response")
         XCTAssertNil(captions.consume(.init(speaker: "assistant", text: "Old response", id: 1)))
+    }
+    func testInterruptSuppressesPartialCaptionAndItsLateFinal() {
+        var captions = VoiceSpeechCaptions()
+        XCTAssertNil(captions.consume(.init(speaker: "assistant", text: "Sentence one. Sentence two.", isFinal: false, id: 1)))
+        captions.interrupt()
+        let late = ManagedVoiceTranscript(speaker: "assistant", text: "Sentence one. Sentence two. Late final", id: 1)
+        XCTAssertNil(captions.consume(late))
+        XCTAssertTrue(captions.isSuppressed(late))
+        XCTAssertEqual(captions.consume(.init(speaker: "assistant", text: "New response", id: 2)), "New response")
+        captions.interrupt()
+        XCTAssertNil(captions.consume(.init(speaker: "assistant", text: "New response repeated", id: 2)))
+    }
+    func testManyPartialSentencesNeverCreateSynthesisFragments() {
+        var captions = VoiceSpeechCaptions()
+        var text = ""
+        for _ in 0..<64 {
+            text += "A sentence. "
+            XCTAssertNil(captions.consume(.init(speaker: "assistant", text: text, isFinal: false, id: 1)))
+        }
+        XCTAssertEqual(captions.consume(.init(speaker: "assistant", text: text, id: 1)), text.trimmingCharacters(in: .whitespaces))
+        XCTAssertNil(captions.consume(.init(speaker: "assistant", text: "New unfinished response.", isFinal: false, id: 2)))
+        XCTAssertNil(captions.consume(.init(speaker: "assistant", text: "Stale final", id: 1)))
     }
     func testAccountAuthenticatedSpeechContract() async throws {
         let fixture = try HTTPFixture { request in

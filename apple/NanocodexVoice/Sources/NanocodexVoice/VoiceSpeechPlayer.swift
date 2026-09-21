@@ -57,14 +57,14 @@ import InboxCore
     }
 }
 
-/// Tracks cumulative captions and revokes the interrupted caption permanently.
+/// Emits each completed caption once, preserving whole-response prosody.
+/// Partial captions still identify the response to revoke on interruption.
 struct VoiceSpeechCaptions {
     private var caption: UInt64?
     private var suppressed: UInt64?
-    private var offset = 0
+    private var emittedFinal = false
     mutating func interrupt() {
         if let caption { suppressed = max(suppressed ?? 0, caption) }
-        offset = 0
     }
     func isSuppressed(_ entry: ManagedVoiceTranscript) -> Bool {
         entry.speaker == "assistant" && entry.id.map { id in suppressed.map { id <= $0 } ?? false } == true
@@ -73,18 +73,10 @@ struct VoiceSpeechCaptions {
         guard entry.speaker == "assistant", let id = entry.id,
               suppressed.map({ id > $0 }) ?? true,
               caption.map({ id >= $0 }) ?? true else { return nil }
-        if caption != id { caption = id; offset = 0 }
-        let chars = Array(entry.text)
-        guard chars.count >= offset else { return nil }
-        var end = chars.count
-        if !entry.isFinal {
-            end = offset
-            for i in offset..<chars.count where ".!?\n".contains(chars[i]) {
-                if i + 1 == chars.count || chars[i + 1].isWhitespace { end = i + 1 }
-            }
-        }
-        let text = String(chars[offset..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
-        offset = end
+        if caption != id { caption = id; emittedFinal = false }
+        guard entry.isFinal, !emittedFinal else { return nil }
+        emittedFinal = true
+        let text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
     }
 }
