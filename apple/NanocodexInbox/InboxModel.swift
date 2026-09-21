@@ -425,13 +425,14 @@ final class InboxModel: ObservableObject {
         }
         if isDemo, ProcessInfo.processInfo.environment["NANOCODEX_DEMO_STREAMING_GROWTH"] == "1", let id = focused?.id {
             let epoch = generation
+            let interval = min(1_000, max(50, Int(ProcessInfo.processInfo.environment["NANOCODEX_DEMO_STREAM_INTERVAL_MS"] ?? "") ?? 180))
             Task {
                 try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled, generation == epoch, focused?.id == id,
                       !rows.contains(where: { $0.id == "demo-streaming-growth" }) else { return }
                 rows.append(.init(id: "demo-streaming-growth", role: "Agent", text: "Streaming response begins.", running: true))
                 for index in 1...60 {
-                    try? await Task.sleep(for: .milliseconds(180))
+                    try? await Task.sleep(for: .milliseconds(interval))
                     guard !Task.isCancelled, generation == epoch, focused?.id == id,
                           let row = rows.firstIndex(where: { $0.id == "demo-streaming-growth" }) else { return }
                     rows[row].text += "\n\nStream paragraph \(index). A steadily growing response keeps the live tail visible while preserving the reader's chosen position."
