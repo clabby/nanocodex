@@ -192,3 +192,27 @@ test("accepts GLM's exact original tool name only when registered and unambiguou
   const qualifiedOut = await events(await qualified({ input: "read", tools: [namespace, duplicate] }));
   assert.equal(qualifiedOut.find(e => e.type === "response.output_item.done").item.namespace, "files");
 });
+
+test("malformed or truncated provider tools never dispatch", async () => {
+  for (const [message, reason] of [
+    [{ content: { text: "silently lost" } }, "stop"],
+    [{ tool_calls: {} }, "tool_calls"],
+    [{ refusal: "no" }, "stop"],
+    [{ tool_calls: [null] }, "tool_calls"],
+    [{ tool_calls: [{ id: 42, function: { name: "tool_0", arguments: "{}" } }] }, "tool_calls"],
+    [{ tool_calls: [{ function: { name: "tool_0", arguments: "null" } }] }, "tool_calls"],
+    [{ tool_calls: [{ function: { name: "tool_0", arguments: "[]" } }] }, "tool_calls"],
+    [{ tool_calls: [{ function: { name: "tool_0", arguments: "{}" } }] }, "length"],
+  ]) await assert.rejects(fixture(async () => completion(message, reason))({ tools: [{ type: "function", name: "read" }], input: "hi" }));
+  await assert.rejects(fixture(async () => ({ ...completion({ content: "ok" }), error: { message: "bad" } }))({ input: "hi" }), /invalid chat completion/);
+});
+
+test("rejects duplicate history IDs and interleaved tool batches before inference", async () => {
+  const call = id => ({ type: "function_call", call_id: id, name: "f", arguments: "{}" });
+  const output = id => ({ type: "function_call_output", call_id: id, output: "ok" });
+  const invoke = fixture(() => assert.fail("must not infer"));
+  await assert.rejects(invoke({ input: [call("a"), output("a"), call("a"), output("a")] }), /duplicate tool call ID/);
+  await assert.rejects(invoke({ input: [call("a"), call("b"), output("a"), call("c"), output("b"), output("c")] }), /all outputs/);
+  await assert.rejects(invoke({ input: "hi", text: { format: { type: "json_schema" } } }), /structured output/);
+  await assert.rejects(invoke({ input: "hi", tool_choice: "invalid" }), /tool_choice/);
+});

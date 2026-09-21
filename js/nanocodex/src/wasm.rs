@@ -226,43 +226,85 @@ extern "C" {
     ) -> Result<(), JsValue>;
 }
 
-struct JavaScriptSpawnRouter { host_definition_id: u32 }
+struct JavaScriptSpawnRouter {
+    host_definition_id: u32,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct JavaScriptSpawnRoute { model: String, thinking: Thinking, route_id: String }
+struct JavaScriptSpawnRoute {
+    model: String,
+    thinking: Thinking,
+    route_id: String,
+}
 
 #[async_trait::async_trait(?Send)]
 impl nanocodex_subagents::SpawnRouter for JavaScriptSpawnRouter {
-    async fn resolve(&self, parent_session_id: &str, role: &str, task: &str,
-        options: SpawnOptions, host_context: Option<&str>) -> std::io::Result<nanocodex_subagents::SpawnRoute> {
+    async fn resolve(
+        &self,
+        parent_session_id: &str,
+        role: &str,
+        task: &str,
+        options: SpawnOptions,
+        host_context: Option<&str>,
+    ) -> std::io::Result<nanocodex_subagents::SpawnRoute> {
         let mut request = serde_json::json!({ "parentSessionId": parent_session_id,
             "role": role, "task": task });
-        if let Some(model) = options.selected_model() { request["model"] = serde_json::to_value(model)?; }
-        if let Some(thinking) = options.selected_thinking() { request["thinking"] = serde_json::to_value(thinking)?; }
-        if let Some(context) = host_context { request["hostContextRef"] = context.into(); }
+        if let Some(model) = options.selected_model() {
+            request["model"] = serde_json::to_value(model)?;
+        }
+        if let Some(thinking) = options.selected_thinking() {
+            request["thinking"] = serde_json::to_value(thinking)?;
+        }
+        if let Some(context) = host_context {
+            request["hostContextRef"] = context.into();
+        }
         let promise = host_route_subagent(self.host_definition_id, &request.to_string())
             .map_err(|_| std::io::Error::other("subagent routing host rejected request"))?;
-        let value = JsFuture::from(promise).await
+        let value = JsFuture::from(promise)
+            .await
             .map_err(|_| std::io::Error::other("subagent routing failed or was not authorized"))?;
-        let route: JavaScriptSpawnRoute = serde_json::from_str(&value.as_string()
-            .ok_or_else(|| std::io::Error::other("invalid subagent route response"))?)?;
-        let model = route.model.parse::<Model>().map_err(std::io::Error::other)?;
-        if options.selected_model().is_some_and(|requested| requested != model)
-            || options.selected_thinking().is_some_and(|thinking| thinking != route.thinking) {
-            return Err(std::io::Error::other("subagent route conflicts with explicit override"));
+        let route: JavaScriptSpawnRoute = serde_json::from_str(
+            &value
+                .as_string()
+                .ok_or_else(|| std::io::Error::other("invalid subagent route response"))?,
+        )?;
+        let model = route
+            .model
+            .parse::<Model>()
+            .map_err(std::io::Error::other)?;
+        if options
+            .selected_model()
+            .is_some_and(|requested| requested != model)
+            || options
+                .selected_thinking()
+                .is_some_and(|thinking| thinking != route.thinking)
+        {
+            return Err(std::io::Error::other(
+                "subagent route conflicts with explicit override",
+            ));
         }
-        if route.route_id.is_empty() { return Err(std::io::Error::other("empty subagent route reference")); }
+        if route.route_id.trim().is_empty() {
+            return Err(std::io::Error::other("empty subagent route reference"));
+        }
         Ok(nanocodex_subagents::SpawnRoute {
-            options: SpawnOptions::new().model(model).thinking(route.thinking), reference: route.route_id,
+            options: SpawnOptions::new().model(model).thinking(route.thinking),
+            reference: route.route_id,
         })
     }
 
-    fn bind(&self, parent_session_id: &str, child_session_id: &str, reference: &str,
-        host_context: Option<&str>) -> std::io::Result<()> {
+    fn bind(
+        &self,
+        parent_session_id: &str,
+        child_session_id: &str,
+        reference: &str,
+        host_context: Option<&str>,
+    ) -> std::io::Result<()> {
         let mut request = serde_json::json!({ "parentSessionId": parent_session_id,
             "sessionId": child_session_id, "routeId": reference });
-        if let Some(context) = host_context { request["hostContextRef"] = context.into(); }
+        if let Some(context) = host_context {
+            request["hostContextRef"] = context.into();
+        }
         host_bind_subagent_route(self.host_definition_id, &request.to_string())
             .map_err(|_| std::io::Error::other("subagent route binding failed"))
     }

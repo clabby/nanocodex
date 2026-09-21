@@ -1,5 +1,5 @@
 // Local combined routing/runtime test (Node >=24):
-// node --experimental-transform-types --test test/thread-routing-wasm.test.mjs
+// node --test test/thread-routing-wasm.test.mjs
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";

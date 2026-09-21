@@ -525,7 +525,11 @@ const hostBridge = Object.freeze({
   bindSubagentRoute(hostDefinitionId, requestJson) {
     const host = requiredDefinitionHost(hostDefinitionId);
     if (!cloudflareHostMayBindSubagent(host)) throw new Error("subagent host is no longer active");
-    host.bindSubagentRoute(JSON.parse(requestJson));
+    const result = host.bindSubagentRoute(JSON.parse(requestJson));
+    if (result && typeof result.then === "function") {
+      Promise.resolve(result).catch(() => {});
+      throw new TypeError("subagent route binding must be synchronous");
+    }
   },
   bindSubagentSession(
     hostDefinitionId,

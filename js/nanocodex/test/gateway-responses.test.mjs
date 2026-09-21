@@ -78,3 +78,72 @@ test("gateway reasoning text is emitted with the canonical response identity", a
   assert.equal(stream.at(-1).response.output[0].content[0].text, "considered");
   for (const event of stream.filter(event => event.response)) assert.equal(event.response.model, models[1]);
 });
+
+test("telemetry observes actual attempts with no provider content and censors protocol failures", async () => {
+  for (const [fetch, outcome, status] of [
+    [async () => completion({ content: "private output" }), "success", 200],
+    [async () => new Response(secret, { status: 429 }), "http_error", 429],
+    [async () => { throw Error(secret); }, "network_error", null],
+    [async () => new Response(secret), "protocol_error", 200],
+    [async () => Response.json({ error: { message: secret } }), "protocol_error", 200],
+    [async () => completion({ tool_calls: [{ function: { name: secret, arguments: "{}" } }] }, "tool_calls"), "protocol_error", 200],
+  ]) {
+    const observed = [];
+    const transport = createGatewayResponses({ ...options, fetch, onRequest(...args) {
+      assert.deepEqual(args, []);
+      observed.push("start");
+      return { headers: status => observed.push(status), finish: result => { observed.push(result); } };
+    } });
+    const pending = invoke(transport, { input: "private prompt" });
+    if (outcome === "success") await pending; else await assert.rejects(pending);
+    assert.deepEqual(observed, status === null ? ["start", outcome] : ["start", status, outcome]);
+    assert.doesNotMatch(JSON.stringify(observed), /private|synthetic/);
+    observed.length = 0;
+    await assert.rejects(invoke(transport, { reasoning: { effort: "low" } }));
+    assert.deepEqual(observed, []);
+  }
+});
+
+test("telemetry finalizes cancellation once even when fetch ignores its signal", async () => {
+  for (const reason of [new DOMException("private", "AbortError"), new DOMException("private", "TimeoutError")]) {
+    const controller = new AbortController();
+    let start; const ready = new Promise(resolve => { start = resolve; });
+    let complete; const response = new Promise(resolve => { complete = resolve; });
+    const outcomes = [];
+    const transport = createGatewayResponses({ ...options, fetch: async () => { start(); return response; },
+      onRequest: () => ({ headers() {}, finish: outcome => { outcomes.push(outcome); } }) });
+    const pending = invoke(transport, {}, controller.signal);
+    await ready; controller.abort(reason); await assert.rejects(pending);
+    complete(completion({ content: "late" }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(outcomes, [reason.name === "TimeoutError" ? "timeout" : "cancelled"]);
+  }
+});
+
+test("observer exceptions never change a successful generation", async () => {
+  for (const onRequest of [() => { throw Error(secret); }, () => ({ headers() { throw Error(secret); }, async finish() { throw Error(secret); } })]) {
+    const transport = createGatewayResponses({ ...options, fetch: async () => completion({ content: "ok" }), onRequest });
+    assert.equal((await events(await invoke(transport, {}))).at(-1).response.status, "completed");
+  }
+});
+
+test("telemetry waits for body consumption and classifies body transport errors separately", async () => {
+  let release; let notify;
+  const headers = new Promise(resolve => { notify = resolve; });
+  const observed = [];
+  const body = new ReadableStream({ start(controller) { release = () => {
+    controller.enqueue(new TextEncoder().encode(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] })));
+    controller.close();
+  }; } });
+  const transport = createGatewayResponses({ ...options, fetch: async () => new Response(body),
+    onRequest: () => ({ headers(status) { observed.push(status); notify(); }, finish(outcome) { observed.push(outcome); } }) });
+  const pending = invoke(transport, {});
+  await headers; assert.deepEqual(observed, [200]);
+  release(); await pending; assert.deepEqual(observed, [200, "success"]);
+  observed.length = 0;
+  const failed = createGatewayResponses({ ...options,
+    fetch: async () => new Response(new ReadableStream({ start(controller) { controller.error(new TypeError(secret)); } })),
+    onRequest: () => ({ headers(status) { observed.push(status); }, finish(outcome) { observed.push(outcome); } }) });
+  await assert.rejects(invoke(failed, {}), error => !String(error).includes(secret));
+  assert.deepEqual(observed, [200, "network_error"]);
+});

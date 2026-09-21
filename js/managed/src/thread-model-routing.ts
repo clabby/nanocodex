@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const OSS_MODEL = "@cf/zai-org/glm-5.3" as const;
 export const FRONTIER_MODEL = "gpt-6-astra" as const;
-export const ROUTING_VERSION = "jev-direct-v2" as const;
+export const ROUTING_VERSION = "jev-direct-v3" as const;
 const frontierModel = z.enum(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
 const thinking = z.enum(["low", "medium", "high"]);
 export const taskFamily = z.enum([
@@ -121,6 +121,8 @@ export const routingPolicySchema = z.object({
   objective: z.enum(["cost", "effectiveness", "time", "balanced"]).default("balanced"),
   oss_thinking: thinking.default("medium"), frontier_thinking: thinking.default("high"),
   min_confidence: z.number().min(0).max(1).default(0.75),
+  // Low-confidence proposals remain unmeasured fallbacks, never confident admissions.
+  low_confidence_fallback: z.enum(["proposed", "frontier"]).default("proposed"),
   min_success_rate: z.number().min(0).max(1).default(0),
   // Only matched local/held-out measurements belong here. Vendor scores are separate.
   estimates: z.array(estimate).max(100).default([]),
@@ -149,7 +151,7 @@ export const EVAL_EVIDENCE = {
 } as const;
 
 export type ThreadRoute = {
-  version: 1; policy_version: typeof ROUTING_VERSION | "jev-evals-v1"; backend: z.infer<typeof backendSchema>;
+  version: 1; policy_version: typeof ROUTING_VERSION | "jev-direct-v2" | "jev-evals-v1"; backend: z.infer<typeof backendSchema>;
   provider_model: string;
   model: typeof OSS_MODEL | z.infer<typeof frontierModel>; thinking: "low" | "medium" | "high";
   reasoning_mode: "standard"; fast_mode: false; family: TaskFamily; confidence: number;
@@ -163,6 +165,8 @@ export type ThreadRoute = {
     preference_sources: Record<"completion" | "cost" | "duration", "explicit" | "prompt_or_default">;
     eligible_candidates: string[]; candidate_choice: string; proposed_candidate: string | null;
     candidate_confidence: number; classifier_confidence: number;
+    confidence_status?: "accepted" | "low" | "unavailable_or_invalid";
+    fallback_basis?: "none" | "valid_proposal" | "eligible_frontier";
     provider_telemetry?: ReturnType<typeof routingTelemetry>;
   };
 };
@@ -288,6 +292,7 @@ async function resolveDirect(ai: RoutingAi, input: unknown, p: ThreadRoutingPoli
   let family: TaskFamily = "other", confidence = 0, candidateConfidence = 0;
   let selected: typeof eligible[number] | undefined, routerUsage: unknown = null;
   let proposedCandidate: string | null = null;
+  let confidenceStatus: "accepted" | "low" | "unavailable_or_invalid" = "unavailable_or_invalid";
   let reason = "Jev unavailable or invalid result; eligible fallback";
   if (!opening.unsupported && !opening.oversized) {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -297,7 +302,7 @@ async function resolveDirect(ai: RoutingAi, input: unknown, p: ThreadRoutingPoli
           state: JSON.stringify({ opening_prompt: opening.state, task_profiles: taskFamily.options,
             candidates: eligible, eval_evidence: EVAL_EVIDENCE, measurements: p.estimates.filter(e => eligible.some(c => c.backend === e.backend && c.model === e.model && c.thinking === e.thinking)),
             preferences, preference_sources: sources, provider_telemetry: providerTelemetry,
-            policy: { min_success_rate: p.min_success_rate, min_confidence: p.min_confidence },
+            policy: { min_success_rate: p.min_success_rate, min_confidence: p.min_confidence, low_confidence_fallback: p.low_confidence_fallback },
             lower_precedence_defaults: { objective: p.objective, weights: p.weights },
             uncertainty: "Published evals are proxies, not calibrated success probabilities. Missing measurements are unknown. Catalog price hints are dated base token rates, not measured task cost or duration; do not infer free service from a missing price hint. Regional provider telemetry describes transport latency only, not task duration, generation TTFT, client delivery, or completion probability." }),
           questions: {
@@ -320,13 +325,20 @@ async function resolveDirect(ai: RoutingAi, input: unknown, p: ThreadRoutingPoli
       selected = eligible.find(c => c.id === proposedCandidate);
       if (!selected) throw new Error("Unknown candidate");
       if (candidateConfidence < p.min_confidence) {
-        selected = undefined;
-        reason = "Jev candidate confidence below policy threshold; eligible fallback";
-      } else reason = "Jev direct model and thinking selection; success probability unknown unless measured";
+        confidenceStatus = "low";
+        if (p.low_confidence_fallback === "frontier") selected = undefined;
+        reason = selected
+          ? "Jev candidate confidence below policy threshold; valid proposal retained by configured fallback policy, success probability unknown"
+          : "Jev candidate confidence below policy threshold; eligible frontier fallback policy";
+      } else {
+        confidenceStatus = "accepted";
+        reason = "Jev direct model and thinking selection; success probability unknown unless measured";
+      }
     } catch { selected = undefined; }
     finally { clearTimeout(timer); }
   } else reason = "Opening modality or size outside bounded Jev input; eligible fallback";
-  const fallback = !selected;
+  const fallback = confidenceStatus !== "accepted";
+  const fallbackBasis = !fallback ? "none" : selected ? "valid_proposal" : "eligible_frontier";
   const measurementFor = (c: typeof eligible[number]) => p.estimates.find(e => e.family === family
     && e.backend === c.backend && e.model === c.model && e.thinking === c.thinking) ?? null;
   // A confidence score can never satisfy a minimum measured success constraint.
@@ -348,17 +360,18 @@ async function resolveDirect(ai: RoutingAi, input: unknown, p: ThreadRoutingPoli
     router_usage: routerUsage, created_at: new Date().toISOString(),
     audit: { policy: p, preferences, preference_sources: sources,
       eligible_candidates: eligible.map(c => c.id), candidate_choice: selected.id, proposed_candidate: proposedCandidate,
-      candidate_confidence: candidateConfidence, classifier_confidence: confidence, provider_telemetry: providerTelemetry },
+      candidate_confidence: candidateConfidence, classifier_confidence: confidence,
+      confidence_status: confidenceStatus, fallback_basis: fallbackBasis, provider_telemetry: providerTelemetry },
   };
 }
 
 /** One resolver per Durable Object; the committed record is authoritative after restart. */
 export class ThreadRoutePin {
   #pending?: Promise<ThreadRoute>;
-  constructor(private readonly store: {
-    read(): ThreadRoute | undefined;
-    commit(route: ThreadRoute): void;
-  }) {}
+  private readonly store: { read(): ThreadRoute | undefined; commit(route: ThreadRoute): void };
+  constructor(store: { read(): ThreadRoute | undefined; commit(route: ThreadRoute): void }) {
+    this.store = store;
+  }
   resolve(create: () => Promise<ThreadRoute>): Promise<ThreadRoute> {
     const retained = this.store.read();
     if (retained) return Promise.resolve(retained);

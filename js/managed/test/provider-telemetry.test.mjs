@@ -49,3 +49,18 @@ test('live observer measures headers/body separately using monotonic time and pe
  const failed=beginLiveProviderObservation(sample(1,2),{append(){throw Error('storage unavailable');}});
  failed.headers(200);assert.equal(await failed.finish('success'),false);
 });
+
+test('probe byte budget cancels oversized responses and records a censored protocol error', async () => {
+ const observations=[];let cancelled=false;
+ const attempted=await runProviderProbes({enabled:true,dailyRequestLimit:1,workerColo:null,
+ targets:[{backend:'vercel',model:'test/model',key:'secret'}],
+ store:{reserveProbe:()=>true,append:x=>{observations.push(x);}},
+ fetch:async()=>new Response(new ReadableStream({pull(controller){controller.enqueue(new Uint8Array(65_537));},cancel(){cancelled=true;}}))});
+ assert.equal(attempted,1);assert.equal(cancelled,true);assert.equal(observations[0].outcome,'protocol_error');assert.equal(observations[0].fullResponseMs,null);
+});
+test('probe tick dispatches at most two attempts and only literal true enables it', async () => {
+ let calls=0;const target={backend:'vercel',model:'test/model',key:'secret'};
+ const options={enabled:true,dailyRequestLimit:100,workerColo:null,targets:[target,target,target],store:{reserveProbe:()=>true,append(){}},fetch:async()=>{calls++;return new Response('ok');}};
+ assert.equal(await runProviderProbes(options),2);assert.equal(calls,2);
+ assert.equal(await runProviderProbes({...options,enabled:'false'}),0);assert.equal(calls,2);
+});

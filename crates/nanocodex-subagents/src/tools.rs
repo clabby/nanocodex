@@ -185,32 +185,57 @@ pub async fn start_agents_observed(
         // the entire batch has been bound and inserted below.
         let mut routes = Vec::with_capacity(prepared.len());
         for (task, _) in &prepared {
-            routes.push(router.resolve(session_id, &task.role, &task.task,
-                SpawnOptions::new(), host_context.as_deref()).await?);
+            let route = router
+                .resolve(
+                    session_id,
+                    &task.role,
+                    &task.task,
+                    SpawnOptions::new(),
+                    host_context.as_deref(),
+                )
+                .await?;
+            route.validate(SpawnOptions::new())?;
+            routes.push(route);
         }
-        let mut children: Vec<(nanocodex_agent::Nanocodex, nanocodex_agent::AgentEvents)> = Vec::with_capacity(routes.len());
+        let mut children: Vec<(nanocodex_agent::Nanocodex, nanocodex_agent::AgentEvents)> =
+            Vec::with_capacity(routes.len());
         for route in routes {
-            let outcome = parent.spawn_with_host_context(route.options, host_context.as_ref().map(Arc::clone)).await;
+            let outcome = parent
+                .spawn_with_host_context(route.options, host_context.as_ref().map(Arc::clone))
+                .await;
             let child = match outcome {
                 Ok(child) => child,
                 Err(error) => {
-                    for (child, _) in &children { let _ = child.shutdown().await; }
+                    for (child, _) in &children {
+                        let _ = child.shutdown().await;
+                    }
                     return Err(error.into());
                 }
             };
             observe_session(child.0.session_id());
-            if let Err(error) = router.bind(session_id, child.0.session_id(), &route.reference, host_context.as_deref()) {
+            if let Err(error) = router.bind(
+                session_id,
+                child.0.session_id(),
+                &route.reference,
+                host_context.as_deref(),
+            ) {
                 let _ = child.0.shutdown().await;
-                for (child, _) in &children { let _ = child.shutdown().await; }
+                for (child, _) in &children {
+                    let _ = child.shutdown().await;
+                }
                 return Err(error.into());
             }
             children.push(child);
         }
         children
     } else {
-        parent.spawn_many_observed_with_host_context(
-            prepared.len(), observe_session, host_context.as_ref().map(Arc::clone),
-        ).await?
+        parent
+            .spawn_many_observed_with_host_context(
+                prepared.len(),
+                observe_session,
+                host_context.as_ref().map(Arc::clone),
+            )
+            .await?
     };
 
     let mut reports = Vec::with_capacity(prepared.len());
@@ -336,15 +361,27 @@ async fn start_agent_with_host_context(
     };
     let router = registry.spawn_router();
     let route = if let Some(router) = &router {
-        Some(router.resolve(session_id, &role, &task, options, host_context.as_deref()).await?)
+        let route = router
+            .resolve(session_id, &role, &task, options, host_context.as_deref())
+            .await?;
+        route.validate(options)?;
+        Some(route)
     } else {
         None
     };
     let (child, events) = parent
-        .spawn_with_host_context(route.as_ref().map_or(options, |route| route.options), host_context.as_ref().map(Arc::clone))
+        .spawn_with_host_context(
+            route.as_ref().map_or(options, |route| route.options),
+            host_context.as_ref().map(Arc::clone),
+        )
         .await?;
     if let (Some(router), Some(route)) = (&router, &route) {
-        if let Err(error) = router.bind(session_id, child.session_id(), &route.reference, host_context.as_deref()) {
+        if let Err(error) = router.bind(
+            session_id,
+            child.session_id(),
+            &route.reference,
+            host_context.as_deref(),
+        ) {
             let _ = child.shutdown().await;
             return Err(error.into());
         }
@@ -417,6 +454,7 @@ impl Tool for SpawnAgent {
             .registry
             .upgrade()
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+        #[cfg(not(target_family = "wasm"))]
         let report = start_agent_with_host_context(
             &self.parent,
             &registry,
@@ -426,6 +464,29 @@ impl Tool for SpawnAgent {
             host_context,
         )
         .await?;
+        // Tool futures are Send, while host JS routing and shutdown futures are
+        // isolate-local. Poll them on the WASM executor and await a Send receipt.
+        // Dropping the tool still cancels startup instead of detaching it.
+        #[cfg(target_family = "wasm")]
+        let report = {
+            let parent = self.parent.clone();
+            let session_id = context.session_id().to_owned();
+            let pending = super::platform::spawn(async move {
+                start_agent_with_host_context(
+                    &parent,
+                    &registry,
+                    &session_id,
+                    task,
+                    options,
+                    host_context,
+                )
+                .await
+            });
+            let _cancel = pending.abort_on_drop();
+            pending
+                .await
+                .map_err(|_| std::io::Error::other("subagent startup was cancelled"))??
+        };
         json_output(&report)
     }
 }

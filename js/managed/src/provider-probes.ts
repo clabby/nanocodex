@@ -21,7 +21,7 @@ export interface ProviderProbeOptions {
  * Configure ONE budget owner per schedule; multiplying shards multiplies spend limits.
  */
 export async function runProviderProbes(options: ProviderProbeOptions): Promise<number> {
-  if (!options.enabled) return 0;
+  if (options.enabled !== true) return 0;
   if (!Number.isInteger(options.dailyRequestLimit) || options.dailyRequestLimit < 1 || options.dailyRequestLimit > 100) return 0;
   const now = options.now ?? Date.now;
   let attempted = 0;
@@ -31,7 +31,8 @@ export async function runProviderProbes(options: ProviderProbeOptions): Promise<
     if (!await options.store.reserveProbe(new Date(timestamp).toISOString().slice(0, 10), options.dailyRequestLimit)) break;
     attempted++;
     const controller = new AbortController();
-    const timeoutMs = Math.max(1, Math.min(options.timeoutMs ?? 10_000, 30_000));
+    const requestedTimeout = options.timeoutMs ?? 10_000;
+    const timeoutMs = Number.isFinite(requestedTimeout) ? Math.max(1, Math.min(requestedTimeout, 30_000)) : 10_000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const observation: ProviderObservation = { timestamp, source: "probe", workerColo: options.workerColo,
       clientIngressColo: null, backend: target.backend, model: target.model, effort: null,
@@ -53,13 +54,13 @@ export async function runProviderProbes(options: ProviderProbeOptions): Promise<
           const chunk = await reader.read();
           if (chunk.done) break;
           bytes += chunk.value.byteLength;
-          if (bytes > 65_536) { await reader.cancel(); throw new Error("probe response exceeds bound"); }
+          if (bytes > 65_536) { observation.outcome = "protocol_error"; await reader.cancel(); throw new Error("probe response exceeds bound"); }
         }
       }
       observation.outcome = response.ok ? "success" : "http_error";
       if (response.ok) observation.fullResponseMs = Math.max(0, now() - timestamp);
     } catch {
-      observation.outcome = controller.signal.aborted ? "timeout" : "network_error";
+      observation.outcome = controller.signal.aborted ? "timeout" : observation.outcome === "protocol_error" ? "protocol_error" : "network_error";
     } finally {
       clearTimeout(timer);
       observation.elapsedMs = Math.max(0, now() - timestamp);

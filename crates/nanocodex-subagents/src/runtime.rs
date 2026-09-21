@@ -1006,11 +1006,17 @@ impl Registry {
 
     /// Installs a host routing policy before accepting child spawns.
     pub fn set_spawn_router(&self, router: Arc<dyn crate::SpawnRouter>) {
-        *self.spawn_router.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(router);
+        *self
+            .spawn_router
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(router);
     }
 
     pub(super) fn spawn_router(&self) -> Option<Arc<dyn crate::SpawnRouter>> {
-        self.spawn_router.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.spawn_router
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn set_max_concurrency(&self, limit: usize) {
@@ -2047,6 +2053,164 @@ mod tests {
             .build()
             .unwrap();
         Nanocodex::builder(openai).build().unwrap()
+    }
+
+    struct TestSpawnRouter {
+        resolutions: std::sync::atomic::AtomicUsize,
+        bindings: std::sync::atomic::AtomicUsize,
+        reject_resolution: bool,
+        reject_binding: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::SpawnRouter for TestSpawnRouter {
+        async fn resolve(
+            &self,
+            _parent: &str,
+            _role: &str,
+            _task: &str,
+            _options: nanocodex_agent::SpawnOptions,
+            _context: Option<&str>,
+        ) -> std::io::Result<crate::SpawnRoute> {
+            self.resolutions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.reject_resolution {
+                return Err(std::io::Error::other("routing authorization denied"));
+            }
+            Ok(crate::SpawnRoute {
+                options: nanocodex_agent::SpawnOptions::new()
+                    .model(nanocodex_agent::Model::Sol)
+                    .thinking(nanocodex_agent::Thinking::High),
+                reference: "prepared-route".to_owned(),
+            })
+        }
+
+        fn bind(
+            &self,
+            _parent: &str,
+            _child: &str,
+            _reference: &str,
+            _context: Option<&str>,
+        ) -> std::io::Result<()> {
+            let count = self
+                .bindings
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if count == self.reject_binding {
+                return Err(std::io::Error::other("durable pin failed"));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn routed_spawn_failures_never_start_a_child_or_publish_it() {
+        use crate::tools::{AgentTask, start_agent_with, start_agents};
+        use nanocodex_agent::{Model, SpawnOptions};
+        use std::sync::atomic::Ordering;
+
+        // Authorization, explicit override conflicts, single pin failures, and
+        // a late batch pin failure must all happen before any model work starts.
+        for (batch, reject_resolution, reject_binding, explicit_override, expected_children) in [
+            (false, true, 0, false, 0),
+            (false, false, 0, true, 0),
+            (false, false, 1, false, 1),
+            (true, true, 0, false, 0),
+            (true, false, 2, false, 2),
+        ] {
+            let called = Arc::new(Notify::new());
+            let service_called = Arc::clone(&called);
+            let openai = OpenAi::builder("test-key")
+                .service(move || PendingService {
+                    called: Arc::clone(&service_called),
+                })
+                .build()
+                .unwrap();
+            let (handles, mut received_handles) = mpsc::unbounded_channel();
+            let (parent, _events) = Nanocodex::builder(openai)
+                .tools_factory(move |handle| {
+                    handles.send(handle).unwrap();
+                    nanocodex_tools::Tools::builder().without_defaults().build()
+                })
+                .build()
+                .unwrap();
+            let parent_handle = received_handles.recv().await.unwrap();
+            let (updates, mut receiver) = mpsc::unbounded_channel();
+            let registry = Arc::new(Registry::new(updates, 2));
+            let router = Arc::new(TestSpawnRouter {
+                resolutions: 0.into(),
+                bindings: 0.into(),
+                reject_resolution,
+                reject_binding,
+            });
+            registry.set_spawn_router(router.clone());
+            let task = || AgentTask {
+                role: "worker".to_owned(),
+                task: "work".to_owned(),
+                output_schema: json!({ "type": "object" }),
+            };
+            let error = if batch {
+                start_agents(
+                    &parent_handle,
+                    &registry,
+                    parent.session_id(),
+                    vec![task(), task()],
+                )
+                .await
+                .err()
+                .unwrap()
+            } else {
+                let options = if explicit_override {
+                    SpawnOptions::new().model(Model::Astra)
+                } else {
+                    SpawnOptions::new()
+                };
+                start_agent_with(
+                    &parent_handle,
+                    &registry,
+                    parent.session_id(),
+                    task(),
+                    options,
+                )
+                .await
+                .err()
+                .unwrap()
+            };
+            let expected_error = if reject_resolution {
+                "authorization denied"
+            } else if explicit_override {
+                "explicit override"
+            } else {
+                "durable pin failed"
+            };
+            assert!(error.to_string().contains(expected_error), "{error}");
+            assert!(
+                registry
+                    .directory(parent.session_id(), true, false)
+                    .await
+                    .is_empty()
+            );
+            assert!(receiver.try_recv().is_err());
+            assert!(
+                timeout(Duration::from_millis(20), called.notified())
+                    .await
+                    .is_err()
+            );
+            for _ in 0..expected_children {
+                let child = received_handles.try_recv().unwrap();
+                assert!(
+                    child.spawn().await.is_err(),
+                    "failed child must be shut down"
+                );
+            }
+            assert!(received_handles.try_recv().is_err());
+            assert_eq!(router.bindings.load(Ordering::SeqCst), expected_children);
+            assert!(
+                registry.reserve_turns(2).is_ok(),
+                "failed spawn must release capacity"
+            );
+            parent.shutdown().await.unwrap();
+        }
     }
 
     fn test_contract() -> OutputContract {

@@ -1,7 +1,8 @@
-import type { Thinking } from '../types.mjs';
+import type { Model, Thinking } from '../types.mjs';
+export type ChildRouteModel = Model | 'sol' | 'terra' | 'luna' | 'astra' | 'glm-5.3' | 'glm53';
 export type ChildRoute = Readonly<{
   provider: string;
-  model: 'sol' | 'terra' | 'luna' | 'astra' | 'glm-5.3';
+  model: ChildRouteModel;
   thinking: Thinking;
   providerModel?: string;
 }>;
@@ -24,7 +25,11 @@ export type SubagentRouting = Readonly<{
   bind(request: ChildRouteBinding): void;
   route(sessionId: string): ChildRoute;
 }>;
-/** Host-owned routing lifecycle. Authorize must restrict the resolver to eligible providers and credentials. */
+/**
+ * Host-owned routing lifecycle. Authorize must restrict the resolver to eligible
+ * providers and credentials. Public model aliases are normalized before resolution.
+ * Load and save must be synchronous; save must durably pin the route before returning.
+ */
 export function createSubagentRouting<Authority>(options: {
   authorize(parentSessionId: string, hostContextRef?: string): Authority | Promise<Authority>;
   resolve(request: ChildRouteRequest, authority: Authority): ChildRoute | Promise<ChildRoute>;

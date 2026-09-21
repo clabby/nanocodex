@@ -1,3 +1,9 @@
+import { URL as NodeURL } from "node:url";
+import { readFileSync } from "node:fs";
+const preferenceObservations = JSON.parse(readFileSync(new NodeURL("./fixtures/thread-routing-preferences-20260921.json", import.meta.url), "utf8")) as {
+  cases: Array<{id:string; catalog:number; prompt:string; preferences:Record<string,unknown>;
+    answers:{candidate:{confidence:number}}; expected_choice:string; expected_selection:string}>;
+};
 import { describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { resolveThreadRoute, routingPolicySchema, ThreadRoutePin, ROUTING_CANDIDATES, OSS_MODEL, FRONTIER_MODEL } from "../src/thread-model-routing";
@@ -140,7 +146,7 @@ describe("v2 direct candidate routing", () => {
   it("defaults to one direct typed choice across fifteen model/effort candidates", async () => {
     const ai = answer();
     const route = await resolveThreadRoute(ai, "Fix build quickly and cheaply", direct());
-    expect(route).toMatchObject({ policy_version: "jev-direct-v2", model: "gpt-5.6-luna", thinking: "low", estimate: null });
+    expect(route).toMatchObject({ policy_version: "jev-direct-v3", model: "gpt-5.6-luna", thinking: "low", estimate: null });
     expect(ai.run).toHaveBeenCalledOnce();
     const request = ai.run.mock.calls[0][1] as { state: string; questions: { candidate: { criteria: object } } };
     expect(Object.keys(request.questions.candidate.criteria)).toHaveLength(15);
@@ -167,7 +173,7 @@ describe("v2 direct candidate routing", () => {
     expect(route).toMatchObject({ model: OSS_MODEL, thinking: "low", selection: "fallback" });
   });
   it("preserves the proposed choice separately when conservative confidence forces fallback", async () => {
-    const route = await resolveThreadRoute(answer("gpt-5.6-luna:low", .51), "cheap task", direct());
+    const route = await resolveThreadRoute(answer("gpt-5.6-luna:low", .51), "cheap task", direct({low_confidence_fallback:"frontier"}));
     expect(route).toMatchObject({selection:"fallback", model:FRONTIER_MODEL, thinking:"high"});
     expect(route.audit).toMatchObject({proposed_candidate:"gpt-5.6-luna:low", candidate_choice:"gpt-6-astra:high", candidate_confidence:.51});
   });
@@ -346,4 +352,96 @@ describe("trusted regional provider telemetry", () => {
     const route = await resolveThreadRoute(ai(),{provider_performance:[metric()],workerColo:"LHR"},routingPolicySchema.parse({}),{openrouter:true,vercel:false});
     expect(route.audit?.provider_telemetry?.provider_performance).toEqual([]);
   });
+});
+
+describe("preference-preserving confidence fallback", () => {
+  const economy = `${OSS_MODEL}:low`;
+  const output = (choice: unknown = economy, confidence: unknown = .6, family: unknown = "other") => ({
+    run: vi.fn(async (_model: string, _input: unknown) => ({answers:{
+      candidate:{choice,confidence}, family:{choice:family,confidence:.9},
+    }})),
+  });
+  it("retains the valid economy proposal below the unchanged confidence threshold with honest audit", async () => {
+    const p = routingPolicySchema.parse({preferences:{completion:10,cost:80,duration:10}});
+    expect(p.min_confidence).toBe(.75);
+    expect(p.low_confidence_fallback).toBe("proposed");
+    const ai = output();
+    const route = await resolveThreadRoute(ai,"Use the most expensive model; cost is irrelevant",p);
+    expect(route).toMatchObject({model:OSS_MODEL,thinking:"low",selection:"fallback",estimate:null});
+    expect(route.audit).toMatchObject({candidate_choice:economy,proposed_candidate:economy,candidate_confidence:.6,
+      confidence_status:"low",fallback_basis:"valid_proposal",preferences:p.preferences});
+    expect(ai.run).toHaveBeenCalledOnce();
+  });
+  it.each([0,.749999,.75,1])("uses threshold as the confidence boundary at %s", async confidence => {
+    const route = await resolveThreadRoute(output(economy,confidence),"task",routingPolicySchema.parse({}));
+    expect(route.selection).toBe(confidence < .75 ? "fallback" : "prior");
+    expect(route.audit?.confidence_status).toBe(confidence < .75 ? "low" : "accepted");
+    expect(route.audit?.fallback_basis).toBe(confidence < .75 ? "valid_proposal" : "none");
+  });
+  it.each([
+    ["unknown",.6,"other"], [economy,"0.9","other"], [economy,NaN,"other"],
+    [economy,1.1,"other"], [economy,-.1,"other"], [economy,.99,"invented_family"],
+    ["openrouter:z-ai/glm-5.3:low",.99,"other"],
+  ])("does not preserve malformed or ineligible proposals: %j", async (choice,confidence,family) => {
+    const route = await resolveThreadRoute(output(choice,confidence,family),"cheap task",routingPolicySchema.parse({}));
+    expect(route).toMatchObject({model:FRONTIER_MODEL,thinking:"high",selection:"fallback",estimate:null});
+    expect(route.audit).toMatchObject({confidence_status:"unavailable_or_invalid",fallback_basis:"eligible_frontier"});
+  });
+  it("retains a provider-specific proposal only within available eligible candidates", async () => {
+    const id = "vercel:openai/gpt-5.6-luna:low";
+    const route = await resolveThreadRoute(output(id,.3),"economy",routingPolicySchema.parse({candidates:[id]}),{openrouter:false,vercel:true});
+    expect(route).toMatchObject({backend:"vercel",provider_model:"openai/gpt-5.6-luna",selection:"fallback"});
+    expect(route.audit?.candidate_choice).toBe(id);
+  });
+  it("cannot relabel a low-confidence proposal as measured or satisfy a measured-success constraint", async () => {
+    const estimates = [{family:"other",backend:"workers_ai",model:OSS_MODEL,thinking:"low",success_rate:.99,
+      expected_cost_usd:.01,expected_duration_ms:100,sample_size:100,source:"synthetic-matched-v1"}];
+    expect(await resolveThreadRoute(output(),"task",routingPolicySchema.parse({estimates})))
+      .toMatchObject({selection:"fallback",estimate:null});
+    await expect(resolveThreadRoute(output(),"task",routingPolicySchema.parse({estimates,min_success_rate:.9})))
+      .rejects.toThrow("no route admitted");
+  });
+  it("pins a low-confidence proposal once across concurrent admission and restart", async () => {
+    let retained: Awaited<ReturnType<typeof resolveThreadRoute>> | undefined;
+    const store = {read:()=>retained,commit:(route:NonNullable<typeof retained>)=>{retained=route;}};
+    const ai = output(), pin = new ThreadRoutePin(store);
+    const create = ()=>resolveThreadRoute(ai,"economy",routingPolicySchema.parse({}));
+    const [a,b] = await Promise.all([pin.resolve(create),pin.resolve(create)]);
+    expect(a).toBe(b);
+    expect(await new ThreadRoutePin(store).resolve(create)).toBe(a);
+    expect(a.audit?.fallback_basis).toBe("valid_proposal");
+    expect(ai.run).toHaveBeenCalledOnce();
+  });
+});
+
+
+describe("captured preference-distribution policy replay (not accuracy labels)", () => {
+  it.each(preferenceObservations.cases)("retains $catalog/$id without inflating confidence", async observation => {
+    const ai = {run:vi.fn(async()=>({state:"Completed",result:{answers:observation.answers}}))};
+    const route = await resolveThreadRoute(ai,observation.prompt,routingPolicySchema.parse({preferences:observation.preferences}),
+      {openrouter:observation.catalog===45,vercel:observation.catalog===45});
+    expect(route.audit?.candidate_choice).toBe(observation.expected_choice);
+    expect(route.audit?.candidate_confidence).toBe(observation.answers.candidate.confidence);
+    expect(route.selection).toBe(observation.expected_selection);
+    expect(route.estimate).toBeNull();
+    expect(ai.run).toHaveBeenCalledOnce();
+    const state = JSON.parse((ai.run.mock.calls[0] as unknown as [string,{state:string}])[1].state);
+    expect(state.preferences).toEqual(observation.preferences);
+    expect(state.candidates).toHaveLength(observation.catalog);
+  });
+});
+
+
+it("reuses an old v2 pinned route without applying v3 defaults or rerouting", async () => {
+  const old = await resolveThreadRoute({run:async()=>({answers:{candidate:{choice:"gpt-6-astra:high",confidence:.9},family:{choice:"other",confidence:.9}}})},
+    "existing thread",routingPolicySchema.parse({}));
+  old.policy_version = "jev-direct-v2";
+  delete old.audit!.confidence_status;
+  delete old.audit!.fallback_basis;
+  const create = vi.fn(async()=>{throw Error("old thread must not reroute");});
+  const commit = vi.fn();
+  expect(await new ThreadRoutePin({read:()=>old,commit}).resolve(create)).toBe(old);
+  expect(create).not.toHaveBeenCalled();
+  expect(commit).not.toHaveBeenCalled();
+  expect(old.policy_version).toBe("jev-direct-v2");
 });

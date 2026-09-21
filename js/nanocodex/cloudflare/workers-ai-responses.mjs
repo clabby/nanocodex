@@ -39,15 +39,18 @@ async function abortable(promise, signal) {
 }
 
 function translate(body, model) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) fail("expected a Responses request object");
   if (body.model !== undefined && body.model !== model) fail("unsupported model override; expected pinned model");
   const effort = (value) => {
-    if (value !== undefined && !["low", "medium", "high"].includes(value)) fail(`unsupported reasoning effort ${value}; expected low, medium or high`);
+    if (value !== undefined && !["low", "medium", "high"].includes(value)) fail("unsupported reasoning effort; expected low, medium or high");
     return value;
   };
   if (body.previous_response_id) fail("previous_response_id is unsupported; send the complete Responses history");
   if (body.context_management?.length) fail("provider compaction is unsupported; supply portable text history");
   const history = typeof body.input === "string"
     ? [{ type: "message", role: "user", content: body.input }] : body.input ?? [];
+  if (!Array.isArray(history)) fail("expected complete Responses history");
+  if (body.text?.format && body.text.format.type !== "text") fail("structured output formats are unsupported");
   const registry = new Map();
   const byIdentity = new Map();
   function register(tool, namespace, description = "") {
@@ -85,6 +88,7 @@ function translate(body, model) {
   const messages = [];
   if (body.instructions) messages.push({ role: "system", content: body.instructions });
   const pending = new Set();
+  const seenCallIds = new Set();
   let reasoningEffort = effort(body.reasoning?.effort);
   for (const item of history) {
     switch (item.type ?? "message") {
@@ -125,7 +129,9 @@ function translate(body, model) {
           entry = { alias: `history_${byIdentity.size}` };
           byIdentity.set(key(item.namespace, name), entry);
         }
-        if (!item.call_id || pending.has(item.call_id)) fail("missing or duplicate tool call ID");
+        if (typeof item.call_id !== "string" || !item.call_id || seenCallIds.has(item.call_id)) fail("missing or duplicate tool call ID");
+        if (pending.size && messages.at(-1)?.role !== "assistant") fail("tool calls require all outputs before another tool call");
+        seenCallIds.add(item.call_id);
         pending.add(item.call_id);
         const call = { id: item.call_id, type: "function", function: { name: entry.alias,
           arguments: item.type === "custom_tool_call" ? JSON.stringify({ input: item.input }) : json(item.arguments) } };
@@ -157,7 +163,10 @@ function translate(body, model) {
   if (body.max_output_tokens !== undefined) input.max_completion_tokens = body.max_output_tokens;
   if (reasoningEffort !== undefined) input.reasoning_effort = reasoningEffort;
   if (body.tool_choice !== undefined) {
-    if (typeof body.tool_choice === "string") input.tool_choice = body.tool_choice;
+    if (typeof body.tool_choice === "string") {
+      if (!["auto", "none", "required"].includes(body.tool_choice)) fail("unsupported tool_choice");
+      input.tool_choice = body.tool_choice;
+    }
     else {
       const choice = byIdentity.get(key(body.tool_choice.namespace, body.tool_choice.name ?? (body.tool_choice.type === "tool_search" ? "tool_search" : undefined)));
       if (!choice?.definition) fail("tool_choice refers to an unavailable tool");
@@ -180,10 +189,17 @@ function textContent(content) {
 
 function toResponse(result, registry, model) {
   const choice = result?.choices?.[0];
-  if (!choice?.message || !["stop", "tool_calls", "length", "content_filter"].includes(choice.finish_reason)) {
+  if (result?.error || !choice?.message || typeof choice.message !== "object" || Array.isArray(choice.message)
+    || !["stop", "tool_calls", "length", "content_filter"].includes(choice.finish_reason)) {
     fail("invalid chat completion or unsupported finish reason");
   }
   const message = choice.message;
+  if (message.content != null && typeof message.content !== "string") fail("unsupported completion content");
+  if (message.tool_calls != null && !Array.isArray(message.tool_calls)) fail("invalid completion tool calls");
+  if (message.refusal) fail("provider refused completion");
+  if (["length", "content_filter"].includes(choice.finish_reason) && message.tool_calls?.length) {
+    fail("incomplete completion cannot dispatch tool calls");
+  }
   const output = [];
   const id = `resp_${crypto.randomUUID()}`;
   const reasoning = message.reasoning_content ?? message.reasoning;
@@ -197,6 +213,7 @@ function toResponse(result, registry, model) {
   }
   const callIds = new Set();
   for (const call of message.tool_calls ?? []) {
+    if (!call || (call.type !== undefined && call.type !== "function")) fail("unsupported completion tool call");
     const returnedName = call.function?.name;
     let entry = registry.get(returnedName);
     if (!entry && typeof returnedName === "string") {
@@ -211,6 +228,8 @@ function toResponse(result, registry, model) {
     const argumentsText = json(call.function.arguments);
     let args;
     try { args = JSON.parse(argumentsText); } catch { fail("model returned invalid tool JSON"); }
+    if (call.id !== undefined && (typeof call.id !== "string" || !call.id)) fail("invalid tool call ID");
+    if (!args || typeof args !== "object" || Array.isArray(args)) fail("tool arguments must be a JSON object");
     const call_id = call.id || `call_${crypto.randomUUID()}`;
     if (callIds.has(call_id)) fail("model returned duplicate tool call IDs");
     callIds.add(call_id);

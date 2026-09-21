@@ -19,7 +19,7 @@ export function createGatewayResponses(options) {
   const gatewayModel = model === MODELS[0]
     ? (provider === "openrouter" ? "z-ai/glm-5.3" : "zai/glm-5.3") : `openai/${model}`;
   const apiBaseUrl = `https://${provider}-responses.invalid/v1`;
-  const adapter = signal => createWorkersAiResponses({
+  const adapter = (signal, attempt) => createWorkersAiResponses({
     async run(_model, input) {
       signal?.throwIfAborted();
       if (input.reasoning_effort !== undefined && input.reasoning_effort !== reasoningEffort) fail("reasoning override does not match pinned effort");
@@ -32,6 +32,8 @@ export function createGatewayResponses(options) {
         payload.provider = { require_parameters: true };
       }
       let response;
+      attempt.outcome = "network_error";
+      try { attempt.observer = options.onRequest?.(); } catch { /* telemetry is best effort */ }
       try {
         response = await fetchImpl(endpoint, { method: "POST", redirect: "error", signal,
           headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
@@ -40,22 +42,43 @@ export function createGatewayResponses(options) {
         signal?.throwIfAborted();
         fail("provider request failed");
       }
+      if (signal?.aborted) {
+        try { await response.body?.cancel(); } catch { /* best effort release */ }
+        signal.throwIfAborted();
+      }
+      try { attempt.observer?.headers(response.status); } catch { /* telemetry is best effort */ }
       if (!response.ok) {
+        attempt.outcome = "http_error";
         // Never parse, quote, or retain an upstream error body or status text.
         try { await response.body?.cancel(); } catch { /* best effort release */ }
         fail("provider rejected request");
       }
+      attempt.outcome = "protocol_error";
       try { return await response.json(); }
-      catch { signal?.throwIfAborted(); fail("invalid provider response"); }
+      catch (error) {
+        signal?.throwIfAborted();
+        attempt.outcome = error instanceof SyntaxError ? "protocol_error" : "network_error";
+        fail("invalid provider response");
+      }
     },
   }, { model, apiBaseUrl });
   return Object.freeze({ apiBaseUrl, stateless: true,
     async createResponse(endpoint, sessionId, request) {
-      try { return await adapter(request.signal).createResponse(endpoint, sessionId, request); }
+      const attempt = {};
+      try {
+        const response = await adapter(request.signal, attempt).createResponse(endpoint, sessionId, request);
+        attempt.outcome = "success";
+        return response;
+      }
       catch {
         request.signal?.throwIfAborted();
         // Adapter validation must not echo untrusted request/provider fields either.
         fail("request failed or is incompatible with the pinned model and effort");
+      } finally {
+        if (request.signal?.aborted) {
+          attempt.outcome = request.signal.reason?.name === "TimeoutError" ? "timeout" : "cancelled";
+        }
+        try { await attempt.observer?.finish(attempt.outcome); } catch { /* never fail generation for telemetry */ }
       }
     },
   });

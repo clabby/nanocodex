@@ -1,4 +1,6 @@
 import { gatewayAvailability, gatewayRuntime } from "./gateway-runtime";
+import { createSubagentRouteController, type RetainedChildRoute } from "./subagent-model-routing";
+import { SqliteProviderTelemetryStore } from "./provider-telemetry";
 import { resolveThreadRoute, ThreadRoutePin, type ThreadRoute, type RoutingAi } from "./thread-model-routing";
 import { AgentPresentationWriter, generatePresentationText, presentationPending } from "./agent-presentation";
 import { retireSessionProjects, isRetiredProjectCompletion } from "./retired-projects";
@@ -1220,6 +1222,44 @@ export function managedAuthorizationForToolContext(
   if (retained === undefined || retained.root_session_id !== rootSessionId
     || !sameManagedSubagentDescriptor(retained, descriptor)) return undefined;
   try { return parseTurnAuthorization(retained.authorization_json); }
+  catch { return undefined; }
+}
+
+/** Run only between runtimes, after prior shutdown and before child reconstruction. */
+export function pruneOrphanedManagedSubagentRoutes(storage: DurableObjectStorage): void {
+  storage.transactionSync(() => {
+    const hasDescriptors = storage.sql.exec<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'nanocodex_cloudflare_subagents'",
+    ).toArray().length > 0;
+    if (!hasDescriptors) {
+      storage.sql.exec("DELETE FROM managed_subagent_routes");
+      return;
+    }
+    storage.sql.exec(`DELETE FROM managed_subagent_routes
+      WHERE NOT EXISTS (SELECT 1 FROM nanocodex_cloudflare_subagents
+        WHERE nanocodex_cloudflare_subagents.session_id = managed_subagent_routes.session_id)`);
+  });
+}
+
+/** Routing uses the invoking parent's retained provenance, never a later root turn. */
+export function managedAuthorizationForRouting(
+  storage: DurableObjectStorage,
+  rootSessionId: string,
+  parentSessionId: string,
+  hostContextRef: string,
+): TurnAuthorization | undefined {
+  if (!SESSION_ID.test(rootSessionId) || !SESSION_ID.test(parentSessionId)
+    || !TURN_ID.test(hostContextRef)) return undefined;
+  const row = parentSessionId === rootSessionId
+    ? storage.sql.exec<{ authorization_json: string }>(
+      "SELECT authorization_json FROM managed_turns WHERE id = ?", hostContextRef,
+    ).toArray()[0]
+    : storage.sql.exec<{ authorization_json: string }>(
+      `SELECT authorization_json FROM managed_subagent_authorizations
+       WHERE session_id = ? AND root_session_id = ? AND host_context_ref = ?`,
+      parentSessionId, rootSessionId, hostContextRef,
+    ).toArray()[0];
+  try { return row ? parseTurnAuthorization(row.authorization_json) : undefined; }
   catch { return undefined; }
 }
 
@@ -3211,6 +3251,9 @@ export class DurableAgentSession extends DurableComputerSession {
       );
       CREATE TABLE IF NOT EXISTS managed_thread_route (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1), route_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS managed_subagent_routes (
+        session_id TEXT PRIMARY KEY, route_id TEXT NOT NULL UNIQUE, binding_json TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS managed_routing_observations (
         turn_id TEXT PRIMARY KEY, backend TEXT NOT NULL, model TEXT NOT NULL,
@@ -7128,6 +7171,7 @@ export class DurableAgentSession extends DurableComputerSession {
       this.ctx.storage.sql.exec("DELETE FROM managed_prepared_personalization");
       this.ctx.storage.sql.exec("DELETE FROM managed_personalization_state");
       this.ctx.storage.sql.exec("DELETE FROM managed_subagent_authorizations");
+      this.ctx.storage.sql.exec("DELETE FROM managed_subagent_routes");
       this.#goalRuntime.clear();
       this.ctx.storage.sql.exec("DELETE FROM managed_cron_triggers");
       this.ctx.storage.sql.exec("DELETE FROM managed_cron_deliveries");
@@ -7418,6 +7462,10 @@ export class DurableAgentSession extends DurableComputerSession {
       }
       return this.#ensureAgent();
     }
+    // Earlier gates have drained shutdown/failed construction and excluded a live
+    // runtime. A route saved before a failed batch published its descriptor can
+    // now be removed without racing a spawn; retained children keep their pins.
+    pruneOrphanedManagedSubagentRoutes(this.ctx.storage);
     const construction: AgentConstructionOwnership = {
       deletionGeneration: this.#deletionGeneration,
       runtimeGeneration: this.#runtimeOwnershipGeneration,
@@ -7742,15 +7790,87 @@ export class DurableAgentSession extends DurableComputerSession {
       this.#hostedTools.provider(),
       ...(this.#accountHostedTools === undefined ? [] : [this.#accountHostedTools]),
     ];
+    const gatewayTelemetry = {
+      store: new SqliteProviderTelemetryStore(this.ctx.storage.sql),
+      workerColo: null, clientIngressColo: null,
+    };
+    const rootRoutingSessionId = () => this.ctx.storage.sql.exec<{ session_id: string }>(
+      "SELECT session_id FROM nanocodex_cloudflare_agent WHERE singleton = 1",
+    ).one().session_id;
+    const assertRoutingOwned = () => {
+      this.#assertDurabilityAdmissionActive();
+      if (this.env.NANOCODEX_THREAD_ROUTING !== "true" || !this.env.AI
+        || this.#session()?.authorization_epoch !== session.authorization_epoch || !this.#threadRoute()) {
+        throw new Error("Session route ownership is no longer active");
+      }
+    };
+    const assertRoutingAuthority = (authorization: TurnAuthorization | undefined) => {
+      if (!this.#hasFullAccountAuthority(authorization) || !turnCanUseExecutionNamespace(authorization)) {
+        throw new Error("Session routing requires full account tool authority");
+      }
+    };
+    const readChildRoute = (sessionId: string): RetainedChildRoute | undefined => {
+      const row = this.ctx.storage.sql.exec<{ binding_json: string }>(
+        "SELECT binding_json FROM managed_subagent_routes WHERE session_id = ?", sessionId,
+      ).toArray()[0];
+      return row ? JSON.parse(row.binding_json) as RetainedChildRoute : undefined;
+    };
+    const subagentRouting = configuration.model_routing && this.#threadRoute() ? createSubagentRouteController({
+      ai: this.env.AI!, policy: configuration.model_routing,
+      availability: () => gatewayAvailability(this.env),
+      authorize: (parentSessionId, hostContextRef) => {
+        assertRoutingOwned();
+        assertRoutingAuthority(managedAuthorizationForRouting(
+          this.ctx.storage, rootRoutingSessionId(), parentSessionId, hostContextRef,
+        ));
+      },
+      store: {
+        read: readChildRoute,
+        commit: (sessionId, binding) => {
+          if (sessionId === rootRoutingSessionId()) throw new Error("Child route cannot replace root route");
+          this.ctx.storage.sql.exec(
+            "INSERT INTO managed_subagent_routes (session_id, route_id, binding_json) VALUES (?, ?, ?)",
+            sessionId, binding.routeId, JSON.stringify(binding),
+          );
+        },
+      },
+    }) : undefined;
+    // Called for every provider request, including child continuations after restore.
+    const inferenceForSession = subagentRouting === undefined ? undefined : (sessionId: string) => {
+      const assertSessionActive = () => {
+        assertRoutingOwned();
+        const rootSessionId = rootRoutingSessionId();
+        if (sessionId === rootSessionId) {
+          assertRoutingAuthority(this.#activeTurnAuthorization());
+        } else {
+          const binding = readChildRoute(sessionId);
+          if (!binding) throw new Error("Child route is missing; refusing parent transport");
+          assertRoutingAuthority(managedAuthorizationForRouting(
+            this.ctx.storage, rootSessionId, sessionId, binding.hostContextRef,
+          ));
+        }
+      };
+      assertSessionActive();
+      const route = sessionId === rootRoutingSessionId() ? this.#threadRoute()! : readChildRoute(sessionId)!.route;
+      return {
+        model: route.model, thinking: route.thinking,
+        ...(route.backend === "workers_ai" ? {
+          workersAi: { model: route.model, thinking: route.thinking, ai: {
+            run: async (model: string, input: unknown) => {
+              assertSessionActive();
+              if (model !== route.model) throw new Error("Workers AI request does not match pinned session route");
+              return this.env.AI!.run(model, input);
+            },
+          } },
+        } : {}),
+        gateway: gatewayRuntime(this.env, route, assertSessionActive, undefined, gatewayTelemetry),
+      };
+    };
     const codeEvaluatorStartedAt = performance.now();
     const hostedRuntime = hostedProviders.length === 0 ? undefined : {
       codeEvaluator: await managedCodeEvaluator(),
       toolMode: "code" as const,
       toolProviders: hostedProviders,
-      subagentLifecycle: (event: unknown) => applyManagedSubagentLifecycle(
-        this.ctx.storage,
-        event,
-      ),
     };
     const codeEvaluatorMs = performance.now() - codeEvaluatorStartedAt;
     const accountMcpConnections = this.#accountMcpConnections ?? [];
@@ -8086,6 +8206,15 @@ export class DurableAgentSession extends DurableComputerSession {
       };
       Object.defineProperty(agentOptions, internalRuntime, { value: {
         ...hostedRuntime,
+        subagentRouting,
+        inferenceForSession,
+        subagentLifecycle: (event: unknown) => {
+          applyManagedSubagentLifecycle(this.ctx.storage, event);
+          const lifecycle = event as { type: string; sessionId: string };
+          if (lifecycle.type === "release") this.ctx.storage.sql.exec(
+            "DELETE FROM managed_subagent_routes WHERE session_id = ?", lifecycle.sessionId,
+          );
+        },
         ...(this.#threadRoute()?.backend === "workers_ai" ? {
           workersAi: {
             ai: { run: async (model: string, input: unknown) => {
@@ -8106,10 +8235,10 @@ export class DurableAgentSession extends DurableComputerSession {
             || !route || (route.backend !== "openrouter" && route.backend !== "vercel")) {
             throw new Error("Gateway route ownership is no longer active");
           }
-        }),
+        }, undefined, gatewayTelemetry),
         // Voice and session control can start while the owned Responses relay warms up.
         waitForPreconnect: false,
-        subagentsEnabled: configuration.model_routing ? false : configuration.multi_agent?.enabled,
+        subagentsEnabled: configuration.multi_agent?.enabled,
         subagentMaxConcurrency: configuration.multi_agent?.enabled
           ? configuration.multi_agent.max_concurrent_subagents ?? 6 : undefined,
         responseControls: {

@@ -19,6 +19,7 @@ export type WorkersAiResponsesTransport = Readonly<{
 /**
  * Buffered, stateless Responses SSE over the GLM-5.3 Workers AI binding.
  * Requires full text history; opaque compaction and unsupported modalities fail explicitly.
+ * Structured output formats and malformed or truncated tool calls fail explicitly.
  * Custom grammars are supplied as instructions, not enforced by the provider.
  * Cancellation stops waiting; the binding does not expose cancellation of inference.
  */

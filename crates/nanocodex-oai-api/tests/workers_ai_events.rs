@@ -17,6 +17,9 @@ fn workers_ai_adapter_events_are_accepted_by_the_rust_protocol() {
             _ => {}
         }
     }
-    assert_eq!(completed_items, 5, "reasoning, message, custom, function, search");
+    assert_eq!(
+        completed_items, 5,
+        "reasoning, message, custom, function, search"
+    );
     assert!(terminal);
 }

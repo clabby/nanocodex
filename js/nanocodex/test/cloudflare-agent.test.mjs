@@ -1338,3 +1338,71 @@ for (const provider of ["openrouter", "vercel"]) {
     } finally {await agent.session.shutdown();}
   });
 }
+
+test("routed children use their own provider and reuse the pin on continuation", { timeout: 30_000 }, async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  let rootCalls = 0, childCalls = 0, choices = 0;
+  const routes = new Map();
+  const childAi = { async run(model, input) {
+    childCalls++;
+    assert.ok(childCalls <= 4, "bounded child model requests");
+    assert.equal(model, "@cf/zai-org/glm-5.3");
+    assert.equal(input.reasoning_effort, "high");
+    assert.equal(routes.size, 1, "child route is saved before inference");
+    if (input.messages.at(-1)?.role === "tool") {
+      return { choices: [{ finish_reason: "stop", message: { content: "CHILD_DONE" } }] };
+    }
+    const submit = input.tools.find(t => t.function.description.startsWith("submit_result\n"));
+    assert.ok(submit);
+    const tokens = [...JSON.stringify(input.messages).matchAll(/turn_token: (\d+)/g)];
+    assert.ok(tokens.length);
+    return { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{
+      id: `submit-${childCalls}`, type: "function", function: { name: submit.function.name,
+        arguments: JSON.stringify({ turn_token: Number(tokens.at(-1)[1]), output: { ok: Number(tokens.at(-1)[1]) } }) },
+    }] } }] };
+  } };
+  const gateway = { provider: "openrouter", model: "gpt-5.6-sol", reasoningEffort: "low", apiKey: "synthetic-test-key",
+    async fetch(_url, init) {
+      rootCalls++;
+      const body = JSON.parse(init.body);
+      assert.equal(body.model, "openai/gpt-5.6-sol");
+      assert.equal(body.reasoning.effort, "low");
+      return Response.json({ choices: [{ finish_reason: "stop", message: { content: "ROOT_PIN_OK" } }] });
+    },
+  };
+  const agent = await create(module, durableOwner(storage), {
+    [Symbol.for("nanocodex.cloudflare.internalConfiguration")]: { model: gateway.model, thinking: "low", reasoning_mode: "standard", fast_mode: false },
+    [Symbol.for("nanocodex.cloudflare.internalRuntime")]: {
+      gateway, toolMode: "direct", subagentsEnabled: true,
+      subagentRouting: {
+        async resolve(request) {
+          choices++;
+          assert.equal(request.parentSessionId, storage.sessionId);
+          return { model: "@cf/zai-org/glm-5.3", thinking: "high", routeId: "child-choice" };
+        },
+        bind(request) {
+          assert.equal(request.routeId, "child-choice");
+          routes.set(request.sessionId, { model: "@cf/zai-org/glm-5.3", thinking: "high",
+            workersAi: { ai: childAi, model: "@cf/zai-org/glm-5.3", thinking: "high" } });
+        },
+      },
+      inferenceForSession(id) {
+        return id === storage.sessionId ? { model: gateway.model, thinking: "low", gateway } : routes.get(id);
+      },
+    },
+  });
+  try {
+    assert.equal((await agent.turn.prompt({ input: "Respond briefly." }).result()).finalMessage, "ROOT_PIN_OK");
+    const child = await Subagents.spawn(agent, { role: "test-child", task: "Return an object.", outputSchema: { type: "object" } });
+    const first = await Subagents.wait(agent, { agentIds: [child.agent_id], timeoutMs: 5_000 });
+    assert.deepEqual(first.agents[0].status, { state: "completed", output: { ok: 1 } });
+    await Subagents.send(agent, { agentId: child.agent_id, message: "Return another object." });
+    const second = await Subagents.wait(agent, { agentIds: [child.agent_id], timeoutMs: 5_000 });
+    assert.deepEqual(second.agents[0].status, { state: "completed", output: { ok: 2 } });
+    assert.equal(choices, 1, "continuing a child does not reroute");
+    assert.equal(childCalls, 4);
+    assert.equal((await agent.turn.prompt({ input: "Still the root." }).result()).finalMessage, "ROOT_PIN_OK");
+    assert.equal(rootCalls, 2);
+  } finally { await agent.session.shutdown(); }
+});

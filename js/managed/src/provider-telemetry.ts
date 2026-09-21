@@ -7,7 +7,7 @@ export interface ProviderObservation {
   backend: string;
   model: string;
   effort: string | null;
-  outcome: "success" | "http_error" | "network_error" | "timeout" | "cancelled";
+  outcome: "success" | "http_error" | "network_error" | "protocol_error" | "timeout" | "cancelled";
   status: number | null;
   headersMs: number | null;
   fullResponseMs: number | null;
@@ -46,7 +46,9 @@ export function providerObservationKey(x: ProviderObservation): string {
 }
 /** Attach to an existing sharded DO SQLite storage (tenant/thread or regional probe shard). */
 export class SqliteProviderTelemetryStore implements ProviderTelemetryStore {
-  constructor(private sql: { exec(query: string, ...bindings: any[]): any }) {
+  private sql: { exec(query: string, ...bindings: any[]): any };
+  constructor(sql: { exec(query: string, ...bindings: any[]): any }) {
+    this.sql = sql;
     sql.exec("CREATE TABLE IF NOT EXISTS provider_observations (id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, sample TEXT NOT NULL)");
     sql.exec("CREATE TABLE IF NOT EXISTS provider_probe_budget (day TEXT PRIMARY KEY, count INTEGER NOT NULL)");
   }
