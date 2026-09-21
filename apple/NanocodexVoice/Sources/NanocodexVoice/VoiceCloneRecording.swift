@@ -9,6 +9,7 @@ import SwiftUI
     @Published private(set) var saving = false
     @Published private(set) var permissionDenied = false
     @Published private(set) var playing = false
+    @Published private(set) var playingURL: URL?
     @Published private(set) var sample: URL?
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
@@ -151,6 +152,7 @@ import SwiftUI
             player.delegate = self; self.player = player
             playbackDuration = player.duration
             guard player.play() else { throw CocoaError(.fileReadCorruptFile) }
+            playingURL = url
             playing = true
             playbackTask = Task { [weak self] in
                 while !Task.isCancelled {
@@ -170,6 +172,7 @@ import SwiftUI
         player = nil
         old?.stop()
         playbackAccess = nil
+        playingURL = nil
         playing = false
         playbackElapsed = 0
         playbackDuration = 0
