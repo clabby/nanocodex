@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi, afterEach } from "vitest";
 import {
-  InferenceSession, InferenceSessionRuntime, INFERENCE_KEY_ID_HEADER, INFERENCE_MAX_OUTPUT_TOKENS_HEADER,
+  InferenceSession, InferenceSessionRuntime, executeStatelessInferenceResponse, INFERENCE_KEY_ID_HEADER, INFERENCE_MAX_OUTPUT_TOKENS_HEADER,
   INFERENCE_MAX_BODY_BYTES, INFERENCE_TIMEOUT_MS, INFERENCE_PROBE_TIMEOUT_MS, normalizeInferencePolicy, validateInferenceRequest,
   type InferenceSessionEnv, type InferenceSessionMetadata,
 } from "../src/inference-session";
@@ -112,7 +112,7 @@ describe("standalone inference session isolation", () => {
     expect(f.commits.at(-1)?.counters).toEqual({ requests: 2, completed: 1, failed: 1 });
     const count = f.ai.mock.calls.length;
     expect((await f.call("POST", "/responses", { input: "x", reasoning: { effort: "high" } })).status).toBe(409);
-    expect((await f.call("POST", "/responses", { input: "x", model: "gpt-6-astra" })).status).toBe(400);
+    expect((await f.call("POST", "/responses", { input: "x", model: "gpt-6-astra" })).status).toBe(409);
     expect((await f.call("POST", "/responses", { input: "x", routing: {} })).status).toBe(400);
     expect(f.ai).toHaveBeenCalledTimes(count);
   });
@@ -453,4 +453,172 @@ describe("trusted deployment probe context", () => {
     expect(snapshot).not.toHaveBeenCalled();
     expect(f.ai).not.toHaveBeenCalled();
   });
+});
+
+describe("stateless standard Responses", () => {
+  const call = (bindings: InferenceSessionEnv, body: unknown, limit = 4096, signal = new AbortController().signal) =>
+    executeStatelessInferenceResponse(bindings, body, limit, signal);
+
+  it("routes independent requests without storage, session identity or account access", async () => {
+    let selected = candidate;
+    const ai = vi.fn(async (model: string, input: unknown) => {
+      if (model === "typesafe/jev") return classification(selected);
+      expect(input).toMatchObject({ messages: [{ role: "user", content: selected }] });
+      return completion();
+    });
+    const bindings = new Proxy({ AI: { run: ai } }, {
+      get(target, key) {
+        if (["OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "NANOCODEX_PROVIDER_PROBES",
+          "NANOCODEX_PROVIDER_PROBE_COORDINATOR"].includes(String(key))) return undefined;
+        if (key === "AI") return target.AI;
+        throw Error(`unexpected capability ${String(key)}`);
+      },
+    });
+    const send = vi.fn(() => { throw Error("unexpected account or network call"); });
+    vi.stubGlobal("fetch", send);
+    const ids: string[] = [];
+    for (const effort of ["medium", "high"]) {
+      selected = `${OSS_MODEL}:${effort}`;
+      const response = await call(bindings, { model: "auto", input: selected });
+      expect(response.status).toBe(200);
+      const body = await response.json() as Record<string, unknown>;
+      expect(body).toMatchObject({ object: "response", status: "completed", model: OSS_MODEL,
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "fixture answer" }] }],
+        usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+        route: { backend: "workers_ai", thinking: effort }, buffering: "buffered" });
+      expect(body).not.toHaveProperty("session_id");
+      expect(response.headers.get("x-nanocodex-session-id")).toBeNull();
+      expect(response.headers.get("x-nanocodex-inference-session-id")).toBeNull();
+      ids.push(body.id as string);
+    }
+    expect(new Set(ids).size).toBe(2);
+    expect(ai.mock.calls.map(([model]) => model)).toEqual(["typesafe/jev", OSS_MODEL, "typesafe/jev", OSS_MODEL]);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each(["auto", OSS_MODEL, `${OSS_MODEL}:low`])("selects %s within the requested constraints", async model => {
+    const f = fixture();
+    f.ai.mockImplementation(async (backend, input) => {
+      if (backend !== "typesafe/jev") return completion();
+      const state = JSON.parse((input as { state: string }).state);
+      expect(state.candidates.every((c: any) => c.model === OSS_MODEL && c.backend === "workers_ai")).toBe(true);
+      if (model.endsWith(":low")) expect(state.candidates.map((c: any) => c.id)).toEqual([model]);
+      return classification(`${OSS_MODEL}:low`);
+    });
+    const response = await call(f.bindings, { model, input: "hello" }, 32);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ model: OSS_MODEL, route: { thinking: "low" } });
+    expect(f.ai.mock.calls[1]?.[1]).toMatchObject({ max_completion_tokens: 32 });
+    expect(f.persisted.size).toBe(0);
+  });
+
+  it("lets canonical models span providers and exact candidates select provider/effort", async () => {
+    const exact = "vercel:openai/gpt-6-astra:high";
+    const send = vi.fn(async (..._args: Parameters<typeof fetch>) => Response.json(completion()));
+    vi.stubGlobal("fetch", send);
+    const f = fixture({ OPENROUTER_API_KEY: "synthetic-key", AI_GATEWAY_API_KEY: "synthetic-key" });
+    for (const model of ["gpt-6-astra", exact]) {
+      f.ai.mockImplementation(async (_backend, input) => {
+        const state = JSON.parse((input as { state: string }).state);
+        expect(state.candidates.every((c: any) => c.model === "gpt-6-astra")).toBe(true);
+        if (model === exact) expect(state.candidates.map((c: any) => c.id)).toEqual([exact]);
+        else expect(new Set(state.candidates.map((c: any) => c.backend))).toEqual(new Set(["openrouter", "vercel"]));
+        return classification(exact);
+      });
+      const response = await call(f.bindings, { model, input: "hello" });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ model: "gpt-6-astra", route: { backend: "vercel", thinking: "high" } });
+    }
+    expect(send).toHaveBeenCalledTimes(2);
+    for (const [endpoint, init] of send.mock.calls) {
+      expect(endpoint).toBe("https://ai-gateway.vercel.sh/v1/chat/completions");
+      expect(JSON.parse(init!.body as string)).toMatchObject({ model: "openai/gpt-6-astra", reasoning_effort: "high" });
+    }
+  });
+
+  it.each([
+    { model: "unknown-model" }, { model: "gpt-6-astra:high" }, { session_id: sessionId },
+    { previous_response_id: "resp_unknown" }, { previous_response_id: null },
+    { model: `${OSS_MODEL}:low`, reasoning: { effort: "high" } },
+    { max_output_tokens: 33 }, { account_id: "synthetic-account" },
+  ])("rejects invalid stateless requests before routing %#", async extra => {
+    const f = fixture();
+    expect((await call(f.bindings, { input: "hello", ...extra }, 32)).status).toBe(400);
+    expect(f.ai).not.toHaveBeenCalled();
+    expect(f.persisted.size).toBe(0);
+  });
+
+  it("keeps buffered SSE free of session fields and headers", async () => {
+    const f = fixture();
+    const response = await call(f.bindings, { input: "hello", stream: true });
+    expect(response.headers.get("x-nanocodex-inference-buffering")).toBe("buffered");
+    expect(response.headers.get("x-nanocodex-session-id")).toBeNull();
+    const text = await response.text();
+    expect(text).toContain("event: response.completed");
+    expect(text).toContain('"object":"response"');
+    expect(text).not.toContain("session_id");
+  });
+
+  it("sanitizes stateless provider failures", async () => {
+    const f = fixture();
+    f.ai.mockImplementation(async model => {
+      if (model === "typesafe/jev") return classification();
+      throw Error("private prompt and deployment key");
+    });
+    const response = await call(f.bindings, { input: "hello" });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: { code: "inference_failed" } });
+  });
+
+  it("shares the 120s deadline across routing and generation", async () => {
+    vi.useFakeTimers();
+    let routing!: () => void, generation!: () => void;
+    const routeStarted = new Promise<void>(resolve => { routing = resolve; });
+    const generationStarted = new Promise<void>(resolve => { generation = resolve; });
+    const f = fixture();
+    f.ai.mockImplementation(async model => {
+      if (model === "typesafe/jev") {
+        routing();
+        return new Promise(resolve => setTimeout(() => resolve(classification()), 9000));
+      }
+      generation(); return new Promise(() => {});
+    });
+    const pending = call(f.bindings, { input: "hello" });
+    await routeStarted;
+    await vi.advanceTimersByTimeAsync(9000);
+    await generationStarted;
+    await vi.advanceTimersByTimeAsync(INFERENCE_TIMEOUT_MS - 9000);
+    const response = await pending;
+    expect(response.status).toBe(504);
+    expect(await response.json()).toEqual({ error: { code: "inference_timeout" } });
+    expect(f.persisted.size).toBe(0);
+  });
+
+  it("cancels routing without issuing generation after a late route resolves", async () => {
+    let started!: () => void, release!: (value: unknown) => void;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    const f = fixture();
+    f.ai.mockImplementation(async () => { started(); return new Promise(resolve => { release = resolve; }); });
+    const controller = new AbortController();
+    const pending = call(f.bindings, { input: "hello" }, 4096, controller.signal);
+    await entered; controller.abort(new Error("private cancellation reason"));
+    expect((await pending).status).toBe(502);
+    release(classification());
+    await Promise.resolve(); await Promise.resolve();
+    expect(f.ai).toHaveBeenCalledTimes(1);
+    expect(f.persisted.size).toBe(0);
+  });
+});
+
+it("accepts matching session models and rejects models conflicting with the pin", async () => {
+  const f = fixture(); await f.create({});
+  expect((await f.call("POST", "/responses", { input: "hello", model: candidate })).status).toBe(200);
+  for (const model of ["auto", OSS_MODEL, candidate])
+    expect((await f.call("POST", "/responses", { input: "full history", model })).status).toBe(200);
+  const count = f.ai.mock.calls.length;
+  for (const model of ["gpt-6-astra", `${OSS_MODEL}:high`, "openrouter:z-ai/glm-5.3:medium"])
+    expect((await f.call("POST", "/responses", { input: "full history", model })).status).toBe(409);
+  expect((await f.call("POST", "/responses", { input: "full history", model: "unknown-model" })).status).toBe(400);
+  expect(f.ai).toHaveBeenCalledTimes(count);
+  expect(f.ai.mock.calls.filter(([model]) => model === "typesafe/jev")).toHaveLength(1);
 });

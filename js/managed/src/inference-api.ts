@@ -1,6 +1,6 @@
 import { authenticate, requireSameOriginMutation, type AccountAuthEnv, type Principal } from "./account-auth";
 import { authorizeInferenceKey, routeInferenceKeys, type InferenceKeysEnv } from "./inference-keys";
-import type { InferenceSessionEnv } from "./inference-session";
+import { executeStatelessInferenceResponse, type InferenceSessionEnv } from "./inference-session";
 import { ROUTING_CANDIDATES } from "./thread-model-routing";
 import { gatewayAvailability } from "./gateway-runtime";
 
@@ -42,15 +42,29 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("invalid_request");
   return body as Record<string, unknown>;
 }
-/** Separate credential and runtime boundary. No managed agent is constructed here. */
+/** Standard SDK entry points use the familiar structured error envelope. */
 export async function routeInferenceApi(request: Request, env: InferenceApiEnv, url: URL,
   trustedPrincipal?: Principal): Promise<Response | undefined> {
-  const inNamespace = url.pathname === BASE || url.pathname.startsWith(BASE + "/");
+  const response = await routeInferenceApiInternal(request, env, url, trustedPrincipal);
+  if (!response || response.status < 400 || (url.pathname !== "/v1/responses" && url.pathname !== "/v1/models")) return response;
+  const body = await response.json<{error?: string | {code?: string}}>();
+  const code = typeof body.error === "string" ? body.error : body.error?.code ?? "inference_unavailable";
+  const type = response.status === 401 ? "authentication_error" : response.status === 429 ? "rate_limit_error"
+    : response.status >= 500 ? "server_error" : "invalid_request_error";
+  return Response.json({error:{message:code.replaceAll("_", " "),type,param:null,code}},
+    {status:response.status,headers:response.headers});
+}
+
+/** Separate credential and runtime boundary. No managed agent is constructed here. */
+async function routeInferenceApiInternal(request: Request, env: InferenceApiEnv, url: URL,
+  trustedPrincipal?: Principal): Promise<Response | undefined> {
+  const standardPath = url.pathname === "/v1/responses" ? "/responses" : url.pathname === "/v1/models" ? "/models" : undefined;
+  const inNamespace = standardPath !== undefined || url.pathname === BASE || url.pathname.startsWith(BASE + "/");
   // Run before all account/connector/hand routers, including cached authorization.
   if (isInferenceCredential(request) && !inNamespace) return json({ error: "inference_key_scope" }, 403);
   if (!inNamespace) return undefined;
   if (url.search) return json({ error: "invalid_request" }, 400);
-  const suffix = url.pathname.slice(BASE.length);
+  const suffix = standardPath ?? url.pathname.slice(BASE.length);
   if (suffix === "/keys" || suffix.startsWith("/keys/")) {
     if (isInferenceCredential(request)) return json({ error: "inference_key_scope" }, 403);
     const principal = trustedPrincipal ?? await authenticate(request, env, url);
@@ -77,7 +91,7 @@ export async function routeInferenceApi(request: Request, env: InferenceApiEnv, 
     const available = gatewayAvailability(env);
     const candidates = ROUTING_CANDIDATES.filter(candidate => candidate.backend !== "chatgpt"
       && (candidate.backend === "workers_ai" || available[candidate.backend]));
-    return json({ object: "list", data: candidates.map(({ id, model, provider_model, backend, thinking }) => ({ id, model, provider_model, provider: backend, thinking })) });
+    return json({ object: "list", data: candidates.map(({ id, model, provider_model, backend, thinking }) => ({ id, object: "model", created: 0, owned_by: backend, model, provider_model, provider: backend, thinking })) });
   }
   try {
     const headers = new Headers({ "content-type": "application/json", "x-inference-key-id": key.id,
@@ -90,6 +104,9 @@ export async function routeInferenceApi(request: Request, env: InferenceApiEnv, 
       body = { ...body, session_id: id, key_id: key.id };
     } else if (suffix === "/responses") {
       body = await readBody(request);
+      if (body.session_id === undefined) {
+        return executeStatelessInferenceResponse({ ...env, AI: env.AI }, body, key.limits.maxOutputTokens, request.signal);
+      }
       if (typeof body.session_id !== "string" || !SESSION_ID.test(body.session_id)) return json({ error: "session_id_required" }, 400);
       id = body.session_id; delete body.session_id; path = "/responses";
     } else {

@@ -85,3 +85,22 @@ it("ordinary and anonymous account authority cannot mint shared-credit inference
   expect(response?.status).toBe(403);
   expect(await response?.json()).toEqual({error:"inference_key_admin_required"});
 });
+
+
+it("standard Responses aliases require only inference credentials and preserve the standard model catalog", async () => {
+  const userId=crypto.randomUUID();
+  const bindings={...env,NANOCODEX_INFERENCE_ENABLED:"true",NANOCODEX_ADMIN_USER_ID:userId,AI:{run:async()=>{throw Error("unexpected provider call");}}} as unknown as InferenceApiEnv;
+  const principal={kind:"api_key",userId,organizationId:crypto.randomUUID(),teamId:crypto.randomUUID(),role:"owner",subjectId:`user:${userId}`,credentialId:"synthetic",authorizationEpoch:1,capabilities:["api_keys:read","api_keys:write"]} as const;
+  const issuedRequest=new Request("https://nanocodex.example/v1/inference/keys",{method:"POST",headers:{"content-type":"application/json"},body:"{}"});
+  const issued=await (await routeInferenceApi(issuedRequest,bindings,new URL(issuedRequest.url),principal))!.json<{api_key:string}>();
+  const modelsRequest=new Request("https://nanocodex.example/v1/models",{headers:{authorization:`Bearer ${issued.api_key}`}});
+  const models=await routeInferenceApi(modelsRequest,bindings,new URL(modelsRequest.url));
+  expect(models?.status).toBe(200);
+  expect(await models?.json()).toMatchObject({object:"list",data:expect.arrayContaining([expect.objectContaining({object:"model",owned_by:"workers_ai",created:0})])});
+  const responseRequest=new Request("https://nanocodex.example/v1/responses",{method:"POST",headers:{authorization:`Bearer ${issued.api_key}`,"content-type":"application/json"},body:JSON.stringify({model:"auto",input:"hello",tools:[{type:"web_search"}]})});
+  const response=await routeInferenceApi(responseRequest,bindings,new URL(responseRequest.url));
+  expect(response?.status).toBe(400);
+  expect(await response?.json()).toMatchObject({error:{code:"invalid_inference_request"}});
+  const fullAccountRequest=new Request("https://nanocodex.example/v1/responses",{method:"POST",headers:{authorization:"Bearer ncx_live_synthetic"},body:"{}"});
+  expect((await routeInferenceApi(fullAccountRequest,bindings,new URL(fullAccountRequest.url)))?.status).toBe(401);
+});
