@@ -47,6 +47,7 @@
   "browser": {
     "binding": "BROWSER"
   },
+  "images": { "binding": "NANOCODEX_ATTACHMENT_IMAGES" },
   "worker_loaders": [
     {
       "binding": "LOADER"

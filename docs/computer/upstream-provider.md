@@ -39,10 +39,22 @@ compared with its Store source using SHA-256. The matching bundled Node handles
 long Windows paths; no extra Node or Python installation is needed. Windows
 requires Microsoft App Installer/winget and Store access for initial download.
 
-Linux and Linux VM/container guests retain the existing Linux computer backend.
-This implementation has no verified official Linux Sky distribution; it does not
-try to run a macOS or Windows binary there. `computer setup` reports unsupported
-on other platforms.
+Windows setup also writes a Nanocodex-owned host script outside the verified
+OpenAI resources tree. It starts the packaged `WindowsHelperTransport` and signed
+helper through the upstream native-pipe integration, then starts the official
+MCP provider with that pipe. `CODEX_CLI_PATH` and the provider sandbox remain in
+place. The host forwards authentic turn metadata and approval requests through
+the SDK's `requestComputerUseApproval`/elicitation bridge; it never grants app
+access itself. Timeout, cancellation, disconnect, reset, and turn completion
+close pending approvals and the native helper. Each receipt retains its own host
+script so replacing the selected runtime does not overwrite a running host.
+
+
+Linux and Linux VM/container guests require an explicitly configured upstream
+MCP provider. No custom CUA runtime, background-input plugin, or legacy fallback
+is bundled. Automatic `computer setup` currently supports macOS and Windows;
+without a provider, guests report CUA unavailable. Remote screen streaming is
+a separate feature and does not imply an installed CUA provider.
 
 ## Selection and updates
 
@@ -65,9 +77,9 @@ copy helper. Normal installations use the shared native provisioning command.
 ## Approval integration and validation
 
 The adapters preserve upstream `elicitation/create` and
-`openai/elicitation/create` forms. Desktop and remote-Hand form approval UI is
-still separate work: installing a provider does not grant consent, and operations
-requiring an unwired form remain unavailable. See the native and JavaScript
+`openai/elicitation/create` forms. Foreground terminals and native Mac/Windows Hands can present provider forms to
+the user. Installing a provider does not grant consent. A host without a human
+response channel leaves operations requiring a form unavailable. See the native and JavaScript
 adapter READMEs for the embedding callback API.
 
 Validation covers installer invocation/opt-outs, exact command and environment
@@ -76,3 +88,57 @@ start. A real macOS download and the Windows Store installation were exercised,
 and both installed providers returned `js`, `js_add_node_module_dir`, `js_reset`,
 and hidden `turn_ended` through MCP. Catalog discovery is not a claim of completed
 approval UI or a full screen/input acceptance test.
+
+
+The Windows native-pipe contract was verified against Store build 26.915.4065.0
+and Codex Desktop 9922. An isolated real-provider test returned app inventory,
+forwarded a Calculator approval form, preserved a deliberate denial, and completed
+`turn_ended`. This proves transport and denial handling; it does not establish
+human approval UI, screen capture, or input acceptance. The diagnostic fixture is
+`crates/experimental/nanocodex-computer/tests/windows-sky/live-probe.mjs` (place it
+beside the host script and run with the verified bundled Node on Windows). Its
+responses to every elicitation are declines. Transport fixtures run with
+`node --test crates/experimental/nanocodex-computer/tests/windows-sky/host.test.mjs`.
+
+## Linux native host
+
+A configured Linux provider must launch the native Sky service outside the model
+sandbox so it can reach the desktop X server. `linux_sky_host.mjs` hosts the
+unchanged `@oai/sky/service` in a disposable desktop-user process. Its trusted
+proxy uses the upstream NodeREPL `nativePipe` bridge; ordinary model JavaScript
+keeps the Codex sandbox and has no nativePipe capability. MCP tool definitions,
+descriptions and results still come from the official provider.
+
+For an already installed, compatible upstream Linux runtime, create a separate
+host installation from this checkout:
+
+```sh
+python3 scripts/install-linux-sky-host.py \
+  --runtime /path/to/cua_node \
+  --codex-cli /path/to/codex \
+  --destination "$HOME/.local/share/nanocodex/sky-host-version"
+```
+
+Set `NANOCODEX_COMPUTER` to the printed launcher path and
+`NANOCODEX_COMPUTER_TRANSPORT=mcp`. Run the Hand/provider as the desktop user with
+its real DISPLAY and session bus. Keep the host modules outside model-writable
+workspaces. A system administrator can install the same modules in a protected
+system directory and wrap the launcher with the desktop-session environment.
+The script does not obtain or authenticate an upstream Linux distribution;
+automatic `computer setup` remains limited to macOS and Windows.
+
+The host serializes native calls, bounds frames and queues, and owns a private
+Unix socket. Disconnect, cancellation, reset and turn completion reject queued
+work, release tracked drags through upstream `drag_end`, and terminate the
+service/helper process group after bounded cleanup. An in-flight input operation
+can have partial effects before cancellation; cancellation is never a rollback.
+
+The installed Linux Sky target controls X11/Xwayland windows. This transport does
+not make native Wayland windows visible to that target. Application-level input
+filters still apply (for example, xterm rejects synthetic SendEvent input by
+default). Browser control remains the separate official browser surface.
+
+Transport tests: `node --test crates/experimental/nanocodex-computer/tests/linux-sky/host.test.mjs`.
+Live verification used the unmodified Linux service: inventory, a GTK X11 test
+window screenshot, exact text plus Enter received by that app, and reconnect after
+turn completion. The model process retained NoNewPrivs/Seccomp and had no nativePipe.

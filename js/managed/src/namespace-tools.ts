@@ -20,7 +20,7 @@ const TOOL_RESULT = Symbol.for("nanocodex.toolResult");
 const DEFAULT_CWD = "/brain";
 
 export type RoutedTool = Readonly<{
-  definition?: Readonly<{ description?: string; parameters?: Record<string, unknown> }>;
+  definition?: Readonly<{ description?: string; parameters?: Record<string, unknown>; [key: string]: unknown }>;
   handler(input: unknown, context: ToolContext): unknown | Promise<unknown>;
 }>;
 
@@ -64,9 +64,11 @@ type ProcessBinding = Readonly<{
   writeStdin: RoutedTool;
 }>;
 
+export type NamespaceCaptureFilter = (machine: NamespaceMachine) => boolean;
+
 export type NamespaceExecutionRuntime = Readonly<{
   tools: ToolMap;
-  capture(context: ToolContext): void;
+  capture(context: ToolContext, filter?: NamespaceCaptureFilter): void;
 }>;
 
 /**
@@ -90,13 +92,13 @@ export function createNamespaceExecutionRuntime(
   const sessions = new Map<number, ProcessBinding>();
   const computers = new Map<string, MountedHand>();
 
-  const cell = (context: ToolContext): CellBinding => {
+  const cell = (context: ToolContext, filter?: NamespaceCaptureFilter): CellBinding => {
     // Direct tools have an empty parentCallId. Pin those to their own call,
     // while nested Code Mode tools keep sharing their parent's captured lease.
     const key = `${context.sessionId}\u0000${context.parentCallId || context.callId}`;
     const retained = cells.get(key);
     if (retained !== undefined) return retained;
-    const created = createCellBinding(brain, machines(context), resolveMachineTool, context, key, resolveScreenTool);
+    const created = createCellBinding(brain, machines(context).filter(filter ?? (() => true)), resolveMachineTool, context, key, resolveScreenTool);
     cells.set(key, created);
     return created;
   };
@@ -148,7 +150,7 @@ export function createNamespaceExecutionRuntime(
             || !definition.parameters || typeof definition.parameters !== "object") {
             throw new Error(`Hand ${hand.root} has no discovered ${name} contract; reconnect its CUA provider`);
           }
-          return { name, description: definition.description, parameters: definition.parameters };
+          return { ...definition, name };
         });
         computers.set(context.sessionId, hand);
         return { workdir: hand.root, machine_id: hand.machineId,
@@ -281,7 +283,7 @@ export function createNamespaceExecutionRuntime(
   };
   return Object.freeze({
     tools,
-    capture: (context: ToolContext) => { void cell(context); },
+    capture: (context: ToolContext, filter?: NamespaceCaptureFilter) => { void cell(context, filter); },
   });
 }
 
@@ -453,4 +455,19 @@ function stableHash(value: string): string {
     hash = BigInt.asUintN(64, hash * 0x100000001b3n);
   }
   return hash.toString(16).padStart(16, "0");
+}
+
+/** Admit each retained VM independently, then capture all verified routes once.
+ * A rejected probe or a negative receipt excludes that VM, including cached routes.
+ */
+export async function prepareNamespaceHostMounts<T extends Readonly<{ id: string }>>(
+  mounts: readonly T[],
+  probe: (mount: T) => Promise<NamespaceCaptureFilter | undefined>,
+): Promise<NamespaceCaptureFilter> {
+  const results = await Promise.allSettled(mounts.map(probe));
+  const checks = new Map(mounts.map((mount, index) => {
+    const result = results[index]!;
+    return [mount.id, result.status === "fulfilled" ? result.value : undefined] as const;
+  }));
+  return machine => !checks.has(machine.id) || checks.get(machine.id)?.(machine) === true;
 }

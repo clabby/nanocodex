@@ -516,7 +516,19 @@ function managedSummary(value) {
     createdAt: value.created_at,
     updatedAt: value.updated_at,
     turnCount: value.turn_count,
+    lastUserMessageAt: nonnegativeNumber(value.last_user_message_at) ? value.last_user_message_at : value.turn_count > 0 ? value.updated_at : 0,
+    ...(validPresentation(value.presentation) ? { presentation: Object.freeze({ ...value.presentation, activeTurnIds: Object.freeze([...value.presentation.activeTurnIds]) }) } : {}),
   });
+}
+
+function validPresentation(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    && Number.isSafeInteger(value.revision) && value.revision > 0
+    && ["running", "stopping", "completed", "cancelled", "failed", "idle"].includes(value.status)
+    && Array.isArray(value.activeTurnIds) && value.activeTurnIds.every(id => typeof id === "string")
+    && nonnegativeNumber(value.updatedAt)
+    && (value.activity === undefined || typeof value.activity === "string")
+    && (value.activityTurnId === undefined || typeof value.activityTurnId === "string");
 }
 
 function nonnegativeNumber(value) {
@@ -1560,7 +1572,7 @@ function managedClient(options) {
 
   const response = async (path, init = {}) => {
     const headers = new Headers();
-    if (path === "/v1/agents" || path.startsWith("/v1/agents/")) headers.set("x-nanocodex-client-context", JSON.stringify(requestOrigin));
+    if (path === "/v1/agent-runs" || path === "/v1/agents" || path.startsWith("/v1/agents/")) headers.set("x-nanocodex-client-context", JSON.stringify(requestOrigin));
     if (init.body !== undefined) headers.set("content-type", "application/json");
     if (init.accept) headers.set("accept", init.accept);
     if (init.idempotencyKey) headers.set("idempotency-key", init.idempotencyKey);

@@ -54,9 +54,13 @@ public actor HandWorkspace {
         let bluetoothTools = bluetooth == nil ? [] : BluetoothLETools.catalog {
             tool($0, $1, properties: $2, required: $3, parallel: false, timeout: 180_000)
         }
+        let personalTools = HandPersonalTools.available ? HandPersonalTools.catalog {
+            tool($0, $1, properties: $2, required: $3)
+        } : []
         let optionalCapabilities = (messageContext == nil ? [] : ["message_context"])
             + (flipper == nil ? [] : ["bluetooth", "flipper_zero"])
             + (bluetooth == nil ? [] : ["bluetooth_le", "gatt"])
+            + (HandPersonalTools.available ? ["contacts", "photos", "location"] : [])
         return .object([
             "type": .string("catalog"), "attachment_id": .string(id),
             "machines": .array([.object(["id": .string(id), "name": .string(name), "workspace": .string("/workspace"), "capabilities": .array((["native", "filesystem", platform == "ios" ? "background_limited" : "background"] + optionalCapabilities).map(JSON.string))])]),
@@ -65,13 +69,27 @@ public actor HandWorkspace {
                 tool("list_files", "List files in this device's app workspace. No setup is needed. Other apps' files are not accessible.", properties: ["path": path], required: ["path"]),
                 tool("read_file", "Read a UTF-8 file from this device's app workspace.", properties: ["path": path], required: ["path"]),
                 tool("write_file", "Write a UTF-8 file in this device's app workspace. Creates parent folders and replaces the file atomically.", properties: ["path": path, "content": .object(["type": .string("string")])], required: ["path", "content"], parallel: false)
-            ] + contextTools + flipperTools + bluetoothTools)
+            ] + contextTools + flipperTools + bluetoothTools + personalTools)
         ])
     }
 
     public func call(name: String, input: JSON) async throws -> JSON {
         try Task.checkCancellation()
         guard case .object(let fields) = input else { throw HandFailure.invalidInput }
+        if HandPersonalTools.available, name == "read_photo" {
+            let request = try PersonalToolRequest(fields, allowed: ["id"])
+            let id = try request.text("id", required: true)!
+            #if os(iOS)
+            let data = try await IOSPhotoReader.read(id: id)
+            try Task.checkCancellation()
+            return try savePhoto(data, id: id)
+            #else
+            throw HandFailure.contextAccess("Personal device tools require iOS.")
+            #endif
+        }
+        if HandPersonalTools.available, HandPersonalTools.names.contains(name) {
+            return try await HandPersonalTools.call(name: name, fields: fields)
+        }
         if let messageContext, HandContextTools.names.contains(name) {
             return try HandContextTools.call(name: name, fields: fields, context: messageContext)
         }
@@ -87,7 +105,7 @@ public actor HandWorkspace {
         }
         if name == "device_info" {
             guard fields.isEmpty else { throw HandFailure.invalidInput }
-            return .object(["id": .string(id), "name": .string(self.name), "platform": .string(platform), "workspace": .string("/workspace"), "availability": .string(platform == "ios" ? "automatic while active and during iOS-granted background time; locked-device availability is not guaranteed" : "automatic in the background while the app is running and the Mac is awake")])
+            return .object(["id": .string(id), "name": .string(self.name), "platform": .string(platform), "workspace": .string("/workspace"), "app_version": .string(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"), "app_build": .string(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"), "availability": .string(platform == "ios" ? "automatic while active and during iOS-granted background time; locked-device availability is not guaranteed" : "automatic in the background while the app is running and the Mac is awake")])
         }
         guard ["list_files", "read_file", "write_file"].contains(name),
               Set(fields.keys) == Set(name == "write_file" ? ["path", "content"] : ["path"]),
@@ -113,6 +131,20 @@ public actor HandWorkspace {
             try Data(content.utf8).write(to: url, options: .atomic)
             return .object(["written_bytes": .number(Double(content.utf8.count))])
         }
+    }
+
+    /// Materialize only a validated inspection rendition inside this account's workspace.
+    func savePhoto(_ data: Data, id: String) throws -> JSON {
+        let dimensions = try HandPhotoRendition.dimensions(data)
+        let path = "/workspace/photos/" + UUID().uuidString.lowercased() + ".jpg"
+        let destination = try resolve(path)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Task.checkCancellation()
+        try data.write(to: destination, options: .atomic)
+        #if os(iOS)
+        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: destination.path)
+        #endif
+        return try HandPhotoRendition.result(data, id: id, path: path, width: dimensions.0, height: dimensions.1)
     }
 
     private func resolve(_ path: String) throws -> URL {

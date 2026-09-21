@@ -1,5 +1,6 @@
 import { gatewayAvailability, gatewayRuntime } from "./gateway-runtime";
 import { resolveThreadRoute, ThreadRoutePin, type ThreadRoute, type RoutingAi } from "./thread-model-routing";
+import { AgentPresentationWriter, generatePresentationText, presentationPending } from "./agent-presentation";
 import { retireSessionProjects, isRetiredProjectCompletion } from "./retired-projects";
 import { downloadPath, downloadBrainFile, downloadHandFile, fileDownloadFailure, FileDownloadError } from "./file-download";
 import { callerContext, type CallerContext } from "./request-origin";
@@ -31,6 +32,7 @@ import { emailTools, type EmailConfig } from "./email-tool";
 import { PhoneContainer } from "./phone-container";
 export { PhoneContainer };
 import { createVaultIntakeTool } from "./vault-intake-tool";
+import { validateBrowserVaultTakeoverAction, type BrowserVaultTakeoverAction } from "./browser-vault-takeover";
 import {
   getWorkspace,
   withWorkspace,
@@ -49,9 +51,10 @@ import type {
 } from "nanocodex";
 import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
 import { Agent as ManagedAgent } from "nanocodex/managed";
-import { imageGeneration, updatePlan, viewImage, web } from "nanocodex/tools";
-import { createWorkspaceFilesystem } from "nanocodex-tools";
+import { imageGeneration, updatePlan, web } from "nanocodex/tools";
+import { createWorkspaceFilesystem, resolveNamespaceCwd } from "nanocodex-tools";
 import { SessionAttachments } from "./attachments";
+import { createR2ViewImage } from "./attachment-image";
 import { createBrainWorkspace } from "./brain-workspace";
 import { createBrainBucket } from "./brain-bucket";
 import { browseX, X_API } from "nanocodex-tools/x";
@@ -73,6 +76,8 @@ import {
 } from "./sandbox-tools";
 import {
   createNamespaceExecutionRuntime,
+  prepareNamespaceHostMounts,
+  type NamespaceCaptureFilter,
   isBrainExecution,
   machineMountRoot,
   type MachineToolResolver,
@@ -403,6 +408,7 @@ export interface Env extends
   NANOCODEX_X?: Fetcher;
   NANOCODEX_HISTORY: R2Bucket;
   NANOCODEX_WORKSPACES: R2Bucket;
+  NANOCODEX_ATTACHMENT_IMAGES?: ImagesBinding;
   NANOCODEX_ADMIN_TOKEN: string;
   NANOCODEX_ADMIN_USER_ID?: string;
   NANOCODEX_SYSTEM_HOST_TOKEN?: string;
@@ -921,19 +927,13 @@ async function readPrivateBrowserChallenge(request: Request, takeover = false): 
     if (takeover) {
       if (typeof fields.challenge_id !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(fields.challenge_id)
         || typeof fields.action !== "string") throw new Error();
-      const keys: Record<string, readonly string[]> = {
-        observe: [], click: ["x", "y"], type: ["text"], key: ["key"], scroll: ["delta_y"], finish: [],
-      };
-      const extra = Object.hasOwn(keys, fields.action) ? keys[fields.action] : undefined;
-      if (!extra || Object.keys(fields).length !== extra.length + 2
-        || extra.some(key => !Object.hasOwn(fields, key))
-        || Object.keys(fields).some(key => !["challenge_id", "action", ...extra].includes(key))) throw new Error();
-      if (fields.action === "click" && (![fields.x, fields.y].every(value => typeof value === "number"
-        && Number.isFinite(value) && value >= 0 && value <= 1))) throw new Error();
-      if (fields.action === "type" && (typeof fields.text !== "string" || fields.text.length < 1 || fields.text.length > 512)) throw new Error();
-      if (fields.action === "key" && !["Enter", "Tab", "Backspace", "Escape"].includes(String(fields.key))) throw new Error();
-      if (fields.action === "scroll" && (typeof fields.delta_y !== "number" || !Number.isFinite(fields.delta_y)
-        || Math.abs(fields.delta_y) > 2000)) throw new Error();
+      const { challenge_id: _id, ...action } = fields;
+      if (action.action === "finish") {
+        if (Object.keys(action).length !== 1) throw new Error();
+      } else {
+        // Share the runtime contract: mobile clients send viewport, touch and edit.
+        validateBrowserVaultTakeoverAction(action as BrowserVaultTakeoverAction);
+      }
       return fields;
     }
     if (Object.keys(fields).length !== 2
@@ -1245,12 +1245,55 @@ export function createSharedBrainReadWorkspace(
   bucket: R2Bucket,
   resourceId: string,
   fallback: Readonly<{ readFile(path: string): Promise<Uint8Array> }>,
+  options: Readonly<{ relativePathsUseBrain?: boolean }> = {},
 ): Readonly<{ readFile(path: string): Promise<Uint8Array> }> {
   return Object.freeze({
     readFile: async (path: string): Promise<Uint8Array> => {
-      const key = sharedBrainObjectKey(resourceId, path);
+      const relativeBrainPath = !path.startsWith("/") && options.relativePathsUseBrain !== false;
+      const brainPath = relativeBrainPath ? resolveNamespaceCwd("/brain", path) : path;
+      if (relativeBrainPath && !brainPath.startsWith("/brain/")) {
+        throw new Error("brain workspace path must name a file beneath /brain");
+      }
+      const key = sharedBrainObjectKey(resourceId, brainPath);
       if (key === undefined) return fallback.readFile(path);
-      return createBrainWorkspace(bucket, resourceId).readFile(path);
+      // Both viewImage and imageGeneration accept at most 10 MiB per image.
+      // Check HEAD before GET so an oversized original never starts a body read.
+      const maximum = 10 * 1024 * 1024;
+      const tooLarge = () => new Error(`${path} exceeds the 10 MiB image limit. Use the attachment preview_path when available, or a resized copy under 10 MiB.`);
+      const metadata = await bucket.head(key);
+      if (!metadata) throw new Error(`brain workspace file not found: ${path}`);
+      if (metadata.size > maximum) throw tooLarge();
+      const object = await bucket.get(key);
+      if (!object) throw new Error(`brain workspace file not found: ${path}`);
+      // The object may have been replaced between HEAD and GET.
+      if (object.size > maximum) {
+        await object.body.cancel();
+        throw tooLarge();
+      }
+      const reader = object.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value.byteLength > maximum - length) {
+            await reader.cancel();
+            throw tooLarge();
+          }
+          chunks.push(value);
+          length += value.byteLength;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return bytes;
     },
   });
 }
@@ -1644,6 +1687,8 @@ async function managedFetchRoute(
           created_at: summary.createdAt,
           updated_at: summary.updatedAt,
           turn_count: summary.turnCount,
+          last_user_message_at: summary.presentation?.lastUserMessageAt ?? (summary.turnCount > 0 ? summary.updatedAt : 0),
+          ...(summary.presentation ? { presentation: summary.presentation } : {}),
           ...(principal.connectGrant ? {} : { may_have_scheduled_jobs: summary.mayHaveScheduledJobs }),
         }])),
       });
@@ -2762,7 +2807,7 @@ export function createManagedNamespaceTools(
   canUseExecutionNamespace: (context: ToolContext) => boolean,
   machines: (context: ToolContext) => readonly NamespaceMachine[] = () => [],
   resolveMachineTool: MachineToolResolver = () => undefined,
-  prepareNamespace: (context: ToolContext, toolName?: string) => Promise<void> = async () => {},
+  prepareNamespace: (context: ToolContext, toolName?: string) => Promise<void | NamespaceCaptureFilter> = async () => {},
   brain?: Readonly<{ tool: NamedTool; allowed(context: ToolContext): boolean }>,
   resolveScreenTool?: ScreenToolResolver,
 ): NamedTool[] {
@@ -2780,7 +2825,7 @@ function createManagedNamespaceRuntime(
   canUseExecutionNamespace: (context: ToolContext) => boolean,
   machines: (context: ToolContext) => readonly NamespaceMachine[] = () => [],
   resolveMachineTool: MachineToolResolver = () => undefined,
-  prepareNamespace: (context: ToolContext, toolName?: string) => Promise<void> = async () => {},
+  prepareNamespace: (context: ToolContext, toolName?: string) => Promise<void | NamespaceCaptureFilter> = async () => {},
   brain?: Readonly<{ tool: NamedTool; allowed(context: ToolContext): boolean }>,
   resolveScreenTool?: ScreenToolResolver,
 ): Readonly<{ tools: NamedTool[]; capture(context: ToolContext): Promise<void> }> {
@@ -2801,8 +2846,12 @@ function createManagedNamespaceRuntime(
     const pending = preparations.get(key);
     if (pending !== undefined) return pending;
     const preparation = (async () => {
-      await prepareNamespace(context, toolName);
-      runtime.capture(context);
+      const filter = await prepareNamespace(context, toolName);
+     if (!canUseExecutionNamespace(context)) {
+        throw new ManagedRequestError(403, "namespace_forbidden", "the current authorization cannot use execution hands");
+      }
+      context.signal.throwIfAborted();
+      runtime.capture(context, filter || undefined);
       captured.add(key);
     })();
     preparations.set(key, preparation);
@@ -3039,6 +3088,7 @@ export class DurableAgentSession extends DurableComputerSession {
   readonly #agentConstructions = new Set<AgentConstructionOwnership>();
   #agentShutdownPromise?: Promise<void>;
   #managedBrowserRuntimePromise?: Promise<ManagedBrowserRuntime>;
+  #presentation?: AgentPresentationWriter;
   #events?: EventWatcher;
   readonly #eventLog: DurableEventLog<StreamMessage>;
   readonly #eventArchive: ManagedEventArchive<StreamMessage>;
@@ -3072,7 +3122,6 @@ export class DurableAgentSession extends DurableComputerSession {
   readonly #realtimeOperations = new Map<string, Promise<unknown>>();
   #realtimeOperationTail: Promise<void> = Promise.resolve();
   readonly #inFlight = new Set<Promise<unknown>>();
-  readonly #namespaceMountRefreshTasks = new Map<string, Promise<void>>();
   #realtimeEventBuffer?: AgentEvent[];
   #realtimeRouteTail: Promise<void> = Promise.resolve();
   readonly #cronTriggers: CronTriggers;
@@ -4220,6 +4269,7 @@ export class DurableAgentSession extends DurableComputerSession {
       }
       return;
     }
+    if (presentationPending(this.ctx.storage)) await this.#sidebarPresentation().flush();
     if (this.#operations.nextAlarm() !== undefined) await this.#operations.drain();
     await this.#fireCronTriggers();
     // Archival owns a separate durable retry deadline. It must neither block
@@ -5282,7 +5332,7 @@ export class DurableAgentSession extends DurableComputerSession {
               throw new ManagedRequestError(409, "cron_trigger_changed", "trigger changed before admission");
             }
           },
-          undefined, "schedule",
+          undefined, "schedule", {}, false,
         );
       } catch (error) {
         if (error instanceof ManagedRequestError && error.code === "cron_trigger_changed") continue;
@@ -5893,6 +5943,7 @@ export class DurableAgentSession extends DurableComputerSession {
             "steered realtime input has no active managed turn attribution",
           );
         }
+        this.#sidebarPresentation().recordUserMessage(`voice:${request.voiceSessionId}:${request.operationId}`, Date.now());
         return {
           operation_id: request.operationId,
           route: "steered",
@@ -6008,11 +6059,13 @@ export class DurableAgentSession extends DurableComputerSession {
         const turn = await this.#steerableManagedTurn(id, authorization);
         await turn.steer({ input: goalContinuation(this.#goals.get())!, messageId });
       }
+      this.#sidebarPresentation().recordUserMessage(`steer:${messageId ?? crypto.randomUUID()}`, Date.now());
       await this.#scheduleNextAlarm();
       return;
     }
     const turn = await this.#steerableManagedTurn(id, authorization);
     await turn.steer({ input, messageId });
+    this.#sidebarPresentation().recordUserMessage(`steer:${messageId ?? crypto.randomUUID()}`, Date.now());
   }
 
   async #withdrawSteerHttpTurn(id: string, request: Request, authorization: TurnAuthorization): Promise<Response> {
@@ -6204,6 +6257,7 @@ export class DurableAgentSession extends DurableComputerSession {
       );
     });
     this.#publish(event!);
+    this.#sidebarPresentation().recordUserMessage(`turn:${id}`, now);
     this.#observe("managed.turn.accepted", {
       turn_id: id,
       transport: "realtime",
@@ -6255,6 +6309,7 @@ export class DurableAgentSession extends DurableComputerSession {
     voiceSessionId?: string,
     transport: import("./startup-context").StartupTransport = "unknown",
     caller: CallerContext = {},
+    userInitiated = true,
   ): Promise<ManagedTurnSubmission> {
     await this.#settingsMutationTail;
     if (this.#deleting || this.#deleted) {
@@ -6387,6 +6442,7 @@ export class DurableAgentSession extends DurableComputerSession {
       );
     });
     this.#publish(event!);
+    if (userInitiated) this.#sidebarPresentation().recordUserMessage(`turn:${id}`, now);
     if (cancellingEvent) this.#publish(cancellingEvent);
     this.#observe("managed.turn.accepted", {
       turn_id: id,
@@ -7641,7 +7697,13 @@ export class DurableAgentSession extends DurableComputerSession {
         // filesystem during ordinary brain-only startup or relative reads.
         return (await createWorkspaceFilesystem(workspace)).readFile(path);
       } },
+      { relativePathsUseBrain: !multiplayer },
     );
+    const brainViewImage = createR2ViewImage({
+      bucket: this.#brainBucket(), resourceId: session.session_id,
+      images: this.env.NANOCODEX_ATTACHMENT_IMAGES,
+      fallbackWorkspace: sharedBrainWorkspace, relativePathsUseBrain: !multiplayer,
+    });
     const computerRuntimeMs = performance.now() - phaseStartedAt;
     const currentAccountInfo = async (context: ToolContext) => {
       await this.#accountHostedTools?.refresh();
@@ -7779,13 +7841,14 @@ export class DurableAgentSession extends DurableComputerSession {
       namespaceMachines,
       resolveNamespaceMachineTool,
       async (context, toolName) => {
-        await this.#refreshMountedHostMounts(this.#authorizationForToolContext(context));
+        const filter = await this.#refreshMountedHostMounts(this.#authorizationForToolContext(context));
         // Publishers reconnect independently of shell attachments. A cached
         // startup inventory must not hide a screen that has since come online.
         if (toolName === "select_computer"
           && this.#hasFullAccountAuthority(this.#authorizationForToolContext(context))) {
           await this.#accountHostedTools?.refresh();
         }
+        return filter;
       },
       {
         tool: computer.tool,
@@ -7864,7 +7927,7 @@ export class DurableAgentSession extends DurableComputerSession {
         fetch: managedImageFetch(this.env, this.#credentialSubject(), configuration.chatgpt_account_id),
         workspace: sharedBrainWorkspace,
       }),
-      viewImage({ workspace: sharedBrainWorkspace }),
+      brainViewImage,
       updatePlan(),
       {
         name: "runtimeInfo",
@@ -7960,7 +8023,7 @@ export class DurableAgentSession extends DurableComputerSession {
     let cloudflareAgentMs = 0;
     try {
       phaseStartedAt = performance.now();
-      const selectedTools = restrictedEnvironment ? [computer.tool, viewImage({ workspace: sharedBrainWorkspace }), updatePlan()] : cloudTools;
+      const selectedTools = restrictedEnvironment ? [computer.tool, brainViewImage, updatePlan()] : cloudTools;
       const configuredNames = configuration.tools?.flatMap(name => name === "memory"
         ? ["list", "read", "search", "add_ad_hoc_note"].map(method => `memories__${method}`) : [name]);
       const configuredTools = configuredNames === undefined ? selectedTools : selectedTools.filter(tool => configuredNames.includes(tool.name));
@@ -8064,20 +8127,7 @@ export class DurableAgentSession extends DurableComputerSession {
       const owner = this.#credentialBinding?.strategy === "session_v1" || configuration.chatgpt_account_id ? {
         // Adapter lifecycle ownership is keyed by the exact context object.
         ctx: this.ctx,
-        env: { NANOCODEX: scopedManagedModelEgress(
-          this.env.NANOCODEX, this.ctx.id.toString(), this.#credentialSubject(),
-          this.#credentialBinding?.strategy !== "session_v1" || this.env.NANOCODEX_SESSION_MODEL_EGRESS === undefined ? undefined : {
-            binding: this.env.NANOCODEX_SESSION_MODEL_EGRESS,
-            owner: () => sessionCredentialOwner({
-              subject: this.#credentialSubject(), storageId: this.ctx.id.toString(),
-              binding: this.#credentialBinding, session: this.#session(),
-              initialization: this.#initializationOwnership(),
-              deleting: this.#deleting, deleted: this.#deleted,
-              exported: this.#durabilityExported, importPending: this.#durabilityImportState === "pending",
-            }),
-          },
-          configuration.chatgpt_account_id,
-        ) },
+        env: { NANOCODEX: this.#modelEgress() },
       } : this;
       agent = await CloudflareAgent.create(owner, agentOptions);
       cloudflareAgentMs = performance.now() - phaseStartedAt;
@@ -8408,7 +8458,7 @@ export class DurableAgentSession extends DurableComputerSession {
         throw new ManagedRequestError(409, "goal_changed", "goal changed before continuation admission");
       }
       this.#goalRuntime.discardPending();
-    });
+    }, undefined, "unknown", {}, false);
   }
 
   #activeTurnAuthorization(): TurnAuthorization | undefined {
@@ -8640,36 +8690,81 @@ export class DurableAgentSession extends DurableComputerSession {
 
   async #refreshMountedHostMounts(
     authorization: TurnAuthorization | undefined,
-  ): Promise<void> {
+  ): Promise<NamespaceCaptureFilter> {
     if (!this.#canUseExecutionNamespace(authorization)) {
-      throw new ManagedRequestError(
-        403,
-        "namespace_forbidden",
-        "the current authorization cannot use execution hands",
-      );
+      throw new ManagedRequestError(403, "namespace_forbidden", "the current authorization cannot use execution hands");
     }
     if (this.#deleting || this.#deleted) throw retryableError("agent is being deleted");
     const deletionGeneration = this.#deletionGeneration;
     const mounts = this.#managedMounts("mounted").filter((mount) => (
       mount.provider === "host" && vmHostMountAllocation(mount) !== undefined
-    ));
-    await Promise.all(mounts.map((mount) => this.#refreshMountedHostMount(mount)));
+    )).map(mount => ({ id: `sandbox:${mount.id}`, mount }));
+    const filter = await prepareNamespaceHostMounts(mounts, async ({ mount }) => {
+      const ready = await this.#probeMountedHostMount(mount);
+      if (ready === undefined || ready.route_id === undefined) return undefined;
+      const routeId = ready.route_id;
+      // Validate again synchronously when the complete cell snapshot is captured.
+      return () => {
+        const current = this.#managedMount(mount.id);
+        const allocation = current && vmHostMountAllocation(current);
+        return current?.state === "mounted" && current.provider === "host"
+          && allocation?.pool_locator === ready.pool_locator
+          && allocation.allocation_id === ready.allocation_id
+          && allocation.generation === ready.generation
+          && allocation.machine_id === ready.machine_id
+          && allocation.route_id === ready.route_id
+          && this.#hostedTools.machineOnRoute(routeId, ready.machine_id) !== undefined;
+      };
+    });
+    if (!this.#canUseExecutionNamespace(authorization)) {
+      throw new ManagedRequestError(403, "namespace_forbidden", "the current authorization cannot use execution hands");
+    }
     if (this.#deleting || this.#deleted || this.#deletionGeneration !== deletionGeneration) {
       throw retryableError("agent is being deleted");
     }
+    return filter;
   }
 
-  #refreshMountedHostMount(mount: ManagedMountRow): Promise<void> {
-    const pending = this.#namespaceMountRefreshTasks.get(mount.id);
-    if (pending !== undefined) return pending;
-    const refresh = this.#prepareHostMount(mount);
-    this.#namespaceMountRefreshTasks.set(mount.id, refresh);
-    void refresh.finally(() => {
-      if (this.#namespaceMountRefreshTasks.get(mount.id) === refresh) {
-        this.#namespaceMountRefreshTasks.delete(mount.id);
-      }
-    }).catch(() => {});
-    return refresh;
+  async #probeMountedHostMount(
+    mount: ManagedMountRow,
+  ): Promise<NonNullable<ManagedMountConfiguration["vm_host"]> | undefined> {
+    const retained = vmHostMountAllocation(mount);
+    const session = this.#session();
+    const factoryName = vmHostFactoryName(mount);
+    if (mount.state !== "mounted" || retained === undefined || session === undefined || factoryName === undefined) return undefined;
+    try {
+      // Namespace discovery only probes existing allocations. Explicit mount
+      // still uses #prepareHostMount's allocation and readiness retry loop.
+      const status = await fetchResponseWithDeadline(
+        this.env.NANOCODEX_VM_HOST_POOLS.getByName(retained.pool_locator),
+        "https://vm-host-pool.internal/ready",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            owner_id: session.owner_id, agent_id: session.session_id, mount_id: mount.id,
+            allocation_id: retained.allocation_id, generation: retained.generation,
+            pool_locator: retained.pool_locator,
+          }),
+        },
+        5_000,
+        "VM namespace readiness",
+        async response => {
+          if (!response.ok) throw new Error(`VM readiness returned HTTP ${response.status}`);
+          return response.json<unknown>();
+        },
+      );
+      if (!validVmHostAllocation(status) || (status as { ready?: unknown }).ready !== true
+        || status.factory_name !== factoryName || status.allocation_id !== retained.allocation_id
+        || status.generation !== retained.generation || status.machine_id !== retained.machine_id) return undefined;
+      const current = this.#managedMount(mount.id);
+      if (this.#deleting || this.#deleted || current?.state !== "mounted") return undefined;
+      return this.#persistRefreshedHostRoute(mount, retained, status.route_id);
+    } catch (error) {
+      console.warn({ type: "vm.namespace.unavailable", mount_id: mount.id,
+        error: error instanceof Error ? error.message : "VM readiness failed" });
+      return undefined;
+    }
   }
 
   async #prepareHostMount(mount: ManagedMountRow): Promise<void> {
@@ -9559,7 +9654,61 @@ export class DurableAgentSession extends DurableComputerSession {
     this.#publish(persistence.event!);
   }
 
+  #modelEgress(): Pick<Fetcher, "fetch"> {
+    return scopedManagedModelEgress(
+      this.env.NANOCODEX, this.ctx.id.toString(), this.#credentialSubject(),
+      this.#credentialBinding?.strategy !== "session_v1" || this.env.NANOCODEX_SESSION_MODEL_EGRESS === undefined ? undefined : {
+        binding: this.env.NANOCODEX_SESSION_MODEL_EGRESS,
+        owner: () => sessionCredentialOwner({
+          subject: this.#credentialSubject(), storageId: this.ctx.id.toString(),
+          binding: this.#credentialBinding, session: this.#session(),
+          initialization: this.#initializationOwnership(),
+          deleting: this.#deleting, deleted: this.#deleted,
+          exported: this.#durabilityExported, importPending: this.#durabilityImportState === "pending",
+        }),
+      },
+      this.#configuration().chatgpt_account_id,
+    );
+  }
+
+  #sidebarPresentation(): AgentPresentationWriter {
+    const session = this.#session()!;
+    return this.#presentation ??= new AgentPresentationWriter(this.ctx.storage, async value => {
+      if (this.#deleting) return;
+      const response = await this.env.NANOCODEX_USERS.getByName(session.owner_id).fetch(
+        `https://user.internal/agents/${session.session_id}/presentation`, {
+          method: "POST", signal: AbortSignal.timeout(5_000),
+          headers: { "content-type": "application/json" }, body: JSON.stringify(value),
+        });
+      await response.body?.cancel();
+      if (!response.ok) throw new Error("presentation delivery failed");
+    }, async (kind, source) => {
+      const text = await generatePresentationText(this.#modelEgress(), this.ctx.id.toString(), kind, source,
+        this.#configuration().chatgpt_account_id);
+      return this.#deleting || this.#deleted || this.#durabilityExported ? undefined : text;
+    }, promise => this.ctx.waitUntil(promise.finally(() => this.#scheduleNextAlarm())));
+  }
+
   #publish(event: DurableEvent<StreamMessage>): void {
+    // Do no sidebar work per token or tool delta. Lifecycle and complete
+    // commentary messages are sufficient to describe current work.
+    const message = event.message;
+    const relevant = ["turn_accepted", "turn_cancelling", "turn_completed", "turn_cancelled", "turn_failed", "turn_retryable"].includes(message.type)
+      || (message.type === "event" && message.agent_id === undefined
+        && message.event.type === "assistant.message" && message.event.payload.phase === "commentary");
+    const session = relevant ? this.#session() : undefined;
+    if (session?.runtime_profile === "managed" && !this.#deleting) {
+      try {
+        const active = this.#activeTurnIds();
+        const status = active.length ? (active.some(id => this.#managedTurn(id)?.state === "cancelling") ? "stopping" : "running")
+          : message.type === "turn_failed" ? "failed" : message.type === "turn_cancelled" ? "cancelled"
+          : message.type === "turn_completed" ? "completed" : undefined;
+        const commentary = message.type === "event" && message.agent_id === undefined
+          && message.event.type === "assistant.message" && message.event.payload.phase === "commentary"
+          && typeof message.event.payload.text === "string" ? message.event.payload.text : undefined;
+        if (status) this.#sidebarPresentation().observe(status, active, message.type === "turn_accepted" ? promptInputText(message.input) : this.#firstPrompt(), event.turn_id ?? undefined, commentary);
+      } catch { /* Presentation failures must never affect execution or event delivery. */ }
+    }
     this.#eventLog.publish(event);
     if (this.#operations.nextAlarm() !== undefined) this.ctx.waitUntil(this.#scheduleNextAlarm());
     this.#broadcast({
@@ -10315,6 +10464,7 @@ export class DurableAgentSession extends DurableComputerSession {
     if (this.#deleting || !this.#sessionId()) return;
     const now = Date.now();
     const targets: number[] = [];
+    if (presentationPending(this.ctx.storage)) targets.push(now + 20_000);
     const webhookAlarm = this.#operations.nextAlarm();
     if (webhookAlarm !== undefined) targets.push(webhookAlarm);
     if (!this.#durabilityExported && this.#durabilityImportState !== "pending") {
