@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { spawn } from 'node:child_process';
-import { AppServer, configuration, serveMcp } from '../openai-cua-app-server.mjs';
+import { AppServer, configuration, serveMcp } from '../../crates/experimental/nanocodex-computer/src/openai-cua-app-server.mjs';
 
 // Minimal synthetic server for actual Node WebSocket traffic (no npm packages).
 async function fixture(t, handler) {
@@ -100,7 +100,7 @@ test('configuration accepts literal loopback only and rejects credential-bearing
 test('stdio entry fails closed without trusted configuration', options, async () => {
   const env = { ...process.env };
   delete env.NANOCODEX_CUA_APP_SERVER_WS_URL;
-  const child = spawn(process.execPath, [new URL('../openai-cua-app-server.mjs', import.meta.url).pathname], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [new URL('../../crates/experimental/nanocodex-computer/src/openai-cua-app-server.mjs', import.meta.url).pathname], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = ''; let stderr = '';
   child.stdout.on('data', data => stdout += data);
   child.stderr.on('data', data => stderr += data);
