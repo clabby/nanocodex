@@ -479,7 +479,9 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
     observeAgentRelease(exposed, () => {
       if (lifecycle.active === active) lifecycle.active = undefined;
     });
-    commitCloudflareAgentSession(sessionReservation);
+    // Consume only after all startup checks succeed. Once exposed, this owner
+    // may mutate children; only its next clean unload can save a safe snapshot.
+    commitCloudflareAgentSession(sessionReservation, () => subagentSessions.consumeCheckpoint());
     return exposed;
   } catch (error) {
     const cleanupErrors = [];
@@ -757,6 +759,12 @@ function cloudflareSubagentSessions(storage, reservation, lifecycle) {
       const checkpoint = chunks.map(({ payload }) => payload).join("");
       validateSubagentCheckpointSize(checkpoint);
       return checkpoint;
+    },
+    consumeCheckpoint() {
+      if (!mayBindCloudflareSubagentSession(reservation)) {
+        throw new Error("Subagent checkpoint reader no longer owns the session");
+      }
+      storage.sql.exec("DELETE FROM nanocodex_cloudflare_subagent_checkpoints");
     },
     checkpoint(checkpoint) {
       if (!mayReleaseCloudflareSubagentSession(reservation)) {
