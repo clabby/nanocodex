@@ -115,8 +115,11 @@ cargo test -p nanocodex-computer
 Tests cover MCP framing and metadata fidelity, thread isolation, cancellation,
 readiness ordering, malformed events, child loss, host identity, singleton leases,
 and installation publication. Live build 9922 checks established official GUI
-cold startup, warm PID-addressed navigation, catalog discovery, and app inventory
-through the managed adapter. The preceding standalone bridge also completed
+cold startup, warm PID-addressed navigation, catalog discovery, app inventory,
+and independent REPL variables through the installed managed adapter. Browser
+verification discovered the existing Brave extension, opened Example Domain,
+read its accessibility tree, and closed the owned tab. The preceding standalone
+bridge also completed
 TextEdit input/undo and independent REPL scopes.
 
 The later managed-host native-input check reached the provider but returned
