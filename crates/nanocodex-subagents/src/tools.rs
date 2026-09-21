@@ -549,7 +549,7 @@ impl Tool for SubmitResult {
                             { "type": "string" }, { "type": "number" },
                             { "type": "boolean" }, { "type": "null" }
                         ],
-                        "description": "The final JSON value required by this agent's output schema. Pass objects and arrays directly, not as JSON-encoded strings. Use a string only when the output schema permits a string."
+                        "description": "The final JSON value required by this agent's output schema. Pass objects and arrays directly, not as JSON-encoded strings. Use a string only when the output schema permits a string. A JSON-encoded object or array is decoded once only if it matches the required schema; the receipt reports decoded_json_text."
                     },
                     "turn_token": {
                         "type": "integer",
@@ -564,7 +564,8 @@ impl Tool for SubmitResult {
         .with_output_schema(json!({
             "type": "object",
             "properties": {
-                "accepted": { "type": "boolean", "const": true }
+                "accepted": { "type": "boolean", "const": true },
+                "decoded_json_text": { "type": "boolean", "const": true }
             },
             "required": ["accepted"],
             "additionalProperties": false
@@ -577,10 +578,15 @@ impl Tool for SubmitResult {
             .registry
             .upgrade()
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
-        registry
+        let decoded_json_text = registry
             .submit_result(context.session_id(), turn_token, output)
             .await?;
-        Ok(ToolOutput::from_json(json!({ "accepted": true }), true))
+        let receipt = if decoded_json_text {
+            json!({ "accepted": true, "decoded_json_text": true })
+        } else {
+            json!({ "accepted": true })
+        };
+        Ok(ToolOutput::from_json(receipt, true))
     }
 }
 

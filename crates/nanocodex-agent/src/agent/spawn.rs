@@ -117,6 +117,7 @@ where
             context_source,
             depth: 0,
             execution: codex.execution,
+            restored_snapshot: None,
             host_context: None,
             service_factory,
         },

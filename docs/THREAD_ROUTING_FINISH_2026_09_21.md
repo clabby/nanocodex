@@ -1,6 +1,6 @@
 # Thread routing completion and verification — 2026-09-21
 
-This revision implements the provider/child routing work in PR #436 and merges current master. Later actual-CLI verification found remaining live child-result and idle-reconstruction failures; see the follow-up below. The feature remains opt-in; nothing was deployed and no recurring probes were enabled.
+This revision implements the provider/child routing work in PR #436 and merges current master. Later actual-CLI verification found child-result and idle-reconstruction failures, now fixed and verified in the [recovery follow-up](THREAD_ROUTING_CHILD_RECOVERY_2026_09_21.md). The feature remains opt-in; nothing was deployed and no recurring probes were enabled.
 
 ## Resulting behavior
 
@@ -41,7 +41,7 @@ A separate [12-call Jev preference smoke](THREAD_ROUTING_PREFERENCE_EVAL_2026_09
 
 ## Actual CLI follow-up
 
-A subsequent [verification with the PR-built native and managed CLI binaries](THREAD_ROUTING_CLI_VERIFICATION_2026_09_21.md) tests live inference, tools and continuation. It also caught and removes a stale public-admission restriction that prevented routed multi-agent creation, plus a CI Clippy warning. Native and managed root journeys pass. Live GLM object results and child continuation after managed idle shutdown remain failing; the earlier unit/SDK checks do not establish those guarantees.
+A subsequent [verification with the PR-built native and managed CLI binaries](THREAD_ROUTING_CLI_VERIFICATION_2026_09_21.md) tests live inference, tools and continuation. It also caught and removes a stale public-admission restriction that prevented routed multi-agent creation, plus a CI Clippy warning. Native and managed root journeys pass. The subsequent [recovery fixes and actual-CLI rerun](THREAD_ROUTING_CHILD_RECOVERY_2026_09_21.md) pass live GLM object results, child continuation across two managed idle boundaries, explicit close and public deletion.
 
 ## Remaining PoC limits
 

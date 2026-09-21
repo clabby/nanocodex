@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex, Weak},
@@ -44,9 +44,10 @@ use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 use nanocodex_subagents::{
     AgentDescriptor, AgentDirectoryEntry, AgentId as SubagentId, AgentStatus as SubagentStatus,
-    AgentSummary, AgentTask, AgentUpdate as SubagentUpdate, MessageId as SubagentMessageId,
-    MessagePriority, MessagePurpose, Registry as SubagentRegistry, ScopedAgentUpdate,
-    SubagentControl, start_agent_with, start_agents_observed,
+    AgentSummary, AgentTask, AgentUpdate as SubagentUpdate, MAX_SUBAGENT_CHECKPOINT_BYTES,
+    MessageId as SubagentMessageId, MessagePriority, MessagePurpose, Registry as SubagentRegistry,
+    ScopedAgentUpdate, SubagentCheckpoint, SubagentControl, start_agent_with,
+    start_agents_observed,
 };
 use nanocodex_voice_protocol::{
     BrowserVoiceEffects, BrowserVoiceProtocol, REALTIME_END_INSTRUCTIONS,
@@ -1249,6 +1250,7 @@ struct WasmSubagents {
     parents: Arc<Mutex<HashMap<String, AgentHandle>>>,
     sessions: Rc<RefCell<HashMap<(String, SubagentId), String>>>,
     event_forwarders: Rc<Cell<usize>>,
+    unloaded_roots: Rc<RefCell<HashSet<String>>>,
 }
 
 struct WasmBatchParentCleanup {
@@ -1300,6 +1302,7 @@ impl WasmSubagents {
     ) -> Self {
         let sessions = Rc::new(RefCell::new(HashMap::new()));
         let event_forwarders = Rc::new(Cell::new(0));
+        let unloaded_roots = Rc::new(RefCell::new(HashSet::new()));
         forward_subagent_updates(
             host_definition_id,
             Arc::downgrade(&registry),
@@ -1307,6 +1310,7 @@ impl WasmSubagents {
             Rc::clone(&sessions),
             Rc::clone(&event_forwarders),
             Arc::clone(&parents),
+            Rc::clone(&unloaded_roots),
         );
         Self {
             host_definition_id,
@@ -1315,6 +1319,7 @@ impl WasmSubagents {
             parents,
             sessions,
             event_forwarders,
+            unloaded_roots,
         }
     }
 
@@ -1365,6 +1370,31 @@ impl WasmSubagents {
                     .and_then(|host_context| host_context.as_deref()),
             )?;
         }
+        Ok(())
+    }
+
+    async fn unload(&self, root_session_id: &str) -> std::io::Result<()> {
+        // Install the fence before closing: queued Closed updates and eventual
+        // update-stream teardown must never release durable descriptors/routes.
+        self.unloaded_roots
+            .borrow_mut()
+            .insert(root_session_id.to_owned());
+        self.control.close_all(root_session_id).await?;
+        let session_ids = {
+            let mut sessions = self.sessions.borrow_mut();
+            let keys = sessions
+                .keys()
+                .filter(|(root, _)| root == root_session_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| sessions.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        for session_id in session_ids {
+            self.remove_parent(&session_id);
+        }
+        self.remove_parent(root_session_id);
         Ok(())
     }
 
@@ -1556,6 +1586,56 @@ impl WasmNanocodex {
         descriptors_json: &str,
         host_contexts_json: Option<String>,
     ) -> Result<(), JsValue> {
+        if descriptors_json.len() > MAX_SUBAGENT_CHECKPOINT_BYTES {
+            return Err(js_error("subagent checkpoint exceeds size limit"));
+        }
+        if descriptors_json.trim_start().starts_with('{') {
+            let checkpoint: SubagentCheckpoint = serde_json::from_str(descriptors_json)
+                .map_err(|error| js_error(format!("invalid subagent checkpoint: {error}")))?;
+            if self.subagents.is_none() && checkpoint.children.is_empty() {
+                checkpoint
+                    .validate(self.inner.session_id())
+                    .map_err(js_error)?;
+                return Ok(());
+            }
+            let subagents = self.subagents.as_ref().ok_or_else(|| {
+                js_error("this agent was not created with the subagent extension")
+            })?;
+            if let Some(encoded) = &host_contexts_json {
+                let contexts: HashMap<String, Option<String>> =
+                    serde_json::from_str(encoded).map_err(js_error)?;
+                if contexts.len() != checkpoint.children.len()
+                    || checkpoint.children.iter().any(|child| {
+                        contexts.get(&child.descriptor.session_id) != Some(&child.host_context)
+                    })
+                {
+                    return Err(js_error(
+                        "child checkpoint host context differs from its retained binding",
+                    ));
+                }
+            }
+            let children = checkpoint.children.clone();
+            subagents
+                .registry
+                .restore_checkpoint(&self.inner, checkpoint)
+                .await
+                .map_err(js_error)?;
+            for child in children {
+                if !matches!(
+                    child.status,
+                    SubagentStatus::Closed | SubagentStatus::Closing
+                ) {
+                    bind_subagent_session(
+                        subagents.host_definition_id,
+                        &subagents.sessions,
+                        self.inner.session_id(),
+                        &child.descriptor,
+                        child.host_context.as_deref(),
+                    )?;
+                }
+            }
+            return Ok(());
+        }
         let descriptors = serde_json::from_str::<Vec<WasmRestoredSubagent>>(descriptors_json)
             .map_err(|error| js_error(format!("invalid restored subagents: {error}")))?
             .into_iter()
@@ -1595,6 +1675,37 @@ impl WasmNanocodex {
         subagents
             .restore(self.inner.session_id(), descriptors, host_contexts)
             .await
+    }
+
+    /// Serializes safe child boundaries for storage under the owner's durability generation.
+    #[wasm_bindgen(js_name = checkpointSubagents)]
+    pub async fn checkpoint_subagents(&self) -> Result<String, JsValue> {
+        let checkpoint = match &self.subagents {
+            Some(subagents) => subagents
+                .registry
+                .checkpoint(self.inner.session_id())
+                .await
+                .map_err(js_error)?,
+            None => SubagentCheckpoint {
+                version: 1,
+                root_session_id: self.inner.session_id().to_owned(),
+                next_agent_id: 1,
+                children: Vec::new(),
+            },
+        };
+        serde_json::to_string(&checkpoint).map_err(js_error)
+    }
+
+    /// Unloads child drivers after their checkpoint has been durably stored by the owner.
+    #[wasm_bindgen(js_name = shutdownDurable)]
+    pub async fn shutdown_durable(&self) -> Result<(), JsValue> {
+        if let Some(subagents) = &self.subagents {
+            subagents
+                .unload(self.inner.session_id())
+                .await
+                .map_err(js_error)?;
+        }
+        self.inner.shutdown().await.map_err(js_error)
     }
 
     /// Enables or disables the optional JavaScript event crossing for this handle.
@@ -3214,10 +3325,14 @@ fn forward_subagent_updates(
     sessions: Rc<RefCell<HashMap<(String, SubagentId), String>>>,
     event_forwarders: Rc<Cell<usize>>,
     parents: Arc<Mutex<HashMap<String, AgentHandle>>>,
+    unloaded_roots: Rc<RefCell<HashSet<String>>>,
 ) {
     spawn_local(async move {
         while let Some(scoped) = updates.recv().await {
             let root_session_id = scoped.root_session_id;
+            if unloaded_roots.borrow().contains(&root_session_id) {
+                continue;
+            }
             match scoped.update {
                 SubagentUpdate::Added(descriptor) => {
                     let Some(registry) = registry.upgrade() else {
@@ -3277,6 +3392,9 @@ fn forward_subagent_updates(
             .collect::<Vec<_>>();
         for (root_session_id, session_id) in session_ids {
             remove_subagent_parent(&parents, &session_id);
+            if unloaded_roots.borrow().contains(&root_session_id) {
+                continue;
+            }
             if let Err(error) =
                 host_release_subagent_session(host_definition_id, &root_session_id, &session_id)
             {

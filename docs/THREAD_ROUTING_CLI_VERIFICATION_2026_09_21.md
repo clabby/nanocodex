@@ -1,6 +1,6 @@
 # Actual CLI verification — PR #436, 2026-09-21
 
-Root-thread tests pass; live object-valued child results and child continuation after idle runtime reconstruction remain failing. This is not an all-green child-routing result.
+Historical verification record: these runs found failures in live object-valued child results and idle reconstruction. Both are fixed and pass the subsequent [native and managed CLI recovery verification](THREAD_ROUTING_CHILD_RECOVERY_2026_09_21.md). The original observations below are preserved.
 
 Both native executables were built from PR head `96e49f104357207d9cdf4dc25910af9498a27e0b` in the isolated worktree. These runs use the actual `nanocodex` and `nanocodex2` binaries, not SDK substitutes. Live inference used the authenticated Workers AI binding; task data was synthetic. Both binaries were rebuilt and native repair/restart was repeated after the source fixes below. No installed executable, saved login, or production deployment was changed.
 

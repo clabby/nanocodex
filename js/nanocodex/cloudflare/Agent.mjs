@@ -120,6 +120,7 @@ export function destroy(owner) {
       );
     }
     storage.sql.exec("DELETE FROM nanocodex_cloudflare_subagents");
+    storage.sql.exec("DELETE FROM nanocodex_cloudflare_subagent_checkpoints");
     clearCloudflareEventSocket(context);
   });
 }
@@ -710,6 +711,12 @@ function initializeAgentStorage(storage) {
       host_context_ref TEXT
     )
   `);
+  storage.sql.exec(`
+    CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_subagent_checkpoints (
+      chunk_index INTEGER PRIMARY KEY,
+      payload TEXT NOT NULL
+    )
+  `);
   const subagentColumns = storage.sql.exec(
     "PRAGMA table_info('nanocodex_cloudflare_subagents')",
   ).toArray();
@@ -722,12 +729,14 @@ function initializeAgentStorage(storage) {
 
 function cloudflareSubagentSessions(storage, reservation, lifecycle) {
   const restoredHostContextRefs = new Map();
+  const retainedBindings = new Map();
   return Object.freeze({
     restore() {
       const restored = storage.sql.exec(
         "SELECT descriptor_json, host_context_ref FROM nanocodex_cloudflare_subagents",
       ).toArray().map(({ descriptor_json, host_context_ref }) => {
         const descriptor = Object.freeze(JSON.parse(descriptor_json));
+        retainedBindings.set(descriptor.sessionId, { descriptor, hostContextRef: host_context_ref ?? undefined });
         restoredHostContextRefs.set(
           descriptor.sessionId,
           host_context_ref === null ? undefined : host_context_ref,
@@ -736,8 +745,57 @@ function cloudflareSubagentSessions(storage, reservation, lifecycle) {
       });
       return Object.freeze(restored);
     },
+    restoreCheckpoint() {
+      const chunks = storage.sql.exec(
+        "SELECT chunk_index, payload FROM nanocodex_cloudflare_subagent_checkpoints ORDER BY chunk_index",
+      ).toArray();
+      if (chunks.length === 0) return undefined;
+      if (chunks.length > 256 || chunks.some((chunk, index) => chunk.chunk_index !== index
+        || typeof chunk.payload !== "string" || chunk.payload.length > 65_536)) {
+        throw new Error("Invalid durable subagent checkpoint chunks");
+      }
+      const checkpoint = chunks.map(({ payload }) => payload).join("");
+      validateSubagentCheckpointSize(checkpoint);
+      return checkpoint;
+    },
+    checkpoint(checkpoint) {
+      if (!mayReleaseCloudflareSubagentSession(reservation)) {
+        throw new Error("Subagent checkpoint writer no longer owns the session");
+      }
+      validateSubagentCheckpointSize(checkpoint);
+      // Check syntax before replacing the last complete checkpoint. Rust owns
+      // the versioned tree schema and checks identities during reconstruction.
+      JSON.parse(checkpoint);
+      storage.transactionSync(() => {
+        storage.sql.exec("DELETE FROM nanocodex_cloudflare_subagent_checkpoints");
+        for (let offset = 0, index = 0; offset < checkpoint.length; index += 1) {
+          let end = Math.min(offset + 65_536, checkpoint.length);
+          if (end < checkpoint.length && /[\uD800-\uDBFF]/.test(checkpoint[end - 1])) end -= 1;
+          storage.sql.exec(
+            "INSERT INTO nanocodex_cloudflare_subagent_checkpoints (chunk_index, payload) VALUES (?, ?)",
+            index, checkpoint.slice(offset, end),
+          );
+          offset = end;
+        }
+      });
+    },
     hostContextRef(sessionId) {
       return restoredHostContextRefs.get(sessionId);
+    },
+    bindingDescriptor(sessionId, descriptor, hostContextRef) {
+      const retained = retainedBindings.get(sessionId);
+      if (retained === undefined) return descriptor;
+      const original = retained.descriptor;
+      const attachesInitialProvenance = retained.hostContextRef === undefined
+        && typeof hostContextRef === "string" && descriptor.task === original.task;
+      if (original.sessionId !== descriptor.sessionId || original.agentId !== descriptor.agentId
+        || original.parentAgentId !== descriptor.parentAgentId || original.role !== descriptor.role
+        || (retained.hostContextRef !== hostContextRef && !attachesInitialProvenance)) {
+        throw new Error("Subagent binding identity or host context changed");
+      }
+      // Delegation replaces the Rust task, not its spawning-turn authority.
+      // Tools retain the original descriptor used to mint that authority.
+      return original;
     },
     bind(sessionId, descriptor, hostContextRef) {
       if (!mayBindCloudflareSubagentSession(reservation)) return;
@@ -767,6 +825,7 @@ function cloudflareSubagentSessions(storage, reservation, lifecycle) {
           hostContextRef,
         });
       });
+      retainedBindings.set(sessionId, { descriptor, hostContextRef });
       restoredHostContextRefs.delete(sessionId);
     },
     release(sessionId, hostContextRef) {
@@ -779,6 +838,7 @@ function cloudflareSubagentSessions(storage, reservation, lifecycle) {
           hostContextRef ?? null,
         ).toArray();
         if (retained.length === 0) return;
+        storage.sql.exec("DELETE FROM nanocodex_cloudflare_subagent_checkpoints");
         notifySubagentLifecycle(lifecycle, {
           type: "release",
           rootSessionId: reservation.sessionId,
@@ -791,9 +851,17 @@ function cloudflareSubagentSessions(storage, reservation, lifecycle) {
           sessionId,
           hostContextRef ?? null,
         );
+        retainedBindings.delete(sessionId);
       });
     },
   });
+}
+
+function validateSubagentCheckpointSize(checkpoint) {
+  if (typeof checkpoint !== "string" || checkpoint.length === 0
+    || new TextEncoder().encode(checkpoint).byteLength > 16 * 1024 * 1024) {
+    throw new Error("Subagent checkpoint must be non-empty JSON bounded to 16 MiB");
+  }
 }
 
 function notifySubagentLifecycle(lifecycle, event) {

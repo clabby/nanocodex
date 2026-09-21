@@ -12,10 +12,12 @@ import {
   defineRuntime,
   loadDurabilityRuntime,
   loadSubscriptionRuntime,
+  mayReleaseCloudflareSubagentSession,
   reportError,
   registerDefinitionHost,
   releaseDefinitionHost,
   releaseHostSession,
+  releaseHostSessions,
   toWasmConfig,
 } from "../internal.mjs";
 import { createBrowserHost } from "./host.mjs";
@@ -181,7 +183,11 @@ export async function create(options = {}) {
         if (cloudflareReservation !== undefined) {
           activateCloudflareAgentSession(cloudflareReservation);
           const restoredSubagents = subagentSessions?.restore?.() ?? [];
-          if (restoredSubagents.length > 0) {
+          const checkpoint = subagentSessions?.restoreCheckpoint?.();
+          if (checkpoint !== undefined) {
+            validateRestoredChildBindings(checkpoint, raw.sessionId, restoredSubagents);
+          }
+          if (restoredSubagents.length > 0 || checkpoint !== undefined) {
             const restoredHostContextRefs = Object.fromEntries(
               restoredSubagents.map((descriptor) => {
                 const hostContextRef = subagentSessions?.hostContextRef?.(descriptor.sessionId);
@@ -189,7 +195,7 @@ export async function create(options = {}) {
               }),
             );
             await raw.restoreSubagents(
-              JSON.stringify(restoredSubagents),
+              checkpoint ?? JSON.stringify(restoredSubagents),
               JSON.stringify(restoredHostContextRefs),
             );
           }
@@ -198,11 +204,15 @@ export async function create(options = {}) {
       } catch (error) {
         const cleanupErrors = [];
         if (raw !== undefined) {
-          try { await raw.shutdown(); }
+          try {
+            if (cloudflareReservation !== undefined) await raw.shutdownDurable();
+            else await raw.shutdown();
+          }
           catch (cleanupError) { cleanupErrors.push(cleanupError); }
           try { raw.free(); }
           catch (cleanupError) { cleanupErrors.push(cleanupError); }
         }
+        releaseHostSessions(host);
         try { durabilityOwner?.abandon(); }
         catch (cleanupError) { cleanupErrors.push(cleanupError); }
         try { await host.dispose(); }
@@ -215,6 +225,31 @@ export async function create(options = {}) {
         }
         throw error;
       }
+    },
+    async shutdown(raw) {
+      if (cloudflareReservation === undefined || raw.sessionId !== cloudflareReservation.sessionId
+        || subagentSessions?.checkpoint === undefined) {
+        await raw.shutdown();
+        return;
+      }
+      const errors = [];
+      try {
+        if (mayReleaseCloudflareSubagentSession(cloudflareReservation)) {
+          const checkpoint = await raw.checkpointSubagents();
+          if (mayReleaseCloudflareSubagentSession(cloudflareReservation)) {
+            subagentSessions.checkpoint(checkpoint);
+          }
+        }
+      } catch (error) {
+        errors.push(error);
+      }
+      try { await raw.shutdownDurable(); }
+      catch (error) { errors.push(error); }
+      // Durable unload keeps descriptors, but relinquishes this host's in-memory
+      // registrations. The released Cloudflare generation has no host authority.
+      releaseHostSessions(host);
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, "Subagent checkpoint and shutdown failed");
     },
     subscribe: events.subscribe,
     adopt(raw) {
@@ -270,4 +305,22 @@ export async function create(options = {}) {
 
 function releaseHost(host) {
   void host.release().catch(reportError);
+}
+
+function validateRestoredChildBindings(encoded, rootSessionId, bindings) {
+  const checkpoint = JSON.parse(encoded);
+  if (checkpoint.version !== 1 || checkpoint.root_session_id !== rootSessionId
+    || !Array.isArray(checkpoint.children) || checkpoint.children.length !== bindings.length) {
+    throw new Error("Durable child checkpoint does not match its session bindings");
+  }
+  const retained = new Map(bindings.map((binding) => [binding.sessionId, binding]));
+  for (const child of checkpoint.children) {
+    const descriptor = child?.descriptor;
+    const binding = retained.get(descriptor?.session_id);
+    if (binding === undefined || String(descriptor.id) !== binding.agentId || descriptor.role !== binding.role
+      || (descriptor.parent == null ? null : String(descriptor.parent)) !== (binding.parentAgentId ?? null)) {
+      throw new Error("Durable child checkpoint identity differs from its session binding");
+    }
+    retained.delete(descriptor.session_id);
+  }
 }
