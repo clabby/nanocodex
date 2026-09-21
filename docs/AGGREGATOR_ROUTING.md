@@ -38,3 +38,9 @@ Changes in telemetry inform new threads and new children. They do not silently a
 Public listings establish availability in a catalog, not access granted to our deployment. Authenticated live OpenRouter/Vercel inference requires configured keys and credits. Do not describe mocked transport checks or Mac-side timing as live global Worker measurements.
 
 Authenticated GLM-low CLI execution and gateway compatibility fixes are recorded in [the 2026-09-21 live verification report](THREAD_ROUTING_GATEWAYS_2026_09_21.md).
+
+## Scheduled TTFT selection
+
+The Worker configuration enables a half-hourly streaming probe sweep and automatic routing for new full-account agents without explicit model settings. One deployment-wide Durable Object deduplicates schedule slots and limits requests. Three successful fresh samples qualify a candidate's p50/EWMA TTFT for Jev; failure counts remain separate evidence. The complete audit is retained, while compact candidate fields avoid overloading Jev's input. Existing roots and children remain pinned.
+
+See [schedule, controls, measurement definition and live verification](THREAD_ROUTING_TTFT_2026_09_21.md). Shared probes cover Workers AI, OpenRouter and Vercel; ChatGPT subscriptions do not inherit gateway TTFT. Production activation requires deployment of the PR.

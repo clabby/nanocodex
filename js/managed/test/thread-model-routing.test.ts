@@ -336,25 +336,42 @@ describe("trusted regional provider telemetry", () => {
     const router = ai();
     const route = await resolveThreadRoute(router,"task",routingPolicySchema.parse({}),runtime([metric({apiKey:"secret",prompt:"private",errorBody:"sensitive"}),metric({source:"probe"})]));
     const snapshot = route.audit?.provider_telemetry;
-    expect(snapshot).toMatchObject({provenance:"trusted_runtime_aggregate",workerColo:"LHR",clientIngressColo:"SJC",windowMs:300000});
+    expect(snapshot).toMatchObject({provenance:"trusted_runtime_aggregate",workerColo:"LHR",clientIngressColo:"SJC",windowMs:7200000});
     expect(snapshot?.provider_performance).toHaveLength(2);
     expect(snapshot?.provider_performance[0]).toMatchObject({model:FRONTIER_MODEL,fullResponseP50Ms:120});
-    expect(JSON.parse((router.run.mock.calls[0][1] as {state:string}).state).provider_telemetry).toEqual(snapshot);
+    const state = JSON.parse((router.run.mock.calls[0][1] as {state:string}).state);
+    expect(state.provider_telemetry).not.toHaveProperty("provider_performance");
+    expect(state.provider_telemetry).toMatchObject({ provenance: "trusted_runtime_aggregate", workerColo: "LHR" });
+    expect(state.candidates.find((c: {id:string}) => c.id === id).availability.live).toMatchObject({ sampleCount: 6, failureCount: 1 });
     for (const privateField of ["apiKey","prompt","errorBody","successRate"]) expect(snapshot?.provider_performance[0]).not.toHaveProperty(privateField);
     expect(route.estimate).toBeNull();
     expect(route.selection).toBe("prior");
   });
-  it("rejects stale, future, sparse, wrong-region, unknown and unavailable groups", async () => {
-    const samples = [metric({lastObservedAt:Date.now()-300001}),metric({lastObservedAt:Date.now()+60000}),metric({successCount:4}),metric({usable:false}),metric({workerColo:"SJC"}),metric({model:"unlisted"}),metric({backend:"vercel"}),metric({effort:null}),metric({fullResponseP50Ms:Infinity}),metric({successCount:20})];
+  it("rejects stale, future, inconsistent, wrong-region, unknown and unavailable groups", async () => {
+    const samples = [metric({lastObservedAt:Date.now()-300001}),metric({lastObservedAt:Date.now()+60000}),metric({successCount:4}),metric({workerColo:"SJC"}),metric({model:"unlisted"}),metric({backend:"vercel"}),metric({effort:null}),metric({fullResponseP50Ms:Infinity}),metric({successCount:20})];
     const route = await resolveThreadRoute(ai(),"task",routingPolicySchema.parse({}),runtime(samples));
     expect(route.audit?.provider_telemetry?.provider_performance).toEqual([]);
     const unknownColo = await resolveThreadRoute(ai(),"task",routingPolicySchema.parse({}),{...runtime([metric()]),workerColo:null});
     expect(unknownColo.audit?.provider_telemetry?.provider_performance).toEqual([]);
   });
+  it("retains availability-only context without presenting it as generation latency", async () => {
+    const router = ai();
+    const route = await resolveThreadRoute(router,"task",routingPolicySchema.parse({}),runtime([metric({usable:false})]));
+    expect(route.audit?.provider_telemetry?.provider_performance).toHaveLength(1);
+    expect(route.audit?.provider_telemetry?.provider_performance[0]).toMatchObject({
+      sampleCount:6,successCount:5,availabilityFailureCount:1,usable:false,ttftUsable:false,
+      generationTtftP50Ms:null,generationTtftEwmaMs:null,generationTtftSampleCount:0,
+    });
+    const state = JSON.parse((router.run.mock.calls[0][1] as {state:string}).state);
+    expect(state.candidates.find((candidate: {id:string}) => candidate.id === id).responsiveness).toMatchObject({live:null,probe:null});
+    expect(route.estimate).toBeNull();
+    expect(route.selection).toBe("prior");
+  });
   it("bounds and deduplicates aggregates without merging probe/live cohorts", async () => {
     const samples = ROUTING_CANDIDATES.filter(c=>c.backend==="openrouter").flatMap(c=>[metric({model:c.model,effort:c.thinking}),metric({model:c.model,effort:c.thinking,source:"probe"})]);
     const route = await resolveThreadRoute(ai(),"task",routingPolicySchema.parse({}),runtime([samples[0],...samples]));
-    expect(route.audit?.provider_telemetry?.provider_performance).toHaveLength(16);
+    expect(route.audit?.provider_telemetry?.provider_performance).toHaveLength(30);
+    expect(new Set(route.audit?.provider_telemetry?.provider_performance.map(m => `${m.source}/${m.candidateId}`)).size).toBe(30);
   });
   it("cannot satisfy a measured-success threshold or trust policy/request telemetry", async () => {
     expect(()=>routingPolicySchema.parse({provider_performance:[metric()]})).toThrow();

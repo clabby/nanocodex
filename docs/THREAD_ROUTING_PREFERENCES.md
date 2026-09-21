@@ -61,7 +61,7 @@ The route's audit record retains the parsed policy, preferences, eligible IDs, p
 - [RouteLLM](https://github.com/lm-sys/RouteLLM): calibrating cost/quality tradeoffs on representative queries.
 - [Jev routing experiment](https://github.com/TokenTrim/jev-routing-experiment): retrieval evidence and an evidence-only ablation; Jev's incremental benefit must be tested.
 
-The feature remains opt-in behind NANOCODEX_THREAD_ROUTING and the AI binding. There is no deployment in this PR.
+The feature requires NANOCODEX_THREAD_ROUTING and the AI binding. The Worker configuration now enables NANOCODEX_AUTO_ROUTING for new full-account agents that omit explicit model settings; constrained Connect grants and imports retain their prior behavior. Existing routes remain pinned. This PR has not been deployed. See [scheduled TTFT routing](THREAD_ROUTING_TTFT_2026_09_21.md).
 
 ## Child threads and provider transport
 

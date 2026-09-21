@@ -41,7 +41,7 @@ export const CHILD_ROUTE_TICKET_TTL_MS = 15 * 60_000;
 export function createSubagentRouteController(options: {
   ai: RoutingAi;
   policy: ThreadRoutingPolicy;
-  availability: () => RoutingAvailability;
+  availability: () => RoutingAvailability | Promise<RoutingAvailability>;
   store: ChildRouteStore;
   authorize: (parentSessionId: string, hostContextRef: string) => void;
   id?: () => string;
@@ -73,7 +73,7 @@ export function createSubagentRouteController(options: {
       resolving++;
       try {
         const route = await resolveThreadRoute(options.ai, JSON.stringify({ role: request.role, task: request.task }),
-          routingPolicySchema.parse({ ...options.policy, strategy: "direct", candidates }), options.availability());
+          routingPolicySchema.parse({ ...options.policy, strategy: "direct", candidates }), await options.availability());
         // Authority can change while the classifier is in flight. Bind checks it again.
         options.authorize(request.parentSessionId, request.hostContextRef);
         const routeId = options.id ? options.id() : crypto.randomUUID();

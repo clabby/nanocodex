@@ -1,6 +1,10 @@
+import { automaticRoutingConfiguration } from "./automatic-routing";
+import { ProviderProbeCoordinator } from "./provider-probe-coordinator";
+import { PROBE_OWNER, type ProviderProbeEnvironment } from "./provider-probe-schedule";
+export { ProviderProbeCoordinator };
 import { gatewayAvailability, gatewayRuntime } from "./gateway-runtime";
 import { createSubagentRouteController, type RetainedChildRoute } from "./subagent-model-routing";
-import { SqliteProviderTelemetryStore } from "./provider-telemetry";
+import { SqliteProviderTelemetryStore, summarizeProviderObservationGroups } from "./provider-telemetry";
 import { resolveThreadRoute, ThreadRoutePin, type ThreadRoute, type RoutingAi } from "./thread-model-routing";
 import { AgentPresentationWriter, generatePresentationText, presentationPending } from "./agent-presentation";
 import { retireSessionProjects, isRetiredProjectCompletion } from "./retired-projects";
@@ -374,6 +378,7 @@ const MEMORY_TEAM_ASSERTION = "x-nanocodex-team-id";
 const MEMORY_SUBJECT_ASSERTION = "x-nanocodex-subject-id";
 const MEMORY_MUTATION_ASSERTION = "x-nanocodex-memory-mutation";
 export interface Env extends
+  ProviderProbeEnvironment,
   EmailConfig,
   AccountAuthEnv,
   ChiefOfStaffPrincipalEnv,
@@ -384,6 +389,8 @@ export interface Env extends
   AI_GATEWAY_API_KEY?: string;
   /** Opt-in paid inference PoC; absent/false preserves current routing. */
   NANOCODEX_THREAD_ROUTING?: string;
+  NANOCODEX_AUTO_ROUTING?: string;
+  NANOCODEX_PROVIDER_PROBE_COORDINATOR?: DurableObjectNamespace<ProviderProbeCoordinator>;
   NANOCODEX_PERFORMANCE_TRACE?: string;
   NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
   NANOCODEX_ACCOUNT_TOOLS: DurableObjectNamespace<AccountHostedTools>;
@@ -1996,6 +2003,11 @@ async function managedFetchRoute(
           }
         }
         validateAgentAdmissionSettings(creationSettings);
+        creationConfiguration = automaticRoutingConfiguration(creationConfiguration, {
+          enabled: env.NANOCODEX_AUTO_ROUTING === "true" && env.NANOCODEX_THREAD_ROUTING === "true" && !!env.AI,
+          fullAccountAuthority: !principal.connectGrant && principal.capabilities.includes("tools:use"),
+          settingsProvided, importing: durabilityArchive !== undefined,
+        });
 
       } catch (error) {
         return json({ error: "invalid_request", message: errorMessage(error) }, { status: 400 });
@@ -3092,6 +3104,11 @@ function agentCreationResponse(url: URL, agentId: string, settings: ManagedAgent
 
 export default {
   fetch: managedFetch,
+  scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    if (env.NANOCODEX_PROVIDER_PROBES === "true" && env.NANOCODEX_PROVIDER_PROBE_COORDINATOR) {
+      ctx.waitUntil(env.NANOCODEX_PROVIDER_PROBE_COORDINATOR.getByName(PROBE_OWNER).tick(event.scheduledTime));
+    }
+  },
 };
 
 class DurableComputerObject extends DurableObject<Env> {
@@ -7817,7 +7834,7 @@ export class DurableAgentSession extends DurableComputerSession {
     };
     const subagentRouting = configuration.model_routing && this.#threadRoute() ? createSubagentRouteController({
       ai: this.env.AI!, policy: configuration.model_routing,
-      availability: () => gatewayAvailability(this.env),
+      availability: () => this.#routingAvailability(),
       authorize: (parentSessionId, hostContextRef) => {
         assertRoutingOwned();
         assertRoutingAuthority(managedAuthorizationForRouting(
@@ -10199,6 +10216,24 @@ export class DurableAgentSession extends DurableComputerSession {
     return row ? JSON.parse(row.route_json) as ThreadRoute : undefined;
   }
 
+  async #routingAvailability() {
+    const live = summarizeProviderObservationGroups(new SqliteProviderTelemetryStore(this.ctx.storage.sql).read(), Date.now());
+    let probes: unknown[] = [];
+    const coordinator = this.env.NANOCODEX_PROVIDER_PROBE_COORDINATOR;
+    if (coordinator && this.env.NANOCODEX_PROVIDER_PROBES === "true") {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        probes = await Promise.race([
+          coordinator.getByName(PROBE_OWNER).snapshot(),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("probe telemetry timeout")), 250); }),
+        ]);
+      } catch { /* Missing telemetry stays unknown; it never blocks inference. */ }
+      finally { if (timer) clearTimeout(timer); }
+    }
+    return { ...gatewayAvailability(this.env), workerColo: null, clientIngressColo: null,
+      provider_performance: [...live, ...probes] };
+  }
+
   async #ensureThreadRoute(row: ManagedTurnRow, assertActive: () => void): Promise<void> {
     const policy = this.#configuration().model_routing;
     if (!policy) return;
@@ -10208,6 +10243,8 @@ export class DurableAgentSession extends DurableComputerSession {
     if (!this.#hasFullAccountAuthority(parseTurnAuthorization(row.authorization_json))) {
       throw new ManagedRequestError(403, "routing_forbidden", "thread routing PoC requires full account authority");
     }
+    // The opening route owns this conversation. New probe measurements,
+    // reconnects and restarts must never select another provider or model.
     if (this.#threadRoute()) return;
     const session = this.#session()!;
     if (session.runtime_profile !== "managed" || session.completed_turns > 0 || this.#sessionStatus()?.has_snapshot) {
@@ -10220,7 +10257,7 @@ export class DurableAgentSession extends DurableComputerSession {
       ).one();
       const opening = this.#managedTurn(first.id);
       if (!opening) throw new Error("first routing task is unavailable");
-      const route = await resolveThreadRoute(this.env.AI!, JSON.parse(opening.input_json), policy, gatewayAvailability(this.env));
+      const route = await resolveThreadRoute(this.env.AI!, JSON.parse(opening.input_json), policy, await this.#routingAvailability());
       assertActive();
       await this.#shutdownAgent(true);
       assertActive();
@@ -10261,7 +10298,9 @@ export class DurableAgentSession extends DurableComputerSession {
     if (!session) throw new ManagedRequestError(404, "not_found", "agent is not initialized");
     const current = this.#settings();
     if (this.#configuration().model_routing) {
-      throw new ManagedRequestError(409, "settings_locked", "routed thread model and thinking are fixed by its creation policy");
+      // Reasoning changes are locked too until the pinned transport supports a
+      // verified append-only effort update that preserves the cached prefix.
+      throw new ManagedRequestError(409, "settings_locked", "routed thread provider/model are pinned; cache-preserving reasoning updates are not enabled");
     }
     let settings: ManagedAgentSettings;
     try {
