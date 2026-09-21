@@ -13,6 +13,7 @@ import SwiftUI
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var playbackElapsed: TimeInterval = 0
+    @Published private(set) var playbackDuration: TimeInterval = 0
     @Published private(set) var level: Float = 0
     @Published var error: String?
     private var meterTask: Task<Void, Never>?
@@ -93,6 +94,16 @@ import SwiftUI
             }
         } catch { abandonPendingRecording(); self.error = "Could not start recording. Check microphone access and try again." }
     }
+    #if DEBUG
+    /// Seeds capture ownership without requesting microphone permission or starting audio I/O.
+    func prepareRecordingForTesting(_ recorder: AVAudioRecorder) {
+        abandonPendingRecording()
+        stopPlayback()
+        pendingURL = recorder.url
+        self.recorder = recorder
+        recording = true
+    }
+    #endif
     private func updateMeter() {
         guard let recorder, recording else { return }
         elapsed = recorder.currentTime
@@ -138,6 +149,7 @@ import SwiftUI
             ownsAudio = true
             let player = try AVAudioPlayer(contentsOf: url)
             player.delegate = self; self.player = player
+            playbackDuration = player.duration
             guard player.play() else { throw CocoaError(.fileReadCorruptFile) }
             playing = true
             playbackTask = Task { [weak self] in
@@ -160,6 +172,7 @@ import SwiftUI
         playbackAccess = nil
         playing = false
         playbackElapsed = 0
+        playbackDuration = 0
         if recorder == nil { releaseAudio() }
     }
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
