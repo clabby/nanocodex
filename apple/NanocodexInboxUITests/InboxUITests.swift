@@ -2663,18 +2663,107 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(previous.waitForExistence(timeout: 10))
         XCTAssertTrue(previous.isEnabled)
         previous.tap()
-        let collapse = app.buttons["collapse-all-tools"]
+        let collapse = app.buttons["toggle-all-tools"]
         let finished = NSPredicate { _, _ in collapse.isEnabled && !previous.isEnabled }
         expectation(for: finished, evaluatedWith: nil)
         waitForExpectations(timeout: 10)
         XCTAssertFalse(app.buttons["next-user-message"].isEnabled)
     }
 
+    func testConversationArrowNavigationResponsiveness() {
+        let app = launch(["NANOCODEX_DEMO_CODE_MODE_BATCH": "1", "NANOCODEX_DEMO_THREAD_CONTROLS": "1",
+                          "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        selectInbox(app)
+        let previous = app.buttons["previous-user-message"]
+        let next = app.buttons["next-user-message"]
+        XCTAssertTrue(previous.waitForExistence(timeout: 10))
+        previous.tap()
+        if previous.isEnabled { previous.tap() }
+        XCTAssertFalse(previous.isEnabled)
+        let options = XCTMeasureOptions()
+        options.iterationCount = 5
+        var metrics: [XCTMetric] = [XCTClockMetric(), XCTCPUMetric(application: app)]
+        if #available(iOS 26.0, *) { metrics.append(XCTHitchMetric(application: app)) }
+        measure(metrics: metrics, options: options) {
+            next.tap()
+            XCTAssertFalse(next.isEnabled)
+            previous.tap()
+            XCTAssertFalse(previous.isEnabled)
+        }
+        capture(app, "transparent-controls-first-message")
+        next.tap()
+        capture(app, "transparent-controls-next-message")
+    }
+
+    func testLiveConversationArrowNavigation() throws {
+        guard ProcessInfo.processInfo.environment["NANOCODEX_INBOX_LIVE"] == "1" else {
+            throw XCTSkip("Requires a signed-in test device with existing conversation history.")
+        }
+        let app = XCUIApplication()
+        app.launch()
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 30))
+        let conversation = app.scrollViews["conversation"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 20))
+        let previous = app.buttons["previous-user-message"]
+        let next = app.buttons["next-user-message"]
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: previous)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 20), .completed)
+        let draft = composer(app).value as? String
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        var metrics: [XCTMetric] = [XCTClockMetric(), XCTCPUMetric(application: app)]
+        if #available(iOS 26.0, *) { metrics.append(XCTHitchMetric(application: app)) }
+        // Read-only: navigate existing messages without sending or changing drafts.
+        measure(metrics: metrics, options: options) {
+            previous.tap()
+            XCTAssertTrue(next.waitForExistence(timeout: 2))
+            if next.isEnabled { next.tap() }
+            XCTAssertTrue(previous.isEnabled)
+        }
+        XCTAssertEqual(composer(app).value as? String, draft)
+    }
+
+    func testToolsButtonExpandsAndCollapsesRepeatedly() {
+        let app = launch(["NANOCODEX_DEMO_CODE_MODE_BATCH": "1",
+                          "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        selectInbox(app)
+        let toggle = app.buttons["toggle-all-tools"]
+        let batch = app.buttons["code-mode-batch-demo-code-mode-batch"]
+        let child = app.buttons["tool-disclosure-demo-code-mode-batch/code-1"]
+        let source = app.buttons["code-mode-javascript-demo-code-mode-batch"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        for _ in 0..<3 {
+            XCTAssertEqual(toggle.label, "Collapse all tool calls")
+            toggle.tap()
+            XCTAssertEqual(batch.value as? String, "Collapsed")
+            XCTAssertEqual(toggle.label, "Expand all tool calls")
+            toggle.tap()
+            XCTAssertEqual(batch.value as? String, "Expanded")
+            XCTAssertEqual(child.value as? String, "Expanded")
+            XCTAssertEqual(source.value as? String, "Expanded")
+        }
+        capture(app, "tools-toggle-expanded")
+        toggle.tap()
+        capture(app, "tools-toggle-collapsed")
+        // Scroll with a real gesture to release the preserved reading anchor.
+        app.scrollViews["conversation"].swipeUp()
+        // A manual disclosure change must update the global button's next action.
+        batch.tap()
+        XCTAssertEqual(toggle.label, "Collapse all tool calls")
+        toggle.tap()
+        XCTAssertEqual(batch.value as? String, "Collapsed")
+        switchConversation(app, id: "durability")
+        switchConversation(app, id: "inbox")
+        XCTAssertEqual(toggle.label, "Expand all tool calls")
+        toggle.tap()
+        XCTAssertEqual(child.value as? String, "Expanded")
+    }
+
     func testThreadControlsCollapseAndNavigateUserMessages() {
         let app = launch(["NANOCODEX_DEMO_CODE_MODE_BATCH": "1", "NANOCODEX_DEMO_THREAD_CONTROLS": "1",
                           "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
         selectInbox(app)
-        let collapse = app.buttons["collapse-all-tools"]
+        let collapse = app.buttons["toggle-all-tools"]
         XCTAssertTrue(collapse.waitForExistence(timeout: 10))
         collapse.tap()
         let batch = app.buttons["code-mode-batch-demo-code-mode-batch"]
