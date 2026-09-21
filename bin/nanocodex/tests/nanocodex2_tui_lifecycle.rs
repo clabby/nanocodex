@@ -78,6 +78,9 @@ impl Terminal {
         command.env_remove("TERM_PROGRAM");
         command.env_remove("NANOCODEX2_RELOAD_EXECUTABLE");
         command.env("TERM", "xterm-256color");
+        // Exercise terminal clipboard output without changing the developer's
+        // native clipboard. This fixture emulates a remote terminal.
+        command.env("SSH_TTY", "/dev/nanocodex-test-pty");
         command.env("NANOCODEX_MANAGED_URL", origin);
         // Every test terminal gets an isolated registry, even when the caller
         // inherited a real user's reload directory. Only explicit peers share it.
