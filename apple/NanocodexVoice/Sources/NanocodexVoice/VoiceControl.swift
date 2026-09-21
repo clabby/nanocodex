@@ -209,9 +209,10 @@ private struct VoicePanel: View {
     private func returnToChat() { onReturnToChat(); dismiss() }
 }
 
-private struct VoiceSettingsView: View {
+struct VoiceSettingsView: View {
     @ObservedObject var session: VoiceSession
     let onStart: @MainActor () async throws -> VoiceConfiguration
+    var urlConfiguration: URLSessionConfiguration? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var draft = VoiceSettings()
     @State private var error: String?
@@ -228,7 +229,7 @@ private struct VoiceSettingsView: View {
                 }
                 .disabled(sampleAudioBusy)
                 if draft.outputProvider == .elevenlabs {
-                    ElevenLabsSettingsView(session: session, sampleAudioBusy: $sampleAudioBusy, settings: $draft, onUseVoice: saveSettings, configuration: onStart)
+                    ElevenLabsSettingsView(session: session, sampleAudioBusy: $sampleAudioBusy, settings: $draft, onUseVoice: saveSettings, configuration: onStart, urlConfiguration: urlConfiguration)
                 }
                 if draft.outputProvider != .elevenlabs {
                     Picker("Voice", selection: $draft.voice) {

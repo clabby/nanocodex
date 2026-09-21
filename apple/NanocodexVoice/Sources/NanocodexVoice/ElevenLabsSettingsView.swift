@@ -18,6 +18,7 @@ struct ElevenLabsSettingsView: View {
     @State private var voices: [JSON] = []
     @State private var cursor: String?
     @State private var name = ""
+    @FocusState private var editingName: Bool
     @State private var files: [URL] = []
     @State private var consent = false
     @State private var importing = false
@@ -112,8 +113,7 @@ struct ElevenLabsSettingsView: View {
         .onChange(of: recording.playing) { _, playing in updateAudioBusy(); if !playing { removePreview() } }
         .onChange(of: recording.preparing) { _, _ in updateAudioBusy() }
         .onChange(of: recording.saving) { _, _ in updateAudioBusy() }
-        .onChange(of: recording.sample) { _, _ in consent = false }
-        .onChange(of: recording.recording) { _, active in if active { files = []; consent = false } }
+        .onChange(of: recording.sample) { _, sample in consent = false; if sample != nil { files = [] } }
         .onChange(of: busy) { _, _ in updateAudioBusy() }
         .onChange(of: session.isEngaged) { _, engaged in if engaged { recording.discard(); updateAudioBusy() } }
         .onChange(of: scenePhase) { _, phase in
@@ -146,6 +146,7 @@ struct ElevenLabsSettingsView: View {
         Text("Clone a voice").font(.headline).accessibilityIdentifier("clone-voice-heading")
         Text("1. Name your voice").font(.subheadline.weight(.medium))
         TextField("For example, My natural voice", text: $name)
+            .focused($editingName).submitLabel(.done).onSubmit { editingName = false }
             .accessibilityLabel("Clone name").accessibilityIdentifier("clone-name")
         if name.count > 100 { Text("Use 100 characters or fewer.").font(.caption).foregroundStyle(.red) }
         Text("2. Record or choose a sample").font(.subheadline.weight(.medium))
@@ -157,7 +158,7 @@ struct ElevenLabsSettingsView: View {
             Text(VoiceCloneGuidance.script).font(.body).textSelection(.enabled)
         }
         Button("Choose audio samples") {
-            importing = true
+            editingName = false; importing = true
         }.disabled(sampleAudioBusy).accessibilityIdentifier("clone-import-samples")
         ForEach(Array(files.enumerated()), id: \.offset) { index, file in
             HStack {
@@ -197,7 +198,7 @@ struct ElevenLabsSettingsView: View {
     }
     @MainActor private func createClone() {
         guard let client else { return }
-        uploading = true
+        editingName = false; uploading = true
         perform {
             defer { uploading = false }
             let result: JSON
@@ -230,6 +231,7 @@ struct ElevenLabsSettingsView: View {
     }
     private func previewVoice() {
         guard let client, let id = settings.elevenLabsVoiceId else { return }
+        editingName = false
         perform {
             let data = try await client.speech(text: "Hello! This is a preview of my voice. How does it sound?", voiceID: id)
             try Task.checkCancellation()
@@ -258,11 +260,11 @@ struct ElevenLabsSettingsView: View {
             ProgressView(value: Double(recording.level)).accessibilityLabel("Microphone level")
             Text("Aim for 60–90 seconds. Speak naturally in your usual tone in a quiet room; avoid music and other voices.").font(.caption)
             Button("Stop recording") { recording.stop() }.accessibilityIdentifier("clone-stop-recording")
-            Button("Discard recording", role: .destructive) { recording.discard(); consent = false }
+            Button("Cancel recording", role: .destructive) { recording.cancelRecording(); consent = false }
         } else {
             Text("Record 60–90 seconds in a quiet room using your usual tone. Recording stops after two minutes.").font(.caption)
             Button(recording.sample == nil ? "Record voice sample" : "Record again") {
-                consent = false; createdVoiceID = nil
+                editingName = false; consent = false; createdVoiceID = nil
                 sampleAudioBusy = true
                 Task { await recording.start(); updateAudioBusy() }
             }

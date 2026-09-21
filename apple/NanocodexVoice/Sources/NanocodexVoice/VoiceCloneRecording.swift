@@ -221,6 +221,10 @@ import SwiftUI
         generation = UUID()
         preparing = false
     }
+    func cancelRecording() {
+        abandonPendingRecording()
+        error = nil
+    }
     private func abandonPendingRecording() {
         generation = UUID()
         meterTask?.cancel(); meterTask = nil
