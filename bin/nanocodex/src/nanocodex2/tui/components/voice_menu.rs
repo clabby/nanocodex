@@ -62,7 +62,7 @@ impl VoiceMenu {
                 .map(|name| {
                     (
                         (*name).to_owned(),
-                        Command::Select(Selection::Chatgpt(*name)),
+                        Command::Select(Selection::Chatgpt(name)),
                     )
                 })
                 .collect(),

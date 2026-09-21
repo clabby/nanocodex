@@ -1972,10 +1972,10 @@ async fn run_inner(
                 break;
             }
         }
-        if runtime.voice.is_none() {
-            if let Some(panel) = &mut runtime.clone_panel {
-                panel.start_if_ready();
-            }
+        if runtime.voice.is_none()
+            && let Some(panel) = &mut runtime.clone_panel
+        {
+            panel.start_if_ready();
         }
         if let Some(pending) = runtime.take_ready_voice() {
             match crate::voice::Session::start_with_settings(

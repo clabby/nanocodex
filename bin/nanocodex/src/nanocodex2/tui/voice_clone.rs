@@ -2,13 +2,6 @@
 use crate::voice_recording::{RecordedSample, Recorder};
 use tokio::task::JoinSet;
 
-// Original practice passage.
-pub(super) const READ_ALOUD: &str = "This morning, I opened the window and listened to the neighborhood waking up. A bicycle rolled past, someone called a friendly greeting, and the leaves moved gently in the breeze. I decided to take a short walk before starting the day.
-
-At the corner, a small shop was arranging fresh flowers beside the door. The colors reminded me of a garden I used to visit, where every path seemed to lead somewhere different. I paused for a moment, then continued toward the park.
-
-There was no need to hurry. I thought about the work ahead, the people I wanted to call, and a meal I might cook that evening. Ordinary plans can be surprisingly comforting. By the time I returned home, I felt ready to begin, with a clear mind and a little more patience for whatever the day might bring.";
-
 pub(super) enum State {
     Ready,
     Waiting,
@@ -167,8 +160,9 @@ mod tests {
         let mut panel = Panel::new("Synthetic voice".into());
         assert!(panel.text().contains("60–90s"));
         assert!(panel.text().contains("H: read-aloud script"));
-        assert!(!panel.text().contains(READ_ALOUD));
-        assert!((130..=160).contains(&READ_ALOUD.split_whitespace().count()));
+        let script = include_str!("voice_clone_script.txt").trim();
+        assert!(!panel.text().contains(script));
+        assert!((130..=160).contains(&script.split_whitespace().count()));
         panel.state = State::Stopping;
         panel.notice = Some("Stopped by you".into());
         assert!(!panel.text().contains("H: read-aloud script"));
