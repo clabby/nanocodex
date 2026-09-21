@@ -27,6 +27,10 @@ const routes: [string, string][] = [
   ["GET", "/api/chief-of-staff/slack/install"], ["GET", "/v1/me"],
   ["GET", "/v1/account/hands"], ["POST", "/v1/agents"],
   ["GET", "/v1/inference-other"], ["GET", "/unknown"],
+  ["POST", "/v1/responses/"], ["GET", "/v1/responses/response-id"],
+  ["POST", "/v1/responses-other"], ["GET", "/v1/models/"],
+  ["GET", "/v1/models/model-id"], ["GET", "/v1/models-other"],
+  ["POST", "/v1/chat/completions"], ["POST", "/v1/sessions"],
 ];
 
 for (const [method, path] of routes) {
@@ -51,16 +55,24 @@ test("malformed and combined inference credentials cannot fall back to ambient a
   }
 });
 
-test("inference namespace reaches its dedicated managed authenticator without adding authority", async () => {
-  for (const path of ["/v1/inference", "/v1/inference/models", "/v1/inference/sessions", "/v1/inference/responses", "/v1/inference/keys"]) {
+test("inference namespace and exact Responses aliases reach dedicated authentication without adding authority", async () => {
+  for (const [method, path] of [
+    ["GET", "/v1/inference"], ["GET", "/v1/inference/models"], ["POST", "/v1/inference/sessions"],
+    ["POST", "/v1/inference/responses"], ["GET", "/v1/inference/keys"],
+    ["GET", "/v1/models"], ["POST", "/v1/responses"],
+  ]) {
     const request = new Request("https://nanocodex.example" + path, {
-      headers: { ...ambient, authorization: `Bearer ${token}` },
+      method, headers: { ...ambient, authorization: `Bearer ${token}`, "content-type": "application/json" },
+      ...(method === "POST" ? { body: JSON.stringify({ model: "auto", input: "Synthetic input" }) } : {}),
     });
     let forwarded = 0;
     const response = await worker.fetch(request, {
       NANOCODEX_BACKEND: { fetch: async (candidate: Request) => {
         forwarded++;
         assert.equal(candidate, request);
+        assert.equal(candidate.headers.get("authorization"), `Bearer ${token}`);
+        assert.equal(candidate.headers.get("x-nanocodex-access"), ambient["x-nanocodex-access"]);
+        if (method === "POST") assert.deepEqual(await candidate.json(), { model: "auto", input: "Synthetic input" });
         return Response.json({ error: "synthetic_dedicated_authenticator" }, { status: 401 });
       } } as unknown as Fetcher,
     } as Env);

@@ -63,7 +63,7 @@ const tool = z.union([
   }).strict(),
 ]);
 const requestSchema = z.object({
-  model: z.literal("auto").default("auto"), input: z.union([z.string().min(1), z.array(historyItem).min(1).max(1024)]),
+  model: z.string().min(1).max(256).default("auto"), input: z.union([z.string().min(1), z.array(historyItem).min(1).max(1024)]),
   instructions: z.string().optional(), stream: z.boolean().default(false),
   max_output_tokens: z.number().int().min(1).max(INFERENCE_MAX_OUTPUT_TOKENS).optional(),
   reasoning: z.object({ effort: z.enum(["low", "medium", "high"]) }).strict().optional(),
@@ -97,6 +97,8 @@ export function validateInferenceRequest(value: unknown, tokenLimit = INFERENCE_
   const parsed = requestSchema.safeParse(value);
   if (!parsed.success) throw new InferenceRequestError("invalid_inference_request");
   const body = parsed.data;
+  if (body.model !== "auto" && !ROUTING_CANDIDATES.some(c => c.backend !== "chatgpt"
+    && (c.model === body.model || c.id === body.model))) throw new InferenceRequestError("unknown_model");
   if (bytes(body.input) + bytes(body.instructions ?? "") > INFERENCE_MAX_INPUT_BYTES)
     throw new InferenceRequestError("input_too_large", 413);
   body.max_output_tokens ??= tokenLimit;
@@ -182,18 +184,63 @@ function admittedRoute(route: InferenceRoute, policy?: ThreadRoutingPolicy) {
     && (!policy || policy.candidates?.includes(c.id)));
 }
 
-/** Executes exactly one stateless inference; returned tool calls are never executed. */
-export async function executeInferenceResponse(env: InferenceSessionEnv, session: Pick<InferenceSessionMetadata, "id" | "route">,
-  input: InferenceRequest, signal: AbortSignal, fetchImpl: typeof fetch = fetch): Promise<Response> {
-  const route = session.route;
-  if (!route || !admittedRoute(route)) throw new InferenceRequestError("invalid_pinned_route", 503);
-  if (input.reasoning && input.reasoning.effort !== route.thinking) throw new InferenceRequestError("route_is_pinned", 409);
+function matchesModel(route: InferenceRoute, model: string) {
+  return model === "auto" || model === route.model || ROUTING_CANDIDATES.some(c => c.id === model
+    && c.backend === route.backend && c.model === route.model && c.provider_model === route.provider_model
+    && c.thinking === route.thinking);
+}
+function assertPinnedRequest(route: InferenceRoute, input: InferenceRequest) {
+  if (!matchesModel(route, input.model) || (input.reasoning && input.reasoning.effort !== route.thinking))
+    throw new InferenceRequestError("route_is_pinned", 409);
+}
+function requestPolicy(policy: ThreadRoutingPolicy, input: InferenceRequest): ThreadRoutingPolicy {
+  const candidates = policy.candidates!.filter(id => {
+    const candidate = ROUTING_CANDIDATES.find(c => c.id === id)!;
+    return (input.model === "auto" || input.model === candidate.model || input.model === candidate.id)
+      && (!input.reasoning || candidate.thinking === input.reasoning.effort);
+  });
+  if (!candidates.length) throw new InferenceRequestError("no_inference_candidates");
+  return { ...policy, candidates };
+}
+
+/** Stop waiting even when a routing binding does not expose cancellation. */
+async function abortable<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  let abort: (() => void) | undefined;
+  try {
+    return await Promise.race([pending, new Promise<never>((_resolve, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+    })]);
+  } finally { if (abort) signal.removeEventListener("abort", abort); }
+}
+async function resolveInferenceRoute(env: InferenceSessionEnv, input: InferenceRequest,
+  policy: ThreadRoutingPolicy, signal: AbortSignal): Promise<InferenceRoute> {
+  const constrained = requestPolicy(policy, input);
+  const availability = await inferenceRoutingAvailability(env, signal);
+  signal.throwIfAborted();
+  if (!ROUTING_CANDIDATES.some(c => constrained.candidates!.includes(c.id)
+    && (c.backend === "workers_ai" || c.backend !== "chatgpt" && availability[c.backend])))
+    throw new InferenceRequestError("no_inference_candidates");
+  const route = await abortable(resolveThreadRoute(env.AI, input.input, constrained, availability), signal);
+  signal.throwIfAborted();
+  if (!admittedRoute(route, constrained)) throw new InferenceRequestError("invalid_pinned_route", 503);
+  return retainRoute(route);
+}
+
+/** Executes one generation using a resolved route; returned tools remain caller-owned. */
+async function executeRoutedResponse(env: InferenceSessionEnv, route: InferenceRoute,
+  input: InferenceRequest, signal: AbortSignal, fetchImpl: typeof fetch, sessionId?: string): Promise<Response> {
+  if (!admittedRoute(route)) throw new InferenceRequestError("invalid_pinned_route", 503);
+  assertPinnedRequest(route, input);
+  signal.throwIfAborted();
   const transport = route.backend === "workers_ai"
     ? createWorkersAiResponses({ run: (model, body) => env.AI.run(model, body) }, { model: OSS_MODEL })
     : createGatewayResponses({ provider: route.backend as "openrouter" | "vercel", model: route.model,
       reasoningEffort: route.thinking, apiKey: (route.backend === "openrouter" ? env.OPENROUTER_API_KEY : env.AI_GATEWAY_API_KEY) ?? "",
       fetch: fetchImpl });
-  const response = await transport.createResponse(`${transport.apiBaseUrl}/responses`, session.id, {
+  const response = await transport.createResponse(`${transport.apiBaseUrl}/responses`, sessionId ?? "", {
+    // Pure adapters ignore the legacy session argument; stateless requests invent no session.
     authorization: "host_managed", signal,
     body: JSON.stringify({ ...input, model: route.model, reasoning: { effort: route.thinking }, store: false }),
   });
@@ -204,7 +251,7 @@ export async function executeInferenceResponse(env: InferenceSessionEnv, session
     if (!data) continue;
     const event = JSON.parse(data) as Record<string, unknown>;
     if (event.response && typeof event.response === "object") {
-      event.response = { ...event.response, model: route.model, session_id: session.id, route, buffering: "buffered" };
+      event.response = { ...event.response, model: route.model, ...(sessionId ? { session_id: sessionId } : {}), route, buffering: "buffered" };
       if (event.type === "response.completed" || event.type === "response.incomplete") completed = event.response as Record<string, unknown>;
     }
     events.push(event);
@@ -212,12 +259,42 @@ export async function executeInferenceResponse(env: InferenceSessionEnv, session
   if (!completed) throw new Error("invalid_provider_protocol");
   signal.throwIfAborted();
   const headers = { "cache-control": "no-store", "x-nanocodex-inference-buffering": "buffered",
-    "x-nanocodex-inference-session-id": session.id, "x-nanocodex-session-id": session.id,
+    ...(sessionId ? { "x-nanocodex-inference-session-id": sessionId, "x-nanocodex-session-id": sessionId } : {}),
     "x-nanocodex-provider": route.backend, "x-nanocodex-model": route.model, "x-nanocodex-thinking": route.thinking };
   return input.stream
     ? new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), {
       headers: { ...headers, "content-type": "text/event-stream; charset=utf-8" },
     }) : Response.json(completed, { headers });
+}
+
+/** Session wrapper preserves the committed provider/model/effort pin. */
+export async function executeInferenceResponse(env: InferenceSessionEnv, session: Pick<InferenceSessionMetadata, "id" | "route">,
+  input: InferenceRequest, signal: AbortSignal, fetchImpl: typeof fetch = fetch): Promise<Response> {
+  if (!session.route) throw new InferenceRequestError("invalid_pinned_route", 503);
+  return executeRoutedResponse(env, session.route, input, signal, fetchImpl, session.id);
+}
+
+function inferenceErrorResponse(error: unknown, signal: AbortSignal): Response {
+  if (error instanceof InferenceRequestError) return json({ error: { code: error.code } }, error.status);
+  const timeout = signal.aborted && signal.reason?.name === "TimeoutError";
+  return json({ error: { code: timeout ? "inference_timeout" : "inference_failed" } }, timeout ? 504 : 502);
+}
+
+/** Standard Responses request: no storage, retained transcript, or account context. */
+export async function executeStatelessInferenceResponse(env: InferenceSessionEnv, rawBody: unknown,
+  maxOutputTokens: number, signal: AbortSignal): Promise<Response> {
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal.reason);
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  const timer = setTimeout(() => controller.abort(new DOMException("Inference timeout", "TimeoutError")), INFERENCE_TIMEOUT_MS);
+  try {
+    const input = validateInferenceRequest(rawBody, maxOutputTokens);
+    controller.signal.throwIfAborted();
+    const route = await resolveInferenceRoute(env, input, normalizeInferencePolicy(), controller.signal);
+    return await abortable(executeRoutedResponse(env, route, input, controller.signal, fetch), controller.signal);
+  } catch (error) { return inferenceErrorResponse(error, controller.signal); }
+  finally { clearTimeout(timer); signal.removeEventListener("abort", abort); }
 }
 
 async function boundedJson(request: Request, signal: AbortSignal): Promise<unknown> {
@@ -268,9 +345,7 @@ export class InferenceSessionRuntime {
     const timer = setTimeout(() => controller.abort(new DOMException("Inference timeout", "TimeoutError")), INFERENCE_TIMEOUT_MS);
     try { return await this.#handle(request, controller.signal); }
     catch (error) {
-      if (error instanceof InferenceRequestError) return json({ error: { code: error.code } }, error.status);
-      const timeout = controller.signal.aborted && controller.signal.reason?.name === "TimeoutError";
-      return json({ error: { code: timeout ? "inference_timeout" : "inference_failed" } }, timeout ? 504 : 502);
+      return inferenceErrorResponse(error, controller.signal);
     } finally {
       clearTimeout(timer); request.signal.removeEventListener("abort", abort); this.#busy = false;
     }
@@ -303,19 +378,10 @@ export class InferenceSessionRuntime {
     const limitHeader = request.headers.get(INFERENCE_MAX_OUTPUT_TOKENS_HEADER);
     const limit = limitHeader === null ? INFERENCE_MAX_OUTPUT_TOKENS : /^\d+$/.test(limitHeader) ? Number(limitHeader) : NaN;
     const input = validateInferenceRequest(await boundedJson(request, signal), limit);
-    if (retained.route && input.reasoning && input.reasoning.effort !== retained.route.thinking)
-      throw new InferenceRequestError("route_is_pinned", 409);
+    if (retained.route) assertPinnedRequest(retained.route, input);
     signal.throwIfAborted();
     if (!retained.route) {
-      const policy = { ...retained.routing, candidates: retained.routing.candidates!.filter(id =>
-        !input.reasoning || ROUTING_CANDIDATES.find(c => c.id === id)?.thinking === input.reasoning.effort) };
-      if (!policy.candidates.length) throw new InferenceRequestError("no_inference_candidates");
-      const availability = await inferenceRoutingAvailability(this.env, signal);
-      signal.throwIfAborted();
-      const route = await resolveThreadRoute(this.env.AI, input.input, policy, availability);
-      signal.throwIfAborted();
-      if (!admittedRoute(route, policy)) throw new InferenceRequestError("invalid_pinned_route", 503);
-      retained.route = retainRoute(route);
+      retained.route = await resolveInferenceRoute(this.env, input, retained.routing, signal);
       // Await durable commit before issuing the generation request. Failed generation keeps this exact pin.
       await this.ctx.storage.put(STORAGE_KEY, retained);
     }

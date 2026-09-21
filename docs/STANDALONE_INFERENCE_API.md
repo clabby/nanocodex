@@ -1,16 +1,69 @@
 # Standalone inference API
 
-Base URL:
+Use the standard OpenAI SDK Responses interface with this base URL:
 
 ```text
-https://nanocodex.gakonst.workers.dev/v1/inference
+https://nanocodex.gakonst.workers.dev/v1
 ```
 
 Every credential and identifier in the examples is a placeholder. Obtain an inference key from the deployment operator before making requests.
 
-The service performs inference using deployment-funded Workers AI, OpenRouter, or Vercel AI Gateway. A session retains its routing policy, selected provider/model/effort, and request counters. **Your application sends the full conversation history on every response request.** A session is not a managed Nanocodex agent.
+### Python (OpenAI SDK)
 
-Inference credentials do not authorize account data, memories, connectors, Hands, shell execution, browsers, ChatGPT subscriptions, or server tool execution. Function and custom tools describe calls for your application to handle; the service only returns the calls as data.
+Install `openai` and set `NANOCODEX_INFERENCE_KEY` in your environment:
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["NANOCODEX_INFERENCE_KEY"],
+    base_url=os.environ.get("NANOCODEX_BASE_URL", "https://nanocodex.gakonst.workers.dev/v1"),
+    max_retries=0,
+)
+response = client.responses.create(
+    model="auto",
+    input="Explain why the sky is blue in two sentences.",
+    max_output_tokens=512,
+)
+print(response.output_text)
+```
+
+### JavaScript (OpenAI SDK)
+
+Install `openai`, set the same environment variable, and save as an `.mjs` file:
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.NANOCODEX_INFERENCE_KEY,
+  baseURL: process.env.NANOCODEX_BASE_URL ?? "https://nanocodex.gakonst.workers.dev/v1",
+  maxRetries: 0,
+});
+const response = await client.responses.create({
+  model: "auto",
+  input: "Explain why the sky is blue in two sentences.",
+  max_output_tokens: 512,
+});
+console.log(response.output_text);
+```
+
+### Raw HTTP
+
+```sh
+export NANOCODEX_INFERENCE_KEY='YOUR_INFERENCE_KEY'
+curl --fail-with-body 'https://nanocodex.gakonst.workers.dev/v1/responses' \
+  -H "Authorization: Bearer $NANOCODEX_INFERENCE_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"model":"auto","input":"Explain why the sky is blue in two sentences.","max_output_tokens":512}'
+```
+
+These requests are **stateless**: omit `session_id`, send all history needed for each call, and expect a fresh routing decision on each `model: "auto"` request. Calls do not pin a route across requests. For provider/model/effort pinning and routing preferences, use the optional session extension below. `previous_response_id` is unsupported; the server does not restore conversation history.
+
+The service implements a **bounded, text-only Responses-format subset with custom routing/session extensions**, not full OpenAI API parity. `stream: true` returns **buffered SSE after upstream generation finishes**, not live token delivery. The SDK examples disable automatic retries because generation has no replay guarantee. The SDK's `output_text` convenience accessor reads message output; raw JSON clients should read `output` items.
+
+Inference uses deployment-funded Workers AI, OpenRouter, or Vercel AI Gateway. Inference credentials do not authorize account data, memories, connectors, Hands, shell execution, browsers, ChatGPT subscriptions, or server tool execution. Function and custom tools describe calls for your application to handle; the service only returns the calls as data. Inference keys are owner-attributed and retain only inference authority.
 
 ## Authentication
 
@@ -22,27 +75,28 @@ Authorization: Bearer YOUR_INFERENCE_KEY
 
 The bearer scheme and token must match the issued value. Cookies and full-account `ncx_live_` keys do not authenticate inference requests. Inference keys cannot authenticate account endpoints or manage keys, including when accompanied by account cookies. Each key is attributed to its issuing user account in server-side ownership records and carries immutable `scope: "inference"`. Owner attribution does not grant account capabilities: it never enables that user’s connectors, Hands, saved data, or subscription credentials. These are two authority classes: `ncx_live_` account keys retain their existing account permissions, while `nci_live_` platform inference keys authorize only this inference API. A platform inference key never inherits its owner’s account permissions and cannot change or widen its scope. Do not include query parameters on inference API URLs.
 
-Keep keys in your application server's environment or a local environment variable. The admin key used for issuance is a separate, more powerful credential and must not be distributed to inference users.
+Use `NANOCODEX_BASE_URL` for the standard SDK base (`/v1`) and `NANOCODEX_INFERENCE_BASE` for the optional extension (`/v1/inference`), alongside `NANOCODEX_INFERENCE_KEY`. These are also the names used in a delivered private `.env` file. Keep keys in your application server's environment or a local environment variable. The admin key used for issuance is a separate, more powerful credential and must not be distributed to inference users.
 
 ```sh
-export NANOCODEX_INFERENCE_BASE='https://nanocodex.gakonst.workers.dev/v1/inference'
+export NANOCODEX_BASE_URL='https://nanocodex.gakonst.workers.dev/v1'
+export NANOCODEX_INFERENCE_BASE="$NANOCODEX_BASE_URL/inference"
 export NANOCODEX_INFERENCE_KEY='YOUR_INFERENCE_KEY'
 ```
 
 ## Endpoints
 
-Paths are relative to the base URL.
+Paths below are relative to the standard `/v1` base URL. `/v1/inference/models` and `/v1/inference/responses` remain supported aliases with the same authentication and request contract. Only the exact `/v1/models` and `/v1/responses` paths are standard aliases; they do not grant access to any other `/v1` route.
 
 | Method | Path | Authorization | Result |
 | --- | --- | --- | --- |
 | GET | `/models` | Inference key | Eligible deployment-funded routing candidates. |
-| POST | `/sessions` | Inference key | Create a session; HTTP 201. |
-| GET | `/sessions/{session_id}` | Same inference key | Session metadata. |
-| DELETE | `/sessions/{session_id}` | Same inference key | Delete session; HTTP 204. |
-| POST | `/responses` | Same inference key | Generate from supplied full history. |
-| GET | `/keys` | Deployment operator, full account, `api_keys:read` | List this account's inference-key metadata. |
-| POST | `/keys` | Deployment operator, full account, `api_keys:write` | Issue one inference key; HTTP 201. |
-| DELETE | `/keys/{key_id}` | Deployment operator, full account, `api_keys:write` | Revoke an owned key; HTTP 204. |
+| POST | `/inference/sessions` | Inference key | Create a session; HTTP 201. |
+| GET | `/inference/sessions/{session_id}` | Same inference key | Session metadata. |
+| DELETE | `/inference/sessions/{session_id}` | Same inference key | Delete session; HTTP 204. |
+| POST | `/responses` | Inference key | Stateless generation, or an optional owned `session_id`. |
+| GET | `/inference/keys` | Deployment operator, full account, `api_keys:read` | List this account's inference-key metadata. |
+| POST | `/inference/keys` | Deployment operator, full account, `api_keys:write` | Issue one inference key; HTTP 201. |
+| DELETE | `/inference/keys/{key_id}` | Deployment operator, full account, `api_keys:write` | Revoke an owned key; HTTP 204. |
 
 Key administration is restricted to the deployment operator whose account matches the configured `NANOCODEX_ADMIN_USER_ID`; other accounts are denied even with key-management capabilities. An unset operator ID fails closed. Teammates use their issued inference keys for the data endpoints.
 
@@ -51,15 +105,18 @@ The data-plane deployment gate is `NANOCODEX_INFERENCE_ENABLED=true`; an unavail
 ## Discover models
 
 ```sh
-curl --fail-with-body "$NANOCODEX_INFERENCE_BASE/models" \
+curl --fail-with-body "$NANOCODEX_BASE_URL/models" \
   -H "Authorization: Bearer $NANOCODEX_INFERENCE_KEY"
 ```
 
-The result is an object with `object: "list"` and a `data` array. Each entry has `id`, `model`, `provider_model`, `provider`, and `thinking`. Example entry:
+The result is an object with `object: "list"` and a `data` array. Each entry has the model-list fields `id`, `object: "model"`, `created: 0`, and `owned_by` (the provider), plus the routing extensions `model`, `provider_model`, `provider`, and `thinking`. `created: 0` is a placeholder, not a model release timestamp. Example entry:
 
 ```json
 {
   "id": "@cf/zai-org/glm-5.3:medium",
+  "object": "model",
+  "created": 0,
+  "owned_by": "workers_ai",
   "model": "@cf/zai-org/glm-5.3",
   "provider_model": "@cf/zai-org/glm-5.3",
   "provider": "workers_ai",
@@ -67,9 +124,11 @@ The result is an object with `object: "list"` and a `data` array. Each entry has
 }
 ```
 
-Gateway entries appear only when their deployment credentials are configured. Read the live catalog for available IDs. Native ChatGPT subscription candidates are excluded. `id` is a routing candidate ID, not the value for the response request's `model` field; that field is always `"auto"`.
+Gateway entries appear only when their deployment credentials are configured. Read the live catalog for available IDs. Native ChatGPT subscription candidates are excluded. `model: "auto"` lets the router choose from eligible candidates. You can also pass a catalog entry's canonical `model` to restrict selection to that model, or its exact `id` to select a particular provider/model/effort candidate. Only eligible deployment-funded candidates are accepted; unavailable and native ChatGPT subscription models are excluded. A canonical model can have multiple candidates; use the exact candidate ID when provider and effort must be fixed.
 
-## Create and inspect a session
+## Optional session extension: create and inspect a session
+
+Use this extension when repeated calls should retain routing preferences and a provider/model/effort pin. **Your application still sends the full conversation history on every response request.** A session stores routing metadata and counters; it is not a managed Nanocodex agent. Without `session_id`, neither SDK calls nor raw HTTP calls use a persistent session.
 
 A minimal creation body is `{}`. Only the optional `routing` property is accepted.
 
@@ -121,10 +180,10 @@ Preferences are not probabilities, quotas, billing caps, or deadlines. Router co
 
 Once chosen, the `route` object reports `version`, `policy_version`, `backend`, `model`, `provider_model`, `thinking`, `reasoning_mode`, `fast_mode`, `family`, `confidence`, `objective`, `selection`, `created_at`, and `router_duration_ms`. Free-form routing reasons, raw router usage, and full audit payloads are omitted. The response body also includes this route.
 
-## Generate a response
+## Generate with the optional session extension
 
 ```sh
-curl --fail-with-body "$NANOCODEX_INFERENCE_BASE/responses" \
+curl --fail-with-body "$NANOCODEX_BASE_URL/responses" \
   -H "Authorization: Bearer $NANOCODEX_INFERENCE_KEY" \
   -H 'Content-Type: application/json' \
   --data "$(jq -n --arg session_id "$SESSION_ID" '{
@@ -136,9 +195,9 @@ curl --fail-with-body "$NANOCODEX_INFERENCE_BASE/responses" \
   }')"
 ```
 
-The response follows a bounded Responses-style contract. Expect `id`, `object: "response"`, `status`, `model`, `output`, `usage`, `session_id`, `route`, and `buffering: "buffered"`. Text is in message output items' `content` entries with `type: "output_text"`; there is no promised top-level `output_text` convenience field. Output can also contain reasoning or tool-call items. Handle `status: "incomplete"` and `incomplete_details`, including output-token exhaustion.
+A session response follows a bounded Responses-format contract. Expect `id`, `object: "response"`, `status`, `model`, `output`, `usage`, `session_id`, `route`, and `buffering: "buffered"`. Text is in message output items' `content` entries with `type: "output_text"`; there is no promised top-level `output_text` convenience field. Stateless responses have the same output format and route metadata, with no `session_id`. Output can also contain reasoning or tool-call items. Handle `status: "incomplete"` and `incomplete_details`, including output-token exhaustion.
 
-Both JSON and buffered SSE responses expose the retained selection in headers:
+Both JSON and buffered SSE responses expose the selected route in headers. Session ID headers apply only to the session extension; stateless responses do not create a reusable session:
 
 | Header | Value |
 | --- | --- |
@@ -154,13 +213,13 @@ Both JSON and buffered SSE responses expose the retained selection in headers:
 
 | Field | Contract |
 | --- | --- |
-| `session_id` | Required session UUID. |
-| `model` | `"auto"`; defaults to `"auto"`. |
+| `session_id` | Optional session UUID from `/v1/inference/sessions`; omission makes the request stateless. Sessions are owned by the exact inference key. |
+| `model` | `"auto"` (default), an eligible canonical `model`, or exact candidate `id` from `/models`. With a session pin, an explicit model/candidate must match that pin. |
 | `input` | Required nonempty string, or 1–1,024 history items. |
 | `instructions` | Optional string; resend on every request when needed. |
 | `stream` | Boolean; default `false`. See buffered SSE below. |
 | `max_output_tokens` | Positive integer up to the key's limit and service ceiling of 4,096; omission uses the key limit. |
-| `reasoning` | Optional `{ "effort": "low" \| "medium" \| "high" }`; filters first selection, then must match the retained route. |
+| `reasoning` | Optional `{ "effort": "low" \| "medium" \| "high" }`; filters selection; for a session, must match any retained route. |
 | `tools` | Up to 128 function/custom definitions with unique names. |
 | `tool_choice` | `"auto"`, `"none"`, `"required"`, or `{ "type": "function" \| "custom", "name": "..." }`. A named choice must match a supplied definition. |
 | `parallel_tool_calls` | Optional boolean. |
@@ -180,7 +239,7 @@ History supports:
 
 Retain returned item IDs and status when replaying. Every historical tool call must have one matching output before the next user/assistant message. Duplicate call IDs, unmatched outputs, or pending calls at the end of a submitted history are rejected.
 
-### Full-history Python client
+### Optional full-history session client: Python
 
 Python 3, standard library only. This example makes one session and two response requests. It has no automatic retries.
 
@@ -228,7 +287,7 @@ for prompt in ["Explain rainbows briefly.", "Now explain it to a child."]:
 api("/sessions/" + session["id"], method="DELETE")
 ```
 
-### Full-history Node.js client
+### Optional full-history session client: Node.js
 
 Node.js with built-in `fetch`. Save as an `.mjs` file. This example also uses no automatic retries.
 
@@ -309,7 +368,7 @@ The inference timeout is 120 seconds. Client cancellation stops waiting; Workers
 
 Default inference-key limits are **100 reserved POST requests per UTC day, 10 per UTC minute, and 4,096 output tokens per inference**, with expiry 30 days after issuance. Limits can be lower for a particular key; check metadata supplied by the issuer. Daily/minute windows are fixed UTC windows, not sliding windows. HTTP 429 includes a `Retry-After` value in seconds.
 
-Quota is reserved before body validation for both `POST /sessions` and `POST /responses`. A rejected body or later provider failure can therefore still consume a slot. Authentication failures and quota-rejected attempts do not reserve an additional slot. Model listing and session GET/DELETE authenticate the key without reserving generation quota. Session counters describe admitted generation attempts, not the key's complete quota usage.
+Quota is reserved before body validation for both `POST /v1/inference/sessions` and response POST requests on either alias. A rejected body or later provider failure can therefore still consume a slot. Authentication failures and quota-rejected attempts do not reserve an additional slot. Model listing and session GET/DELETE authenticate the key without reserving generation quota. Session counters describe admitted generation attempts, not the key's complete quota usage.
 
 Additional ceilings:
 
@@ -324,25 +383,31 @@ Additional ceilings:
 | Inference timeout | 120 seconds |
 | Admin issuance request body | 4,096 bytes |
 
-Session creation and generation have **no idempotency-key or response-replay guarantee**. Retrying `POST /sessions` creates another session. Retrying `POST /responses` can run another generation and consume another quota slot; it retains the route but need not return identical output. No endpoint recovers a lost generated response. Do not blindly retry after a network timeout or uncertain result.
+Session creation and generation have **no idempotency-key or response-replay guarantee**. Retrying `POST /v1/inference/sessions` creates another session. Retrying a response POST can run another generation and consume another quota slot. Only the optional session extension retains its route across requests; stateless auto requests select afresh. Neither mode promises identical output. No endpoint recovers a lost generated response. Do not blindly retry after a network timeout or uncertain result.
 
 To handle `session_busy`, wait for the outstanding request to finish. To handle quota exhaustion, respect `Retry-After`. Key issuance has a separate `operation_id` mechanism described below; it does not apply to inference requests.
 
 ## Errors
 
-Depending on the rejecting layer, an error is either `{"error":"CODE"}` or `{"error":{"code":"CODE"}}`. Normalize both in clients. Provider error bodies, deployment secrets, and internal exception messages are not exposed.
+The standard `/v1/responses` and `/v1/models` aliases return HTTP errors in the SDK-compatible envelope below, preserving the HTTP status and headers such as `Retry-After`:
+
+```json
+{"error":{"message":"unauthorized","type":"authentication_error","param":null,"code":"unauthorized"}}
+```
+
+`type` is `authentication_error` for HTTP 401, `rate_limit_error` for 429, `server_error` for 5xx, and `invalid_request_error` for other errors. Use `code` for programmatic handling. The `/v1/inference/*` extension paths retain their earlier mixed shapes: `{"error":"CODE"}` or `{"error":{"code":"CODE"}}`; clients using those paths must normalize both. Provider error bodies, deployment secrets, and internal exception messages are not exposed.
 
 | HTTP | Representative codes | Meaning |
 | --- | --- | --- |
-| 400 | `invalid_request`, `invalid_inference_request`, `invalid_json`, `session_id_required` | Malformed body, missing session, unknown or unsupported fields. |
-| 400 | `invalid_routing_policy`, `unsupported_routing_strategy`, `no_inference_candidates` | Invalid routing policy or no allowed candidate. |
+| 400 | `invalid_request`, `invalid_inference_request`, `invalid_json`, `session_id_required` | Malformed body or session ID, unknown or unsupported fields. |
+| 400 | `invalid_routing_policy`, `unsupported_routing_strategy`, `unknown_model`, `no_inference_candidates` | Invalid routing policy/model or no eligible candidate matching the model and effort. |
 | 400 | `invalid_tool_history`, `duplicate_tool_name`, `invalid_tool_choice` | Invalid tool definitions or full-history pairing. |
 | 400 | `max_output_tokens_exceeds_key_limit` | Requested output exceeds this key's cap. |
 | 401 | `unauthorized` | Missing, invalid, expired, or revoked inference key; also missing admin authority. |
 | 403 | `inference_key_scope`, `inference_key_admin_required`, `forbidden`, `forbidden_origin` | Wrong credential scope, account is not the configured deployment operator, insufficient admin capability, or failed browser origin check. |
 | 404 | `not_found`, `session_not_found` | Unknown route/session/key, deleted session, or session owned by another key. |
 | 405 | `method_not_allowed` | Unsupported HTTP method. |
-| 409 | `session_busy`, `route_is_pinned` | Concurrent session operation or attempt to change pinned reasoning effort. |
+| 409 | `session_busy`, `route_is_pinned` | Concurrent session operation or attempt to change a pinned model, candidate, or reasoning effort. |
 | 409 | `already_issued` | An issuance operation ID was already claimed; metadata only is returned. |
 | 413 | `body_too_large`, `request_too_large`, `input_too_large`, `payload_too_large` | Request/input exceeds its size ceiling. |
 | 415 | `expected_json` | Key issuance requires `Content-Type: application/json`. |
@@ -402,7 +467,7 @@ Revocation returns HTTP 204 and is checked on subsequent inference API calls. Al
 
 ## Source and isolation boundaries
 
-The API uses dedicated key and session Durable Objects, not the managed agent runtime. The gateway replaces internal key/session headers after authentication. Sessions are bound to key IDs, tools are returned without execution, provider destinations are fixed by the server, and the stored session contains routing metadata/counters rather than conversation transcripts. The full supplied history still goes to the selected inference provider; this is not a provider retention guarantee.
+The API authenticates through dedicated key Durable Objects and executes stateless requests without creating a persistent session. The optional extension uses dedicated session Durable Objects. Neither path constructs a managed agent runtime. The gateway replaces internal key/session headers after authentication. Sessions are bound to key IDs, tools are returned without execution, provider destinations are fixed by the server, and the stored session contains routing metadata/counters rather than conversation transcripts. The full supplied history still goes to the selected inference provider; this is not a provider retention guarantee.
 
 Implementation references:
 

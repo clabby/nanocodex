@@ -247,7 +247,7 @@ test("cloud phone controls and signed callbacks reach managed authentication", (
 });
 
 test("standalone inference routes project through the managed service", async () => {
-  for (const path of ["/v1/inference/models", "/v1/inference/sessions", "/v1/inference/responses", "/v1/inference/keys"]) {
+  for (const path of ["/v1/models", "/v1/responses", "/v1/inference/models", "/v1/inference/sessions", "/v1/inference/responses", "/v1/inference/keys"]) {
     assert.equal(isManagedRoutePath(path), true);
     const request = new Request("https://nanocodex.example" + path, { headers: { authorization: "Bearer nci_live_synthetic" } });
     let forwarded: Request | undefined;
@@ -257,6 +257,21 @@ test("standalone inference routes project through the managed service", async ()
     } }, new URL(request.url));
     assert.equal(response?.status, 204);
     assert.equal(forwarded, request);
+  }
+});
+
+test("standard inference aliases project only their exact paths", async () => {
+  for (const path of ["/v1/responses/", "/v1/responses/response-id", "/v1/responses-other",
+    "/v1/models/", "/v1/models/model-id", "/v1/models-other", "/v1/chat/completions", "/v1/sessions"]) {
+    assert.equal(isManagedRoutePath(path), false, path);
+    const request = new Request("https://nanocodex.example" + path, {
+      headers: { authorization: "Bearer nci_live_synthetic", cookie: "synthetic=owner" },
+    });
+    const response = await routeManaged(request, { NANOCODEX_BACKEND: {
+      fetch() { throw new Error("unrecognized alias must not forward"); },
+      connect() { throw new Error("unused"); },
+    } }, new URL(request.url));
+    assert.equal(response, undefined, path);
   }
 });
 
