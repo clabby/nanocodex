@@ -427,7 +427,7 @@ describe("trusted deployment probe context", () => {
       probe("medium", 2, { generationTtftSampleCount: 2 }),
       probe("medium", 3, { workerColo: "LHR", scope: "worker_colo" }),
       probe("medium", 4, { source: "live" }),
-      probe("medium", 5, { model: "uncatalogued-model" }),
+      probe("medium", 5, { model: "uncataloged-model" }),
       probe("medium", 6, { backend: "chatgpt", model: "gpt-6-astra" }),
     ]);
     const f = fixture({ NANOCODEX_PROVIDER_PROBES: "true", NANOCODEX_PROVIDER_PROBE_COORDINATOR: { getByName: () => ({ snapshot }) } });
