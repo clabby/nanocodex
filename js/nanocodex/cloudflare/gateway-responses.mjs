@@ -30,12 +30,16 @@ export function createGatewayResponses(options) {
         delete payload.reasoning_effort;
         payload.reasoning = { effort: reasoningEffort };
         payload.provider = { require_parameters: true };
+        // OpenRouter filters on parameter presence, including false. Its catalog
+        // omits parallel_tool_calls for otherwise tool-capable endpoints. Enforce
+        // the requested single-call contract on the buffered response instead.
+        if (input.parallel_tool_calls === false) delete payload.parallel_tool_calls;
       }
       let response;
       attempt.outcome = "network_error";
       try { attempt.observer = options.onRequest?.(); } catch { /* telemetry is best effort */ }
       try {
-        response = await fetchImpl(endpoint, { method: "POST", redirect: "error", signal,
+        response = await fetchImpl(endpoint, { method: "POST", redirect: "manual", signal,
           headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
           body: JSON.stringify(payload) });
       } catch {
@@ -54,12 +58,18 @@ export function createGatewayResponses(options) {
         fail("provider rejected request");
       }
       attempt.outcome = "protocol_error";
-      try { return await response.json(); }
+      let value;
+      try { value = await response.json(); }
       catch (error) {
         signal?.throwIfAborted();
         attempt.outcome = error instanceof SyntaxError ? "protocol_error" : "network_error";
         fail("invalid provider response");
       }
+      if (provider === "openrouter" && input.parallel_tool_calls === false
+        && (value.choices ?? []).some(choice => (choice.message?.tool_calls?.length ?? 0) > 1)) {
+        fail("provider returned parallel tool calls despite a single-call contract");
+      }
+      return value;
     },
   }, { model, apiBaseUrl });
   return Object.freeze({ apiBaseUrl, stateless: true,

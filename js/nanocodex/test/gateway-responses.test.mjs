@@ -14,7 +14,7 @@ for (const provider of ["openrouter", "vercel"]) for (const model of models) {
     const requests = [];
     const transport = createGatewayResponses({ ...options, provider, model, fetch: async (url, init) => {
       assert.equal(url, provider === "openrouter" ? "https://openrouter.ai/api/v1/chat/completions" : "https://ai-gateway.vercel.sh/v1/chat/completions");
-      assert.equal(init.redirect, "error");
+      assert.equal(init.redirect, "manual");
       assert.equal(init.headers.authorization, `Bearer ${secret}`);
       const body = JSON.parse(init.body); requests.push(body);
       assert.equal(body.model, model === models[0] ? (provider === "openrouter" ? "z-ai/glm-5.3" : "zai/glm-5.3") : `openai/${model}`);
@@ -147,3 +147,59 @@ test("telemetry waits for body consumption and classifies body transport errors 
   await assert.rejects(invoke(failed, {}), error => !String(error).includes(secret));
   assert.deepEqual(observed, [200, "network_error"]);
 });
+
+test("OpenRouter single-call mode does not require a parallel-call endpoint", async () => {
+  const transport = createGatewayResponses({ ...options, fetch: async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(Object.hasOwn(body, "parallel_tool_calls"), false);
+    assert.deepEqual(body.provider, { require_parameters: true });
+    assert.deepEqual(body.reasoning, { effort: "high" });
+    return completion({ tool_calls: [{ id: "single", function: { name: body.tools[0].function.name, arguments: "{}" } }] }, "tool_calls");
+  } });
+  const result = await events(await invoke(transport, { parallel_tool_calls: false,
+    tools: [{ type: "function", name: "read", parameters: { type: "object" } }], input: "read" }));
+  assert.equal(result.at(-1).response.output.length, 1);
+});
+
+test("OpenRouter fails closed when single-call mode receives multiple calls", async () => {
+  const outcomes = [];
+  const transport = createGatewayResponses({ ...options, onRequest: () => ({
+    headers() {}, finish(outcome) { outcomes.push(outcome); },
+  }), fetch: async (_url, init) => {
+    const body = JSON.parse(init.body);
+    return completion({ tool_calls: ["one", "two"].map(id => ({ id,
+      function: { name: body.tools[0].function.name, arguments: "{}" } })) }, "tool_calls");
+  } });
+  await assert.rejects(invoke(transport, { parallel_tool_calls: false,
+    tools: [{ type: "function", name: "read", parameters: { type: "object" } }], input: "read" }), /Gateway Responses/);
+  assert.deepEqual(outcomes, ["protocol_error"]);
+});
+
+test("explicit parallel mode still requires provider support", async () => {
+  const transport = createGatewayResponses({ ...options, fetch: async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(body.parallel_tool_calls, true);
+    assert.deepEqual(body.provider, { require_parameters: true });
+    return completion({ content: "done" });
+  } });
+  await invoke(transport, { parallel_tool_calls: true, input: "read" });
+});
+
+for (const provider of ["openrouter", "vercel"]) {
+  test(`${provider} rejects redirects without forwarding server credentials`, async () => {
+    let calls = 0;
+    const outcomes = [];
+    const transport = createGatewayResponses({ ...options, provider,
+      onRequest: () => ({ headers() {}, finish(outcome) { outcomes.push(outcome); } }),
+      fetch: async (_url, init) => {
+        calls++;
+        // workerd supports manual and follow, but rejects redirect: error.
+        assert.equal(init.redirect, "manual");
+        return new Response(null, { status: 307, headers: { location: "https://other.invalid/" } });
+      },
+    });
+    await assert.rejects(invoke(transport, {}), /Gateway Responses/);
+    assert.equal(calls, 1);
+    assert.deepEqual(outcomes, ["http_error"]);
+  });
+}

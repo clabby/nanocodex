@@ -10,6 +10,8 @@ With both gateways configured, the supported catalog contains 45 provider/model/
 
 This is an explicitly supported model catalog, not permission to invoke arbitrary catalog entries or URLs. Broader model families require runtime capability profiles and compatibility validation. Tool-use support and reasoning controls must be supported by the selected endpoint. The gateway transports use fixed HTTPS endpoints and bearer authorization, refuse redirects, and do not expose raw provider error bodies. No cross-model fallback list is sent to the gateways. A gateway may select its own upstream host for that same model; measurements describe the gateway route unless the actual upstream is known.
 
+OpenRouter single-call mode omits `parallel_tool_calls: false` from provider matching because some tool-capable endpoints do not advertise that parameter. The adapter enforces the single-call contract on the buffered response before dispatching any tools. Explicit parallel mode continues to require provider support. Both gateways use manual redirect handling and reject redirect responses, including in Cloudflare's runtime.
+
 Both gateway routes reuse the existing Rust/WASM loop through a buffered, full-history HTTP adapter. Model and effort remain canonical in agent state; only the gateway wire identifier differs. Custom tools and namespace aliases use the same translation as the Cloudflare route. Stateless HTTP is explicitly configured for gateway GPT models rather than relying on the GLM-specific default. Gateway costs must be interpreted using gateway metadata or invoice records; core canonical-model estimates are not verified gateway charges.
 
 ## Cost evidence
@@ -34,3 +36,5 @@ Changes in telemetry inform new threads and new children. They do not silently a
 - [Cloudflare placement](https://developers.cloudflare.com/workers/configuration/placement/) explains that moving execution toward an upstream can improve overall latency, and that scheduled/RPC entrypoints do not share fetch Smart Placement behavior.
 
 Public listings establish availability in a catalog, not access granted to our deployment. Authenticated live OpenRouter/Vercel inference requires configured keys and credits. Do not describe mocked transport checks or Mac-side timing as live global Worker measurements.
+
+Authenticated GLM-low CLI execution and gateway compatibility fixes are recorded in [the 2026-09-21 live verification report](THREAD_ROUTING_GATEWAYS_2026_09_21.md).
