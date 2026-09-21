@@ -20,6 +20,20 @@ import SwiftUI
     private var recorder: AVAudioRecorder?
     private var player: AVAudioPlayer?
     private var pendingURL: URL?
+    private var playbackAccess: PlaybackAccess?
+
+    /// Balances imported-file access even when this controller is released during playback.
+    private final class PlaybackAccess {
+        let url: URL
+        let scoped: Bool
+        init(url: URL) {
+            self.url = url
+            scoped = url.startAccessingSecurityScopedResource()
+        }
+        deinit {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+        }
+    }
     private var generation = UUID()
     private var ownsAudio = false
 
@@ -45,7 +59,11 @@ import SwiftUI
     }
 
     func start() async {
-        discard()
+        guard !preparing, !recording, !saving else { return }
+        stopPlayback()
+        generation = UUID()
+        elapsed = 0
+        error = nil
         let token = generation
         preparing = true
         permissionDenied = false
@@ -73,7 +91,7 @@ import SwiftUI
                     do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
                 }
             }
-        } catch { discard(); self.error = "Could not start recording. Check microphone access and try again." }
+        } catch { abandonPendingRecording(); self.error = "Could not start recording. Check microphone access and try again." }
     }
     private func updateMeter() {
         guard let recorder, recording else { return }
@@ -94,22 +112,31 @@ import SwiftUI
             guard self.recorder === recorder else { return }
             self.meterTask?.cancel(); self.meterTask = nil; self.level = 0
             self.recording = false; self.saving = false; self.recorder = nil
-            if flag {
-                self.sample = self.pendingURL; self.pendingURL = nil
-                if let sample = self.sample { self.duration = (try? AVAudioPlayer(contentsOf: sample).duration) ?? self.elapsed }
+            if flag, let replacement = self.pendingURL {
+                let previous = self.sample
+                self.sample = replacement; self.pendingURL = nil
+                self.duration = (try? AVAudioPlayer(contentsOf: replacement).duration) ?? self.elapsed
+                if let previous, previous != replacement { try? FileManager.default.removeItem(at: previous) }
             }
-            else { self.discard(); self.error = "Recording was interrupted. Please record again." }
+            else { self.abandonPendingRecording(); self.error = "Recording was interrupted. Please record again." }
             self.releaseAudio()
         }
     }
     func play() {
-        guard !preparing, !recording, !saving, !playing, let sample else { return }
+        guard let sample else { return }
+        play(url: sample)
+    }
+    func play(url: URL) {
+        guard !preparing, !recording, !saving else { return }
+        stopPlayback()
+        error = nil
         playbackElapsed = 0
+        playbackAccess = PlaybackAccess(url: url)
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
             try AVAudioSession.sharedInstance().setActive(true)
             ownsAudio = true
-            let player = try AVAudioPlayer(contentsOf: sample)
+            let player = try AVAudioPlayer(contentsOf: url)
             player.delegate = self; self.player = player
             guard player.play() else { throw CocoaError(.fileReadCorruptFile) }
             playing = true
@@ -130,6 +157,7 @@ import SwiftUI
         let old = player
         player = nil
         old?.stop()
+        playbackAccess = nil
         playing = false
         playbackElapsed = 0
         if recorder == nil { releaseAudio() }
@@ -146,22 +174,35 @@ import SwiftUI
     nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
         Task { @MainActor in
             guard self.recorder === recorder else { return }
-            self.discard(); self.error = "Recording failed. Please record again."
+            self.abandonPendingRecording(); self.error = "Recording failed. Please record again."
         }
     }
-    func discard() {
-        generation = UUID()
-        meterTask?.cancel(); meterTask = nil
-        elapsed = 0; duration = 0; level = 0
-        preparing = false; saving = false
-        let old = recorder; recorder = nil; old?.stop(); recording = false
-        stopPlayback()
-        for url in [sample, pendingURL].compactMap({ $0 }) { try? FileManager.default.removeItem(at: url) }
-        sample = nil; pendingURL = nil; error = nil
-    }
-    func suspend() {
+    /// Cancels a permission request without removing the sample already under review.
+    func cancelPreparation() {
+        guard preparing else { return }
         generation = UUID()
         preparing = false
+    }
+    private func abandonPendingRecording() {
+        generation = UUID()
+        meterTask?.cancel(); meterTask = nil
+        preparing = false; recording = false; saving = false
+        elapsed = 0; level = 0
+        let old = recorder
+        recorder = nil
+        old?.stop()
+        if let pendingURL { try? FileManager.default.removeItem(at: pendingURL) }
+        pendingURL = nil
+        releaseAudio()
+    }
+    func discard() {
+        abandonPendingRecording()
+        stopPlayback()
+        if let sample { try? FileManager.default.removeItem(at: sample) }
+        sample = nil; duration = 0; error = nil
+    }
+    func suspend() {
+        cancelPreparation()
         if recording { stop() }
         if playing { stopPlayback() }
     }
