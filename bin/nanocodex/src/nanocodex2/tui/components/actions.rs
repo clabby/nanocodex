@@ -335,7 +335,7 @@ impl Action {
             Self::Bug => "Debug a bug",
             Self::Screen => "Watch Hand screen",
             Self::Zoom => "Zoom focused pane",
-            Self::Voice => "Toggle voice",
+            Self::Voice => "Voice menu · providers and cloning",
             Self::AgentId => "Show agent ID",
             Self::Handoff => "Prepare handoff",
             Self::Review => "Review changes",

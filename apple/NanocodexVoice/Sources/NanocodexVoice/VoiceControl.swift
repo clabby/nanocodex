@@ -217,13 +217,24 @@ private struct VoiceSettingsView: View {
     @State private var error: String?
     @State private var testingAudio = false
     @State private var receivedTestAudio = false
+    @State private var sampleAudioBusy = false
 
     var body: some View {
         NavigationStack {
             Form {
-                Picker("Voice", selection: $draft.voice) {
-                    ForEach(ManagedVoiceProtocol.voices, id: \.self) { Text($0.capitalized).tag($0) }
-                }.accessibilityIdentifier("voice-selection")
+                Picker("Speech provider", selection: $draft.outputProvider) {
+                    Text("ChatGPT").tag(Optional(VoiceSettings.OutputProvider.openai))
+                    Text("ElevenLabs").tag(Optional(VoiceSettings.OutputProvider.elevenlabs))
+                }
+                .disabled(sampleAudioBusy)
+                if draft.outputProvider == .elevenlabs {
+                    ElevenLabsSettingsView(session: session, sampleAudioBusy: $sampleAudioBusy, settings: $draft, configuration: onStart)
+                }
+                if draft.outputProvider != .elevenlabs {
+                    Picker("Voice", selection: $draft.voice) {
+                        ForEach(ManagedVoiceProtocol.voices, id: \.self) { Text($0.capitalized).tag($0) }
+                    }.accessibilityIdentifier("voice-selection")
+                }
                 Picker("Pace", selection: $draft.pace) {
                     Text("Relaxed").tag(VoiceSettings.Pace.slow)
                     Text("Natural").tag(VoiceSettings.Pace.natural)
@@ -283,11 +294,11 @@ private struct VoiceSettingsView: View {
                             if session.isEngaged { session.restart(using: onStart) }
                             dismiss()
                         } catch { self.error = error.localizedDescription }
-                    }.accessibilityIdentifier("save-voice-settings")
+                    }.disabled(sampleAudioBusy).accessibilityIdentifier("save-voice-settings")
                 }
             }
         }
-        .onAppear { draft = session.settings }
+        .onAppear { draft = session.settings; if draft.outputProvider == nil { draft.outputProvider = .openai } }
         .onChange(of: session.outputLevel) { _, level in
             if testingAudio, level > 0.015 { receivedTestAudio = true }
         }

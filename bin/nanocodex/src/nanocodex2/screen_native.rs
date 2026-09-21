@@ -197,12 +197,14 @@ impl NativeScreen {
             ))
         }
     }
+    #[cfg(target_os = "linux")]
     pub(crate) async fn refresh(&self, target: &AttachmentTarget) -> Result<(), ManagedError> {
         match &self.publisher {
             Some(publisher) => publisher.refresh(target).await,
             None => Err(configuration("native screen publisher unavailable")),
         }
     }
+    #[cfg(target_os = "linux")]
     pub(crate) fn is_finished(&self) -> bool {
         self.publisher
             .as_ref()

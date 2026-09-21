@@ -13,11 +13,20 @@ import UIKit
 import AVFoundation
 import os.signpost
 
+private struct ConversationComposerHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
 private struct ConversationNavigationActiveKey: EnvironmentKey {
     static let defaultValue = false
 }
 
 private extension EnvironmentValues {
+    var conversationComposerHeight: CGFloat {
+        get { self[ConversationComposerHeightKey.self] }
+        set { self[ConversationComposerHeightKey.self] = newValue }
+    }
+
     var conversationNavigationActive: Bool {
         get { self[ConversationNavigationActiveKey.self] }
         set { self[ConversationNavigationActiveKey.self] = newValue }
@@ -66,6 +75,7 @@ struct InboxView: View {
     @State private var screenViewerRevision = UUID()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var composerFocused = false
+    @State private var composerHeight: CGFloat = 80
 
     var body: some View {
         NavigationStack {
@@ -302,6 +312,7 @@ struct InboxView: View {
             Group {
                     if let identity = model.focusedConversationIdentity {
                         ConversationView(model: model, identity: identity, readingPositions: readingPositions).id(identity)
+                            .environment(\.conversationComposerHeight, composerHeight)
                     } else { emptyState.frame(maxWidth: .infinity, maxHeight: .infinity) }
             }
             .frame(maxHeight: screenExpanded && screenThreads.contains(model.focusedConversationIdentity ?? "") ? 0 : .infinity)
@@ -314,20 +325,20 @@ struct InboxView: View {
                 ConnectionStatusView(status: model.threadLoading ? "" : model.connection, retry: { model.retryConnection() }, signIn: { showSettings = true })
                     .padding(.horizontal, 16)
             }
-            if let error = model.error {
-                HStack(alignment: .top) {
-                    Text(error).font(.caption).foregroundStyle(Ink.amber)
-                    Spacer(minLength: 4)
-                    Button { model.error = nil } label: { Image(systemName: "xmark") }
-                        .accessibilityLabel("Dismiss error")
-                }
-                .padding(12).background(Ink.card, in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal, 12)
-            } else if let notice = model.notice, !composerFocused {
-                Text(notice).font(.caption).foregroundStyle(Ink.muted).accessibilityIdentifier("notice")
-            }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        .overlay(alignment: .bottom) {
             VStack(spacing: 0) {
+                if let error = model.error {
+                    HStack(alignment: .top) {
+                        Text(error).font(.caption).foregroundStyle(Ink.amber)
+                        Spacer(minLength: 4)
+                        Button { model.error = nil } label: { Image(systemName: "xmark") }
+                            .accessibilityLabel("Dismiss error")
+                    }
+                    .padding(12).background(Ink.card, in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal, 12)
+                } else if let notice = model.notice, !composerFocused {
+                    Text(notice).font(.caption).foregroundStyle(Ink.muted).accessibilityIdentifier("notice")
+                }
                 if model.focused != nil {
                     AgentComposerView(model: model, focused: $composerFocused, onVoiceChat: {
                         composerFocused = false
@@ -335,10 +346,7 @@ struct InboxView: View {
                 }
             }
             .padding(.bottom, 4)
-            .background {
-                LinearGradient(colors: [Ink.background.opacity(0), Ink.background, Ink.background], startPoint: .top, endPoint: .bottom)
-                    .ignoresSafeArea(edges: .bottom)
-            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerHeight = $0 }
         }
     }
 
@@ -831,16 +839,17 @@ private struct AgentComposerView: View {
                                         AttachmentPhotoThumbnail(attachment: attachment, model: model)
                                     }
                                 }
-                                    .frame(width: 88, height: 76)
+                                    .frame(width: 120, height: 120)
                                     .overlay(alignment: .topTrailing) {
                                         Button { model.removeAttachment(attachment.id) } label: {
-                                            Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette)
-                                                .foregroundStyle(Ink.text, Ink.background).frame(width: 44, height: 44)
+                                            Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+                                                .foregroundStyle(.white).frame(width: 20, height: 20)
+                                                .background(.black.opacity(0.65), in: Circle())
+                                                .frame(width: 44, height: 44).contentShape(Rectangle())
                                         }.buttonStyle(.plain).accessibilityLabel("Remove " + attachment.name)
                                             .accessibilityIdentifier("remove-attachment-" + attachment.id)
                                     }
-                                Text(attachment.name).font(.caption2).lineLimit(1)
-                            }.frame(width: 88).accessibilityElement(children: .contain)
+                            }.frame(width: 120).accessibilityElement(children: .contain)
                                 .accessibilityIdentifier("attachment-" + attachment.id)
                         }
                     }.padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 6)
@@ -859,19 +868,14 @@ private struct AgentComposerView: View {
                 Text(error).font(.caption).foregroundStyle(Ink.muted).frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16).padding(.vertical, 8).accessibilityIdentifier("attachment-error")
             }
+            if !attachments.isEmpty {
+                composerText.frame(minHeight: 52, alignment: .topLeading).padding(.horizontal, 12)
+            }
             HStack(alignment: .bottom, spacing: 2) {
                 Button { focused = false; showAttachmentMenu = true } label: {
                     Image(systemName: "plus").frame(width: 44, height: 44).contentShape(Rectangle())
                 }.accessibilityLabel("Add attachments").accessibilityIdentifier("add-attachments")
-                ChatComposerEditor(text: $model.draft, focused: $focused, overflowing: $composerOverflows,
-                                   onPasteImages: pasteImages)
-                    .accessibilityIdentifier("composer")
-                    .overlay(alignment: .topLeading) {
-                        if model.draft.isEmpty {
-                            Text("Ask Nanocodex").font(.body).foregroundStyle(.tertiary)
-                                .padding(.top, 8).allowsHitTesting(false).accessibilityHidden(true)
-                        }
-                    }
+                if attachments.isEmpty { composerText } else { Spacer(minLength: 0) }
                 if let agentID = card?.id {
                     NanocodexVoiceControl(session: model.voice, onReturnToChat: onVoiceChat) {
                         focused = false
@@ -1008,6 +1012,18 @@ private struct AgentComposerView: View {
         guard let target = model.captureAttachmentTarget() else { return }
         pickerError = nil
         model.importAttachmentProviders(providers, target: target)
+    }
+
+    private var composerText: some View {
+                ChatComposerEditor(text: $model.draft, focused: $focused, overflowing: $composerOverflows,
+                                   onPasteImages: pasteImages)
+                    .accessibilityIdentifier("composer")
+                    .overlay(alignment: .topLeading) {
+                        if model.draft.isEmpty {
+                            Text("Ask Nanocodex").font(.body).foregroundStyle(.tertiary)
+                                .padding(.top, 8).allowsHitTesting(false).accessibilityHidden(true)
+                        }
+                    }
     }
 
     private func attachmentOption(_ title: String, icon: String, action: AttachmentAction, identifier: String) -> some View {
@@ -1209,20 +1225,59 @@ private struct VideoAttachmentView: View {
     }
 }
 
+private struct AttachmentGridLayout: Layout {
+    private let gap: CGFloat = 6
+    private func metrics(_ proposal: ProposedViewSize, count: Int) -> (columns: Int, side: CGFloat) {
+        let columns = min(3, max(1, count))
+        let maximum: CGFloat = count <= 2 ? 256 : 360
+        let width = min(proposal.width ?? maximum, maximum)
+        return (columns, max(1, (width - CGFloat(columns - 1) * gap) / CGFloat(columns)))
+    }
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let (columns, side) = metrics(proposal, count: subviews.count)
+        if subviews.count == 1 {
+            let ideal = subviews[0].sizeThatFits(ProposedViewSize(width: side, height: nil))
+            let height = max(1, ideal.height)
+            let scale = min(1, 320 / height)
+            return CGSize(width: side * scale, height: height * scale)
+        }
+        let rows = (subviews.count + columns - 1) / columns
+        return CGSize(width: CGFloat(columns) * side + CGFloat(columns - 1) * gap,
+                      height: CGFloat(rows) * side + CGFloat(rows - 1) * gap)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let (columns, side) = metrics(ProposedViewSize(width: bounds.width, height: nil), count: subviews.count)
+        if subviews.count == 1 {
+            subviews[0].place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(bounds.size))
+            return
+        }
+        for (index, view) in subviews.enumerated() {
+            let row = index / columns, column = index % columns
+            let rowCount = min(columns, subviews.count - row * columns)
+            let leading = bounds.maxX - CGFloat(rowCount) * side - CGFloat(rowCount - 1) * gap
+            view.place(at: CGPoint(x: leading + CGFloat(column) * (side + gap), y: bounds.minY + CGFloat(row) * (side + gap)),
+                       anchor: .topLeading, proposal: ProposedViewSize(width: side, height: side))
+        }
+    }
+}
+
 private struct OriginalImageAttachmentView: View {
     let attachment: MessageAttachment
     let model: InboxModel
     let agentID: String
+    var preservesAspectRatio = false
+    @State private var imageRatio: CGFloat = 1
     @State private var preview: Data?
-    @State private var visible = false
     @State private var error: String?
     @State private var selection: URL?
     private var localPreview: URL? {
         model.attachmentURL(attachment) ?? model.attachmentOriginalURL(attachment)
     }
     private var thumbnail: some View {
-        AttachmentImageView(source: localPreview.map(AttachmentImageSource.file) ?? preview.map(AttachmentImageSource.data), contentMode: .fit)
-            .frame(maxWidth: 240).frame(height: 180)
+        AttachmentImageView(source: localPreview.map(AttachmentImageSource.file) ?? preview.map(AttachmentImageSource.data),
+                            contentMode: preservesAspectRatio ? .fit : .fill, imageRatio: preservesAspectRatio ? $imageRatio : nil)
+            .aspectRatio(preservesAspectRatio ? imageRatio : 1, contentMode: .fit)
             .accessibilityLabel("Open " + attachment.name).accessibilityIdentifier("message-image")
     }
     var body: some View {
@@ -1240,9 +1295,8 @@ private struct OriginalImageAttachmentView: View {
             }
             if let error { Text(error).font(.caption).foregroundStyle(.secondary) }
         }
-        .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
-        .task(id: visible ? attachment.id : nil) {
-            guard visible, preview == nil, localPreview == nil else { return }
+        .task(id: attachment.id) {
+            guard preview == nil, localPreview == nil else { return }
             do {
                 let data = try await model.attachmentPreview(attachment, agentID: agentID)
                 guard !Task.isCancelled else { return }
@@ -1254,41 +1308,79 @@ private struct OriginalImageAttachmentView: View {
     }
 }
 
+private struct InlinePhotoAttachmentView: View {
+    let source: String
+    let preservesAspectRatio: Bool
+    @State private var imageRatio: CGFloat = 1
+    var body: some View {
+        ChatMediaPreview(load: { [try await ChatMediaFile.inline(source)] }) {
+            AttachmentImageView(source: .inline(source), contentMode: preservesAspectRatio ? .fit : .fill,
+                                imageRatio: preservesAspectRatio ? $imageRatio : nil)
+                .aspectRatio(preservesAspectRatio ? imageRatio : 1, contentMode: .fit)
+                .accessibilityLabel("Open attached image").accessibilityIdentifier("message-image")
+        }
+    }
+}
+
 private struct AttachmentImageView: View {
     let source: AttachmentImageSource?
     var contentMode: ContentMode = .fill
+    var imageRatio: Binding<CGFloat>? = nil
     @State private var thumbnail: CGImage?
-    @State private var visible = false
 
     var body: some View {
-        Group {
-            if let thumbnail {
-                Image(decorative: thumbnail, scale: 1).resizable().aspectRatio(contentMode: contentMode)
-            } else {
-                Image(systemName: "photo").font(.title2).foregroundStyle(Ink.muted)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        GeometryReader { geometry in
+            ZStack {
+                Ink.surface
+                if let thumbnail {
+                    Image(decorative: thumbnail, scale: 1).resizable()
+                        .interpolation(.high).aspectRatio(contentMode: contentMode)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                } else {
+                    ProgressView().controlSize(.small).tint(Ink.muted)
+                }
             }
         }
-        .background(Ink.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(.primary.opacity(0.06), lineWidth: 0.5))
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .accessibilityElement(children: .ignore).accessibilityLabel("Attached image")
         .accessibilityValue(thumbnail == nil ? "Loading image" : "Image loaded")
-        .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
-        .task(id: visible ? source : nil) {
-            thumbnail = nil
-            guard visible else { return }
-            let captured = source
-            let decoded = await Task.detached(priority: .utility) { Self.decode(captured) }.value
+        .task(id: source) {
+            guard let source else { thumbnail = nil; return }
+            if let cached = Self.cache.object(forKey: ThumbnailKey(source)) {
+                thumbnail = cached
+                imageRatio?.wrappedValue = CGFloat(cached.width) / CGFloat(cached.height)
+                return
+            }
+            let decoded = await Task.detached(priority: .userInitiated) { Self.decode(source) }.value
             guard !Task.isCancelled else { return }
+            if let decoded { Self.cache.setObject(decoded, forKey: ThumbnailKey(source), cost: decoded.bytesPerRow * decoded.height) }
             thumbnail = decoded
+            if let decoded { imageRatio?.wrappedValue = CGFloat(decoded.width) / CGFloat(decoded.height) }
         }
     }
+
+    private final class ThumbnailKey: NSObject {
+        let source: AttachmentImageSource
+        init(_ source: AttachmentImageSource) { self.source = source }
+        override var hash: Int { source.hashValue }
+        override func isEqual(_ other: Any?) -> Bool { (other as? ThumbnailKey)?.source == source }
+    }
+    private static let cache: NSCache<ThumbnailKey, CGImage> = {
+        let cache = NSCache<ThumbnailKey, CGImage>()
+        cache.totalCostLimit = 24 * 1024 * 1024
+        cache.countLimit = 32
+        return cache
+    }()
 
     private nonisolated static func decode(_ source: AttachmentImageSource?) -> CGImage? {
         let image: CGImageSource?
         switch source {
         case .file(let url):
             guard url.isFileURL else { return nil }
-            image = CGImageSourceCreateWithURL(url as CFURL, nil)
+            image = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
         case .inline(let value):
             guard value.hasPrefix("data:image/"), let separator = value.firstIndex(of: ","),
                   value[..<separator].hasSuffix(";base64"),
@@ -1301,7 +1393,7 @@ private struct AttachmentImageView: View {
         return CGImageSourceCreateThumbnailAtIndex(image, 0, [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 480,
+            kCGImageSourceThumbnailMaxPixelSize: 960,
             kCGImageSourceShouldCacheImmediately: true,
         ] as CFDictionary)
     }
@@ -1482,84 +1574,94 @@ private struct ConversationMessageContent: View, Equatable {
     }
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            if row.role == "You" { Spacer(minLength: 44) }
-            VStack(alignment: .leading, spacing: 10) {
-                if row.role == "Thinking" {
-                    ChatMarkdown(text: row.text, compact: true)
-                        .foregroundStyle(Ink.muted)
-                } else if row.role == "You", let receipt = BrowserReceiptPresentation.summary(row.text) {
-                    Label(receipt, systemImage: "lock.shield").font(.subheadline)
-                } else if row.role == "You", let content = ContextPrompt.separate(row.text) {
-                    Text(content.request).font(.body).lineSpacing(3).textSelection(.enabled)
-                    DisclosureGroup("Captured context (\(content.captures.count))") {
-                        ForEach(Array(content.captures.enumerated()), id: \.offset) { _, capture in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(capture.source + (capture.sender.isEmpty ? "" : " · " + capture.sender)).font(.caption.weight(.semibold))
-                                Text(capture.text.isEmpty ? capture.url : capture.text).font(.subheadline).textSelection(.enabled)
-                            }.padding(.vertical, 4)
+            if row.role == "You" { Spacer(minLength: (delivery?.attachments ?? row.imageFiles ?? []).count >= 3 ? 0 : 44) }
+            VStack(alignment: row.role == "You" ? .trailing : .leading, spacing: 8) {
+                media
+                if !row.text.isEmpty || !row.detail.isEmpty || delivery?.phase == .failed || steering != nil {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if row.role == "Thinking" {
+                            ChatMarkdown(text: row.text, compact: true)
+                                .foregroundStyle(Ink.muted)
+                        } else if row.role == "You", let receipt = BrowserReceiptPresentation.summary(row.text) {
+                            Label(receipt, systemImage: "lock.shield").font(.subheadline)
+                        } else if row.role == "You", let content = ContextPrompt.separate(row.text) {
+                            Text(content.request).font(.body).lineSpacing(3).textSelection(.enabled)
+                            DisclosureGroup("Captured context (\(content.captures.count))") {
+                                ForEach(Array(content.captures.enumerated()), id: \.offset) { _, capture in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(capture.source + (capture.sender.isEmpty ? "" : " · " + capture.sender)).font(.caption.weight(.semibold))
+                                        Text(capture.text.isEmpty ? capture.url : capture.text).font(.subheadline).textSelection(.enabled)
+                                    }.padding(.vertical, 4)
+                                }
+                            }.font(.caption).foregroundStyle(Ink.muted)
+                        } else if row.role == "Agent", !row.text.isEmpty {
+                            ChatMarkdown(text: row.text, compact: true)
+                        } else if !row.text.isEmpty {
+                            Text(row.text).font(.system(size: row.role == "Status" ? 14 : 17))
+                                .lineSpacing(5).textSelection(.enabled)
+                                .foregroundStyle(row.role == "Status" ? Ink.muted : Ink.text)
                         }
-                    }.font(.caption).foregroundStyle(Ink.muted)
-                } else if row.role == "Agent", !row.text.isEmpty {
-                    ChatMarkdown(text: row.text, compact: true)
-                } else if !row.text.isEmpty {
-                    Text(row.text).font(.system(size: row.role == "Status" ? 14 : 17))
-                        .lineSpacing(5).textSelection(.enabled)
-                        .foregroundStyle(row.role == "Status" ? Ink.muted : Ink.text)
-                }
-                if !row.detail.isEmpty { Text(row.detail).font(.caption).foregroundStyle(Ink.muted) }
-                if let delivery, delivery.phase == .failed {
-                    Label("Couldn’t confirm delivery", systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Button("Retry") { model.retryPending(delivery.id) }.accessibilityIdentifier("retry-pending")
-                        Button("Cancel") { model.cancelPending(delivery.id) }.accessibilityLabel("Cancel message")
-                    }.font(.caption).disabled(!canRetry)
-                }
-                if let transfer = steering, transfer.direct == true, transfer.error != nil, transfer.canResume {
-                    Button("Retry sending") { model.steerNow(transfer.id) }
-                        .font(.caption).accessibilityIdentifier("retry-steering")
-                        .disabled(!connected)
-                }
-                if let transfer = steering, canWithdraw, (transfer.wasAccepted || transfer.phase == .unconfirmed), transfer.phase != .withdrawn {
-                    Button(transfer.phase == .withdrawing ? "Withdrawing…" : "Withdraw steering") { model.withdrawSteering(transfer.id) }
-                        .font(.caption).accessibilityIdentifier("withdraw-steering")
-                        .disabled(!connected || (transfer.phase == .withdrawing && transfer.error == nil))
-                }
-                if let images = row.images {
-                    ForEach(Array(images.enumerated()), id: \.offset) { _, image in
-                        ConversationUserImageView(source: image).frame(maxWidth: 240)
-                            .accessibilityIdentifier("message-image")
-                    }
-                }
-                if let attachments = delivery?.attachments, !attachments.isEmpty {
-                    ForEach(attachments) { attachment in
-                        if attachment.isVideo {
-                            AttachmentMovieThumbnail(attachment: attachment, poster: model.attachmentURL(attachment), movie: model.attachmentMovieURL(attachment))
-                                .frame(width: 240, height: 180)
-                        } else {
-                            AttachmentPhotoThumbnail(attachment: attachment, model: model).frame(width: 240, height: 180)
+                        if !row.detail.isEmpty { Text(row.detail).font(.caption).foregroundStyle(Ink.muted) }
+                        if let delivery, delivery.phase == .failed {
+                            Label("Couldn’t confirm delivery", systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Button("Retry") { model.retryPending(delivery.id) }.accessibilityIdentifier("retry-pending")
+                                Button("Cancel") { model.cancelPending(delivery.id) }.accessibilityLabel("Cancel message")
+                            }.font(.caption).disabled(!canRetry)
+                        }
+                        if let transfer = steering, transfer.direct == true, transfer.error != nil, transfer.canResume {
+                            Button("Retry sending") { model.steerNow(transfer.id) }
+                                .font(.caption).accessibilityIdentifier("retry-steering")
+                                .disabled(!connected)
+                        }
+                        if let transfer = steering, canWithdraw, (transfer.wasAccepted || transfer.phase == .unconfirmed), transfer.phase != .withdrawn {
+                            Button(transfer.phase == .withdrawing ? "Withdrawing…" : "Withdraw steering") { model.withdrawSteering(transfer.id) }
+                                .font(.caption).accessibilityIdentifier("withdraw-steering")
+                                .disabled(!connected || (transfer.phase == .withdrawing && transfer.error == nil))
                         }
                     }
-                } else {
-                    ForEach(row.imageFiles ?? []) { OriginalImageAttachmentView(attachment: $0, model: model, agentID: agentID) }
-                    ForEach(row.videos ?? []) { VideoAttachmentView(video: $0, model: model, agentID: agentID) }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel(row.role == "You" ? "Your message" : row.role == "Agent" ? "Assistant message" : row.role)
+                    .padding(.horizontal, row.role == "You" ? 12 : 0)
+                    .padding(.vertical, row.role == "You" || row.role == "Agent" ? 9 : 0)
+                    .background(row.role == "You" ? Ink.userMessage : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 18))
+                    .contextMenu {
+                        if row.role == "Agent", !row.text.isEmpty {
+                            ChatCopyButton(text: row.text, showsLabel: true)
+                        }
+                    }
+                    .accessibilityAction(named: "Copy response") {
+                        UIPasteboard.general.string = row.text
+                    }
                 }
-            }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(row.role == "You" ? "Your message" : row.role == "Agent" ? "Assistant message" : row.role)
-            .padding(.horizontal, row.role == "You" ? 12 : 0)
-            .padding(.vertical, row.role == "You" || row.role == "Agent" ? 9 : 0)
-            .background(row.role == "You" ? Ink.userMessage : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 18))
-            .contextMenu {
-                if row.role == "Agent", !row.text.isEmpty {
-                    ChatCopyButton(text: row.text, showsLabel: true)
-                }
-            }
-            .accessibilityAction(named: "Copy response") {
-                UIPasteboard.general.string = row.text
             }
             if row.role != "You" { Spacer(minLength: row.role == "Agent" ? 16 : 0) }
         }.frame(maxWidth: .infinity, alignment: row.role == "You" ? .trailing : .leading)
+    }
+
+    @ViewBuilder private var media: some View {
+        let pendingAttachments = delivery?.attachments ?? []
+        let attachments = pendingAttachments.isEmpty ? (row.imageFiles ?? []) : pendingAttachments
+        let photos = attachments.filter { !$0.isVideo }
+        let inline = row.images ?? []
+        if !photos.isEmpty || !inline.isEmpty {
+            AttachmentGridLayout {
+                ForEach(photos) { attachment in
+                    OriginalImageAttachmentView(attachment: attachment, model: model, agentID: agentID, preservesAspectRatio: photos.count + inline.count == 1)
+                }
+                ForEach(Array(inline.enumerated()), id: \.offset) { _, image in
+                    InlinePhotoAttachmentView(source: image, preservesAspectRatio: photos.count + inline.count == 1)
+                }
+            }.accessibilityElement(children: .contain).accessibilityIdentifier("message-photo-grid")
+        }
+        ForEach(attachments.filter(\.isVideo)) { attachment in
+            AttachmentMovieThumbnail(attachment: attachment, poster: model.attachmentURL(attachment), movie: model.attachmentMovieURL(attachment))
+                .frame(width: 240, height: 180)
+        }
+        if pendingAttachments.isEmpty {
+            ForEach(row.videos ?? []) { VideoAttachmentView(video: $0, model: model, agentID: agentID) }
+        }
     }
 }
 
@@ -1581,13 +1683,16 @@ private final class ConversationReadingPositions {
 }
 
 @Observable private final class ConversationToolExpansion {
-    var collapsedAll = false
+    private var allExpanded: Bool?
     var expanded: [String: Bool] = [:]
+    func isExpanded(_ id: String, initiallyExpanded: Bool = false) -> Bool {
+        expanded[id] ?? allExpanded ?? initiallyExpanded
+    }
     func binding(_ id: String, initiallyExpanded: Bool = false) -> Binding<Bool> {
-        Binding(get: { self.expanded[id] ?? (initiallyExpanded && !self.collapsedAll) },
+        Binding(get: { self.isExpanded(id, initiallyExpanded: initiallyExpanded) },
                 set: { self.expanded[id] = $0 })
     }
-    func collapseAll() { collapsedAll = true; expanded.removeAll() }
+    func setAllExpanded(_ value: Bool) { allExpanded = value; expanded.removeAll() }
 }
 
 private struct ConversationRenderedItem: Identifiable, Equatable, Sendable {
@@ -1785,6 +1890,7 @@ private struct ConversationContentView: View {
         var previous: String?
         var next: String?
     }
+    @Environment(\.conversationComposerHeight) private var composerHeight
     @State private var userNavigationTargets = UserNavigationTargets()
     @State private var selectedUserMessage: String?
     @State private var pendingUserDirection: HistoryDirection?
@@ -1905,7 +2011,11 @@ private struct ConversationContentView: View {
         }
     }
     private var userMessages: [ConversationRenderedItem] {
-        revision.items.filter { $0.message?.role == "You" }
+        // A history mutation can retire a row before its render projection arrives.
+        let retained = revision.preparing ? Set(model.rows.map(\.id)) : nil
+        return revision.items.filter {
+            $0.message?.role == "You" && (retained?.contains($0.id) ?? true)
+        }
     }
     private func userTarget(_ direction: HistoryDirection) -> String? {
         let users = userMessages
@@ -1918,6 +2028,8 @@ private struct ConversationContentView: View {
     }
     private func jumpToUser(_ id: String, using scroll: ScrollViewProxy) {
         followsLatest = false
+        model.setHistoryAtLatest(false)
+        model.protectHistoryRows([id])
         historyDirection = nil
         historyRestore = nil
         selectedUserMessage = id
@@ -1925,10 +2037,17 @@ private struct ConversationContentView: View {
         pendingReadingRestore = .init(atLatest: false, rowID: id, offsetY: 0)
         readingPositions.values[identity] = pendingReadingRestore
         // Measured restoration retains the target through streaming and layout changes.
-        scroll.scrollTo(id, anchor: .top)
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { scroll.scrollTo(id, anchor: .top) }
     }
     private func navigateUser(_ direction: HistoryDirection, using scroll: ScrollViewProxy) {
+        // History insertion/restoration must finish before another explicit jump.
+        guard !model.loadingOlder, !model.loadingNewer else { return }
         if let id = userTarget(direction) { jumpToUser(id, using: scroll); return }
+        guard pendingUserDirection == nil, !revision.preparing,
+              !model.loadingOlder, !model.loadingNewer,
+              direction == .older ? model.hasOlder : model.hasNewer else { return }
         navigationKnownIDs = Set(revision.items.map(\.id))
         pendingUserDirection = direction
         pendingReadingRestore = nil
@@ -1999,40 +2118,55 @@ private struct ConversationContentView: View {
             rememberHistoryPosition(in: viewport)
         }
     }
+    private var hasExpandedTools: Bool {
+        revision.items.contains { item in
+            guard let content = item.content else { return false }
+            if content.isCodeModeBatch {
+                return tools.isExpanded(content.id, initiallyExpanded: true)
+            }
+            return content.activity.contains { tools.isExpanded($0.id) }
+        }
+    }
     private func threadControls(using scroll: ScrollViewProxy) -> some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 8) {
             Button {
                 followsLatest = false
                 if let first = rowGeometry.firstFrame(where: { revision.itemsByID[$0] != nil }) {
                     pendingReadingRestore = .init(atLatest: false, rowID: first.key,
                         offsetY: revision.itemsByID[first.key]?.message == nil ? max(0, first.value.minY) : first.value.minY)
                 }
-                tools.collapseAll()
-            } label: { Image(systemName: "rectangle.compress.vertical").frame(width: 44, height: 44) }
-                .accessibilityLabel("Collapse all tool calls")
-                .accessibilityIdentifier("collapse-all-tools")
-            Divider().frame(height: 20)
+                tools.setAllExpanded(!hasExpandedTools)
+            } label: { Image(systemName: hasExpandedTools ? "rectangle.compress.vertical" : "rectangle.expand.vertical").frame(width: 44, height: 44)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay(Circle().strokeBorder(Ink.border, lineWidth: 0.5))
+                    .contentShape(Rectangle()) }
+                .accessibilityLabel(hasExpandedTools ? "Collapse all tool calls" : "Expand all tool calls")
+                .accessibilityIdentifier("toggle-all-tools")
             Button { navigateUser(.older, using: scroll) } label: {
                 Image(systemName: "arrow.up").frame(width: 44, height: 44)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay(Circle().strokeBorder(Ink.border, lineWidth: 0.5))
+                    .contentShape(Rectangle())
             }.accessibilityLabel("Previous user message").accessibilityIdentifier("previous-user-message")
-                .disabled(userTarget(.older) == nil && !model.hasOlder)
+                .disabled(userTarget(.older) == nil && (!model.hasOlder || revision.preparing || model.loadingOlder || model.loadingNewer || pendingUserDirection != nil))
             Button { navigateUser(.newer, using: scroll) } label: {
                 Image(systemName: "arrow.down").frame(width: 44, height: 44)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay(Circle().strokeBorder(Ink.border, lineWidth: 0.5))
+                    .contentShape(Rectangle())
             }.accessibilityLabel("Next user message").accessibilityIdentifier("next-user-message")
-                .disabled(userTarget(.newer) == nil && !model.hasNewer)
+                .disabled(userTarget(.newer) == nil && (!model.hasNewer || revision.preparing || model.loadingOlder || model.loadingNewer || pendingUserDirection != nil))
         }
         .buttonStyle(.plain)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Ink.border, lineWidth: 0.5))
-        .disabled(revision.loading || revision.preparing || model.loadingOlder || model.loadingNewer || pendingUserDirection != nil)
+        .disabled(revision.loading || model.loadingOlder || model.loadingNewer)
         .padding(.horizontal, 20).padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .trailing)
     }
     var body: some View {
         ScrollViewReader { scroll in
-            VStack(spacing: 0) {
-            // Measure only the transcript viewport: scrollTo anchors exclude
-            // the thread controls below it when restoring a reading offset.
+            ZStack(alignment: .bottom) {
+            // The transcript fills the viewport and scrolls beneath the controls
+            // and composer. Content margins keep the final message reachable.
             GeometryReader { viewport in
             let boundaryItemID = historyBoundaryItemID
             ZStack(alignment: .top) {
@@ -2074,7 +2208,18 @@ private struct ConversationContentView: View {
                                 }
                                 if historyRequestInFlight { rememberHistoryPosition(in: viewport) }
                             }
-                            if content.isCodeModeBatch {
+                            if let child = content.childAgentID {
+                                DisclosureGroup("Agent " + child + " activity", isExpanded: tools.binding(content.id)) {
+                                    ForEach(content.activity) { row in
+                                        if row.role == "Tool" {
+                                            ConversationToolCard(row: row, live: content.isRunning && row.running, expanded: tools.binding(row.id + ":detail"), onToggle: onToggle)
+                                        } else {
+                                            ConversationMessageView(row: row, model: model, agentID: model.focused?.id ?? "")
+                                        }
+                                    }
+                                }
+                                .accessibilityIdentifier("child-agent-activity-" + child)
+                            } else if content.isCodeModeBatch {
                                 ConversationCodeModeBatch(item: content, tools: tools, expanded: tools.binding(content.id, initiallyExpanded: true), showsJavaScript: tools.binding(content.id + ":javascript"), onToggle: onToggle)
                             } else {
                                 ForEach(content.activity) { row in
@@ -2119,6 +2264,8 @@ private struct ConversationContentView: View {
             // Keep layout from snapping to the bottom before animated following runs.
             .defaultScrollAnchor(.top, for: .sizeChanges)
             .defaultScrollAnchor(readingPositions.values[identity]?.atLatest == false ? .top : .bottom, for: .initialOffset)
+            .contentMargins(.bottom, composerHeight + 52, for: .scrollContent)
+            .contentMargins(.bottom, composerHeight + 52, for: .scrollIndicators)
             .scrollDismissesKeyboard(.interactively)
             .scrollBounceBehavior(.always, axes: .vertical)
             .coordinateSpace(name: "conversation-viewport")
@@ -2136,7 +2283,7 @@ private struct ConversationContentView: View {
                     nearTop: geometry.contentOffset.y + geometry.contentInsets.top <= 240,
                     approachingTop: geometry.contentOffset.y + geometry.contentInsets.top <= max(800, geometry.containerSize.height * 2),
                     atLatest: geometry.contentSize.height - geometry.contentOffset.y
-                        - geometry.containerSize.height <= verticalPadding + 1,
+                        - geometry.containerSize.height + geometry.contentInsets.bottom <= verticalPadding + 1,
                     isMeasured: geometry.containerSize.height > 0)
             } action: { _, position in
                 historyContent = position
@@ -2144,7 +2291,7 @@ private struct ConversationContentView: View {
                 saveReadingPosition(in: viewport)
             }
             .onScrollPhaseChange { previous, phase in
-                if phase == .tracking { scrollsTowardLatest = false; selectedUserMessage = nil; pendingUserDirection = nil }
+                if phase == .tracking { scrollsTowardLatest = false }
                 isInteractingTranscript = phase == .interacting
                 isScrollGestureActive = phase == .tracking || phase == .interacting || phase == .decelerating
                 // Horizontal drawer gestures can enter a scroll phase without
@@ -2160,7 +2307,9 @@ private struct ConversationContentView: View {
                     followLatest(using: scroll)
                 }
             }
-            .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: { _, _ in
+            .onScrollGeometryChange(for: CGSize.self) {
+                CGSize(width: $0.contentInsets.bottom, height: $0.contentSize.height)
+            } action: { _, _ in
                 // Rendered height also changes within a streaming row, without
                 // adding a new row ID. Follow after that layout has arrived.
                 followLatest(using: scroll)
@@ -2214,6 +2363,8 @@ private struct ConversationContentView: View {
                 // Its inserted height is not a reversal of the reader's swipe.
                 guard isInteractingTranscript, !navigationActive, abs(previous - offset) > 0.5, !historyRequestInFlight else { return }
                 followsLatest = false
+                selectedUserMessage = nil
+                pendingUserDirection = nil
                 pendingReadingRestore = nil
                 scrollsTowardLatest = offset > previous
                 historyDirection = scrollsTowardLatest ? .newer : .older
@@ -2254,7 +2405,7 @@ private struct ConversationContentView: View {
                     }
                     .buttonStyle(.plain)
                     .frame(width: 42, height: 42)
-                    .padding(.bottom, 8)
+                    .padding(.bottom, composerHeight + 60)
                     .disabled(model.loadingNewer || model.loadingOlder)
                     .accessibilityLabel("Latest messages")
                     .accessibilityHint("Scroll to the latest message and follow new responses")
@@ -2290,6 +2441,7 @@ private struct ConversationContentView: View {
             }
             }
             threadControls(using: scroll)
+                .padding(.bottom, composerHeight)
             }
             .onChange(of: revision.rows.first?.id, initial: true) { _, _ in
                 if !hasInitialPosition, !revision.rows.isEmpty {

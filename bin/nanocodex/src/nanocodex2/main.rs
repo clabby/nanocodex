@@ -61,6 +61,7 @@ mod vm_hand;
 mod vm_hand_config;
 mod vm_host;
 mod voice;
+mod voice_recording;
 mod voice_state;
 
 use std::{

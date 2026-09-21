@@ -109,6 +109,16 @@ func responseError(_ data: Data, response: HTTPURLResponse) -> ManagedError {
         ?? (body["retry_after"] == .null ? nil : body["retry_after"].number)
     var message = body["message"].string
     if message.isEmpty {
+        let providerMessages = [
+            "elevenlabs_not_configured": "Connect your ElevenLabs API key in voice settings.",
+            "elevenlabs_credentials_or_permissions_invalid": "Check your ElevenLabs API key and its voice and speech permissions.",
+            "elevenlabs_rate_or_quota_limit": "ElevenLabs reached a rate or credit limit. Check your plan before trying again.",
+            "elevenlabs_request_rejected": "ElevenLabs rejected this request. Check the selected voice and complete any required verification in ElevenLabs.",
+            "elevenlabs_unavailable": "ElevenLabs is unavailable. Please try again later."
+        ]
+        message = providerMessages[code] ?? ""
+    }
+    if message.isEmpty {
         switch response.statusCode {
         case 401: message = "Your sign-in expired. Sign in again to continue."
         case 403: message = "This account does not have permission for that action."

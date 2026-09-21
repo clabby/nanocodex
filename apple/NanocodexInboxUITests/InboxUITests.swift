@@ -533,7 +533,7 @@ final class InboxUITests: XCTestCase {
             let opened = app.navigationBars["Scheduled jobs"].waitForExistence(timeout: 10)
             capture(app, "menu-after-tap-\(pass)")
             XCTAssertTrue(opened, app.debugDescription)
-            app.navigationBars.buttons["Inbox"].tap()
+            app.navigationBars["Scheduled jobs"].buttons.element(boundBy: 0).tap()
         }
         app.buttons["add-attachments"].tap()
         let camera = app.buttons["choose-camera"]
@@ -815,13 +815,15 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(active.waitForExistence(timeout: 10))
         XCTAssertEqual(app.sheets.count, 0, "Scheduled jobs opens directly from the inbox as a navigation page")
         XCTAssertTrue(paused.exists, "Identical job IDs from different agents remain separate")
-        XCTAssertTrue(app.staticTexts["Create new scheduled jobs by asking an agent in chat."].exists)
+        XCTAssertTrue(app.staticTexts["Tap a job to edit, pause, or cancel it. Create new jobs by asking an agent in chat."].exists)
         XCTAssertFalse(app.buttons["New schedule"].exists)
         capture(app, "scheduled-jobs-account-list")
         active.tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label ENDSWITH %@", "Europe/Athens")).firstMatch.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label ENDSWITH %@", "0 9 * * *")).firstMatch.exists)
         XCTAssertTrue(app.buttons["scheduled-job-latest-run"].exists)
+        XCTAssertTrue(app.buttons["scheduled-job-edit"].exists)
+        XCTAssertFalse(app.buttons["scheduled-job-edit"].isEnabled, "Demo jobs must not mutate an account")
         capture(app, "scheduled-job-detail")
         app.buttons["scheduled-job-source-chat"].tap()
         XCTAssertTrue(app.scrollViews["conversation"].waitForExistence(timeout: 5))
@@ -847,7 +849,7 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Ask an agent to run a task on a schedule. It will appear here."].exists)
         XCTAssertFalse(app.buttons["New schedule"].exists)
         capture(app, "scheduled-jobs-empty")
-        app.navigationBars.buttons["Inbox"].tap()
+        app.navigationBars["Scheduled jobs"].buttons.element(boundBy: 0).tap()
         navigationAction(app, "Account settings").tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Done"].exists, "Settings must dismiss back to the existing conversation")
@@ -1959,16 +1961,17 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["STEERED_" + marker].exists)
     }
     func testFailedWithdrawalCanRetryWithoutDuplicateInput() {
-        let app = launch(["NANOCODEX_DEMO_FAIL_ONCE": "submit"])
+        let app = launch(["NANOCODEX_DEMO_FAIL_ONCE": "withdraw", "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
         selectInbox(app); queue(app, "Keep the captured target")
         XCTAssertTrue(app.buttons["withdraw-steering"].waitForExistence(timeout: 5))
         app.buttons["withdraw-steering"].tap()
+        XCTAssertTrue(app.staticTexts["Steering could not be confirmed. Retry keeps the same message and target."].waitForExistence(timeout: 5))
         let retry = app.buttons["withdraw-steering"]
         let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: retry)
         XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 5), .completed)
         retry.tap()
         XCTAssertTrue(app.staticTexts["Steering withdrawn: Keep the captured target"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.scrollViews["conversation"].staticTexts.matching(NSPredicate(format: "label == %@", "Keep the captured target")).count, 1)
+        XCTAssertEqual(app.scrollViews["conversation"].staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Keep the captured target")).count, 1)
     }
 
     func testDirectMessageSurvivesRelaunchAndCanBeWithdrawn() {
@@ -2283,18 +2286,105 @@ final class InboxUITests: XCTestCase {
         XCTAssertEqual(composer(app).value as? String, "Keep the latest reply in view")
     }
 
+    func testComposerPhotoThumbnailsUseHorizontalSquares() {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString,
+                          "NANOCODEX_DEMO_COMPOSER_PHOTOS": "1"])
+        let tray = app.scrollViews["composer-attachments"]
+        XCTAssertTrue(tray.waitForExistence(timeout: 10))
+        let photos = tray.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "preview-image-"))
+        XCTAssertEqual(photos.count, 3)
+        var previous: CGRect?
+        for index in 1...3 {
+            let photo = photos.matching(NSPredicate(format: "label == %@", "Preview Phone photo \(index).png")).firstMatch
+            XCTAssertTrue(photo.exists)
+            let frame = photo.frame
+            XCTAssertEqual(frame.width, 120, accuracy: 1)
+            XCTAssertEqual(frame.height, 120, accuracy: 1)
+            if let previous {
+                XCTAssertEqual(frame.minY, previous.minY, accuracy: 1)
+                XCTAssertGreaterThan(frame.minX, previous.maxX)
+            }
+            previous = frame
+        }
+        capture(app, "composer-photo-square-thumbnails")
+        app.buttons["Remove Phone photo 1.png"].tap()
+        XCTAssertEqual(photos.count, 2)
+    }
+
+    func testSingleLocalPhotoPreservesAspectRatio() {
+        verifyLocalPhotoJourney(count: 1)
+    }
+
     func testMultipleLocalPhotoHistoryThumbnailsSurvivePreviewAndRelaunch() {
-        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString, "NANOCODEX_DEMO_LOCAL_PHOTOS": "1"])
+        verifyLocalPhotoJourney(count: 2)
+    }
+
+    func testThreeLocalPhotoHistoryThumbnailsFitOneRow() {
+        verifyLocalPhotoJourney(count: 3)
+    }
+
+    func testFourLocalPhotoHistoryThumbnailsWrapIntoGrid() {
+        verifyLocalPhotoJourney(count: 4)
+    }
+
+    func testSinglePortraitLocalPhotoPreservesAspectRatio() {
+        verifyLocalPhotoJourney(count: 1, styleIndex: 2)
+    }
+
+    func testSinglePanoramaLocalPhotoPreservesAspectRatio() {
+        verifyLocalPhotoJourney(count: 1, styleIndex: 3)
+    }
+
+    private func verifyLocalPhotoJourney(count: Int, styleIndex: Int = 1) {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString, "NANOCODEX_DEMO_LOCAL_PHOTOS": "1",
+                          "NANOCODEX_DEMO_LOCAL_PHOTO_COUNT": String(count), "NANOCODEX_DEMO_LOCAL_PHOTO_STYLE": String(styleIndex)])
         func verifyPhotos() {
             let conversation = app.scrollViews["conversation"]
             XCTAssertTrue(conversation.waitForExistence(timeout: 10))
             let photos = conversation.descendants(matching: .any).matching(identifier: "message-image")
-            XCTAssertEqual(photos.count, 2, "Project both phone path references into separate thumbnails")
-            for index in 1...2 {
+            XCTAssertEqual(photos.count, count, "Project every phone path reference into a separate thumbnail: " + app.debugDescription)
+            var frames: [CGRect] = []
+            for index in 1...count {
                 let photo = photos.matching(NSPredicate(format: "label == %@", "Open Phone photo \(index).png")).firstMatch
-                for _ in 0..<4 { if photo.isHittable { break }; conversation.swipeDown() }
                 let loaded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Image loaded"), object: photo)
                 XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: 10), .completed, "Decode photo \(index) from its retained local original")
+                XCTAssertTrue(photo.isHittable, "All compact thumbnails should be visible together")
+                let frame = photo.frame
+                if count == 1 {
+                    let ratio: CGFloat = styleIndex == 2 ? 480.0 / 800 : styleIndex == 3 ? 1080.0 / 480 : 800.0 / 480
+                    XCTAssertEqual(frame.width, styleIndex == 2 ? 192 : 256, accuracy: 1)
+                    XCTAssertLessThanOrEqual(frame.height, 321)
+                    XCTAssertEqual(frame.height, frame.width / ratio, accuracy: 1, "Single image retains its original aspect ratio")
+                } else {
+                    XCTAssertGreaterThanOrEqual(frame.width, 100)
+                    XCTAssertLessThanOrEqual(frame.width, 125)
+                    if count == 2 { XCTAssertEqual(frame.width, 125, accuracy: 1) }
+                    XCTAssertEqual(frame.width, frame.height, accuracy: 1, "Landscape and portrait originals share a square crop")
+                }
+                frames.append(frame)
+            }
+            if count > 1 {
+                XCTAssertEqual(frames[0].minY, frames[1].minY, accuracy: 1)
+                XCTAssertEqual(frames[1].minX - frames[0].maxX, 6, accuracy: 1)
+            }
+            for frame in frames.dropFirst() {
+                XCTAssertEqual(frame.width, frames[0].width, accuracy: 1)
+                XCTAssertEqual(frame.height, frames[0].height, accuracy: 1)
+            }
+            if count >= 3 {
+                XCTAssertEqual(frames[2].minY, frames[0].minY, accuracy: 1)
+                XCTAssertLessThan(frames[1].maxX, frames[2].minX)
+                XCTAssertLessThanOrEqual(frames[2].maxX - frames[0].minX, 360)
+            }
+            if count == 4 {
+                XCTAssertGreaterThan(frames[3].minY, frames[0].maxY, "The fourth photo wraps onto a second row")
+                XCTAssertEqual(frames[3].maxX, frames[2].maxX, accuracy: 1, "The incomplete row aligns to the right")
+            }
+            let caption = conversation.staticTexts[count == 1 ? "Review this phone photo." : "Compare these \(count) phone photos."]
+            XCTAssertTrue(caption.exists)
+            XCTAssertGreaterThanOrEqual(caption.frame.minY, frames.map(\.maxY).max()!)
+            for index in 1...count {
+                let photo = photos.matching(NSPredicate(format: "label == %@", "Open Phone photo \(index).png")).firstMatch
                 photo.tap()
                 let done = app.buttons["Done"]
                 XCTAssertTrue(done.waitForExistence(timeout: 10))
@@ -2304,12 +2394,11 @@ final class InboxUITests: XCTestCase {
             XCTAssertFalse(conversation.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "[Image attachment]")).firstMatch.exists)
         }
         verifyPhotos()
-        verifyPhotos()
-        capture(app, "local-photos-before-relaunch")
+        capture(app, "local-photos-\(count)-style-\(styleIndex)-before-relaunch")
         app.terminate()
         app.launch()
         verifyPhotos()
-        capture(app, "local-photos-after-relaunch")
+        capture(app, "local-photos-\(count)-style-\(styleIndex)-after-relaunch")
     }
 
     func testNativeMediaPreviewZoomPlaybackAndDraftRestoration() throws {
@@ -2595,18 +2684,107 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(previous.waitForExistence(timeout: 10))
         XCTAssertTrue(previous.isEnabled)
         previous.tap()
-        let collapse = app.buttons["collapse-all-tools"]
+        let collapse = app.buttons["toggle-all-tools"]
         let finished = NSPredicate { _, _ in collapse.isEnabled && !previous.isEnabled }
         expectation(for: finished, evaluatedWith: nil)
         waitForExpectations(timeout: 10)
         XCTAssertFalse(app.buttons["next-user-message"].isEnabled)
     }
 
+    func testConversationArrowNavigationResponsiveness() {
+        let app = launch(["NANOCODEX_DEMO_CODE_MODE_BATCH": "1", "NANOCODEX_DEMO_THREAD_CONTROLS": "1",
+                          "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        selectInbox(app)
+        let previous = app.buttons["previous-user-message"]
+        let next = app.buttons["next-user-message"]
+        XCTAssertTrue(previous.waitForExistence(timeout: 10))
+        previous.tap()
+        if previous.isEnabled { previous.tap() }
+        XCTAssertFalse(previous.isEnabled)
+        let options = XCTMeasureOptions()
+        options.iterationCount = 5
+        var metrics: [XCTMetric] = [XCTClockMetric(), XCTCPUMetric(application: app)]
+        if #available(iOS 26.0, *) { metrics.append(XCTHitchMetric(application: app)) }
+        measure(metrics: metrics, options: options) {
+            next.tap()
+            XCTAssertFalse(next.isEnabled)
+            previous.tap()
+            XCTAssertFalse(previous.isEnabled)
+        }
+        capture(app, "transparent-controls-first-message")
+        next.tap()
+        capture(app, "transparent-controls-next-message")
+    }
+
+    func testLiveConversationArrowNavigation() throws {
+        guard ProcessInfo.processInfo.environment["NANOCODEX_INBOX_LIVE"] == "1" else {
+            throw XCTSkip("Requires a signed-in test device with existing conversation history.")
+        }
+        let app = XCUIApplication()
+        app.launch()
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 30))
+        let conversation = app.scrollViews["conversation"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 20))
+        let previous = app.buttons["previous-user-message"]
+        let next = app.buttons["next-user-message"]
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: previous)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 20), .completed)
+        let draft = composer(app).value as? String
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        var metrics: [XCTMetric] = [XCTClockMetric(), XCTCPUMetric(application: app)]
+        if #available(iOS 26.0, *) { metrics.append(XCTHitchMetric(application: app)) }
+        // Read-only: navigate existing messages without sending or changing drafts.
+        measure(metrics: metrics, options: options) {
+            previous.tap()
+            XCTAssertTrue(next.waitForExistence(timeout: 2))
+            if next.isEnabled { next.tap() }
+            XCTAssertTrue(previous.isEnabled)
+        }
+        XCTAssertEqual(composer(app).value as? String, draft)
+    }
+
+    func testToolsButtonExpandsAndCollapsesRepeatedly() {
+        let app = launch(["NANOCODEX_DEMO_CODE_MODE_BATCH": "1",
+                          "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        selectInbox(app)
+        let toggle = app.buttons["toggle-all-tools"]
+        let batch = app.buttons["code-mode-batch-demo-code-mode-batch"]
+        let child = app.buttons["tool-disclosure-demo-code-mode-batch/code-1"]
+        let source = app.buttons["code-mode-javascript-demo-code-mode-batch"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        for _ in 0..<3 {
+            XCTAssertEqual(toggle.label, "Collapse all tool calls")
+            toggle.tap()
+            XCTAssertEqual(batch.value as? String, "Collapsed")
+            XCTAssertEqual(toggle.label, "Expand all tool calls")
+            toggle.tap()
+            XCTAssertEqual(batch.value as? String, "Expanded")
+            XCTAssertEqual(child.value as? String, "Expanded")
+            XCTAssertEqual(source.value as? String, "Expanded")
+        }
+        capture(app, "tools-toggle-expanded")
+        toggle.tap()
+        capture(app, "tools-toggle-collapsed")
+        // Scroll with a real gesture to release the preserved reading anchor.
+        app.scrollViews["conversation"].swipeUp()
+        // A manual disclosure change must update the global button's next action.
+        batch.tap()
+        XCTAssertEqual(toggle.label, "Collapse all tool calls")
+        toggle.tap()
+        XCTAssertEqual(batch.value as? String, "Collapsed")
+        switchConversation(app, id: "durability")
+        switchConversation(app, id: "inbox")
+        XCTAssertEqual(toggle.label, "Expand all tool calls")
+        toggle.tap()
+        XCTAssertEqual(child.value as? String, "Expanded")
+    }
+
     func testThreadControlsCollapseAndNavigateUserMessages() {
         let app = launch(["NANOCODEX_DEMO_CODE_MODE_BATCH": "1", "NANOCODEX_DEMO_THREAD_CONTROLS": "1",
                           "NANOCODEX_DEMO_PROFILE": UUID().uuidString])
         selectInbox(app)
-        let collapse = app.buttons["collapse-all-tools"]
+        let collapse = app.buttons["toggle-all-tools"]
         XCTAssertTrue(collapse.waitForExistence(timeout: 10))
         collapse.tap()
         let batch = app.buttons["code-mode-batch-demo-code-mode-batch"]

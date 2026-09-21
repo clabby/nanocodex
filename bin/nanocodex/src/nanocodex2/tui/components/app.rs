@@ -219,6 +219,10 @@ pub(crate) enum AppEvent {
         id: String,
     },
     VoiceStatus(Option<crate::voice_state::Status>),
+    VoiceOutput {
+        pane: PaneId,
+        text: String,
+    },
     NotifyError {
         pane: PaneId,
         error: String,
@@ -565,6 +569,9 @@ impl AppNode {
             }
             AppEvent::NotifyError { pane, error } => {
                 self.update_root(pane, RootEvent::NotifyError(error))
+            }
+            AppEvent::VoiceOutput { pane, text } => {
+                self.update_root(pane, RootEvent::VoiceOutput(text))
             }
             AppEvent::NotifySuccess { pane, message } => {
                 self.update_root(pane, RootEvent::NotifySuccess(message))

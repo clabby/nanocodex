@@ -1496,11 +1496,40 @@ final class InboxModel: ObservableObject {
             return
         }
     }
+    private var schedulesMutating = false
+
+    func updateScheduledJob(_ job: ScheduledJob, cron: String, timezone: String, input: String,
+                            enabled: Bool, startsNewConversation: Bool) async throws {
+        guard !isDemo, !schedulesMutating, let client else { throw APIError.invalidCredential }
+        schedulesMutating = true
+        defer { schedulesMutating = false }
+        let epoch = generation
+        await schedulesTask?.value
+        guard generation == epoch else { throw CancellationError() }
+        let updated = try await client.updateScheduledJob(job, cron: cron, timezone: timezone, input: input,
+                                                         enabled: enabled, startsNewConversation: startsNewConversation)
+        guard generation == epoch else { throw CancellationError() }
+        scheduledJobs = scheduledJobs.map { $0.id == updated.id ? updated : $0 }
+    }
+
+    func cancelScheduledJob(_ job: ScheduledJob) async throws {
+        guard !isDemo, !schedulesMutating, let client else { throw APIError.invalidCredential }
+        schedulesMutating = true
+        defer { schedulesMutating = false }
+        let epoch = generation
+        await schedulesTask?.value
+        guard generation == epoch else { throw CancellationError() }
+        try await client.cancelScheduledJob(job)
+        guard generation == epoch else { throw CancellationError() }
+        scheduledJobs.removeAll { $0.id == job.id }
+    }
+
     func refreshScheduledJobs() async {
         await startScheduledJobsRefresh()?.value
     }
 
     @discardableResult private func startScheduledJobsRefresh(initialListing: [AgentCard]? = nil) -> Task<Void, Never>? {
+        guard !schedulesMutating else { return nil }
         guard connected else { return nil }
         // The model owns the read: opening the screen joins an existing prefetch,
         // and pushing a detail view does not cancel useful work for this account.
@@ -2783,7 +2812,7 @@ final class InboxModel: ObservableObject {
             let delayKey = command.kind == .stop ? "NANOCODEX_DEMO_CANCEL_DELAY_MS" : command.kind == .steer ? "NANOCODEX_DEMO_STEER_DELAY_MS" : "NANOCODEX_DEMO_DELAY_MS"
             let delay = Int(ProcessInfo.processInfo.environment[delayKey] ?? ProcessInfo.processInfo.environment["NANOCODEX_DEMO_DELAY_MS"] ?? "200") ?? 200
             try await Task.sleep(for: .milliseconds(delay))
-            let fault = command.kind == .stop ? "cancel" : command.kind == .steer ? "steer" : "submit"
+            let fault = command.kind == .stop ? "cancel" : command.kind == .steer ? "steer" : command.kind == .withdrawSteer ? "withdraw" : "submit"
             if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_FAIL_ONCE"] == fault, demoFaults.insert(fault).inserted {
                 throw APIError.http(503)
             }
@@ -3028,6 +3057,16 @@ final class InboxModel: ObservableObject {
         scope = "demo." + (ProcessInfo.processInfo.environment["NANOCODEX_DEMO_PROFILE"] ?? "default")
         closedConversationIDs = Set(UserDefaults.standard.stringArray(forKey: "inbox.closedTabs." + scope) ?? [])
         cards = DemoContent.cards()
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_COMPOSER_PHOTOS"] == "1",
+           let prepared = try? DemoContent.composerPhotoFixtures(), let store = try? AttachmentStore(scope: scope) {
+            for item in prepared {
+                try? store.save(item)
+                attachmentDrafts["inbox", default: []].append(item.attachment)
+                cacheAttachment(item.attachment, scope: scope)
+            }
+        }
+        #endif
         if let profile = ProcessInfo.processInfo.environment["NANOCODEX_DEMO_PROFILE"] {
             scope = "demo." + profile
             restorePending()
