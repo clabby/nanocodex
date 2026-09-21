@@ -1,6 +1,6 @@
 # Preference-aware thread routing
 
-The default routing strategy is `direct`. At initial admission, one Jev request chooses a supported model **and thinking level**. Subsequent turns reuse the persisted choice; changes in later messages do not reroute the thread. The Rust agent loop and provider transports remain the same.
+Routing is opt-in per new agent; omitting `configuration.model_routing` preserves existing client behavior. For opted-in agents, the default routing strategy is `direct`. At initial admission, one Jev request chooses a supported model **and thinking level**. Subsequent turns reuse the persisted choice; changes in later messages do not reroute the thread. The Rust agent loop and provider transports remain the same.
 
 ## Configuration
 
@@ -61,7 +61,7 @@ The route's audit record retains the parsed policy, preferences, eligible IDs, p
 - [RouteLLM](https://github.com/lm-sys/RouteLLM): calibrating cost/quality tradeoffs on representative queries.
 - [Jev routing experiment](https://github.com/TokenTrim/jev-routing-experiment): retrieval evidence and an evidence-only ablation; Jev's incremental benefit must be tested.
 
-The feature requires NANOCODEX_THREAD_ROUTING and the AI binding. The Worker configuration now enables NANOCODEX_AUTO_ROUTING for new full-account agents that omit explicit model settings; constrained Connect grants and imports retain their prior behavior. Existing routes remain pinned. This PR has not been deployed. See [scheduled TTFT routing](THREAD_ROUTING_TTFT_2026_09_21.md).
+The feature requires `NANOCODEX_THREAD_ROUTING=true` and the AI binding. The Worker enables the API but never injects a routing policy: opt in with `{"configuration":{"model_routing":{}}}` when creating a new agent (or explicitly choose a saved definition containing that policy). Existing `nanocodex` and `nanocodex2` requests remain unchanged. Background probes separately require `NANOCODEX_PROVIDER_PROBES=true` and ship disabled. Existing routes remain pinned. This PR has not been deployed. See [scheduled TTFT routing](THREAD_ROUTING_TTFT_2026_09_21.md).
 
 ## Child threads and provider transport
 

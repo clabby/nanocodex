@@ -1,7 +1,7 @@
 import { createExecutionContext, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import worker, { type DurableAgentSession } from "../src/index";
-import { parseCompleteAgentSettings } from "../src/agent-settings";
+import { DEFAULT_AGENT_SETTINGS, parseCompleteAgentSettings } from "../src/agent-settings";
 import { parseConfiguration } from "../src/agent-configuration";
 import { resolveThreadRoute, routingPolicySchema } from "../src/thread-model-routing";
 import type { Principal } from "../src/account-auth";
@@ -28,6 +28,38 @@ async function fixture(run: (instance: DurableAgentSession, state: DurableObject
 }
 
 describe("managed routing admission", () => {
+  it.each([
+    { name: "legacy empty request", body: "", routed: false },
+    { name: "empty configuration", body: JSON.stringify({ configuration: {} }), routed: false },
+    { name: "explicit model", body: JSON.stringify({ settings: { ...DEFAULT_AGENT_SETTINGS, model: "gpt-5.6-sol" } }), routed: false },
+    { name: "unrelated tool policy", body: JSON.stringify({ configuration: { tools: ["exec_command"] } }), routed: false },
+    { name: "explicit routing opt-in", body: JSON.stringify({ configuration: { model_routing: {} } }), routed: true },
+  ])("API deployment preserves opt-in admission: $name", async ({ body, routed }) => {
+    let admitted: any;
+    const runtime = { ...env,
+      NANOCODEX_THREAD_ROUTING: "true",
+      // Even an obsolete deployment-wide auto flag must not enroll a client.
+      NANOCODEX_AUTO_ROUTING: "true",
+      AI: { run() { throw Error("admission must not call Jev"); } },
+      NANOCODEX_USERS: { getByName() { return {}; } },
+      NANOCODEX_SESSIONS: {
+        idFromName: () => ({ toString: () => "fixture-session" }),
+        getByName: () => ({ fetch: async (input: RequestInfo, init?: RequestInit) => {
+          const request = new Request(input, init);
+          expect(new URL(request.url).pathname).toBe("/create");
+          admitted = await request.json();
+          return Response.json({});
+        } }),
+      },
+    } as unknown as Parameters<typeof worker.fetch>[1];
+    const response = await worker.fetch(new Request("https://nanocodex.example/v1/agents", { method: "POST", body }),
+      runtime, createExecutionContext(), principal);
+    expect(response.status).toBe(201);
+    expect(!!admitted.configuration.model_routing).toBe(routed);
+    expect(admitted.settings).toEqual(body.includes("gpt-5.6-sol") ? { ...DEFAULT_AGENT_SETTINGS, model: "gpt-5.6-sol" } : DEFAULT_AGENT_SETTINGS);
+    if (routed) expect(admitted.configuration.model_routing.strategy).toBe("direct");
+  });
+
   it.each([
     { settings: glm },
     { configuration: { settings: glm } },

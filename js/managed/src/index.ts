@@ -1,4 +1,3 @@
-import { automaticRoutingConfiguration } from "./automatic-routing";
 import { ProviderProbeCoordinator } from "./provider-probe-coordinator";
 import { PROBE_OWNER, type ProviderProbeEnvironment } from "./provider-probe-schedule";
 export { ProviderProbeCoordinator };
@@ -389,7 +388,6 @@ export interface Env extends
   AI_GATEWAY_API_KEY?: string;
   /** Opt-in paid inference PoC; absent/false preserves current routing. */
   NANOCODEX_THREAD_ROUTING?: string;
-  NANOCODEX_AUTO_ROUTING?: string;
   NANOCODEX_PROVIDER_PROBE_COORDINATOR?: DurableObjectNamespace<ProviderProbeCoordinator>;
   NANOCODEX_PERFORMANCE_TRACE?: string;
   NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
@@ -2003,11 +2001,8 @@ async function managedFetchRoute(
           }
         }
         validateAgentAdmissionSettings(creationSettings);
-        creationConfiguration = automaticRoutingConfiguration(creationConfiguration, {
-          enabled: env.NANOCODEX_AUTO_ROUTING === "true" && env.NANOCODEX_THREAD_ROUTING === "true" && !!env.AI,
-          fullAccountAuthority: !principal.connectGrant && principal.capabilities.includes("tools:use"),
-          settingsProvided, importing: durabilityArchive !== undefined,
-        });
+        // Routing requires an explicit creation policy (inline or saved definition).
+        // Deploying the API must not opt existing clients into a new model/provider.
 
       } catch (error) {
         return json({ error: "invalid_request", message: errorMessage(error) }, { status: 400 });
