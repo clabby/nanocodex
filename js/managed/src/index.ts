@@ -2462,6 +2462,18 @@ async function managedFetchRoute(
       if (failure) return failure;
       return stub.fetch("https://session.internal/prepare", { method: "POST", headers: sessionHeaders });
     }
+    if (resource === "routing") {
+      if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
+      if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
+      if (principal.kind === "connect_grant" || principal.connectGrant
+        || !principal.capabilities.includes("agents:write")
+        || !principal.capabilities.includes("tools:use")) return json({ error: "forbidden" }, { status: 403 });
+      const originFailure = requireSameOriginMutation(request, url, principal);
+      if (originFailure) return originFailure;
+      return stub.fetch("https://session.internal/routing", {
+        method: "POST", headers: sessionHeaders, body: request.body,
+      });
+    }
     if (resource === "settings") {
       if (request.method !== "PATCH") {
         return json({ error: "method_not_allowed" }, { status: 405 });
@@ -4130,6 +4142,12 @@ export class DurableAgentSession extends DurableComputerSession {
     if (url.pathname === "/triggers" || url.pathname.startsWith("/triggers/")) {
       return this.#cronTriggerRequest(request, turnAuthorization);
     }
+    if (request.method === "POST" && url.pathname === "/routing") {
+      if (!ownerAssertion || !this.#hasFullAccountAuthority(turnAuthorization)
+        || !turnAuthorization.capabilities.includes("agents:write")
+        || !turnAuthorization.capabilities.includes("tools:use")) return json({ error: "forbidden" }, { status: 403 });
+      return this.#trackSettingsMutation(previous => this.#enableAutoRouting(request, previous));
+    }
     if (request.method === "PATCH" && url.pathname === "/settings") {
       return this.#trackSettingsPatch(request);
     }
@@ -4200,6 +4218,7 @@ export class DurableAgentSession extends DurableComputerSession {
         stream_error: session.stream_error,
         settings: this.#settings(),
         model_route: this.#threadRoute() ?? null,
+        model_routing_enabled: !!this.#configuration().model_routing,
         routing_observations: this.ctx.storage.sql.exec("SELECT * FROM managed_routing_observations ORDER BY rowid DESC LIMIT 20").toArray(),
       });
     }
@@ -5211,14 +5230,72 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   #trackSettingsPatch(request: Request): Promise<Response> {
+    return this.#trackSettingsMutation(previous => this.#patchSettings(request, previous));
+  }
+
+  #trackSettingsMutation(operation: (previous: Promise<void>) => Promise<Response>): Promise<Response> {
     const previous = this.#settingsMutationTail.catch(() => {});
     let release!: () => void;
     const reservation = new Promise<void>((resolve) => { release = resolve; });
     this.#settingsMutationTail = previous.then(() => reservation);
-    const task = this.#patchSettings(request, previous).finally(release);
+    const task = operation(previous).finally(release);
     this.#settingsRequests.add(task);
     void task.finally(() => this.#settingsRequests.delete(task)).catch(() => {});
     return this.#track(task);
+  }
+
+  async #enableAutoRouting(request: Request, previous: Promise<void>): Promise<Response> {
+    try {
+      const text = await request.text();
+      const body = text.trim() === "" ? {} : JSON.parse(text);
+      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) {
+        return json({ error: "invalid_request", message: "routing accepts only an empty object" }, { status: 400 });
+      }
+      await previous;
+      this.#assertSettingsLifecycle();
+      const session = this.#session();
+      if (!session) return json({ error: "not_found" }, { status: 404 });
+      if (this.env.NANOCODEX_THREAD_ROUTING !== "true" || !this.env.AI) {
+        return json({ error: "routing_unavailable", message: "thread routing requires enabled Workers AI binding" }, { status: 503 });
+      }
+      const configuration = this.#configuration();
+      // A retry reports the retained opt-in without changing a pinned conversation.
+      if (configuration.model_routing) return json({ enabled: true,
+        model_routing: configuration.model_routing, settings: this.#settings(), route: this.#threadRoute() });
+      if (session.runtime_profile !== "managed" || session.accepted_turns !== 0
+        || session.completed_turns !== 0 || this.#durabilityImportState !== undefined
+        || this.#threadRoute() || this.#hasRoutingHistory()) {
+        return json({ error: "routing_requires_new_thread", message: "automatic routing must be enabled before the first accepted message in an empty managed thread" }, { status: 409 });
+      }
+      if (this.#immutableSettingsBusy()) {
+        return json({ error: "routing_busy", message: "automatic routing cannot be enabled while agent work is active" }, { status: 409 });
+      }
+      // Persist the explicit opt-in synchronously before retiring the prepared runtime.
+      // Admissions await this reservation, including after their archive lookups.
+      const { settings: _settings, ...retained } = configuration;
+      const routed = parseConfiguration({ ...retained, model_routing: {} });
+      this.ctx.storage.sql.exec("INSERT OR REPLACE INTO managed_configuration (singleton, body) VALUES (1, ?)", JSON.stringify(routed));
+      await this.#shutdownAgent(true);
+      this.#assertSettingsLifecycle();
+      return json({ enabled: true, model_routing: routed.model_routing, settings: this.#settings() });
+    } catch (error) {
+      return error instanceof SyntaxError
+        ? json({ error: "invalid_json" }, { status: 400 })
+        : managedErrorResponse(error, "routing_enable_failed");
+    }
+  }
+
+  #hasRoutingHistory(): boolean {
+    // Runtime tables are lazy. Any retained checkpoint, event, operation, or child
+    // disqualifies opt-in, even if legacy/imported counters say zero.
+    for (const table of ["nanocodex_durable_states", "nanocodex_durable_records",
+      "nanocodex_cloudflare_subagents", "nanocodex_cloudflare_subagent_checkpoints",
+      "nanocodex_cloudflare_events", "managed_turns", "managed_portability_restoration",
+      "managed_subagent_authorizations", "managed_realtime_operations"]) {
+      if (this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", table).toArray().length
+        && this.ctx.storage.sql.exec(`SELECT 1 FROM ${table} LIMIT 1`).toArray().length) return true;
+    }
+    return this.#eventArchive.capacity().archived_events !== 0;
   }
 
   async #patchSettings(request: Request, previous: Promise<void>): Promise<Response> {
@@ -6247,6 +6324,10 @@ export class DurableAgentSession extends DurableComputerSession {
       this.#findManagedTurn(id),
       this.#findManagedTurnByRequestKey(requestKey),
     ]);
+    let settingsTail: Promise<void>;
+    do { settingsTail = this.#settingsMutationTail; await settingsTail; }
+    while (settingsTail !== this.#settingsMutationTail);
+    this.#assertRealtimeRouteAvailable();
     if (retained[0] || retained[1]) {
       throw new ManagedRequestError(
         409,
@@ -6380,6 +6461,9 @@ export class DurableAgentSession extends DurableComputerSession {
         ? Promise.resolve(undefined)
         : this.#archivedTurnByRequestKey(requestKey),
     ]);
+    let settingsTail: Promise<void>;
+    do { settingsTail = this.#settingsMutationTail; await settingsTail; }
+    while (settingsTail !== this.#settingsMutationTail);
     this.#assertDurabilityAdmissionActive();
     if (this.#deleting || this.#deleted) {
       throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
@@ -7385,6 +7469,7 @@ export class DurableAgentSession extends DurableComputerSession {
     })();
     this.#preparationTask = task;
     this.ctx.waitUntil(task.catch((error) => {
+      console.warn("ROUTING_TEST_DIAGNOSTIC", error);
       this.#observe("managed.preparation_failed", { error_kind: errorKind(error) }, "warn");
     }).finally(async () => {
       if (this.#preparationTask === task) this.#preparationTask = undefined;
@@ -7457,6 +7542,9 @@ export class DurableAgentSession extends DurableComputerSession {
       }
       if (this.#deleting) throw retryableError("agent is being deleted");
       return this.#ensureAgent();
+    }
+    if (this.#configuration().model_routing && !this.#threadRoute()) {
+      throw retryableError("thread route is pending the first admitted text task");
     }
     if (this.#agent) return this.#agent;
     if (this.#agentPromise) return this.#agentPromise;

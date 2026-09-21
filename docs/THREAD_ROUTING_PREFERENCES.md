@@ -68,3 +68,13 @@ The feature requires `NANOCODEX_THREAD_ROUTING=true` and the AI binding. The Wor
 If `multi_agent.enabled` is true, a new child is routed independently with the same policy and current provider availability. Its role/task and any explicit model/thinking overrides determine its eligible choices. The child decision is saved before inference, reused on continuation/reconstruction, and authorized against the retained spawning-turn context. The root decision stays unchanged. Missing authorization or route metadata fails closed.
 
 See [provider configuration](AGGREGATOR_ROUTING.md) and [completion/validation report](THREAD_ROUTING_FINISH_2026_09_21.md). Mixed-provider trees use stateless HTTP and full history replay; OpenRouter/Vercel routes need their deployment-owned secrets. Transport telemetry records outcomes, but unknown execution locations do not become regional performance evidence.
+
+## Before-first-message command
+
+In the managed `nanocodex2` terminal, use `/autoroute` (also listed in the `/` actions menu) before sending the first message. Like `/model`, it is unavailable once the thread starts, including when reopening an existing conversation. The command is a local UI action, not a message to the model. The UI waits for the API receipt before allowing submission, then Jev chooses and pins the provider/model from the first real task. Subagents continue to choose their own routes. New threads remain opt-in; this does not change a global preference.
+
+For an already-created empty managed agent, `POST /v1/agents/{id}/routing` with no body or `{}` performs the same opt-in. It requires full account authority, the routing deployment gate and the AI binding. The server serializes it with settings changes and first-message admission, rejects retained history or previously accepted messages, and preserves unrelated configuration. Retrying an existing opt-in does not replace its route.
+
+Native `nanocodex` does not yet have production integration for the managed provider router. Its `/autoroute` command explicitly reports that limitation and never claims to enable routing or submits the command as a prompt. The earlier native routing verification used an external adapter; it was not native terminal integration.
+
+The model footer shows `Auto · choosing…` before selection, then the retained model, provider and effort. Child choices never replace the main-thread label. Read-only route metadata restores it on reconnect; a new manual thread returns to normal model defaults. See [terminal and subagent verification](THREAD_ROUTING_UX_2026_09_21.md).

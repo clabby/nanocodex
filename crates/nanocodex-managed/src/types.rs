@@ -388,6 +388,64 @@ pub struct AgentCapabilities {
     pub native_cross_mounts: bool,
 }
 
+/// Provider transport that owns a pinned managed conversation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteProvider {
+    /// ChatGPT subscription transport.
+    Chatgpt,
+    /// Cloudflare Workers AI.
+    WorkersAi,
+    /// OpenRouter gateway.
+    Openrouter,
+    /// Vercel AI Gateway.
+    Vercel,
+}
+impl RouteProvider {
+    /// Human-readable transport label, independent of the model family.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Chatgpt => "ChatGPT",
+            Self::WorkersAi => "Workers AI",
+            Self::Openrouter => "OpenRouter",
+            Self::Vercel => "Vercel",
+        }
+    }
+}
+
+/// Public display projection of the retained route, without router internals.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ModelRoute {
+    /// Actual transport selected for this conversation.
+    pub backend: RouteProvider,
+    /// Canonical model selected by the router.
+    #[serde(with = "model_serde")]
+    pub model: Model,
+    /// Reasoning effort selected for this conversation.
+    pub thinking: Thinking,
+}
+
+/// Routing metadata read from the retained agent state.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RoutingStatus {
+    /// Whether routing has explicitly been enabled; absent on older servers.
+    #[serde(default, rename = "model_routing_enabled")]
+    pub enabled: bool,
+    /// Pinned route, or none while waiting for the opening task.
+    #[serde(default, rename = "model_route")]
+    pub route: Option<ModelRoute>,
+}
+
+/// Receipt for explicitly enabling automatic routing before the first message.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AutoRoutingStatus {
+    /// Whether this session has automatic routing enabled.
+    pub enabled: bool,
+    /// Current settings; the opening message selects the pinned route.
+    pub settings: AgentSettings,
+}
+
 /// Model and reasoning policy owned by one managed agent.
 ///
 /// Model and reasoning mode may only be changed before the first turn is
