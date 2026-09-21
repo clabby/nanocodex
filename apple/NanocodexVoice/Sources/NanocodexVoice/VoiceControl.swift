@@ -217,20 +217,24 @@ private struct VoiceSettingsView: View {
     @State private var error: String?
     @State private var testingAudio = false
     @State private var receivedTestAudio = false
+    @State private var sampleAudioBusy = false
 
     var body: some View {
         NavigationStack {
             Form {
                 Picker("Speech provider", selection: $draft.outputProvider) {
-                    Text("OpenAI").tag(Optional(VoiceSettings.OutputProvider.openai))
+                    Text("ChatGPT").tag(Optional(VoiceSettings.OutputProvider.openai))
                     Text("ElevenLabs").tag(Optional(VoiceSettings.OutputProvider.elevenlabs))
                 }
+                .disabled(sampleAudioBusy)
                 if draft.outputProvider == .elevenlabs {
-                    ElevenLabsSettingsView(settings: $draft, configuration: onStart)
+                    ElevenLabsSettingsView(session: session, sampleAudioBusy: $sampleAudioBusy, settings: $draft, configuration: onStart)
                 }
-                Picker("Voice", selection: $draft.voice) {
-                    ForEach(ManagedVoiceProtocol.voices, id: \.self) { Text($0.capitalized).tag($0) }
-                }.accessibilityIdentifier("voice-selection")
+                if draft.outputProvider != .elevenlabs {
+                    Picker("Voice", selection: $draft.voice) {
+                        ForEach(ManagedVoiceProtocol.voices, id: \.self) { Text($0.capitalized).tag($0) }
+                    }.accessibilityIdentifier("voice-selection")
+                }
                 Picker("Pace", selection: $draft.pace) {
                     Text("Relaxed").tag(VoiceSettings.Pace.slow)
                     Text("Natural").tag(VoiceSettings.Pace.natural)
@@ -290,7 +294,7 @@ private struct VoiceSettingsView: View {
                             if session.isEngaged { session.restart(using: onStart) }
                             dismiss()
                         } catch { self.error = error.localizedDescription }
-                    }.accessibilityIdentifier("save-voice-settings")
+                    }.disabled(sampleAudioBusy).accessibilityIdentifier("save-voice-settings")
                 }
             }
         }
