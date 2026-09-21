@@ -3454,8 +3454,10 @@ final class InboxUITests: XCTestCase {
         let conversation = app.scrollViews["conversation"]
         let counter = app.staticTexts["conversation-row-measurement-count"]
         XCTAssertTrue(counter.waitForExistence(timeout: 10))
-        XCTAssertTrue(conversation.staticTexts.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "Review note ")).firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(conversation.waitForExistence(timeout: 10))
+        // A heading can be outside the native accessibility snapshot of a long
+        // transcript. Verify the actual rendered item count instead.
+        XCTAssertEqual(counter.value as? String, "500")
         // Settle initial bottom positioning before counting native scroll updates.
         conversation.swipeDown()
         let initial = counter.label

@@ -30,11 +30,14 @@ card inputs. Unchanged rows do not invalidate media and transcript projection.
   delay, and frame presentation. It is not an iPhone FPS or end-to-end benchmark.
   The host was shared with other builds; these values characterize this run only.
 - The iOS simulator app and UI-test targets build successfully with Xcode 26.5.
-- New UI regressions: `testScrollingDoesNotRemeasureEveryTranscriptRow` (500
-  Markdown messages), and
-  `testLongActiveTranscriptDrawerScrollPreservesSelectionAndSearch`.
-  Existing drawer-anchor, streaming-anchor, and history-pagination tests remain
-  required runtime checks.
+- UI regression `testDrawerButtonsAndEdgeSwipePreserveMiddleTranscriptAnchor`
+  passes on iOS 18.2 and iOS 26.5 simulators.
+- iOS 18.2 also passes `testLongActiveTranscriptDrawerScrollPreservesSelectionAndSearch`,
+  `testStreamingGrowthDoesNotMoveReaderInEarlierParagraphs`, and
+  `testLongThreadKeepsPlaceAcrossUpdatesHistoryAndForeground`.
+- `testScrollingDoesNotRemeasureEveryTranscriptRow` passes on iOS 18.2 with
+  500 Markdown messages and an unchanged geometry-publication count while scrolling. Its instrumentation remains a sibling of the native scroll view so
+  that it does not replace the scroll view's accessibility node.
 
 ## Scope and remaining work
 

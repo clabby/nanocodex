@@ -51,7 +51,8 @@ struct InboxView: View {
     @ObservedObject var model: InboxModel
     @State private var showConversations = false
     @State private var drawerTranslation: CGFloat = 0
-    @GestureState private var drawerDragIsHorizontal: Bool?
+    @State private var drawerDragIsHorizontal: Bool?
+    @GestureState private var drawerGestureActive = false
     @State private var readingPositions = ConversationReadingPositions()
     @State private var showScheduledJobs = false
     @State private var showConnectors = false
@@ -224,17 +225,15 @@ struct InboxView: View {
             .clipped()
             .contentShape(Rectangle())
             .simultaneousGesture(DragGesture(minimumDistance: 16)
-                .updating($drawerDragIsHorizontal) { value, direction, _ in
-                    // Decide once: diagonal drift during a vertical list scroll
-                    // must never turn that same touch into drawer navigation.
-                    // GestureState also releases the decision on cancellation.
-                    if direction == nil {
-                        direction = (showConversations || value.startLocation.x <= 28)
+                .updating($drawerGestureActive) { _, active, _ in active = true }
+                .onChanged { value in
+                    // Keep the direction through onEnded: GestureState can reset
+                    // before that callback on iOS 18. Cancellation is handled below.
+                    if drawerDragIsHorizontal == nil {
+                        drawerDragIsHorizontal = (showConversations || value.startLocation.x <= 28)
                             && abs(value.translation.width) > abs(value.translation.height) * 1.5
                             && (showConversations || value.translation.width > 0)
                     }
-                }
-                .onChanged { value in
                     guard drawerDragIsHorizontal == true else { return }
                     if showConversations {
                         drawerTranslation = max(-width, min(0, value.translation.width))
@@ -245,6 +244,7 @@ struct InboxView: View {
                 }
                 .onEnded { value in
                     let horizontal = drawerDragIsHorizontal == true
+                    drawerDragIsHorizontal = nil
                     guard horizontal else { return }
                     let visible: Bool
                     if showConversations {
@@ -256,6 +256,11 @@ struct InboxView: View {
                     }
                     setConversationsVisible(visible)
                 })
+                .onChange(of: drawerGestureActive) { _, active in
+                    guard !active else { return }
+                    drawerDragIsHorizontal = nil
+                    if drawerTranslation != 0 { setConversationsVisible(showConversations) }
+                }
         }
     }
     private func setConversationsVisible(_ visible: Bool) {
@@ -2117,15 +2122,6 @@ private struct ConversationContentView: View {
             .scrollDismissesKeyboard(.interactively)
             .scrollBounceBehavior(.always, axes: .vertical)
             .coordinateSpace(name: "conversation-viewport")
-            #if DEBUG
-            .overlay(alignment: .topLeading) {
-                if ProcessInfo.processInfo.environment["NANOCODEX_RENDER_COUNTER"] == "1" {
-                    Text(String(rowMeasurementCount)).font(.caption2)
-                        .accessibilityIdentifier("conversation-row-measurement-count")
-                        .allowsHitTesting(false)
-                }
-            }
-            #endif
             .onPreferenceChange(ConversationRowFrames.self) { frames in
                 rowGeometry.updateContentFrames(frames)
                 #if DEBUG
@@ -2266,6 +2262,17 @@ private struct ConversationContentView: View {
                 }
             }
             .accessibilityElement(children: .contain)
+            #if DEBUG
+            // Keep instrumentation beside the native scroll view. An overlay on
+            // the scroll view itself replaces its accessibility node on iOS 18.
+            if ProcessInfo.processInfo.environment["NANOCODEX_RENDER_COUNTER"] == "1" {
+                Text(String(rowMeasurementCount)).font(.caption2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("conversation-row-measurement-count")
+                    .accessibilityValue(String(revision.items.count))
+                    .allowsHitTesting(false)
+            }
+            #endif
             if revision.loading {
                     ProgressView()
                         .accessibilityLabel("Loading conversation")
