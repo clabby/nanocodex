@@ -1,3 +1,6 @@
+import { routeInferenceApi, type InferenceApiEnv } from "./inference-api";
+export { InferenceKey, InferenceAccount } from "./inference-keys";
+export { InferenceSession } from "./inference-session";
 import { ProviderProbeCoordinator } from "./provider-probe-coordinator";
 import { PROBE_OWNER, type ProviderProbeEnvironment } from "./provider-probe-schedule";
 export { ProviderProbeCoordinator };
@@ -373,6 +376,7 @@ const MEMORY_TEAM_ASSERTION = "x-nanocodex-team-id";
 const MEMORY_SUBJECT_ASSERTION = "x-nanocodex-subject-id";
 const MEMORY_MUTATION_ASSERTION = "x-nanocodex-memory-mutation";
 export interface Env extends
+  InferenceApiEnv,
   ProviderProbeEnvironment,
   EmailConfig,
   AccountAuthEnv,
@@ -1507,6 +1511,8 @@ async function managedFetchRoute(
   trustedAgentPrincipal?: Principal,
 ): Promise<Response> {
     const url = new URL(request.url);
+    const inference = await routeInferenceApi(request, env, url, trustedAgentPrincipal);
+    if (inference) return inference;
     if (url.pathname.startsWith("/v1/phone/bridge/")) {
       if (!env.NANOCODEX_PHONES || !env.NANOCODEX_PHONE_OWNER_ID || !phoneAdminConfigured(env)) return new Response("Not found", { status: 404 });
       const target = new URL(url);
