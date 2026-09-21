@@ -425,13 +425,14 @@ final class InboxModel: ObservableObject {
         }
         if isDemo, ProcessInfo.processInfo.environment["NANOCODEX_DEMO_STREAMING_GROWTH"] == "1", let id = focused?.id {
             let epoch = generation
+            let interval = min(1_000, max(50, Int(ProcessInfo.processInfo.environment["NANOCODEX_DEMO_STREAM_INTERVAL_MS"] ?? "") ?? 180))
             Task {
                 try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled, generation == epoch, focused?.id == id,
                       !rows.contains(where: { $0.id == "demo-streaming-growth" }) else { return }
                 rows.append(.init(id: "demo-streaming-growth", role: "Agent", text: "Streaming response begins.", running: true))
                 for index in 1...60 {
-                    try? await Task.sleep(for: .milliseconds(180))
+                    try? await Task.sleep(for: .milliseconds(interval))
                     guard !Task.isCancelled, generation == epoch, focused?.id == id,
                           let row = rows.firstIndex(where: { $0.id == "demo-streaming-growth" }) else { return }
                     rows[row].text += "\n\nStream paragraph \(index). A steadily growing response keeps the live tail visible while preserving the reader's chosen position."
@@ -500,14 +501,16 @@ final class InboxModel: ObservableObject {
         return AttachmentTarget(agentID: id, generation: generation, scope: scope)
     }
     func attachmentURL(_ attachment: MessageAttachment) -> URL? {
-        attachmentURLs[attachment.id]
+        attachmentURLs[attachment.id] ?? deviceHand?.localImageURL(attachment: attachment, preview: true)
     }
     func attachmentOriginalURL(_ attachment: MessageAttachment) -> URL? {
+        if let local = deviceHand?.localImageURL(attachment: attachment, preview: false) { return local }
         guard let store = try? AttachmentStore(scope: scope) else { return nil }
         return try? store.url(for: attachment)
     }
     func attachmentMovieURL(_ attachment: MessageAttachment) -> URL? { attachmentMovieURLs[attachment.id] }
     func downloadAttachment(_ attachment: MessageAttachment, agentID: String) async throws -> URL {
+        if attachment.handID != nil { throw AttachmentError.localImageUnavailable }
         guard let client else { throw APIError.invalidCredential }
         let epoch = generation
         let url = try await client.downloadAttachment(agentID: agentID, attachment: attachment)
@@ -528,6 +531,13 @@ final class InboxModel: ObservableObject {
         return url
     }
     func attachmentPreview(_ attachment: MessageAttachment, agentID: String) async throws -> Data {
+        if let local = attachmentURL(attachment) {
+            let epoch = generation
+            let data = try await Task.detached(priority: .userInitiated) { try Data(contentsOf: local) }.value
+            guard epoch == generation, !Task.isCancelled else { throw CancellationError() }
+            return data
+        }
+        if attachment.handID != nil { throw AttachmentError.localImageUnavailable }
         guard let client else { throw APIError.invalidCredential }
         let epoch = generation
         let data = try await client.attachmentPreview(agentID: agentID, attachmentID: attachment.id)
@@ -1487,11 +1497,40 @@ final class InboxModel: ObservableObject {
             return
         }
     }
+    private var schedulesMutating = false
+
+    func updateScheduledJob(_ job: ScheduledJob, cron: String, timezone: String, input: String,
+                            enabled: Bool, startsNewConversation: Bool) async throws {
+        guard !isDemo, !schedulesMutating, let client else { throw APIError.invalidCredential }
+        schedulesMutating = true
+        defer { schedulesMutating = false }
+        let epoch = generation
+        await schedulesTask?.value
+        guard generation == epoch else { throw CancellationError() }
+        let updated = try await client.updateScheduledJob(job, cron: cron, timezone: timezone, input: input,
+                                                         enabled: enabled, startsNewConversation: startsNewConversation)
+        guard generation == epoch else { throw CancellationError() }
+        scheduledJobs = scheduledJobs.map { $0.id == updated.id ? updated : $0 }
+    }
+
+    func cancelScheduledJob(_ job: ScheduledJob) async throws {
+        guard !isDemo, !schedulesMutating, let client else { throw APIError.invalidCredential }
+        schedulesMutating = true
+        defer { schedulesMutating = false }
+        let epoch = generation
+        await schedulesTask?.value
+        guard generation == epoch else { throw CancellationError() }
+        try await client.cancelScheduledJob(job)
+        guard generation == epoch else { throw CancellationError() }
+        scheduledJobs.removeAll { $0.id == job.id }
+    }
+
     func refreshScheduledJobs() async {
         await startScheduledJobsRefresh()?.value
     }
 
     @discardableResult private func startScheduledJobsRefresh(initialListing: [AgentCard]? = nil) -> Task<Void, Never>? {
+        guard !schedulesMutating else { return nil }
         guard connected else { return nil }
         // The model owns the read: opening the screen joins an existing prefetch,
         // and pushing a detail view does not cancel useful work for this account.
@@ -1973,17 +2012,36 @@ final class InboxModel: ObservableObject {
         let history = events, revision = eventsRevision
         guard let projected = try? await streamProjector.rows(history),
               generation == epoch, observation == token, !Task.isCancelled else { return false }
-        let media = await prepareMedia(projected)
+        // The retained window can exceed its byte target while an active turn or
+        // reading anchor protects it. Keep every history-sized operation off the
+        // main actor, including equality and the card's event/preview scans.
+        let previousRows = rows, previousRowsRevision = rowsRevision
+        let previousMedia = mediaProjection
+        let previousCard = cards.first(where: { $0.id == id })
+        let task = Task.detached(priority: .userInitiated) {
+            let signpostID = OSSignpostID(log: accountPerformanceLog)
+            os_signpost(.begin, log: accountPerformanceLog, name: "HistoryPublicationPreparation", signpostID: signpostID, "events=%d rows=%d", history.count, projected.count)
+            defer { os_signpost(.end, log: accountPerformanceLog, name: "HistoryPublicationPreparation", signpostID: signpostID) }
+            let prepared = TranscriptPublicationPreparation(events: history, rows: projected,
+                previousRows: previousRows, card: previousCard, rowsRevision: previousRowsRevision)
+            var media = previousMedia
+            if prepared.rowsChanged { media.update(projected) }
+            return (media, prepared)
+        }
+        let (media, prepared) = await withTaskCancellationHandler(
+            operation: { await task.value }, onCancel: { task.cancel() })
         guard generation == epoch, observation == token, !Task.isCancelled else { return false }
+        // State refreshes and history navigation may run while preparation is
+        // suspended. Retry against their latest inputs instead of restoring an
+        // old card or publishing equality computed against different rows.
+        guard prepared.isCurrent(rowsRevision: rowsRevision,
+            card: cards.first(where: { $0.id == id })) else { return true }
         // Rows and media become visible together. A second asynchronous media
         // insertion after a history prepend would invalidate its reading anchor.
         if history.first?.cursor == events.first?.cursor {
-            if rows != projected { publishPreparedRows(projected, media: media) }
-            else { mediaProjection = media }
+            if prepared.rowsChanged { publishPreparedRows(projected, media: media) }
             projectedFirstCursor = history.first?.cursor
-            if let index = cards.firstIndex(where: { $0.id == id }) {
-                var card = cards[index]
-                card.apply(events: history, transcriptRows: projected)
+            if let card = prepared.card, let index = cards.firstIndex(where: { $0.id == id }) {
                 historyCursors[id] = max(historyCursors[id] ?? .zero, history.last?.cursor ?? .zero)
                 if cards[index] != card { cards[index] = card }
             }
@@ -2337,11 +2395,30 @@ final class InboxModel: ObservableObject {
             if let attachments = message.attachments, !attachments.isEmpty {
                 let store = try AttachmentStore(scope: scope)
                 guard let client else { throw APIError.invalidCredential }
-                // Verify saved drafts before uploading, including legacy drafts.
+                guard generation == epoch,
+                      let pendingIndex = pending.firstIndex(where: { $0.id == message.id }),
+                      pending[pendingIndex].phase != .cancelling else { throw CancellationError() }
+                let usePhone = pending[pendingIndex].resolveAttachmentTransport(phoneEnabled: deviceHandEnabled)
+                persist()
+                await preferences.flush()
+                guard generation == epoch, !Task.isCancelled else { throw CancellationError() }
+                var retained = attachments
+                // Verify saved drafts before publishing or uploading, including legacy drafts.
                 _ = try await Task.detached(priority: .userInitiated) { try store.content(for: attachments) }.value
-                for attachment in attachments {
+                for (index, attachment) in attachments.enumerated() {
                     let source = try store.url(for: attachment)
                     let preview = attachment.isVideo ? nil : (try store.previewURL(for: attachment))
+                    if attachment.handID != nil || (!attachment.isVideo && usePhone) {
+                        guard let hand = deviceHand, let preview,
+                              attachment.handID == nil || attachment.handID == hand.workspaceID else { throw AttachmentError.unavailable }
+                        let path = try await hand.publishImage(attachment: attachment, source: source, preview: preview)
+                        guard generation == epoch, !Task.isCancelled else { throw CancellationError() }
+                        let local = try MessageAttachment(id: attachment.id, name: attachment.name,
+                            mediaType: attachment.mediaType, byteCount: attachment.byteCount, handID: hand.workspaceID)
+                        command.images += try local.originalContent(path: path)
+                        retained[index] = local
+                        continue
+                    }
                     let path = try await client.uploadAttachment(agentID: message.agentID, attachment: attachment, source: source, preview: preview) { [weak self] in
                         await MainActor.run {
                             guard let self else { return true }
@@ -2349,6 +2426,15 @@ final class InboxModel: ObservableObject {
                         }
                     }
                     command.images += try attachment.originalContent(path: path)
+                }
+                guard generation == epoch, !Task.isCancelled else { throw CancellationError() }
+                if let index = pending.firstIndex(where: { $0.id == message.id }) {
+                    guard pending[index].phase != .cancelling else { throw CancellationError() }
+                    // Keep the same device/path identity for retries and optimistic thumbnails.
+                    pending[index].attachments = retained
+                    persist()
+                    await preferences.flush()
+                    guard generation == epoch, !Task.isCancelled else { throw CancellationError() }
                 }
             }
             return command
@@ -2727,7 +2813,7 @@ final class InboxModel: ObservableObject {
             let delayKey = command.kind == .stop ? "NANOCODEX_DEMO_CANCEL_DELAY_MS" : command.kind == .steer ? "NANOCODEX_DEMO_STEER_DELAY_MS" : "NANOCODEX_DEMO_DELAY_MS"
             let delay = Int(ProcessInfo.processInfo.environment[delayKey] ?? ProcessInfo.processInfo.environment["NANOCODEX_DEMO_DELAY_MS"] ?? "200") ?? 200
             try await Task.sleep(for: .milliseconds(delay))
-            let fault = command.kind == .stop ? "cancel" : command.kind == .steer ? "steer" : "submit"
+            let fault = command.kind == .stop ? "cancel" : command.kind == .steer ? "steer" : command.kind == .withdrawSteer ? "withdraw" : "submit"
             if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_FAIL_ONCE"] == fault, demoFaults.insert(fault).inserted {
                 throw APIError.http(503)
             }
@@ -2972,6 +3058,16 @@ final class InboxModel: ObservableObject {
         scope = "demo." + (ProcessInfo.processInfo.environment["NANOCODEX_DEMO_PROFILE"] ?? "default")
         closedConversationIDs = Set(UserDefaults.standard.stringArray(forKey: "inbox.closedTabs." + scope) ?? [])
         cards = DemoContent.cards()
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_COMPOSER_PHOTOS"] == "1",
+           let prepared = try? DemoContent.composerPhotoFixtures(), let store = try? AttachmentStore(scope: scope) {
+            for item in prepared {
+                try? store.save(item)
+                attachmentDrafts["inbox", default: []].append(item.attachment)
+                cacheAttachment(item.attachment, scope: scope)
+            }
+        }
+        #endif
         if let profile = ProcessInfo.processInfo.environment["NANOCODEX_DEMO_PROFILE"] {
             scope = "demo." + profile
             restorePending()

@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::native_hand::NativeState;
 
+mod account;
 mod transport;
 
 #[derive(Args, Default)]
@@ -191,19 +192,7 @@ async fn directory(origin: &str, key: &str) -> Result<PathBuf, ManagedError> {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .map_err(error)?;
-            let response = client
-                .get(format!("{origin}/v1/me"))
-                .bearer_auth(key)
-                .send()
-                .await
-                .map_err(|_| error("Cannot identify the computer Hand account"))?;
-            if !response.status().is_success() {
-                return Err(error("Computer Hand sign-in failed; run nanocodex2 login"));
-            }
-            let body: Value = response
-                .json()
-                .await
-                .map_err(|_| error("Invalid Hand account response"))?;
+            let body = account::identify(&client, origin, key).await?;
             let owner = body["user"]["id"]
                 .as_str()
                 .filter(|id| valid(id))
@@ -222,11 +211,10 @@ async fn directory(origin: &str, key: &str) -> Result<PathBuf, ManagedError> {
 fn open(directory: &Path) -> Result<NativeState, ManagedError> {
     let workspace = home()?.join("Nanocodex");
     fs::create_dir_all(&workspace).map_err(error)?;
-    NativeState::open_with_browser(
+    NativeState::open(
         &workspace,
         directory,
         super::host::bounded_display_name(whoami::devicename()),
-        false,
     )
 }
 fn identity(directory: &Path) -> Result<Value, ManagedError> {
@@ -384,7 +372,6 @@ async fn share(
             let result = super::native_hand::run_observed(
                 client.account_attachment_target()?,
                 &state,
-                None,
                 async {
                     cancel.cancelled().await;
                     Ok(())

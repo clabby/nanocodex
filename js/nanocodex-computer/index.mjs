@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { access, stat } from "node:fs/promises";
 import { constants, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { namedTool } from "nanocodex-tools/named-tool";
@@ -11,23 +11,24 @@ const runSetup = promisify(execFile);
 const preparations = new Map();
 const supportsManagedComputer = () => ["darwin", "win32"].includes(process.platform);
 const managedRoot = () => join(process.env.NANOCODEX_DIR || join(process.env.HOME || process.env.USERPROFILE || homedir(), ".nanocodex"), "runtimes", "openai-cua");
-function windowsProvider() {
-  if (process.platform !== "win32") return undefined;
+function managedProvider() {
+  if (!supportsManagedComputer()) return undefined;
   let source;
   try { source = readFileSync(join(managedRoot(), "provider.json"), "utf8"); }
   catch (error) { if (error.code === "ENOENT") return undefined; throw error; }
   if (source.length > 65536) throw new Error("Invalid managed CUA receipt; run nanocodex2 computer setup");
   const value = JSON.parse(source);
-  if (value.status !== "installed" || value.transport !== "mcp" || typeof value.executable !== "string"
+  if (value?.status !== "installed" || value.transport !== "mcp" || typeof value.executable !== "string" || !isAbsolute(value.executable)
     || !Array.isArray(value.args) || !value.args.every(arg => typeof arg === "string")
-    || !value.environment || typeof value.environment !== "object" || !Object.values(value.environment).every(v => typeof v === "string")) {
+    || !value.environment || typeof value.environment !== "object" || Array.isArray(value.environment) || !Object.values(value.environment).every(v => typeof v === "string")) {
     throw new Error("Invalid managed CUA receipt; run nanocodex2 computer setup");
   }
   return value;
 }
-const managedComputer = () => process.platform === "win32" ? windowsProvider()?.executable : join(managedRoot(), "current", "cua-provider");
+const managedComputer = () => managedProvider()?.executable;
 function managedOptions(options) {
-  const managed = windowsProvider();
+  if (process.env.NANOCODEX_COMPUTER) return options;
+  const managed = managedProvider();
   if (!managed || resolve(options.executable) !== resolve(managed.executable)) return options;
   return { ...options, args: options.args ?? managed.args, environment: { ...managed.environment, ...options.environment } };
 }
@@ -35,13 +36,15 @@ async function executableExists(path) {
   try { if (!path) return false; await access(path, constants.X_OK); return (await stat(path)).isFile(); } catch { return false; }
 }
 
-/** Provision the managed provider only when missing, using a trusted native CLI. */
+/** Select the installed helper’s current host once per process and install root. */
 export async function ensureComputer({ binary } = {}) {
   if (process.env.NANOCODEX_COMPUTER || !supportsManagedComputer()) return discoverComputer({ binary });
-  const executable = managedComputer();
-  if (await executableExists(executable)) return executable;
   const retry = "Run nanocodex2 computer setup to retry, or set NANOCODEX_COMPUTER to an explicit provider (off disables CUA).";
-  if (!binary) throw new Error(`OpenAI CUA setup requires the installed Nanocodex native helper. Reinstall Nanocodex. ${retry}`);
+  if (!binary) {
+    const executable = managedComputer();
+    if (await executableExists(executable)) return executable;
+    throw new Error(`OpenAI CUA setup requires the installed Nanocodex native helper. Reinstall Nanocodex. ${retry}`);
+  }
   const identity = JSON.stringify([resolve(binary), resolve(managedRoot())]);
   if (preparations.has(identity)) return preparations.get(identity);
   const preparation = (async () => {
@@ -62,7 +65,7 @@ export async function ensureComputer({ binary } = {}) {
     }
   })();
   preparations.set(identity, preparation);
-  try { return await preparation; } finally { preparations.delete(identity); }
+  try { return await preparation; } catch (error) { preparations.delete(identity); throw error; }
 }
 
 /** Read-only discovery of trusted installed providers; no app or browser starts. */
@@ -77,7 +80,7 @@ export async function discoverComputer({ binary } = {}) {
 export async function connectComputerTools(options) {
   if (!options?.executable) throw new TypeError("A trusted CUA executable is required");
   options = managedOptions(options);
-  const providerProcess = new ComputerProcess(options.executable, options.args ?? [], options.environment ?? {}, options);
+  const providerProcess = new ComputerProcess(options.executable, options.args ?? [], options.environment ?? {});
   try {
     await providerProcess.initialize();
     const definitions = await providerProcess.discover();
@@ -87,8 +90,7 @@ export async function connectComputerTools(options) {
 
 /** A native attachment owns the executable/configuration, each conversation a JS scope. */
 export function createComputerTools(options) {
-  const { executable, args = [], environment = {}, definitions, elicitationHandler, elicitationTimeoutMs = 300_000 } = managedOptions(options);
-  validateElicitationOptions({ elicitationHandler, elicitationTimeoutMs });
+  const { executable, args = [], environment = {}, definitions } = managedOptions(options);
   if (!executable) throw new TypeError("A trusted CUA executable is required");
   if (definitions === undefined) throw new TypeError("MCP providers require connectComputerTools discovery or a trusted catalog");
   const catalog = validateCatalog(definitions);
@@ -112,7 +114,14 @@ export function createComputerTools(options) {
       });
     }
     const session = sessions.get(id);
-    const signal = AbortSignal.any([session.lifetime.signal, ...(context.signal ? [context.signal] : [])]);
+    const deadline = new AbortController();
+    const timeoutMs = Number.isSafeInteger(input?.timeout_ms) && input.timeout_ms > 0
+      ? Math.min(input.timeout_ms, 2_147_483_647) : 30_000;
+    const timer = name === "js" || name === "js_reset"
+      ? setTimeout(() => deadline.abort(new Error(`CUA ${name} timed out after ${timeoutMs} ms`)), timeoutMs)
+      : undefined;
+    timer?.unref();
+    const signal = AbortSignal.any([session.lifetime.signal, deadline.signal, ...(context.signal ? [context.signal] : [])]);
     const run = async () => {
       signal.throwIfAborted();
       if (disposed) throw new Error("CUA attachment is closed");
@@ -123,14 +132,12 @@ export function createComputerTools(options) {
         if (!session.process) {
           signal.throwIfAborted();
           if (disposed) throw new Error("CUA attachment is closed");
-          session.process = new ComputerProcess(executable, args, environment, { elicitationHandler, elicitationTimeoutMs });
-          session.process.context = context;
+          session.process = new ComputerProcess(executable, args, environment);
           await session.process.initialize();
           const discovered = await session.process.discover();
           const matches = canonical(discovered) === canonical(catalog);
           if (!matches) throw new Error("CUA provider catalog changed; reconnect the attachment before invoking it");
         }
-        session.process.context = context;
         const result = await session.process.rpc("tools/call", {
           name, arguments: input,
           _meta: { "x-codex-turn-metadata": {
@@ -145,7 +152,6 @@ export function createComputerTools(options) {
       } catch (error) {
         session.process?.close(); session.process = undefined; throw error;
       } finally {
-        if (session.process) session.process.context = undefined;
         signal.removeEventListener("abort", abort);
       }
     };
@@ -155,7 +161,7 @@ export function createComputerTools(options) {
     session.tail = result.catch(() => {});
     // A queued cancellation reaches the caller immediately. The queued run
     // still checks the signal and session identity before touching its process.
-    return interruptible(result, signal);
+    return interruptible(result, signal).finally(() => clearTimeout(timer));
   };
   const allTools = catalog.map(tool => namedTool(`mcp__cua_repl__${tool.name}`, {
       description: tool.description ?? "", parameters: tool.inputSchema,
@@ -181,33 +187,8 @@ function interruptible(result, signal) {
   });
 }
 
-// Node's setTimeout overflows above 2^31-1 ms. Long valid Codex timeouts must
-// remain long instead of unexpectedly terminating the kernel after one ms.
-function scheduleDeadline(callback, milliseconds) {
-  const deadline = performance.now() + milliseconds;
-  let timer;
-  const tick = () => {
-    const remaining = deadline - performance.now();
-    if (remaining <= 0) callback();
-    else timer = setTimeout(tick, Math.min(remaining, 2_147_483_647));
-  };
-  tick();
-  return () => clearTimeout(timer);
-}
-
-function validateElicitationOptions({ elicitationHandler, elicitationTimeoutMs = 300_000 }) {
-  if (elicitationHandler !== undefined && typeof elicitationHandler !== "function") throw new TypeError("elicitationHandler must be a function");
-  if (!Number.isSafeInteger(elicitationTimeoutMs) || elicitationTimeoutMs < 1) throw new TypeError("elicitationTimeoutMs must be a positive safe integer");
-}
-
-function isObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
-
 class ComputerProcess {
-  constructor(executable, args, environment, options = {}) {
-    validateElicitationOptions(options);
-    this.elicitationHandler = options.elicitationHandler;
-    this.elicitationTimeoutMs = options.elicitationTimeoutMs ?? 300_000;
-    this.elicitations = new Map();
+  constructor(executable, args, environment) {
     const env = Object.fromEntries(["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TEMP", "SystemRoot", "LOCALAPPDATA", "LANG", "SKY_ENABLE_AUDIO"]
       .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
     this.child = spawn(executable, args, { env: { ...env, ...environment }, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
@@ -219,13 +200,11 @@ class ComputerProcess {
           const value = JSON.parse(line.toString("utf8"));
           if (value.method) {
             if (value.id !== undefined) void this.serverRequest(value).catch(error => this.close(error));
-            else if (value.method === "notifications/cancelled") this.elicitations.get(value.params?.requestId)?.abort(new Error("CUA provider cancelled elicitation"));
             continue;
           }
           const pending = this.pending.get(value.id);
           if (!pending) throw new Error("CUA response belongs to an unknown call");
           this.pending.delete(value.id);
-          for (const controller of this.elicitations.values()) controller.abort(new Error("CUA requesting call completed"));
           if (value.error) pending.reject(new Error(value.error.message ?? "CUA runtime error"));
           else pending.resolve(value.result);
         }
@@ -236,60 +215,10 @@ class ComputerProcess {
     this.child.stdin.on("error", error => this.close(error));
   }
   async serverRequest(request) {
-    const reply = value => this.send({ jsonrpc: "2.0", id: request.id, ...value });
-    if (!["elicitation/create", "openai/elicitation/create"].includes(request.method) || !this.elicitationHandler) {
-      await reply({ error: { code: -32601, message: "No host form elicitation handler for this request" } });
-      return;
-    }
-    const params = request.params;
-    if (!isObject(params) || (params.mode !== undefined && params.mode !== "form")
-      || typeof params.message !== "string" || !isObject(params.requestedSchema)
-      || (params._meta !== undefined && !isObject(params._meta))) {
-      await reply({ error: { code: -32602, message: "Expected MCP form elicitation parameters" } });
-      return;
-    }
-    if (this.elicitations.has(request.id) || this.elicitations.size >= 32) {
-      throw new Error("CUA provider sent duplicate or excessive pending elicitations");
-    }
-    const callId = this.pending.keys().next().value;
-    if (callId === undefined) {
-      await reply({ error: { code: -32601, message: "No active CUA call for form elicitation" } });
-      return;
-    }
-    const controller = new AbortController();
-    this.elicitations.set(request.id, controller);
-    const cancelTimeout = scheduleDeadline(() => controller.abort(new Error("CUA form elicitation timed out")), this.elicitationTimeoutMs);
-    const context = this.context;
-    try {
-      // Forward the complete provider request, including approval/persistence
-      // hints in _meta. Only a genuine host UI may select the response.
-      const result = await interruptible(Promise.resolve().then(() => {
-        controller.signal.throwIfAborted();
-        return this.elicitationHandler(params, {
-          sessionId: context?.sessionId, callId: context?.callId, model: context?.model,
-          requestId: request.id, signal: controller.signal,
-        });
-      }), controller.signal);
-      controller.signal.throwIfAborted();
-      if (!this.pending.has(callId)) return;
-      if (!isObject(result) || !["accept", "decline", "cancel"].includes(result.action)
-        || (result.content !== undefined && !isObject(result.content))
-        || (result._meta !== undefined && !isObject(result._meta))) {
-        await reply({ error: { code: -32602, message: "Invalid host form elicitation response" } });
-      } else if (!this.closed && this.pending.has(callId)) {
-        await reply({ result });
-      }
-    } catch (error) {
-      if (!this.closed && this.pending.has(callId)) await reply(controller.signal.aborted
-        ? { result: { action: "cancel" } }
-        : { error: { code: -32603, message: "Host form elicitation failed" } });
-    } finally {
-      cancelTimeout();
-      this.elicitations.delete(request.id);
-    }
+    await this.send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Method not found" } });
   }
   async initialize() {
-    await this.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: this.elicitationHandler ? { elicitation: { form: {} } } : {}, clientInfo: { name: "nanocodex-computer", version: "0.1.0" } });
+    await this.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "nanocodex-computer", version: "0.1.0" } });
     await this.send({ jsonrpc: "2.0", method: "notifications/initialized" });
   }
   async discover() {
@@ -325,8 +254,6 @@ class ComputerProcess {
   close(error = new Error("CUA session stopped")) {
     if (this.closed) return;
     this.closed = error;
-    for (const controller of this.elicitations.values()) controller.abort(error);
-    this.elicitations.clear();
     this.child.kill("SIGKILL");
     this.child.stdin.destroy(); this.child.stdout.destroy();
     for (const pending of this.pending.values()) pending.reject(error);

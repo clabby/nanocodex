@@ -3,6 +3,7 @@
 
 //! Async child-agent sessions, turns, and lifecycle orchestration.
 
+use super::diagnostics::{CompletionError, CompletionErrorCode};
 use super::{
     capacity::{Capacity, TurnCapacity},
     harness::{self, HarnessHandle},
@@ -72,9 +73,10 @@ pub(super) fn completion_instructions(schema: &str, turn_token: u64) -> String {
     format!(
         "Your contractual result is not prose. Before finishing, call `submit_result` exactly \
          once with `{{ turn_token: {turn_token}, output: ... }}` and a JSON value matching the \
-         output schema below. The tool may be exposed directly or through Code Mode as \
-         `tools.submit_result`. Pass objects and arrays directly as JSON values; do not \
-         serialize them into JSON strings. If validation rejects the value, correct it and retry. A turn \
+         output schema below. Use the callable `submit_result` entry in your actual tool catalog. Do not assume \
+         a Code Mode `tools.submit_result` binding exists unless that catalog exposes it. \
+         Pass objects and arrays directly as JSON values; do not serialize them into JSON strings. \
+         If validation rejects the value, correct it and retry. A turn \
          that ends without an accepted result fails.\n\nOutput schema:\n{schema}"
     )
 }
@@ -343,40 +345,67 @@ impl RegistryState {
         output: Value,
     ) -> std::io::Result<bool> {
         let root_session_id = self.root_session_id(session_id).to_owned();
-        let scope = self
-            .scopes
-            .get_mut(&root_session_id)
-            .ok_or_else(|| std::io::Error::other("submit_result is only available to subagents"))?;
+        let scope = self.scopes.get_mut(&root_session_id).ok_or_else(|| {
+            CompletionError::new(
+                CompletionErrorCode::NotChild,
+                false,
+                "submit_result is only available to subagents",
+                "Return root answers as assistant text.",
+            )
+        })?;
         let id = scope
             .topology
             .agent_for_session(session_id)
-            .ok_or_else(|| std::io::Error::other("submit_result is only available to subagents"))?;
+            .ok_or_else(|| {
+                CompletionError::new(
+                    CompletionErrorCode::NotChild,
+                    false,
+                    "submit_result is only available to subagents",
+                    "Return root answers as assistant text.",
+                )
+            })?;
         let session = scope
             .sessions
             .get_mut(&id)
             .ok_or_else(|| std::io::Error::other("subagent session disappeared"))?;
         if !session.active {
-            return Err(std::io::Error::other(
+            return Err(CompletionError::new(
+                CompletionErrorCode::InactiveTurn,
+                false,
                 "submit_result is only available during an active subagent turn",
-            ));
+                "Start a new assigned turn before submitting.",
+            )
+            .into());
         }
         if session.steering {
-            return Err(std::io::Error::other(
-                "the subagent turn is being steered; retry submit_result",
-            ));
+            return Err(CompletionError::new(
+                CompletionErrorCode::SteeringInProgress,
+                true,
+                "the subagent turn is being steered",
+                "Wait for the steering message, incorporate it, and submit with its turn_token.",
+            )
+            .into());
         }
         if session.active_turn_token != Some(turn_token) {
-            return Err(std::io::Error::other(
+            return Err(CompletionError::new(
+                CompletionErrorCode::StaleTurnToken,
+                true,
                 "submit_result used a stale or unknown turn_token",
-            ));
+                "Read and incorporate the latest steering instructions before resubmitting; do not only replace the token.",
+            ).with_token(session.active_turn_token).into());
         }
         if session.submitted_output.is_some() {
-            return Err(std::io::Error::other(
+            return Err(CompletionError::new(
+                CompletionErrorCode::AlreadyAccepted,
+                false,
                 "submit_result already accepted one result for this turn",
-            ));
+                "Finish this turn; do not submit again.",
+            )
+            .into());
         }
         let (output, decoded_json_text) =
-            validate_submitted_output(&session.output_validator, output)?;
+            validate_submitted_output(&session.output_validator, output)
+                .map_err(|error| error.with_token(session.active_turn_token))?;
         session.submitted_output = Some(output);
         Ok(decoded_json_text)
     }
@@ -740,7 +769,7 @@ impl RegistryState {
         }
         let harness = target.harness.clone().ok_or_else(|| {
             std::io::Error::other(format!(
-                "agent {to} is not resident and cannot receive messages"
+                "agent {to} is not resident and cannot receive messages. Call list_agents with include_completed=true and select a recipient with can_message=true, or spawn a replacement agent. Do not retry this recipient while can_message=false."
             ))
         })?;
         self.next_access = self.next_access.wrapping_add(1);
@@ -1664,6 +1693,11 @@ impl Registry {
             session.active_turn_token = None;
             session.steering = false;
             let submitted_output = session.submitted_output.take();
+            // Acceptance belongs to this turn even if cancellation/close wins settlement.
+            // Keep its evidence, without claiming the interrupted execution completed.
+            if let Some(output) = &submitted_output {
+                session.last_output = Some(output.clone());
+            }
             if matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
                 session.status.clone()
             } else {
@@ -2220,7 +2254,12 @@ impl Registry {
 fn complete_session(session: &mut ChildSession, output: Option<Value>) -> AgentStatus {
     let Some(output) = output else {
         return AgentStatus::Failed {
-            error: "subagent turn ended without a valid submit_result call".to_owned(),
+            error: CompletionError::new(
+                CompletionErrorCode::MissingResult,
+                false,
+                "subagent turn ended without a valid submit_result call",
+                "Inspect child evidence before assigning recovery. A plain final answer is not an accepted result; do not replay task side effects.",
+            ).to_string(),
         };
     };
     session.last_output = Some(output.clone());
@@ -2232,7 +2271,7 @@ fn complete_session(session: &mut ChildSession, output: Option<Value>) -> AgentS
 fn validate_submitted_output(
     validator: &Validator,
     output: Value,
-) -> std::io::Result<(Value, bool)> {
+) -> Result<(Value, bool), CompletionError> {
     if validator.is_valid(&output) {
         return Ok((output, false));
     }
@@ -2248,12 +2287,20 @@ fn validate_submitted_output(
     let errors = validator
         .iter_errors(&output)
         .take(4)
-        .map(|error| error.to_string())
+        .map(|error| {
+            format!(
+                "instance {}: schema {}",
+                error.instance_path(),
+                error.schema_path()
+            )
+        })
         .collect::<Vec<_>>();
-    Err(std::io::Error::other(format!(
-        "submitted output does not match the required schema: {}",
-        errors.join("; ")
-    )))
+    Err(CompletionError::new(
+        CompletionErrorCode::SchemaValidation,
+        true,
+        "submitted output does not match the required schema",
+        "Correct output using the required schema and retry submit_result within this turn; do not repeat task side effects.",
+    ).with_details(errors))
 }
 
 fn restored_tombstone(descriptor: AgentDescriptor, host_context: Option<Arc<str>>) -> ChildSession {
@@ -2630,7 +2677,9 @@ mod tests {
         let contract = OutputContract::compile(&schema).unwrap();
         let instructions = completion_instructions(&contract.schema, 7);
 
-        assert!(instructions.contains("tools.submit_result"));
+        assert!(instructions.contains("actual tool catalog"));
+        assert!(instructions.contains("unless that catalog exposes it"));
+        assert!(instructions.contains("Pass objects and arrays directly as JSON values"));
         assert!(instructions.contains("turn_token: 7"));
         assert!(instructions.contains("exactly once"));
         assert!(instructions.contains("\"report\""));
@@ -3146,7 +3195,25 @@ mod tests {
             .unwrap();
 
         let invalid = registry.submit_result("child-session", 1, json!({ "answer": "42" }));
-        assert!(invalid.unwrap_err().to_string().contains("required schema"));
+        let invalid = invalid.unwrap_err();
+        let diagnostic = invalid
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<super::CompletionError>()
+            .unwrap();
+        assert_eq!(
+            diagnostic.code,
+            super::CompletionErrorCode::SchemaValidation
+        );
+        assert!(diagnostic.recoverable);
+        assert_eq!(diagnostic.current_turn_token, Some(1));
+        assert!(diagnostic.details[0].contains("/answer"));
+        assert!(!diagnostic.details[0].contains("42"));
+        assert!(
+            diagnostic
+                .recovery
+                .contains("do not repeat task side effects")
+        );
         assert!(
             registry
                 .submit_result("child-session", 1, json!("{\"answer\":42}"))
@@ -3202,7 +3269,12 @@ mod tests {
             json!("\"{\\\"answer\\\":42}\""),
             json!(format!("{}{{\"answer\":42}}", " ".repeat(1_048_576))),
         ] {
-            assert!(super::validate_submitted_output(&object, invalid).is_err());
+            let error = super::validate_submitted_output(&object, invalid).unwrap_err();
+            assert_eq!(error.code, super::CompletionErrorCode::SchemaValidation);
+            assert!(error.recoverable);
+            assert!(!error.details.is_empty());
+            assert!(!error.to_string().contains("42"));
+            assert!(!error.to_string().contains("not JSON"));
         }
         let array = jsonschema::validator_for(&json!({"type":"array", "items":{"type":"integer"}}))
             .unwrap();
@@ -3242,7 +3314,15 @@ mod tests {
 
         let status = complete_session(&mut session, None);
 
-        assert!(matches!(status, AgentStatus::Failed { error } if error.contains("submit_result")));
+        let AgentStatus::Failed { error } = status else {
+            panic!("missing result must fail")
+        };
+        assert!(error.contains("without a valid submit_result call"));
+        assert!(error.contains("do not replay task side effects"));
+        assert!(
+            !error.starts_with('{'),
+            "failure cards must not display JSON envelopes"
+        );
         assert_eq!(session.last_output, None);
     }
 
@@ -3305,17 +3385,88 @@ mod tests {
 
         let steer = registry.begin_turn_steer("main", reservation.id).unwrap();
         assert_eq!(steer.token(), 2);
-        registry.finish_turn_steer("main", steer, true);
-        assert!(
-            registry
-                .submit_result("child-session", 1, json!({ "report": "stale" }))
-                .is_err()
+        let error = registry
+            .submit_result("child-session", 1, json!({"report": "before steering"}))
+            .unwrap_err();
+        let diagnostic = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<super::CompletionError>()
+            .unwrap();
+        assert_eq!(
+            diagnostic.code,
+            super::CompletionErrorCode::SteeringInProgress
         );
+        assert_eq!(diagnostic.current_turn_token, None);
+        registry.finish_turn_steer("main", steer, true);
+        let error = registry
+            .submit_result("child-session", 1, json!({ "report": "stale" }))
+            .unwrap_err();
+        let diagnostic = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<super::CompletionError>()
+            .unwrap();
+        assert_eq!(diagnostic.code, super::CompletionErrorCode::StaleTurnToken);
+        assert_eq!(diagnostic.current_turn_token, Some(2));
+        assert!(diagnostic.recoverable);
         registry
             .submit_result("child-session", 2, json!({ "report": "current" }))
             .unwrap();
 
         assert!(registry.begin_turn_steer("main", reservation.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn accepted_result_survives_cancelled_settlement_without_completing_execution() {
+        let (registry, _control, _updates) = super::channel(32);
+        let reservation = registry.reserve("main").await.unwrap();
+        let id = reservation.id;
+        let mut session = test_session(id, "child-session", None);
+        session.active = true;
+        session.active_turn_token = Some(1);
+        session.next_turn_token = 1;
+        session.status = AgentStatus::Running;
+        registry
+            .state
+            .lock()
+            .await
+            .insert("main".into(), id, "child-session".into(), session)
+            .unwrap();
+        registry
+            .submit_result("child-session", 1, json!({"report": "accepted"}))
+            .await
+            .unwrap();
+        registry
+            .harness_turn_finished(
+                "main",
+                id,
+                Err(nanocodex_agent::NanocodexError::TurnCancelled),
+            )
+            .await;
+        {
+            let state = registry.state.lock().await;
+            let session = &state.scopes["main"].sessions[&id];
+            assert_eq!(session.status, AgentStatus::Interrupted);
+            assert_eq!(
+                session.summary().last_output,
+                Some(json!({"report": "accepted"}))
+            );
+            assert_eq!(session.active_turn_token, None);
+            assert_eq!(session.submitted_output, None);
+        }
+        assert_eq!(registry.harness_turn_started("main", id).await, Some(2));
+        assert!(
+            registry
+                .submit_result("child-session", 1, json!({"report": "old"}))
+                .await
+                .is_err()
+        );
+        assert!(
+            registry.state.lock().await.scopes["main"].sessions[&id]
+                .submitted_output
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -4131,6 +4282,21 @@ mod tests {
             };
         }
 
+        let error = registry
+            .prepare_message(
+                "parent-session",
+                child.id,
+                MessagePriority::Deferred,
+                MessagePurpose::Coordinate,
+                None,
+                "continue".to_owned(),
+            )
+            .err()
+            .expect("nonresident agents cannot receive messages");
+        assert!(error.to_string().contains("list_agents"));
+        assert!(error.to_string().contains("can_message=true"));
+        assert!(error.to_string().contains("spawn a replacement"));
+
         let directory = registry.directory("parent-session", true, false);
 
         assert_eq!(
@@ -4475,7 +4641,8 @@ mod tests {
         let child = &interrupted.children[1];
         assert_eq!(child.next_turn_token, 8);
         assert_eq!(child.status, AgentStatus::Interrupted);
-        assert_eq!(child.last_output, Some(json!({"answer":42})));
+        // Checkpoint cancellation preserves the latest accepted result as evidence.
+        assert_eq!(child.last_output, Some(json!({"answer":43})));
         assert!(
             !restored.state.lock().await.scopes[root_id].sessions[&child_reservation.id].active
         );

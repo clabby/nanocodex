@@ -22,7 +22,10 @@ read-only. Both honor `NANOCODEX_COMPUTER` as an explicit provider executable,
 and `off`, `none`, or `0` disable CUA. Neither searches for the retired companion
 in PATH, Cargo directories, source builds, or adjacent installations. Unsupported
 platforms return no provider unless an explicit MCP executable is configured.
-The Windows managed receipt supplies its exact arguments and environment.
+The managed receipt supplies its exact arguments and environment on both platforms.
+Mac setup selects immutable host assets separately from the signed bundle. CUA
+then starts the official app server and isolated GUI automatically; see the
+[managed Mac host](../../docs/computer/official-app-server-bridge.md).
 
 `connectComputerTools` discovers the full paginated MCP catalog before exposing
 an attachment. `definitions` and each tool's `providerDefinition` preserve the
@@ -37,15 +40,20 @@ Trusted `args` and `environment` configure the child process. There are no
 companion launch flags, platform arguments, security configuration, private
 desktop routing, or protocol switches. The inherited child environment omits
 account/API credentials. The provider receives model arguments unchanged,
-including its own optional fields and timeouts. Tool execution deadlines and
-reset behavior belong to the provider.
+including its own optional fields and timeouts. For `js` and `js_reset`, the host
+also enforces a deadline covering queue wait, process startup, and the provider
+call. A positive safe integer `timeout_ms` selects that deadline (clamped to
+2,147,483,647 ms to avoid timer overflow); all other values default to 30 seconds.
+The provider still owns reset behavior.
 
 Each conversation has its own process and ordered call queue. Independent
 conversations run concurrently. Caller cancellation stops the active process;
-queued cancellation rejects without running that call. Session release and
-attachment close cancel their active and queued work. A later call after a
-transport failure starts a fresh provider process; the adapter does not require
-an invented reset command. It never retries a failed call automatically.
+queued cancellation rejects without running that call. Host deadline expiry uses
+the same cancellation path: active calls stop their process, while queued calls
+never run or stop another call's process. Session release and attachment close
+cancel their active and queued work. A later call after a transport failure or
+active deadline expiry starts a fresh provider process; the adapter does not
+require an invented reset command. It never retries a failed call automatically.
 
 MCP results and metadata remain available unchanged as the tool result's `value`.
 Text, images, and audio are translated into model content; other MCP content is
@@ -56,34 +64,10 @@ CUA calls carry `session_id`, `thread_id`, `call_id`, and `model` in
 `x-codex-turn-metadata`, plus `turn_id` when supplied by the agent runtime. The
 adapter never derives a turn ID from a tool call ID.
 
-Hosts with a genuine user-facing form UI can provide `elicitationHandler`:
-
-```js
-const computer = await connectComputerTools({
-  executable: providerExecutable,
-  args: providerArgs,
-  elicitationHandler: async (params, context) => {
-    // Display the provider's message, schema, and metadata in a real host UI.
-    // Dismiss the form when context.signal is aborted.
-    return await showHostForm(params, context);
-  },
-});
-```
-
-Only a configured handler advertises MCP `elicitation.form`. Form requests from
-`elicitation/create` or `openai/elicitation/create` are forwarded with their raw
-parameters and `_meta`; omitted mode means form. The host response preserves its
-content and metadata. The adapter never fabricates acceptance or persistence.
-Without a handler it returns method-not-found. Unsupported URL requests return
-an error. The desktop app currently supplies no form callback and therefore does
-not advertise interactive elicitation.
-
-Context includes `requestId`, `signal`, and the active tool's `sessionId`,
-`callId`, and `model`; discovery-time requests have no active tool identity.
-`elicitationTimeoutMs` defaults to 300000 and must be a positive safe integer.
-Expiry or provider cancellation returns `cancel`. Caller abort, call completion,
-release, process exit, and attachment close dismiss pending forms; late responses
-are ignored. Host exceptions produce an internal error without exposing details.
+Permissions and consent belong to the official OpenAI provider. The attachment
+advertises no MCP client capabilities and responds to incoming provider RPC
+requests with standard method-not-found (`-32601`) errors. Provider notifications
+receive no response.
 
 Run `pnpm --filter nanocodex-computer test` and
 `pnpm --filter nanocodex-computer typecheck`. Tests use synthetic MCP protocol
