@@ -5,6 +5,7 @@ import TestRenderer, { act } from "react-test-renderer";
 
 import {
   AgentTerminalView,
+  ElevenLabsSettings,
   GeneratedOutputView,
   ConversationHistoryRail,
   TerminalComposer,
@@ -1116,5 +1117,49 @@ test("client-owned tool forms render nested requests even when tool details are 
   });
   assert.equal(renderer.root.findAllByProps({ "data-intake": "intake" }).length, 1);
   assert.equal(renderer.root.findAllByType("details").length, 0);
+  await act(async () => renderer.unmount());
+});
+
+test("ElevenLabs preferences select provider and voice before reconnect", async () => {
+  const calls = [];
+  let renderer;
+  await act(async () => { renderer = TestRenderer.create(React.createElement(VoiceControl, {
+    agentReady: true,
+    elevenLabsManager: { listVoices: async () => [{ voiceId: "sample", name: "Sample" }] },
+    voice: voiceSnapshot({ isActive: true, stop: async () => calls.push("stop"), start: async settings => calls.push(settings) }),
+  })); });
+  await act(async () => renderer.root.findByProps({ "aria-label": "Voice settings" }).props.onClick());
+  const provider = renderer.root.findAllByType("label").find(node => node.children[0] === "Speech provider").findByType("select");
+  await act(async () => provider.props.onChange({ target: { value: "elevenlabs" } }));
+  await act(async () => renderer.root.findByProps({ "aria-label": "Save voice settings" }).props.onClick());
+  assert.equal(calls.length, 0);
+  await act(async () => renderer.root.findByProps({ "aria-label": "ElevenLabs voice" }).props.onChange({ target: { value: "sample" } }));
+  await act(async () => renderer.root.findByProps({ "aria-label": "Save voice settings" }).props.onClick());
+  assert.equal(calls[0], "stop");
+  assert.equal(calls[1].outputProvider, "elevenlabs");
+  assert.equal(calls[1].elevenLabsVoiceId, "sample");
+  await act(async () => renderer.unmount());
+});
+
+
+test("clone verification leaves current voice unchanged and clears recordings", async () => {
+  const selected = [];
+  let renderer;
+  await act(async () => { renderer = TestRenderer.create(React.createElement(ElevenLabsSettings, {
+    voiceId: "existing", onSelect: id => selected.push(id), manager: {
+      listVoices: async () => [],
+      cloneVoice: async input => { assert.equal(input.consent, true); return { voiceId: "clone", name: input.name, requiresVerification: true }; },
+    },
+  })); });
+  const root = renderer.root;
+  await act(async () => root.findAllByType("input").find(node => node.props.maxLength === 100).props.onChange({ target: { value: "Sample" } }));
+  await act(async () => root.findByProps({ type: "file" }).props.onChange({ target: { files: [new File(["audio"], "sample.wav", { type: "audio/wav" })] } }));
+  const cloneButton = () => root.findAllByType("button").find(node => node.children[0] === "Create voice clone");
+  assert.equal(cloneButton().props.disabled, true);
+  await act(async () => root.findByProps({ type: "checkbox" }).props.onChange({ target: { checked: true } }));
+  await act(async () => cloneButton().props.onClick());
+  assert.deepEqual(selected, []);
+  assert.match(root.findByProps({ role: "status" }).children.join(""), /Complete verification/);
+  assert.equal(root.findByProps({ type: "checkbox" }).props.checked, false);
   await act(async () => renderer.unmount());
 });

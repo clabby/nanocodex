@@ -143,6 +143,7 @@ jobs:
           continuity=devices::playout::tests::continuous_speech_survives_device_cadence_and_packet_jitter
           cargo test --locked --manifest-path third_party/codex-voice/Cargo.toml -p nanocodex-voice-host -- --skip "$continuity"
           cargo test --locked --manifest-path third_party/codex-voice/Cargo.toml -p nanocodex-voice-host "$continuity" -- --exact
+          cargo test --locked --manifest-path third_party/codex-voice/Cargo.toml -p nanocodex-webrtc-voice-host -- --test-threads=1
           cargo test --locked -p nanocodex-voice-native
       - name: Stage private runtime
         run: python3 scripts/build-voice-native.py

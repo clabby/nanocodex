@@ -203,7 +203,7 @@ export class RemoteBrowserSession {
           if (track.kind !== "video" && track.kind !== "audio") return;
           // Request interactive playout for both synchronized tracks. This is
           // a preference; the receiver still adapts to actual network jitter.
-          const lowDelay = receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null; playoutDelayHint?: number };
+          const lowDelay = receiver as { jitterBufferTarget?: number | null; playoutDelayHint?: number };
           try {
             if ("jitterBufferTarget" in lowDelay) lowDelay.jitterBufferTarget = 0;
             else if ("playoutDelayHint" in lowDelay) lowDelay.playoutDelayHint = 0;

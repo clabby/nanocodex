@@ -236,8 +236,13 @@ requesting speech. Context and speech are split into provider-sized messages.
 These commands retain frames until sent and preserve them
 across reconnects when using the sideband transport. They are also methods on
 the resource and on
-`useVoice` from `nanocodex-react`. These settings use ChatGPT subscription voice;
-custom voices and Platform audio configuration are not accepted.
+`useVoice` from `nanocodex-react`. Choose `outputProvider: "elevenlabs"` and `elevenLabsVoiceId` to synthesize
+spoken output with an ElevenLabs account voice, including an instant clone.
+The account voice settings panel connects the API key, lists voices, and uploads
+cloning samples after explicit consent. Keys are encrypted on the server and
+never included in saved voice settings. ChatGPT still owns live input and agent
+handoffs; `voice` continues to select its built-in voice. The default output
+provider is `openai`. Platform audio configuration is not accepted.
 
 `Voice.create(...)` remains the equivalent namespaced resource constructor, and
 `Voice.voices` is the exact ChatGPT V3 voice catalog. The constructor accepts a
