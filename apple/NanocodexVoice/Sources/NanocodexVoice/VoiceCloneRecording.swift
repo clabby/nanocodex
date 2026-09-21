@@ -69,7 +69,16 @@ import SwiftUI
         let token = generation
         preparing = true
         permissionDenied = false
-        let granted = await AVAudioApplication.requestRecordPermission()
+        let granted: Bool
+        #if DEBUG && targetEnvironment(simulator)
+        if ProcessInfo.processInfo.arguments.contains("--voice-clone-ui-fixture") {
+            granted = true
+        } else {
+            granted = await AVAudioApplication.requestRecordPermission()
+        }
+        #else
+        granted = await AVAudioApplication.requestRecordPermission()
+        #endif
         guard token == generation else { return }
         preparing = false
         permissionDenied = !granted
@@ -79,9 +88,22 @@ import SwiftUI
             try audio.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
             try audio.setActive(true)
             ownsAudio = true
+            let recorder: AVAudioRecorder
+            #if DEBUG && targetEnvironment(simulator)
+            if ProcessInfo.processInfo.arguments.contains("--voice-clone-ui-fixture") {
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-clone-\(UUID().uuidString).wav")
+                pendingURL = url
+                recorder = try SimulatorVoiceCloneRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 8000, AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16])
+            } else {
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-clone-\(UUID().uuidString).m4a")
+                pendingURL = url
+                recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44100, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 128000])
+            }
+            #else
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-clone-\(UUID().uuidString).m4a")
             pendingURL = url
-            let recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44100, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 128000])
+            recorder = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44100, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 128000])
+            #endif
             recorder.isMeteringEnabled = true
             recorder.delegate = self
             self.recorder = recorder
@@ -224,4 +246,55 @@ import SwiftUI
     }
     private func releaseAudio() { guard ownsAudio else { return }; ownsAudio = false; try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
 }
+#if DEBUG && targetEnvironment(simulator)
+/// Explicit UI-test fixture; never captures microphone input and is absent from device/release builds.
+private final class SimulatorVoiceCloneRecorder: AVAudioRecorder {
+    private var startedAt: Date?
+    private var stoppedElapsed: TimeInterval = 0
+    private var limit: TimeInterval = 120
+    private var stopTimer: Timer?
+
+    override var currentTime: TimeInterval {
+        guard let startedAt else { return stoppedElapsed }
+        return min(limit, Date().timeIntervalSince(startedAt))
+    }
+    override func record(forDuration duration: TimeInterval) -> Bool {
+        limit = duration
+        startedAt = Date()
+        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in self?.stop() }
+        return true
+    }
+    override func updateMeters() {}
+    override func averagePower(forChannel channelNumber: Int) -> Float { -12 }
+    override func stop() {
+        guard startedAt != nil else { return }
+        stoppedElapsed = currentTime
+        startedAt = nil
+        stopTimer?.invalidate(); stopTimer = nil
+        do {
+            // A quiet tone makes real playback observable while avoiding any recorded personal audio.
+            let count = max(1, Int(stoppedElapsed * 8000))
+            let byteCount = UInt32(count * 2)
+            var wav = Data()
+            func word<T: FixedWidthInteger>(_ value: T) {
+                var little = value.littleEndian
+                withUnsafeBytes(of: &little) { wav.append(contentsOf: $0) }
+            }
+            wav.append(contentsOf: "RIFF".utf8); word(byteCount + 36)
+            wav.append(contentsOf: "WAVEfmt ".utf8); word(UInt32(16))
+            word(UInt16(1)); word(UInt16(1)); word(UInt32(8000))
+            word(UInt32(16000)); word(UInt16(2)); word(UInt16(16))
+            wav.append(contentsOf: "data".utf8); word(byteCount)
+            for index in 0..<count {
+                word(Int16(sin(Double(index) * 2 * .pi * 220 / 8000) * 1200))
+            }
+            try wav.write(to: url)
+            delegate?.audioRecorderDidFinishRecording?(self, successfully: true)
+        } catch {
+            delegate?.audioRecorderDidFinishRecording?(self, successfully: false)
+        }
+    }
+    deinit { stopTimer?.invalidate() }
+}
+#endif
 #endif
