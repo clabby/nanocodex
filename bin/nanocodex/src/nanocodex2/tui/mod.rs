@@ -10,6 +10,7 @@ mod bug;
 mod clipboard;
 mod components;
 mod context;
+mod control;
 mod editor;
 mod format;
 mod history;
@@ -506,6 +507,7 @@ struct PendingVoice {
 }
 
 struct DriverRuntime {
+    control_bridge: Option<nanocodex_tui_control::Bridge>,
     screen: screen::Controller,
     pending_voice: Option<PendingVoice>,
     voice_selection: crate::voice::Selection,
@@ -1890,6 +1892,7 @@ async fn run_inner(
     let mut input = EventStream::new();
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
     let mut runtime = DriverRuntime {
+        control_bridge: None,
         screen: screen::Controller::new(components::video_picker()),
         client: client.clone(),
         pending_voice: None,
@@ -2002,10 +2005,21 @@ async fn run_inner(
     let mut clone_tick = tokio::time::interval(std::time::Duration::from_millis(200));
     clone_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut stopping = false;
+    let mut control_server = if nanocodex_tui_control::Server::enabled() {
+        Some(nanocodex_tui_control::Server::start("managed").map_err(terminal_error)?)
+    } else {
+        None
+    };
+    runtime.control_bridge = control_server.as_ref().map(|server| server.bridge.clone());
+    let mut control_tasks = JoinSet::new();
+
     let mut routing_tick = tokio::time::interval(Duration::from_secs(1));
     routing_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     while !stopping {
+        if let Some(server) = &control_server {
+            control::snapshot(&server.bridge, &app, &runtime, false);
+        }
         // Finish thread selection and prompt admission before detaching. The durable
         // managed turn itself continues independently of this terminal.
         if reload_requested && runtime.ready_for_reload() {
@@ -2164,6 +2178,23 @@ async fn run_inner(
                 (Some(&mut voice.status), Some(&mut voice.transcripts))
             });
         tokio::select! {
+            command = async { match &mut control_server { Some(server) => server.commands.recv().await, None => pending().await } } => {
+                if let Some(command) = command { control::dispatch(command, &control_server.as_ref().unwrap().bridge, &runtime, &mut control_tasks); }
+            }
+            Some(result) = control_tasks.join_next(), if !control_tasks.is_empty() => {
+                if let Ok((command, result, settings, session)) = result {
+                    if session == runtime.agent_id && let Some(settings) = settings {
+                        runtime.settings = settings;
+                        request_render(app.update(AppEvent::SettingsHydrated {pane:PaneId::Main,
+                            effort:effort_from_thinking(settings.thinking),fast_mode:settings.fast_mode,model:settings.model}), &mut scheduler);
+                    }
+                    // Publish readiness and revisions before a client can act on this acknowledgement.
+                    if let Some(server) = &control_server {
+                        control::snapshot(&server.bridge, &app, &runtime, false);
+                    }
+                    command.finish(result);
+                }
+            }
             _ = routing_tick.tick(), if runtime.routing_enabled && !runtime.routing_resolved
                 && (!runtime.controls.is_empty() || !runtime.admitting.is_empty() || !runtime.managed_active_turns.ids.is_empty()) => {
                 runtime.refresh_routing();
@@ -2337,6 +2368,7 @@ async fn run_inner(
             }, if runtime.managed_events_open => {
                 match event {
                     Some(event) => {
+                        if let Some(server) = &control_server { let mut value=serde_json::to_value(&event).unwrap_or_default(); value["session_id"]=serde_json::json!(runtime.agent_id); server.bridge.publish("managed.event",value); }
                         runtime.observed_cursor.clone_from(&event.cursor);
                         if let Some(request_id) = event.data.turn_id() {
                             if runtime.submitted_turns.contains(request_id) {
@@ -4070,6 +4102,9 @@ async fn apply_update(
                             .composer()
                             .draft()
                             .to_owned();
+                        if let Some(bridge) = &runtime.control_bridge {
+                            control::snapshot(bridge, app, runtime, true);
+                        }
                         terminal.suspend().map_err(terminal_error)?;
                         let outcome = editor::edit(&draft, &runtime.workspace).await;
                         terminal.resume().map_err(terminal_error)?;
@@ -4711,6 +4746,7 @@ mod tests {
             ManagedApiKey::parse(format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43)))
                 .unwrap();
         DriverRuntime {
+            control_bridge: None,
             screen: crate::tui::screen::Controller::new(ratatui_image::picker::Picker::halfblocks()),
             pending_voice: None,
             voice_selection: Default::default(),

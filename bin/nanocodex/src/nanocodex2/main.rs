@@ -103,6 +103,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Discover and control a running interactive terminal.
+    Tui(nanocodex_tui_control::Cli),
     /// Install or refresh the upstream computer-use runtime.
     Computer(computer::Computer),
     /// Sign in with an SMS code, or import an account API key from stdin.
@@ -601,6 +603,12 @@ fn try_main() -> Result<(), ManagedError> {
 
 async fn run(cli: Cli) -> Result<(), ManagedError> {
     let command = match cli.command {
+        Some(Command::Tui(command)) => {
+            return command
+                .run()
+                .await
+                .map_err(|error| ManagedError::Configuration(error.to_string()));
+        }
         #[cfg(target_os = "linux")]
         Some(Command::WaylandHost(_) | Command::DesktopHost(_) | Command::ServerHost(_)) => {
             return Err(ManagedError::Configuration(
@@ -685,7 +693,13 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         None
     };
     let result = match command {
-        Some(Command::Login(_) | Command::Status(_) | Command::Logout(_) | Command::Account(_)) => {
+        Some(
+            Command::Tui(_)
+            | Command::Login(_)
+            | Command::Status(_)
+            | Command::Logout(_)
+            | Command::Account(_),
+        ) => {
             unreachable!("handled before managed client setup")
         }
         Some(Command::Voice(command)) => voice::run(&client, command).await,

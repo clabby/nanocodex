@@ -96,6 +96,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Discover and control a running interactive terminal.
+    Tui(nanocodex_tui_control::Cli),
     /// Install or refresh the upstream computer-use runtime.
     Computer(computer::Computer),
     /// Manage this computer’s Hand service or add a Linux Hand over SSH.
@@ -212,6 +214,7 @@ async fn run(cli: Cli) -> Result<()> {
         eprintln!("Could not configure automatic updates: {error:#}");
     }
     match cli.command {
+        Some(Command::Tui(command)) => command.run().await.map_err(Into::into),
         Some(Command::Computer(command)) => command.run().await.map_err(|error| eyre!(error)),
         Some(Command::Hand(command)) => command.run().await,
         Some(Command::Account(command)) => command.run().await.map_err(Into::into),

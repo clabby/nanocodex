@@ -5772,6 +5772,7 @@ dependencies = [
  "nanocodex-observability",
  "nanocodex-subagents",
  "nanocodex-tools",
+ "nanocodex-tui-control",
  "nanocodex-vm",
  "nanocodex-voice",
  "nanousd",
@@ -6245,6 +6246,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex-tui-control"
+version = "0.6.4"
+dependencies = [
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "nanocodex-vm"
 version = "0.6.4"
 dependencies = [
@@ -6378,6 +6392,7 @@ dependencies = [
  "nanocodex-remote",
  "nanocodex-subagents",
  "nanocodex-tools",
+ "nanocodex-tui-control",
  "nanocodex-vm",
  "nanocodex-voice-native",
  "nanocodex-voice-protocol",

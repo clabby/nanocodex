@@ -150,6 +150,11 @@ pub trait LifecycleBackend: Send + Sync + 'static {
         completed: Option<TurnResult>,
     ) -> BackendFuture<Result<(Nanocodex, AgentEvents)>>;
 
+    /// Forks a side conversation with explicit persisted provenance.
+    fn fork_side_conversation(&self) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+        self.fork(None)
+    }
+
     /// Flushes backend-owned persistence.
     fn flush(&self) -> BackendFuture<Result<()>>;
 
@@ -539,6 +544,12 @@ impl LifecycleBackend for LocalLifecycle {
         Box::pin(async move { request_spawn(&commands, &shutdown, options).await })
     }
 
+    fn fork_side_conversation(&self) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+        let commands = self.commands.clone();
+        let shutdown = self.shutdown.clone();
+        Box::pin(async move { request_fork(&commands, &shutdown, None, true).await })
+    }
+
     fn fork(
         &self,
         completed: Option<TurnResult>,
@@ -559,7 +570,7 @@ impl LifecycleBackend for LocalLifecycle {
                 }
                 None => None,
             };
-            request_fork(&commands, &shutdown, checkpoint).await
+            request_fork(&commands, &shutdown, checkpoint, false).await
         })
     }
 
