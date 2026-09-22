@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn filled_bar_uses_the_selected_model_color() {
-        let mut selector = ModelSelector::new(Model::Astra);
+        let mut selector = ModelSelector::new(Model::Luna);
         let terminal = render(&mut selector);
         let rail = terminal
             .backend()
@@ -365,7 +365,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(!rail.is_empty());
-        assert!(rail.iter().all(|cell| cell.fg == Color::LightMagenta));
+        assert!(rail.iter().all(|cell| cell.fg == Color::White));
     }
 
     #[test]
