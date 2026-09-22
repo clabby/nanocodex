@@ -3675,9 +3675,7 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
                 return Submission::ModelPicker;
             };
             if settings.next().is_some() {
-                return Submission::InvalidCommand(
-                    "Usage: /model [sol|terra|luna|astra]".to_owned(),
-                );
+                return Submission::InvalidCommand("Usage: /model [astra|sol|luna]".to_owned());
             }
             return match argument.parse() {
                 Ok(model) => Submission::Model(model),
