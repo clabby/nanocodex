@@ -45,7 +45,10 @@ public struct MessageQueuePresentation: Sendable {
         messages = ordered + pending.compactMap { $0.agentID == agentID ? byID.removeValue(forKey: $0.id) : nil }
         attachmentNames = Dictionary(uniqueKeysWithValues: messages.map { message in
             let row = userRows[message.id]
-            let names = (message.attachments ?? []).map(\.name) + (row?.imageFiles ?? []).map(\.name) + (row?.videos ?? []).map(\.name)
+            let attachmentNames: [String] = (message.attachments ?? []).map(\.name)
+            let imageNames: [String] = (row?.imageFiles ?? []).map(\.name)
+            let videoNames: [String] = (row?.videos ?? []).map(\.name)
+            let names = attachmentNames + imageNames + videoNames
             var seen = Set<String>()
             return (message.id, names.filter { seen.insert($0).inserted })
         })

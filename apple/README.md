@@ -213,6 +213,7 @@ Return/Tab/Esc controls below the video.
 | Voice | Start an interactive spoken conversation with this agent; minimize the panel to keep talking |
 | Stop turn | Immediately cancel the selected turn from the send button |
 | Header menu → Account settings | Manage the account and device Hand in a dismissible sheet |
+| Bottom bar → CRM | Search people and companies, open saved profiles, browse social links, education/work facts and notes, and follow relationships to related profiles. Reads use the signed-in account; paginated sections offer Load more. |
 | Header menu → Scheduled jobs | View, edit, pause, resume, or cancel jobs across the account; open the source chat and latest run |
 
 The compact header shows the selected conversation, its running indicator, a

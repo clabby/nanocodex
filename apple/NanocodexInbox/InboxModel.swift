@@ -1202,6 +1202,21 @@ final class InboxModel: ObservableObject {
         connected = true; connection = "Connecting"; reconcile(); resume(initialListing: initial)
         updateDeviceHand(); scheduleHandRefresh()
     }
+    func crmRead(id: String? = nil, section: String? = nil, query: [String: String] = [:]) async throws -> JSON {
+        guard connected, let client else { throw APIError.invalidCredential }
+        let epoch = generation
+        var path = "/v1/crm"
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        if let id { path += "/" + (id.addingPercentEncoding(withAllowedCharacters: allowed) ?? "") }
+        if let section { path += "/" + section }
+        var components = URLComponents()
+        components.queryItems = query.filter { !$0.value.isEmpty }.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
+        if let query = components.percentEncodedQuery, !query.isEmpty { path += "?" + query }
+        let result = try await client.json(path: path)
+        guard connected, generation == epoch, self.client === client else { throw CancellationError() }
+        return result
+    }
+
     func musicConnectorClient() -> ManagedClient? {
         guard connected, !isDemo, let accountCredential else { return nil }
         return ManagedClient(credential: accountCredential, locationContext: { await Self.promptLocationContext() })

@@ -377,6 +377,7 @@ enum StartupFixture {
 private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
     private static let queue = DispatchQueue(label: "nanocodex.startup-fixture")
     private static var historyLive = false
+    private static var crmFailed = false
     private static var historyStreams: [String: StartupFixtureProtocol] = [:]
     private static var historyPages: Int { ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_LIVE_READING"] == "1" ? 3 : historyMedia ? 6 : 20 }
     private static let historyPageSize = 128
@@ -409,7 +410,21 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
             let id = request.url!.pathComponents.dropFirst(3).first ?? "saved"
             let isStream = path.hasSuffix("/events")
             var status = 200, delay = 0.05, body = "{}"
-            if path == "/v1/agents" {
+            if path == "/v1/crm" {
+                body = #"{"records":[{"id":"alex","kind":"person","name":"Alex Morgan","title":"Product designer · Example Studio"},{"id":"sam","kind":"person","name":"Sam Rivera","title":"Landscape architect"},{"id":"maya","kind":"person","name":"Maya Chen","title":"Engineer · Northstar"}],"next_cursor":null}"#
+                let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                if ProcessInfo.processInfo.environment["NANOCODEX_CRM_RETRY_FIXTURE"] == "1", !Self.crmFailed {
+                    Self.crmFailed = true; status = 503; body = #"{"error":"crm_unavailable"}"#
+                } else if query.contains(where: { $0.name == "q" && $0.value == "missing" }) {
+                    body = #"{"records":[],"next_cursor":null}"#
+                } else if query.contains(where: { $0.name == "kind" && $0.value == "company" }) {
+                    body = #"{"records":[{"id":"studio","kind":"company","name":"Example Studio"}],"next_cursor":null}"#
+                }
+            } else if path == "/v1/crm/alex" {
+                body = #"{"record":{"id":"alex","kind":"person","name":"Alex Morgan","title":"Product designer · Example Studio"},"identities":[{"id":"social","kind":"github","value":"example"}],"facts":[{"id":"education","predicate":"bio.education","value":"Example University","origin":"user"}],"relationships":[{"id":"friend","from_id":"alex","to_id":"sam","to_name":"Sam Rivera","type":"worked_with","description":"Designed the community garden.","origin":"user"}],"notes":[{"id":"note","body":"Met at the design workshop.","created_at":"2026-09-01"}]}"#
+            } else if path == "/v1/crm/sam" {
+                body = #"{"record":{"id":"sam","kind":"person","name":"Sam Rivera","title":"Landscape architect"},"identities":[],"facts":[],"relationships":[{"id":"friend","from_id":"alex","from_name":"Alex Morgan","to_id":"sam","to_name":"Sam Rivera","type":"worked_with","description":"Designed the community garden together.","origin":"user"}],"notes":[{"id":"sam-note","body":"Interested in making shared spaces feel more welcoming.","created_at":"2026-09-12"}]}"#
+            } else if path == "/v1/agents" {
                 delay = 6
                 if ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_REJECT"] == "1" { status = 401 }
             let now = Date().timeIntervalSince1970 * 1000
@@ -476,7 +491,9 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
         }
         if historyMedia {
             let slot = (cursor - 1) % historyPageSize
-            let call = "history-image-\((cursor - 1) / historyPageSize * 3 + max(0, slot - 121) / 2 + 1)"
+            let pageIndex: Int = (cursor - 1) / historyPageSize
+            let imageOffset: Int = max(0, slot - 121) / 2
+            let call = "history-image-\(pageIndex * 3 + imageOffset + 1)"
             if slot >= 121 && slot <= 126 {
                 let index = (cursor - 1) / historyPageSize * 3 + (slot - 121) / 2 + 1
                 let type = slot % 2 == 1 ? "tool.call" : "tool.result"

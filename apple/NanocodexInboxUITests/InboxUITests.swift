@@ -2,6 +2,41 @@ import XCTest
 import UIKit
 
 final class InboxUITests: XCTestCase {
+    // CRM failure scenarios: failed fetch must be retryable; filters must not retain
+    // old rows; profile facts/notes must render; relationships must open their target.
+    func testCRMBrowseAndRelationshipNavigation() {
+        let app = XCUIApplication()
+        app.launchEnvironment["NANOCODEX_STARTUP_FIXTURE"] = "1"
+        app.launchEnvironment["NANOCODEX_STARTUP_PROFILE"] = UUID().uuidString
+        app.launchEnvironment["NANOCODEX_CRM_RETRY_FIXTURE"] = "1"
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-crm"].waitForExistence(timeout: 25))
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["Retry"].waitForExistence(timeout: 10))
+        app.buttons["Retry"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 10))
+        capture(app, "crm-directory")
+        app.buttons["crm-filter-company"].tap()
+        XCTAssertTrue(app.buttons["crm-record-studio"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["crm-record-alex"].exists)
+        app.buttons["crm-filter-person"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 5))
+        let search = app.textFields["crm-search"]
+        search.tap(); search.typeText("missing")
+        XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5))
+        search.tap(); search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 7))
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 5))
+        app.buttons["crm-record-alex"].tap()
+        XCTAssertTrue(app.staticTexts["Example University"].waitForExistence(timeout: 5))
+        capture(app, "crm-profile")
+        for _ in 0..<4 where !app.staticTexts["Met at the design workshop."].isHittable { app.swipeUp() }
+        XCTAssertTrue(app.staticTexts["Met at the design workshop."].exists)
+        for _ in 0..<4 where !app.buttons["crm-related-sam"].isHittable { app.swipeDown() }
+        app.buttons["crm-related-sam"].tap()
+        XCTAssertTrue(app.staticTexts["Sam Rivera"].waitForExistence(timeout: 5))
+        capture(app, "crm-related-profile")
+    }
+
     private func selectedConversationTab(_ app: XCUIApplication) -> XCUIElement {
         app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND selected == true", "conversation-title:")).firstMatch
     }

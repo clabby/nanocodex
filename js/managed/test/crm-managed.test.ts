@@ -101,3 +101,14 @@ it("imports and researches a meeting, recalls missing notes, and records the use
   expect(calendarReads).toBe(1);
   expect(emailReads).toBe(1);
 }, 60_000);
+
+it("routes CRM reads through the worker while denying trusted Connect principals", async () => {
+  const { default: worker } = await import("../src/index");
+  const { createExecutionContext } = await import("cloudflare:test");
+  const principal: Principal = { kind: "api_key", userId: "crm-route-owner", organizationId: "example-org", teamId: "example-team", role: "owner", subjectId: "user:crm-route-owner", credentialId: "example-key", authorizationEpoch: 1, capabilities: ["agents:read", "tools:use"] };
+  const request = () => new Request("https://example.test/v1/crm?kind=person");
+  const direct = await worker.fetch(request(), env as never, createExecutionContext(), principal);
+  expect(direct.status).toBe(200);
+  expect(await direct.json()).toMatchObject({ records: [] });
+  expect((await worker.fetch(request(), env as never, createExecutionContext(), { ...principal, kind: "connect_grant" })).status).toBe(403);
+});

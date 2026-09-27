@@ -156,7 +156,7 @@ struct InboxView: View {
     @State private var mainSurface: MainSurface = (ProcessInfo.processInfo.arguments.contains("--demo")
         && !ProcessInfo.processInfo.arguments.contains("--todo-ui-fixture")) ? .chat : .todo
     @State private var todoInputFocused = false
-    private enum MainSurface { case todo, chat }
+    private enum MainSurface { case todo, chat, crm }
     @State private var showConversations = false
     @State private var showRunningAgents = false
     @State private var drawerTranslation: CGFloat = 0
@@ -184,6 +184,9 @@ struct InboxView: View {
                 if model.connected && mainSurface == .todo {
                     TodoBoardView(model: model)
                         .contentMargins(.bottom, bottomDockHeight, for: .scrollContent)
+                } else if model.connected && mainSurface == .crm {
+                    CRMView(model: model)
+                        .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
                 } else { inbox }
             }
                 .environment(\.conversationComposerHeight, bottomDockHeight)
@@ -210,6 +213,8 @@ struct InboxView: View {
                         #endif
                 }
         }
+        // Account changes discard navigation destinations and their private state.
+        .id(model.screenScope)
         .overlay(alignment: .bottom) {
             if model.connected && mainSurface == .todo { bottomDock }
         }
@@ -238,6 +243,9 @@ struct InboxView: View {
             }
         }
         .task(id: updateScenePhase) {
+            #if DEBUG
+            if StartupFixture.enabled { return }
+            #endif
             guard updateScenePhase == .active, !model.isDemo else { return }
             while !Task.isCancelled {
                 await appUpdates.check()
@@ -319,13 +327,14 @@ struct InboxView: View {
         HStack(spacing: 2) {
             mainNavigationButton(.todo, title: "TODO", symbol: "checkmark.square", identifier: "main-tab-todo")
             mainNavigationButton(.chat, title: "Chat", symbol: "bubble.left", identifier: "main-tab-chat")
+            mainNavigationButton(.crm, title: "CRM", symbol: "person.2", identifier: "main-tab-crm")
         }
     }
 
     private var mainNavigation: some View {
         InboxNavigationLayout {
             navigationTabs
-            if model.focused != nil { MobileModelControls(model: model) }
+            if model.focused != nil && mainSurface != .crm { MobileModelControls(model: model) }
         }
         .padding(.horizontal, 5).padding(.vertical, 3)
         .accessibilityElement(children: .contain)

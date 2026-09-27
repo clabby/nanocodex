@@ -412,6 +412,26 @@ fields and an empty tags array clears tags. A company deletion unlinks its
 people and preserves those people. Tool arguments cannot choose another account.
 CRM records and notes remain untrusted content, never tool authority.
 
+Account clients can browse the same data through read-only HTTP routes. All
+require direct account authorization with `agents:read` and `tools:use`; Connect
+grants are rejected. Responses use `Cache-Control: no-store`.
+
+| GET route | Query parameters | Response |
+| --- | --- | --- |
+| `/v1/crm` | `q`, `kind` (`person` or `company`), `tag`, `company_id`, `limit`, `cursor` | `records`, `next_cursor` |
+| `/v1/crm/:id` | `notes_limit`, `notes_cursor`, `timeline_limit`, `timeline_cursor` | `record`, `notes`, notes `next_cursor`, research, `identities`, `facts`, `relationships`, and each collection's `*_next_cursor`; people also include `timeline` and `timeline_next_cursor` |
+| `/v1/crm/:id/identities` | `limit`, `cursor` | `identities`, `next_cursor` |
+| `/v1/crm/:id/facts` | `limit`, `cursor` | `facts`, `next_cursor` |
+| `/v1/crm/:id/relationships` | `limit`, `cursor` | `relationships`, `next_cursor` |
+
+Relationship rows include account-scoped `from_name` and `to_name` alongside
+`from_id` and `to_id`. Continue notes with `/v1/crm/:id?notes_cursor=...`.
+Cursors are opaque and bound to the account and query; preserve filters between
+pages. Page limits range from 1 to 100. Unknown or repeated query parameters
+return 400; missing authentication returns 401, insufficient authorization 403,
+missing or another account's records 404, unsupported methods 405, and unavailable
+storage 503.
+
 Calendar collection is opt-in through `crm_automation` (`enable`, `status`,
 `disable`). Enable selects one connected Google account and one or more calendars
 (default `primary`), and creates an hourly durable agent schedule. The first

@@ -446,3 +446,15 @@ test("TODO forwarding excludes unsupported adjacent endpoints", async () => {
     } }, new URL(request.url)), undefined, path);
   }
 });
+
+test("CRM reads reach the managed authorization boundary with pagination intact", async () => {
+  for (const path of ["/v1/crm?q=Example&limit=1", "/v1/crm/example?notes_cursor=opaque", "/v1/crm/example/identities?cursor=opaque", "/v1/crm/example/facts", "/v1/crm/example/relationships"]) {
+    const request = new Request(`https://account.test${path}`, { headers: { authorization: "Bearer synthetic-key" } });
+    const response = new Response("{}", { headers: { "cache-control": "no-store" } });
+    let forwarded: Request | undefined;
+    const result = await routeManaged(request, { NANOCODEX_BACKEND: { async fetch(candidate: Request) { forwarded = candidate; return response; }, connect() { throw new Error("unused"); } } }, new URL(request.url));
+    assert.equal(forwarded, request);
+    assert.equal(result, response);
+  }
+  assert.equal(isManagedRoutePath("/v1/crm/example/delete"), false);
+});

@@ -13,6 +13,27 @@ struct TodoBoardView: View {
         List {
             let feed = TodoFeed(captures: model.todoItems, decisions: model.todoDecisions,
                                 traces: model.todoTraces, filter: filter)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("TODO")
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .tracking(-1.5)
+                    Spacer()
+                    let pending = model.todoDecisions.filter { $0.status == "needs_you" }.count
+                    if pending > 0 {
+                        Text("\(pending) to decide")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(Color.orange.opacity(0.09), in: Capsule())
+                    }
+                }
+            }
+            .padding(.top, 8).padding(.bottom, 6)
+            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+
             Picker("Show", selection: $model.todoFilter) {
                 ForEach(TodoFeedFilter.allCases, id: \.self) { value in
                     Text(value.rawValue).tag(value)
@@ -20,21 +41,27 @@ struct TodoBoardView: View {
             }
             .pickerStyle(.segmented)
             .accessibilityIdentifier("todo-filter")
+            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 8, trailing: 16))
             .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
             let visible = feed.decisions
             if visible.isEmpty && feed.traces.isEmpty && !model.todoLoaded {
-                Text(model.todoError == nil ? "Loading decisions…" : "Decisions couldn't be loaded. Pull down to retry.")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                emptyState(title: model.todoError == nil ? "Finding your next move" : "Couldn't load decisions",
+                           detail: model.todoError == nil ? "Your decisions will appear here shortly." : "Pull down to try again.",
+                           symbol: "tray")
                     .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
             } else if visible.isEmpty && feed.traces.isEmpty {
-                Label(filter == .ignore ? "No ignored results in the recent feed" : "Nothing needs your decision right now", systemImage: "checkmark.circle")
-                    .foregroundStyle(.secondary)
+                emptyState(title: filter == .ignore ? "Nothing ignored" : "You're all caught up",
+                           detail: filter == .ignore ? "No ignored results in the recent feed" : "Nothing needs your decision right now",
+                           symbol: "checkmark")
                     .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
                     .accessibilityIdentifier("todo-no-decisions")
             } else {
                 ForEach(visible) { decision in
                     decisionCard(decision)
-                        .listRowInsets(EdgeInsets(top: 6, leading: 18, bottom: 6, trailing: 18))
+                        .listRowInsets(EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16))
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
@@ -42,7 +69,7 @@ struct TodoBoardView: View {
                                 Button {
                                     Task { _ = await model.respondTodo(to: decision, choiceID: choice.id, text: nil) }
                                 } label: { Label(choice.title, systemImage: "checkmark") }
-                                    .tint(.green).disabled(model.todoResponding)
+                                    .tint(.orange).disabled(model.todoResponding)
                                     .accessibilityIdentifier("decision-swipe-primary:\(decision.id)")
                             }
                         }
@@ -61,7 +88,7 @@ struct TodoBoardView: View {
             if !feed.traces.isEmpty {
                 Section {
                     ForEach(feed.traces) { trace in
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 3) {
                             Text(trace.outcomeLabel).font(.caption.weight(.medium)).foregroundStyle(.secondary)
                             Text(trace.title).font(.headline)
                             if !trace.sender.isEmpty { Text(trace.sender).font(.subheadline).foregroundStyle(.secondary) }
@@ -72,17 +99,23 @@ struct TodoBoardView: View {
                             if let date = trace.observedAt { Text(date, style: .date).font(.caption2).foregroundStyle(.secondary) }
                             if let url = trace.sourceURL {
                                 Link("Open source", destination: url).font(.caption)
+                                    .frame(minHeight: 44)
                             }
                         }
-                        .padding(.vertical, 5)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(ChatPalette.composer, in: RoundedRectangle(cornerRadius: 14))
+                        .listRowInsets(EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("todo-trace:\(trace.id)")
                     }
-                } header: { Text("Recent email results") }
+                } header: { sectionHeading("Recent email results", count: feed.traces.count) }
                   footer: { Text("Up to 100 recent results from the last 90 days.") }
             }
             if !feed.captures.isEmpty {
-                Section("Captured") {
+                Section {
                     ForEach(feed.captures) { item in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.body).font(.body)
@@ -92,14 +125,19 @@ struct TodoBoardView: View {
                             Text(item.status == "watching" ? "Watching" : item.status.capitalized)
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
-                        .padding(.vertical, 3)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 14))
+                        .listRowInsets(EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                     }
-                }
+                } header: { sectionHeading("Captured", count: feed.captures.count) }
             }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .background(Color(uiColor: .systemBackground))
+        .background(ChatPalette.background)
         .refreshable { await model.refreshTodo() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
@@ -116,23 +154,58 @@ struct TodoBoardView: View {
         }
     }
 
+    private func sectionHeading(_ title: String, count: Int) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).font(.system(size: 16, weight: .semibold))
+            Spacer()
+            Text(count, format: .number).font(.caption.monospacedDigit())
+        }
+        .foregroundStyle(.secondary)
+        .textCase(nil)
+        .padding(.top, 8).padding(.bottom, 4)
+    }
+
+    private func emptyState(title: String, detail: String, symbol: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 22, weight: .light))
+                .frame(width: 48, height: 48)
+                .background(ChatPalette.userBubble, in: Circle())
+            Text(title).font(.title2.weight(.semibold))
+            Text(detail).font(.subheadline).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16).padding(.vertical, 8)
+    }
+
     private func decisionCard(_ decision: TodoDecision) -> some View {
         Button { selectedDecision = decision } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(decision.sourceLabel.isEmpty ? "Decision" : decision.sourceLabel)
-                        .font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                    Spacer()
-                    if decision.status == "needs_you" {
-                        Circle().fill(.orange).frame(width: 7, height: 7)
-                    } else { Text(decision.status.capitalized).font(.caption).foregroundStyle(.secondary) }
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(decision.sourceLabel.isEmpty ? "Decision" : decision.sourceLabel)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(decision.status == "needs_you" ? "Pending" : decision.status.capitalized)
+                            .foregroundStyle(decision.status == "needs_you" ? Color.orange : Color.secondary)
+                    }
+                    .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    Text(decision.title)
+                        .font(.headline).multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !decision.context.isEmpty {
+                        Text(decision.context).font(.subheadline).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.leading).lineLimit(2)
+                    }
                 }
-                Text(decision.title).font(.headline).multilineTextAlignment(.leading)
-                Text(decision.context).font(.subheadline).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.leading).lineLimit(2)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
-            .padding(15).frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
+            .padding(12).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .background(ChatPalette.composer, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.primary.opacity(0.055)))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("decision-card:" + decision.id)
@@ -225,28 +298,27 @@ private struct DecisionDetailView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 10) {
                     Label(decision.sourceLabel.isEmpty ? "Decision" : decision.sourceLabel, systemImage: "sparkle")
                         .font(.subheadline).foregroundStyle(.secondary)
-                    Text(decision.title).font(.largeTitle.weight(.bold))
-                    Text(decision.context).font(.body)
+                    Text(decision.title).font(.system(size: 24, weight: .semibold)).tracking(-0.4)
+                    Text(decision.context).font(.body).foregroundStyle(.secondary)
                     if let todoID = decision.todoID,
                        let thought = model.todoItems.first(where: { $0.id == todoID }) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("From your capture").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                             Text(thought.body).font(.subheadline)
                         }
-                        .padding(14)
+                        .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 15))
+                        .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 12))
                     }
                     if let url = decision.sourceURL {
                         Link(destination: url) {
                             Label("Open source", systemImage: "arrow.up.right.square")
-                        }.accessibilityIdentifier("decision-source")
+                        }.frame(minHeight: 44).accessibilityIdentifier("decision-source")
                     }
                     if decision.status == "needs_you" {
-                        Text("Choose what happens next").font(.headline).padding(.top, 10)
                         ForEach(decision.choices) { choice in
                             Button {
                                 Task {
@@ -258,16 +330,18 @@ private struct DecisionDetailView: View {
                                     Spacer()
                                     Image(systemName: "arrow.right")
                                 }
-                                .padding(16)
-                                .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 15))
+                                .padding(.horizontal, 12).padding(.vertical, 8)
+                                .frame(minHeight: 44)
+                                .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 12))
                             }
                             .buttonStyle(.plain).disabled(model.todoResponding)
                             .accessibilityIdentifier("decision-choice:\(decision.id):\(choice.id)")
                         }
-                        Text("Edit or give instructions").font(.headline).padding(.top, 10)
+                        Text("Edit or give instructions").font(.subheadline.weight(.semibold)).padding(.top, 4)
                         TextEditor(text: $instructions)
-                            .frame(minHeight: 100).padding(8)
-                            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 15))
+                            .scrollContentBackground(.hidden)
+                            .frame(minHeight: 80).padding(6)
+                            .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 12))
                             .accessibilityIdentifier("decision-instructions")
                         Button("Submit instructions") {
                             Task {
@@ -275,7 +349,8 @@ private struct DecisionDetailView: View {
                                                            text: instructions.trimmingCharacters(in: .whitespacesAndNewlines)) { dismiss() }
                             }
                         }
-                        .buttonStyle(.borderedProminent)
+                        .frame(minHeight: 44)
+                        .buttonStyle(.borderedProminent).tint(.primary)
                         .disabled(instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.todoResponding)
                         if let error = model.todoError { Text(error).font(.caption).foregroundStyle(.orange) }
                     } else {
@@ -283,11 +358,10 @@ private struct DecisionDetailView: View {
                               systemImage: "checkmark.circle")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
-                    Text("A choice applies only to this decision; it never grants blanket permission for future actions.")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
-                .padding(22).frame(maxWidth: 620, alignment: .leading).frame(maxWidth: .infinity)
+                .padding(16).frame(maxWidth: 620, alignment: .leading).frame(maxWidth: .infinity)
             }
+            .background(ChatPalette.background)
             .navigationTitle("Decision").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) {
                 Button("Done") { dismiss() }.accessibilityIdentifier("decision-detail-close")
