@@ -252,6 +252,20 @@ normal browser Agent, an account-owned managed Agent, or a grant-scoped
 one-use ticket for that path. The browser binding never receives ChatGPT
 credentials or places its reusable grant bearer in a WebSocket URL.
 
+### Content-free Worker tracing
+
+`nanocodex/cloudflare/tracing` wraps native `tracing.enterSpan(name, callback)`
+with sanitized exception events. Use static operation names: they become
+exception codes on failure. The original error is rethrown; its message and
+stack are never passed to `recordException`.
+
+`setSpanAttributes(span, attributes)` sets bulk metadata, while
+`annotateActiveSpan(attributes)` annotates the current invocation or active
+span without changing nesting. `recordSpanException(span, code)` handles
+failures represented by results rather than thrown errors. Supply only static
+codes and content-free attributes. On older workerd versions, these retain
+individual attributes and `error.type` without requiring the September APIs.
+
 ### Durable Cloudflare Agent
 
 `nanocodex/cloudflare` is the standard Durable Object consumer. It keeps the

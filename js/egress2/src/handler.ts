@@ -1,4 +1,4 @@
-import { tracing } from "cloudflare:workers";
+import { tracing, annotateActiveSpan, setSpanAttributes, recordSpanException } from "nanocodex/cloudflare/tracing";
 
 /** The owner header is asserted by the trusted host, never by an untrusted client. */
 export const OWNER_HEADER = "x-managed2-owner";
@@ -17,7 +17,7 @@ type CredentialReader<Env> = (ownerId: string, env: Env) => Promise<string | Act
 type UpstreamFetch<Env> = (request: Request, ownerId: string, env: Env, region: string | null) => Promise<Response>;
 type CredentialRecovery<Env> = (ownerId: string, rejectedRevision: string, env: Env) => Promise<ActiveCredential | null>;
 
-/** No Cloudflare runtime dependency: inject the credential reader and upstream fetch in tests. */
+/** Credential storage and upstream transport are supplied by the private Worker entrypoint. */
 export function createEgressHandler<Env>({
   readCredential,
   recoverCredential,
@@ -73,6 +73,13 @@ export function createEgressHandler<Env>({
         ? "chatgpt_subscription" : "openai_api";
       const finish = (response: Response): Response => {
         const totalMs = Math.max(0, clock() - started);
+        annotateActiveSpan({
+          "egress2.route": routeKind, "egress2.credential_cache": cacheResult,
+          "egress2.request_id": egressRequestId ?? undefined,
+          "egress2.recovery_outcome": recoveryOutcome, "egress2.retry_attempt": retryAttempt,
+          "egress2.upstream_status": upstreamStatus ?? undefined,
+          "http.response.status_code": response.status,
+        });
         const duration = (value: number) => Math.max(0, value).toFixed(1);
         // One fixed route label makes provider placement visible at response headers,
         // while durations end when upstream response headers arrive (not stream EOF).
@@ -166,11 +173,11 @@ export function createEgressHandler<Env>({
       const fetchAttempt = async (active: ActiveCredential, retry = false): Promise<Response> => {
         const upstreamStarted = clock();
         try { return await tracing.enterSpan("egress2.upstream", async span => {
-          if (traceId) span.setAttribute("managed2.trace_id", traceId);
-          span.setAttribute("egress2.route", routeKind);
-          span.setAttribute("egress2.attempt", retry ? "recovery" : "first");
+          setSpanAttributes(span, { "managed2.trace_id": traceId ?? undefined,
+            "egress2.route": routeKind, "egress2.attempt": retry ? "recovery" : "first" });
           const response = await send(active, retry);
           span.setAttribute("http.response.status_code", response.status);
+          if (response.status >= 400) recordSpanException(span, "upstream_rejected");
           return response;
         }); }
         finally { upstreamMs += clock() - upstreamStarted; }

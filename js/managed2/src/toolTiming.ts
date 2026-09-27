@@ -1,5 +1,5 @@
 import type { NamedTool, ToolContext } from "nanocodex";
-import { tracing } from "cloudflare:workers";
+import { tracing, setSpanAttributes } from "nanocodex/cloudflare/tracing";
 
 type Sql = DurableObjectStorage["sql"];
 type ToolRow = {
@@ -42,9 +42,8 @@ export class ToolTiming {
       ...tool,
       handler: (input, context) => tracing.enterSpan("managed2.tool", async span => {
         // Tool names are from this fixed local registration, never model input.
-        span.setAttribute("managed2.tool.name", tool.name);
         const traceId = correlation(context);
-        if (traceId) span.setAttribute("managed2.trace_id", traceId);
+        setSpanAttributes(span, { "managed2.tool.name": tool.name, "managed2.trace_id": traceId });
         const began = performance.now();
         try {
           const result = await tool.handler(input, context);

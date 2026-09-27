@@ -1,4 +1,4 @@
-import { DurableObject, WorkerEntrypoint, tracing } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createEgressHandler, type ActiveCredential } from "./handler";
 import { validChatGptImport, type ChatGptCredentialImport } from "./chatgpt";
 import { OwnerSubscription } from "./subscription";
@@ -6,6 +6,7 @@ import { openChatGptSubscription } from "./subscriptionRuntime";
 import { CredentialCipher } from "./encryption";
 import { routeChatGpt } from "./relay";
 import { createSearchHandler } from "./search";
+import { tracing, annotateActiveSpan, setSpanAttributes, recordSpanException } from "nanocodex/cloudflare/tracing";
 
 interface Env {
   USER_CREDENTIALS: DurableObjectNamespace<UserCredentials>;
@@ -52,14 +53,18 @@ export class UserCredentials extends DurableObject<Env> {
       return value ? { kind: "openai", secret: await this.cipher.open(value, "openai") } : null;
     }
     if (active !== "chatgpt") return null;
-    try { return { kind: "chatgpt", ...await this.subscription.credential() }; }
-    catch { return null; } // no Rust/provider error or secret crosses the RPC boundary
+    return tracing.enterSpan("egress2.subscription.credential", async span => {
+      try { return { kind: "chatgpt" as const, ...await this.subscription.credential() }; }
+      catch { recordSpanException(span, "credential_unavailable"); return null; } // no provider error crosses RPC
+    });
   }
 
   async recoverChatGptCredential(revision: string): Promise<ActiveCredential | null> {
     if (this.read("active") !== "chatgpt" || !/^(0|[1-9][0-9]*)$/.test(revision)) return null;
-    try { return { kind: "chatgpt", ...await this.subscription.recover(revision) }; }
-    catch { return null; }
+    return tracing.enterSpan("egress2.subscription.recovery", async span => {
+      try { return { kind: "chatgpt" as const, ...await this.subscription.recover(revision) }; }
+      catch { recordSpanException(span, "credential_recovery_unavailable"); return null; }
+    });
   }
 
   async putCredential(provider: string, value: string): Promise<void> {
@@ -96,15 +101,17 @@ const search = createSearchHandler<Env>({
 export default class Egress2 extends WorkerEntrypoint<Env> {
   fetch(request: Request): Promise<Response> {
     const isSearch = request.url === "https://nanocodex.internal/v1/search";
+    // This UUID is application correlation, never a Cloudflare trace/span ID.
+    const supplied = request.headers.get("x-managed2-trace-id");
+    const traceId = supplied && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(supplied)
+      ? supplied : undefined;
+    const attributes = { "managed2.trace_id": traceId, "egress2.operation": isSearch ? "search" : "model" };
+    annotateActiveSpan(attributes);
     return tracing.enterSpan(isSearch ? "egress2.search" : "egress2.model", async span => {
-      // This is an application correlation UUID, not a Cloudflare trace/span ID.
-      // No owner, prompt, search terms, URL, or credential enters telemetry.
-      const supplied = request.headers.get("x-managed2-trace-id");
-      if (supplied && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(supplied)) {
-        span.setAttribute("managed2.trace_id", supplied);
-      }
+      setSpanAttributes(span, attributes);
       const response = await (isSearch ? search(request, this.env) : handler.fetch(request, this.env));
       span.setAttribute("http.response.status_code", response.status);
+      if (response.status >= 500) recordSpanException(span, "egress_unavailable");
       return response;
     });
   }

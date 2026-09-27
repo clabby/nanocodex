@@ -1,4 +1,5 @@
-import { DurableObject, tracing } from "cloudflare:workers";
+import { DurableObject } from "cloudflare:workers";
+import { tracing, annotateActiveSpan, setSpanAttributes, recordSpanException } from "nanocodex/cloudflare/tracing";
 import { Agent } from "nanocodex/cloudflare";
 import { placementRegion } from "nanocodex/cloudflare/durable-placement";
 import type { NamedTool } from "nanocodex";
@@ -46,6 +47,7 @@ export default {
       span.setAttribute("managed2.auth.outcome", authenticated ? "allowed" : "denied");
       return authenticated;
     });
+    annotateActiveSpan({ "managed2.auth.outcome": principal ? "allowed" : "denied" });
     const authMs = performance.now() - authStart;
     const authTiming = `auth;dur=${authMs.toFixed(1)}`;
     if (!principal) {
@@ -402,8 +404,7 @@ export class Session extends DurableObject<Env> {
       // marker. The durable timeline measures the full interval across events.
       const phase = timing.first_tool_result_ms !== null ? "continuation" : "first";
       tracing.enterSpan("managed2.model.call.started", span => {
-        span.setAttribute("managed2.trace_id", timing.trace_id);
-        span.setAttribute("managed2.model.phase", phase);
+        setSpanAttributes(span, { "managed2.trace_id": timing.trace_id, "managed2.model.phase": phase });
       });
       const column = timing.first_tool_result_ms !== null ? "post_tool_model_call_ms" : "first_model_call_ms";
       this.ctx.storage.sql.exec(
@@ -415,8 +416,9 @@ export class Session extends DurableObject<Env> {
     }
     if (event.type === "model.call.completed" || event.type === "model.call.failed") {
       tracing.enterSpan("managed2.model.call.ended", span => {
-        span.setAttribute("managed2.trace_id", timing.trace_id);
-        span.setAttribute("managed2.outcome", event.type === "model.call.completed" ? "completed" : "failed");
+        setSpanAttributes(span, { "managed2.trace_id": timing.trace_id,
+          "managed2.outcome": event.type === "model.call.completed" ? "completed" : "failed" });
+        if (event.type === "model.call.failed") recordSpanException(span, "managed2.model.call.failed");
       });
       return;
     }

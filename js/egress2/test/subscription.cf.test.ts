@@ -62,6 +62,28 @@ describe("actual workerd UserCredentials + compiled Rust subscription", () => {
     } finally { info.mockRestore(); }
   });
 
+  it("keeps search parsing and credential failures sanitized through the Worker boundary", async () => {
+    const owner = `synthetic-failure-${crypto.randomUUID()}`;
+    const stub = credentialEnv.USER_CREDENTIALS.getByName(owner);
+    await stub.putCredential("openai", "sk-synthetic-only");
+    const headers = { "x-managed2-owner": owner,
+      "x-managed2-trace-id": "fc7b7fd4-48e8-4ccb-bfe2-058128da0131",
+      authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL", "content-type": "application/json" };
+    const malformed = await SELF.fetch("https://nanocodex.internal/v1/search", {
+      method: "POST", headers, body: '{"private-synthetic-query":',
+    });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ error: "invalid_search_request" });
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec("UPDATE credentials SET value = ? WHERE provider = ?", "private-synthetic-corruption", "openai");
+    });
+    const unavailable = await SELF.fetch("https://api.openai.com/v1/responses", {
+      method: "POST", headers, body: "{}",
+    });
+    expect(unavailable.status).toBe(502);
+    expect(await unavailable.text()).toBe("Credential unavailable");
+  });
+
   it("encrypts API keys in SQLite and rejects plaintext without fallback", async () => {
     const stub = credentialEnv.USER_CREDENTIALS.getByName(`synthetic-api-${crypto.randomUUID()}`);
     await stub.putCredential("openai", "sk-synthetic-only");

@@ -1,5 +1,5 @@
 import type { ActiveCredential } from "./handler";
-import { tracing } from "cloudflare:workers";
+import { tracing, annotateActiveSpan, setSpanAttributes, recordSpanException } from "nanocodex/cloudflare/tracing";
 
 const SEARCH_ROUTE = "https://nanocodex.internal/v1/search";
 const API_URL = "https://api.openai.com/v1/alpha/search";
@@ -30,6 +30,9 @@ export function createSearchHandler<Env>({ readCredential, upstreamFetch, clock 
     let route: "openai_api" | "chatgpt_subscription" | "unknown" = "unknown";
     let upstreamStatus: number | null = null;
     const finish = (response: Response): Response => {
+      annotateActiveSpan({ "egress2.route": route,
+        "egress2.upstream_status": upstreamStatus ?? undefined,
+        "http.response.status_code": response.status });
       const duration = (value: number) => Math.max(0, value).toFixed(1);
       const timing = `search_prepare;dur=${duration(prepareMs)}, search_credential;dur=${duration(credentialMs)}, search_upstream;dur=${duration(upstreamMs)}, search_parse;dur=${duration(parseMs)}, search_total;dur=${duration(clock() - started)}, search_route;desc="${route}"`;
       // Only fixed labels and durations: never emit query, owner, URLs, credentials, or provider body.
@@ -67,12 +70,12 @@ export function createSearchHandler<Env>({ readCredential, upstreamFetch, clock 
       const upstreamStart = clock();
       let upstream: Response;
       try { upstream = await tracing.enterSpan("egress2.upstream", async span => {
-        if (traceId) span.setAttribute("managed2.trace_id", traceId);
-        span.setAttribute("egress2.route", route);
+        setSpanAttributes(span, { "managed2.trace_id": traceId ?? undefined, "egress2.route": route });
         const response = await upstreamFetch(new Request(target, {
           method: "POST", headers, body: JSON.stringify(body), redirect: "manual",
         }), owner, env, request.headers.get("x-managed2-relay-region"));
         span.setAttribute("http.response.status_code", response.status);
+        if (response.status >= 400) recordSpanException(span, "upstream_rejected");
         return response;
       }); }
       catch { upstreamMs = clock() - upstreamStart; return finish(error(502, "search_unavailable")); }

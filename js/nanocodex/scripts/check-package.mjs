@@ -58,6 +58,8 @@ const requiredFiles = [
   "cloudflare/rpc.d.mts",
   "cloudflare/egress.mjs",
   "cloudflare/egress.d.mts",
+  "cloudflare/tracing.mjs",
+  "cloudflare/tracing.d.mts",
   "cloudflare/egress-subject.mjs",
   "cloudflare/event-socket.mjs",
   "cloudflare/Agent.mjs",

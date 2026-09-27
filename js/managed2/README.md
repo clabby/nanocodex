@@ -134,6 +134,16 @@ Egress preconnect span from a warm turn or claim these spans are all additive.
 No log contains keys, owner/account IDs, prompts, message text, upstream
 headers or bodies. Persistent Worker logs/traces are sampled at 100%; use
 Cloudflare Observability or `wrangler tail` to filter the fixed event names.
+The shared `nanocodex/cloudflare/tracing` adapter records exception events with
+fixed operation codes on failed spans, including failures reported by model
+events. It never forwards caught error messages or stacks, which can contain
+prompt text or credentials. Active invocation spans receive authentication
+outcomes; child spans retain their turn correlation and nesting. Bulk attributes
+and exception events use the September 2026 runtime APIs when available; the
+pinned older local workerd retains individual attributes and `error.type`.
+`startSpan` is intentionally not used for model event pairs: they may arrive in
+separate invocations, and a manually ended span cannot join those contexts.
+
 External container/provider spans are not in the Cloudflare trace. A request,
 stream connection, and alarm-resumed turn may have separate trace roots;
 `0ms` spans can be timer-resolution artifacts.

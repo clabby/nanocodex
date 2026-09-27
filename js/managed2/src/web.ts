@@ -1,5 +1,5 @@
 import { web } from "nanocodex/tools";
-import { tracing } from "cloudflare:workers";
+import { tracing } from "nanocodex/cloudflare/tracing";
 import type { NamedTool, ToolContext } from "nanocodex";
 
 const SEARCH_URL = "https://nanocodex.internal/v1/search";

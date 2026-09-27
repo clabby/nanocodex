@@ -162,6 +162,10 @@
     "./cloudflare/managed-live": {
       "types": "./cloudflare/managed-live.d.mts",
       "import": "./cloudflare/managed-live.mjs"
+    },
+    "./cloudflare/tracing": {
+      "types": "./cloudflare/tracing.d.mts",
+      "import": "./cloudflare/tracing.mjs"
     }
   },
   "files": [

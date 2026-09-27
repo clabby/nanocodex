@@ -1,5 +1,5 @@
 import type { NamedTool, ToolContext } from "nanocodex";
-import { tracing } from "cloudflare:workers";
+import { tracing } from "nanocodex/cloudflare/tracing";
 import { justBash, type Workspace } from "nanocodex-tools";
 
 export type BashPhase = "setup" | "vfs_hydrate" | "execute" | "vfs_flush";

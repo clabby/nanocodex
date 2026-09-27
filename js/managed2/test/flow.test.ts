@@ -75,6 +75,19 @@ it("does not let another owner read the session or borrow its model key", async 
     const response = await SELF.fetch(`https://api.test/v1/agents/${otherId}/turns/${turn_id}`, { headers: { authorization: other } });
     return (await response.json<{ state: string; message?: string }>()).state;
   }, { timeout: 10_000 }).toBe("failed");
+  // A recorded model failure must not poison the next turn's tracing context.
+  expect((await SELF.fetch("https://api.test/v1/credentials/openai", {
+    method: "PUT", headers: { authorization: other }, body: JSON.stringify({ value: "sk-fixture-only" }),
+  })).status).toBe(204);
+  const recovery = await SELF.fetch(`https://api.test/v1/agents/${otherId}/turns`, {
+    method: "POST", headers: { authorization: other }, body: JSON.stringify({ input: "Say hello" }),
+  });
+  expect(recovery.status).toBe(202);
+  const { turn_id: recoveredTurn } = await recovery.json<{ turn_id: string }>();
+  await expect.poll(async () => {
+    const response = await SELF.fetch(`https://api.test/v1/agents/${otherId}/turns/${recoveredTurn}`, { headers: { authorization: other } });
+    return response.json();
+  }, { timeout: 10_000 }).toMatchObject({ state: "completed", message: "hello from test model" });
 });
 
 it("uses a ChatGPT subscription without giving the access or refresh token to the Agent", async () => {
