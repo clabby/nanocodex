@@ -164,6 +164,10 @@ import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
 import { drainRuntimeForDeletion } from "./deletion-runtime";
 import { createManagedComputerRuntime } from "./computer-runtime";
 import {
+  createManagedBrowserRuntime,
+  type ManagedBrowserRuntime,
+} from "./browser-runtime";
+import {
   exactConnectorAccess,
   handleManagedEgress,
   type ManagedEgressConnectorId,
@@ -453,6 +457,12 @@ export interface Env extends
   NANOCODEX_ADMIN_USER_ID?: string;
   NANOCODEX_SYSTEM_HOST_TOKEN?: string;
   HISTORY_AI_SEARCH?: AiSearchInstance;
+  BROWSER?: import("agents/browser").BrowserBinding;
+  MANAGED_BROWSER_PROVIDER?: string;
+  MANAGED_BROWSER_KEEP_ALIVE_MS?: string;
+  MANAGED_BROWSER_TOOL_TIMEOUT_MS?: string;
+  BROWSERBASE_API_KEY?: string;
+  BROWSERBASE_PROJECT_ID?: string;
   LOADER?: WorkerLoader;
   NANOCODEX_MEDIA?: Fetcher;
   AGENT_IDLE_TIMEOUT_MS?: string;
@@ -3423,6 +3433,7 @@ export class DurableAgentSession extends DurableComputerObject {
   #agentConstruction?: AgentConstructionOwnership;
   readonly #agentConstructions = new Set<AgentConstructionOwnership>();
   #agentShutdownPromise?: Promise<void>;
+  #managedBrowserRuntimePromise?: Promise<ManagedBrowserRuntime>;
   #presentation?: AgentPresentationWriter;
   #events?: EventWatcher;
   readonly #eventLog: DurableEventLog<StreamMessage>;
@@ -4440,7 +4451,27 @@ export class DurableAgentSession extends DurableComputerObject {
         || !turnAuthorization.capabilities.includes("agents:write")
         || !turnAuthorization.capabilities.includes("tools:use")) return json({ error: "forbidden" }, { status: 403 });
       if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
-      return json({ error: "managed_browser_disabled" }, { status: 410 });
+      const session = this.#session();
+      if (this.#deleting || this.#deleted || this.#durabilityExported
+        || session?.runtime_profile !== "managed") return json({ error: "agent_unavailable" }, { status: 409 });
+      const networkAccess = this.#configuration().environment?.network.access;
+      if (networkAccess !== undefined && networkAccess !== "enabled") {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      const takeover = url.pathname === "/browser-vault/takeover";
+      const payload = await readPrivateBrowserChallenge(request, takeover);
+      if (payload instanceof Response) return payload;
+      // Restore the runtime for a durable, bound challenge after eviction.
+      // This authority is the authenticated direct request, never a forged model turn.
+      try {
+        const runtime = await this.#managedBrowserRuntime(session);
+        return json(takeover
+          ? await runtime.submitVaultTakeover(payload, request.signal)
+          : await runtime.submitVaultChallenge(payload, request.signal));
+      } catch {
+        // Provider/parser failures may contain the private input; never reflect them.
+        return json({ error: "challenge_unavailable" }, { status: 409 });
+      }
     }
     if (url.pathname === "/files") {
       if (request.method !== "GET") return json({ error: "method_not_allowed" }, { status: 405 });
@@ -4982,7 +5013,14 @@ export class DurableAgentSession extends DurableComputerObject {
       return;
     }
     this.#logCapacity("idle_shutdown");
-    // Archive cleanup can yield to incoming requests; recheck runtime ownership.
+    if (this.#managedBrowserRuntimePromise) {
+      await this.#managedBrowserRuntimePromise
+        .then((runtime) => runtime.expireAndSweep())
+        .catch((error) => {
+          console.warn({ type: "managed.browser_sweep_failed", error_kind: errorKind(error) });
+        });
+    }
+    // Archive and browser cleanup can yield to incoming requests; recheck runtime ownership.
     if (this.#recoverableTurnCount() > 0 || this.#agentPromise
       || this.#managedRealtimeSession() !== undefined
       || await this.#hasActiveSubagents()
@@ -8161,6 +8199,7 @@ export class DurableAgentSession extends DurableComputerObject {
     const shutdown = this.#agentShutdownPromise;
     const turns = [...this.#turns.values()];
     const inFlight = [...this.#inFlight];
+    const browserRuntime = this.#managedBrowserRuntimePromise;
     if (this.#durabilityImportTask) inFlight.push(this.#durabilityImportTask.promise);
 
     this.#runtimeOwnershipGeneration += 1;
@@ -8168,6 +8207,7 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#agentPromise = undefined;
     this.#agentConstruction = undefined;
     this.#agentShutdownPromise = undefined;
+    this.#managedBrowserRuntimePromise = undefined;
     this.#events?.off();
     this.#events = undefined;
     this.#turns.clear();
@@ -8194,10 +8234,10 @@ export class DurableAgentSession extends DurableComputerObject {
       timeoutMs,
       turns,
       async () => {
-        if (shutdown) return shutdown;
         await Promise.all([
-          agent?.session.shutdown(),
+          shutdown ?? agent?.session.shutdown(),
           constructionShutdown,
+          browserRuntime?.then((runtime) => runtime.close()),
         ]);
       },
       inFlight,
@@ -8587,6 +8627,53 @@ export class DurableAgentSession extends DurableComputerObject {
     }
   }
 
+  #managedBrowserRuntime(session: SessionRow): Promise<ManagedBrowserRuntime> {
+    if (this.#deleting || this.#deleted || this.#durabilityExported) {
+      return Promise.reject(new Error("Browser session is unavailable"));
+    }
+    const generation = this.#runtimeOwnershipGeneration;
+    let runtime = this.#managedBrowserRuntimePromise;
+    if (!runtime) {
+      runtime = createManagedBrowserRuntime({
+        ctx: this.ctx,
+        env: this.env,
+        sessionId: session.session_id,
+        authorizeVaultAccess: context => this.#authorizeVaultTool(context),
+        resolveVaultLogin: async (request, context) => {
+          this.#authorizeVaultTool(context);
+          const response = await this.env.NANOCODEX.fetch("https://browser-vault.internal/v1/login", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-nanocodex-subject": this.#credentialSubject() },
+            body: JSON.stringify({ vault_id: request.vault_id, expected_origin: request.expected_origin }),
+            signal: AbortSignal.any([context.signal, AbortSignal.timeout(10_000)]),
+          });
+          if (!response.ok) {
+            await response.body?.cancel();
+            throw new Error("Vault login is unavailable or its website has not been approved");
+          }
+          const value = await response.json<{ username?: unknown; password?: unknown }>();
+          if (typeof value.username !== "string" || typeof value.password !== "string"
+            || value.username.length > 512 || value.password.length > 8192) throw new Error("Invalid private Vault response");
+          return { username: value.username, password: value.password };
+        },
+      }).then(async (created) => {
+        if (generation !== this.#runtimeOwnershipGeneration
+          || this.#deleting || this.#deleted || this.#durabilityExported) {
+          await created.close();
+          throw new Error("Browser session is unavailable");
+        }
+        return created;
+      });
+      this.#managedBrowserRuntimePromise = runtime;
+      void runtime.catch(() => {
+        if (this.#managedBrowserRuntimePromise === runtime) {
+          this.#managedBrowserRuntimePromise = undefined;
+        }
+      });
+    }
+    return runtime;
+  }
+
   #configuration(): AgentConfiguration {
     const row = this.ctx.storage.sql.exec<{ body: string }>("SELECT body FROM managed_configuration WHERE singleton=1").toArray()[0];
     return row ? normalizeToolNames(JSON.parse(row.body) as AgentConfiguration) : {};
@@ -8690,6 +8777,13 @@ export class DurableAgentSession extends DurableComputerObject {
     const restrictedEnvironment = configuration.environment?.network.access !== undefined && configuration.environment.network.access !== "enabled";
     if (!multiplayer && create === undefined) await this.#ensureCredentialBinding(session);
     const credentialBindingMs = preparation?.credentialBindingMs ?? performance.now() - phaseStartedAt;
+    phaseStartedAt = performance.now();
+    signal?.throwIfAborted();
+    const browserConfigured = this.env.BROWSER !== undefined
+      || this.env.MANAGED_BROWSER_PROVIDER?.trim().toLowerCase() === "browserbase";
+    const browserRuntime = multiplayer || restrictedEnvironment || !browserConfigured
+      ? undefined : await this.#managedBrowserRuntime(session);
+    const browserRuntimeMs = performance.now() - phaseStartedAt;
     phaseStartedAt = performance.now();
     const workspace = await this.#workspace();
     const workspaceMs = performance.now() - phaseStartedAt;
@@ -9025,6 +9119,7 @@ export class DurableAgentSession extends DurableComputerObject {
       this.#processSessions,
     );
     const cloudTools: NamedTool[] = [
+      ...(browserRuntime?.tools ?? []),
       ...(multiplayer ? [computer.tool] : []),
       ...(multiplayer ? [] : [managedMountTool(async (request, context) => {
         if (!turnCanProvisionExecutionProvider(this.#authorizationForToolContext(context), request.provider)) {
@@ -9249,7 +9344,7 @@ export class DurableAgentSession extends DurableComputerObject {
             "Hands appear as logical top-level paths returned by mount or listed in environment().hands. exec_command defaults to /brain; omit workdir or use /brain for Just Bash. For native execution, select the hand whose name and advertised capabilities match the user's project, and set workdir to its exact path or a path beneath it. The mount already maps to that workspace: if /laptop maps to /Users/me/repo, use /laptop for the project root or /laptop/src for its src directory; do not append the host's absolute workspace path. The root of that cwd selects where the process runs. write_stdin remains pinned to the hand that created its session. There is no host argument.",
             "A Code Mode cell captures its mount mapping. Commands in Promise.all may run concurrently on different cwd roots, and subagents use the same cwd rule independently. A disconnect or reconnect never retargets an admitted command or session.",
             "Cloudflare sandbox hands are separate retained workspaces mounted into each other's native filesystem namespaces. A process may write its executing hand through /workspace or that hand's logical mount path, read peer hand paths without mutating them, and read or write /brain using ordinary filesystem syscalls. The trees are mounted, never copied or synchronized. Connected user hands and future providers remain placement-only until their provider advertises a conforming native namespace adapter, so native_cross_mounts remains false globally while runtimeInfo.cloudflare_native_cross_mounts is true.",
-            "Use CUA with an explicit workdir for all browser interaction. Discover its provider contract through a workdir-only CUA JS call and follow that contract. Do not fall back to browser_execute, direct CDP, Playwright, or a separate browser automation runtime. If no suitable CUA Hand is attached, discover an available computer or mount a supported Hand. If that cannot provide CUA, report the concrete missing capability. Hosted browser execution and private browser Vault sessions are disabled. Never retrieve or expose Vault secrets, passwords, cookies, authorization material, or browser connection URLs, or pass them through CUA code or tool arguments. Ordinary public-web search remains available through tools.web__run.",
+            "When available, use browser_execute for hosted browser interaction without mounting a Hand. Use workdir-scoped CUA for an attached computer’s browser. The browser_execute tool is the managed remote browser. Reuse its retained session when continuity matters. Never inspect, return, or persist cookies, authorization material, CDP connection URLs, provider URLs, or Live View URLs. For an explicitly requested Vault login, use browser_vault_status to discover supported fields and browser_vault_fill with the named item and its exact approved HTTPS origin. Submission is not proof of successful sign-in. Credential sessions block all arbitrary CDP and ordinary browser inspection after secrets enter the session. Use browser_vault_snapshot for redacted private snapshots and browser_vault_action for constrained private actions, or browser_vault_close to discard the session. Use browser_vault_request_challenge to show the authenticated private code form; codes go directly from that form to the bound challenge and must never enter chat, tool arguments, logs, or files. If the existing item needs website approval, request_vault_intake with operation authorize_origin lets the user approve it without reentering the password. Never pass passwords into browser_execute. For an OTP challenge, use the private challenge form. If CAPTCHA or another unsupported human-only gate appears, use browser_vault_request_takeover for the user to operate the private browser directly. Takeover images and typed input stay in the authenticated client and must never enter chat, tool results, or logs. Wait for the user to finish before resuming private snapshots; do not bypass the gate.",
             "Connected services expose first-party deferred tools alongside MCPs in tool_search. Search by service and operation (for example Spotify playlists); environment().accounts lists the tool names for connected services. Use the discovered service_request tool for authenticated JSON reads and writes, selecting the exact accounts[service].connections id when multiple accounts exist. Provider scopes and live grants still apply. Never automatically retry a write after an ambiguous failure.",
             "For ordinary account operations, environment is not a prerequisite to an explicit gh, git, curl, or other shell command. Those commands use transparent authenticated egress when the current grant permits it. environment is a tool, not a shell command.",
             "For a Nanocodex iPhone self-update requested from the phone, prefer the repository's apple/scripts/request-self-update.sh helper from a Cloudflare sandbox Hand. It dispatches the supported signed macOS Xcode delivery workflow, waits for the exact run, and writes its provider receipt to durable /brain/ios-deployments. Do not attempt to install Xcode in Linux or request Apple signing credentials; signing stays in GitHub Actions and Apple TestFlight performs supported distribution.",
@@ -9365,6 +9460,7 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#logCapacity("agent_constructed", {
       account_mcp_refresh_ms: accountMcpRefreshMs,
       credential_binding_ms: roundMilliseconds(credentialBindingMs),
+      browser_runtime_ms: roundMilliseconds(browserRuntimeMs),
       workspace_ms: roundMilliseconds(workspaceMs),
       computer_runtime_ms: roundMilliseconds(computerRuntimeMs),
       code_evaluator_ms: roundMilliseconds(codeEvaluatorMs),

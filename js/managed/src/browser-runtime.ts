@@ -459,6 +459,8 @@ export async function createManagedBrowserRuntime(
   };
   const tools: NamedTool[] = adapted.map(tool => ({ ...tool,
     handler: (input, context) => exclusive(async () => {
+      // Retained pages belong to the account, including sessions without a Vault login.
+      options.authorizeVaultAccess?.(context);
       if (options.resolveVaultLogin) await checkQuarantine();
       return tool.handler(input, context);
     }),

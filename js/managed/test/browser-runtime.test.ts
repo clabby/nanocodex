@@ -475,3 +475,27 @@ describe("private browser verification lifecycle", () => {
     } finally { f.connect.mockRestore(); }
   });
 });
+
+
+describe("hosted browser account authority", () => {
+  it("checks current authority on every ordinary browser call before provider execution", async () => {
+    let allowed = true;
+    const execute = vi.fn(async () => ({ title: "Class schedule" }));
+    const runtime = await createManagedBrowserRuntime({
+      ctx: { storage: { get: async () => undefined } } as unknown as DurableObjectState,
+      env: { BROWSER: { fetch: vi.fn() }, LOADER: {} as WorkerLoader },
+      sessionId: "account-browser",
+      authorizeVaultAccess: () => { if (!allowed) throw new Error("full account authority required"); },
+      createRuntime: () => ({
+        tools: { browser_execute: tool({ inputSchema: jsonSchema({ type: "object" }), execute }) },
+        connector: {}, runtime: {},
+      }) as unknown as BrowserRuntime,
+    });
+    const browser = runtime.tools.find(tool => tool.name === "browser_execute")!;
+    const context = { signal: new AbortController().signal } as Parameters<typeof browser.handler>[1];
+    await expect(browser.handler({ code: "1" }, context)).resolves.toEqual({ title: "Class schedule" });
+    allowed = false;
+    await expect(browser.handler({ code: "1" }, context)).rejects.toThrow("full account authority required");
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+});

@@ -4,7 +4,7 @@ import worker, { type DurableAgentSession } from "../src/index";
 import type { Principal } from "../src/account-auth";
 import { DEFAULT_AGENT_SETTINGS } from "../src/agent-settings";
 
-async function fixture(resource = "challenge") {
+async function fixture(resource = "challenge", networkDisabled = false) {
   const id = crypto.randomUUID();
   const principal: Principal = {
     kind: "api_key", userId: crypto.randomUUID(), organizationId: crypto.randomUUID(),
@@ -21,7 +21,7 @@ async function fixture(resource = "challenge") {
     expect((await agent.fetch(new Request("https://session.internal/initialize", {
       method: "PUT", body: JSON.stringify({ session_id: id, owner_id: principal.userId,
         organization_id: principal.organizationId, team_id: principal.teamId, authorization_epoch: 1,
-        public_origin: "https://nanocodex.example", settings: DEFAULT_AGENT_SETTINGS, configuration: { tools: [] } }),
+        public_origin: "https://nanocodex.example", settings: DEFAULT_AGENT_SETTINGS, configuration: { tools: [], ...(networkDisabled ? { environment: { network: { access: "disabled" } } } : {}) } }),
     }))).status).toBe(204);
     await state.storage.deleteAlarm();
   });
@@ -45,7 +45,7 @@ describe("private browser direct challenge endpoint", () => {
     expect((await call({ ...principal, authorizationEpoch: 2 })).status).toBe(404);
     expect((await call({ ...principal, kind: "account_session" })).status).toBe(403);
     expect((await call({ ...principal, kind: "account_session" }, { headers: { origin: "https://evil.example" } })).status).toBe(403);
-    expect((await call({ ...principal, kind: "account_session" }, { headers: { origin: "https://nanocodex.example" } })).status).toBe(410);
+    expect((await call({ ...principal, kind: "account_session" }, { headers: { origin: "https://nanocodex.example" } })).status).toBe(409);
   });
   it("bounds and validates input without reflecting it", async () => {
     const { principal, call } = await fixture();
@@ -66,8 +66,8 @@ describe("private browser direct challenge endpoint", () => {
     }
     expect((await call(principal, {}, "?code=123456")).status).toBe(400);
     const unavailable = await call();
-    expect(unavailable.status).toBe(410);
-    expect(await unavailable.json()).toEqual({ error: "managed_browser_disabled" });
+    expect(unavailable.status).toBe(409);
+    expect(await unavailable.json()).toEqual({ error: "challenge_unavailable" });
   });
   it("rejects internal submissions lacking owner assertions", async () => {
     const { stub } = await fixture();
@@ -90,11 +90,11 @@ describe("private browser direct takeover endpoint", () => {
     expect((await call({ ...principal, kind: "account_session" }, init)).status).toBe(403);
     expect((await call({ ...principal, connectGrant: { grantId: `0x${"a".repeat(64)}`, connectors: ["chatgpt"], mcpIds: [] } }, init)).status).toBe(403);
     const response = await call(principal, init);
-    expect(response.status).toBe(410);
+    expect(response.status).toBe(409);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.json()).toEqual({ error: "managed_browser_disabled" });
+    expect(await response.json()).toEqual({ error: "challenge_unavailable" });
   });
-  it("disables native mobile browser continuation after authorization", async () => {
+  it("accepts the native mobile contract through both HTTP boundaries", async () => {
     const { principal, call } = await fixture("takeover");
     for (const action of [
       { action: "observe", viewport: { width: 390, height: 700, mobile: true } },
@@ -106,9 +106,10 @@ describe("private browser direct takeover endpoint", () => {
       { action: "finish" },
     ]) {
       const response = await call(principal, { body: JSON.stringify({ challenge_id: "opaque-fixture", ...action }) });
-      // Valid old clients receive an explicit disabled response without creating a browser.
-      expect(response.status, JSON.stringify(action)).toBe(410);
-      expect(await response.json()).toEqual({ error: "managed_browser_disabled" });
+      // No browser binding or lease exists in this fixture. 409 proves parser acceptance
+      // and an attempted runtime lookup, not provider execution or successful takeover.
+      expect(response.status, JSON.stringify(action)).toBe(409);
+      expect(await response.json()).toEqual({ error: "challenge_unavailable" });
     }
   });
   it("rejects arbitrary or oversized action input before invoking runtime", async () => {
@@ -134,5 +135,19 @@ describe("private browser direct takeover endpoint", () => {
       expect(await response.text()).not.toContain("private-text");
     }
     expect((await call(principal, { body: "x".repeat(2049) })).status).toBe(413);
+  });
+});
+
+
+describe("private browser route network restrictions", () => {
+  it.each(["challenge", "takeover"])("denies %s continuation when the agent network is disabled", async resource => {
+    const { principal, call } = await fixture(resource, true);
+    const body = resource === "takeover"
+      ? { challenge_id: "opaque-fixture", action: "observe" }
+      : { challenge_id: "opaque-fixture", code: "123456" };
+    const response = await call(principal, { body: JSON.stringify(body) });
+    expect(response.status).toBe(403);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.text()).not.toContain("123456");
   });
 });
