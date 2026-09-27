@@ -9,7 +9,7 @@ type Input = Record<string, unknown>;
 type Value = string | number | null;
 type Row = Record<string, Value>;
 type Kind = "event" | "participation" | "interaction";
-const provenance = ["origin", "sources", "confidence", "rationale"];
+const provenance = ["origin", "sources", "confidence", "rationale", "metadata"];
 const fields: Record<Kind, string[]> = {
   event: ["title", "description", "location", "start_at", "end_at", ...provenance],
   participation: ["event_id", "record_id", "status", "role", ...provenance],
@@ -32,14 +32,21 @@ function id(value: unknown): string {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) invalid("Invalid id.");
   return value;
 }
-function date(value: unknown): { value: string; ms: number } {
+function date(value: unknown): { value: string; ms: number; precision: "year" | "month" | "date" | "datetime" } {
   const s = text(value, "timestamp", 64);
+  const partial = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$/.exec(s);
+  if (partial) {
+    const precision = partial[3] ? "date" : partial[2] ? "month" : "year";
+    // UTC period floor is only an internal ordering/filter key; retain the supplied date.
+    const full = date(`${partial[1]}-${partial[2] ?? "01"}-${partial[3] ?? "01"}T00:00:00Z`);
+    return { value: s, ms: full.ms, precision };
+  }
   const m = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|[+-](\d{2}):(\d{2}))$/.exec(s);
-  if (!m) invalid("Expected an absolute RFC3339 timestamp.");
+  if (!m) invalid("Expected YYYY, YYYY-MM, YYYY-MM-DD or an absolute RFC3339 timestamp.");
   const y = Number(m[1]), month = Number(m[2]), d = Number(m[3]);
   const days = [31, y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
   if (month < 1 || month > 12 || d < 1 || d > days[month - 1] || Number(m[4]) > 23 || Number(m[5]) > 59 || Number(m[6]) > 59 || Number(m[7] ?? 0) > 23 || Number(m[8] ?? 0) > 59 || !Number.isFinite(Date.parse(s))) invalid("Invalid timestamp.");
-  return { value: s, ms: Date.parse(s) };
+  return { value: s, ms: Date.parse(s), precision: "datetime" };
 }
 function choice(value: unknown, allowed: string[], field: string): string {
   if (typeof value !== "string" || !allowed.includes(value)) invalid(`Invalid ${field}.`);
@@ -61,9 +68,25 @@ function sources(value: unknown): string {
   if (Buffer.byteLength(encoded) > 16384) invalid("Sources exceed 16 KiB.");
   return encoded;
 }
+function metadata(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) invalid("metadata must be a JSON object.");
+  const seen = new Set<object>();
+  const check = (item: unknown, depth: number): void => {
+    if (depth > 32) invalid("metadata exceeds maximum nesting depth.");
+    if (item === null || typeof item === "string" || typeof item === "boolean" || (typeof item === "number" && Number.isFinite(item))) return;
+    if (typeof item !== "object" || !item || seen.has(item) || (!Array.isArray(item) && ![Object.prototype, null].includes(Object.getPrototypeOf(item))) || Object.getOwnPropertySymbols(item).length) invalid("metadata must contain only JSON values.");
+    seen.add(item);
+    for (const child of Object.values(item)) check(child, depth + 1);
+    seen.delete(item);
+  };
+  check(value, 0);
+  const encoded = JSON.stringify(value);
+  if (Buffer.byteLength(encoded) > 16384) invalid("Metadata exceeds 16 KiB.");
+  return encoded;
+}
 function view(row: Row): Input {
-  const { owner_id: _, ...rest } = row;
-  return { ...rest, sources: JSON.parse(String(row.sources)) };
+  const { owner_id: _, start_ms: _start, end_ms: _end, occurred_ms: _occurred, occurred_precision, ...rest } = row;
+  return { ...rest, ...(occurred_precision ? { precision: occurred_precision } : {}), metadata: JSON.parse(String(row.metadata ?? "{}")), sources: JSON.parse(String(row.sources)) };
 }
 
 async function request(db: D1Database, owner: string, kind: Kind, operation: string, input: unknown, createId: string): Promise<unknown> {
@@ -94,19 +117,20 @@ async function request(db: D1Database, owner: string, kind: Kind, operation: str
       return { event: view(row), ...roster };
     }
     if (operation === "list") {
-      const filters = kind === "event" ? ["q", "from", "to"] : kind === "participation" ? ["event_id", "record_id", "person_id"] : ["person_id", "event_id", "from", "to"];
+      const filters = kind === "event" ? ["q", "record_id", "from", "to"] : kind === "participation" ? ["event_id", "record_id", "person_id"] : ["person_id", "record_id", "event_id", "from", "to"];
       const args = object(input, [...filters, "limit", "cursor"]);
+      if (kind === "interaction" && args.person_id !== undefined && args.record_id !== undefined && args.person_id !== args.record_id) invalid("person_id and record_id must match when both are supplied.");
       const size = args.limit ?? 20;
       if (typeof size !== "number" || !Number.isInteger(size) || size < 1 || size > 100) invalid("limit must be an integer from 1 to 100.");
       const where = ["owner_id=?"], values: Value[] = [owner];
       const order = kind === "event" ? "start_ms" : kind === "interaction" ? "occurred_ms" : "created_at";
       for (const field of ["person_id", "record_id", "event_id"]) if (args[field] !== undefined) {
-        const key = id(args[field]); where.push(kind === "interaction" && field === "person_id" ? "EXISTS(SELECT 1 FROM crm_interaction_participants p WHERE p.owner_id=crm_interactions.owner_id AND p.interaction_id=crm_interactions.id AND p.record_id=?)" : `${field}=?`); values.push(key);
+        const key = id(args[field]); where.push(kind === "event" && field === "record_id" ? "EXISTS(SELECT 1 FROM crm_event_participation p WHERE p.owner_id=crm_events.owner_id AND p.event_id=crm_events.id AND p.record_id=?)" : kind === "interaction" && (field === "person_id" || field === "record_id") ? "EXISTS(SELECT 1 FROM crm_interaction_participants p WHERE p.owner_id=crm_interactions.owner_id AND p.interaction_id=crm_interactions.id AND p.record_id=?)" : `${field}=?`); values.push(key);
         if (field === "person_id") await person(key);
         else if (field === "record_id") { if (!await session.prepare("SELECT id FROM crm_records WHERE owner_id=? AND id=?").bind(owner, key).first()) missing(); }
         else if (!await session.prepare("SELECT id FROM crm_events WHERE owner_id=? AND id=?").bind(owner, key).first()) missing();
       }
-      if (kind === "participation" && args.person_id === undefined && args.record_id === undefined && args.event_id === undefined) invalid("event_id or person_id is required.");
+      if (kind === "participation" && args.person_id === undefined && args.record_id === undefined && args.event_id === undefined) invalid("event_id or record_id is required.");
       if (args.q !== undefined) { where.push("instr(lower(title),lower(?))>0"); values.push(text(args.q, "q")); }
       const from = args.from === undefined ? null : date(args.from).ms, to = args.to === undefined ? null : date(args.to).ms;
       if (from !== null && to !== null && from >= to) invalid("from must precede to.");
@@ -134,6 +158,7 @@ async function request(db: D1Database, owner: string, kind: Kind, operation: str
     for (const field of immutable) if (existing && args[field] !== undefined && args[field] !== existing[field]) invalid(`${field} is immutable.`);
     let participants: {record_id:string;role:string|null}[] = [];
     const row: Row = {};
+    row.metadata = args.metadata === undefined && existing ? String(existing.metadata ?? "{}") : metadata(args.metadata === undefined ? {} : args.metadata);
     row.origin = choice(merged.origin, ["user", "source", "inferred"], "origin");
     row.sources = args.sources === undefined && existing ? String(existing.sources) : sources(merged.sources ?? []);
     row.confidence = merged.confidence == null ? null : choice(merged.confidence, ["low", "medium", "high"], "confidence");
@@ -146,14 +171,13 @@ async function request(db: D1Database, owner: string, kind: Kind, operation: str
       row.location = merged.location == null ? null : text(merged.location, "location", 2048);
       const start = date(merged.start_at), end = merged.end_at == null ? null : date(merged.end_at);
       if (end && end.ms < start.ms) invalid("end_at must not precede start_at.");
-      Object.assign(row, { start_at: start.value, start_ms: start.ms, end_at: end?.value ?? null, end_ms: end?.ms ?? null });
+      Object.assign(row, { start_at: start.value, start_ms: start.ms, start_precision: start.precision, end_at: end?.value ?? null, end_ms: end?.ms ?? null, end_precision: end?.precision ?? null });
     } else {
       if (kind === "participation") {
         row.record_id = id(merged.record_id);
         const record = await session.prepare("SELECT kind FROM crm_records WHERE owner_id=? AND id=?").bind(owner, row.record_id).first<{ kind: string }>();
         if (!record) missing();
         row.person_id = record.kind === "person" ? row.record_id : null;
-        if (record.kind === "company" && merged.role !== "organizer") invalid("Companies participate only as organizers.");
       } else {
         row.person_id = merged.person_id == null ? null : id(merged.person_id);
         if (row.person_id) await person(row.person_id);
@@ -171,7 +195,7 @@ async function request(db: D1Database, owner: string, kind: Kind, operation: str
       if (row.event_id && !await session.prepare("SELECT id FROM crm_events WHERE owner_id=? AND id=?").bind(owner, row.event_id).first()) missing();
       if (kind === "participation") {
         row.status = choice(merged.status ?? "unknown", ["invited", "expected", "attended", "declined", "unknown"], "status");
-        row.role = choice(merged.role ?? "attendee", ["attendee", "organizer"], "role");
+        row.role = text(merged.role ?? "attendee", "role", 128);
         const duplicate = await session.prepare("SELECT id FROM crm_event_participation WHERE owner_id=? AND event_id=? AND record_id=? AND id!=?").bind(owner, row.event_id, row.record_id, recordId).first();
         if (duplicate) invalid("Participation already exists; edit its id.");
       } else {
@@ -182,10 +206,11 @@ async function request(db: D1Database, owner: string, kind: Kind, operation: str
         const ids = JSON.stringify(participants.map(p => p.record_id));
         if (!existing && row.meeting_id && !await session.prepare("SELECT meeting_id FROM crm_meeting_attendees WHERE owner_id=? AND meeting_id=? AND person_id IN (SELECT value FROM json_each(?))").bind(owner, row.meeting_id, ids).first()) invalid("Meeting must match a participant.");
         if (!existing && row.message_id && !await session.prepare("SELECT message_id FROM crm_email_imports WHERE owner_id=? AND connection_id=? AND message_id=? AND record_id IN (SELECT value FROM json_each(?))").bind(owner, row.connection_id, row.message_id, ids).first()) invalid("Email must match a participant.");
-        const dateOnly = typeof merged.occurred_at === "string" && /^\d{4}-\d{2}-\d{2}$/.test(merged.occurred_at);
-        const at = date(dateOnly ? `${merged.occurred_at}T00:00:00Z` : merged.occurred_at);
-        row.precision = dateOnly ? "date" : "datetime";
-        Object.assign(row, { occurred_at: dateOnly ? String(merged.occurred_at) : at.value, occurred_ms: at.ms, body: text(merged.body, "body", 20000, true) });
+        const at = date(merged.occurred_at);
+        // Preserve the legacy checked column; occurred_precision is authoritative.
+        row.precision = at.precision === "datetime" ? "datetime" : "date";
+        row.occurred_precision = at.precision;
+        Object.assign(row, { occurred_at: at.value, occurred_ms: at.ms, body: text(merged.body, "body", 20000, true) });
       }
     }
     const now = Date.now(), keys = Object.keys(row);

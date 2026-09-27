@@ -175,3 +175,26 @@ it("enforces tool authority and returns the same timeline through crm_get", asyn
   authorization = full;
   await expect(run("crm_timeline", { person_id: "person", owner_id: "forged" })).rejects.toThrow();
 });
+
+it("returns a company's generic event and shared interaction through tools and crm_get", async () => {
+ const owner = account(); await person(owner);
+ await crmRequest(db, owner, "save", { kind: "company", name: "Synthetic Investor" }, "company");
+ const tools = crmTools({ db, ownerId: owner, authorization: () => ({ capabilities: ["agents:read", "agents:write", "tools:use"] }) });
+ const run = (name: string, input: unknown): Promise<any> => tools.find(t => t.name === name)!.handler(input, { callId: crypto.randomUUID(), parentCallId: "", sessionId: "generic-events", model: "test", signal: new AbortController().signal }) as Promise<any>;
+ const { event } = await run("crm_events", { operation: "save", title: "Synthetic financing", start_at: "2026-02", origin: "user", metadata: { stage: "seed" } });
+ await run("crm_event_participation", { operation: "save", event_id: event.id, record_id: "company", role: "investor", origin: "user", metadata: { lead: true } });
+ await run("crm_interactions", { operation: "save", event_id: event.id, participants: [{ record_id: "company", role: "investor" }, { record_id: "person", role: "founder" }], occurred_at: "2026", body: "Discussed financing", origin: "user", metadata: { private: true } });
+ const listed = await run("crm_events", { operation: "list", record_id: "company" });
+ expect(listed.events.map((e: any) => e.id)).toEqual([event.id]);
+ const roster = await run("crm_events", { operation: "get", id: listed.events[0].id });
+ expect(roster.participation[0]).toMatchObject({ record_id: "company", role: "investor", status: "unknown" });
+ const page = await run("crm_timeline", { record_id: "company", limit: 1 });
+ expect(page.entries[0]).toMatchObject({ record_id: "company", person_id: null, kind: "event_participation", occurred_at: "2026-02", precision: "month", metadata: { lead: true }, event_metadata: { stage: "seed" } });
+ const record = await run("crm_get", { id: "company", timeline_limit: 1 });
+ expect(record.timeline).toEqual(page.entries);
+ expect(record.timeline_next_cursor).toEqual(page.next_cursor);
+ const next = await run("crm_timeline", { record_id: "company", cursor: page.next_cursor });
+ expect(next.entries[0]).toMatchObject({ kind: "interaction", occurred_at: "2026", precision: "year", metadata: { private: true } });
+ await invalid(crmTimelineRequest(db, owner, { record_id: "person", cursor: page.next_cursor }));
+ await invalid(crmTimelineRequest(db, owner, { record_id: "company", person_id: "person" }));
+});

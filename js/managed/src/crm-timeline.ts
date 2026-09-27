@@ -6,6 +6,7 @@ export interface CrmTimelineEntry {
   kind: string;
   id: string;
   person_id: string | null;
+  record_id: string | null;
   occurred_at: string;
   [field: string]: unknown;
 }
@@ -17,7 +18,7 @@ function object(value: unknown, keys: string[]): Input {
   return value as Input;
 }
 function id(value: unknown): string {
-  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) invalid("Invalid person or entry id.");
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) invalid("Invalid record or entry id.");
   return value;
 }
 function date(value: unknown): number | null {
@@ -56,12 +57,13 @@ const union = `
  UNION ALL
  SELECT e.start_ms,'event_participation',p.id,
  json_object('title',e.title,'event_id',e.id,'record_id',p.record_id,'person_id',p.person_id,'participation_status',p.status,'role',p.role,'origin',p.origin,
- 'sources',json(p.sources),'confidence',p.confidence,'rationale',p.rationale)
+ 'sources',json(p.sources),'confidence',p.confidence,'rationale',p.rationale,'metadata',json(p.metadata),
+ 'start_at',e.start_at,'start_precision',e.start_precision,'end_at',e.end_at,'end_precision',e.end_precision,'occurred_at',e.start_at,'precision',e.start_precision,'event_metadata',json(e.metadata))
  FROM crm_event_participation p JOIN crm_events e ON e.owner_id=p.owner_id AND e.id=p.event_id
- WHERE p.owner_id=?1 AND (?2 IS NULL OR p.person_id=?2) AND (?3 IS NULL OR p.event_id=?3)
+ WHERE p.owner_id=?1 AND (?2 IS NULL OR p.record_id=?2) AND (?3 IS NULL OR p.event_id=?3)
  UNION ALL
  SELECT i.occurred_ms,'interaction',i.id,
- json_object('body',i.body,'type',i.type,'summary',i.summary,'occurred_at',i.occurred_at,'precision',i.precision,'participants',json((SELECT json_group_array(json_object('record_id',p.record_id,'role',p.role)) FROM (SELECT record_id,role FROM crm_interaction_participants WHERE owner_id=i.owner_id AND interaction_id=i.id ORDER BY record_id LIMIT 100) p)),'event_id',i.event_id,'meeting_id',i.meeting_id,'connection_id',i.connection_id,'message_id',i.message_id,
+ json_object('body',i.body,'type',i.type,'summary',i.summary,'occurred_at',i.occurred_at,'precision',i.occurred_precision,'metadata',json(i.metadata),'participants',json((SELECT json_group_array(json_object('record_id',p.record_id,'role',p.role)) FROM (SELECT record_id,role FROM crm_interaction_participants WHERE owner_id=i.owner_id AND interaction_id=i.id ORDER BY record_id LIMIT 100) p)),'event_id',i.event_id,'meeting_id',i.meeting_id,'connection_id',i.connection_id,'message_id',i.message_id,
  'origin',i.origin,'sources',json(i.sources),'confidence',i.confidence,'rationale',i.rationale)
  FROM crm_interactions i WHERE i.owner_id=?1 AND (?3 IS NULL OR i.event_id=?3) AND (?2 IS NULL OR EXISTS (SELECT 1 FROM crm_interaction_participants p WHERE p.owner_id=i.owner_id AND p.interaction_id=i.id AND p.record_id=?2))
  UNION ALL
@@ -72,11 +74,14 @@ const union = `
 /** Account-private, descending keyset timeline. Calendar invitations do not prove attendance. */
 export async function crmTimelineRequest(db: D1Database, owner: string, input: unknown): Promise<CrmTimelinePage> {
   if (typeof owner !== "string" || !owner.trim() || owner.length > 512 || /[\u0000-\u001f\u007f]/.test(owner)) invalid("Invalid authenticated owner.");
-  const args = object(input, ["person_id", "event_id", "limit", "cursor", "from", "to"]);
-  const person = args.person_id === undefined ? null : id(args.person_id), event = args.event_id === undefined ? null : id(args.event_id), from = date(args.from), to = date(args.to), limit = args.limit ?? 20;
+  const args = object(input, ["record_id", "person_id", "event_id", "limit", "cursor", "from", "to"]);
+  const legacyPerson = args.person_id === undefined ? null : id(args.person_id);
+  const record = args.record_id === undefined ? legacyPerson : id(args.record_id);
+  if (legacyPerson !== null && record !== legacyPerson) invalid("record_id and person_id must match when both are supplied.");
+  const event = args.event_id === undefined ? null : id(args.event_id), from = date(args.from), to = date(args.to), limit = args.limit ?? 20;
   if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 100) invalid("limit must be an integer from 1 to 100.");
   if (from !== null && to !== null && from >= to) invalid("from must precede to.");
-  const scope = createHash("sha256").update(JSON.stringify([owner, person, event, from, to])).digest("hex");
+  const scope = createHash("sha256").update(JSON.stringify([owner, record, event, from, to])).digest("hex");
   let cursor: { at: number; kind: string; id: string } | null = null;
   if (args.cursor !== undefined) {
     try {
@@ -88,9 +93,10 @@ export async function crmTimelineRequest(db: D1Database, owner: string, input: u
   }
   try {
     const session = db.withSession("first-primary");
-    if (person !== null && !await session.prepare("SELECT id FROM crm_records WHERE owner_id=? AND id=? AND kind='person'").bind(owner, person).first()) throw new CrmError("not_found", "CRM person not found.");
+    const selected = record === null ? null : await session.prepare("SELECT id,kind FROM crm_records WHERE owner_id=? AND id=?").bind(owner, record).first<{ id: string; kind: string }>();
+    if (record !== null && (!selected || (legacyPerson !== null && selected.kind !== "person"))) throw new CrmError("not_found", "CRM record not found.");
     if (event !== null && !await session.prepare("SELECT id FROM crm_events WHERE owner_id=? AND id=?").bind(owner, event).first()) throw new CrmError("not_found", "CRM event not found.");
-    const where: string[] = [], values: (string | number | null)[] = [owner, person, event];
+    const where: string[] = [], values: (string | number | null)[] = [owner, record, event];
     if (from !== null) { where.push("at>=?"); values.push(from); }
     if (to !== null) { where.push("at<?"); values.push(to); }
     if (cursor) {
@@ -100,7 +106,7 @@ export async function crmTimelineRequest(db: D1Database, owner: string, input: u
     const rows = (await session.prepare(`WITH timeline AS (${union}) SELECT at,kind,id,payload FROM timeline ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY at DESC,kind DESC,id DESC LIMIT ?`).bind(...values, limit + 1).all<{ at: number; kind: string; id: string; payload: string }>()).results;
     const page = rows.slice(0, limit), last = page.at(-1);
     return {
-      entries: page.map(row => ({ kind: row.kind, id: row.id, person_id: person, occurred_at: new Date(row.at).toISOString(), ...JSON.parse(row.payload) as Input })),
+      entries: page.map(row => ({ kind: row.kind, id: row.id, record_id: record, person_id: selected?.kind === "person" ? record : null, occurred_at: new Date(row.at).toISOString(), ...JSON.parse(row.payload) as Input })),
       next_cursor: rows.length > limit && last ? Buffer.from(JSON.stringify({ v: 1, scope, at: last.at, kind: last.kind, id: last.id })).toString("base64url") : null,
     };
   } catch (error) {

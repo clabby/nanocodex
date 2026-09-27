@@ -33,7 +33,7 @@ it("keeps organizer role separate from attendance and paginates an owned roster"
  expect(rows.find(p => p.person_id === "person").status).toBe("invited");
  await expect(crmEventRequest(db, crypto.randomUUID(), "get", { id: "event" }, "unused")).rejects.toMatchObject({ code: "not_found" });
  await invalid(participation(owner, { id: "participation", record_id: "other" }));
- await invalid(participation(owner, { id: "organizer", role: "attendee" }));
+ expect((await participation(owner, { id: "organizer", role: "sponsor" })).participation).toMatchObject({ role: "sponsor", status: "unknown" });
 });
 it("validates provenance and absolute timestamps and preserves stable create replays", async () => {
  const owner = await setup();
@@ -104,4 +104,63 @@ it("retains free-form provenance and permits editing history after a linked part
  await crmRequest(db, owner, "delete", { id: "person" }, "unused");
  const saved = await interaction(owner, { id: "interaction", body: "Corrected observation" });
  expect(saved.interaction).toMatchObject({ body: "Corrected observation", sources, participants: [{ record_id: "other", role: null }] });
+});
+
+// Generic event failure cases: company roles must survive graph traversal without
+// implying attendance; metadata cannot bypass provenance or exceed JSON bounds;
+// partial dates must not become fabricated observed timestamps.
+it("traverses company and person participation with flexible roles and preserved metadata", async () => {
+ const owner = await setup();
+ const metadata = { round: "seed", amount: { value: 12, currency: "USD" }, tags: ["synthetic", null, false] };
+ await event(owner, { id: "event", title: "Funding", start_at: "2026-01", metadata });
+ const sources = [{ kind: "document", reference: "/synthetic/announcement.md" }];
+ await participation(owner, { event_id: "event", record_id: "company", role: "investor", origin: "source", sources, metadata }, "investor");
+ await participation(owner, { event_id: "event", record_id: "person", role: "founder", origin: "inferred", sources, confidence: "medium", rationale: "Synthetic evidence", metadata }, "founder");
+ const page: any = await crmEventRequest(db, owner, "list", { record_id: "company" }, "unused");
+ expect(page.events).toHaveLength(1);
+ expect(page.events[0]).toMatchObject({ id: "event", start_at: "2026-01", start_precision: "month", metadata });
+ const roster: any = await crmEventRequest(db, owner, "get", { id: page.events[0].id }, "unused");
+ expect(roster.participation).toEqual(expect.arrayContaining([
+  expect.objectContaining({ record_id: "company", person_id: null, role: "investor", status: "unknown", metadata, origin: "source", sources }),
+  expect.objectContaining({ record_id: "person", person_id: "person", role: "founder", status: "unknown", metadata, origin: "inferred", confidence: "medium", rationale: "Synthetic evidence" }),
+ ]));
+ expect((await event(owner, { id: "event", description: "Updated" })).event.metadata).toEqual(metadata);
+ expect((await participation(owner, { id: "investor", status: "expected" })).participation.metadata).toEqual(metadata);
+ expect((await participation(owner, { id: "investor", metadata: {} })).participation.metadata).toEqual({});
+ await invalid(participation(owner, { id: "founder", sources: [] }));
+ for (const role of [" ", "x".repeat(129)]) await invalid(participation(owner, { id: "investor", role }));
+ await expect(crmEventRequest(db, crypto.randomUUID(), "list", { record_id: "company" }, "unused")).rejects.toMatchObject({ code: "not_found" });
+});
+
+it("roundtrips bounded JSON metadata on all assertions while retaining provenance checks", async () => {
+ const owner = await setup();
+ await participation(owner, { event_id: "event", record_id: "person", origin: "user" });
+ await interaction(owner, { participants: [{ record_id: "company", role: "buyer" }, { record_id: "person", role: "seller" }], occurred_at: "2026", body: "Synthetic transaction", origin: "user", metadata: { agreed: true } });
+ const mutations = [
+  (metadata: unknown) => event(owner, { id: "event", metadata }),
+  (metadata: unknown) => participation(owner, { id: "participation", metadata }),
+  (metadata: unknown) => interaction(owner, { id: "interaction", metadata }),
+ ];
+ const cyclic: any = {}; cyclic.self = cyclic;
+ for (const mutate of mutations) {
+  for (const value of [null, [], "text", { huge: "é".repeat(8192) }, { value: Infinity }, cyclic]) await invalid(mutate(value));
+  await mutate({ exact: "x".repeat(16372) }); // 12 bytes of JSON framing, exactly 16 KiB.
+  await invalid(mutate({ exact: "x".repeat(16373) }));
+  await mutate({ nested: [1, null, { valid: true }] });
+ }
+ const saved: any = await crmInteractionRequest(db, owner, "get", { id: "interaction" }, "unused");
+ expect(saved.interaction).toMatchObject({ occurred_at: "2026", precision: "year", metadata: { nested: [1, null, { valid: true }] } });
+ await invalid(event(owner, { title: "Unsupported source", start_at: "2026", origin: "source", metadata: { evidence: "not provenance" } }, "bad-source"));
+});
+
+it("preserves year month and day precision and rejects impossible partial dates", async () => {
+ const owner = await setup();
+ for (const [value, precision] of [["2024", "year"], ["2024-02", "month"], ["2024-02-29", "date"]]) {
+  expect((await event(owner, { id: "event", start_at: value, end_at: value })).event).toMatchObject({ start_at: value, end_at: value, start_precision: precision, end_precision: precision });
+  expect((await interaction(owner, { participants: [{ record_id: "company", role: "acquirer" }], occurred_at: value, body: "Synthetic acquisition", origin: "user" }, value)).interaction).toMatchObject({ occurred_at: value, precision });
+ }
+ for (const value of ["2023-02-29", "2026-13", "2026-00", "26", "2026-2", "2026-04-31"]) {
+  await invalid(event(owner, { title: "Invalid", start_at: value, origin: "user" }, value));
+  await invalid(interaction(owner, { person_id: "person", occurred_at: value, body: "Invalid", origin: "user" }, value));
+ }
 });
