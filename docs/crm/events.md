@@ -1,5 +1,9 @@
 # CRM events and connections
 
+These APIs remain available for existing integrations. New untyped knowledge can
+use the [CRM graph](graph.md); legacy events and participation are synchronized
+into it with their original provenance.
+
 An event is a titled occurrence with dates, provenance, and optional JSON metadata.
 Conferences, funding announcements, acquisitions, and other milestones use the same
 `crm_events` API and storage. There is no required event type or dedicated funding

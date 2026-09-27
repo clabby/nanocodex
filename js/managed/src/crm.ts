@@ -100,7 +100,7 @@ function record(row: EffectiveRecordRow) {
   const field_origins = { ...(website_origin ? { website: website_origin } : {}),
     ...(title_origin ? { title: title_origin } : {}),
     ...(company_id_origin ? { company_id: company_id_origin } : {}) };
-  return { ...fields, tags: JSON.parse(row.tags) as string[], ...(Object.keys(field_origins).length ? { field_origins } : {}) };
+  return { ...fields, graph_node_id: `legacy:crm_records:${JSON.stringify([row.id])}`, tags: JSON.parse(row.tags) as string[], ...(Object.keys(field_origins).length ? { field_origins } : {}) };
 }
 async function scope(parts: unknown[]): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(parts)));
