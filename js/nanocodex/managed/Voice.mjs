@@ -39,6 +39,7 @@ export async function createManagedBrowserVoice(agent, voice, options = {}) {
     if (typeof routed.turn_id !== "string") return [];
     activeTurnId = routed.turn_id;
     if (routed.route === "started") startedTurnId = routed.turn_id;
+    else if (startedTurnId !== activeTurnId) startedTurnId = undefined;
     const buffered = pendingEvents;
     pendingEvents = [];
     return buffered.map(observe).filter((effects) => effects !== undefined);
@@ -137,7 +138,8 @@ export async function createManagedBrowserVoice(agent, voice, options = {}) {
       }
       let stopFailure;
       try {
-        await stopManagedRealtime(agent, voiceSessionId, stopOperationId);
+        await stopManagedRealtime(agent, voiceSessionId, stopOperationId,
+          update.delegation?.trim() ? undefined : update.transcript);
       } catch (error) {
         stopFailure = error;
       }

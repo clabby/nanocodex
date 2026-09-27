@@ -183,9 +183,17 @@ impl ManagedVoiceProtocol {
                 return Ok(Value::Null);
             }
             "tail" => {
-                return Ok(json!(realtime_tail_delegation(
-                    &self.protocol.take_transcript_tail()
-                )));
+                let transcript = self.protocol.take_transcript_tail();
+                let delegation = realtime_tail_delegation(&transcript);
+                if command["structured"].as_bool() == Some(true) {
+                    return Ok(json!({
+                        "delegation": delegation,
+                        "transcript": transcript.iter().map(|entry| json!({
+                            "role": entry.role, "text": entry.text
+                        })).collect::<Vec<_>>()
+                    }));
+                }
+                return Ok(json!(delegation));
             }
             "close" => self.protocol.close_effects(),
             "instructions" => {
@@ -302,6 +310,28 @@ fn managed_personalization_context(context: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_tail_is_atomic_and_retains_legacy_tail_shape() {
+        let mut voice = ManagedVoiceProtocol::new("cove").unwrap();
+        voice
+            .protocol
+            .realtime_message(r#"{"type":"turn.done","turn":{"role":"user","transcript":"tail"}}"#);
+        let result = voice
+            .dispatch(&json!({"op":"tail","structured":true}))
+            .unwrap();
+        assert_eq!(
+            result["transcript"].as_array().unwrap().last().unwrap()["text"],
+            "tail"
+        );
+        assert!(
+            result["delegation"]
+                .as_str()
+                .unwrap()
+                .contains("transcript_tail_flush")
+        );
+        assert_eq!(voice.dispatch(&json!({"op":"tail"})).unwrap(), Value::Null);
+    }
 
     #[test]
     fn prepared_personalization_is_optional_bounded_data_separate_from_history() {

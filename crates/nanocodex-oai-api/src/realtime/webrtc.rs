@@ -1001,7 +1001,7 @@ async fn bounded_body(
     Ok(body)
 }
 
-fn add_auth_headers(
+pub(super) fn add_auth_headers(
     headers: &mut http::HeaderMap,
     auth: &OpenAiAuthSnapshot,
 ) -> Result<(), RealtimeError> {
@@ -1153,6 +1153,36 @@ mod tests {
         assert!(media.sdp().contains("opus/48000/2"));
         assert!(media.answer("invalid sdp".to_owned()).await.is_err());
         media.close().await;
+    }
+
+    #[test]
+    fn realtime_auth_headers_preserve_selected_chatgpt_account() {
+        let snapshot = OpenAiAuthSnapshot::new(
+            OpenAiAuthMode::ChatGpt,
+            "synthetic-token",
+            Some("synthetic-account"),
+            false,
+            0,
+        );
+        let mut headers = http::HeaderMap::new();
+        super::add_auth_headers(&mut headers, &snapshot).unwrap();
+        assert_eq!(headers["authorization"], "Bearer synthetic-token");
+        assert_eq!(headers["chatgpt-account-id"], "synthetic-account");
+    }
+
+    #[test]
+    fn realtime_api_key_headers_do_not_invent_an_account() {
+        let snapshot = OpenAiAuthSnapshot::new(
+            OpenAiAuthMode::ApiKey,
+            "synthetic-key",
+            None::<String>,
+            false,
+            0,
+        );
+        let mut headers = http::HeaderMap::new();
+        super::add_auth_headers(&mut headers, &snapshot).unwrap();
+        assert_eq!(headers["authorization"], "Bearer synthetic-key");
+        assert!(!headers.contains_key("chatgpt-account-id"));
     }
 
     #[test]

@@ -2365,7 +2365,7 @@ impl WasmBrowserVoice {
         encode_voice_effects(&self.protocol.borrow_mut().flush(final_chunk))
     }
 
-    /// Flushes any final transcript tail and ends Codex's Realtime lifecycle.
+    /// Retains final transcript history without a task and ends the Realtime lifecycle.
     ///
     /// # Errors
     ///
@@ -2375,11 +2375,16 @@ impl WasmBrowserVoice {
             return encode_voice_effects(&self.protocol.borrow_mut().close_effects());
         }
         let tail = self.protocol.borrow_mut().take_transcript_tail();
-        let routed = if let Some(input) = realtime_tail_delegation(&tail) {
-            self.route_agent_input(input).await
-        } else {
-            Ok(())
-        };
+        let routed =
+            if let Some(context) = nanocodex_voice_protocol::realtime_transcript_context(&tail) {
+                self.agent
+                    .append_developer_message(context)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            } else {
+                Ok(())
+            };
         let ended = self
             .agent
             .append_developer_message(REALTIME_END_INSTRUCTIONS)
@@ -2766,17 +2771,22 @@ impl WasmManagedBrowserVoice {
         encode_voice_effects(&self.protocol.borrow_mut().flush(final_chunk))
     }
 
-    /// Stops the protocol and returns final transcript delegation plus close effects.
+    /// Stops the protocol and returns transcript history plus close effects, without a delegation.
     ///
     /// # Errors
     ///
     /// Rejects only when the update cannot be serialized.
     pub fn stop(&self) -> Result<String, JsValue> {
         let tail = self.protocol.borrow_mut().take_transcript_tail();
-        let delegation = realtime_tail_delegation(&tail);
         self.started.set(false);
         self.startup_context.replace(None);
-        encode_managed_voice_update(self.protocol.borrow_mut().close_effects(), delegation, None)
+        serde_json::to_string(&serde_json::json!({
+            "effects": self.protocol.borrow_mut().close_effects(),
+            "transcript": tail.iter().map(|entry| serde_json::json!({
+                "role": entry.role, "text": entry.text
+            })).collect::<Vec<_>>()
+        }))
+        .map_err(js_error)
     }
 
     /// Selects Codex's preferred physical input from browser device labels.

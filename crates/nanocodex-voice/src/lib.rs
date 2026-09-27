@@ -451,6 +451,8 @@ pub struct VoiceSessionBuilder {
     codex_response_handoff_mode: RealtimeResponseHandoffMode,
     codex_response_handoff_channel_prefixes: BTreeMap<String, Vec<String>>,
     initial_items: Vec<RealtimeInitialItem>,
+    realtime_start_instructions: Option<String>,
+    realtime_end_instructions: Option<String>,
     include_startup_context: bool,
     flush_transcript_tail_on_session_end: bool,
     audio: AudioConfig,
@@ -462,7 +464,6 @@ impl VoiceSessionBuilder {
     /// Creates a voice lifecycle over an existing OpenAI recipe and agent.
     #[must_use]
     pub fn new(openai: OpenAi, agent: Nanocodex) -> Self {
-        let desktop_handoffs = openai.auth_mode() == OpenAiAuthMode::ChatGpt;
         Self {
             openai,
             agent,
@@ -475,15 +476,17 @@ impl VoiceSessionBuilder {
             transport: None,
             session_mode: RealtimeSessionMode::Conversational,
             output_modality: RealtimeOutputModality::Audio,
-            client_managed_handoffs: desktop_handoffs,
+            client_managed_handoffs: false,
             delegation_ack_filler: None,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_mode: RealtimeResponseHandoffMode::Thinking,
             codex_response_handoff_channel_prefixes: BTreeMap::new(),
             initial_items: Vec::new(),
-            include_startup_context: !desktop_handoffs,
-            flush_transcript_tail_on_session_end: true,
+            realtime_start_instructions: None,
+            realtime_end_instructions: None,
+            include_startup_context: true,
+            flush_transcript_tail_on_session_end: false,
             audio: AudioConfig::default(),
             agent_control: VoiceAgentControl::default(),
             media_controls: Arc::default(),
@@ -640,6 +643,38 @@ impl VoiceSessionBuilder {
         self
     }
 
+    /// Overrides the developer instruction recorded when realtime starts.
+    ///
+    /// # Errors
+    /// Rejects instructions exceeding Codex's 8,192 estimated-token limit.
+    pub fn realtime_start_instructions(
+        mut self,
+        instructions: impl Into<String>,
+    ) -> Result<Self, RealtimeError> {
+        let instructions = instructions.into();
+        validate_mode_instructions("realtime start instructions", &instructions)?;
+        self.realtime_start_instructions = Some(format!(
+            "<realtime_conversation>\n{instructions}\n</realtime_conversation>"
+        ));
+        Ok(self)
+    }
+
+    /// Overrides the developer instruction recorded when realtime ends.
+    ///
+    /// # Errors
+    /// Rejects instructions exceeding Codex's 8,192 estimated-token limit.
+    pub fn realtime_end_instructions(
+        mut self,
+        instructions: impl Into<String>,
+    ) -> Result<Self, RealtimeError> {
+        let instructions = instructions.into();
+        validate_mode_instructions("realtime end instructions", &instructions)?;
+        self.realtime_end_instructions = Some(format!(
+            "<realtime_conversation>\n{instructions}\n</realtime_conversation>"
+        ));
+        Ok(self)
+    }
+
     /// Enables or disables Codex's bounded realtime startup context.
     ///
     /// This defaults to `true` and includes current-thread history, recent
@@ -651,6 +686,7 @@ impl VoiceSessionBuilder {
     }
 
     /// Enables or disables routing an unconsumed transcript tail when voice ends.
+    /// Defaults to `false`, matching the app-server start request.
     #[must_use]
     pub const fn flush_transcript_tail_on_session_end(mut self, flush: bool) -> Self {
         self.flush_transcript_tail_on_session_end = flush;
@@ -855,6 +891,15 @@ fn run_thread(
     drop(finished.send(completion));
 }
 
+fn validate_mode_instructions(name: &str, instructions: &str) -> Result<(), RealtimeError> {
+    if instructions.len().div_ceil(4) > 8_192 {
+        return Err(RealtimeError::InvalidConfiguration(format!(
+            "{name} must not exceed 8192 estimated tokens"
+        )));
+    }
+    Ok(())
+}
+
 async fn run_voice(
     mut builder: VoiceSessionBuilder,
     events: &mpsc::UnboundedSender<VoiceEvent>,
@@ -865,8 +910,14 @@ async fn run_voice(
 ) -> Result<(), VoiceFailure> {
     send_event(events, VoiceEvent::Connecting);
     let lifecycle_agent = builder.agent.clone();
+    let end_instructions = builder.realtime_end_instructions.clone();
     let context = lifecycle_agent
-        .append_developer_message(REALTIME_START_INSTRUCTIONS)
+        .append_developer_message(
+            builder
+                .realtime_start_instructions
+                .as_deref()
+                .unwrap_or(REALTIME_START_INSTRUCTIONS),
+        )
         .await?;
     if builder.include_startup_context {
         let rollout = lifecycle_agent
@@ -886,7 +937,11 @@ async fn run_voice(
     )
     .await;
     let ended = lifecycle_agent
-        .append_developer_message(REALTIME_END_INSTRUCTIONS)
+        .append_developer_message(
+            end_instructions
+                .as_deref()
+                .unwrap_or(REALTIME_END_INSTRUCTIONS),
+        )
         .await
         .map(|_| ());
     match (result, ended) {
@@ -1005,7 +1060,12 @@ async fn run_active_voice(
                         drop(result.send(session.send_text(role, text).await));
                     }
                     VoiceCommand::AppendSpeech { text, result } => {
-                        drop(result.send(session.append_speech(text).await));
+                        let outcome = session.append_speech(text).await;
+                        if outcome.is_ok() {
+                            agent_bridge.delivery.allow_explicit_speech();
+                            audio.resume();
+                        }
+                        drop(result.send(outcome));
                     }
                 }
             }
@@ -1116,6 +1176,8 @@ async fn run_active_voice(
             let tail = session.close_with_transcript_tail().await?;
             if builder.flush_transcript_tail_on_session_end {
                 route_transcript_tail(&agent_bridge.agent, &tail).await?;
+            } else {
+                retain_transcript_tail(&agent_bridge.agent, &tail).await?;
             }
         }
         Ok(())
@@ -1219,6 +1281,8 @@ async fn handle_realtime_event(
         RealtimeEvent::TranscriptTail(tail) => {
             if flush_transcript_tail_on_session_end {
                 route_transcript_tail(&agent_bridge.agent, &tail).await?;
+            } else {
+                retain_transcript_tail(&agent_bridge.agent, &tail).await?;
             }
         }
         RealtimeEvent::SpeechStarted => {
@@ -1559,6 +1623,20 @@ async fn handle_observed_agent_event(
     Ok(())
 }
 
+async fn retain_transcript_tail(
+    agent: &Nanocodex,
+    tail: &[RealtimeTranscriptEntry],
+) -> Result<(), VoiceFailure> {
+    let transcript = tail
+        .iter()
+        .map(|entry| ProtocolTranscriptEntry::new(&entry.role, &entry.text))
+        .collect::<Vec<_>>();
+    if let Some(context) = nanocodex_voice_protocol::realtime_transcript_context(&transcript) {
+        agent.append_developer_message(context).await?;
+    }
+    Ok(())
+}
+
 async fn route_transcript_tail(
     agent: &Nanocodex,
     tail: &[RealtimeTranscriptEntry],
@@ -1828,6 +1906,23 @@ mod tests {
             stream.recv().await,
             Some(super::VoiceEvent::Stopped)
         ));
+    }
+
+    #[test]
+    fn lifecycle_instruction_budget_matches_app_server() {
+        assert!(super::validate_mode_instructions("realtime start instructions", "").is_ok());
+        assert!(
+            super::validate_mode_instructions("realtime start instructions", &"a".repeat(32_768))
+                .is_ok()
+        );
+        let error =
+            super::validate_mode_instructions("realtime end instructions", &"a".repeat(32_769))
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("realtime end instructions must not exceed 8192 estimated tokens")
+        );
     }
 
     #[test]

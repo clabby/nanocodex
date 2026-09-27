@@ -173,7 +173,7 @@ impl LiveTranscript {
         }
         if partial {
             self.text.push_str(text);
-        } else if !text.is_empty() && !retains_spoken_prefix(speaker, &self.text, text) {
+        } else if !text.is_empty() && text.starts_with(&self.text) {
             self.text = text.to_owned();
         }
         self.complete = !partial;
@@ -338,9 +338,12 @@ impl BrowserVoiceProtocol {
 
     /// Explicit speech is independent of background narration preferences.
     pub fn append_speech(&mut self, text: &str) -> Result<BrowserVoiceEffects, String> {
+        if text.trim().is_empty() {
+            return Ok(BrowserVoiceEffects::default());
+        }
         validate_text(text)?;
         let mut effects = self.enqueue_frames(
-            session_context_frames(text, "speakable")
+            session_context_frames(&bounded_speech(text), "speakable")
                 .into_iter()
                 .map(|frame| frame.to_string())
                 .collect(),
@@ -359,7 +362,8 @@ impl BrowserVoiceProtocol {
     }
 
     /// Codex's subscription adapter sends text as chunked context, regardless
-    /// of its API role. Background-only callers should use `append_context`.
+    /// of its API role. FramelessBidi maps to core V1, so the V2-only
+    /// `[USER] ` prefix does not apply. Background-only callers use `append_context`.
     pub fn append_text(
         &mut self,
         _role: VoiceTextRole,
@@ -397,6 +401,19 @@ impl BrowserVoiceProtocol {
         let Some(kind) = event.get("type").and_then(Value::as_str) else {
             return BrowserVoiceUpdate::default();
         };
+        // Match Codex's frameless parser: a malformed completion is not an
+        // event and must not close captions or change input ownership.
+        if kind == "turn.done"
+            && (!matches!(
+                event.pointer("/turn/role").and_then(Value::as_str),
+                Some("user" | "assistant")
+            ) || event
+                .pointer("/turn/transcript")
+                .and_then(Value::as_str)
+                .is_none())
+        {
+            return BrowserVoiceUpdate::default();
+        }
         let accepts_output = self
             .client_delivery
             .as_ref()
@@ -525,13 +542,15 @@ impl BrowserVoiceProtocol {
                 if let Some(delivery) = &mut self.client_delivery {
                     delivery.delegate();
                 }
-                if !self
-                    .transcript
-                    .iter()
-                    .any(|entry| entry.role == "user" && entry.text == input)
+                let transcript_input = input.trim();
+                if !transcript_input.is_empty()
+                    && !self
+                        .transcript
+                        .iter()
+                        .any(|entry| entry.role == "user" && entry.text.trim() == transcript_input)
                 {
                     self.transcript
-                        .push(super::TranscriptEntry::new("user", input.clone()));
+                        .push(super::TranscriptEntry::new("user", transcript_input));
                 }
                 update.delegation = Some(BrowserVoiceDelegation {
                     id,
@@ -688,7 +707,17 @@ impl BrowserVoiceProtocol {
             .as_mut()
             .map(|delivery| delivery.close())
             .unwrap_or_default();
+        let mut transcripts = Vec::new();
+        for (role, live) in [
+            ("user", &mut self.input),
+            ("assistant", &mut self.output_transcript),
+        ] {
+            if !live.complete && !live.text.is_empty() {
+                transcripts.push(live.update(role, "", false));
+            }
+        }
         BrowserVoiceEffects {
+            transcripts,
             frames: vec![json!({ "type": "session.close" }).to_string()],
             status: Some("Voice stopped".to_owned()),
             ..recovery
@@ -801,6 +830,27 @@ impl BrowserVoiceProtocol {
         self.pending_frames.extend(new_frames.iter().cloned());
         effects.frames.extend(new_frames);
         effects.acknowledge_frames = true;
+    }
+}
+
+// Match core's 1,000-token standalone-speech cap, including its middle
+// truncation marker and retry with a tightened content budget.
+fn bounded_speech(text: &str) -> String {
+    let mut budget = REALTIME_OUTPUT_BYTE_LIMIT / APPROX_BYTES_PER_TOKEN;
+    loop {
+        let maximum = budget * APPROX_BYTES_PER_TOKEN;
+        if text.len() <= maximum {
+            return text.to_owned();
+        }
+        let head = take_first_bytes(text, maximum / 2);
+        let tail = take_last_bytes(text, maximum - maximum / 2);
+        let removed = (text.len() - maximum).div_ceil(APPROX_BYTES_PER_TOKEN);
+        let candidate = format!("{head}…{removed} tokens truncated…{tail}");
+        let excess = tokens(&candidate).saturating_sub(1_000);
+        if excess == 0 {
+            return candidate;
+        }
+        budget = budget.saturating_sub(excess);
     }
 }
 
@@ -1034,24 +1084,14 @@ fn complete_transcript(
     force_new: bool,
 ) {
     if !force_new && let Some(last) = transcript.iter_mut().rev().find(|entry| entry.role == role) {
-        if !retains_spoken_prefix(role, &last.text, text) {
+        // Frameless finals can lag deltas from the next utterance. Match
+        // Codex by replacing accumulated speech only when the final extends it.
+        if text.starts_with(&last.text) {
             last.text = text.to_owned();
         }
     } else {
         transcript.push(super::TranscriptEntry::new(role, text));
     }
-}
-
-fn retains_spoken_prefix(role: &str, streamed: &str, completed: &str) -> bool {
-    // Frameless turn boundaries can omit speech already emitted before the
-    // other speaker's turn ended. Keep that prefix only for an exact suffix;
-    // corrected finals and removal of interrupted trailing speech still win.
-    role == "assistant"
-        && !completed.trim().is_empty()
-        && streamed
-            .trim_end()
-            .strip_suffix(completed.trim())
-            .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with(char::is_whitespace))
 }
 
 fn truncate_active_transcript(entries: &mut Vec<super::TranscriptEntry>) {
@@ -1209,6 +1249,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_speech_budget_matches_core_middle_truncation() {
+        assert_eq!(bounded_speech(&"x".repeat(4_000)), "x".repeat(4_000));
+        assert_eq!(
+            bounded_speech(&"x".repeat(4_001)),
+            format!(
+                "{}…7 tokens truncated…{}",
+                "x".repeat(1_988),
+                "x".repeat(1_988)
+            )
+        );
+        for text in ["🦊".repeat(2_000), "a".repeat(100_000)] {
+            let result = bounded_speech(&text);
+            assert!(result.len() <= REALTIME_OUTPUT_BYTE_LIMIT);
+            assert!(result.contains("tokens truncated"));
+        }
+    }
+
+    #[test]
+    fn close_finishes_both_partial_captions_once_and_preserves_tail() {
+        let mut voice = BrowserVoiceProtocol::new("cove").unwrap();
+        voice.realtime_message(r#"{"type":"input_transcript.added","item":{"text":"hello"}}"#);
+        voice.realtime_message(r#"{"type":"output_transcript.added","item":{"text":"hi"}}"#);
+        let close = voice.close_effects();
+        assert_eq!(close.transcripts.len(), 2);
+        assert!(close.transcripts.iter().all(|entry| !entry.is_partial));
+        assert!(voice.close_effects().transcripts.is_empty());
+        assert_eq!(voice.take_transcript_tail().len(), 2);
+    }
+
+    #[test]
+    fn malformed_turn_done_does_not_complete_an_active_caption() {
+        for client_managed in [false, true] {
+            let mut protocol = BrowserVoiceProtocol::new("cove").unwrap();
+            if client_managed {
+                protocol.enable_client_managed_handoffs();
+            }
+            protocol
+                .realtime_message(r#"{"type":"input_transcript.added","item":{"text":"hello"}}"#);
+            for turn in [
+                json!({"role":"user"}),
+                json!({"role":"user","transcript":null}),
+                json!({"role":"tool","transcript":"ignored"}),
+            ] {
+                let update =
+                    protocol.realtime_message(&json!({"type":"turn.done","turn":turn}).to_string());
+                assert_eq!(update, BrowserVoiceUpdate::default());
+                assert!(!protocol.input.complete);
+                assert!(!protocol.new_input_entry);
+            }
+            let update = protocol.realtime_message(
+                r#"{"type":"turn.done","turn":{"role":"user","transcript":"hello"}}"#,
+            );
+            assert_eq!(update.effects.transcripts[0].text, "hello");
+            assert!(!update.effects.transcripts[0].is_partial);
+        }
+    }
+
+    #[test]
     fn explicit_speech_and_role_text_are_validated_and_retained_until_acknowledged() {
         let mut voice = BrowserVoiceProtocol::new("maple").unwrap();
         voice
@@ -1245,7 +1343,14 @@ mod tests {
         voice.frames_sent(3);
         assert!(voice.sideband_opened().frames.is_empty());
         for invalid in [" ".to_owned(), "bad\0text".to_owned()] {
-            assert!(voice.append_speech(&invalid).is_err());
+            if invalid.trim().is_empty() {
+                assert_eq!(
+                    voice.append_speech(&invalid).unwrap(),
+                    BrowserVoiceEffects::default()
+                );
+            } else {
+                assert!(voice.append_speech(&invalid).is_err());
+            }
             assert!(voice.append_text(VoiceTextRole::User, &invalid).is_err());
         }
         let long = "🦊".repeat(4096);
@@ -1264,7 +1369,16 @@ mod tests {
                     text.to_owned()
                 })
                 .collect::<String>();
-            assert_eq!(chunks, long);
+            if effects
+                .frames
+                .iter()
+                .any(|frame| frame.contains("speakable"))
+            {
+                assert_eq!(chunks, bounded_speech(&long));
+                assert!(chunks.len() <= REALTIME_OUTPUT_BYTE_LIMIT);
+            } else {
+                assert_eq!(chunks, long);
+            }
             voice.frames_sent(effects.frames.len());
         }
         for role in [
@@ -1372,7 +1486,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_output_keeps_spoken_prefix_but_not_interrupted_tail() {
+    fn delayed_finals_preserve_accumulated_speech_unless_they_extend_it() {
         for (role, streamed, completed, expected) in [
             (
                 "assistant",
@@ -1380,9 +1494,21 @@ mod tests {
                 " thing. Starting now. One...",
                 " Sure thing. Starting now. One...",
             ),
-            ("assistant", "One. Two. Three.", "One. Two.", "One. Two."),
-            ("assistant", "cannot", "not", "not"),
-            ("user", "Sure thing.", "thing.", "thing."),
+            (
+                "assistant",
+                "One. Two. Three.",
+                "One. Two.",
+                "One. Two. Three.",
+            ),
+            ("assistant", "cannot", "not", "cannot"),
+            ("user", "Sure thing.", "thing.", "Sure thing."),
+            ("user", "Hey. Hi.", "Hey.", "Hey. Hi."),
+            (
+                "assistant",
+                "Hey there!",
+                "Hey there! How can I help?",
+                "Hey there! How can I help?",
+            ),
         ] {
             let mut voice = BrowserVoiceProtocol::new("cove").unwrap();
             let kind = if role == "user" {
@@ -1399,6 +1525,50 @@ mod tests {
             assert!(!done.effects.transcripts[0].is_partial);
             assert_eq!(voice.take_transcript_tail()[0].text, expected);
         }
+    }
+
+    #[test]
+    fn interleaved_greetings_keep_roles_and_completed_utterances_distinct() {
+        let mut voice = BrowserVoiceProtocol::new("cove").unwrap();
+        for (kind, text) in [
+            ("input_transcript.added", "Hey."),
+            ("output_transcript.added", "Hi. "),
+            ("input_transcript.added", " Hi."),
+            ("output_transcript.added", "Hey there!"),
+        ] {
+            voice.realtime_message(&json!({"type":kind,"item":{"text":text}}).to_string());
+        }
+        // The user final can lag a newer fragment. Upstream preserves both.
+        voice
+            .realtime_message(r#"{"type":"turn.done","turn":{"role":"user","transcript":"Hey."}}"#);
+        voice.realtime_message(
+            r#"{"type":"turn.done","turn":{"role":"assistant","transcript":"Hey there!"}}"#,
+        );
+        voice.realtime_message(r#"{"type":"input_transcript.added","item":{"text":"Again"}}"#);
+        voice.realtime_message(
+            r#"{"type":"turn.done","turn":{"role":"user","transcript":"Again."}}"#,
+        );
+        assert_eq!(
+            voice.take_transcript_tail(),
+            vec![
+                super::super::TranscriptEntry::new("user", "Hey. Hi."),
+                super::super::TranscriptEntry::new("assistant", "Hi. Hey there!"),
+                super::super::TranscriptEntry::new("user", "Again."),
+            ]
+        );
+    }
+
+    #[test]
+    fn handoff_does_not_duplicate_transcript_input_with_different_whitespace() {
+        let mut voice = BrowserVoiceProtocol::new("cove").unwrap();
+        voice.realtime_message(
+            r#"{"type":"turn.done","turn":{"role":"user","transcript":"  Check the build. "}}"#,
+        );
+        let update = voice.realtime_message(r#"{"type":"delegation.created","item":{"type":"delegation","target":"client","id":"d1","content":[{"type":"input_text","text":"Check the build.\n"}]}}"#);
+        let transcript = update.delegation.unwrap().transcript;
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(transcript[0].role, "user");
+        assert_eq!(transcript[0].text.trim(), "Check the build.");
     }
 
     #[test]

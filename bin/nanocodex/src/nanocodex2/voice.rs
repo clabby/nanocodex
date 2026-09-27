@@ -709,32 +709,12 @@ impl Actor {
     async fn cleanup(&mut self) -> Result<(), ManagedError> {
         let tail = self
             .protocol
-            .dispatch(&json!({"op":"tail"}))
+            .dispatch(&json!({"op":"tail", "structured":true}))
             .map_err(error)?;
-        let mut tail_error = None;
-        if let Some(input) = tail.as_str().filter(|text| !text.trim().is_empty()) {
-            tail_error = self
-                .client
-                .voice_operation(
-                    &self.agent,
-                    &self.session,
-                    "delegate",
-                    json!({"operation_id":uuid::Uuid::new_v4().to_string(),"input":input}),
-                )
-                .await
-                .err();
-        }
-        self.client
-            .voice_operation(
-                &self.agent,
-                &self.session,
-                "stop",
-                json!({"operation_id":uuid::Uuid::new_v4().to_string()}),
-            )
-            .await?;
-        if let Some(error) = tail_error {
-            return Err(error);
-        }
+        self.client.voice_operation(
+            &self.agent, &self.session, "stop",
+            json!({"operation_id":uuid::Uuid::new_v4().to_string(), "transcript":tail["transcript"]}),
+        ).await?;
         Ok(())
     }
 }

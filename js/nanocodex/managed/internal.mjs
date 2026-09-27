@@ -59,13 +59,14 @@ export function routeManagedRealtime(agent, voiceSessionId, operationId, input) 
 }
 
 /** @internal Ends the canonical Realtime lifecycle on the selected durable Agent. */
-export function stopManagedRealtime(agent, voiceSessionId, operationId) {
+export function stopManagedRealtime(agent, voiceSessionId, operationId, transcript) {
   const { client, id } = managedAgent(agent);
   return client.json(`${agentPath(id)}/realtime/stop`, {
     method: "POST",
     body: JSON.stringify({
       voice_session_id: voiceSessionId,
       operation_id: operationId,
+      ...(transcript?.length ? { transcript } : {}),
     }),
   });
 }

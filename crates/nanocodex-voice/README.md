@@ -42,8 +42,12 @@ The builder exposes V1/V2/V3, WebSocket/WebRTC, conversation/transcription,
 audio/text output, initial items, client-managed handoffs, responses-as-items,
 item prefixes, thinking/commentary/BEM routing, configurable BEM prefixes,
 delegation acknowledgement filler, startup-context policy, and tail-flush
-policy. ChatGPT defaults select native WebRTC, V3, client-managed handoffs, and no startup
-context; Platform defaults retain provider-managed PCM behavior.
+policy. ChatGPT transport defaults select native WebRTC and V3. The reusable builder follows
+app-server policy defaults: provider-managed handoffs, startup context enabled, and
+transcript-tail delegation disabled. The TUI explicitly selects client-managed
+handoffs and disables startup context. Platform sessions retain PCM behavior.
+Stopping retains the remaining transcript as background context without starting
+a turn; explicit tail-flush opt-in retains the delegation behavior.
 
 For ChatGPT subscriptions, `VoiceSessionBuilder::settings(VoiceSettings)` applies
 the same preferences used by managed browser and Apple clients: the nine

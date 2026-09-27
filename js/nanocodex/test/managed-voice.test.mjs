@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { Agent } from "../managed/index.mjs";
 import { createManagedBrowserVoice } from "../managed/Voice.mjs";
-import { managedBrowserVoiceTransport } from "../managed/internal.mjs";
+import { managedBrowserVoiceTransport, stopManagedRealtime } from "../managed/internal.mjs";
 import { Voice } from "../browser/index.mjs";
 
 const AGENT_ID = "019d2f5d-7491-8000-8000-000000000001";
@@ -495,5 +495,77 @@ test("real WASM speaks only completed voice finals and recovers superseded or un
     await realtime({ type: "turn.done", turn: { role: "assistant", transcript: "Spoken answer" } });
     const stopped = JSON.parse(await voice.stop());
     assert.deepEqual(stopped.undelivered_answers ?? [], []);
+  } finally { voice.free(); }
+});
+
+test("steering another turn releases cancellation ownership of the prior voice turn", async () => {
+  const module = await WebAssembly.compile(await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url)));
+  for (const sameTurn of [false, true]) {
+    const requests = [];
+    let routes = 0;
+    const agent = Agent.open(AGENT_ID, { baseUrl: "https://managed.example", fetch: async input => {
+      const path = new URL(input).pathname;
+      requests.push(path);
+      if (path.endsWith("/delegate")) return Response.json(++routes === 1
+        ? { route: "started", turn_id: "voice-owned" }
+        : { route: "steered", turn_id: sameTurn ? "voice-owned" : "typed-turn" });
+      return Response.json({ context: { workspace: "/brain", history: [] } });
+    } });
+    const voice = await createManagedBrowserVoice(agent, "cove", { module });
+    try {
+      await voice.start();
+      voice.callBody("v=offer");
+      for (const id of ["first", "second"]) await voice.realtimeMessage(JSON.stringify({
+        type: "delegation.created", item: { type: "delegation", target: "client", id,
+          content: [{ type: "input_text", text: "Find the saved project note" }] },
+      }));
+      assert.equal(await voice.cancel(), sameTurn);
+      assert.equal(requests.some(path => path.endsWith("/voice-owned/cancel")), sameTurn);
+      assert.equal(requests.some(path => path.endsWith("/typed-turn/cancel")), false);
+      await voice.stop();
+    } finally { voice.free(); }
+  }
+});
+
+test("managed stop forwards retained transcript without admitting a turn", async () => {
+  const requests = [];
+  const agent = Agent.open(AGENT_ID, { baseUrl: "https://managed.example", fetch: async (input, init) => {
+    requests.push({ path: new URL(input).pathname, body: JSON.parse(init.body) });
+    return Response.json({ stopped: true });
+  } });
+  const transcript = [{ role: "user", text: "Remember the project discussion" },
+    { role: "assistant", text: "We discussed the next milestone." }];
+  await stopManagedRealtime(agent, "voice-session", "stop-operation", transcript);
+  await stopManagedRealtime(agent, "empty-session", "empty-operation", []);
+  assert.deepEqual(requests, [
+    { path: `/v1/agents/${AGENT_ID}/realtime/stop`, body: {
+      voice_session_id: "voice-session", operation_id: "stop-operation", transcript,
+    } },
+    { path: `/v1/agents/${AGENT_ID}/realtime/stop`, body: {
+      voice_session_id: "empty-session", operation_id: "empty-operation",
+    } },
+  ]);
+});
+
+test("real WASM call shutdown saves conversation without a tail delegation", async () => {
+  const module = await WebAssembly.compile(await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url)));
+  const requests = [];
+  const agent = Agent.open(AGENT_ID, { baseUrl: "https://managed.example", fetch: async (input, init) => {
+    requests.push({ path: new URL(input).pathname, body: JSON.parse(init.body) });
+    return Response.json({ context: { workspace: "/brain", history: [] }, stopped: true });
+  } });
+  const voice = await createManagedBrowserVoice(agent, "cove", { module });
+  try {
+    await voice.start();
+    voice.callBody("v=offer");
+    await voice.realtimeMessage(JSON.stringify({ type: "input_transcript.added", item: { text: "Hello." } }));
+    await voice.realtimeMessage(JSON.stringify({ type: "output_transcript.added", item: { text: "Hi." } }));
+    const stopped = JSON.parse(await voice.stop());
+    assert.equal(requests.filter(request => request.path.endsWith("/delegate")).length, 0);
+    assert.deepEqual(requests.at(-1).body.transcript, [
+      { role: "user", text: "Hello." }, { role: "assistant", text: "Hi." },
+    ]);
+    assert.equal(stopped.transcripts.length, 2);
+    assert(stopped.transcripts.every(entry => !entry.is_partial));
   } finally { voice.free(); }
 });

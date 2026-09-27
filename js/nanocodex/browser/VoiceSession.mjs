@@ -90,6 +90,7 @@ export class BrowserVoiceSession {
   #elevenLabs;
   #muted = false;
   #inputGeneration = 0;
+  #playbackRevision = 0;
   #meterTimer;
   #backendReady;
   #resolveBackendReady;
@@ -267,7 +268,7 @@ export class BrowserVoiceSession {
     const channel = this.#channel;
     channel.addEventListener("message", (event) => {
       if (this.#directControl && !this.#closed && this.#channel === channel) {
-        this.#receiveControl(event.data, () => this.#channel === channel);
+        this.#receiveControl(event.data, () => this.#channel === channel && channel.readyState === "open");
       }
     });
     channel.addEventListener("close", () => {
@@ -311,6 +312,7 @@ export class BrowserVoiceSession {
   }
 
   noteTypedInput() {
+    this.#playbackRevision++;
     this.#playbackEnabled = false;
     this.#elevenLabs?.interrupt();
     this.#speaker?.setEnabled(false);
@@ -429,14 +431,19 @@ export class BrowserVoiceSession {
     for (const text of effects.undelivered_answers ?? []) this.#options.onUndeliveredAnswer?.(text);
     if (effects.input_generation !== undefined) {
       if (effects.input_generation < this.#inputGeneration) return;
-      if (effects.input_generation > this.#inputGeneration) this.#elevenLabs?.interrupt();
+      if (effects.input_generation > this.#inputGeneration) {
+        this.#playbackRevision++;
+        this.#elevenLabs?.interrupt();
+      }
       this.#inputGeneration = effects.input_generation;
     }
     if (effects.playback_enabled === false) {
+      this.#playbackRevision++;
       this.#playbackEnabled = false;
       this.#elevenLabs?.interrupt();
       this.#speaker?.setEnabled(false);
     }
+    const playbackRevision = this.#playbackRevision;
     let sent = 0;
     for (const frame of effects.frames ?? []) {
       if (this.#directControl && this.#channel?.readyState === "open") {
@@ -448,12 +455,15 @@ export class BrowserVoiceSession {
       }
     }
     if (effects.acknowledge_frames && sent > 0) await this.#core?.framesSent(sent);
-    if (!this.#closed && effects.playback_enabled === true && sent === (effects.frames?.length ?? 0)) {
+    // A live interruption can overtake asynchronous frame acknowledgement.
+    // Keep its speaker gate authoritative while retaining accepted captions.
+    const currentPlayback = playbackRevision === this.#playbackRevision;
+    if (currentPlayback && !this.#closed && effects.playback_enabled === true && sent === (effects.frames?.length ?? 0)) {
       this.#playbackEnabled = true;
       this.#speaker?.setEnabled(!this.#elevenLabs);
     }
     for (const entry of effects.transcripts ?? []) {
-      if (this.#playbackEnabled && !this.#closed) this.#elevenLabs?.transcript(entry);
+      if (currentPlayback && this.#playbackEnabled && !this.#closed) this.#elevenLabs?.transcript(entry);
       this.#options.onTranscript(entry.speaker, entry.text, entry);
     }
     if (effects.status) this.#status(effects.status);
@@ -490,7 +500,7 @@ export class BrowserVoiceSession {
     let opened = false;
     sideband.addEventListener("message", (event) => {
       if (!this.#closed && generation === this.#sidebandGeneration) {
-        this.#receiveControl(event.data, () => generation === this.#sidebandGeneration);
+        this.#receiveControl(event.data, () => generation === this.#sidebandGeneration && sideband.readyState === WebSocket.OPEN);
       }
     });
     sideband.addEventListener("close", () => {
@@ -516,7 +526,11 @@ export class BrowserVoiceSession {
     this.#applyLive(async () => {
       if (!this.#directControl) await this.#admission;
       if (this.#closed || !isCurrent()) return;
-      if (await this.#core.requiresAgentAdmission(payload)) {
+      const requiresAdmission = await this.#core.requiresAgentAdmission(payload);
+      // Classification can yield while this transport closes or is replaced.
+      // Only requests accepted on the current connection may enter the queue.
+      if (this.#closed || !isCurrent()) return;
+      if (requiresAdmission) {
         // Retain accepted requests on close, but keep captions and interruptions
         // independent of the durable route and its ordered task queue.
         void this.#enqueue(async () => {

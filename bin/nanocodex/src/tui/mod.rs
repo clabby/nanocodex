@@ -1825,7 +1825,10 @@ impl AgentWorker {
             }));
             return;
         }
+        let chatgpt_voice = realtime.auth_mode() == nanocodex::oai::auth::OpenAiAuthMode::ChatGpt;
         let mut builder = VoiceSessionBuilder::new(realtime, self.main.agent.clone())
+            .client_managed_handoffs(chatgpt_voice)
+            .include_startup_context(!chatgpt_voice)
             .session_id(Arc::clone(&self.main.request_id))
             .agent_control(self.voice_agent_control.clone());
         if let Some(voice) = voice {

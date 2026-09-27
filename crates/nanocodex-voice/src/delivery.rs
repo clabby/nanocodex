@@ -37,6 +37,12 @@ impl SpeechDelivery {
         }
     }
 
+    /// Explicit speech can follow typed input without reviving a stale handoff.
+    pub(crate) fn allow_explicit_speech(&mut self) {
+        self.voice_input = true;
+        self.output_caption = None;
+    }
+
     pub(crate) fn delegate(&mut self, generation: u64) {
         if self.voice_input {
             self.owner = Some((generation, self.input_generation));
@@ -190,6 +196,24 @@ impl Drop for SpeechDelivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_speech_after_typing_reenables_playback_without_reviving_a_handoff() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut delivery = SpeechDelivery::new(tx);
+        delivery.delegate(1);
+        delivery.output_started("old caption");
+        delivery.invalidate();
+        assert!(!delivery.accepts_caption());
+        delivery.allow_explicit_speech();
+        assert!(delivery.accepts_caption());
+        delivery.output_started("explicit speech");
+        assert!(delivery.caption_owns_output());
+        assert!(delivery.prepare(1, "stale answer".into()).is_none());
+        assert!(
+            matches!(rx.try_recv(), Ok(VoiceEvent::UndeliveredAnswer { text }) if text == "stale answer")
+        );
+    }
 
     #[test]
     fn repeated_done_after_typing_cannot_reclaim_speech() {

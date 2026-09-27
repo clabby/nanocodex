@@ -198,10 +198,17 @@ export function create(agent, options = {}) {
     // Media readiness updates the UI independently; start still waits for task
     // admission, and a later rejection closes media through the same error path.
     startPromise = next.start().then(publishReady).catch(async (cause) => {
-      if (session === next) session = undefined;
-      if (activeResources.get(agent) === resource) activeResources.delete(agent);
-      cleanupWatcher();
-      await next.close().catch(() => next.abort());
+      if (session === next) {
+        session = undefined;
+        if (activeResources.get(agent) === resource) activeResources.delete(agent);
+        cleanupWatcher();
+      }
+      // Keep replacement starts behind failed startup cleanup, just like stop().
+      // A stale attempt must never detach a replacement session's event watcher.
+      const closing = next.close().catch(() => next.abort());
+      if (generation === current) stopPromise = closing;
+      await closing;
+      if (stopPromise === closing) stopPromise = undefined;
       if (destroyed || generation !== current) return;
       if (attempt === 0 && cause?.code === "peer_connection_timeout") return start(parameters, 1);
       const error = cause instanceof Error ? cause : new Error(String(cause));
