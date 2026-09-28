@@ -330,6 +330,7 @@ export function toWasmConfig(options = {}) {
   copy(config, "instructions", options.instructions);
   copy(config, "additional_instructions", options.additionalInstructions);
   copy(config, "session_id", options.sessionId);
+  copy(config, "prompt_cache_key", options.promptCacheKey);
   copy(config, "workspace", options.workspace);
   if (options.executionEnvironment !== undefined) {
     const environment = options.executionEnvironment;
