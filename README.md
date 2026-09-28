@@ -417,17 +417,17 @@ MCP is part of the native tools crate rather than a separate agent runtime.
 The `nanocodex` CLI and Cloudflare managed agents (including `nanocodex2`
 conversations) include [Mercator](https://mercator.sh/setup.md) discovery at
 `https://mercator.sh/mcp` in their default MCP catalog. Discover its tools with
-`tool_search`; free discovery does not provide a payment wallet or authorize a
-paid job. Native `--mcp-defaults=false` disables the CLI defaults, and a named
-MCP entry can override Mercator. To onboard Mercator for protected workflows in Nanocodex web, open **Account →
-Connections**, select **Mercator → Add**, then **Authorize** the new connection.
-The browser flow asks you to approve a Tempo Wallet capability and select its
-spending limits and expiry. A connected account is not necessarily funded or
-payment-ready; use Mercator’s free `get_connection_status` to check readiness
-before any paid job. You can also add `https://mercator.sh/mcp/auth` as an MCP
-connection manually. When using an external Connect app, approve that MCP
-connection in its grant as well. Nanocodex does not receive your wallet key or
-infer spending permission from public discovery. Native `--provider.tempo` instead
+`tool_search`; free discovery alone does not authorize a paid job. Native
+`--mcp-defaults=false` disables the CLI defaults, and a named MCP entry can
+override Mercator. In Nanocodex web, Mercator's default MCP server can use the
+account's funded Tempo wallet for an in-band `create_job` payment challenge, without an extra
+payment tool or connection. The broker keeps the signing key private, checks
+the payment challenge against a fresh quote of the unchanged plan and
+retains idempotency across retries. Nanocodex adds no separate spending limit;
+Mercator's quoted total and MCP payment challenge govern the job charge. No
+wallet or insufficient funds leaves free discovery available but cannot
+execute a paid job. Connect grants do not inherit this owner-wallet payment
+path. Native `--provider.tempo` instead
 uses a separately configured local Tempo Accounts wallet for MPP challenges.
 
 Stdio and Streamable HTTP servers are discovered in the background; deferred

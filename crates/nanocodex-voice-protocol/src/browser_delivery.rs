@@ -26,7 +26,7 @@ impl BrowserSpeechDelivery {
             ..Self::default()
         }
     }
-    pub(crate) fn generation(&self) -> u64 {
+    pub(crate) const fn generation(&self) -> u64 {
         self.generation
     }
     pub(crate) fn accepts_caption(&self) -> bool {
@@ -36,13 +36,13 @@ impl BrowserSpeechDelivery {
                 .is_none_or(|(generation, _)| generation == self.generation)
     }
 
-    pub(crate) fn allow_explicit_speech(&mut self) {
+    pub(crate) const fn allow_explicit_speech(&mut self) {
         self.voice_input = true;
         self.suppressed = false;
         self.output_caption = None;
     }
 
-    pub(crate) fn playback_enabled(&self) -> bool {
+    pub(crate) const fn playback_enabled(&self) -> bool {
         !self.suppressed
     }
 

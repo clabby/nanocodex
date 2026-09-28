@@ -1,3 +1,4 @@
+import { accountWalletMetadata, type AccountWallet } from "./account-wallet";
 import { discoveryMetadata, type DiscoveryRead } from "./account-discovery";
 import { consumeRpcData } from "nanocodex/cloudflare/rpc";
 import type { CloudflareAccountMetadataBinding } from "nanocodex/cloudflare/egress";
@@ -93,8 +94,9 @@ export type AccountInfo = Readonly<{
   connectorTools: ReturnType<typeof connectorToolMetadata>;
   /** Known hands, including retained user hands whose attachment is offline. */
   machines: readonly AccountMachine[];
-  identity: Readonly<Record<string, never>>;
-  stablecoins: readonly [];
+  wallet: AccountWallet;
+  identity: Readonly<{ tempoAddress?: string }>;
+  stablecoins: readonly Readonly<{ token: string; symbol: string; balance: string; decimals: number }>[];
   authorizations: readonly [];
   vault: readonly VaultEntry[];
 }>;
@@ -129,6 +131,11 @@ export async function accountInfo(
   machines = projectHandProviders(machines);
   if (!enabled) return emptyInfo("disabled", machines, apis);
   signal?.throwIfAborted();
+  const walletPromise = allowedConnectors === undefined
+    ? accountWalletMetadata(binding, userId, signal)
+    : Promise.resolve<AccountWallet>({ status: "disabled" });
+  // Attach immediately so cancellation cannot leave an unhandled rejection.
+  const walletResult = walletPromise.catch(() => ({ status: "unavailable" as const }));
   try {
     const encodedUserId = encodeURIComponent(userId);
     const [connectorMetadata, vault] = await Promise.all([
@@ -167,6 +174,8 @@ export async function accountInfo(
         connectorAccounts[id] = status.connections;
       }
     }
+    const wallet = await walletResult;
+    signal?.throwIfAborted();
     return {
       status: "ready",
       apis,
@@ -175,14 +184,15 @@ export async function accountInfo(
       connectorAccounts,
       connectorTools: connectorToolMetadata(authenticated),
       machines,
-      identity: {},
-      stablecoins: [],
+      ...walletProjection(wallet),
       authorizations: [],
       vault,
     };
   } catch {
     signal?.throwIfAborted();
-    return emptyInfo("unavailable", machines, apis);
+    const wallet = await walletResult;
+    signal?.throwIfAborted();
+    return { ...emptyInfo("unavailable", machines, apis), ...walletProjection(wallet) };
   }
 }
 
@@ -207,6 +217,7 @@ export function projectAccountInfo(
   if (allowedConnectors === undefined) {
     return {
       ...info,
+      ...walletProjection(info.wallet ?? { status: "unavailable" }),
       apis: info.apis ?? [],
       connectorAccounts: info.connectorAccounts ?? {},
       connectorTools: connectorToolMetadata(info.authenticated),
@@ -243,6 +254,7 @@ export function projectAccountInfo(
   }
   return {
     ...info,
+    ...walletProjection({ status: "disabled" }),
     apis: info.apis ?? [],
     authenticated,
     accounts,
@@ -250,6 +262,18 @@ export function projectAccountInfo(
     connectorTools: connectorToolMetadata(authenticated),
     vault,
     machines: projectHandProviders(info.machines ?? []),
+  };
+}
+
+/** Compatibility fields share the same validated wallet and authority boundary. */
+function walletProjection(wallet: AccountWallet): Pick<AccountInfo, "wallet" | "identity" | "stablecoins"> {
+  return {
+    wallet,
+    identity: wallet.status === "ready" ? { tempoAddress: wallet.address } : {},
+    stablecoins: wallet.status === "ready" && wallet.balance.status === "ready" ? [{
+      token: wallet.balance.token, symbol: wallet.balance.symbol,
+      balance: wallet.balance.amount, decimals: wallet.balance.decimals,
+    }] : [],
   };
 }
 
@@ -266,6 +290,7 @@ function emptyInfo(
     connectorAccounts: {},
     connectorTools: {},
     machines,
+    wallet: { status },
     identity: {},
     stablecoins: [],
     authorizations: [],

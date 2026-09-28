@@ -32,7 +32,7 @@ export function useWalletFunding(enabled: boolean) {
 
   const { query: configQuery } = useAccountQuery(accountId, "/v1/machine-usd/config", decodeMachineUsdConfig, { enabled, staleTime: 5 * 60_000 });
   const config = configQuery.data ?? null;
-  const error = operationError ?? (configQuery.error ? clientFailureMessage(configQuery.error, "Couldn’t load Wallet funding.") : null);
+  const error = operationError ?? (configQuery.error ? "Adding funds is temporarily unavailable. Please try again later." : null);
 
   useEffect(() => {
     cancel();
@@ -96,6 +96,7 @@ export function useWalletFunding(enabled: boolean) {
     amountCents: config ? defaultFundingAmountCents(config) : 500,
     available: config?.onrampEnabled === true,
     error,
+    errorSource: operationError ? "order" : configQuery.error ? "configuration" : null,
     fund,
     loading: configQuery.isLoading,
     operation,

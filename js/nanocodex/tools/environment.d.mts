@@ -1,3 +1,9 @@
+/** Public account metadata; a funded wallet does not imply payment authorization. */
+export type EnvironmentWallet = Readonly<
+  | { status: "disabled" | "not_configured" | "unavailable" }
+  | { status: "ready"; address: string; created_at: number; chain: "tempo"; chain_id: 4217;
+      balance: Readonly<{ status: "unavailable" } | { status: "ready"; amount: string; decimals: 6; symbol: "MACH"; token: string }> }
+>;
 export type EnvironmentHand = Readonly<{
   name: string; path: string; capabilities: readonly string[];
   kind?: string; online?: boolean; provider?: string; vm_provider?: string;
@@ -21,6 +27,7 @@ export type AccountEnvironmentSource = Readonly<{
   }>[];
   apis: readonly unknown[]; identity: Readonly<Record<string, unknown>>;
   stablecoins: readonly unknown[]; authorizations: readonly unknown[]; vault: readonly unknown[];
+  wallet?: EnvironmentWallet;
 }>;
 export type AgentEnvironment = Readonly<{
   runtime: string; default_cwd: string; status: string;
@@ -28,6 +35,7 @@ export type AgentEnvironment = Readonly<{
   accounts: Readonly<Record<string, EnvironmentAccount>>;
   apis: readonly unknown[]; identity: Readonly<Record<string, unknown>>;
   stablecoins: readonly unknown[]; authorizations: readonly unknown[]; vault: readonly unknown[];
+  wallet?: EnvironmentWallet;
 }>;
 export function projectEnvironment(info: AccountEnvironmentSource, host: Readonly<{ runtime: string; default_cwd: string }>): AgentEnvironment;
 export function contextData(tag: string, value: unknown): string;

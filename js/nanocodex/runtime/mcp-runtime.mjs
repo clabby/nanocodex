@@ -389,11 +389,13 @@ async function callRemoteTool(entry, input, context) {
     if (!isServerAvailable(entry.server)) {
       throw new Error(`MCP server ${entry.server.name} is unavailable`);
     }
+    const configuredContext = entry.server.payment?.context;
+    const paymentContext = typeof configuredContext === "function"
+      ? await configuredContext({ name: entry.remoteName, arguments: input ?? {} }, context, entry.client)
+      : configuredContext;
     const options = {
       ...requestOptions,
-      ...(entry.server.payment?.context !== undefined
-        ? { context: entry.server.payment.context }
-        : {}),
+      ...(paymentContext !== undefined ? { context: paymentContext } : {}),
     };
     return entry.client.callTool(
       {

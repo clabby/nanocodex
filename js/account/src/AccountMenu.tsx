@@ -25,10 +25,9 @@ import { localDevelopmentCredential } from "./localDevelopmentCredential";
 import { ProfileConnectors } from "./ProfileConnectors";
 import {
   decodeWalletBalance,
-  formatDollars,
   formatWalletBalance,
-  type WalletBalance,
 } from "./walletFunding";
+import { TempoWalletConnectionCard } from "./TempoWalletConnectionCard";
 import { useWalletFunding } from "./useWalletFunding";
 
 type ApiKeyMetadata = Readonly<{
@@ -384,8 +383,9 @@ function AccountMenuContent({ inline }: { inline: boolean }) {
                 fundingAmountCents={walletFunding.amountCents}
                 fundingAvailable={walletFunding.available}
                 fundingError={walletFunding.error}
+                fundingErrorSource={walletFunding.errorSource}
                 fundingOperation={walletFunding.operation}
-                fundingSuccess={null}
+                fundingLoading={walletFunding.loading}
                 onFund={walletFunding.fund}
               />
               {credentials ? (
@@ -747,52 +747,6 @@ function AccountMenuContent({ inline }: { inline: boolean }) {
           )}
         </section>
       ) : null}
-    </div>
-  );
-}
-
-function TempoWalletConnectionCard({
-  address,
-  balance,
-  fundingAmountCents,
-  fundingAvailable,
-  fundingError,
-  fundingOperation,
-  fundingSuccess,
-  onFund,
-}: Readonly<{
-  address?: string | undefined;
-  balance: string;
-  fundingAmountCents: number;
-  fundingAvailable: boolean;
-  fundingError: string | null;
-  fundingOperation: "prepare" | "payment" | null;
-  fundingSuccess: string | null;
-  onFund(): void;
-}>) {
-  const busy = fundingOperation !== null;
-  return (
-    <div className="wizard-connector-card tempo-wallet-connection" id="wallet" role="listitem">
-      <div className={`connection-card tempo-wallet-card${address ? " is-connected" : " is-unavailable"}`}>
-        <ConnectionLogo id="tempo" />
-        <span className="connection-card-copy">
-          <strong>{busy ? "Add funds" : "Wallet"}</strong>
-          <span className="tempo-wallet-balance" role={busy ? "status" : undefined}>{fundingOperation === "prepare"
-            ? "Preparing secure checkout…"
-            : fundingOperation === "payment"
-              ? "Complete payment in Stripe"
-              : balance}</span>
-          {fundingError ? <span className="tempo-wallet-message is-error" role="alert">{fundingError}</span> : null}
-          {fundingSuccess ? <span className="tempo-wallet-message is-success" role="status">{fundingSuccess}</span> : null}
-        </span>
-        {busy ? <span className="tempo-wallet-payment-status" role="status">Waiting</span> : (
-          <span className="tempo-wallet-card-actions">
-            <button disabled={!address || !fundingAvailable} onClick={onFund} type="button">
-              {fundingAvailable ? `Add ${formatDollars(fundingAmountCents)}` : "Onramp unavailable"}
-            </button>
-          </span>
-        )}
-      </div>
     </div>
   );
 }

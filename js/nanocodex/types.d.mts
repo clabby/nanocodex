@@ -523,7 +523,8 @@ export type CodeEvaluator = (
 export type McpPayment = {
   /** MPPx client methods, such as `tempo.session({ account, getClient, channelStore })`. */
   methods: readonly unknown[];
-  /** Optional MPP method context forwarded for each paid MCP tool call. */
+  /** Static MPP method context, or an async per-tool function called before MCP execution.
+   * A function receives the remote tool, ToolContext, and its connected MCP client. */
   context?: unknown;
   /** Called before MPPx creates a payment credential. */
   onPaymentRequired?: ((challenge: unknown) => boolean | Promise<boolean>) | undefined;

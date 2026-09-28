@@ -63,6 +63,7 @@ import { routeTodoRequest } from "./todo-inbox";
 import { phoneAdminConfigured } from "./phone-admin";
 import { phoneTools } from "./phone-tool";
 import { emailTools, type EmailConfig } from "./email-tool";
+import { mercatorMcpPayment } from "./mercator-mcp-payment";
 import { PhoneContainer } from "./phone-container";
 export { PhoneContainer };
 import { createVaultIntakeTool } from "./vault-intake-tool";
@@ -131,6 +132,7 @@ import {
   connectedManagedAccountMcps,
   createDefaultManagedTools,
   defaultManagedMcpServers,
+  DEFAULT_MANAGED_MCP_CATALOG,
   managedAccountMcpServerName,
   managedAccountMcpServers,
   type ManagedAccountMcpConnection,
@@ -9194,6 +9196,17 @@ export class DurableAgentSession extends DurableComputerObject {
       ? {}
       : {
           ...defaultManagedMcpServers(),
+          mercator: {
+            ...DEFAULT_MANAGED_MCP_CATALOG.mercator,
+            fetch: globalThis.fetch,
+            payment: mercatorMcpPayment(this.env.NANOCODEX, session.owner_id, context => {
+              const authorization = this.#authorizationForToolContext(context as ToolContext);
+              if (!this.#hasFullAccountAuthority(authorization)
+                || !authorization.capabilities.includes("agents:write") || !authorization.capabilities.includes("tools:use")) {
+                throw new ManagedRequestError(403, "forbidden", "Mercator payments require full account tool authority");
+              }
+            }),
+          },
           ...managedAccountMcpServers(
             accountMcpConnections,
             this.env.NANOCODEX,
@@ -9345,7 +9358,7 @@ export class DurableAgentSession extends DurableComputerObject {
       }]),
       ...(multiplayer ? [] : [{
         name: "environment",
-        description: "Inspect the current environment: hands keyed by ID with logical path and capabilities, connected accounts, native public APIs, safe Vault references, stablecoin balances, and app authorization boundaries. Vault references may show usernames, addresses, phone numbers, and card last four, but never passwords or complete card data.",
+        description: "Inspect the current environment: hands keyed by ID with logical path and capabilities, connected accounts, native public APIs, safe Vault references, the Nanocodex account wallet address and balance, and app authorization boundaries. Vault references may show usernames, addresses, phone numbers, and card last four, but never passwords or complete card data.",
         parameters: { type: "object", additionalProperties: false },
         handler: async (_input: unknown, context: ToolContext) => projectEnvironment(await currentAccountInfo(context), { runtime: "cloudflare-durable-object", default_cwd: "/brain" }),
       }]),

@@ -137,7 +137,7 @@ impl VoiceSettings {
     }
 
     #[must_use]
-    pub fn effective_handoff_mode(&self) -> VoiceHandoffMode {
+    pub const fn effective_handoff_mode(&self) -> VoiceHandoffMode {
         match self.updates {
             VoiceUpdates::Auto => self.handoff_mode,
             VoiceUpdates::Results => VoiceHandoffMode::BemTags,

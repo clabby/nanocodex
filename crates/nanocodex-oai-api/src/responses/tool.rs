@@ -199,7 +199,7 @@ impl ToolDefinition {
     /// supply a strict-compatible, closed parameter schema (including all
     /// properties in `required`); the provider rejects incompatible schemas.
     #[must_use]
-    pub fn with_strict_parameters(mut self) -> Self {
+    pub const fn with_strict_parameters(mut self) -> Self {
         if let Self::Function { strict, .. } = &mut self {
             *strict = true;
         }

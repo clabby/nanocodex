@@ -390,6 +390,9 @@ importers:
       accounts:
         specifier: 0.17.0
         version: 0.17.0(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@types/react@19.2.14)(@wagmi/core@3.6.5)(express@5.2.1(supports-color@10.2.2))(immer@11.1.18)(react@19.2.8)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@19.2.8))(viem@2.55.19(typescript@5.9.3)(zod@4.5.4))(wagmi@3.7.7)
+      mppx:
+        specifier: 0.11.0
+        version: 0.11.0(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(express@5.2.1(supports-color@10.2.2))(hono@4.13.5)(typescript@5.9.3)(viem@2.55.19(typescript@5.9.3)(zod@4.5.4))
       nanocodex:
         specifier: workspace:*
         version: link:../nanocodex
@@ -489,6 +492,9 @@ importers:
       cron-parser:
         specifier: 5.6.0
         version: 5.6.0
+      mppx:
+        specifier: 0.9.1
+        version: 0.9.1(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(express@5.2.1(supports-color@10.2.2))(hono@4.13.5)(typescript@5.9.3)(viem@2.55.19(typescript@5.9.3)(zod@4.5.4))
       nanocodex:
         specifier: workspace:*
         version: link:../nanocodex
@@ -4356,6 +4362,43 @@ packages:
   modern-tar@0.7.7:
     resolution: {integrity: sha512-t9VmxaqrmANnEOBhpSDI6HD192Ge48k8vmWqQQL7hSFEqHEYwZbbsu49+aKLWZeRvFs3j1pMhXOqqF4kPlvjkQ==}
     engines: {node: '>=18.0.0'}
+
+  mppx@0.11.0:
+    resolution: {integrity: sha512-4cgsF8EAqj21oT8UDEj90xHHpi529INi4KjriirxAJEpBNs6U3Zcj7QVGME/coBQBT9cyK95omC3yVYhrlBPYA==}
+    hasBin: true
+    peerDependencies:
+      '@modelcontextprotocol/sdk': '>=1.25.0'
+      '@x402/core': '>=2.22.0'
+      '@x402/express': '>=2.22.0'
+      '@x402/hono': '>=2.22.0'
+      '@x402/mcp': '>=2.22.0'
+      '@x402/next': '>=2.22.0'
+      elysia: '>=1'
+      express: '>=5'
+      hono: '>=4.12.25'
+      next: '>=16.2.6'
+      viem: '>=2.54.0'
+    peerDependenciesMeta:
+      '@modelcontextprotocol/sdk':
+        optional: true
+      '@x402/core':
+        optional: true
+      '@x402/express':
+        optional: true
+      '@x402/hono':
+        optional: true
+      '@x402/mcp':
+        optional: true
+      '@x402/next':
+        optional: true
+      elysia:
+        optional: true
+      express:
+        optional: true
+      hono:
+        optional: true
+      next:
+        optional: true
 
   mppx@0.8.17:
     resolution: {integrity: sha512-6cfaqzsiMh947CqPJPnJBwUJv4yveRRIA52PrxEjNM/36Le7sOpKG9fh5PU9fmTEkfjf0O5vFPGo4tx6tlrRUw==}
@@ -9266,6 +9309,21 @@ snapshots:
 
   modern-tar@0.7.7: {}
 
+  mppx@0.11.0(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(express@5.2.1(supports-color@10.2.2))(hono@4.13.5)(typescript@5.9.3)(viem@2.55.19(typescript@5.9.3)(zod@4.5.4)):
+    dependencies:
+      '@stripe/stripe-js': 9.13.0
+      eventsource-parser: 3.1.1
+      ox: 0.14.33(typescript@5.9.3)(zod@4.5.4)
+      structured-headers: 2.0.3
+      viem: 2.55.19(typescript@5.9.3)(zod@4.5.4)
+      zod: 4.5.4
+    optionalDependencies:
+      '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4)
+      express: 5.2.1(supports-color@10.2.2)
+      hono: 4.13.5
+    transitivePeerDependencies:
+      - typescript
+
   mppx@0.8.17(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(express@5.2.1(supports-color@10.2.2))(hono@4.13.5)(typescript@5.9.3)(viem@2.55.19(typescript@5.9.3)(zod@4.5.4)):
     dependencies:
       '@stripe/stripe-js': 9.12.1
@@ -9304,6 +9362,21 @@ snapshots:
       ox: 0.14.33(typescript@5.9.3)(zod@4.5.4)
       structured-headers: 2.0.3
       viem: 2.55.13(typescript@5.9.3)(zod@4.5.4)
+      zod: 4.5.4
+    optionalDependencies:
+      '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4)
+      express: 5.2.1(supports-color@10.2.2)
+      hono: 4.13.5
+    transitivePeerDependencies:
+      - typescript
+
+  mppx@0.9.1(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(express@5.2.1(supports-color@10.2.2))(hono@4.13.5)(typescript@5.9.3)(viem@2.55.19(typescript@5.9.3)(zod@4.5.4)):
+    dependencies:
+      '@stripe/stripe-js': 9.13.0
+      eventsource-parser: 3.1.1
+      ox: 0.14.33(typescript@5.9.3)(zod@4.5.4)
+      structured-headers: 2.0.3
+      viem: 2.55.19(typescript@5.9.3)(zod@4.5.4)
       zod: 4.5.4
     optionalDependencies:
       '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4)
