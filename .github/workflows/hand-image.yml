@@ -56,12 +56,40 @@ jobs:
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Configure per-architecture registry cache
+        id: image-cache
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          CACHE_WRITE: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' }}
+        run: |
+          ref="ghcr.io/${GITHUB_REPOSITORY,,}-hand:buildcache-image-$ARCH"
+          echo "from=type=registry,ref=$ref" >> "$GITHUB_OUTPUT"
+          if [ "$CACHE_WRITE" = true ]; then
+            echo "to=type=registry,ref=$ref,mode=max,ignore-error=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        id: cache-login
+        continue-on-error: true
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       # Native runners avoid running Zig's translate-c compiler under emulation.
+      # A missing cache never skips the real image build; only trusted master
+      # dispatches write the cache, and PRs can only read it.
       - name: Build native image
         env:
           ARCH: ${{ matrix.arch }}
+          CACHE_FROM: ${{ steps.image-cache.outputs.from }}
+          CACHE_TO: ${{ steps.cache-login.outcome == 'success' && steps.image-cache.outputs.to || '' }}
         run: |
+          cache_args=(--cache-from "$CACHE_FROM")
+          if [ -n "$CACHE_TO" ]; then
+            cache_args+=(--cache-to "$CACHE_TO")
+          fi
           docker buildx build --platform "linux/$ARCH" --load \
+            "${cache_args[@]}" \
             --tag "$IMAGE:$IMAGE_TAG-$ARCH" \
             --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
