@@ -37,7 +37,10 @@ test('production owner key creates and revokes a guest link', { timeout: 90_000 
   const url = new URL(link.url);
   assert.equal(url.origin, origin);
   assert.equal(url.pathname, `/share/${id}`);
-  const document = await fetch(`${origin}${url.pathname}`, { signal: AbortSignal.timeout(15_000) });
+  const document = await fetch(`${origin}${url.pathname}`, {
+    signal: AbortSignal.timeout(15_000),
+    headers: { accept: 'text/html', 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate' },
+  });
   assert.equal(document.status, 200, `guest website route returned ${document.status}`);
   assert.match(document.headers.get('content-type') ?? '', /text\/html/);
   assert.match(link.id, /^[0-9a-f-]{36}$/);
