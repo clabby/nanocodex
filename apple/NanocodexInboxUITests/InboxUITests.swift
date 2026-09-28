@@ -206,6 +206,12 @@ final class InboxUITests: XCTestCase {
                 XCTAssertEqual(control.frame.midY, controls[0].frame.midY, accuracy: 1)
             }
             XCTAssertEqual(dock.frame.midX, app.frame.midX, accuracy: 1)
+            if !typing {
+                XCTAssertLessThanOrEqual(dock.frame.width, 380 + 0.01,
+                                         "The floating app/model selector should stay compact")
+                XCTAssertLessThan(app.frame.maxY - dock.frame.maxY, 30,
+                                  "The dock should sit just above the home indicator, not above a white band")
+            }
             if typing {
                 XCTAssertTrue(app.keyboards.firstMatch.exists)
                 XCTAssertLessThanOrEqual(dock.frame.maxY, app.keyboards.firstMatch.frame.minY)

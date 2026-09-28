@@ -323,6 +323,17 @@ struct InboxView: View {
             }
             .frame(maxWidth: InboxChrome.maximumWidth)
             .frame(maxWidth: .infinity)
+            // Continue the chrome behind the home indicator instead of leaving
+            // a white strip below the floating composer and picker.
+            .background {
+                LinearGradient(colors: [.clear, ChatPalette.background, ChatPalette.background],
+                               startPoint: .top, endPoint: .bottom)
+                    .ignoresSafeArea(.container, edges: .bottom)
+            }
+            // The dock is an overlay rather than a system tab bar. Let its
+            // controls sit nearer the home indicator while a draft is idle;
+            // return to the keyboard-safe position as soon as an editor focuses.
+            .offset(y: composerFocused || todoInputFocused ? 0 : 14)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomDockHeight = $0 }
         }
     }
@@ -344,6 +355,10 @@ struct InboxView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("main-selection-bar")
         .modifier(InboxNavigationSurface())
+        // Keep the model picker readable without making its glass surface
+        // span the whole phone (or all 620 points on an iPad).
+        .frame(maxWidth: 380)
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, InboxChrome.gutter).padding(.top, 4).padding(.bottom, 2)
     }
 
