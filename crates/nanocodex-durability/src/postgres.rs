@@ -181,25 +181,11 @@ impl StateStore for PostgresStore {
                     actual,
                 });
             }
-            if !records.is_empty() {
-                let keys = records
-                    .iter()
-                    .map(|record| record.key.as_str())
-                    .collect::<Vec<_>>();
-                let values = records
-                    .iter()
-                    .map(|record| record.value.as_str())
-                    .collect::<Vec<_>>();
-                transaction
-                    .execute(
-                        "INSERT INTO nanocodex_durable_records (state_id, key, value)
-                         SELECT $1, record.key, record.value
-                         FROM unnest($2::text[], $3::text[]) AS record(key, value)
-                         ON CONFLICT (state_id, key) DO NOTHING",
-                        &[&state_id, &keys, &values],
-                    )
-                    .await
-                    .map_err(backend)?;
+            for record in records {
+                transaction.execute(
+                    "INSERT INTO nanocodex_durable_records (state_id, key, value) VALUES ($1, $2, $3)
+                     ON CONFLICT (state_id, key) DO NOTHING", &[&state_id, &record.key, &record.value],
+                ).await.map_err(backend)?;
             }
             let revision = actual.checked_add(1).ok_or_else(|| {
                 StoreError::NotCommitted("Postgres durability revision overflow".to_owned())

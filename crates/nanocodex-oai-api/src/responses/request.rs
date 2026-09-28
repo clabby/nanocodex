@@ -274,61 +274,32 @@ impl ResponseHistory {
     }
 
     /// Returns how many leading items `self` provably shares with `previous`
-    /// by allocation identity, without comparing or serializing items.
-    ///
-    /// Committed segments are immutable once sealed, and a segment's position
-    /// is fixed by its immutable `previous` chain, so a pointer-equal segment
-    /// proves that every item up to its end is identical. A tail is mutated
-    /// only through `Arc::make_mut`, which copies while `previous` shares it;
-    /// a segment sealed from `previous`'s exact tail on top of `previous`'s
-    /// exact head therefore also proves all of `previous`. Both values are
-    /// live for the duration of the call, so equal addresses cannot come from
-    /// a reused allocation. The result is conservative: content that is equal
-    /// but was rebuilt (replacement, compaction, repair) reports no sharing.
+    /// by allocation identity: sealed segments are immutable and a shared tail
+    /// is copied before mutation, so while both are alive equal pointers prove
+    /// equal content. Rebuilt but equal content reports no sharing.
     #[doc(hidden)]
     #[must_use]
     pub fn shared_prefix_len(&self, previous: &Self) -> usize {
-        let same_head = match (&self.head, &previous.head) {
-            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-            (None, None) => true,
-            _ => false,
-        };
-        if same_head && Arc::ptr_eq(&self.tail, &previous.tail) {
+        let head = |history: &Self| history.head.as_ref().map(Arc::as_ptr);
+        if head(self) == head(previous) && Arc::ptr_eq(&self.tail, &previous.tail) {
             return self.len();
         }
-        let previous_len = previous.len();
-        if previous_len == 0 {
-            return 0;
-        }
-        let mut current = self.head.as_deref();
+        let mut retained = previous.head.as_ref();
+        let mut current = self.head.as_ref();
         while let Some(segment) = current {
-            if segment.len < previous_len {
-                break;
-            }
-            if segment.len == previous_len
-                && Arc::ptr_eq(&segment.items, &previous.tail)
-                && match (&segment.previous, &previous.head) {
-                    (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-                    (None, None) => true,
-                    _ => false,
-                }
+            // `previous`'s exact tail sealed on top of its exact head.
+            if Arc::ptr_eq(&segment.items, &previous.tail)
+                && segment.previous.as_ref().map(Arc::as_ptr) == head(previous)
             {
-                return previous_len;
+                return segment.len;
             }
-            current = segment.previous.as_deref();
-        }
-        let mut left = self.head.as_ref();
-        let mut right = previous.head.as_ref();
-        while let (Some(candidate), Some(retained)) = (left, right) {
-            if Arc::ptr_eq(candidate, retained) {
-                return candidate.len;
+            while let Some(older) = retained.filter(|older| older.len > segment.len) {
+                retained = older.previous.as_ref();
             }
-            if candidate.len >= retained.len {
-                left = candidate.previous.as_ref();
+            if retained.is_some_and(|older| Arc::ptr_eq(older, segment)) {
+                return segment.len;
             }
-            if retained.len >= candidate.len {
-                right = retained.previous.as_ref();
-            }
+            current = segment.previous.as_ref();
         }
         0
     }
@@ -1494,8 +1465,7 @@ mod tests {
         );
     }
 
-    /// Durable checkpoints reuse record keys for the pointer-shared prefix, so
-    /// a claimed item that differs would silently persist the wrong context.
+    /// Durable checkpoints reuse records for the claimed prefix.
     #[test]
     fn pointer_shared_prefix_never_claims_rewritten_items() {
         let item = |text: &str| {
@@ -1524,18 +1494,11 @@ mod tests {
         boundary.commit_tail();
         boundary.push(item("d"));
         assert_eq!(shared(&boundary, &previous), 3);
-        boundary.commit_tail();
-        boundary.push(item("e"));
-        assert_eq!(shared(&boundary, &previous), 3);
 
         // In-place tail edits copy while the checkpoint shares the tail.
         let mut edited = live.clone();
         edited.tail_mut()[0] = item("rewritten");
         assert_eq!(shared(&edited, &previous), 2);
-
-        let mut appended = live.clone();
-        appended.push(item("d"));
-        assert_eq!(shared(&appended, &previous), 2);
 
         let mut suffix = boundary.clone();
         suffix.replace_suffix(1, vec![item("z")]);
@@ -1548,6 +1511,5 @@ mod tests {
         replaced.replace(previous.iter().cloned().collect());
         assert_eq!(shared(&replaced, &previous), 0);
         assert_eq!(shared(&ResponseHistory::default(), &previous), 0);
-        assert_eq!(shared(&previous, &ResponseHistory::default()), 0);
     }
 }

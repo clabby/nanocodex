@@ -24,7 +24,7 @@ pub use postgres::PostgresStore;
 pub use session::{Admission, AutomaticAdmission, BeginStep, DurableSession};
 #[cfg(all(feature = "sqlite", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "sqlite", not(target_family = "wasm")))))]
-pub use sqlite::{SqliteOptions, SqliteStore, SqliteSynchronous};
+pub use sqlite::SqliteStore;
 pub use state::{
     DurableState, EncodedPayload, IdentifiedSteerReceipt, OperationState, OperationStatus,
     SteerState, StepState, StepStatus, Transition,

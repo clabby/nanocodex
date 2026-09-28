@@ -69,12 +69,8 @@ pub enum ExecutionStepAdmission {
 
 /// Current execution metadata and the active model context.
 /// Hosts persist context records independently from the small execution position.
-///
-/// The context is shared with the live agent rather than copied: cloning
-/// either field is O(1), and a host that retains the previous boundary's
-/// values can use allocation identity
-/// ([`ResponseHistory::shared_prefix_len`]
-/// and [`Arc::ptr_eq`]) to persist only what changed.
+/// Context is shared with the live agent (O(1) clones), so a host retaining
+/// the previous boundary can persist only what changed by allocation identity.
 pub struct ExecutionContinuation {
     /// Serialized execution position and settings, excluding conversation bodies.
     pub state_json: String,

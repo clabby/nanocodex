@@ -48,7 +48,3 @@ tower.workspace = true
 
 [lints]
 workspace = true
-
-[[example]]
-name = "durable_checkpoint_bench"
-required-features = ["sqlite"]

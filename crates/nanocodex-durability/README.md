@@ -100,8 +100,7 @@ IDs when it needs cold tree reconstruction.
 The execution head contains references, active phase, counters, and a bounded
 receipt tail. SHA-256 addressed records hold exact payloads in chunks of at most
 256,000 UTF-8 bytes. Persistent context pages reference 64 messages each; new
-boundaries write new messages and changed pages, and encode only items after
-the prefix they share with the last acknowledged boundary. Cold recovery loads only the
+boundaries write new messages and changed pages. Cold recovery loads only the
 current context and active effects, in batches of at most 16 records. Opening a
 session for admission or status does not hydrate conversation bodies.
 
@@ -142,12 +141,9 @@ match state.admit_typed::<_, String, String>("request-7", &"hello").await? {
 # }
 ```
 
-Enable `sqlite` and open `SqliteStore` for a directly owned native connection.
-`SqliteStore::open` enables WAL, a 5 s busy timeout, and `synchronous=FULL`;
-`open_with(path, SqliteOptions { synchronous: SqliteSynchronous::Normal, .. })`
-trades the newest acknowledged commits after an OS crash for fewer fsyncs.
-`from_connection` leaves those pragmas to the caller. The connection runs on a
-dedicated thread, so store calls never block the async executor.
+Enable `sqlite` and open `SqliteStore` for a directly owned native connection
+(`open` enables WAL, `synchronous=FULL`, and a 5 s busy timeout; calls run on
+Tokio's blocking pool).
 Enable `postgres` and pass a driven `tokio_postgres::Client` to
 `PostgresStore::new`. Both implement the exact same `StateStore` contract.
 
@@ -156,7 +152,7 @@ The logical host contract has three operations:
 - `acquire(state_id, owner_id)` atomically advances the persisted owner
   fence and returns that token with one coherent current-state value.
 - `read_record(state_id, key)` returns one immutable body; `read_records` batches
-  up to 16 reads in one query or boundary crossing when the backend supports it.
+  up to 16 reads when the backend supports it.
 - `replace(state_id, owner_token, expected_revision, payload, records)` checks
   authority before revision and publishes immutable records with their new head
   in one transaction. A head can never reference a partially committed batch.

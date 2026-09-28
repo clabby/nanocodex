@@ -27,7 +27,7 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
         let state_id = state.state_id().to_owned();
         let mut builder = self;
         let (owner, checkpoint) = state.acquire_agent().await.map_err(agent_error)?;
-        let mut known_records = Default::default();
+        let mut known_records = ContextCache::default();
         if let Some(checkpoint) = checkpoint {
             let (restored, keys) = crate::context::load_snapshot_with_keys(
                 (&owner).into(),
@@ -46,7 +46,7 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
                     "configured resume snapshot does not match the durability state".to_owned(),
                 ));
             }
-            known_records = keys;
+            known_records.known = keys;
             builder = builder.resume(restored);
         } else if builder.resume_snapshot().is_none() {
             // A fork's explicitly supplied completed snapshot owns its cache
@@ -70,7 +70,8 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
                                 .to_owned(),
                         )
                     })?;
-                let policy = DurableExecution::ready(owner, ContextCache::with_known(keys));
+                let policy = DurableExecution::ready(owner);
+                policy.remember(keys)?;
                 let policy: Arc<dyn ExecutionPolicy> = Arc::new(policy);
                 Ok(policy)
             }) )
@@ -79,32 +80,31 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
 
 struct DurableExecution {
     owner: DurableOwner,
-    /// Held across prepare and commit so concurrent context writes serialize
-    /// and the memo only ever describes acknowledged commits.
-    context: tokio::sync::Mutex<ContextCache>,
+    context_records: Mutex<ContextCache>,
 }
 
 impl DurableExecution {
-    fn ready(owner: DurableOwner, context: ContextCache) -> Self {
+    fn ready(owner: DurableOwner) -> Self {
         Self {
             owner,
-            context: tokio::sync::Mutex::new(context),
+            context_records: Mutex::new(ContextCache::default()),
         }
     }
 
-    /// Prepares context records, runs `commit`, and advances the memo only
-    /// when the store acknowledged it. A failed, fenced, or ambiguous commit
-    /// leaves the memo describing the last acknowledged state.
-    async fn commit_context<T, P, F>(&self, prepare: P, commit: F) -> AgentResult<T>
-    where
-        P: FnOnce(&ContextCache) -> crate::Result<crate::context::Prepared>,
-        F: AsyncFnOnce(crate::EncodedPayload) -> crate::Result<T>,
-    {
-        let mut context = self.context.lock().await;
-        let (payload, update) = prepare(&context).map_err(agent_error)?.into_parts();
-        let output = commit(payload).await.map_err(agent_error)?;
-        context.committed(update);
-        Ok(output)
+    fn prepare_snapshot(&self, snapshot: SessionSnapshot) -> AgentResult<crate::context::Prepared> {
+        let cache = self
+            .context_records
+            .lock()
+            .map_err(|_| NanocodexError::InvalidExecutionPolicy("context cache poisoned".into()))?;
+        crate::context::prepare_snapshot(snapshot, &cache).map_err(agent_error)
+    }
+
+    fn remember(&self, delta: ContextCache) -> AgentResult<()> {
+        self.context_records
+            .lock()
+            .map_err(|_| NanocodexError::InvalidExecutionPolicy("context cache poisoned".into()))?
+            .extend(delta);
+        Ok(())
     }
 }
 
@@ -158,11 +158,12 @@ impl ExecutionPolicy for DurableExecution {
         snapshot: SessionSnapshot,
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.commit_context(
-                |context| context.prepare_snapshot(snapshot),
-                async |payload| self.owner.commit_checkpoint(payload).await,
-            )
-            .await
+            let prepared = self.prepare_snapshot(snapshot)?;
+            self.owner
+                .commit_checkpoint(prepared.payload)
+                .await
+                .map_err(agent_error)?;
+            self.remember(prepared.delta)
         })
     }
 
@@ -214,18 +215,21 @@ impl ExecutionPolicy for DurableExecution {
         snapshot: Option<SessionSnapshot>,
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            let Some(snapshot) = snapshot else {
-                return self
-                    .owner
-                    .cancel(operation_id, None)
-                    .await
-                    .map_err(agent_error);
+            let prepared = snapshot
+                .map(|snapshot| self.prepare_snapshot(snapshot))
+                .transpose()?;
+            let (checkpoint, delta) = match prepared {
+                Some(value) => (Some(value.payload), Some(value.delta)),
+                None => (None, None),
             };
-            self.commit_context(
-                |context| context.prepare_snapshot(snapshot),
-                async |checkpoint| self.owner.cancel(operation_id, Some(checkpoint)).await,
-            )
-            .await
+            self.owner
+                .cancel(operation_id, checkpoint)
+                .await
+                .map_err(agent_error)?;
+            if let Some(delta) = delta {
+                self.remember(delta)?;
+            }
+            Ok(())
         })
     }
 
@@ -368,12 +372,11 @@ impl ExecutionPolicy for DurableExecution {
                 .map_err(agent_error)?
             {
                 Some(value) => {
-                    let mut context = self.context.lock().await;
-                    let (continuation, loaded) =
+                    let (continuation, delta) =
                         crate::context::load_continuation(owner.into(), value)
                             .await
                             .map_err(agent_error)?;
-                    context.loaded(loaded);
+                    self.remember(delta)?;
                     Ok(Some(continuation))
                 }
                 None => Ok(None),
@@ -387,11 +390,17 @@ impl ExecutionPolicy for DurableExecution {
         continuation: ExecutionContinuation,
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.commit_context(
-                |context| context.prepare_continuation(continuation),
-                async |payload| self.owner.advance(operation_id, payload).await,
-            )
-            .await
+            let prepared = {
+                let cache = self.context_records.lock().map_err(|_| {
+                    NanocodexError::InvalidExecutionPolicy("context cache poisoned".into())
+                })?;
+                crate::context::prepare_continuation(continuation, &cache).map_err(agent_error)?
+            };
+            self.owner
+                .advance(operation_id, prepared.payload)
+                .await
+                .map_err(agent_error)?;
+            self.remember(prepared.delta)
         })
     }
 
@@ -440,11 +449,12 @@ impl ExecutionPolicy for DurableExecution {
         output: ExecutionOutput,
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.commit_context(
-                |context| context.prepare_snapshot(snapshot),
-                async |payload| self.owner.complete(operation_id, payload, &output).await,
-            )
-            .await
+            let prepared = self.prepare_snapshot(snapshot)?;
+            self.owner
+                .complete(operation_id, prepared.payload, &output)
+                .await
+                .map_err(agent_error)?;
+            self.remember(prepared.delta)
         })
     }
 
@@ -468,11 +478,12 @@ impl ExecutionPolicy for DurableExecution {
         error: String,
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.commit_context(
-                |context| context.prepare_snapshot(snapshot),
-                async |payload| self.owner.fail(operation_id, payload, error).await,
-            )
-            .await
+            let prepared = self.prepare_snapshot(snapshot)?;
+            self.owner
+                .fail(operation_id, prepared.payload, error)
+                .await
+                .map_err(agent_error)?;
+            self.remember(prepared.delta)
         })
     }
 }
@@ -546,7 +557,7 @@ mod tests {
             .admit_typed::<_, u32, String>("turn".into(), &"input")
             .await
             .unwrap();
-        let policy = DurableExecution::ready(owner, ContextCache::default());
+        let policy = DurableExecution::ready(owner);
         let failure = policy
             .recover_failure(
                 "turn".into(),
@@ -571,7 +582,7 @@ mod tests {
             .await
             .unwrap();
         owner.begin_attempt("first".into()).await.unwrap();
-        let policy = DurableExecution::ready(owner, ContextCache::default());
+        let policy = DurableExecution::ready(owner);
         let failure = policy
             .recover_failure(
                 "first".into(),
@@ -640,7 +651,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let policy = DurableExecution::ready(owner, ContextCache::default());
+        let policy = DurableExecution::ready(owner);
         let failure = policy
             .recover_failure("newer".into(), NanocodexError::TurnStopped)
             .await;
@@ -657,138 +668,45 @@ mod tests {
         policy.shutdown().await.unwrap();
     }
 
-    struct FlakyStore {
-        inner: crate::MemoryStore,
-        fail: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl crate::StateStore for FlakyStore {
-        fn read_record<'a>(
-            &'a mut self,
-            state_id: &'a str,
-            key: &'a str,
-        ) -> crate::StoreFuture<'a, std::result::Result<Option<String>, crate::StoreError>>
-        {
-            self.inner.read_record(state_id, key)
-        }
-
-        fn acquire<'a>(
-            &'a mut self,
-            state_id: &'a str,
-            owner_id: crate::OwnerId,
-        ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedState, crate::StoreError>>
-        {
-            self.inner.acquire(state_id, owner_id)
-        }
-
-        fn replace<'a>(
-            &'a mut self,
-            state_id: &'a str,
-            owner: &'a crate::OwnerToken,
-            expected_revision: u64,
-            payload: &'a str,
-            records: &'a [crate::StoreRecord],
-        ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
-            if self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                return Box::pin(async {
-                    Err(crate::StoreError::NotCommitted("injected".to_owned()))
-                });
-            }
-            self.inner
-                .replace(state_id, owner, expected_revision, payload, records)
-        }
-    }
-
-    /// The boundary memo reuses record keys for the prefix shared with the
-    /// last acknowledged boundary. Each stored continuation must still decode
-    /// to exactly the live context across appends, page boundaries, suffix
-    /// rewrites, wholesale replacement, a new prefix, and a retry after an
-    /// uncommitted write (which must re-stage the records it skipped).
+    /// The agent reloads its continuation after a failed write, so this is not
+    /// observable end to end: a rejected commit must not advance the context
+    /// cache, or retrying the same boundary would skip the records it needs.
     #[tokio::test]
-    async fn incremental_boundaries_persist_exactly_the_live_context() {
+    async fn rejected_boundary_does_not_advance_the_context_cache() {
         use nanocodex_agent::execution::{ResponseHistory, ResponseItem};
         use nanocodex_oai_api::responses::{ContentItem, MessageRole};
 
-        let item = |text: String| {
-            ResponseItem::message(MessageRole::User, [ContentItem::input_text(text)])
-        };
-        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let store = FlakyStore {
-            inner: crate::MemoryStore::new().unwrap(),
-            fail: Arc::clone(&fail),
-        };
-        let state = DurableSession::open(store, "incremental").await.unwrap();
+        let state = DurableSession::open(crate::MemoryStore::new().unwrap(), "cache")
+            .await
+            .unwrap();
         let (owner, _) = state.acquire_agent().await.unwrap();
         owner
             .admit_typed::<_, u32, String>("turn".into(), &"input")
             .await
             .unwrap();
-        owner.begin_attempt("turn".into()).await.unwrap();
-        let policy = DurableExecution::ready(owner, ContextCache::default());
-
-        let mut live = ResponseHistory::new(vec![item("task".into())]);
-        let mut prefix: Arc<[ResponseItem]> = vec![item("instructions".into())].into();
-        let mut boundary = 0_u32;
-        let advance = async |live: &ResponseHistory, prefix: &Arc<[ResponseItem]>, boundary| {
-            policy
-                .advance(
-                    "turn".into(),
-                    ExecutionContinuation {
-                        state_json: format!("{{\"boundary\":{boundary}}}"),
-                        history: live.clone(),
-                        prefix: Arc::clone(prefix),
-                    },
-                )
-                .await
+        let policy = DurableExecution::ready(owner);
+        let item = |index| {
+            ResponseItem::message(
+                MessageRole::User,
+                [ContentItem::input_text(format!("{index}"))],
+            )
         };
-        let verify = async |live: &ResponseHistory, prefix: &Arc<[ResponseItem]>| {
-            let stored = state.agent_continuation("turn").await.unwrap().unwrap();
-            let json = |items: Vec<&ResponseItem>| serde_json::to_value(items).unwrap();
-            assert_eq!(
-                json(stored.history.iter().collect()),
-                json(live.iter().collect())
-            );
-            assert_eq!(
-                json(stored.prefix.iter().collect()),
-                json(prefix.iter().collect())
-            );
+        let history = ResponseHistory::new((0..70).map(item).collect());
+        let continuation = || ExecutionContinuation {
+            state_json: "{}".into(),
+            history: history.clone(),
+            prefix: Arc::from([item(-1)]),
         };
-
-        // Appends across several 64-item pages, sealed as the agent does.
-        for index in 0..150 {
-            live.push(item(format!("item {index}")));
-            if index % 3 == 2 {
-                boundary += 1;
-                advance(&live, &prefix, boundary).await.unwrap();
-                verify(&live, &prefix).await;
-                live.commit_tail();
-            }
-        }
-
-        live.push(item("after an uncommitted write".into()));
-        fail.store(true, std::sync::atomic::Ordering::SeqCst);
-        boundary += 1;
-        assert!(advance(&live, &prefix, boundary).await.is_err());
-        advance(&live, &prefix, boundary).await.unwrap();
-        verify(&live, &prefix).await;
-        live.commit_tail();
-
-        live.replace_suffix(live.len() - 70, vec![item("rewritten suffix".into())]);
-        boundary += 1;
-        advance(&live, &prefix, boundary).await.unwrap();
-        verify(&live, &prefix).await;
-
-        live.replace(vec![item("task".into()), item("compacted".into())]);
-        prefix = vec![item("new instructions".into())].into();
-        for index in 0..70 {
-            live.push(item(format!("item {index}")));
-            if index % 7 == 0 {
-                boundary += 1;
-                advance(&live, &prefix, boundary).await.unwrap();
-                verify(&live, &prefix).await;
-                live.commit_tail();
-            }
-        }
+        // No attempt is running yet, so the owner rejects the first commit.
+        assert!(policy.advance("turn".into(), continuation()).await.is_err());
+        policy.begin_attempt("turn".into()).await.unwrap();
+        policy.advance("turn".into(), continuation()).await.unwrap();
+        let stored = state.agent_continuation("turn").await.unwrap().unwrap();
+        let json = |items: Vec<&ResponseItem>| serde_json::to_value(items).unwrap();
+        assert_eq!(
+            json(stored.history.iter().collect()),
+            json(history.iter().collect())
+        );
         policy.shutdown().await.unwrap();
     }
 
