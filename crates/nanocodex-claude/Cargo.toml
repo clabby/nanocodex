@@ -1,0 +1,26 @@
+[package]
+name = "nanocodex-claude"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Typed Anthropic Messages protocol and streaming transport"
+
+[dependencies]
+futures-util.workspace = true
+nanocodex-agent = { path = "../nanocodex-agent", default-features = false }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+reqwest = { workspace = true, features = ["stream"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rustls.workspace = true
+
+axum.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync"] }
+
+[lints]
+workspace = true

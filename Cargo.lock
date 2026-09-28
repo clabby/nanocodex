@@ -5844,6 +5844,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex-claude"
+version = "0.6.5"
+dependencies = [
+ "axum",
+ "futures-util",
+ "nanocodex-agent",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "nanocodex-cli-auth"
 version = "0.6.5"
 dependencies = [
