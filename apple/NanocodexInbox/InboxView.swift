@@ -2647,6 +2647,14 @@ private struct ConversationContentView: View {
                         onToggle: { nativeToolToggle(item.id) }))
                 }))
             }
+            for activity in content.activity where activity.tool?.secureInput != nil {
+                if let intake = activity.tool?.secureInput {
+                    rows.append(.init(id: item.id + ":secure:" + activity.id, revision: cellRevision, content: {
+                        AnyView(SecureInputCard(model: model, intake: intake)
+                            .id("\(activity.id):\(model.vaultIntakeAccount)"))
+                    }))
+                }
+            }
             // Intake prompts remain reachable even when their group is collapsed.
             for activity in content.activity where activity.tool?.vaultIntake != nil {
                 if let intake = activity.tool?.vaultIntake {
@@ -3982,3 +3990,140 @@ private struct MobileModelControls: View {
         }
     }
 }
+
+private struct SecureInputCard: View {
+    @ObservedObject var model: InboxModel
+    let intake: SecureInputRequest
+    @State private var showing = false
+    @State private var attempted = false
+    @State private var status: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Enter password privately", systemImage: "lock.shield").font(.headline)
+            Text(intake.origin).font(.subheadline)
+            if let status { Text(status) }
+            else {
+                Text("Use your password manager or enter a password. It goes directly to this browser and is not saved to Vault.").font(.subheadline)
+                Button("Open secure form") { showing = true }
+                    .disabled(attempted || !intake.isCurrent(agentID: model.focused?.id ?? ""))
+                    .accessibilityIdentifier("secure-input-open")
+            }
+        }.padding(16).background(Ink.surface, in: RoundedRectangle(cornerRadius: 16))
+        .sheet(isPresented: $showing) {
+            SecureInputSheet(model: model, intake: intake, attempted: $attempted) { status = $0 }
+        }
+    }
+}
+private struct SecureInputSheet: View {
+    @ObservedObject var model: InboxModel
+    let intake: SecureInputRequest
+    @Binding var attempted: Bool
+    let completed: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var password = ""
+    @State private var account = UUID()
+    @State private var busy = false
+    @State private var failure: String?
+    @State private var submission: Task<Void, Never>?
+    @State private var resolved = false
+    @State private var cancellationStarted = false
+    private func cancelRequest() {
+        password = ""
+        guard !resolved, !cancellationStarted else { return }
+        cancellationStarted = true; attempted = true
+        submission?.cancel()
+        Task { @MainActor in
+            do {
+                let receipt = try await model.cancelSecureInput(intake, account: account)
+                model.publishSecureInputReceipt(receipt, intake: intake, account: account)
+                completed("Secure input cancelled.")
+            } catch { completed("Cancellation could not be confirmed. Check the destination before continuing.") }
+        }
+    }
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text(intake.origin)
+                    SecurePasswordField(password: $password).disabled(attempted)
+                } footer: { Text("Sent directly to the bound browser input, outside chat. Not saved to Vault.") }
+                if let failure { Text(failure) }
+                Button(busy ? "Sending…" : "Send password") {
+                    attempted = true; busy = true
+                    let value = password; password = ""
+                    submission = Task { @MainActor in
+                        defer { busy = false }
+                        do {
+                            let receipt = try await model.submitSecureInput(intake, value: value, account: account)
+                            guard !Task.isCancelled, model.vaultIntakeAccount == account else { return }
+                            model.publishSecureInputReceipt(receipt, intake: intake, account: account)
+                            resolved = true
+                            completed(receipt.message)
+                            dismiss()
+                        } catch {
+                            guard !cancellationStarted, model.vaultIntakeAccount == account else { return }
+                            failure = "Couldn’t confirm submission. Check the destination directly before any further attempt."
+                            completed("Submission could not be confirmed. Check the destination directly before any further attempt.")
+                        }
+                    }
+                }.disabled(attempted || password.isEmpty || password.utf16.count > 4096 || password.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) || !intake.isCurrent(agentID: model.focused?.id ?? ""))
+                    .accessibilityIdentifier("secure-input-submit")
+            }
+            .navigationTitle("Private password")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { cancelRequest(); dismiss() } } }
+            .overlay { if scenePhase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
+        }
+        .interactiveDismissDisabled(busy)
+        .task(id: intake.requestID) {
+            account = model.vaultIntakeAccount
+            while !Task.isCancelled {
+                let remaining = intake.expiresAt / 1000 - Date().timeIntervalSince1970
+                if remaining <= 0 {
+                    password = ""
+                    if !resolved { cancelRequest(); dismiss() }
+                    return
+                }
+                do { try await Task.sleep(for: .seconds(min(remaining, 60))) }
+                catch { return }
+            }
+        }
+        .onDisappear { password = ""; if !resolved { cancelRequest() } }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { password = "" } }
+        .onChange(of: model.vaultIntakeAccount) { _, _ in submission?.cancel(); password = ""; dismiss() }
+        .onChange(of: model.connected) { _, connected in if !connected { submission?.cancel(); password = ""; dismiss() } }
+    }
+}
+
+struct SecurePasswordField: View {
+    @Binding var password: String
+    var body: some View {
+        SecureField("Password", text: $password)
+            .textContentType(.password).textInputAutocapitalization(.never)
+            .autocorrectionDisabled().privacySensitive()
+            .accessibilityIdentifier("secure-input-password")
+    }
+}
+#if DEBUG && targetEnvironment(simulator)
+/// Synthetic UI journey; HTTP protocol coverage lives in InboxCore tests.
+struct SecureInputUIFixture: View {
+    @State private var password = ""
+    @State private var status: String?
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let status { Text(status) }
+                else {
+                    Text("https://example.com")
+                    SecurePasswordField(password: $password)
+                    Button("Send password") {
+                        password = ""
+                        let receipt = try? SecureInputReceipt.parse(.object(["type": .string("secure_input_receipt"), "request_id": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "status": .string("filled")]), requestID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                        status = receipt?.message ?? "Invalid receipt"
+                    }.accessibilityIdentifier("secure-input-submit")
+                }
+            }.navigationTitle("Private password")
+        }
+    }
+}
+#endif

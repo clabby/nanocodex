@@ -2,6 +2,22 @@ import XCTest
 import UIKit
 
 final class InboxUITests: XCTestCase {
+    func testPrivatePasswordFieldAndSafeReceipt() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--secure-input-ui-fixture"]
+        app.launch()
+        let field = app.secureTextFields["secure-input-password"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "Password input must use native secure text entry")
+        field.tap(); field.typeText("synthetic-password")
+        XCTAssertNotEqual(field.value as? String, "synthetic-password")
+        app.buttons["secure-input-submit"].tap()
+        XCTAssertTrue(app.staticTexts["Password filled in browser."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["synthetic-password"].exists)
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "secure-input-safe-receipt"; attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     // CRM failure scenarios: failed fetch must be retryable; filters must not retain
     // old rows; profile facts/notes must render; relationships must open their target.
     func testCRMBrowseAndRelationshipNavigation() {

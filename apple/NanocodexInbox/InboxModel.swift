@@ -1262,6 +1262,27 @@ final class InboxModel: ObservableObject {
         return presentedBrowserRequests.insert("\(generation):\(id)").inserted
     }
     var vaultIntakeAccount: UUID { generation }
+    func cancelSecureInput(_ intake: SecureInputRequest, account: UUID) async throws -> SecureInputReceipt {
+        guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
+        let receipt = try await client.cancelSecureInput(intake)
+        guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
+        return receipt
+    }
+    func submitSecureInput(_ intake: SecureInputRequest, value: String, account: UUID) async throws -> SecureInputReceipt {
+        guard let client, connected, !isDemo, generation == account,
+              intake.isCurrent(agentID: focused?.id ?? "") else { throw APIError.invalidCredential }
+        let receipt = try await client.submitSecureInput(intake, value: value)
+        guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
+        return receipt
+    }
+    func publishSecureInputReceipt(_ receipt: SecureInputReceipt, intake: SecureInputRequest, account: UUID) {
+        guard generation == account, connected, !isDemo, receipt.requestID == intake.requestID,
+              cards.contains(where: { $0.id == intake.agentID }) else { return }
+        let predecessor = pending.last(where: { $0.agentID == intake.agentID })?.id ?? (focused?.id == intake.agentID ? focusedTurn : "")
+        let message = PendingMessage(agentID: intake.agentID, input: receipt.json.pretty, predecessor: predecessor)
+        pending.append(message); busy.insert(intake.agentID); persist()
+        Task { await submit(message, epoch: account) }
+    }
     func vaultLoginMetadata(id: String, account: UUID) async throws -> VaultIntakeReceipt {
         guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
         let item = try await client.vaultLoginMetadata(id: id)

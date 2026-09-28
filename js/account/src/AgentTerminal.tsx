@@ -25,6 +25,7 @@ import {
   type ModelSessionStatus,
   type CredentialSource,
 } from "./modelSession";
+import { SecureInputCard } from "./SecureInputCard";
 import { VaultIntakeCard } from "./VaultIntakeCard";
 import { ArtifactDock } from "./ArtifactDock";
 import { PhoneCallsPanel } from "./PhoneCallsPanel";
@@ -345,7 +346,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
       onConversationActivity={recordConversationActivity}
       onStateChange={onStateChange}
       retryAgent={retryAgent}
-      renderTool={(tool, { submit }) => <VaultIntakeCard key={tool.callId} tool={tool} onReceipt={submit} />}
+      renderTool={(tool, { submit }) => <><SecureInputCard key={`secure:${tool.callId}`} tool={tool} agentId={agentId} onReceipt={submit} /><VaultIntakeCard key={tool.callId} tool={tool} onReceipt={submit} /></>}
       voice={voiceEnabled}
       welcome={settingsReady && !conversationStarted ? "# What should we work on?" : undefined}
       composerPlaceholder="Ask Nanocodex"

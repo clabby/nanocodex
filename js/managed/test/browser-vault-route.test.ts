@@ -26,7 +26,7 @@ async function fixture(resource = "challenge", networkDisabled = false) {
     await state.storage.deleteAlarm();
   });
   const call = (actor = principal, init: RequestInit = {}, query = "") => worker.fetch(
-    new Request(`https://nanocodex.example/v1/agents/${id}/browser-vault/${resource}${query}`, {
+    new Request(`https://nanocodex.example/v1/agents/${id}/${resource === "secure-input" ? resource : `browser-vault/${resource}`}${query}`, {
       method: "POST", body: JSON.stringify({ challenge_id: "opaque-fixture", code: "123456" }),
       ...init, headers: { "content-type": "application/json", ...init.headers },
     }), env as Parameters<typeof worker.fetch>[1], createExecutionContext(), actor,
@@ -149,5 +149,31 @@ describe("private browser route network restrictions", () => {
     expect(response.status).toBe(403);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.text()).not.toContain("123456");
+  });
+});
+
+
+describe("standalone secure input endpoint", () => {
+  it("enforces owner, capabilities, CSRF, bounded input and fixed failures", async () => {
+    const {principal, call, stub} = await fixture("secure-input");
+    const payload = {request_id:crypto.randomUUID(),value:"synthetic-private-password"};
+    const disabled = await fixture("secure-input",true);
+    expect((await disabled.call(disabled.principal,{body:JSON.stringify(payload)})).status).toBe(403);
+    const init = {body:JSON.stringify(payload)};
+    expect((await call({...principal,capabilities:[]},init)).status).toBe(403);
+    expect((await call({...principal,kind:"account_session"},init)).status).toBe(403);
+    expect((await call({...principal,userId:crypto.randomUUID()},init)).status).toBe(404);
+    expect((await call({...principal,authorizationEpoch:2},init)).status).toBe(404);
+    expect((await call({...principal,connectGrant:{grantId:`0x${"a".repeat(64)}`,connectors:["chatgpt"],mcpIds:[]}},init)).status).toBe(403);
+    expect((await call(principal,init,"?value=secret")).status).toBe(400);
+    expect((await call(principal,{body:JSON.stringify({...payload,extra:true})})).status).toBe(400);
+    expect((await call(principal,{body:JSON.stringify({...payload,value:"x".repeat(4097)})})).status).toBe(400);
+    expect((await call(principal,{body:JSON.stringify({request_id:payload.request_id,action:"cancel"})})).status).toBe(409);
+    expect((await call(principal,{body:JSON.stringify({...payload,value:"x".repeat(4096)})})).status).toBe(409);
+    const response = await call(principal,init);
+    expect(response.status).toBe(409);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.text()).not.toContain(payload.value);
+    expect((await stub.fetch("https://session.internal/secure-input",{method:"POST",headers:{"content-type":"application/json"},...init})).status).toBe(403);
   });
 });

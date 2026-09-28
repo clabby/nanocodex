@@ -15,7 +15,7 @@ export type BrowserVaultResolver = (
   request: BrowserVaultRequest, context: ToolContext,
 ) => Promise<BrowserVaultLogin>;
 export type BrowserVaultQuarantine = Readonly<{
-  sessionId: string; targetId: string; loaderId: string; origin: string; vaultId: string;
+  sessionId: string; targetId: string; loaderId: string; origin: string; vaultId: string; mode?: "one_time";
 }>;
 
 export function parseBrowserVaultRequest(value: unknown): BrowserVaultRequest {
@@ -210,7 +210,7 @@ export class PrivateBrowserContinuationSession {
  * Restrict to a visible, same-origin POST login form in the top frame. Atomic checks
  * and native setters are followed by input/change events and destination rechecks.
  */
-export const BROWSER_VAULT_FILL_FUNCTION = `function(origin, usernameSelector, passwordSelector, username, password, submit) {
+export const BROWSER_VAULT_FILL_FUNCTION = `function(origin, usernameSelector, passwordSelector, username, password, submit, dryRun = false) {
   if (window !== window.top || location.origin !== origin || location.protocol !== "https:") return false;
   ${VAULT_FORM_SUBMISSION}
   const one = selector => { const nodes = document.querySelectorAll(selector); return nodes.length === 1 ? nodes[0] : null; };
@@ -239,6 +239,7 @@ export const BROWSER_VAULT_FILL_FUNCTION = `function(origin, usernameSelector, p
   const valid = () => !challenge() && safeLoginForm(form)
     && (!user || (one(usernameSelector) === user && user.form === form && visible(user) && ['text','email'].includes(user.type)))
     && (!pass || (one(passwordSelector) === pass && pass.form === form && visible(pass) && pass.type === 'password'));
+  if (dryRun) return valid();
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
   for (const [input, value] of [[user, username], [pass, password]]) {
     if (!input) continue;
@@ -267,6 +268,7 @@ export async function fillBrowserVault(options: {
   cdp: PrivateBrowserChannel;
   sessionId: string;
   request: BrowserVaultRequest;
+  expectedLoaderId?: string;
   resolve: () => Promise<BrowserVaultLogin>;
   quarantine: (value: BrowserVaultQuarantine) => Promise<void>;
   signal?: AbortSignal;
@@ -283,9 +285,19 @@ export async function fillBrowserVault(options: {
     const tree = await cdp.send("Page.getFrameTree", {}, sid);
     const frame = tree?.frameTree?.frame;
     if (!frame || frame.parentId || typeof frame.id !== "string" || typeof frame.loaderId !== "string"
-      || new URL(frame.url).origin !== request.expected_origin) throw new Error();
+      || new URL(frame.url).origin !== request.expected_origin
+      || (options.expectedLoaderId !== undefined && frame.loaderId !== options.expectedLoaderId)) throw new Error();
     const world = await cdp.send("Page.createIsolatedWorld", { frameId: frame.id, worldName: "nanocodex-vault", grantUniveralAccess: false }, sid);
     if (!Number.isInteger(world?.executionContextId)) throw new Error();
+    if (options.expectedLoaderId !== undefined) {
+      // Creating a world can race navigation in the same top-level frame. The
+      // world must have been created before a second matching document check;
+      // subsequent navigation destroys that world instead of retargeting input.
+      const current = (await cdp.send("Page.getFrameTree", {}, sid))?.frameTree?.frame;
+      if (!current || current.parentId || current.id !== frame.id
+        || current.loaderId !== options.expectedLoaderId
+        || new URL(current.url).origin !== request.expected_origin) throw new Error();
+    }
     const login = await options.resolve();
     checkAbort();
     if ((request.username_selector && !login.username) || (request.password_selector && !login.password)) throw new Error();
@@ -648,4 +660,19 @@ export async function captureBrowserVaultDocumentBinding(cdp: PrivateBrowserChan
     if (!world) throw new Error();
     return { loaderId: world.loaderId };
   } catch { throw new Error("Private browser document is unavailable"); }
+}
+
+/** Validate the exact password selector before asking the user for private input. */
+export async function captureBrowserPasswordBinding(cdp: PrivateBrowserChannel, request: BrowserVaultRequest): Promise<{loaderId: string}> {
+  try {
+    const world = await privateWorld(cdp, request);
+    if (!world || !request.password_selector) throw new Error();
+    const result = await cdp.send("Runtime.callFunctionOn", {
+      executionContextId:world.executionContextId, functionDeclaration:BROWSER_VAULT_FILL_FUNCTION,
+      arguments:[request.expected_origin,null,request.password_selector,null,null,false,true].map(value => ({value})),
+      returnByValue:true,silent:true,
+    },world.sessionId);
+    if (result?.exceptionDetails || result?.result?.value !== true) throw new Error();
+    return {loaderId:world.loaderId};
+  } catch { throw new Error("Supported password form is unavailable"); }
 }
