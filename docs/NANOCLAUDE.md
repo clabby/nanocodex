@@ -19,7 +19,7 @@ through `BuilderBackend` and `LifecycleBackend`; an external
 The initial `nanocodex-claude` crate provides `ClaudeClient` and
 `Nanocodex::builder(Claude::new(client, model))`: streamed text, caller-
 registered JSON function tools with Claude `tool_use` / user `tool_result`
-ordering, manual and 95%-threshold client-side summarization, cancellation,
+ordering, manual and reserve-aware client-side summarization, cancellation,
 usage, and shared lifecycle events. `Claude::latest(client)` currently chooses
 `claude-opus-5-5` (September 2026); its default context budget is 1M tokens,
 as are the documented Fable 5.1 and Sonnet 5 model IDs. Unknown model IDs
@@ -51,14 +51,13 @@ let result = agent.prompt("Hello").await?.result().await?;
 println!("{}", result.final_message());
 ```
 
-The request shape supports opt-in top-level automatic `cache_control`,
-`output_config.effort` for adaptive thinking, strict client tool definitions, and string or nested block arrays for tool results.
+The request shape supports opt-in top-level automatic `cache_control` (including 1-hour TTL),
+`thinking:adaptive`, `output_config.effort`, `context_management` keep-all-thinking with its documented beta, caller-supplied system text blocks and cache markers, strict client tool definitions, and string or nested block arrays for tool results.
 The transport assembles SSE text, tool input JSON, signed thinking and cache
 usage, validates event names, terminal stop reasons and JSON object tool input,
 and limits each SSE frame to 32 MiB. Thinking/redacted-thinking block fields are
 preserved for replay. Unknown delta types on a known block fail closed, rather
-than returning altered content or executing a partial tool call. The current agent handler itself still returns **text** tool results; richer
-result blocks are available only through the protocol API. Independent client
+than returning altered content or executing a partial tool call. Agent handlers can return text or richer Claude content blocks via `.tool_blocks()`. Independent client
 functions can opt into concurrent execution via `.parallel_tools(true)`; the
 caller must ensure side effects do not conflict. The default is sequential.
 Anthropic-executed `web_search_20250305` and `web_fetch_20250910` can be
@@ -69,9 +68,8 @@ server/client distinction and `pause_turn` continuation have loopback tests. We 
 synthetic loopback server, not a live Platform account.
 
 
-This is **not Claude Code parity**. Bare CLI 2.1.283 advertises native
-`Bash`, `Read`, and `Edit` schemas; this crate currently exposes only explicitly
-registered functions, not those built-ins or `nanocodex-tools`. Multi-modal user inputs and agent-handler tool outputs, automatic instruction reload,
+This is **not Claude Code parity**. Native tools remain explicit opt-ins; the
+`workspace-files` feature supplies only bounded adapters, not the full CLI. Multi-modal user inputs, automatic instruction reload,
 full thinking policy,
 steering, spawn/fork, snapshots, durability/preservation hooks and live auth
 remain unimplemented; unsupported lifecycle operations return errors. In
@@ -154,4 +152,12 @@ References: [Claude tool calls](https://platform.claude.com/docs/en/agents-and-t
 
 A controlled live run using the already authenticated Claude Code CLI and a short-lived process-scoped TLS measurement relay confirmed the client-managed compaction exchange, tool-result ordering, deferred tool discovery and the two-layer client `WebSearch` to nested server `web_search_20250305` path. It sampled 20 successful `-p` prompts plus valid persisted continuation and two compactions under an explicit 100k-token auto-compact window. Main subscription requests had four system text blocks (two cached with `ttl:1h`), adaptive thinking `display:updates`, `diagnostics.previous_message_id` on follow-ups and ordinary Claude content-block history. The CLI used an Authorization header, with no value captured.
 
-The current crate remains a **partial** implementation: it does not authenticate via the subscription, implement client `ToolSearch`, provide Claude Code's nested `WebSearch` flow, or match full compaction thresholds/cache layout. `ClaudeAuthProvider` is a seam for an explicitly approved integration; first-party CLI headers observed in the research are not a recipe to impersonate the CLI.
+The draft now has an **opt-in, local** `client_tool_search()` registry (returns Claude client `tool_reference` blocks and advertises discovered functions only afterward), and `.nested_web_search(deferred)` which makes an independent streamed Messages call with Anthropic's basic server search, then converts its result into a bounded string client `tool_result`. One synthetic test covers deferred discovery, nested search, summarization and continuation. To use deferred search, chain `.client_tool_search().nested_web_search(true)`; immediate search is `.nested_web_search(false)`. The interactive trace corrected the nested search's `tool_choice` to `auto`; auxiliary search may incur provider charges. This is distinct from the injected `ApprovedWebProvider` adapter and from adding a server search tool to the main request. Both paths require an explicitly approved provider/credential; neither reads Claude Code's local login.
+
+Context handling now allows caller-supplied cached system blocks (`system_blocks`), 1-hour top-level cache (`cache_one_hour`), opt-in adaptive thinking, documented keep-all-thinking context management and `message_diagnostics()` continuity hints. Compaction remains an ordinary streamed summarization request with the currently available tool catalog and atomic replacement at a completed boundary; its trigger reserves up to 20k output tokens plus 13k margin rather than blindly using 95% on normal windows. This **does not reproduce** the private CLI system prompt, exact text layout, dynamic preflight token accounting, full diagnostics semantics, all context variants, or first-party request-class header. It has only synthetic loopback tests, not a live Nanoclaude subscription call. `ClaudeAuthProvider` remains a seam for the separately approved integration; observed first-party CLI identity headers are not a recipe to impersonate the CLI.
+
+## Interactive TTY correction (actual `claude`, not `-p`)
+
+[Credential-redacted interactive report and trace](research/nanoclaude-interactive-tty.md) supersede extrapolations from print mode. In 14 default interactive synthetic turns and two manual-permission turns, the CLI created an auxiliary Haiku title request, advertised a different initial catalog, handled AskUserQuestion and Edit in native terminal permission UI, spawned a distinct subagent request class with asynchronous handback, and packed additional system-role Messages. Its client `WebFetch` directly fetched the public page and made a *separate Haiku summary request*; it did not invoke the Anthropic server `web_fetch` tool. The documented/public API server search/fetch tools remain available as distinct opt-in capabilities, not substitutes for Claude Code client tools.
+
+`web_fetch_with_source(approved_source, deferred)` (with the `workspace-files` feature) now offers an explicit, **synthetic-tested approximation** of the observed fetch→auxiliary-summary layers. The host must implement `ApprovedWebFetchSource` with permission checks, public DNS and redirect enforcement, byte limits, and no ambient credentials; the adapter itself does not contact websites or replicate the CLI's `/api/web/domain_info` service. It returns one string Claude `tool_result`. `client_tool_search`'s schema now requires both `query` and `max_results` as observed. Neither UI authorization, asynchronous subagents, private prompt packing, exact result formatting, nor the trusted-program OAuth integration is implemented by this prototype. Do not claim full interactive parity from these tests.

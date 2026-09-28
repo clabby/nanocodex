@@ -368,7 +368,15 @@ pub struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub tool_choice: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<Value>,
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
@@ -584,10 +592,13 @@ impl ClaudeClient {
             request: &'a MessagesRequest,
             stream: bool,
         }
-        let builder = self
+        let mut builder = self
             .http
             .post(&self.endpoint)
             .header("anthropic-version", ANTHROPIC_VERSION);
+        if request.context_management.is_some() {
+            builder = builder.header("anthropic-beta", "context-management-2025-06-27");
+        }
         let builder = match &self.auth {
             ClientAuth::ApiKey(key) => builder.header("x-api-key", key),
             ClientAuth::Headers(headers) => builder.headers(headers.clone()),

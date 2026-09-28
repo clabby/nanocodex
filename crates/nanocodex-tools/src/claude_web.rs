@@ -51,6 +51,30 @@ pub trait ApprovedWebProvider: Send + Sync {
     ) -> impl std::future::Future<Output = Result<String, String>> + Send;
 }
 
+/// Bounded, decoded public page supplied by a host-approved fetch capability.
+/// The provider must strip credentials and enforce its own redirect/DNS/URL
+/// policy. `final_url` is the post-redirect citation source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovedPage {
+    /// Validated public URL after all approved redirects.
+    pub final_url: String,
+    /// Bounded UTF-8 page text or HTML; its instructions remain untrusted.
+    pub content: String,
+}
+
+/// Fetch only the public page, without asking the provider to summarize it.
+/// The Claude backend may then make a *separate* auxiliary Messages request to
+/// interpret this untrusted page, matching the observed client WebFetch layers.
+/// There is no default implementation or ambient HTTP access.
+pub trait ApprovedWebFetchSource: Send + Sync {
+    /// Obtain a bounded page after independently enforcing host policy,
+    /// public-DNS restrictions, redirect checks and capture limits.
+    fn fetch_source(
+        &self,
+        request: WebFetchRequest,
+    ) -> impl std::future::Future<Output = Result<ApprovedPage, String>> + Send;
+}
+
 /// Opt-in client tool adapter. Unlike Anthropic Messages server tools, these
 /// operations produce ordinary client `tool_result` text from an injected host.
 pub struct ClaudeWeb<P: ApprovedWebProvider> {
