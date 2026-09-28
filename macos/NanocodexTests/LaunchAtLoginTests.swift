@@ -30,6 +30,11 @@ final class LaunchAtLoginTests: XCTestCase {
         return preferences
     }
 
+    func testVisibleWindowReopenDoesNotOrderItAgain() {
+        XCTAssertFalse(AppDelegate.shouldOrderWindowOnReopen(hasVisibleWindows: true))
+        XCTAssertTrue(AppDelegate.shouldOrderWindowOnReopen(hasVisibleWindows: false))
+    }
+
     func testInstalledAppDefaultsOnOnceAndPreservesLaterOSRemoval() async {
         let service = FakeService(), preferences = preferences()
         let launch = LaunchAtLogin(service: service, preferences: preferences)

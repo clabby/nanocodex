@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import OSLog
 import SwiftUI
 import NanocodexUI
 
@@ -41,6 +42,7 @@ final class HandStatusItem: NSObject, NSPopoverDelegate {
     private var eventMonitors: [Any] = []
     private var currentSymbol = ""
     private var currentTitle = ""
+    private let activationLog = Logger(subsystem: "xyz.paradigm.nanocodex.macos", category: "Activation")
 
     init(model: AppModel, openMainWindow: @escaping () -> Void) {
         self.model = model
@@ -60,6 +62,7 @@ final class HandStatusItem: NSObject, NSPopoverDelegate {
         popover.contentSize = NSSize(width: 720, height: 560)
         popover.contentViewController = NSHostingController(rootView: HandControlPanel(model: model, openMainWindow: { [weak self] in
             self?.popover.performClose(nil)
+            self?.activationLog.info("User requested Open from status panel")
             openMainWindow()
             NSApp.activate(ignoringOtherApps: true)
         }))
