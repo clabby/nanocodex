@@ -51,7 +51,7 @@ jobs:
   cron-live:
     name: exercise deployed cron schedules
     needs: deployment
-    if: needs.deployment.outputs.deployed == 'true' && (github.event_name != 'workflow_dispatch' || inputs.suite != 'goals')
+    if: needs.deployment.outputs.deployed == 'true' && (github.event_name != 'workflow_dispatch' || inputs.suite == 'all')
     runs-on: ubuntu-latest
     timeout-minutes: 12
     environment: cloudflare-production
@@ -73,7 +73,7 @@ jobs:
   durability-live:
     name: exercise deployed durable threads
     needs: deployment
-    if: needs.deployment.outputs.deployed == 'true' && (github.event_name != 'workflow_dispatch' || inputs.suite != 'goals')
+    if: needs.deployment.outputs.deployed == 'true' && (github.event_name != 'workflow_dispatch' || inputs.suite == 'all')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: cloudflare-production
@@ -117,7 +117,7 @@ jobs:
   goals-live:
     name: exercise deployed goals
     needs: deployment
-    if: needs.deployment.outputs.deployed == 'true'
+    if: needs.deployment.outputs.deployed == 'true' && (github.event_name != 'workflow_dispatch' || inputs.suite == 'all' || inputs.suite == 'goals')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: cloudflare-production
