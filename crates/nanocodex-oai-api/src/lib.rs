@@ -8,6 +8,9 @@ compile_error!(
     "nanocodex-oai-api supports native targets and hosted wasm*-unknown-unknown targets; WASI is not yet supported"
 );
 
+/// Duration-based audio token estimates shared by context and tool budgets.
+#[cfg(feature = "client")]
+pub mod audio;
 /// Authentication sources and managed credential snapshots.
 #[cfg(feature = "client")]
 pub mod auth;

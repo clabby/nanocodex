@@ -209,14 +209,11 @@ must never imply synchronization.
 
 The default `native` feature remains the complete tools crate: registry, Code
 Mode, MCP, web/image tools, macros, and standard workspace tools. It is the
-union of three narrower features:
+union of two narrower features:
 
 - `code-mode` — the registry, Code Mode/QuickJS runtime, web/image tools,
   macros, and standard workspace tools that the agent loop requires.
 - `mcp` — MCP servers, OAuth login, and deferred-tool search.
-- `audio-duration` — container decoders that measure MP3/MP4/Ogg/Matroska
-  audio for context estimates. Without it, PCM WAV is still measured exactly
-  and other audio uses the conservative size-based estimate.
 
 The narrower `workspace-runtime` feature exists only for process companions
 such as `nanocodex-vm-guest`. With default features disabled, it exposes the

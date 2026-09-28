@@ -42,9 +42,9 @@ workspace-runtime = [
     "dep:nix",
     "dep:rustix",
 ]
-# Full native runtime: Code Mode, MCP, and exact audio-duration estimates.
-native = ["code-mode", "mcp", "audio-duration"]
-# Code Mode tool runtime used by the agent loop, without MCP or audio decoding.
+# Full native runtime: Code Mode and MCP.
+native = ["code-mode", "mcp"]
+# Code Mode tool runtime used by the agent loop, without MCP.
 code-mode = [
     "attachment",
     "workspace-runtime",
@@ -59,9 +59,6 @@ code-mode = [
 ]
 # MCP servers, OAuth login, and deferred-tool search.
 mcp = ["code-mode", "dep:bm25", "dep:oauth2", "dep:rmcp", "dep:tokio-util"]
-# Decodes compressed audio containers to measure duration. Without it, only
-# PCM WAV durations are measured and other audio falls back to size estimates.
-audio-duration = ["code-mode", "nanocodex-oai-api/audio-duration", "dep:symphonia"]
 
 [dependencies]
 base64 = { workspace = true, optional = true }
@@ -84,7 +81,6 @@ nanocodex-tools-macros = { workspace = true, optional = true }
 portable-pty = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 rquickjs = { workspace = true, optional = true }
-symphonia = { version = "0.6.0", default-features = false, features = ["isomp4", "mkv", "mp3", "ogg", "wav"], optional = true }
 rmcp = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }

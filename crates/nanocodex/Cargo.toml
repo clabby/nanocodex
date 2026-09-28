@@ -20,11 +20,6 @@ rustdoc-args = ["-D", "warnings"]
 [features]
 default = ["durability", "mcp", "openai", "tools"]
 durability = ["dep:nanocodex-durability", "openai"]
-audio-duration = [
-    "openai",
-    "nanocodex-oai-api/audio-duration",
-    "nanocodex-tools?/audio-duration",
-]
 managed = ["dep:nanocodex-managed"]
 mcp = ["tools", "nanocodex-tools/mcp"]
 observability = ["dep:nanocodex-observability"]

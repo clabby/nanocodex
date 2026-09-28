@@ -1,17 +1,10 @@
-//! Audio handling ported from openai/codex 36430b36881cf5c289cb48e671cfc9e8b542ae7b.
-//! Measures tool-generated PCM WAV clips using the audio bytes actually present.
-//! Unknown formats retain the existing audio output behavior.
+//! Audio handling ported from openai/codex 1427825c40 `code-mode-runtime/src/runtime/audio.rs`.
+//! Measures tool-generated PCM WAV clips using the audio bytes actually present
+//! (short-clip guard). Output budgets use the shared codex-utils-audio port in
+//! `nanocodex_oai_api::audio`, exactly as codex code mode does.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-#[cfg(feature = "audio-duration")]
-use std::io::Cursor;
-#[cfg(feature = "audio-duration")]
-use symphonia::core::{
-    formats::{FormatOptions, TrackType, probe::Hint},
-    io::MediaSourceStream,
-    meta::MetadataOptions,
-};
 const MAX_PROMPT_AUDIO_INPUT_BYTES: usize = 50 * 1024 * 1024;
 
 pub(super) fn wav_duration_seconds(audio_url: &str) -> Option<f64> {
@@ -71,82 +64,4 @@ pub(super) fn wav_duration_seconds(audio_url: &str) -> Option<f64> {
     None
 }
 
-#[cfg(feature = "audio-duration")]
-const fn canonical_audio_mime(mime: &str) -> Option<&'static str> {
-    if mime.eq_ignore_ascii_case("audio/wav")
-        || mime.eq_ignore_ascii_case("audio/x-wav")
-        || mime.eq_ignore_ascii_case("audio/wave")
-        || mime.eq_ignore_ascii_case("audio/vnd.wave")
-    {
-        Some("audio/wav")
-    } else if mime.eq_ignore_ascii_case("audio/mpeg") || mime.eq_ignore_ascii_case("audio/mp3") {
-        Some("audio/mpeg")
-    } else if mime.eq_ignore_ascii_case("audio/mp4")
-        || mime.eq_ignore_ascii_case("audio/m4a")
-        || mime.eq_ignore_ascii_case("audio/x-m4a")
-    {
-        Some("audio/mp4")
-    } else if mime.eq_ignore_ascii_case("audio/webm") {
-        Some("audio/webm")
-    } else if mime.eq_ignore_ascii_case("audio/ogg") {
-        Some("audio/ogg")
-    } else {
-        None
-    }
-}
-
-pub(super) fn estimate_audio_token_count(audio_url: &str) -> usize {
-    #[cfg(feature = "audio-duration")]
-    let duration = audio_duration_seconds(audio_url);
-    #[cfg(not(feature = "audio-duration"))]
-    let duration = wav_duration_seconds(audio_url);
-    match duration {
-        Some(duration) => (duration * 10.0).ceil() as usize,
-        None => audio_url.len().div_ceil(4),
-    }
-}
-
-#[cfg(feature = "audio-duration")]
-fn audio_duration_seconds(audio_url: &str) -> Option<f64> {
-    let (metadata, payload) = audio_url.split_once(',')?;
-    let metadata = metadata.get("data:".len()..)?;
-    let mut metadata_parts = metadata.split(';');
-    let canonical_mime = canonical_audio_mime(metadata_parts.next()?)?;
-    if !metadata_parts.any(|part| part.eq_ignore_ascii_case("base64")) {
-        return None;
-    }
-
-    let bytes = match BASE64_STANDARD.decode(payload) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::trace!(%error, "failed to decode audio payload for token estimation");
-            return None;
-        }
-    };
-    let media_source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
-    let mut hint = Hint::new();
-    hint.mime_type(canonical_mime);
-    let format = match symphonia::default::get_probe().probe(
-        &hint,
-        media_source,
-        FormatOptions::default(),
-        MetadataOptions::default(),
-    ) {
-        Ok(format) => format,
-        Err(error) => {
-            tracing::trace!(%error, "failed to read audio duration for token estimation");
-            return None;
-        }
-    };
-    let track = format.default_track(TrackType::Audio)?;
-    let timing = track.time_base.zip(track.duration).or_else(|| {
-        format
-            .media_info()
-            .time_base
-            .zip(format.media_info().duration)
-    });
-    let (time_base, duration) = timing?;
-    let duration_seconds =
-        duration.get() as f64 * f64::from(time_base.numer.get()) / f64::from(time_base.denom.get());
-    duration_seconds.is_finite().then_some(duration_seconds)
-}
+pub(super) use nanocodex_oai_api::audio::estimate_audio_token_count;

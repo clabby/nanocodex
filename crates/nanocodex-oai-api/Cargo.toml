@@ -18,7 +18,7 @@ all-features = true
 rustdoc-args = ["-D", "warnings"]
 
 [features]
-default = ["client", "audio-duration"]
+default = ["client"]
 client = [
     "events",
     "native-tls",
@@ -27,7 +27,9 @@ client = [
     "dep:http",
     "dep:reqwest",
     "dep:rustls",
+    "dep:sha1",
     "dep:sha2",
+    "dep:symphonia",
     "dep:image",
     "dep:tokio-tungstenite",
     "dep:tower",
@@ -36,16 +38,14 @@ client = [
     "dep:uuid",
 ]
 native-tls = ["dep:rustls", "dep:rustls-native-certs", "dep:rustls-platform-verifier", "dep:tokio", "dep:tracing"]
-# Decodes MP3/MP4/Ogg/Matroska audio to measure its duration for context
-# estimates. Without it, PCM WAV is still measured exactly and other audio uses
-# the conservative size-based estimate.
-audio-duration = ["client", "dep:symphonia"]
 events = ["dep:futures-util", "dep:tokio", "dep:web-time"]
 realtime = ["client", "dep:opusic-c", "dep:webrtc"]
 
 [dependencies]
+sha1 = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
+# Same Symphonia release and container set as codex-rs `codex-utils-audio`.
 symphonia = { version = "0.6.0", default-features = false, features = ["isomp4", "mkv", "mp3", "ogg", "wav"], optional = true }
 async-trait.workspace = true
 base64 = { workspace = true, optional = true }

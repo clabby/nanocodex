@@ -232,9 +232,11 @@ response-item, and tool wire contracts may disable default features. This
 keeps one canonical contract without linking an unused network client; it does
 not create an alternate provider or transport implementation.
 
-The default `audio-duration` feature decodes compressed audio containers to
-measure their duration for context estimates. Clients that disable it still
-measure PCM WAV exactly and estimate other audio conservatively from its size.
+With `client`, audio inputs are charged by decoded duration exactly like
+codex-rs (`codex-utils-audio`): Symphonia measures WAV, MP3, MP4/M4A, WebM and
+Ogg data URLs at 10 tokens per second, and anything unmeasurable falls back to
+`ceil(url.len() / 4)` tokens. [`audio::estimate_audio_token_count`] is the
+shared estimator used by context compaction and tool output budgets.
 
 ## Tools and managed sessions
 
