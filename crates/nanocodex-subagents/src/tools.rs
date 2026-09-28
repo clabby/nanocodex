@@ -1129,7 +1129,7 @@ mod strict_spawn_tests {
             !validator.is_valid(&json!({ "role": "audit", "task": "check", "model": null,
             "thinking": null, "output_contract": [] }))
         );
-        let mut misplaced = valid.clone();
+        let mut misplaced = valid;
         misplaced["required"] = json!(["summary"]);
         assert!(!validator.is_valid(&misplaced));
     }
