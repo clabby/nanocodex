@@ -1,5 +1,5 @@
 import { applyD1Migrations, env } from "cloudflare:test";
-import { beforeAll, expect, it } from "vitest";
+import { beforeAll, expect, it, vi } from "vitest";
 import { configureCalendarPush, receiveCalendarPush, reconcileCalendarPush, renewCalendarPush, disableCalendarPush, dueCalendarPushSources } from "../src/calendar-push";
 import { crmResearchRequest } from "../src/crm-research";
 
@@ -144,4 +144,25 @@ it("bounds Unicode notification envelopes and silently learns newly windowed eve
   f.respond(()=>Response.json({items:[large,{...event,id:"newly-in-window"}],nextSyncToken:"rebuilt"}));
   await reconcileCalendarPush(options,source.id);
   expect(delivered).toHaveLength(1);
+});
+
+it("bounds noncooperative provider fetches and stalled response bodies", async () => {
+ for(const stalledBody of [false,true]) {
+  const f=fixture(),source=await configure(f);
+  let signal:AbortSignal|undefined;
+  vi.useFakeTimers();
+  try {
+   const pending=reconcileCalendarPush({...f.options,fetch:async request=>{
+    signal=request.signal;
+    return stalledBody ? new Response(new ReadableStream({start(){}})) : new Promise<Response>(()=>{});
+   }},source.id);
+   const assertion=expect(pending).rejects.toThrow(/calendar_push_provider_timeout/);
+   for(let i=0;i<100&&!signal;i++) await vi.advanceTimersByTimeAsync(0);
+   expect(signal).toBeDefined();
+   await vi.advanceTimersByTimeAsync(30_001);
+   await assertion;
+   expect(signal?.aborted).toBe(true);
+  } finally { vi.useRealTimers(); }
+  expect(await db.prepare("SELECT lease FROM crm_calendar_push_sources WHERE id=?").bind(source.id).first()).toEqual({lease:null});
+ }
 });

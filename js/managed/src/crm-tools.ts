@@ -86,7 +86,7 @@ export function crmTools(options: {
       operation: { type: "string", enum: ["search", "get", "save", "delete", "links", "link_save", "link_delete", "neighbors", "path", "timeline"] },
       id: graphId, from_id: graphId, to_id: graphId,
       text: { type: "string", minLength: 1, maxLength: 20_000 },
-      metadata: { type: "object", additionalProperties: true, description: "JSON object, maximum 16 KiB. Omitted on edit preserves it; {} clears it. Optional occurred_at preserves supplied date precision. Keep evidence in origin/sources/confidence/rationale." },
+      metadata: { type: "object", additionalProperties: true, description: "JSON object, maximum 16 KiB. Omitted on edit preserves it; {} clears it only for nodes without origin. Once set, origin is immutable; source/inferred assertions must retain evidence. Optional occurred_at preserves supplied date precision. Keep evidence in origin/sources/confidence/rationale." },
       q: { type: "string", maxLength: 512 }, limit: page, cursor,
       max_depth: { type: "integer", minimum: 1, maximum: 10, description: "Maximum undirected link depth; defaults to 6 for paths and 1 for neighborhoods." },
       max_nodes: { type: "integer", minimum: 1, maximum: 500, description: "Maximum visited nodes for bounded path or neighborhood search; default 100." },

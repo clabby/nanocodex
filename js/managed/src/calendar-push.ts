@@ -36,33 +36,39 @@ async function source(o: CalendarPushOptions, id: string): Promise<Source> {
 async function provider(o: CalendarPushOptions, s: Source, url: string, body?: unknown, allowMissing = false): Promise<{ status: number; data: Record<string, unknown> }> {
   authorize(o);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
+  // An abort signal alone cannot bound a connector that ignores cancellation,
+  // or a response stream whose read never settles. Race the entire I/O path.
+  let rejectTimeout: (reason: Error) => void = () => {};
+  const timeout = new Promise<never>((_, reject) => { rejectTimeout = reject; });
+  const timer = setTimeout(() => { rejectTimeout(new Error("calendar_push_provider_timeout")); controller.abort(); }, 30000);
   try {
-    const response = await o.fetch(new Request(url, { method: body === undefined ? "GET" : "POST", redirect: "manual",
-      headers: { "x-nanocodex-connector-connection": s.connection_id, accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal }));
-    authorize(o);
-    if (response.status === 410 || (allowMissing && response.status === 404)) { await response.body?.cancel(); return { status: response.status, data: {} }; }
-    if (!response.ok) { await response.body?.cancel(); throw new Error(`calendar_push_provider_${response.status}`); }
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error("calendar_push_invalid_response");
-    let bytes = 0; const chunks: Uint8Array[] = [];
-    try {
-      while (true) {
-        controller.signal.throwIfAborted();
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        bytes += chunk.value.byteLength;
-        if (bytes > 1048576) { await reader.cancel(); throw new Error("calendar_push_response_too_large"); }
-        chunks.push(chunk.value);
-      }
-    } finally { reader.releaseLock(); }
-    authorize(o);
-    const joined = new Uint8Array(bytes); let offset = 0;
-    for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
-    const data = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(joined));
-    if (!data || typeof data !== "object" || Array.isArray(data) || "error" in data) throw new Error("calendar_push_invalid_response");
-    return { status: response.status, data };
+    return await Promise.race([timeout, (async () => {
+      const response = await o.fetch(new Request(url, { method: body === undefined ? "GET" : "POST", redirect: "manual",
+        headers: { "x-nanocodex-connector-connection": s.connection_id, accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal }));
+      authorize(o);
+      if (response.status === 410 || (allowMissing && response.status === 404)) { await response.body?.cancel(); return { status: response.status, data: {} }; }
+      if (!response.ok) { await response.body?.cancel(); throw new Error(`calendar_push_provider_${response.status}`); }
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("calendar_push_invalid_response");
+      let bytes = 0; const chunks: Uint8Array[] = [];
+      try {
+        while (true) {
+          controller.signal.throwIfAborted();
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          bytes += chunk.value.byteLength;
+          if (bytes > 1048576) { await reader.cancel(); throw new Error("calendar_push_response_too_large"); }
+          chunks.push(chunk.value);
+        }
+      } finally { reader.releaseLock(); }
+      authorize(o);
+      const joined = new Uint8Array(bytes); let offset = 0;
+      for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+      const data = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(joined));
+      if (!data || typeof data !== "object" || Array.isArray(data) || "error" in data) throw new Error("calendar_push_invalid_response");
+      return { status: response.status, data };
+    })()]);
   } finally { clearTimeout(timer); }
 }
 async function acquire(o: CalendarPushOptions, id: string): Promise<string | null> {

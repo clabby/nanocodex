@@ -55,6 +55,7 @@ function metadata(value:unknown):string {
  const encoded=JSON.stringify(meta);
  if(Buffer.byteLength(encoded)>16384) invalid("Metadata exceeds 16 KiB.");
  if(meta.occurred_at!==undefined&&meta.occurred_at!==null) date(meta.occurred_at);
+ if(meta.origin!==undefined&&meta.origin!=="user"&&meta.origin!=="source"&&meta.origin!=="inferred") invalid("Invalid statement origin.");
  if(meta.origin==="source"||meta.origin==="inferred") {
   if(!Array.isArray(meta.sources)||!meta.sources.length||meta.sources.length>50) invalid("Source and inferred statements require evidence in metadata.sources.");
   for(const raw of meta.sources) {
@@ -92,9 +93,13 @@ export async function crmGraphRequest(db:D1Database,owner:string,operation:CrmGr
    const existing=args.id===undefined?null:await read(key);
    const body=args.text===undefined&&existing?existing.text:text(args.text,"text");
    const meta=args.metadata===undefined?(existing?.metadata??"{}"):metadata(args.metadata);
+   // Replacing metadata must not reclassify a saved assertion or silently
+   // remove the evidence required for its original source/inference.
+   if(existing){const prior=JSON.parse(existing.metadata) as Input;const next=JSON.parse(meta) as Input;
+    if(prior.origin!==undefined&&prior.origin!==next.origin)invalid("Statement origin is immutable; save a correction as a new statement.");}
    const now=Date.now();
-   const row=existing?await session.prepare("UPDATE crm_nodes SET text=?,metadata=?,updated_at=max(updated_at,?) WHERE owner_id=? AND id=? RETURNING id,text,metadata,created_at,updated_at").bind(body,meta,now,owner,key).first<Row>():await session.prepare("INSERT INTO crm_nodes(owner_id,id,text,metadata,created_at,updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(owner_id,id) DO NOTHING RETURNING id,text,metadata,created_at,updated_at").bind(owner,key,body,meta,now,now).first<Row>();
-   if(!row){if(existing)missing();const previous=await read(key);if(previous.text!==body||previous.metadata!==meta)invalid("Node id already exists with different content.");return {node:node(previous)};}
+   const row=existing?await session.prepare("UPDATE crm_nodes SET text=?,metadata=?,updated_at=max(updated_at,?) WHERE owner_id=? AND id=? AND text=? AND metadata=? RETURNING id,text,metadata,created_at,updated_at").bind(body,meta,now,owner,key,existing.text,existing.metadata).first<Row>():await session.prepare("INSERT INTO crm_nodes(owner_id,id,text,metadata,created_at,updated_at) VALUES (?,?,?,?,?,?) ON CONFLICT(owner_id,id) DO NOTHING RETURNING id,text,metadata,created_at,updated_at").bind(owner,key,body,meta,now,now).first<Row>();
+   if(!row){if(existing)invalid("Node changed during edit; read it and retry.");const previous=await read(key);if(previous.text!==body||previous.metadata!==meta)invalid("Node id already exists with different content.");return {node:node(previous)};}
    return {node:node(row)};
   }
   if(operation==="delete") {const key=id(args.id);editable(key);if(!await session.prepare("DELETE FROM crm_nodes WHERE owner_id=? AND id=? RETURNING id").bind(owner,key).first())missing();return {deleted:true};}
@@ -108,7 +113,14 @@ export async function crmGraphRequest(db:D1Database,owner:string,operation:CrmGr
     }
     return {deleted:true};
    }
-   const now=Date.now();await session.prepare("INSERT INTO crm_links(owner_id,from_id,to_id,created_at,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(owner_id,from_id,to_id) DO NOTHING").bind(owner,from,to,now,now).run();
+   const now=Date.now();
+   // A projected edge is rebuilt from its source. A duplicate INSERT would
+   // otherwise acknowledge a native link that the next source update removes.
+   const added=await session.prepare(`INSERT INTO crm_links(owner_id,from_id,to_id,created_at,updated_at)
+     SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM crm_legacy_links WHERE owner_id=? AND from_id=? AND to_id=?)
+     ON CONFLICT(owner_id,from_id,to_id) DO NOTHING RETURNING from_id`).bind(owner,from,to,now,now,owner,from,to).first();
+   if(!added&&await session.prepare("SELECT 1 FROM crm_legacy_links WHERE owner_id=? AND from_id=? AND to_id=? LIMIT 1").bind(owner,from,to).first())
+    invalid("This link is source-managed; edit its original source record.");
    return {link:{from_id:from,to_id:to}};
   }
   if(operation==="search") {
