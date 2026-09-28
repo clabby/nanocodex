@@ -100,6 +100,7 @@ function translate(body, model) {
       description: [namespace ? `${namespace}.${name}` : name, description, tool.description,
         tool.type === "custom" ? "Pass the exact free-form tool input as the JSON string field input. Preserve all code and newlines." : "",
         tool.format?.definition ? `Input grammar (${tool.format.syntax}): ${tool.format.definition}` : ""].filter(Boolean).join("\n"),
+      ...(tool.type === "function" && tool.strict === true ? { strict: true } : {}),
       parameters: tool.type === "custom" ? {
         type: "object", properties: { input: { type: "string" } }, required: ["input"], additionalProperties: false,
       } : tool.parameters ?? { type: "object", properties: {} },

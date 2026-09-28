@@ -15,12 +15,19 @@ const principal: Principal = {
   authorizationEpoch: 1, capabilities: ["agents:read", "agents:write", "tools:use"],
 };
 const marker = "synthetic-child-tool-proof";
-const schema = { type: "object", properties: { value: { type: "string" }, turn: { type: "integer" } },
-  required: ["value", "turn"], additionalProperties: false };
+const contract = { kind: "object", fields: [
+  { name: "value", schema: { kind: "string" }, required: true },
+  { name: "turn", schema: { kind: "integer" }, required: true },
+] };
 const completion = (message: unknown, tool = false) => ({ choices: [{ finish_reason: tool ? "tool_calls" : "stop", message }] });
 function toolCall(input: any, name: string, args: unknown, id: string) {
   const declaration = input.tools.find((tool: any) => tool.function.description.startsWith(`${name}\n`));
   expect(declaration, `${name} must come from the actual Rust/WASM tool catalog`).toBeDefined();
+  if (name === "spawn_agent") {
+    expect(declaration.function.strict).toBe(true);
+    expect(declaration.function.parameters.properties.output_contract).toBeDefined();
+    expect(declaration.function.parameters.properties.output_schema).toBeUndefined();
+  }
   return completion({ content: null, tool_calls: [{ id, type: "function", function: {
     name: declaration.function.name, arguments: JSON.stringify(args),
   } }] }, true);
@@ -163,7 +170,7 @@ it.each([
       expect(JSON.parse(String(table("managed_thread_route")[0].route_json))).toMatchObject({ backend: provider, model: "gpt-6-sol", thinking: "low" });
       const last = body.messages.at(-1);
       if (phase === 1 && step++ === 0) return Response.json(call(body, "spawn_agent", {
-        role: "fixture specialist", task: "child-fixture-task: read /brain/child-input.txt and submit the value.", output_schema: schema,
+        role: "fixture specialist", task: "child-fixture-task: read /brain/child-input.txt and submit the value.", model: null, thinking: null, output_contract: contract,
       }));
       if (phase === 1 && childId === undefined) {
         childId = JSON.parse(last.content).agent_id;

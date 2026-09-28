@@ -32,7 +32,7 @@ An enabled runtime installs seven tools for root and child agents:
 
 | Tool | Contract |
 | --- | --- |
-| `spawn_agent` | Create a clean child session with a role, focused task, required output schema, and optional model/thinking overrides. |
+| `spawn_agent` | Create a clean child session with a role, focused task, strict typed output contract, and nullable model/thinking overrides. |
 | `submit_result` | Submit `{output}` against the child’s schema and the runtime’s trusted instruction revision. |
 | `send_agent_message` | Send a bounded directed message within the current task tree. |
 | `list_agents` | List visible agents, status, topology, and caller authority. |
@@ -50,9 +50,11 @@ If steering superseded that request, the tool returns
 Incorporate the updated instructions and submit again. Only an accepted result
 satisfies the child’s completion contract.
 
-Model and thinking overrides apply only to the new child. When either is
-omitted, the child inherits the invoking agent’s current value at the spawn
-boundary.
+Model and thinking overrides apply only to the new child. In the strict
+model-facing tool, pass `null` for either value to inherit the invoking agent’s
+setting. Its `output_contract` uses closed object/array/scalar nodes, compiled
+into a JSON Schema before launch. Trusted programmatic APIs still accept raw
+JSON Schema; legacy in-flight tool calls may complete with `output_schema`.
 
 ## Tree authority and messaging
 
@@ -90,3 +92,23 @@ resume those children. See [durability ownership](DURABILITY.md#agent-identity-a
 Tact’s subagent tree TUI is presentation owned by Tact and is not copied into
 Nanocodex’s existing Ratatui application. Nanocodex drains the same typed
 runtime updates so lifecycle observation remains independent of the scheduler.
+
+## Local real-model spawn check
+
+Build the current branch's WebAssembly package, then opt in to a live provider
+call (Cloudflare AI credentials stay in the local Node process):
+
+```sh
+bash js/nanocodex-vite/scripts/build-js-package.sh
+NANOCODEX_LIVE_ENV_FILE=/path/to/private/.env \
+  NANOCODEX_LIVE_SPAWN_SCENARIO=natural \
+  node js/nanocodex/scripts/live-spawn-harness.mjs
+```
+
+The harness uses the built Rust/WASM tool definitions, forwards them to a real
+model, asserts the provider received `strict: true`, and verifies an actual
+child submission and completed `wait_agent` result. It makes up to 12 model
+requests; no test credentials or provider error bodies are printed. Environment
+variables `CLOUDFLARE_AI_API_TOKEN` and `NANOCODEX_CLOUDFLARE_ACCOUNT_ID` can
+be provided by the process instead of a file. This check does not deploy the
+Worker or test account-side scheduling.

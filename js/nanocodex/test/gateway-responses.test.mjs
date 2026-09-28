@@ -40,6 +40,18 @@ for (const provider of ["openrouter", "vercel"]) for (const model of models) {
     assert.equal(second.at(-1).response.model, model);
   });
 }
+test("Cloudflare Responses bridge preserves strict functions but keeps loose functions explicitly non-strict", async () => {
+  const observed = [];
+  const transport = createGatewayResponses({ ...options, provider: "cloudflare", model: "gpt-6-astra", apiKey: undefined,
+    ai: { run: async (_model, input) => { observed.push(input); return {
+      object: "response", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+    }; } } });
+  await invoke(transport, { input: "x", tools: [
+    { type: "function", name: "closed", strict: true, parameters: { type: "object", properties: {}, required: [], additionalProperties: false } },
+    { type: "function", name: "loose", strict: false, parameters: { type: "object", properties: {} } },
+  ] });
+  assert.deepEqual(observed[0].tools.map(tool => tool.strict), [true, false]);
+});
 test("invalid overrides, compaction and non-host authorization never dispatch", async () => {
   let calls = 0;
   const transport = createGatewayResponses({ ...options, fetch: async () => { calls++; return completion({ content: "bad" }); } });

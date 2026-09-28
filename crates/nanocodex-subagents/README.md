@@ -20,9 +20,10 @@ parent runtime drops the task tree, child history, messages, and results. A fres
 registry starts empty. Historical agent IDs do not identify recovered children;
 use `list_agents` to discover the current live registry before addressing agents.
 
-`spawn_agent` accepts optional `model` (`sol`, `luna`, or `astra`) and
-`thinking` (`none` through `max`) overrides. Omitted values inherit the
-invoking agent's current settings; an override configures only the new child.
+`spawn_agent` accepts `model` (`astra`, `sol`, `luna`, `glm-5.3`, `kimi`,
+`mimo`) and `thinking` (`none` through `max`) overrides. Set either to `null`
+to inherit the invoking agent's current settings; an override configures
+only the new child.
 
 Create one channel for an application-owned agent family, then install fresh
 tools for every driver with `NanocodexBuilder::tools_factory`:
@@ -74,3 +75,28 @@ If cancellation or closure wins settlement after result acceptance, execution
 keeps its interrupted/closing status and `last_output` retains the accepted result
 as evidence. The active revision and submission slot are cleared; that result cannot
 satisfy the next turn's contract.
+
+The model-facing `spawn_agent` declaration uses strict function arguments. It
+accepts `output_contract`, a closed recursive shape with `kind: "object"` and
+`fields: [{name, schema, required}]`, `kind: "array"` with `items`, or scalar
+kinds `string`, `string_enum` (with `values`), `integer`, `number`, `boolean`,
+`null`, and `any`. Set `model` and `thinking` to `null` to inherit the parent's
+settings. The runtime compiles the contract into the same JSON Schema validator
+used for `submit_result` before reserving a child. For example:
+
+```json
+{
+  "role": "auditor", "task": "Review the subsystem",
+  "model": null, "thinking": null,
+  "output_contract": { "kind": "object", "fields": [
+    { "name": "summary", "schema": { "kind": "string" }, "required": true },
+    { "name": "issues", "schema": { "kind": "array", "items": { "kind": "string" } }, "required": true }
+  ] }
+}
+```
+
+Trusted Rust and JavaScript `spawn`/`spawnMany` APIs continue to accept raw JSON
+Schema for advanced constraints. Old tool calls containing `output_schema` may
+finish after upgrade, but new model-visible declarations advertise only
+`output_contract`. Strict provider generation does not constrain calls from
+Code Mode JavaScript; the runtime still parses and validates before child launch.

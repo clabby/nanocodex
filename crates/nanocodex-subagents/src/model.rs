@@ -235,7 +235,11 @@ pub(super) fn agent_prompt(id: AgentId, task: &str) -> String {
         "Act as a specialist subagent. You have no inherited conversation context. Work only on \
          the delegated task and produce the required evidence-backed structured result. Your \
          agent ID is {id}. The runtime automatically places agents you delegate beneath you in \
-         the task tree.{coordination}\n\nDelegated task:\n{task}"
+         the task tree.{coordination} After completing your work, call submit_result({{output}}) \
+         with the required JSON value. When its receipt says accepted, send a brief final \
+         assistant message with no further tool calls; do not end with an empty model \
+         response. If the receipt says superseded, follow the updated instructions instead.\n\n\
+         Delegated task:\n{task}"
     )
 }
 

@@ -51,6 +51,17 @@ test("translates full history, declarations, namespaced calls, and custom code w
   assert.deepEqual(stream.map(event => event.sequence_number), stream.map((_, index) => index));
 });
 
+test("strict function arguments survive Responses-to-Workers-AI translation", async () => {
+  const invoke = fixture(async (_model, input) => {
+    assert.equal(input.tools[0].function.strict, true);
+    assert.equal(input.tools[0].function.parameters.required[0], "role");
+    return completion({ content: "ok" });
+  });
+  await invoke({ tools: [{ type: "function", name: "spawn_agent", strict: true,
+    parameters: { type: "object", properties: { role: { type: "string" } },
+      required: ["role"], additionalProperties: false } }], input: "hello" });
+});
+
 test("round trips custom, function and tool-search calls with original identities", async () => {
   const invoke = fixture(async (_model, input) => completion({ content: null, tool_calls: input.tools.map((tool, index) => ({
     id: `call-${index}`, type: "function", function: { name: tool.function.name,

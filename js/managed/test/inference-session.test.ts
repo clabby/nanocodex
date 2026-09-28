@@ -182,6 +182,11 @@ describe("standalone inference session isolation", () => {
 });
 
 describe("strict Responses boundary", () => {
+  it("preserves strict function declarations without opening the inference API to hosted tools", () => {
+    const strict = { type: "function", name: "spawn_agent", strict: true,
+      parameters: { type: "object", properties: { role: { type: "string" } }, required: ["role"], additionalProperties: false } };
+    expect(validateInferenceRequest({ model: OSS_MODEL, input: "x", tools: [strict] }).tools).toEqual([strict]);
+  });
   it.each(["web_search", "web_search_preview", "file_search", "computer", "computer_use_preview", "code_interpreter", "mcp", "tool_search", "namespace"])("rejects server tool %s before routing", async type => {
     const f = fixture(); await f.create();
     expect((await f.call("POST", "/responses", { input: "x", tools: [{ type, name: "unsafe" }] })).status).toBe(400);
@@ -192,7 +197,6 @@ describe("strict Responses boundary", () => {
     { account_id: "other" }, { api_key: "secret" }, { base_url: "https://attacker.invalid" }, { headers: {} },
     { context_management: [] }, { background: true }, { store: true }, { metadata: { arbitrary: "x" } },
     { text: { format: { type: "json_schema", schema: {} } } },
-    { tools: [{ type: "function", name: "f", strict: true }] },
     { input: [{ type: "configuration_update", reasoning: { effort: "high" } }] },
     { input: [{ type: "additional_tools", tools: [{ type: "mcp" }] }] },
     { input: [{ role: "user", content: [{ type: "input_image", image_url: "file:///private/image.png" }] }] },

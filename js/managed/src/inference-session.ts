@@ -71,8 +71,9 @@ const historyItem = z.union([
 const tool = z.union([
   z.object({ type: z.literal("function"), name, description: z.string().max(8192).optional(),
     parameters: z.record(z.string(), z.unknown()).optional(),
-    // The pure adapters do not enforce strict JSON schemas.
-    strict: z.union([z.literal(false), z.null()]).optional(),
+    // Preserve strict function intent through portable provider adapters.
+    // Runtime JSON argument validation remains authoritative after generation.
+    strict: z.boolean().nullable().optional(),
   }).strict(),
   z.object({ type: z.literal("custom"), name, description: z.string().max(8192).optional(),
     format: z.union([
