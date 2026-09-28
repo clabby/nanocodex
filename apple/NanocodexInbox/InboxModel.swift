@@ -106,8 +106,9 @@ final class InboxModel: ObservableObject {
     private var todoRefreshRequested = false
     private var todoFixtureLoaded = false
     @Published var todoError: String?
-    @Published var todoDraft = ""
-    @Published var todoWatchHint = ""
+    @Published var todoDraft = "" { didSet { persistTodoDraft() } }
+    @Published var todoWatchHint = "" { didSet { persistTodoDraft() } }
+    private var restoringTodoDraft = false
     @Published private(set) var todoSaving = false
     @Published private(set) var todoResponding = false
     private var todoCaptureOperation: (body: String, hint: String, id: UUID)?
@@ -186,6 +187,7 @@ final class InboxModel: ObservableObject {
     private var demoVoice: Task<Void, Never>?
     #endif
     private var client: ManagedClient?
+    private var downloadedFiles: DownloadSnapshotCache?
     let voice = VoiceSession()
     private var accountCredential: AccountCredential?
     var chatGptAccountsURL: URL? {
@@ -238,6 +240,7 @@ final class InboxModel: ObservableObject {
     private var eventBytes: [Int] = []
     private var retainedBytes = 0
     private var projection: Task<Void, Never>?
+    private var historySnapshotTask: Task<Void, Never>?
     @Published private var navigation: [(id: String, seen: String?, deferred: Cursor?, filter: Filter)] = []
     private var deferred: [String: Cursor] = [:] { didSet { rosterRevision = UUID(); scheduleAgentNotifications() } }
     private var cursor = Cursor.zero
@@ -539,26 +542,44 @@ final class InboxModel: ObservableObject {
         return try? store.url(for: attachment)
     }
     func attachmentMovieURL(_ attachment: MessageAttachment) -> URL? { attachmentMovieURLs[attachment.id] }
+    private func cachedDownload(key: String, filename: String, fetch: () async throws -> URL) async throws -> URL {
+        let epoch = generation, cache = downloadedFiles
+        if let saved = await cache?.restore(key: key, filename: filename) {
+            guard epoch == generation, !Task.isCancelled else {
+                try? FileManager.default.removeItem(at: saved.deletingLastPathComponent())
+                throw CancellationError()
+            }
+            return saved
+        }
+        let file = try await fetch()
+        guard epoch == generation, !Task.isCancelled else {
+            try? FileManager.default.removeItem(at: file)
+            throw CancellationError()
+        }
+        await cache?.save(file: file, key: key)
+        guard epoch == generation, !Task.isCancelled else {
+            try? FileManager.default.removeItem(at: file)
+            throw CancellationError()
+        }
+        return file
+    }
     func downloadAttachment(_ attachment: MessageAttachment, agentID: String) async throws -> URL {
         if attachment.handID != nil { throw AttachmentError.localImageUnavailable }
         guard let client else { throw APIError.invalidCredential }
-        let epoch = generation
-        let url = try await client.downloadAttachment(agentID: agentID, attachment: attachment)
-        guard epoch == generation, !Task.isCancelled else {
-            try? FileManager.default.removeItem(at: url)
-            throw CancellationError()
+        let key = JSON.array([.string("attachment"), .string(agentID), .string(attachment.id),
+                              .number(Double(attachment.byteCount)), .string(attachment.mediaType)]).pretty
+        return try await cachedDownload(key: key, filename: attachment.name) {
+            try await client.downloadAttachment(agentID: agentID, attachment: attachment)
         }
-        return url
     }
     func downloadVideo(_ video: TranscriptVideo, agentID: String) async throws -> URL {
         guard let client else { throw APIError.invalidCredential }
-        let epoch = generation
-        let url = try await client.downloadVideo(agentID: agentID, video: video)
-        guard epoch == generation, !Task.isCancelled else {
-            try? FileManager.default.removeItem(at: url)
-            throw CancellationError()
+        let key = JSON.array([.string("video"), .string(agentID), .string(video.id),
+                              .number(Double(video.byteCount ?? 0)), .string(video.mediaType ?? ""), .string(video.path ?? "")]).pretty
+        let filename = "video." + (video.mediaType == "video/quicktime" ? "mov" : "mp4")
+        return try await cachedDownload(key: key, filename: filename) {
+            try await client.downloadVideo(agentID: agentID, video: video)
         }
-        return url
     }
     func downloadOutput(_ link: PublishedOutputLink, agentID: String) async throws -> URL {
         #if DEBUG
@@ -577,13 +598,10 @@ final class InboxModel: ObservableObject {
         }
         #endif
         guard let client else { throw APIError.invalidCredential }
-        let epoch = generation
-        let url = try await client.downloadOutput(agentID: agentID, path: link.path)
-        guard epoch == generation, !Task.isCancelled else {
-            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
-            throw CancellationError()
+        let key = JSON.array([.string("output"), .string(agentID), .string(link.path)]).pretty
+        return try await cachedDownload(key: key, filename: link.filename) {
+            try await client.downloadOutput(agentID: agentID, path: link.path)
         }
-        return url
     }
     func attachmentPreview(_ attachment: MessageAttachment, agentID: String) async throws -> Data {
         if let local = attachmentURL(attachment) {
@@ -969,6 +987,11 @@ final class InboxModel: ObservableObject {
         guard let client else { return }
         let epoch = generation, revision = todoRevision
         todoLoading = true; todoError = nil
+        if !todoLoaded, let saved = await client.cachedJSON(path: "/v1/todo"),
+           let snapshot = try? TodoSnapshot(saved), generation == epoch, revision == todoRevision, connected {
+            todoItems = snapshot.captures; todoDecisions = snapshot.decisions; todoTraces = snapshot.traces; todoLoaded = true
+        }
+        guard generation == epoch, connected else { return }
         do {
             let result = try await client.todoSnapshot()
             guard generation == epoch, connected else { return }
@@ -1002,14 +1025,17 @@ final class InboxModel: ObservableObject {
         }
         guard let client, connected else { return }
         let epoch = generation, hint = todoWatchHint
+        todoSaving = true; todoError = nil
         let operationID: UUID
         if let prior = todoCaptureOperation, prior.body == text, prior.hint == hint {
             operationID = prior.id
         } else {
             operationID = UUID()
             todoCaptureOperation = (text, hint, operationID)
+            persistTodoDraft()
+            await preferences.flush()
+            guard generation == epoch, connected else { return }
         }
-        todoSaving = true; todoError = nil
         do {
             let result = try await client.captureTodo(text, watchHint: hint, operationID: operationID)
             guard generation == epoch, connected else { return }
@@ -1017,6 +1043,7 @@ final class InboxModel: ObservableObject {
             if todoLoading { todoRefreshRequested = true }
             if !todoItems.contains(where: { $0.id == result.id }) { todoItems.insert(result, at: 0) }
             todoCaptureOperation = nil
+            persistTodoDraft()
             // Preserve new keystrokes made while the request was in flight.
             if todoDraft == text && todoWatchHint == hint { todoDraft = ""; todoWatchHint = "" }
         } catch {
@@ -1186,7 +1213,10 @@ final class InboxModel: ObservableObject {
         defer { if !handedOff { openingRequest?.cancel() } }
         let initial: [AgentCard]
         do {
-            initial = try await candidate.list()
+            // A saved account opens from disk; polling reconciles it in the background.
+            // New credentials still require a successful authenticated server read.
+            if !saveCredential, let saved = await candidate.cachedList() { initial = saved }
+            else { initial = try await candidate.list() }
             await preferences.flush()
             guard connectionAttempt == attempt, !Task.isCancelled else { candidate.close(); throw CancellationError() }
             if saveCredential { try KeychainAccount.save(credential) }
@@ -1198,12 +1228,21 @@ final class InboxModel: ObservableObject {
             request.setValue("Bearer " + credential.apiKey, forHTTPHeaderField: "Authorization")
         }
         scope = accountScope
+        downloadedFiles = DownloadSnapshotCache(scope: accountScope)
         closedConversationIDs = Set(UserDefaults.standard.stringArray(forKey: "inbox.closedTabs." + scope) ?? [])
         configureDeviceHand(credential)
         activateContext()
         drafts = UserDefaults.standard.dictionary(forKey: "inbox.drafts." + scope) as? [String: String] ?? [:]
         seen = UserDefaults.standard.dictionary(forKey: "inbox.seen." + scope) as? [String: String] ?? [:]
         restorePending()
+        restoringTodoDraft = true
+        todoDraft = UserDefaults.standard.string(forKey: "inbox.todoDraft." + scope) ?? ""
+        todoWatchHint = UserDefaults.standard.string(forKey: "inbox.todoHint." + scope) ?? ""
+        if let saved = UserDefaults.standard.dictionary(forKey: "inbox.todoOperation." + scope) as? [String: String],
+           let value = saved["id"], let id = UUID(uuidString: value), let body = saved["body"], let hint = saved["hint"] {
+            todoCaptureOperation = (body, hint, id)
+        }
+        restoringTodoDraft = false
         if let data = UserDefaults.standard.data(forKey: "inbox.attachments." + scope) {
             attachmentDrafts = (try? JSONDecoder().decode([String: [MessageAttachment]].self, from: data)) ?? [:]
         }
@@ -1227,9 +1266,7 @@ final class InboxModel: ObservableObject {
         connected = true; connection = "Connecting"; reconcile(); resume(initialListing: initial)
         updateDeviceHand(); scheduleHandRefresh()
     }
-    func crmRead(id: String? = nil, section: String? = nil, query: [String: String] = [:]) async throws -> JSON {
-        guard connected, let client else { throw APIError.invalidCredential }
-        let epoch = generation
+    private func crmPath(id: String?, section: String?, query: [String: String]) -> String {
         var path = "/v1/crm"
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
         if let id { path += "/" + (id.addingPercentEncoding(withAllowedCharacters: allowed) ?? "") }
@@ -1237,7 +1274,19 @@ final class InboxModel: ObservableObject {
         var components = URLComponents()
         components.queryItems = query.filter { !$0.value.isEmpty }.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
         if let query = components.percentEncodedQuery, !query.isEmpty { path += "?" + query }
-        let result = try await client.json(path: path)
+        return path
+    }
+    func crmCachedRead(id: String? = nil, section: String? = nil, query: [String: String] = [:]) async -> JSON? {
+        guard connected, let client else { return nil }
+        let epoch = generation
+        let result = await client.cachedJSON(path: crmPath(id: id, section: section, query: query))
+        guard connected, generation == epoch, self.client === client else { return nil }
+        return result
+    }
+    func crmRead(id: String? = nil, section: String? = nil, query: [String: String] = [:]) async throws -> JSON {
+        guard connected, let client else { throw APIError.invalidCredential }
+        let epoch = generation
+        let result = try await client.json(path: crmPath(id: id, section: section, query: query))
         guard connected, generation == epoch, self.client === client else { throw CancellationError() }
         return result
     }
@@ -1252,6 +1301,7 @@ final class InboxModel: ObservableObject {
         // Leaving sample agents must not touch a saved account or require Keychain access.
         if !isDemo { try KeychainAccount.remove() }
         client?.clearCachedResponses()
+        if let downloadedFiles { Task { await downloadedFiles.clear() } }
         agentNotifications.update(account: "", threads: [], foreground: false)
         reset()
     }
@@ -1333,9 +1383,19 @@ final class InboxModel: ObservableObject {
         pending.append(message); busy.insert(agentID); persist()
         Task { await submit(message, epoch: account) }
     }
+    func cachedConnectorOverview() async -> ConnectorOverview? {
+        guard let client, connected, !isDemo else { return nil }
+        let epoch = generation
+        let result = await client.cachedConnectorOverview()
+        guard connected, generation == epoch, self.client === client else { return nil }
+        return result
+    }
     func connectorOverview() async throws -> ConnectorOverview {
         guard let client, connected, !isDemo else { throw APIError.invalidResponse }
-        return try await client.connectorOverview()
+        let epoch = generation
+        let result = try await client.connectorOverview()
+        guard connected, generation == epoch, self.client === client else { throw CancellationError() }
+        return result
     }
     func beginConnectorAuthorization(_ provider: String) async throws -> ConnectorAuthorization {
         guard let client, connected, !isDemo else { throw APIError.invalidResponse }
@@ -1362,6 +1422,9 @@ final class InboxModel: ObservableObject {
         try await client.disconnectMcpConnection(connectionID: connectionID)
     }
     private func reset() {
+        historySnapshotTask?.cancel(); historySnapshotTask = nil
+        restoringTodoDraft = true
+        defer { restoringTodoDraft = false }
         agentNotificationUpdate?.cancel(); agentNotificationUpdate = nil
         stopOverview()
         overviewTranscripts = [:]; tabHistories = [:]; recentTabs = []; tabOrder = []
@@ -1391,6 +1454,7 @@ final class InboxModel: ObservableObject {
         openingHistory?.request.cancel(); openingHistory = nil
         projection?.cancel(); projection = nil; eventBytes = []; retainedBytes = 0; navigation = []; deferred = [:]
         observedAgentID = nil; threadLoading = false; threadError = nil
+        downloadedFiles = nil
         connected = false; restoringAccount = false; restorationError = nil
         isDemo = false; todoItems = []; todoDecisions = []; todoTraces = []; todoFilter = .all; todoDraft = ""; todoWatchHint = ""; todoCaptureOperation = nil; todoResponseOperations.removeAll(); todoError = nil; todoLoading = false; todoLoaded = false; todoRevision = 0; todoRefreshRequested = false; todoFixtureLoaded = false; todoSaving = false; todoResponding = false; cards = []; deck = InboxDeck(); mediaProjection = InboxMediaProjection(); rows = []; events = []; drafts = [:]; seen = [:]
         for task in attachmentProviderTasks.values { task.cancel() }
@@ -1419,7 +1483,7 @@ final class InboxModel: ObservableObject {
         }
         if active { refreshContext() }
         if active { if isDemo { connection = "Demo" } else { resume() }; resumeOverview() }
-        else { focusedState?.cancel(); focusedState = nil; focusedHistoryRequest?.cancel(); focusedHistoryRequest = nil; finishPreferencesInBackground(); suspendOverview(); scheduleHandRefresh(); polling?.cancel(); streaming?.cancel(); streaming = nil; observation = UUID(); connection = "Paused" }
+        else { persistFocusedHistory(); focusedState?.cancel(); focusedState = nil; focusedHistoryRequest?.cancel(); focusedHistoryRequest = nil; finishPreferencesInBackground(); suspendOverview(); scheduleHandRefresh(); polling?.cancel(); streaming?.cancel(); streaming = nil; observation = UUID(); connection = "Paused" }
         agentNotificationUpdate?.cancel(); agentNotificationUpdate = nil
         updateAgentNotifications()
     }
@@ -1798,6 +1862,17 @@ final class InboxModel: ObservableObject {
                 os_signpost(.end, log: accountPerformanceLog, name: "ScheduledJobsRefresh", signpostID: signpostID)
                 if self.generation == epoch { self.schedulesLoading = false; self.schedulesTask = nil }
             }
+            if !self.schedulesLoaded {
+                let savedAgents = initialListing ?? self.cards
+                for agent in savedAgents {
+                    if let jobs = await client.cachedScheduledJobs(agent.id) {
+                        guard self.generation == epoch, !Task.isCancelled else { return }
+                        self.receiveScheduledJobs(.success(jobs), agentID: agent.id, epoch: epoch)
+                    }
+                }
+                guard self.generation == epoch, !Task.isCancelled else { return }
+                self.scheduledJobAgents = Dictionary(uniqueKeysWithValues: savedAgents.map { ($0.id, $0.title) })
+            }
             do {
                 let agents: [AgentCard]
                 if let initialListing { agents = initialListing }
@@ -1921,6 +1996,7 @@ final class InboxModel: ObservableObject {
     private func observeFocused(restart: Bool = false) {
         let changed = observedAgentID != deck.focusedID
         guard changed || restart else { return }
+        persistFocusedHistory()
         if changed, let previous = observedAgentID, !isDemo, focusedHistoryLoaded {
             // Preserve loaded history along with each tab's draft.
             tabHistories[previous] = TabHistory(events: events, cursor: cursor, hasOlder: hasOlder, hasNewer: hasNewer, newerAfter: newerAfter, additionalGaps: additionalHistoryGaps,
@@ -1995,6 +2071,10 @@ final class InboxModel: ObservableObject {
         streaming = Task { [weak self] in
             guard let self else { return }
             defer { if self.observation == token { self.streaming = nil } }
+            if !self.focusedHistoryLoaded, let saved = await client.cachedConversationHistory(id),
+               self.generation == epoch, self.observation == token, !Task.isCancelled {
+                try? self.applyFocusedTail(saved, id: id, epoch: epoch, token: token)
+            }
             var delay = 1
             while !Task.isCancelled, self.generation == epoch, self.observation == token {
                 let startedAt = Date()
@@ -2323,6 +2403,16 @@ final class InboxModel: ObservableObject {
             scheduleProjection(id: id, epoch: epoch, token: token)
         }
         if let position = frame.cursor { cursor = max(cursor, position) }
+        if let event = frame.event {
+            if ["turn_completed", "turn_failed", "turn_cancelled"].contains(event.type) { persistFocusedHistory() }
+            else if historySnapshotTask == nil {
+                historySnapshotTask = Task { [weak self] in
+                    do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                    self?.historySnapshotTask = nil
+                    self?.persistFocusedHistory()
+                }
+            }
+        }
         // After a failure, the initial cursor alone does not establish a healthy
         // stream. Its next event/keepalive confirms recovery without flickering
         // Live for every short-lived reconnect handshake.
@@ -2330,6 +2420,13 @@ final class InboxModel: ObservableObject {
         streamReceivedFrame = true
         if threadError != nil { threadError = nil }
         if threadLoading { threadLoading = false }
+    }
+    private func persistFocusedHistory() {
+        historySnapshotTask?.cancel(); historySnapshotTask = nil
+        guard !isDemo, let client, let id = observedAgentID, focusedHistoryLoaded,
+              !events.isEmpty, !hasNewer, additionalHistoryGaps.isEmpty else { return }
+        let savedEvents = events, savedCursor = cursor, savedMore = hasOlder
+        Task { await client.saveConversationSnapshot(id, events: savedEvents, latest: savedCursor, hasMore: savedMore) }
     }
     private func scheduleProjection(id: String, epoch: UUID, token: UUID, delay: Duration = .milliseconds(100)) {
         guard projection == nil else { return }
@@ -3456,6 +3553,16 @@ final class InboxModel: ObservableObject {
     private func restoreCreations() {
         pendingCreations = Set(UserDefaults.standard.stringArray(forKey: "inbox.creations." + scope) ?? [])
         cards.insert(contentsOf: pendingCreations.sorted().map(newConversationCard), at: 0)
+    }
+    private func persistTodoDraft() {
+        guard !scope.isEmpty, !restoringTodoDraft, !isDemo else { return }
+        let scope = scope, draft = todoDraft, hint = todoWatchHint
+        let operation = todoCaptureOperation.map { ["body": $0.body, "hint": $0.hint, "id": $0.id.uuidString] }
+        preferences.enqueue { defaults in
+            defaults.set(draft, forKey: "inbox.todoDraft." + scope)
+            defaults.set(hint, forKey: "inbox.todoHint." + scope)
+            defaults.set(operation, forKey: "inbox.todoOperation." + scope)
+        }
     }
     private func persist() {
         guard !scope.isEmpty else { return }

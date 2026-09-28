@@ -415,6 +415,13 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
         Self.queue.async { [self] in
             guard !stopped else { return }
             record("start")
+            // A second process launch reuses the on-disk account cache while
+            // every transport operation fails, including roster and history.
+            if ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_OFFLINE"] == "1" {
+                record("offline")
+                client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+                return
+            }
             let path = request.url!.path
             let id = request.url!.pathComponents.dropFirst(3).first ?? "saved"
             let isStream = path.hasSuffix("/events")

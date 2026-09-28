@@ -268,6 +268,8 @@ new work does not steal focus while typing. Drafts belong to agent IDs. Multiple
 active turns get an explicit selector. Navigation never approves tools, stops an
 agent, or deletes history. No approval endpoints are invented by this client.
 
+Saved accounts restore their roster and retained conversation data from local storage before refreshing. CRM, To Do, schedules, and connector screens also restore saved snapshots; opened files can be reused offline. See [Local-first behavior](LOCAL_FIRST.md) for retention, account isolation, and offline boundaries.
+
 The selected agent receives live updates. Other agents refresh in the background.
 Opening or resuming a conversation fetches its latest history page and starts
 streaming from that snapshot’s exact decimal cursor. Older pages do not block

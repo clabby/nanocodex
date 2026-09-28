@@ -430,6 +430,40 @@ final class InboxUITests: XCTestCase {
         app.launch()
         return app
     }
+    // A process restart must recover persisted roster, transcript, directory,
+    // and visited profile even when every network request fails immediately.
+    func testOfflineColdRelaunchRestoresConversationsAndCRM() {
+        let app = startupFixture(warmTabs: true)
+        XCTAssertTrue(app.buttons["main-tab-chat"].waitForExistence(timeout: 10))
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(app.staticTexts["Loaded saved conversation."].waitForExistence(timeout: 10))
+        switchConversation(app, id: "other")
+        XCTAssertTrue(app.staticTexts["Loaded other conversation."].waitForExistence(timeout: 10))
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 5))
+        app.buttons["crm-record-alex"].tap()
+        XCTAssertTrue(app.staticTexts["Example University"].waitForExistence(timeout: 5))
+        capture(app, "offline-cache-populated")
+
+        app.terminate()
+        app.launchEnvironment["NANOCODEX_STARTUP_OFFLINE"] = "1"
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-chat"].waitForExistence(timeout: 5))
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(app.buttons["conversation-title:other"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["conversation-title:other"].isSelected)
+        XCTAssertTrue(app.staticTexts["Loaded other conversation."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.textFields["phone-number"].exists)
+        switchConversation(app, id: "saved")
+        XCTAssertTrue(app.staticTexts["Loaded saved conversation."].waitForExistence(timeout: 5))
+        capture(app, "offline-cold-restored-conversation")
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 5))
+        app.buttons["crm-record-alex"].tap()
+        XCTAssertTrue(app.staticTexts["Example University"].waitForExistence(timeout: 5))
+        capture(app, "offline-cold-restored-crm-profile")
+    }
+
     func testStartupSpinnerAndLastTabRestoration() {
         let app = startupFixture()
         XCTAssertTrue(app.activityIndicators["account-restoration"].waitForExistence(timeout: 5))

@@ -144,6 +144,22 @@ public enum McpConnectionStart: Equatable, Sendable {
 }
 
 public extension ManagedClient {
+    /// Restores a complete overview without waiting for the network. Cached data
+    /// uses the same validation as a live response; incomplete snapshots are ignored.
+    func cachedConnectorOverview() async -> ConnectorOverview? {
+        async let catalog = cachedJSON(path: "/v1/connectors/catalog")
+        async let statuses = cachedJSON(path: "/v1/connectors")
+        async let mcpConnections = cachedJSON(path: "/v1/connectors/mcp-connections")
+        let values = await (catalog, statuses, mcpConnections)
+        guard let catalogValue = values.0, let statusValue = values.1,
+              let mcpValue = values.2 else { return nil }
+        return try? ConnectorOverview(
+            providers: Self.connectorProviders(from: catalogValue),
+            statuses: Self.connectorStatuses(from: statusValue),
+            mcpConnections: Self.mcpConnections(from: mcpValue)
+        )
+    }
+
     func connectorOverview() async throws -> ConnectorOverview {
         async let catalog = json(path: "/v1/connectors/catalog")
         async let statuses = json(path: "/v1/connectors")

@@ -30,6 +30,59 @@ final class HistoryCacheTests: XCTestCase {
         reconnected.close()
     }
 
+    // Failure modes: offline revalidation, cache miss, revoked access, and
+    // malformed cached bytes. URLProtocol isolates these transport outcomes.
+    func testOfflineHistoryUsesCacheButAuthorizationFailureDoesNot() async throws {
+        let fixture = try HTTPFixture { _ in .init(status: 401) }
+        let configuration = fixture.configuration
+        let cache = URLCache(memoryCapacity: 1024 * 1024, diskCapacity: 0)
+        configuration.urlCache = cache
+        let client = ManagedClient(credential: try .init(origin: fixture.origin, apiKey: fixtureKey), configuration: configuration)
+        defer { client.close(); fixture.close() }
+        let snapshots = PersistentReadCache.scoped(to: client.credential)
+        defer { snapshots.clear() }
+        let path = "/v1/agents/synthetic/events/history?limit=128"
+        let body = Data(#"{"data":[],"latest_cursor":"0","has_more":false}"#.utf8)
+        snapshots.save(body, path: path, ticket: snapshots.ticket())
+        let cached = await client.cachedJSON(path: path)
+        XCTAssertNotNil(cached)
+        do {
+            _ = try await client.history("synthetic")
+            XCTFail("Cached history must not hide revoked access")
+        } catch APIError.http(401) {}
+        fixture.close()
+        // Restore the snapshot in case the rejected response evicted it.
+        snapshots.save(body, path: path, ticket: snapshots.ticket())
+        let history = try await client.history("synthetic")
+        XCTAssertTrue(history.events.isEmpty)
+        XCTAssertEqual(history.latest.rawValue, "0")
+        snapshots.save(Data("broken".utf8), path: path, ticket: snapshots.ticket())
+        let corrupt = await client.cachedJSON(path: path)
+        XCTAssertNil(corrupt)
+        do {
+            _ = try await client.history("synthetic")
+            XCTFail("Corrupt cache must preserve the connectivity error")
+        } catch is URLError {}
+        snapshots.clear()
+        let missing = await client.cachedJSON(path: path)
+        XCTAssertNil(missing)
+    }
+
+    func testCachedRosterUsesLiveValidation() async throws {
+        let credential = try AccountCredential(origin: "https://roster-cache.invalid", apiKey: fixtureKey)
+        let client = ManagedClient(credential: credential)
+        defer { client.clearCachedResponses(); client.close() }
+        let snapshots = PersistentReadCache.scoped(to: credential)
+        let valid = Data(#"{"data":["synthetic"],"summaries":{"synthetic":{"title":"Saved agent","turn_count":2,"updated_at":10}}}"#.utf8)
+        snapshots.save(valid, path: "/v1/agents", ticket: snapshots.ticket())
+        let saved = await client.cachedList()
+        XCTAssertEqual(saved?.first?.title, "Saved agent")
+        let invalid = Data(#"{"data":["synthetic"],"summaries":{"synthetic":{"turn_count":-1}}}"#.utf8)
+        snapshots.save(invalid, path: "/v1/agents", ticket: snapshots.ticket())
+        let invalidRoster = await client.cachedList()
+        XCTAssertNil(invalidRoster)
+    }
+
     func testNativeURLCacheRevalidatesRealDurableHistory() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["NANOCODEX_HISTORY_CACHE_LIVE"] == "1" else {
