@@ -1,7 +1,6 @@
 //! Runs against a real server when `NANOCODEX_POSTGRES_URL` is set, e.g.
 //! `NANOCODEX_POSTGRES_URL="host=127.0.0.1 port=5432 user=postgres" \
-//!  cargo test -p nanocodex-durability --features postgres --test postgres`.
-#![cfg(all(feature = "postgres", not(target_family = "wasm")))]
+//!  cargo test -p nanocodex-durability --features postgres --test it postgres`.
 
 use nanocodex_durability::{OwnerId, PostgresStore, StateStore, StoreError, StoreRecord};
 
