@@ -45,6 +45,8 @@ export function AgentSidebar({
   open,
   pending,
   persistent,
+  runningOnly,
+  onRunningOnlyChange,
   selectedId,
   triggerRef,
   active,
@@ -63,10 +65,16 @@ export function AgentSidebar({
   open: boolean;
   pending: boolean;
   persistent: boolean;
+  runningOnly: boolean;
+  onRunningOnlyChange(value: boolean): void;
   selectedId?: string;
   triggerRef: RefObject<HTMLButtonElement | null>;
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
+  const runningCount = conversations.filter((conversation) => ["running", "stopping"].includes(conversation.presentation?.status ?? "")).length;
+  const visibleConversations = runningOnly
+    ? conversations.filter((conversation) => ["running", "stopping"].includes(conversation.presentation?.status ?? ""))
+    : conversations;
   const panelRef = useRef<HTMLElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -175,13 +183,17 @@ export function AgentSidebar({
         </nav>
         <div className="agent-navigation-history">
           <div className="agent-navigation-heading">
-            <span>{landing ? "Your workspace" : "Recents"}</span>
+            <span>{landing ? "Your workspace" : "Agents"}</span>
           </div>
+          {!landing ? <div className="agent-navigation-filter" role="group" aria-label="Filter agents">
+            <button type="button" aria-pressed={!runningOnly} onClick={() => onRunningOnlyChange(false)}>All</button>
+            <button type="button" aria-pressed={runningOnly} onClick={() => onRunningOnlyChange(true)}>Running ({runningCount})</button>
+          </div> : null}
           <div className="agent-navigation-list" aria-busy={pending}>
             {!landing
-              ? conversations.map((conversation, index) => (
+              ? visibleConversations.map((conversation, index) => (
                   <Fragment key={conversation.id}>
-                    {threadGroup(conversation) !== (index ? threadGroup(conversations[index - 1]!) : undefined) ? (
+                    {threadGroup(conversation) !== (index ? threadGroup(visibleConversations[index - 1]!) : undefined) ? (
                       <div className="agent-navigation-group">{threadGroup(conversation)}</div>
                     ) : null}
                     <button
@@ -227,11 +239,9 @@ export function AgentSidebar({
                   Open your agents <span aria-hidden="true">↗</span>
                 </Link>
               </div>
-            ) : !conversations.length ? (
+            ) : !visibleConversations.length ? (
               <p className="agent-navigation-empty">
-                {pending
-                  ? "Loading your agents…"
-                  : "Your agents will appear here."}
+                {pending ? "Loading your agents…" : runningOnly ? "No agents are running." : "Your agents will appear here."}
               </p>
             ) : null}
             {error ? (

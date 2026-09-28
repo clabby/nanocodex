@@ -342,7 +342,7 @@ impl Action {
     const fn label(self) -> &'static str {
         match self {
             Self::Goal => "Goal",
-            Self::Share => "Share thread · view or comment link",
+            Self::Share => "Share thread · view or write link",
             Self::Bug => "Debug a bug",
             Self::Screen => "Watch Hand screen",
             Self::Zoom => "Zoom focused pane",

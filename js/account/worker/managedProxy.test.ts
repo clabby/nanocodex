@@ -459,22 +459,23 @@ test("CRM reads reach the managed authorization boundary with pagination intact"
   assert.equal(isManagedRoutePath("/v1/crm/example/delete"), false);
 });
 
-test("shared thread endpoints forward bearer to managed but inference keys remain scoped", async () => {
+test("shared thread streams and real turn submissions forward bearer to managed", async () => {
   const id = "11111111-1111-4111-8111-111111111111";
-  for (const suffix of ["", "/events/history", "/comments"])
+  for (const suffix of ["", "/events/history", "/events", "/turns"])
     assert.equal(isManagedRoutePath(`/v1/shared/${id}${suffix}`), true);
-  for (const path of [`/v1/shared/${id}/turns`, `/v1/shared/${id}/events`, "/v1/shared/not-an-id"])
+  for (const path of [`/v1/shared/${id}/comments`, `/v1/shared/${id}/turns/forged/cancel`, "/v1/shared/not-an-id"])
     assert.equal(isManagedRoutePath(path), false);
   const requests: Request[] = [];
   const env = { NANOCODEX_BACKEND: {
-    fetch(request: Request) { requests.push(request); return Promise.resolve(Response.json({ data: [] })); },
+    fetch(request: Request) { requests.push(request); return Promise.resolve(Response.json({ state: "accepted" }, { status: 202 })); },
     connect() { throw Error("unused"); },
   } };
-  const path = `/v1/shared/${id}/comments`;
+  const path = `/v1/shared/${id}/turns`;
   const url = new URL(`https://nanocodex.localhost${path}`);
-  const request = new Request(url, { headers: { authorization: "Bearer nsl_test" } });
-  assert.equal((await routeManaged(request, env, url))?.status, 200);
+  const request = new Request(url, { method: "POST", headers: { authorization: "Bearer nsl_synthetic",
+    origin: url.origin, "content-type": "application/json" }, body: JSON.stringify({ id: "guest-turn", input: "hello" }) });
+  assert.equal((await routeManaged(request, env, url))?.status, 202);
   assert.deepEqual(requests, [request]);
-  assert.equal((await routeManaged(new Request(url, { headers: { authorization: "Bearer nci_test" } }), env, url))?.status, 403);
+  assert.equal((await routeManaged(new Request(url, { method: "POST", headers: { authorization: "Bearer nci_test" } }), env, url))?.status, 403);
   assert.equal(requests.length, 1);
 });

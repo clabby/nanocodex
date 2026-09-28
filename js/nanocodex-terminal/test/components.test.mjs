@@ -584,3 +584,38 @@ test("child JSON is disclosed separately while root JSON survives live and repla
     } finally { await act(async () => renderer.unmount()); }
   }
 });
+
+test("queued owner messages remain visible and cancel targets the selected root", async () => {
+  let emit = () => {};
+  const turns = [];
+  const agent = {
+    sessionId: "queue-journey",
+    events: { watch: () => ({
+      onEvent(listener) { emit = listener; return () => { emit = () => {}; }; },
+      off() {},
+    }) },
+    turn: { prompt({ input }) {
+      const turn = { input, historyEntryId: `managed-user-turn-${turns.length + 1}`, cancelled: false,
+        result: () => new Promise(() => {}), cancel: async () => { turn.cancelled = true; }, dispose() {} };
+      turns.push(turn); return turn;
+    } },
+  };
+  let renderer;
+  try {
+    await act(async () => { renderer = TestRenderer.create(React.createElement(AgentTerminalView, {
+      agent, mode: "full", onConversationActivity() {}, onStateChange() {}, retryAgent() {}, promptIntent: "queue",
+    }), { createNodeMock: (element) => element.type === "div"
+      ? { clientHeight: 300, firstElementChild: null, scrollHeight: 300, scrollTop: 0 } : {} }); });
+    await act(async () => { renderer.root.findByType(TerminalComposer).props.onSubmit("initial task"); });
+    await act(async () => { emit({ request_id: "queue-journey", seq: 1, type: "run.started", payload: { turn_id: "turn-1" } }); });
+    await act(async () => { renderer.root.findByType(TerminalComposer).props.onSubmit("follow-up A"); });
+    await act(async () => { renderer.root.findByType(TerminalComposer).props.onSubmit("follow-up B"); });
+    assert.deepEqual(turns.map(({ input }) => input), ["initial task", "follow-up A", "follow-up B"]);
+    const queue = renderer.root.findByProps({ "aria-label": "Queued messages" });
+    assert.equal(queue.findAllByProps({ className: "agent-prompt-queue-row" }).length, 2);
+    await act(async () => { queue.findByProps({ "aria-label": "Cancel queued message: follow-up A" }).props.onClick(); });
+    assert.equal(turns[1].cancelled, true);
+    assert.equal(turns[2].cancelled, false);
+    assert.ok(renderer.root.findByProps({ "aria-label": "Cancel queued message: follow-up A" }).props.disabled);
+  } finally { if (renderer) await act(async () => renderer.unmount()); }
+});

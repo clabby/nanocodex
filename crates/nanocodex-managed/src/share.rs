@@ -15,7 +15,7 @@ use crate::{
 pub enum SharePermission {
     /// Anyone with the link can read the visible conversation.
     Read,
-    /// Anyone with the link can read and add guest comments.
+    /// Anyone with the link can read and send AI turns into the shared thread.
     Write,
 }
 
@@ -24,7 +24,7 @@ pub enum SharePermission {
 pub struct ShareLink {
     /// Opaque revocable link ID.
     pub id: String,
-    /// View or comment permission.
+    /// View or write permission.
     pub permission: SharePermission,
     /// Creation time as Unix milliseconds.
     pub created_at: u64,
@@ -91,7 +91,7 @@ impl ManagedClient {
         Ok(list.data)
     }
 
-    /// Creates a view or comment link exactly once. On uncertain transport failure,
+    /// Creates a view or write link exactly once. On uncertain transport failure,
     /// list metadata rather than retrying: a link may already have been created.
     pub async fn create_share_link(
         &self,

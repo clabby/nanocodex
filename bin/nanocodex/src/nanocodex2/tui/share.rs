@@ -2,7 +2,7 @@
 
 use nanocodex_managed::{CreatedShareLink, ManagedError, ShareLink, SharePermission};
 
-const USAGE: &str = "Share this managed thread\n/share read  create a view-only link\n/share write  create a comment link\n/share list  list active links\n/share revoke <id>  revoke a link\nAnyone holding a link can view the conversation until revoked. Treat it as a secret; guest comments are not prompts.";
+const USAGE: &str = "Share this managed thread\n/share read  create a view-only link\n/share write  create a link that can send messages\n/share list  list active links\n/share revoke <id>  revoke a link\nAnyone holding a link can view the conversation until revoked. Treat it as a secret; guest messages start AI turns in this thread.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Command {
@@ -55,7 +55,7 @@ pub(crate) fn list_text(links: &[ShareLink]) -> String {
     for link in links {
         let mode = match link.permission {
             SharePermission::Read => "view",
-            SharePermission::Write => "comment",
+            SharePermission::Write => "send messages",
         };
         text.push_str(&format!(
             "\n{} · {} · created {} (Unix ms)",

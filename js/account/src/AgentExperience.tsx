@@ -75,6 +75,7 @@ export const AgentExperience = memo(function AgentExperience({
   const credentialSourceRef = useRef<CredentialSource | undefined>(undefined);
   const [runtimeState, setRuntimeState] = useState<AgentTerminalState>();
   const [railOpen, setRailOpen] = useState(false);
+  const [runningOnly, setRunningOnly] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => safeGet("nanocodex:sidebar-collapsed") === "true");
   const toggleDesktopSidebar = () => setSidebarCollapsed((collapsed) => { safeSet("nanocodex:sidebar-collapsed", String(!collapsed)); return !collapsed; });
   const sidebarTriggerRef = useRef<HTMLButtonElement>(null);
@@ -108,6 +109,7 @@ export const AgentExperience = memo(function AgentExperience({
   const managedConversations = optimisticConversation
     ? [optimisticConversation, ...(conversationsQuery.data ?? []).filter(({ id }) => id !== optimisticConversation.id)]
     : conversationsQuery.data ?? [];
+  const runningCount = managedConversations.filter((conversation) => ["running", "stopping"].includes(conversation.presentation?.status ?? "")).length;
   useEffect(() => {
     if (optimisticConversation && !optimisticConversation.id.startsWith("pending:")
       && conversationsQuery.data?.some(({ id }) => id === optimisticConversation.id)) {
@@ -320,7 +322,7 @@ export const AgentExperience = memo(function AgentExperience({
     <div className={`conversation-workspace${sidebarCollapsed ? " is-sidebar-collapsed" : ""}`}>
       <AgentSidebar key={account.account?.id ?? "anonymous"}
         conversations={managedConversations} error={managedError ?? conversationsQuery.error?.message} landing={!!landing} active={mode !== "hidden"}
-        open={railOpen && mode !== "hidden"} pending={createPending || (!landing && sessionChecking)} selectedId={visibleManagedConversationId}
+        open={railOpen && mode !== "hidden"} runningOnly={runningOnly} onRunningOnlyChange={setRunningOnly} pending={createPending || (!landing && sessionChecking)} selectedId={visibleManagedConversationId}
         onClose={closeSidebar} onCollapse={toggleDesktopSidebar} collapsed={sidebarCollapsed} onCreate={newChat} onRetry={retryManagedConversations} onSelect={selectManaged} onPrefetch={prefetchConversation}
         persistent={account.account?.persistent === true} triggerRef={sidebarTriggerRef}
       />
@@ -329,6 +331,7 @@ export const AgentExperience = memo(function AgentExperience({
           <button ref={sidebarTriggerRef} className="agent-sidebar-toggle chat-icon-button" type="button" onClick={() => { if (window.matchMedia("(min-width: 761px)").matches) toggleDesktopSidebar(); else setRailOpen(true); }} aria-label="Open sidebar" aria-expanded={railOpen} aria-controls="agent-navigation"><PanelLeft aria-hidden="true" /></button>
           <div className="agent-chat-heading"><strong>{landing ? "Nanocodex" : title}</strong></div>
           <div className="agent-chat-header-actions">
+            {!landing ? <button className="chat-running-agents" type="button" aria-label="Running agents" title="Show running agents" onClick={() => { setRunningOnly(true); setRailOpen(true); if (window.matchMedia("(min-width: 761px)").matches) setSidebarCollapsed(false); }}><span className="chat-running-dot" aria-hidden="true" />{runningCount}<span className="agent-terminal-sr-only"> running agents</span></button> : null}
             {!landing && visibleManagedConversationId && !visibleManagedConversationId.startsWith("pending:") ? <button className="chat-icon-button" type="button" aria-label="Share thread" title="Share thread" onClick={() => setShareOpen(true)}><Share2 aria-hidden="true" /></button> : null}
             {managedConversationId && <button type="button" onClick={() => setInspectorOpen(open => !open)} aria-expanded={inspectorOpen}>Inspect</button>}
             {agentStatus === "starting" || agentStatus === "error" ? <span className={`agent-chat-status is-${agentStatus}`} role="status"><i aria-hidden="true" />{agentStatus === "starting" ? "Connecting…" : "Needs attention"}</span> : null}

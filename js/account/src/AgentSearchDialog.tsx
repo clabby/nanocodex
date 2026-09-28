@@ -17,7 +17,9 @@ export function AgentSearchDialog({
   const matches = conversations.filter((conversation) =>
     !conversation.id.startsWith("pending:") && (
       conversation.title.toLocaleLowerCase().includes(normalizedQuery)
+      || conversation.id.toLocaleLowerCase().includes(normalizedQuery)
       || (conversation.presentation?.lastUserPrompt ?? "").toLocaleLowerCase().includes(normalizedQuery)
+      || (conversation.presentation?.activity ?? "").toLocaleLowerCase().includes(normalizedQuery)
     ),
   );
   useEffect(() => {

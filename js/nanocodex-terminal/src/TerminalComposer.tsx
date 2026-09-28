@@ -8,6 +8,9 @@ import { COARSE_POINTER_QUERY, terminalComposerAction } from "./policy.js";
 /** One paste-capable composer shared by desktop and touch terminals. */
 export function TerminalComposer({
   controls,
+  formLabel = "Nanocodex message composer",
+  inputLabel = "Message Nanocodex",
+  sendLabel = "Send message",
   draft,
   pending,
   placeholder,
@@ -18,6 +21,9 @@ export function TerminalComposer({
   onSubmit,
 }: {
   controls?: ReactNode;
+  formLabel?: string;
+  inputLabel?: string;
+  sendLabel?: string;
   draft: string;
   pending: boolean;
   placeholder?: string;
@@ -52,7 +58,7 @@ export function TerminalComposer({
   return (
     <form
       className={`agent-touch-composer${running ? " is-running" : ""}`}
-      aria-label="Nanocodex message composer"
+      aria-label={formLabel}
       onSubmit={(event) => {
         event.preventDefault();
         submit();
@@ -61,7 +67,7 @@ export function TerminalComposer({
       <div className="agent-touch-field">
         <textarea
           ref={textarea}
-          aria-label="Message Nanocodex"
+          aria-label={inputLabel}
           enterKeyHint="send"
           rows={1}
           placeholder={placeholder}
@@ -85,7 +91,7 @@ export function TerminalComposer({
               <Square aria-hidden="true" />
             </button>
           ) : null}
-          <button type="submit" aria-label="Send message" title="Send message" disabled={pending || status !== "ready" || !draft.trim()}>
+          <button type="submit" aria-label={sendLabel} title={sendLabel} disabled={pending || status !== "ready" || !draft.trim()}>
             <ArrowUp aria-hidden="true" />
           </button>
         </div>

@@ -3,6 +3,8 @@ export const MAX_HISTORY_PAGE_SIZE = 256;
 export const MAX_HISTORY_PAGE_BYTES = 4 * 1024 * 1024;
 const KEEPALIVE_MS = 15_000;
 const MAX_SUBSCRIBERS = 32;
+// Link holders must not consume all owner event-stream slots.
+const MAX_SHARED_SUBSCRIBERS = 16;
 const MAX_CURSOR = 9_223_372_036_854_775_807n;
 const DIRECT_EVENT_BYTES = 1_000_000;
 const EVENT_CHUNK_CODE_UNITS = 256_000;
@@ -40,6 +42,9 @@ type Subscriber = {
   dirty: boolean;
   keepalive?: ReturnType<typeof setInterval>;
   running: boolean;
+  authorize?: () => boolean;
+  project?: (event: DurableEvent<{ type: string }>) => DurableEvent<{ type: string }> | null;
+  tag?: string;
   removeAbortListener?: () => void;
   page: (after: string, limit: number) => Promise<DurableEvent<{ type: string }>[]>;
   tail: Promise<void>;
@@ -290,6 +295,11 @@ export class DurableEventLog<Message extends { type: string }> {
     latest: string,
     page: (after: string, limit: number) => Promise<DurableEvent<Message>[]>,
     signal?: AbortSignal,
+    options?: {
+      authorize?: () => boolean;
+      project?: (event: DurableEvent<Message>) => DurableEvent<{ type: string }> | null;
+      tag?: string;
+    },
   ): Response {
     const cursor = parseCursor(after);
     if (cursor === undefined) {
@@ -301,9 +311,14 @@ export class DurableEventLog<Message extends { type: string }> {
         { status: 409, headers: { "cache-control": "no-store" } },
       );
     }
-    if (this.#subscribers.size >= MAX_SUBSCRIBERS) {
+    if (options?.authorize && !options.authorize()) {
+      return Response.json({ error: "not_found" }, { status: 404, headers: { "cache-control": "no-store" } });
+    }
+    const sharedLimitReached = options?.tag
+      && [...this.#subscribers].filter((subscriber) => subscriber.tag).length >= MAX_SHARED_SUBSCRIBERS;
+    if (this.#subscribers.size >= MAX_SUBSCRIBERS || sharedLimitReached) {
       return Response.json(
-        { error: "event_stream_limit", limit: MAX_SUBSCRIBERS },
+        { error: "event_stream_limit", limit: sharedLimitReached ? MAX_SHARED_SUBSCRIBERS : MAX_SUBSCRIBERS },
         {
           status: 429,
           headers: { "cache-control": "no-store", "retry-after": "1" },
@@ -322,6 +337,9 @@ export class DurableEventLog<Message extends { type: string }> {
       dirty: false,
       page: page as Subscriber["page"],
       running: false,
+      authorize: options?.authorize,
+      project: options?.project as Subscriber["project"],
+      tag: options?.tag,
       tail: Promise.resolve(),
       writer: body.writable.getWriter(),
     };
@@ -356,6 +374,13 @@ export class DurableEventLog<Message extends { type: string }> {
     });
   }
 
+  /** Terminate streams bound to a revoked share link without disturbing owner streams. */
+  closeTagged(tag: string): void {
+    for (const subscriber of this.#subscribers) {
+      if (subscriber.tag === tag) this.#close(subscriber, true);
+    }
+  }
+
   clear(): void {
     for (const subscriber of this.#subscribers) this.#close(subscriber, true);
     this.#storage.sql.exec("DELETE FROM managed_event_chunks");
@@ -386,10 +411,15 @@ export class DurableEventLog<Message extends { type: string }> {
 
   async #catchUp(subscriber: Subscriber): Promise<void> {
     while (!subscriber.closed) {
+      if (subscriber.authorize && !subscriber.authorize()) return this.#close(subscriber, true);
       const events = await subscriber.page(subscriber.after, REPLAY_PAGE_SIZE);
-      if (subscriber.closed || events.length === 0) return;
+      if (subscriber.closed) return;
+      if (subscriber.authorize && !subscriber.authorize()) return this.#close(subscriber, true);
+      if (events.length === 0) return;
       for (const event of events) {
-        await subscriber.writer.write(encodeEvent(event));
+        if (subscriber.authorize && !subscriber.authorize()) return this.#close(subscriber, true);
+        const projected = subscriber.project ? subscriber.project(event) : event;
+        if (projected) await subscriber.writer.write(encodeEvent(projected));
         subscriber.after = event.cursor;
         if (subscriber.closed) return;
       }
@@ -400,6 +430,7 @@ export class DurableEventLog<Message extends { type: string }> {
 
   #enqueueComment(subscriber: Subscriber, encoded: Uint8Array): void {
     if (subscriber.closed) return;
+    if (subscriber.authorize && !subscriber.authorize()) return this.#close(subscriber, true);
     subscriber.tail = subscriber.tail.then(() => subscriber.writer.write(encoded));
     void subscriber.tail.catch(() => this.#close(subscriber));
   }

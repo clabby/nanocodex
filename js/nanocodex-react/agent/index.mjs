@@ -97,6 +97,7 @@ function createController(agent, options) {
       return submit(input, { ...submitOptions, intent: "steer" });
     },
     cancel,
+    cancelPrompt,
     clear,
     loadOlder,
     dispose,
@@ -110,6 +111,10 @@ function createController(agent, options) {
       running: state.running,
       status: state.status,
       pendingTurns: state.pendingTurns,
+      pendingPrompts: Object.freeze(state.queuedPrompts.map((prompt) => Object.freeze({
+        id: prompt.id, text: prompt.text, turnId: prompt.turnId,
+        state: [...activeTurns].find((record) => record.id === prompt.id)?.cancelRequested ? "cancelling" : "queued",
+      }))),
       isLoadingOlder: loadingOlder,
       canLoadOlder: Boolean(watcher?.loadOlder) && hasOlder !== false,
       hasOlder,
@@ -338,13 +343,23 @@ function createController(agent, options) {
   }
 
   async function cancel() {
-    const current = latestActiveTurn();
+    return cancelRecord(latestActiveTurn());
+  }
+
+  /** Withdraw one locally retained queued root, never a different active turn. */
+  async function cancelPrompt(id) {
+    if (!state.queuedPrompts.some((prompt) => prompt.id === id)) return false;
+    return cancelRecord([...activeTurns].find((record) => record.id === id));
+  }
+
+  async function cancelRecord(current) {
     if (!current || disposed) return false;
     if (current.cancellation) return current.cancellation;
     // Fence already-submitted corrections before waiting for the server.
     // Later messages start a new turn while this cancellation settles.
     current.cancelRequested = true;
     current.cancelVersion += 1;
+    publish();
     const generation = attachmentGeneration;
     current.cancellation = Promise.resolve().then(() => current.turn.cancel()).then(() => {
       if (!disposed && generation === attachmentGeneration) emit("prompt.cancelled", { id: current.id });
@@ -416,6 +431,7 @@ function createController(agent, options) {
   return Object.freeze({
     attach,
     cancel,
+    cancelPrompt,
     clear,
     dispose,
     getSnapshot,
@@ -502,13 +518,14 @@ const idleControls = Object.freeze({
   async submit() { return undefined; },
   async steer() { return undefined; },
   async cancel() { return false; },
+  async cancelPrompt() { return false; },
   clear() {},
   async loadOlder() { return false; },
   dispose() {},
   setVisible() {},
 });
 const IDLE_SNAPSHOT = Object.freeze({
-  entries: Object.freeze([]), running: false, status: "Idle", pendingTurns: 0,
+  entries: Object.freeze([]), running: false, status: "Idle", pendingTurns: 0, pendingPrompts: Object.freeze([]),
   isLoadingOlder: false, canLoadOlder: false, hasOlder: undefined, visible: true,
   ...idleControls,
 });

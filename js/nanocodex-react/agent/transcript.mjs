@@ -223,7 +223,8 @@ export function applyAgentEvents(state, events) {
         const text = payloadString(payload, "text");
         const id = turnId ? `managed-user-${turnId}` : `managed-user-${event.seq}`;
         if (text && !next.entries.some((entry) => entry.id === id)) {
-          mutableEntries().push({ id, kind: "user", text, ...(turnId ? { turnId } : {}) });
+          mutableEntries().push({ id, kind: "user", text, ...(turnId ? { turnId } : {}),
+            ...(payload.author === "guest" ? { author: "guest" } : {}) });
         }
         break;
       }

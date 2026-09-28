@@ -8,32 +8,16 @@ type CreatedLink = ShareLink & { url: string };
 export function ThreadShareDialog({ agentId, onClose }: { agentId: string; onClose(): void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [links, setLinks] = useState<ShareLink[]>([]);
-  const [comments, setComments] = useState<Array<{ id: string; input: string; created_at: number }>>([]);
-  const [commentsError, setCommentsError] = useState("");
-  const [olderCommentsCursor, setOlderCommentsCursor] = useState<string | null>(null);
   const [permission, setPermission] = useState<"read" | "write">("read");
   const [created, setCreated] = useState<CreatedLink | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const endpoint = `/v1/agents/${encodeURIComponent(agentId)}/share-links`;
-  const refreshComments = async (signal?: AbortSignal, before?: string) => {
-    try {
-      const response = await fetch(`/v1/agents/${encodeURIComponent(agentId)}/share-comments${before ? `?before=${encodeURIComponent(before)}` : ""}`, { credentials: "same-origin", cache: "no-store", signal });
-      if (!response.ok) throw new Error("Couldn’t load guest comments.");
-      const result = await response.json() as { data: typeof comments; has_more?: boolean; next_cursor?: string };
-      if (!signal?.aborted) {
-        setComments((current) => before ? [...result.data, ...current] : result.data);
-        setOlderCommentsCursor(result.has_more ? result.next_cursor ?? null : null);
-        setCommentsError("");
-      }
-    } catch (cause) { if (!signal?.aborted) setCommentsError(errorText(cause)); }
-  };
   useEffect(() => {
     const node = dialog.current;
     node?.showModal();
     const controller = new AbortController();
-    void refreshComments(controller.signal);
     void fetch(endpoint, { credentials: "same-origin", cache: "no-store", signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error("Couldn’t load this thread’s links.");
@@ -82,9 +66,9 @@ export function ThreadShareDialog({ agentId, onClose }: { agentId: string; onClo
       <form onSubmit={create}>
         <label htmlFor="thread-share-permission">Access</label>
         <div className="thread-share-create"><select id="thread-share-permission" value={permission} onChange={(event) => setPermission(event.target.value as "read" | "write")}>
-          <option value="read">Can view</option><option value="write">Can view and comment</option>
-        </select><button type="submit" disabled={busy}>Create {permission === "read" ? "view" : "comment"} link</button></div>
-        <p className="thread-share-help">Anyone with this link can {permission === "read" ? "read the shared messages" : "read and leave comments"}. Comments never send a message to the AI.</p>
+          <option value="read">Can view</option><option value="write">Can view and message</option>
+        </select><button type="submit" disabled={busy}>Create {permission === "read" ? "view" : "message"} link</button></div>
+        <p className="thread-share-help">Anyone with this link can {permission === "read" ? "read this thread, including future messages and tool output" : "read this thread and send real AI turns billed to you"}. Share only with people you trust; revoke the link at any time.</p>
       </form>
       {created ? <div className="thread-share-created"><label htmlFor="thread-share-new-link">New share link · copy it now</label>
         <div><input id="thread-share-new-link" aria-label="New share link" readOnly value={created.url} onFocus={(event) => event.target.select()} />
@@ -92,14 +76,10 @@ export function ThreadShareDialog({ agentId, onClose }: { agentId: string; onClo
         <small>For your privacy, the full link won’t appear again after you close this dialog.</small></div> : null}
       {error ? <p className="thread-share-error" role="alert">{error}</p> : null}
       <section aria-label="Active links" className="thread-share-active"><h3>Active links</h3>
-        {links.length ? <ul>{links.map((link) => <li key={link.id}><span><Link2 aria-hidden="true" /><span><strong>{link.permission === "write" ? "Can view and comment" : "Can view"}</strong><small>{dateLabel(link.createdAt ?? link.created_at)}</small></span></span><button type="button" aria-label="Revoke link" disabled={busy} onClick={() => { void revoke(link.id); }}><Trash2 aria-hidden="true" /> Revoke</button></li>)}</ul>
+        {links.length ? <ul>{links.map((link) => <li key={link.id}><span><Link2 aria-hidden="true" /><span><strong>{link.permission === "write" ? "Can view and message" : "Can view"}</strong><small>{dateLabel(link.createdAt ?? link.created_at)}</small></span></span><button type="button" aria-label="Revoke link" disabled={busy} onClick={() => { void revoke(link.id); }}><Trash2 aria-hidden="true" /> Revoke</button></li>)}</ul>
           : <p>No active links yet.</p>}
       </section>
-      <section aria-label="Guest comments" className="thread-share-comments"><div><h3>Guest comments <span>{comments.length}</span></h3><button type="button" onClick={() => { void refreshComments(); }}>Refresh</button></div>
-        {commentsError ? <p role="alert" className="thread-share-error">{commentsError}</p> : null}
-        {olderCommentsCursor ? <button type="button" className="thread-share-older" onClick={() => { void refreshComments(undefined, olderCommentsCursor); }}>Load earlier comments</button> : null}
-        {comments.length ? <ul>{comments.map((comment) => <li key={comment.id}><small>Guest · {dateLabel(new Date(comment.created_at).toISOString())}</small><p>{comment.input}</p></li>)}</ul> : <p>No guest comments yet.</p>}
-      </section>
+
     </div>
   </dialog>;
 }
