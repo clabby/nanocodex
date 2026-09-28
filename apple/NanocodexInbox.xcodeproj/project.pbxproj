@@ -35,7 +35,9 @@ A713C1000000000000000002 = { isa = PBXBuildFile; fileRef = A713C1000000000000000
 53504F544946590000000002 = { isa = PBXBuildFile; fileRef = 53504F544946590000000001; };
 F0CA00000000000000000001 = { isa = PBXFileReference; lastKnownFileType = file; path = "InboxCore/Tests/InboxCoreTests/Fixtures/VideoAudioCheck.mp4"; sourceTree = SOURCE_ROOT; };
 F0CA00000000000000000002 = { isa = PBXBuildFile; fileRef = F0CA00000000000000000001; };
-F0CA00000000000000000003 = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (F0CA00000000000000000002); runOnlyForDeploymentPostprocessing = 0; };
+F0CA00000000000000000004 = { isa = PBXFileReference; lastKnownFileType = file; path = "NanocodexInboxUITests/fixtures/FrontiersMerchSample.mp4"; sourceTree = SOURCE_ROOT; };
+F0CA00000000000000000005 = { isa = PBXBuildFile; fileRef = F0CA00000000000000000004; };
+F0CA00000000000000000003 = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (F0CA00000000000000000002, F0CA00000000000000000005); runOnlyForDeploymentPostprocessing = 0; };
 A71000000000000000000011 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NanocodexInboxUITests/AgentNotificationUITests.swift"; sourceTree = SOURCE_ROOT; };
 A71000000000000000000012 = { isa = PBXBuildFile; fileRef = A71000000000000000000011; };
 

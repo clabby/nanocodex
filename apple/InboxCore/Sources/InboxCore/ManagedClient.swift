@@ -69,6 +69,29 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     }
 }
 
+/// A download task writes into URLSession's temporary file, not memory. Stop it
+/// during transfer rather than waiting for the entire response to reach disk.
+private final class BoundedOutputDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    let maximumBytes: Int64
+    private let lock = NSLock()
+    private var exceeded = false
+    init(maximumBytes: Int64) { self.maximumBytes = maximumBytes }
+    var sizeExceeded: Bool { lock.lock(); defer { lock.unlock() }; return exceeded }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil) // Task-specific delegates must preserve NoRedirects.
+    }
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        if totalBytesWritten > maximumBytes || totalBytesExpectedToWrite > maximumBytes {
+            lock.lock(); exceeded = true; lock.unlock()
+            downloadTask.cancel()
+        }
+    }
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {}
+}
+
 /// Foundation owns HTTP freshness, validators, disk eviction and cache I/O.
 /// Account-separated stores prevent credentials sharing a history cache, even
 /// when callers create short-lived clients for Shortcuts or reconnects.
@@ -97,6 +120,7 @@ enum ManagedResponseCache {
 /// Native HTTP/SSE adapter for the existing /v1/agents contract. No embedded
 /// runtime, model credentials, or execution environment is owned by this client.
 public final class ManagedClient: @unchecked Sendable {
+    static let maximumOutputDownloadSize: Int64 = 256 * 1024 * 1024
     let credential: AccountCredential
     private let session: URLSession
     private let responseCache: URLCache?
@@ -126,7 +150,10 @@ public final class ManagedClient: @unchecked Sendable {
     /// Call on explicit sign-out, not when suspending an observer.
     public func clearCachedResponses() { responseCache?.removeAllCachedResponses(); ManagedAccess.clear() }
     public func request(path: String, method: String = "GET", body: JSON? = nil, idempotencyKey: String? = nil, location: JSON? = nil) throws -> URLRequest {
-        guard path.hasPrefix("/v1/"), !path.contains(".."), !path.contains("#"),
+        // Query values are data: a perfectly valid output filename may contain "..".
+        // Keep the traversal guard on the endpoint path, not the encoded query.
+        let endpoint = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        guard endpoint.hasPrefix("/v1/"), !endpoint.contains(".."), !path.contains("#"),
               let url = URL(string: credential.origin + path) else { throw APIError.invalidResponse }
         var request = URLRequest(url: url, timeoutInterval: 20)
         // Spotify's shared registration may ask the broker to wait for quota
@@ -444,6 +471,44 @@ public final class ManagedClient: @unchecked Sendable {
         let (_, response) = try await session.upload(for: request, fromFile: source)
         guard let response = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard response.statusCode == 200 else { throw APIError.http(response.statusCode) }
+    }
+
+    /// Download a private /brain/outputs link with this account's credentials.
+    /// The sandbox URI itself is never passed to URLSession or an external app.
+    public func downloadOutput(agentID: String, path: String) async throws -> URL {
+        guard PublishedOutputLink.validPath(path) else { throw APIError.invalidResponse }
+        var query = URLComponents()
+        query.queryItems = [URLQueryItem(name: "path", value: path)]
+        guard let encoded = query.percentEncodedQuery else { throw APIError.invalidResponse }
+        var request = try request(path: Self.agentPath(agentID) + "/files?" + encoded)
+        request.timeoutInterval = 300
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+        let limiter = BoundedOutputDownload(maximumBytes: Self.maximumOutputDownloadSize)
+        let download: URL
+        let response: URLResponse
+        do { (download, response) = try await session.download(for: request, delegate: limiter) }
+        catch { if limiter.sizeExceeded { throw APIError.invalidResponse }; throw error }
+        defer { try? FileManager.default.removeItem(at: download) }
+        guard !limiter.sizeExceeded else { throw APIError.invalidResponse }
+        guard let response = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        guard response.statusCode == 200 else { throw APIError.http(response.statusCode) }
+        guard response.mimeType == "application/octet-stream" else { throw APIError.invalidResponse }
+        let size = try download.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        guard let size, size >= 0, Int64(size) <= Self.maximumOutputDownloadSize,
+              response.expectedContentLength <= Self.maximumOutputDownloadSize,
+              response.expectedContentLength < 0 || Int64(size) == response.expectedContentLength else {
+            throw APIError.invalidResponse
+        }
+        // An isolated folder keeps the original filename in Quick Look and
+        // Save to Files without colliding with another download of that name.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NanocodexOutput-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let local = directory.appendingPathComponent((path as NSString).lastPathComponent)
+        do { try FileManager.default.moveItem(at: download, to: local) }
+        catch { try? FileManager.default.removeItem(at: directory); throw error }
+        if Task.isCancelled { try? FileManager.default.removeItem(at: directory); throw CancellationError() }
+        return local
     }
 
     /// Account-scoped URLCache retains immutable previews; original bytes never

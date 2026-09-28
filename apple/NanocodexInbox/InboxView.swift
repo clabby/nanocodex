@@ -1804,6 +1804,11 @@ private struct ConversationMessageView: View {
 }
 
 private struct ConversationMessageContent: View, Equatable {
+    @State private var openedOutput: URL?
+    @State private var openedFiles: [URL] = []
+    @State private var outputLease = OutputFileLease()
+    @State private var outputError: String?
+    @State private var outputTask: Task<Void, Never>?
     let row: TranscriptRow
     let model: InboxModel
     let agentID: String
@@ -1841,6 +1846,17 @@ private struct ConversationMessageContent: View, Equatable {
                             }.font(.caption).foregroundStyle(Ink.muted)
                         } else if row.role == "Agent", !row.text.isEmpty {
                             ChatMarkdown(text: row.text, compact: true)
+                                .environment(\.openURL, OpenURLAction { url in
+                                    guard let link = PublishedOutputLink(url: url) else { return .systemAction }
+                                    openOutput(link)
+                                    return .handled
+                                })
+                            if !row.running {
+                                ForEach(PublishedOutputLink.parse(row.text)) { link in
+                                    PublishedOutputCard(link: link, model: model, agentID: agentID)
+                                }
+                            }
+                            if let outputError { Text(outputError).font(.caption).foregroundStyle(.secondary) }
                         } else if !row.text.isEmpty {
                             Text(row.text).font(.system(size: row.role == "Status" ? 14 : 17))
                                 .lineSpacing(5).textSelection(.enabled)
@@ -1883,6 +1899,39 @@ private struct ConversationMessageContent: View, Equatable {
             }
             if row.role != "You" { Spacer(minLength: row.role == "Agent" ? 16 : 0) }
         }.frame(maxWidth: .infinity, alignment: row.role == "You" ? .trailing : .leading)
+            .nativeMediaPreview($openedOutput, in: openedFiles, title: "Generated file")
+            .onChange(of: openedOutput) { _, value in
+                if value == nil {
+                    for file in openedFiles { removeDownloadedOutput(file) }
+                    openedFiles = []
+                    outputLease.files = []
+                }
+            }
+            .onDisappear {
+                outputTask?.cancel()
+                if openedOutput == nil {
+                    for file in openedFiles { removeDownloadedOutput(file) }
+                    openedFiles = []
+                    outputLease.files = []
+                }
+            }
+    }
+
+    private func openOutput(_ link: PublishedOutputLink) {
+        outputTask?.cancel()
+        outputError = nil
+        outputTask = Task {
+            do {
+                let file = try await model.downloadOutput(link, agentID: agentID)
+                guard !Task.isCancelled else { removeDownloadedOutput(file); return }
+                for previous in openedFiles { removeDownloadedOutput(previous) }
+                openedFiles = [file]
+                outputLease.files = [file]
+                openedOutput = file
+            } catch {
+                if !Task.isCancelled { outputError = "Couldn’t open file. Tap to retry." }
+            }
+        }
     }
 
     @ViewBuilder private var media: some View {
@@ -1908,6 +1957,100 @@ private struct ConversationMessageContent: View, Equatable {
             ForEach(row.videos ?? []) { VideoAttachmentView(video: $0, model: model, agentID: agentID) }
         }
     }
+}
+
+/// A private Brain output is not a browser URL. Download only after a tap,
+/// then let the native previewer play, inspect, share or save the local copy.
+private struct PublishedOutputCard: View {
+    let link: PublishedOutputLink
+    let model: InboxModel
+    let agentID: String
+    @State private var sharing = false
+    @State private var shareFile: URL?
+    @State private var shareLease = OutputFileLease()
+    @State private var sharePresented = false
+    @State private var failure: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 0) {
+                ChatMediaPreview(title: link.title, load: { [try await model.downloadOutput(link, agentID: agentID)] }) {
+                    HStack(spacing: 12) {
+                        Image(systemName: link.isVideo ? "play.rectangle.fill" : link.isImage ? "photo" : "doc.zipper")
+                            .font(.title2).frame(width: 38)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(link.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                            Text(link.filename).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer(minLength: 6)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("View " + link.title)
+                    .accessibilityIdentifier("published-output-open")
+                }
+                Button { sharing = true; failure = nil } label: {
+                    if sharing { ProgressView() }
+                    else { Image(systemName: "square.and.arrow.up").font(.body.weight(.medium)) }
+                }
+                .frame(width: 44, height: 52)
+                .buttonStyle(.plain)
+                .disabled(sharing)
+                .accessibilityLabel("Save or share " + link.title)
+                .accessibilityIdentifier("published-output-save")
+            }
+            .padding(.leading, 12).padding(.trailing, 4)
+            .background(Ink.surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Ink.border, lineWidth: 0.5))
+            if let failure { Text(failure).font(.caption).foregroundStyle(.secondary) }
+        }
+        .frame(maxWidth: 440)
+        .task(id: sharing) {
+            guard sharing else { return }
+            do {
+                let file = try await model.downloadOutput(link, agentID: agentID)
+                guard !Task.isCancelled else { removeDownloadedOutput(file); return }
+                shareLease.files = [file]; shareFile = file; sharePresented = true
+            } catch { if !Task.isCancelled { failure = "Couldn’t download file. Tap to retry." } }
+            sharing = false
+        }
+        .sheet(isPresented: $sharePresented, onDismiss: {
+            if let shareFile { removeDownloadedOutput(shareFile) }
+            shareFile = nil
+            shareLease.files = []
+        }) {
+            if let shareFile { OutputActivitySheet(file: shareFile) { sharePresented = false } }
+        }
+        .onDisappear {
+            if !sharePresented, let shareFile { removeDownloadedOutput(shareFile); self.shareFile = nil; shareLease.files = [] }
+        }
+    }
+}
+
+private func removeDownloadedOutput(_ file: URL) {
+    let parent = file.deletingLastPathComponent()
+    if parent.lastPathComponent.hasPrefix("NanocodexOutput-"),
+       parent.deletingLastPathComponent().standardizedFileURL == FileManager.default.temporaryDirectory.standardizedFileURL {
+        try? FileManager.default.removeItem(at: parent)
+    } else { try? FileManager.default.removeItem(at: file) }
+}
+
+/// Cleans up even when SwiftUI tears down a whole row with a presented sheet.
+private final class OutputFileLease {
+    var files: [URL] = []
+    deinit { for file in files { removeDownloadedOutput(file) } }
+}
+
+private struct OutputActivitySheet: UIViewControllerRepresentable {
+    let file: URL
+    let complete: () -> Void
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: [file], applicationActivities: nil)
+        controller.completionWithItemsHandler = { _, _, _, _ in DispatchQueue.main.async(execute: complete) }
+        return controller
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 private final class ConversationReadingPositions {

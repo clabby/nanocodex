@@ -2388,6 +2388,34 @@ final class InboxUITests: XCTestCase {
 
 
 
+    func testPrivateOutputLinksRenderNativePreviewAndSaveCards() throws {
+        let clip = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "FrontiersMerchSample", withExtension: "mp4"))
+        let app = launch(["NANOCODEX_DEMO_OUTPUT_LINKS": "1",
+                          "NANOCODEX_DEMO_VIDEO_BASE64": try Data(contentsOf: clip).base64EncodedString()])
+        let conversation = app.descendants(matching: .any)["conversation"].firstMatch
+        XCTAssertTrue(conversation.waitForExistence(timeout: 10))
+        XCTAssertFalse(conversation.buttons["View Not an output"].exists,
+                       "Only canonical /brain/outputs links become file cards")
+        XCTAssertEqual(conversation.buttons.matching(identifier: "published-output-open").count, 2)
+        XCTAssertEqual(conversation.buttons.matching(identifier: "published-output-save").count, 2)
+        XCTAssertTrue(conversation.links["sandbox:/brain/outputs/frontiers-next/frontiers-merch-launch-actual-character.mp4"].exists)
+        XCTAssertTrue(conversation.links["sandbox:/brain/outputs/frontiers-next/frontiers-launch-and-drops.zip"].exists)
+        capture(app, "private-output-links")
+        let launchVideo = conversation.buttons["View Main launch video"]
+        XCTAssertTrue(launchVideo.isHittable)
+        launchVideo.tap()
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 10), "The video should open in native Quick Look")
+        capture(app, "private-output-video-preview")
+        done.tap()
+        let saveVideo = conversation.buttons["Save or share Main launch video"]
+        XCTAssertTrue(saveVideo.isHittable)
+        saveVideo.tap()
+        XCTAssertTrue(app.otherElements["ShareSheet.RemoteContainerView"].waitForExistence(timeout: 10),
+                      "The iOS share sheet should open for a local video file")
+        capture(app, "private-output-save-share")
+    }
+
     func testNativeMediaPreviewZoomPlaybackAndDraftRestoration() throws {
         let clip = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "VideoAudioCheck", withExtension: "mp4"))
         let app = launch(["NANOCODEX_DEMO_GENERATED_OUTPUTS": "1", "NANOCODEX_DEMO_VIDEO_BASE64": try Data(contentsOf: clip).base64EncodedString()])
