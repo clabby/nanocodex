@@ -48,12 +48,15 @@ fn request() -> MessagesRequest {
         output_config: None,
         system: Some("Use tools".into()),
         messages: vec![Message::text(Role::User, "What's the weather?")],
-        tools: vec![ToolDefinition {
-            name: "weather".into(),
-            description: "Find current weather".into(),
-            input_schema: json!({"type":"object","properties":{"city":{"type":"string"}}}),
-            strict: None,
-        }],
+        tools: vec![
+            ToolDefinition {
+                name: "weather".into(),
+                description: "Find current weather".into(),
+                input_schema: json!({"type":"object","properties":{"city":{"type":"string"}}}),
+                strict: None,
+            }
+            .into(),
+        ],
     }
 }
 
@@ -299,7 +302,10 @@ fn serializes_automatic_cache_strict_tools_and_multimodal_tool_results() {
     req.output_config = Some(OutputConfig {
         effort: Effort::High,
     });
-    req.tools[0].strict = Some(true);
+    let nanocodex_claude::ClaudeToolSpec::Client(tool) = &mut req.tools[0] else {
+        panic!("client tool");
+    };
+    tool.strict = Some(true);
     req.messages.push(Message::tool_results(vec![ContentBlock::tool_result_blocks(
         "toolu_1",
         vec![
@@ -401,4 +407,90 @@ async fn collector_does_not_silently_drop_unknown_delta_on_known_block() {
         collect_stream(first, stream).await,
         Err(ClaudeError::Protocol(_))
     ));
+}
+
+#[tokio::test]
+async fn approved_oauth_header_provider_refreshes_before_each_request() {
+    use nanocodex_claude::{ClaudeAuthProvider, ClaudeAuthUnavailable};
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    struct SyntheticApprovedProvider {
+        calls: AtomicUsize,
+    }
+    impl ClaudeAuthProvider for SyntheticApprovedProvider {
+        fn headers(
+            &self,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<reqwest::header::HeaderMap, ClaudeAuthUnavailable>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                let next = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer synthetic-{next}").parse().unwrap(),
+                );
+                Ok(headers)
+            })
+        }
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let captured = seen.clone();
+    let app = Router::new().route("/v1/messages", post(move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+        let captured = captured.clone();
+        async move {
+            assert!(body.get("authorization").is_none());
+            captured.lock().unwrap().push(headers.get("authorization").unwrap().to_str().unwrap().to_owned());
+            Json(json!({"id":"msg","role":"assistant","model":"test","content":[],"usage":{}}))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::with_auth_provider(
+        http_client(),
+        format!("http://{address}/v1/messages"),
+        Arc::new(SyntheticApprovedProvider {
+            calls: AtomicUsize::new(0),
+        }),
+    );
+    client.create(&request()).await.unwrap();
+    client.create(&request()).await.unwrap();
+    assert_eq!(
+        &*seen.lock().unwrap(),
+        &["Bearer synthetic-1", "Bearer synthetic-2"]
+    );
+}
+
+#[tokio::test]
+async fn streaming_web_citation_delta_survives_followup_replay() {
+    let endpoint = server(|_| (StatusCode::OK,"text/event-stream",concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"role\":\"assistant\",\"model\":\"test\",\"content\":[],\"usage\":{}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"source\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"citations_delta\",\"citation\":{\"type\":\"web_search_result_location\",\"url\":\"https://example.org\",\"encrypted_index\":\"opaque-index\",\"cited_text\":\"source\"}}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    ).into())).await;
+    let client = ClaudeClient::new(http_client(), endpoint, "synthetic");
+    let mut stream = client.stream(&request()).await.unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    let result = collect_stream(first, stream).await.unwrap();
+    let replay = serde_json::to_value(Message {
+        role: Role::Assistant,
+        content: result.content,
+    })
+    .unwrap();
+    assert_eq!(
+        replay["content"][0]["citations"][0]["encrypted_index"],
+        "opaque-index"
+    );
 }

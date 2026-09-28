@@ -16,16 +16,18 @@ fn stream(blocks: Vec<Value>, stop: &str) -> String {
         json!({"type":"message_start","message":{"id":"msg","role":"assistant","model":"test","content":[],"usage":{"input_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":1,"output_tokens":0}}}),
     );
     for (i, block) in blocks.iter().enumerate() {
-        let start = if block["type"] == "text" {
-            json!({"type":"text","text":""})
-        } else {
-            json!({"type":"tool_use","id":block["id"],"name":block["name"],"input":{}})
+        let start = match block["type"].as_str() {
+            Some("text") => json!({"type":"text","text":""}),
+            Some("thinking") => {
+                json!({"type":"thinking","thinking":"","signature":block["signature"],"binding":block["binding"]})
+            }
+            _ => json!({"type":"tool_use","id":block["id"],"name":block["name"],"input":{}}),
         };
         emit(json!({"type":"content_block_start","index":i,"content_block":start}));
-        let delta = if block["type"] == "text" {
-            json!({"type":"text_delta","text":block["text"]})
-        } else {
-            json!({"type":"input_json_delta","partial_json":block["input"].to_string()})
+        let delta = match block["type"].as_str() {
+            Some("text") => json!({"type":"text_delta","text":block["text"]}),
+            Some("thinking") => json!({"type":"thinking_delta","thinking":block["thinking"]}),
+            _ => json!({"type":"input_json_delta","partial_json":block["input"].to_string()}),
         };
         emit(json!({"type":"content_block_delta","index":i,"delta":delta}));
         emit(json!({"type":"content_block_stop","index":i}));
@@ -48,7 +50,7 @@ async fn stream_tool_once_compact_and_failed_turn_preserves_history() {
             if index == 5 { return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "synthetic failure".to_string()).into_response(); }
             let (blocks, reason) = match index {
                 1 => (vec![json!({"type":"text","text":"Hello "}),json!({"type":"text","text":"world"})], "end_turn"),
-                2 => (vec![json!({"type":"tool_use","id":"tool-1","name":"lookup","input":{"key":"x"}})], "tool_use"),
+                2 => (vec![json!({"type":"thinking","thinking":"","signature":"signed-tool-turn","binding":"opaque"}),json!({"type":"tool_use","id":"tool-1","name":"lookup","input":{"key":"x"}})], "tool_use"),
                 3 => (vec![json!({"type":"text","text":"found value"})], "end_turn"),
                 4 => (vec![json!({"type":"text","text":"SUMMARY: user greeting and lookup x = value"})], "end_turn"),
                 _ => (vec![json!({"type":"text","text":"after failure"})], "end_turn"),
@@ -159,6 +161,11 @@ async fn stream_tool_once_compact_and_failed_turn_preserves_history() {
     assert_eq!(log[0]["output_config"], json!({"effort":"high"}));
     assert_eq!(log[3]["cache_control"], json!({"type":"ephemeral"}));
     assert_eq!(log[2]["messages"][3]["role"], "assistant");
+    assert_eq!(
+        log[2]["messages"][3]["content"][0]["signature"],
+        "signed-tool-turn"
+    );
+    assert_eq!(log[2]["messages"][3]["content"][0]["binding"], "opaque");
     assert_eq!(log[2]["messages"][4]["role"], "user");
     assert_eq!(log[2]["messages"][4]["content"][0]["type"], "tool_result");
     assert_eq!(log[2]["messages"][4]["content"][0]["tool_use_id"], "tool-1");
@@ -409,6 +416,10 @@ async fn latest_model_sends_opus_5_5_without_legacy_thinking_parameters() {
     assert_eq!(body["model"], "claude-opus-5-5");
     assert!(body.get("thinking").is_none());
     assert!(body.get("tool_choice").is_none());
+    assert!(
+        body.get("tools").is_none(),
+        "no Codex tools are implicitly exposed"
+    );
 }
 
 #[tokio::test]
@@ -444,5 +455,128 @@ async fn latest_model_does_not_compact_at_legacy_200k_window() {
         received.load(Ordering::SeqCst),
         2,
         "unexpected early compaction"
+    );
+}
+
+#[tokio::test]
+async fn independent_tools_can_execute_concurrently_but_results_remain_one_ordered_user_message() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let received = captured.clone();
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+        let received = received.clone();
+        async move {
+            let index = { let mut requests = received.lock().unwrap(); requests.push(body); requests.len() };
+            let blocks = if index == 1 {
+                vec![json!({"type":"tool_use","id":"toolu_a","name":"lookup","input":{"key":"a"}}),json!({"type":"tool_use","id":"toolu_b","name":"lookup","input":{"key":"b"}})]
+            } else { vec![json!({"type":"text","text":"done"})] };
+            ([ ("content-type","text/event-stream") ], stream(blocks, if index == 1 {"tool_use"} else {"end_turn"})).into_response()
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .parallel_tools(true) // caller asserts the registered tool invocations are independent
+        .tool(
+            ToolDefinition {
+                name: "lookup".into(),
+                description: "Read a key".into(),
+                input_schema: json!({"type":"object"}),
+                strict: None,
+            },
+            move |input| {
+                let barrier = barrier.clone();
+                async move {
+                    barrier.wait().await;
+                    if input["key"] == "b" {
+                        Err("not found".into())
+                    } else {
+                        Ok("value a".into())
+                    }
+                }
+            },
+        )
+        .build()
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        agent
+            .prompt("read both")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+    })
+    .await
+    .expect("tools did not overlap");
+    assert_eq!(result.final_message(), "done");
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let returned = &requests[1]["messages"][2];
+    assert_eq!(returned["role"], "user");
+    assert_eq!(returned["content"].as_array().unwrap().len(), 2);
+    assert_eq!(returned["content"][0]["tool_use_id"], "toolu_a");
+    assert_eq!(returned["content"][1]["tool_use_id"], "toolu_b");
+    assert_eq!(returned["content"][1]["is_error"], true);
+}
+
+#[tokio::test]
+async fn compaction_accepts_latest_model_thinking_before_text_summary() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests = captured.clone();
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+        let requests = requests.clone();
+        async move {
+            let index = { let mut r = requests.lock().unwrap(); r.push(body); r.len() };
+            let output = if index == 2 {
+                let mut text = String::new();
+                for event in [
+                    json!({"type":"message_start","message":{"id":"summary","role":"assistant","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":25,"output_tokens":0}}}),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"sig"}}),
+                    json!({"type":"content_block_stop","index":0}),
+                    json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":"Summary of first turn"}}),
+                    json!({"type":"content_block_stop","index":1}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}),
+                    json!({"type":"message_stop"}),
+                ] { text.push_str(&format!("data: {event}\n\n")); }
+                text
+            } else { stream(vec![json!({"type":"text","text":"ok"})],"end_turn") };
+            ([ ("content-type","text/event-stream") ], output).into_response()
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::latest(client)).build().unwrap();
+    agent.prompt("first").await.unwrap().result().await.unwrap();
+    agent.compact().await.unwrap();
+    agent
+        .prompt("second")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2]["messages"].as_array().unwrap().len(), 1);
+    assert!(
+        requests[2]["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Summary of first turn")
     );
 }

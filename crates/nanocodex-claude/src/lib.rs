@@ -2,7 +2,7 @@
 //!
 //! Authentication is supplied by the embedding application (Console API key or
 //! explicitly approved headers). The crate never reads Claude Code credentials.
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,8 @@ pub enum ClaudeError {
     Protocol(String),
     #[error("Messages stream ended before message_stop")]
     IncompleteStream,
+    #[error("approved Claude authentication provider unavailable")]
+    AuthUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,11 +42,45 @@ pub enum Role {
 pub enum ContentBlock {
     Text {
         text: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
     },
     ToolUse {
         id: String,
         name: String,
         input: Value,
+    },
+    ServerToolUse {
+        id: String,
+        name: String,
+        #[serde(default = "empty_object")]
+        input: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    WebSearchToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    WebFetchToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    ToolSearchToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    CodeExecutionToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
     },
     ToolResult {
         tool_use_id: String,
@@ -75,13 +111,20 @@ pub enum ToolResultContent {
     Blocks(Vec<Value>),
 }
 
+fn empty_object() -> Value {
+    serde_json::json!({})
+}
+
 fn is_false(value: &bool) -> bool {
     !value
 }
 
 impl ContentBlock {
     pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into() }
+        Self::Text {
+            text: text.into(),
+            extra: BTreeMap::new(),
+        }
     }
 
     pub fn tool_use(id: impl Into<String>, name: impl Into<String>, input: Value) -> Self {
@@ -141,6 +184,50 @@ pub struct ToolDefinition {
 }
 
 /// Request-level automatic prompt caching. Explicit block breakpoints are not yet modeled.
+/// Anthropic-executed API tools do not have client handlers or tool_result replies.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ServerToolDefinition {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    #[serde(flatten)]
+    pub options: BTreeMap<String, Value>,
+}
+impl ServerToolDefinition {
+    pub fn web_search_basic(max_uses: u32) -> Self {
+        Self {
+            kind: "web_search_20250305".into(),
+            name: "web_search".into(),
+            options: BTreeMap::from([("max_uses".into(), Value::from(max_uses))]),
+        }
+    }
+    pub fn web_fetch_basic(max_uses: u32) -> Self {
+        Self {
+            kind: "web_fetch_20250910".into(),
+            name: "web_fetch".into(),
+            options: BTreeMap::from([("max_uses".into(), Value::from(max_uses))]),
+        }
+    }
+}
+
+/// One entry in the Claude Messages tools array, not an OpenAI tool schema.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ClaudeToolSpec {
+    Client(ToolDefinition),
+    Server(ServerToolDefinition),
+}
+impl From<ToolDefinition> for ClaudeToolSpec {
+    fn from(value: ToolDefinition) -> Self {
+        Self::Client(value)
+    }
+}
+impl From<ServerToolDefinition> for ClaudeToolSpec {
+    fn from(value: ServerToolDefinition) -> Self {
+        Self::Server(value)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheControl {
     #[serde(rename = "type")]
@@ -195,7 +282,7 @@ pub struct MessagesRequest {
     pub system: Option<String>,
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<ToolDefinition>,
+    pub tools: Vec<ClaudeToolSpec>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,6 +345,9 @@ pub enum ContentDelta {
     SignatureDelta {
         signature: String,
     },
+    CitationsDelta {
+        citation: Value,
+    },
     #[serde(other)]
     Other,
 }
@@ -306,10 +396,31 @@ pub struct MessageChange {
     pub stop_reason: Option<StopReason>,
 }
 
+/// An embedding-owned, approved credential broker. It can refresh/rotate OAuth
+/// headers before each request without exposing tokens to the agent loop.
+/// This trait does not perform OAuth registration or define a subscription grant.
+pub trait ClaudeAuthProvider: Send + Sync {
+    fn headers(
+        &self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<reqwest::header::HeaderMap, ClaudeAuthUnavailable>>
+                + Send
+                + '_,
+        >,
+    >;
+}
+
+/// An intentionally detail-free failure; do not put access/refresh tokens in errors.
+#[derive(Debug, Error)]
+#[error("approved Claude authentication provider unavailable")]
+pub struct ClaudeAuthUnavailable;
+
 #[derive(Clone)]
 enum ClientAuth {
     ApiKey(String),
     Headers(reqwest::header::HeaderMap),
+    Provider(Arc<dyn ClaudeAuthProvider>),
 }
 
 #[derive(Clone)]
@@ -350,6 +461,21 @@ impl ClaudeClient {
         }
     }
 
+    /// Resolve caller-owned, approved headers separately for every request.
+    /// The provider owns OAuth acquisition/refresh and any program-specific
+    /// authorization; no Claude Code identity or local credential is borrowed.
+    pub fn with_auth_provider(
+        http: reqwest::Client,
+        endpoint: impl Into<String>,
+        provider: Arc<dyn ClaudeAuthProvider>,
+    ) -> Self {
+        Self {
+            http,
+            endpoint: endpoint.into(),
+            auth: ClientAuth::Provider(provider),
+        }
+    }
+
     pub fn official(http: reqwest::Client, api_key: impl Into<String>) -> Self {
         Self::new(http, ANTHROPIC_MESSAGES_URL, api_key)
     }
@@ -372,6 +498,12 @@ impl ClaudeClient {
         let builder = match &self.auth {
             ClientAuth::ApiKey(key) => builder.header("x-api-key", key),
             ClientAuth::Headers(headers) => builder.headers(headers.clone()),
+            ClientAuth::Provider(provider) => builder.headers(
+                provider
+                    .headers()
+                    .await
+                    .map_err(|_| ClaudeError::AuthUnavailable)?,
+            ),
         };
         let response = builder
             .json(&Body {
@@ -543,7 +675,10 @@ impl SseState {
 
 #[derive(Debug)]
 enum BlockAccumulator {
-    Text(String),
+    Text {
+        text: String,
+        extra: BTreeMap<String, Value>,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -553,6 +688,13 @@ enum BlockAccumulator {
     Thinking {
         thinking: String,
         signature: String,
+        extra: BTreeMap<String, Value>,
+    },
+    ServerToolUse {
+        id: String,
+        name: String,
+        initial: Value,
+        fragments: String,
         extra: BTreeMap<String, Value>,
     },
     Other(ContentBlock),
@@ -585,12 +727,24 @@ where
                     )));
                 }
                 let block = match content_block {
-                    ContentBlock::Text { text } => BlockAccumulator::Text(text),
+                    ContentBlock::Text { text, extra } => BlockAccumulator::Text { text, extra },
                     ContentBlock::ToolUse { id, name, input } => BlockAccumulator::ToolUse {
                         id,
                         name,
                         initial: input,
                         fragments: String::new(),
+                    },
+                    ContentBlock::ServerToolUse {
+                        id,
+                        name,
+                        input,
+                        extra,
+                    } => BlockAccumulator::ServerToolUse {
+                        id,
+                        name,
+                        initial: input,
+                        fragments: String::new(),
+                        extra,
                     },
                     ContentBlock::Thinking {
                         thinking,
@@ -608,11 +762,28 @@ where
             StreamEvent::ContentBlockDelta { index, delta } => {
                 match (active.get_mut(&index), delta) {
                     (
-                        Some(BlockAccumulator::Text(text)),
+                        Some(BlockAccumulator::Text { text, .. }),
                         ContentDelta::TextDelta { text: chunk },
                     ) => text.push_str(&chunk),
                     (
-                        Some(BlockAccumulator::ToolUse { fragments, .. }),
+                        Some(BlockAccumulator::Text { extra, .. }),
+                        ContentDelta::CitationsDelta { citation },
+                    ) => match extra
+                        .entry("citations".to_owned())
+                        .or_insert_with(|| Value::Array(Vec::new()))
+                    {
+                        Value::Array(citations) => citations.push(citation),
+                        _ => {
+                            return Err(ClaudeError::Protocol(
+                                "text citations must be an array".into(),
+                            ));
+                        }
+                    },
+                    (
+                        Some(
+                            BlockAccumulator::ToolUse { fragments, .. }
+                            | BlockAccumulator::ServerToolUse { fragments, .. },
+                        ),
                         ContentDelta::InputJsonDelta { partial_json },
                     ) => fragments.push_str(&partial_json),
                     (
@@ -640,7 +811,7 @@ where
                     ClaudeError::Protocol(format!("unknown content block {index}"))
                 })?;
                 let block = match block {
-                    BlockAccumulator::Text(text) => ContentBlock::text(text),
+                    BlockAccumulator::Text { text, extra } => ContentBlock::Text { text, extra },
                     BlockAccumulator::ToolUse {
                         id,
                         name,
@@ -658,6 +829,30 @@ where
                             ));
                         }
                         ContentBlock::tool_use(id, name, input)
+                    }
+                    BlockAccumulator::ServerToolUse {
+                        id,
+                        name,
+                        initial,
+                        fragments,
+                        extra,
+                    } => {
+                        let input = if fragments.is_empty() {
+                            initial
+                        } else {
+                            serde_json::from_str(&fragments)?
+                        };
+                        if !input.is_object() {
+                            return Err(ClaudeError::Protocol(
+                                "server tool input must be a JSON object".into(),
+                            ));
+                        }
+                        ContentBlock::ServerToolUse {
+                            id,
+                            name,
+                            input,
+                            extra,
+                        }
                     }
                     BlockAccumulator::Thinking {
                         thinking,

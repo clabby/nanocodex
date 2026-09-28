@@ -1,7 +1,7 @@
 //! Provider-specific Messages agent loop. No OpenAI transport or CLI credentials.
 use crate::{
-    ClaudeClient, ContentBlock, ContentDelta, Message, MessagesRequest, Role, StopReason,
-    StreamEvent, ToolDefinition, collect_stream,
+    ClaudeClient, ClaudeToolSpec, ContentBlock, ContentDelta, Message, MessagesRequest, Role,
+    ServerToolDefinition, StopReason, StreamEvent, ToolDefinition, collect_stream,
 };
 use futures_util::StreamExt;
 use nanocodex_agent::{
@@ -16,7 +16,7 @@ use nanocodex_agent::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
     sync::{
@@ -72,6 +72,8 @@ pub struct ClaudeBuilder {
     system: String,
     workspace: String,
     tools: Vec<(ToolDefinition, Handler)>,
+    server_tools: Vec<ServerToolDefinition>,
+    parallel_tools: bool,
 }
 impl ClaudeBuilder {
     fn new(claude: Claude) -> Self {
@@ -88,6 +90,8 @@ impl ClaudeBuilder {
             system: String::new(),
             workspace: String::new(),
             tools: Vec::new(),
+            server_tools: Vec::new(),
+            parallel_tools: false,
         }
     }
     /// Sets the Messages output-token limit.
@@ -120,6 +124,12 @@ impl ClaudeBuilder {
         self.workspace = workspace.into();
         self
     }
+    /// Opt in only when all registered tool invocations are independent and
+    /// safe to overlap. Results remain ordered in one user message.
+    pub const fn parallel_tools(mut self, enabled: bool) -> Self {
+        self.parallel_tools = enabled;
+        self
+    }
     /// Registers one named function. Its result becomes exactly one user tool_result.
     pub fn tool<F, Fut>(mut self, definition: ToolDefinition, function: F) -> Self
     where
@@ -128,6 +138,12 @@ impl ClaudeBuilder {
     {
         self.tools
             .push((definition, Arc::new(move |args| Box::pin(function(args)))));
+        self
+    }
+    /// Explicitly enable an Anthropic-executed server tool. The backend never
+    /// invokes a local client handler for `server_tool_use` blocks.
+    pub fn server_tool(mut self, definition: ServerToolDefinition) -> Self {
+        self.server_tools.push(definition);
         self
     }
     /// Builds the common lifecycle handle and independent session event stream.
@@ -148,6 +164,14 @@ impl ClaudeBuilder {
             }
             definitions.push(definition);
         }
+        let mut names = handlers.keys().map(String::as_str).collect::<HashSet<_>>();
+        for tool in &self.server_tools {
+            if tool.kind.is_empty() || tool.name.is_empty() || !names.insert(&tool.name) {
+                return Err(unsupported(
+                    "duplicate or empty Claude server tool name/type",
+                ));
+            }
+        }
         static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
         let session_id = format!(
             "claude-{}-{}",
@@ -166,7 +190,9 @@ impl ClaudeBuilder {
                 workspace: self.workspace,
                 system: self.system,
                 tools: definitions,
+                server_tools: self.server_tools,
                 handlers,
+                parallel_tools: self.parallel_tools,
                 conversation: Mutex::new(Conversation::default()),
                 cancellations: Mutex::new(HashMap::new()),
                 stopped: AtomicBool::new(false),
@@ -193,7 +219,9 @@ struct State {
     workspace: String,
     system: String,
     tools: Vec<ToolDefinition>,
+    server_tools: Vec<ServerToolDefinition>,
     handlers: HashMap<String, Handler>,
+    parallel_tools: bool,
     conversation: Mutex<Conversation>,
     cancellations: Mutex<HashMap<BackendTurnKey, Arc<Cancellation>>>,
     stopped: AtomicBool,
@@ -247,7 +275,7 @@ impl State {
     async fn response(
         &self,
         messages: Vec<Message>,
-        tools: Vec<ToolDefinition>,
+        tools: Vec<ClaudeToolSpec>,
         cancel: &Cancellation,
         events: Option<&AgentEventPublisher>,
         index: u32,
@@ -296,7 +324,17 @@ impl State {
         let started = Instant::now();
         let mut conversation = self.conversation.lock().await;
         let events = &request.events;
-        self.emit(events,AgentEventKind::RunStarted,json!({"mode":"claude","model":self.model,"reasoning_mode":"none","effort":"none","transport":"messages_sse","orchestration":"claude","websocket_url":"","workspace":self.workspace,"instruction_bytes":request.prompt.text_bytes()}));
+        let reasoning_mode =
+            if matches!(self.model.as_str(), "claude-opus-5-5" | "claude-fable-5-1") {
+                "adaptive"
+            } else {
+                "model_default"
+            };
+        let effort = self
+            .effort
+            .map(|effort| format!("{effort:?}").to_lowercase())
+            .unwrap_or_else(|| "model_default".into());
+        self.emit(events,AgentEventKind::RunStarted,json!({"mode":"claude","model":self.model,"reasoning_mode":reasoning_mode,"effort":effort,"transport":"messages_sse","orchestration":"claude","websocket_url":"","workspace":self.workspace,"instruction_bytes":request.prompt.text_bytes()}));
         let result = self.run_locked(&mut conversation, &request, &cancel).await;
         if let Err(error) = &result {
             self.emit(
@@ -311,7 +349,7 @@ impl State {
             Err(_) => ("failed", AgentEventKind::RunFailed),
         };
         let ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-        self.emit(events,kind,json!({"status":status,"model":self.model,"reasoning_mode":"none","effort":"none","transport":"messages_sse","orchestration":"claude","duration_ms":ns/1_000_000,"duration_ns":ns,"estimated_cost":null,"cost_usd":null,"cost_status":"other"}));
+        self.emit(events,kind,json!({"status":status,"model":self.model,"reasoning_mode":reasoning_mode,"effort":effort,"transport":"messages_sse","orchestration":"claude","duration_ms":ns/1_000_000,"duration_ns":ns,"estimated_cost":null,"cost_usd":null,"cost_status":"other"}));
         result
     }
     async fn compact_locked(
@@ -332,10 +370,14 @@ impl State {
             .content
             .iter()
             .map(|block| match block {
-                ContentBlock::Text { text } => Ok(text.as_str()),
-                _ => Err(provider_error("compaction returned non-text block")),
+                ContentBlock::Text { text, .. } => Ok(Some(text.as_str())),
+                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => Ok(None),
+                _ => Err(provider_error("compaction returned a tool block")),
             })
             .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
             .join("");
         if summary.trim().is_empty() {
             return Err(provider_error("compaction returned empty summary"));
@@ -345,6 +387,28 @@ impl State {
         context.summary = summary;
         context.active_context_tokens = 0;
         Ok(())
+    }
+    async fn call_tool(
+        &self,
+        id: &str,
+        name: &str,
+        input: &Value,
+        handler: &Handler,
+        events: &AgentEventPublisher,
+        index: u32,
+    ) -> ContentBlock {
+        self.emit(
+            events,
+            AgentEventKind::ToolCall,
+            json!({"call_id":id,"tool":name,"arguments":input,"model_call_index":index}),
+        );
+        let began = Instant::now();
+        let (content, is_error) = match handler(input.clone()).await {
+            Ok(content) => (content, false),
+            Err(reason) => (reason, true),
+        };
+        self.emit(events, AgentEventKind::ToolResult, json!({"call_id":id,"tool":name,"status":if is_error {"failed"}else{"completed"},"duration_ns":began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,"started_after_ns":null,"result":{"text":content},"structured_result":null,"metadata":null}));
+        ContentBlock::tool_result(id, content, is_error)
     }
     async fn run_locked(
         &self,
@@ -371,7 +435,7 @@ impl State {
             else {
                 return Err(provider_error("invalid summary continuation"));
             };
-            let Some(ContentBlock::Text { text }) = content.first_mut() else {
+            let Some(ContentBlock::Text { text, .. }) = content.first_mut() else {
                 return Err(provider_error("invalid summary continuation"));
             };
             *text = format!(
@@ -388,7 +452,17 @@ impl State {
             let response = self
                 .response(
                     pending.clone(),
-                    self.tools.clone(),
+                    self.tools
+                        .iter()
+                        .cloned()
+                        .map(ClaudeToolSpec::Client)
+                        .chain(
+                            self.server_tools
+                                .iter()
+                                .cloned()
+                                .map(ClaudeToolSpec::Server),
+                        )
+                        .collect(),
                     cancel,
                     Some(&request.events),
                     index,
@@ -401,48 +475,74 @@ impl State {
             if response.role != Role::Assistant {
                 return Err(provider_error("response role is not assistant"));
             }
-            let mut tool_results = Vec::new();
+            let mut tool_calls = Vec::new();
+            let mut seen_ids = HashSet::new();
             let mut text = String::new();
             for block in &response.content {
                 match block {
-                    ContentBlock::Text { text: part } => text.push_str(part),
+                    ContentBlock::Text { text: part, .. } => text.push_str(part),
                     ContentBlock::ToolUse { id, name, input } => {
                         if response.stop_reason != Some(StopReason::ToolUse) {
                             return Err(provider_error(
                                 "tool_use block without tool_use stop reason",
                             ));
                         }
+                        if id.is_empty() || !seen_ids.insert(id.as_str()) {
+                            return Err(provider_error("duplicate or empty Claude tool_use id"));
+                        }
                         let handler = self.handlers.get(name).ok_or_else(|| {
                             provider_error(format!("unregistered Claude tool {name}"))
                         })?;
-                        self.emit(&request.events,AgentEventKind::ToolCall,json!({"call_id":id,"tool":name,"arguments":input,"model_call_index":index}));
-                        let began = Instant::now();
-                        let value = tokio::select! { value=handler(input.clone())=>value, ()=cancel.cancelled()=>return Err(NanocodexError::TurnCancelled) };
-                        let (content, is_error) = match value {
-                            Ok(content) => (content, false),
-                            Err(reason) => (reason, true),
-                        };
-                        self.emit(&request.events,AgentEventKind::ToolResult,json!({"call_id":id,"tool":name,"status":if is_error {"failed"}else{"completed"},"duration_ns":began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,"started_after_ns":null,"result":{"text":content},"structured_result":null,"metadata":null}));
-                        tool_results.push(ContentBlock::tool_result(id, content, is_error));
+                        tool_calls.push((id, name, input, handler));
                     }
-                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
+                    ContentBlock::Thinking { .. }
+                    | ContentBlock::RedactedThinking { .. }
+                    | ContentBlock::ServerToolUse { .. }
+                    | ContentBlock::WebSearchToolResult { .. }
+                    | ContentBlock::WebFetchToolResult { .. }
+                    | ContentBlock::ToolSearchToolResult { .. }
+                    | ContentBlock::CodeExecutionToolResult { .. } => {}
                     ContentBlock::ToolResult { .. } => {
                         return Err(provider_error("assistant emitted user tool_result"));
                     }
                 }
             }
+            if response.stop_reason == Some(StopReason::ToolUse) && tool_calls.is_empty() {
+                return Err(provider_error("tool_use stop without tool call"));
+            }
+            if !text.is_empty() {
+                self.emit(&request.events,AgentEventKind::AssistantMessage,json!({"model_call_index":index,"item_id":response.id,"phase":null,"text":text}));
+            }
+            let tool_results = if self.parallel_tools {
+                let calls = tool_calls.iter().map(|(id, name, input, handler)| {
+                    self.call_tool(id, name, input, handler, &request.events, index)
+                });
+                tokio::select! {
+                    values = futures_util::future::join_all(calls) => values,
+                    () = cancel.cancelled() => return Err(NanocodexError::TurnCancelled),
+                }
+            } else {
+                let mut results = Vec::with_capacity(tool_calls.len());
+                for (id, name, input, handler) in tool_calls {
+                    let result = tokio::select! {
+                        value = self.call_tool(id, name, input, handler, &request.events, index) => value,
+                        () = cancel.cancelled() => return Err(NanocodexError::TurnCancelled),
+                    };
+                    results.push(result);
+                }
+                results
+            };
             pending.push(Message {
                 role: Role::Assistant,
                 content: response.content,
             });
-            if !text.is_empty() {
-                self.emit(&request.events,AgentEventKind::AssistantMessage,json!({"model_call_index":index,"item_id":response.id,"phase":null,"text":text}));
-            }
             if response.stop_reason == Some(StopReason::ToolUse) {
-                if tool_results.is_empty() {
-                    return Err(provider_error("tool_use stop without tool call"));
-                }
                 pending.push(Message::tool_results(tool_results));
+                continue;
+            }
+            if response.stop_reason == Some(StopReason::PauseTurn) {
+                // Server tools continue with the same tool array and the paused
+                // assistant message, without a fabricated user tool result.
                 continue;
             }
             if !tool_results.is_empty() || response.stop_reason != Some(StopReason::EndTurn) {
