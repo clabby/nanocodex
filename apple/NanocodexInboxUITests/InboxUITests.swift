@@ -149,13 +149,42 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 5))
         app.buttons["crm-record-alex"].tap()
         XCTAssertTrue(app.staticTexts["Example University"].waitForExistence(timeout: 5))
+        let invite = app.descendants(matching: .any)["crm-timeline-calendar_meeting-invite"].firstMatch
+        XCTAssertTrue(invite.waitForExistence(timeout: 5))
+        XCTAssertTrue(invite.label.contains("Scheduled / invited"))
+        XCTAssertTrue(invite.label.contains("Attendance unconfirmed"))
+        XCTAssertFalse(invite.label.contains("Met"))
+        XCTAssertTrue(app.descendants(matching: .any)["crm-timeline-interaction-proposal"].firstMatch.exists)
         capture(app, "crm-profile")
         for _ in 0..<4 where !app.staticTexts["Met at the design workshop."].isHittable { app.swipeUp() }
         XCTAssertTrue(app.staticTexts["Met at the design workshop."].exists)
         for _ in 0..<4 where !app.buttons["crm-related-sam"].isHittable { app.swipeDown() }
         app.buttons["crm-related-sam"].tap()
         XCTAssertTrue(app.staticTexts["Sam Rivera"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["crm-timeline-empty"].firstMatch.waitForExistence(timeout: 5))
         capture(app, "crm-related-profile")
+    }
+
+    func testCRMHistoryPaginationAndCalendarStatuses() {
+        let app = XCUIApplication()
+        app.launchEnvironment["NANOCODEX_STARTUP_FIXTURE"] = "1"
+        app.launchEnvironment["NANOCODEX_STARTUP_PROFILE"] = UUID().uuidString
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-crm"].waitForExistence(timeout: 25))
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 10))
+        app.buttons["crm-record-alex"].tap()
+        let more = app.buttons["crm-timeline-more"]
+        XCTAssertTrue(more.waitForExistence(timeout: 10))
+        for _ in 0..<5 where !more.isHittable { app.swipeUp() }
+        more.tap()
+        let canceled = app.descendants(matching: .any)["crm-timeline-calendar_meeting-cancelled-invite"].firstMatch
+        let declined = app.descendants(matching: .any)["crm-timeline-calendar_meeting-declined-invite"].firstMatch
+        XCTAssertTrue(canceled.waitForExistence(timeout: 10))
+        XCTAssertTrue(canceled.label.contains("Canceled"))
+        XCTAssertTrue(declined.label.contains("Declined"))
+        XCTAssertTrue(app.descendants(matching: .any)["crm-timeline-email-email-note"].firstMatch.label.contains("Import date"))
+        XCTAssertFalse(more.exists)
     }
 
     private func selectedConversationTab(_ app: XCUIApplication) -> XCUIElement {
