@@ -84,6 +84,39 @@ pub enum ContentBlock {
         #[serde(flatten)]
         extra: BTreeMap<String, Value>,
     },
+    BashCodeExecutionToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    TextEditorCodeExecutionToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    McpToolUse {
+        id: String,
+        name: String,
+        server_name: String,
+        #[serde(default = "empty_object")]
+        input: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    McpToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    McpToolListing {
+        mcp_server_name: String,
+        tools: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
     ToolResult {
         tool_use_id: String,
         content: ToolResultContent,
@@ -142,6 +175,18 @@ impl ContentBlock {
         Self::ToolResult {
             tool_use_id: id.into(),
             content: ToolResultContent::Text(content.into()),
+            is_error,
+        }
+    }
+
+    pub fn tool_result_content(
+        id: impl Into<String>,
+        content: ToolResultContent,
+        is_error: bool,
+    ) -> Self {
+        Self::ToolResult {
+            tool_use_id: id.into(),
+            content,
             is_error,
         }
     }
@@ -218,6 +263,31 @@ impl ServerToolDefinition {
             kind: "web_search_20250305".into(),
             name: "web_search".into(),
             options: BTreeMap::from([("max_uses".into(), Value::from(max_uses))]),
+        }
+    }
+    /// Latest web search with response inclusion control; the provider may
+    /// automatically run code execution for dynamic filtering.
+    pub fn web_search_current(max_uses: u32) -> Self {
+        Self {
+            kind: "web_search_20260318".into(),
+            name: "web_search".into(),
+            options: BTreeMap::from([("max_uses".into(), Value::from(max_uses))]),
+        }
+    }
+    /// Latest web fetch with response inclusion control.
+    pub fn web_fetch_current(max_uses: u32) -> Self {
+        Self {
+            kind: "web_fetch_20260318".into(),
+            name: "web_fetch".into(),
+            options: BTreeMap::from([("max_uses".into(), Value::from(max_uses))]),
+        }
+    }
+    /// Provider-executed code sandbox, distinct from local Claude Code Bash.
+    pub fn code_execution_current() -> Self {
+        Self {
+            kind: "code_execution_20260521".into(),
+            name: "code_execution".into(),
+            options: BTreeMap::new(),
         }
     }
     pub fn web_fetch_basic(max_uses: u32) -> Self {
@@ -300,6 +370,8 @@ pub struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
     pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ClaudeToolSpec>,
 }
@@ -339,6 +411,8 @@ pub struct MessageResponse {
     #[serde(default)]
     pub stop_reason: Option<StopReason>,
     pub usage: Usage,
+    #[serde(default)]
+    pub container: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -717,6 +791,14 @@ enum BlockAccumulator {
         fragments: String,
         extra: BTreeMap<String, Value>,
     },
+    McpToolUse {
+        id: String,
+        name: String,
+        server_name: String,
+        initial: Value,
+        fragments: String,
+        extra: BTreeMap<String, Value>,
+    },
     Other(ContentBlock),
 }
 
@@ -781,6 +863,20 @@ where
                         signature,
                         extra,
                     },
+                    ContentBlock::McpToolUse {
+                        id,
+                        name,
+                        server_name,
+                        input,
+                        extra,
+                    } => BlockAccumulator::McpToolUse {
+                        id,
+                        name,
+                        server_name,
+                        initial: input,
+                        fragments: String::new(),
+                        extra,
+                    },
                     other => BlockAccumulator::Other(other),
                 };
                 active.insert(index, block);
@@ -808,7 +904,8 @@ where
                     (
                         Some(
                             BlockAccumulator::ToolUse { fragments, .. }
-                            | BlockAccumulator::ServerToolUse { fragments, .. },
+                            | BlockAccumulator::ServerToolUse { fragments, .. }
+                            | BlockAccumulator::McpToolUse { fragments, .. },
                         ),
                         ContentDelta::InputJsonDelta { partial_json },
                     ) => fragments.push_str(&partial_json),
@@ -895,6 +992,32 @@ where
                         signature,
                         extra,
                     },
+                    BlockAccumulator::McpToolUse {
+                        id,
+                        name,
+                        server_name,
+                        initial,
+                        fragments,
+                        extra,
+                    } => {
+                        let input = if fragments.is_empty() {
+                            initial
+                        } else {
+                            serde_json::from_str(&fragments)?
+                        };
+                        if !input.is_object() {
+                            return Err(ClaudeError::Protocol(
+                                "MCP tool input must be a JSON object".into(),
+                            ));
+                        }
+                        ContentBlock::McpToolUse {
+                            id,
+                            name,
+                            server_name,
+                            input,
+                            extra,
+                        }
+                    }
                     BlockAccumulator::Other(block) => block,
                 };
                 completed.insert(index, block);

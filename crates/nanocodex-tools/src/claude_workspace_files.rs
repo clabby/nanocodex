@@ -56,7 +56,7 @@ impl ClaudeWorkspaceFiles {
             json!({"name":"Edit","description":"Replace exact text in a workspace file, requiring one occurrence unless replace_all is true.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["file_path","old_string","new_string"]}}),
             json!({"name":"Write","description":"Atomically replace a UTF-8 workspace file, creating parent directories as needed.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"]}}),
             json!({"name":"Glob","description":"List matching workspace files using *, ? and ** wildcards.","input_schema":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}}),
-            json!({"name":"Grep","description":"Find regular expression matches in UTF-8 workspace files.","input_schema":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"case_sensitive":{"type":"boolean"}},"required":["pattern"]}}),
+            json!({"name":"Grep","description":"Search UTF-8 files with a bounded Rust regex. Default output is matching file paths; glob supports only *, ? and **. Unsupported type filters are rejected.","input_schema":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string","description":"Simple file glob: *, ? and ** only (no braces or character classes)."},"output_mode":{"type":"string","enum":["content","files_with_matches","count"],"default":"files_with_matches"},"-B":{"type":"integer","minimum":0,"maximum":2000},"-A":{"type":"integer","minimum":0,"maximum":2000},"-C":{"type":"integer","minimum":0,"maximum":2000},"context":{"type":"integer","minimum":0,"maximum":2000},"-n":{"type":"boolean","default":true},"-i":{"type":"boolean"},"-o":{"type":"boolean"},"head_limit":{"type":"integer","minimum":0,"default":250},"offset":{"type":"integer","minimum":0,"default":0},"multiline":{"type":"boolean"}},"required":["pattern"]}}),
         ]
     }
 
@@ -151,6 +151,9 @@ impl ClaudeWorkspaceFiles {
     }
 
     fn read(&self, input: &Value) -> Result<String, String> {
+        if input.get("pages").is_some() {
+            return Err("Read pages is unsupported: PDF reading is not available".into());
+        }
         let (_, path) = self.file(Self::field(input, "file_path")?)?;
         let content = Self::read_text(&path)?;
         let offset = input
@@ -332,26 +335,121 @@ impl ClaudeWorkspaceFiles {
     }
 
     fn grep(&self, input: &Value) -> Result<String, String> {
+        let fields = input.as_object().ok_or("Grep input must be an object")?;
+        for key in fields.keys() {
+            if !matches!(
+                key.as_str(),
+                "pattern"
+                    | "path"
+                    | "glob"
+                    | "output_mode"
+                    | "-B"
+                    | "-A"
+                    | "-C"
+                    | "context"
+                    | "-n"
+                    | "-i"
+                    | "-o"
+                    | "head_limit"
+                    | "offset"
+                    | "multiline"
+                    | "case_sensitive"
+            ) {
+                return Err(format!("unsupported Grep option: {key}"));
+            }
+        }
         let pattern = Self::field(input, "pattern")?;
-        if pattern.is_empty() {
-            return Err("pattern must not be empty".into());
+        if pattern.is_empty() || pattern.len() > 4096 {
+            return Err("pattern must be 1 to 4096 bytes".into());
         }
-        if pattern.len() > 4096 {
-            return Err("pattern exceeds 4096-byte limit".into());
+        let mode = input
+            .get("output_mode")
+            .map_or(Some("files_with_matches"), Value::as_str)
+            .ok_or("invalid output_mode")?;
+        if !matches!(mode, "content" | "files_with_matches" | "count") {
+            return Err("invalid output_mode".into());
         }
-        let sensitive = input
-            .get("case_sensitive")
-            .map_or(Some(true), Value::as_bool)
-            .ok_or("invalid case_sensitive")?;
+        let insensitive = grep_bool(input, "-i", false)?;
+        if input.get("case_sensitive").is_some() && input.get("-i").is_some() {
+            return Err("case_sensitive conflicts with -i".into());
+        }
+        // Retain the original, unadvertised spelling for old callers.
+        let sensitive = grep_bool(input, "case_sensitive", !insensitive)?;
+        let only_matching = grep_bool(input, "-o", false)?;
+        let line_numbers = grep_bool(input, "-n", true)?;
+        let multiline = grep_bool(input, "multiline", false)?;
+        let before = grep_number(input, "-B", 0, 2000)?;
+        let after = grep_number(input, "-A", 0, 2000)?;
+        if input.get("-C").is_some() && input.get("context").is_some() {
+            return Err("-C conflicts with context".into());
+        }
+        let context = if input.get("-C").is_some() {
+            grep_number(input, "-C", 0, 2000)?
+        } else {
+            grep_number(input, "context", 0, 2000)?
+        };
+        let before = if input.get("-B").is_some() {
+            before
+        } else {
+            context
+        };
+        let after = if input.get("-A").is_some() {
+            after
+        } else {
+            context
+        };
+        let offset = grep_number(input, "offset", 0, u64::MAX)?;
+        let head_limit = grep_number(input, "head_limit", 250, u64::MAX)?;
+        if mode != "content"
+            && (input.get("-B").is_some()
+                || input.get("-A").is_some()
+                || input.get("-C").is_some()
+                || input.get("context").is_some()
+                || input.get("-n").is_some()
+                || input.get("-o").is_some())
+        {
+            return Err("context, -n, and -o require output_mode content".into());
+        }
+        if only_matching && (before > 0 || after > 0 || multiline) {
+            return Err("-o cannot be combined with context or multiline".into());
+        }
+        let glob = match input.get("glob") {
+            Some(value) => Some(value.as_str().ok_or("invalid glob")?),
+            None => None,
+        };
+        if let Some(glob) = glob {
+            validate_pattern(glob)?;
+            if glob.contains(['[', ']', '{', '}', '\\']) {
+                return Err("unsupported glob syntax: only *, ? and ** are available".into());
+            }
+        }
         let re = RegexBuilder::new(pattern)
             .case_insensitive(!sensitive)
+            .multi_line(multiline)
+            .dot_matches_new_line(multiline)
             .size_limit(4 * 1024 * 1024)
             .build()
             .map_err(|e| format!("invalid or oversized regex: {e}"))?;
         let (_, root) = self.search_root(input)?;
         let mut out = String::new();
         let mut searched_bytes = 0u64;
+        let mut skipped = 0u64;
+        let mut yielded = 0u64;
         for file in self.walk(&root)? {
+            let shown = file
+                .strip_prefix(&self.root)
+                .map_err(|_| "search escaped workspace")?
+                .to_string_lossy();
+            if let Some(glob) = glob {
+                let target = if glob.contains('/') {
+                    shown.as_ref()
+                } else {
+                    file.file_name().and_then(|s| s.to_str()).unwrap_or("")
+                };
+                if !glob_matches(glob.as_bytes(), target.as_bytes()) {
+                    continue;
+                }
+            }
             let size = fs::metadata(&file)
                 .map_err(|e| format!("search metadata: {e}"))?
                 .len();
@@ -362,20 +460,148 @@ impl ClaudeWorkspaceFiles {
             let Ok(contents) = Self::read_text(&file) else {
                 continue;
             };
-            let shown = file
-                .strip_prefix(&self.root)
-                .map_err(|_| "search escaped workspace")?
-                .display();
-            for (index, line) in contents.lines().enumerate() {
-                if re.is_match(line)
-                    && !push_bounded(&mut out, &format!("{shown}:{}:{line}\n", index + 1))
+            let lines: Vec<&str> = contents.lines().collect();
+            let mut hits = vec![false; lines.len()];
+            if multiline {
+                // A match spanning lines marks each touched line. Byte offsets are UTF-8 safe.
+                let starts: Vec<usize> = std::iter::once(0)
+                    .chain(contents.match_indices('\n').map(|(i, _)| i + 1))
+                    .collect();
+                for found in re.find_iter(&contents) {
+                    let first = starts
+                        .partition_point(|&s| s <= found.start())
+                        .saturating_sub(1);
+                    let last_byte = found.end().saturating_sub(1).max(found.start());
+                    let last = starts
+                        .partition_point(|&s| s <= last_byte)
+                        .saturating_sub(1);
+                    for hit in hits.iter_mut().take(last.saturating_add(1)).skip(first) {
+                        *hit = true;
+                    }
+                }
+            } else {
+                for (line, hit) in lines.iter().zip(&mut hits) {
+                    *hit = re.is_match(line);
+                }
+            }
+            if mode != "content" {
+                let count = hits.iter().filter(|&&hit| hit).count();
+                if count == 0 {
+                    continue;
+                }
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+                if head_limit != 0 && yielded >= head_limit {
+                    return Ok(out);
+                }
+                let line = if mode == "count" {
+                    format!("{shown}:{count}\n")
+                } else {
+                    format!("{shown}\n")
+                };
+                if !push_bounded(&mut out, &line) {
+                    return Ok(out);
+                }
+                yielded += 1;
+                continue;
+            }
+            if only_matching {
+                for (index, line) in lines.iter().enumerate() {
+                    for found in re.find_iter(line) {
+                        if skipped < offset {
+                            skipped += 1;
+                            continue;
+                        }
+                        if head_limit != 0 && yielded >= head_limit {
+                            return Ok(out);
+                        }
+                        let prefix = if line_numbers {
+                            format!("{shown}:{}:", index + 1)
+                        } else {
+                            format!("{shown}:")
+                        };
+                        if !push_bounded(&mut out, &format!("{prefix}{}\n", found.as_str())) {
+                            return Ok(out);
+                        }
+                        yielded += 1;
+                    }
+                }
+                continue;
+            }
+            let mut selected = vec![false; lines.len()];
+            for (index, hit) in hits.iter().enumerate() {
+                if !hit {
+                    continue;
+                }
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+                if head_limit != 0 && yielded >= head_limit {
+                    break;
+                }
+                selected[index] = true;
+                yielded += 1;
+            }
+            let mut emit = vec![false; lines.len()];
+            for (index, &hit) in selected.iter().enumerate() {
+                if hit {
+                    let start = index.saturating_sub(before as usize);
+                    let end = index
+                        .saturating_add(after as usize)
+                        .saturating_add(1)
+                        .min(lines.len());
+                    emit[start..end].fill(true);
+                }
+            }
+            let mut previous = None;
+            for (index, line) in lines.iter().enumerate() {
+                if !emit[index] {
+                    continue;
+                }
+                if let Some(prev) = previous
+                    && index > prev + 1
+                    && !push_bounded(&mut out, "--\n")
                 {
                     return Ok(out);
                 }
+                let separator = if selected[index] { ':' } else { '-' };
+                let result = if line_numbers {
+                    format!("{shown}{separator}{}{separator}{line}\n", index + 1)
+                } else {
+                    format!("{shown}{separator}{line}\n")
+                };
+                if !push_bounded(&mut out, &result) {
+                    return Ok(out);
+                }
+                previous = Some(index);
+            }
+            if head_limit != 0 && yielded >= head_limit {
+                return Ok(out);
             }
         }
         Ok(out)
     }
+}
+
+fn grep_bool(input: &Value, key: &str, default: bool) -> Result<bool, String> {
+    input
+        .get(key)
+        .map_or(Some(default), Value::as_bool)
+        .ok_or_else(|| format!("invalid {key}"))
+}
+
+fn grep_number(input: &Value, key: &str, default: u64, max: u64) -> Result<u64, String> {
+    let value = input
+        .get(key)
+        .map_or(Some(default), Value::as_u64)
+        .ok_or_else(|| format!("invalid {key}"))?;
+    if value > max {
+        return Err(format!("{key} exceeds {max}"));
+    }
+    Ok(value)
 }
 
 fn reject_symlink_target(path: &Path) -> Result<(), String> {
@@ -539,7 +765,7 @@ mod tests {
         );
         assert!(
             files
-                .execute("Grep", json!({"pattern":"green"}))
+                .execute("Grep", json!({"pattern":"green","output_mode":"content"}))
                 .await
                 .unwrap()
                 .contains("a/b.txt:1:green")
@@ -560,12 +786,126 @@ mod tests {
         let found = files
             .execute(
                 "Grep",
-                json!({"pattern":"^alpha [0-9]+$","case_sensitive":false}),
+                json!({"pattern":"^alpha [0-9]+$","-i":true,"output_mode":"content"}),
             )
             .await
             .unwrap();
         assert_eq!(found, "a.txt:1:Alpha 42\n");
         assert!(files.execute("Grep", json!({"pattern":"["})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn grep_modes_filters_pagination_and_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = ClaudeWorkspaceFiles::new(dir.path()).unwrap();
+        files
+            .execute(
+                "Write",
+                json!({"file_path":"src/a.rs","content":"before\nHit Hit\nafter\nspacer\nHit\n"}),
+            )
+            .await
+            .unwrap();
+        files
+            .execute("Write", json!({"file_path":"src/b.txt","content":"hit\n"}))
+            .await
+            .unwrap();
+        files
+            .execute("Write", json!({"file_path":"src/c.rs","content":"hit\n"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            files
+                .execute("Grep", json!({"pattern":"Hit", "glob":"*.rs"}))
+                .await
+                .unwrap(),
+            "src/a.rs\n"
+        );
+        assert_eq!(
+            files
+                .execute(
+                    "Grep",
+                    json!({"pattern":"hit", "-i":true,"glob":"*.rs","output_mode":"count"})
+                )
+                .await
+                .unwrap(),
+            "src/a.rs:2\nsrc/c.rs:1\n"
+        );
+        assert_eq!(files.execute("Grep", json!({"pattern":"hit", "-i":true,"output_mode":"files_with_matches","offset":1,"head_limit":1})).await.unwrap(),
+            "src/b.txt\n");
+        assert_eq!(
+            files
+                .execute(
+                    "Grep",
+                    json!({"pattern":"Hit", "output_mode":"content","-C":1,"head_limit":1})
+                )
+                .await
+                .unwrap(),
+            "src/a.rs-1-before\nsrc/a.rs:2:Hit Hit\nsrc/a.rs-3-after\n"
+        );
+        assert_eq!(files.execute("Grep", json!({"pattern":"Hit", "output_mode":"content","-o":true,"-n":false,"head_limit":2})).await.unwrap(),
+            "src/a.rs:Hit\nsrc/a.rs:Hit\n");
+        assert_eq!(
+            files
+                .execute(
+                    "Grep",
+                    json!({"pattern":"Hit", "output_mode":"content","offset":1,"head_limit":1})
+                )
+                .await
+                .unwrap(),
+            "src/a.rs:5:Hit\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_multiline_and_rejected_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = ClaudeWorkspaceFiles::new(dir.path()).unwrap();
+        files
+            .execute(
+                "Write",
+                json!({"file_path":"a.txt","content":"start\nmiddle\nend\n"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            files
+                .execute(
+                    "Grep",
+                    json!({"pattern":"start.*end","multiline":true,"output_mode":"content"})
+                )
+                .await
+                .unwrap(),
+            "a.txt:1:start\na.txt:2:middle\na.txt:3:end\n"
+        );
+        for bad in [
+            json!({"pattern":"x", "type":"rust"}),
+            json!({"pattern":"x", "glob":"*.{rs,txt}"}),
+            json!({"pattern":"x", "output_mode":"content", "-o":true,"multiline":true}),
+            json!({"pattern":"x", "output_mode":"count", "-n":false}),
+            json!({"pattern":"x", "-A":-1}),
+            json!({"pattern":"x", "head_limit":"10"}),
+        ] {
+            assert!(files.execute("Grep", bad).await.is_err());
+        }
+        assert!(
+            files
+                .execute("Read", json!({"file_path":"a.txt", "pages":"1-2"}))
+                .await
+                .is_err()
+        );
+        let schema = ClaudeWorkspaceFiles::definitions();
+        let grep = schema.iter().find(|s| s["name"] == "Grep").unwrap();
+        assert!(grep["input_schema"]["properties"].get("type").is_none());
+        assert!(
+            grep["input_schema"]["properties"]
+                .get("multiline")
+                .is_some()
+        );
+        assert!(
+            schema.iter().find(|s| s["name"] == "Read").unwrap()["input_schema"]["properties"]
+                .get("pages")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -676,7 +1016,10 @@ mod tests {
         assert!(read.len() <= 64 * 1024);
         assert!(read.contains("[output truncated]"));
         let grep = files
-            .execute("Grep", json!({"pattern":"hit","path":path}))
+            .execute(
+                "Grep",
+                json!({"pattern":"hit","path":path,"output_mode":"content"}),
+            )
             .await
             .unwrap();
         assert!(grep.len() <= 64 * 1024);

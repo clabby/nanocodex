@@ -1,6 +1,8 @@
 //! The Anthropic-executed tools are not client callbacks and never get user tool_result blocks.
 use axum::{Json, Router, response::IntoResponse, routing::post};
+use futures_util::StreamExt;
 use nanocodex_agent::Nanocodex;
+use nanocodex_agent::events::AgentEventKind;
 use nanocodex_claude::{Claude, ClaudeClient, ServerToolDefinition};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -47,7 +49,7 @@ async fn server_web_search_results_and_citations_replay_without_client_result() 
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
         .server_tool(ServerToolDefinition::web_search_basic(2))
         .build()
         .unwrap();
@@ -62,6 +64,14 @@ async fn server_web_search_results_and_citations_replay_without_client_result() 
             .final_message(),
         "An answer"
     );
+    let citation_event = loop {
+        let event = events.next().await.unwrap();
+        if event.kind == AgentEventKind::AssistantMessage {
+            break event;
+        }
+    };
+    let event: Value = serde_json::from_str(citation_event.payload.get()).unwrap();
+    assert_eq!(event["citations"][0]["url"], "https://example.org");
     agent
         .prompt("followup")
         .await
@@ -227,4 +237,88 @@ async fn server_tool_search_reference_and_discovered_client_tool_continue_withou
         r[1]["messages"][2]["content"][0]["tool_use_id"],
         "toolu_lookup"
     );
+}
+
+#[test]
+fn additional_anthropic_server_results_and_mcp_listing_replay_opaque_payload() {
+    use nanocodex_claude::ContentBlock;
+    let cases = [
+        json!({"type":"bash_code_execution_tool_result","tool_use_id":"s1","content":{"type":"bash_code_execution_result","stdout":"a","return_code":0,"content":[{"file_id":"opaque"}]}}),
+        json!({"type":"text_editor_code_execution_tool_result","tool_use_id":"s2","content":{"type":"text_editor_code_execution_view_result","content":"hi"}}),
+        json!({"type":"mcp_tool_use","id":"m1","name":"echo","server_name":"safe","input":{"text":"x"},"caller":{"type":"direct"}}),
+        json!({"type":"mcp_tool_result","tool_use_id":"m1","is_error":false,"content":[{"type":"text","text":"x"}]}),
+        json!({"type":"mcp_tool_listing","mcp_server_name":"safe","tools":[{"name":"echo","input_schema":{"type":"object"}}]}),
+    ];
+    for value in cases {
+        let block: ContentBlock = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(block).unwrap(), value);
+    }
+}
+
+#[tokio::test]
+async fn provider_code_container_id_is_reused_on_next_turn_without_local_bash() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests = received.clone();
+    let app = Router::new().route("/v1/messages", post(move |Json(body):Json<Value>| {
+        let requests=requests.clone();
+        async move {
+            let index={let mut log=requests.lock().unwrap();log.push(body);log.len()};
+            let mut out=String::new();
+            let mut emit=|frame:Value|out.push_str(&format!("data: {frame}\n\n"));
+            emit(json!({"type":"message_start","message":{"id":"m","role":"assistant","model":"test","content":[],"usage":{"input_tokens":1,"output_tokens":0},"container":{"id":"container-fixture","expires_at":"synthetic"}}}));
+            emit(json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}));
+            emit(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":if index==1 {"one"}else{"two"}}}));
+            emit(json!({"type":"content_block_stop","index":0}));
+            emit(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}));
+            emit(json!({"type":"message_stop"}));
+            ([ ("content-type","text/event-stream") ],out).into_response()
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .server_tool(ServerToolDefinition::code_execution_current())
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("first")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "one"
+    );
+    assert_eq!(
+        agent
+            .prompt("second")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "two"
+    );
+    let log = received.lock().unwrap();
+    assert!(log[0].get("container").is_none());
+    assert_eq!(log[0]["tools"][0]["type"], "code_execution_20260521");
+    assert_eq!(log[1]["container"], "container-fixture");
+    assert!(
+        !log[1]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "Bash")
+    );
+    server.abort();
 }

@@ -1,7 +1,8 @@
 //! Provider-specific Messages agent loop. No OpenAI transport or CLI credentials.
 use crate::{
     ClaudeClient, ClaudeToolSpec, ContentBlock, ContentDelta, Message, MessagesRequest, Role,
-    ServerToolDefinition, StopReason, StreamEvent, ToolDefinition, collect_stream,
+    ServerToolDefinition, StopReason, StreamEvent, ToolDefinition, ToolResultContent,
+    collect_stream,
 };
 use futures_util::StreamExt;
 use nanocodex_agent::{
@@ -28,7 +29,10 @@ use std::{
 use tokio::sync::{Mutex, Notify, oneshot};
 
 type Handler = Arc<
-    dyn Fn(Value) -> Pin<Box<dyn Future<Output = std::result::Result<String, String>> + Send>>
+    dyn Fn(
+            Value,
+        )
+            -> Pin<Box<dyn Future<Output = std::result::Result<ToolResultContent, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -136,8 +140,29 @@ impl ClaudeBuilder {
         F: Fn(Value) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = std::result::Result<String, String>> + Send + 'static,
     {
-        self.tools
-            .push((definition, Arc::new(move |args| Box::pin(function(args)))));
+        self.tools.push((
+            definition,
+            Arc::new(move |args| {
+                let future = function(args);
+                Box::pin(async move { future.await.map(ToolResultContent::Text) })
+            }),
+        ));
+        self
+    }
+    /// Register a Claude client tool that returns text, image, or document
+    /// blocks in a single user tool_result. The caller owns capability checks.
+    pub fn tool_blocks<F, Fut>(mut self, definition: ToolDefinition, function: F) -> Self
+    where
+        F: Fn(Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::result::Result<Vec<Value>, String>> + Send + 'static,
+    {
+        self.tools.push((
+            definition,
+            Arc::new(move |args| {
+                let future = function(args);
+                Box::pin(async move { future.await.map(ToolResultContent::Blocks) })
+            }),
+        ));
         self
     }
     /// Register only the five Claude-native text file tools (Read, Edit, Write,
@@ -156,6 +181,65 @@ impl ClaudeBuilder {
                 let files = files.clone();
                 let name = name.clone();
                 async move { files.execute(&name, input).await }
+            });
+        }
+        self
+    }
+    /// Register a separately scoped session-local Claude task board; never a
+    /// Codex plan or account scheduler. Its state is not durable on restart.
+    #[cfg(feature = "workspace-files")]
+    pub fn tasks(mut self, tasks: Arc<nanocodex_tools::claude_tasks::ClaudeTasks>) -> Self {
+        for schema in nanocodex_tools::claude_tasks::ClaudeTasks::definitions() {
+            let definition: ToolDefinition = serde_json::from_value(schema)
+                .expect("built-in Claude task schema must remain valid");
+            let name = definition.name.clone();
+            let tasks = tasks.clone();
+            self = self.tool(definition, move |input| {
+                let tasks = tasks.clone();
+                let name = name.clone();
+                async move { tasks.execute(&name, input).await }
+            });
+        }
+        self
+    }
+    /// Register a notebook editor for an explicitly host-authorized, isolated
+    /// workspace. Its path checks alone do not constitute an OS sandbox.
+    #[cfg(feature = "workspace-files")]
+    pub fn notebook(
+        mut self,
+        notebook: Arc<nanocodex_tools::claude_notebook::ClaudeNotebook>,
+    ) -> Self {
+        for schema in nanocodex_tools::claude_notebook::ClaudeNotebook::definitions() {
+            let definition: ToolDefinition = serde_json::from_value(schema)
+                .expect("built-in Claude notebook schema must remain valid");
+            let name = definition.name.clone();
+            let notebook = notebook.clone();
+            self = self.tool(definition, move |input| {
+                let notebook = notebook.clone();
+                let name = name.clone();
+                async move { notebook.execute(&name, input).await }
+            });
+        }
+        self
+    }
+    /// Register Claude Bash **only** with an embedding-provided sandbox
+    /// capability that enforces permissions, deadlines, and process cleanup.
+    /// No ambient shell executor is constructed here; background/bypass modes
+    /// are rejected by the adapter.
+    #[cfg(feature = "workspace-files")]
+    pub fn sandbox_bash<E>(mut self, bash: Arc<nanocodex_tools::claude_bash::ClaudeBash<E>>) -> Self
+    where
+        E: nanocodex_tools::claude_bash::SandboxBashExecutor + 'static,
+    {
+        for schema in nanocodex_tools::claude_bash::ClaudeBash::<E>::definitions() {
+            let definition: ToolDefinition = serde_json::from_value(schema)
+                .expect("built-in Claude Bash schema must remain valid");
+            let name = definition.name.clone();
+            let bash = bash.clone();
+            self = self.tool(definition, move |input| {
+                let bash = bash.clone();
+                let name = name.clone();
+                async move { bash.execute(&name, input).await }
             });
         }
         self
@@ -228,6 +312,7 @@ struct Conversation {
     messages: Vec<Message>,
     summary: String,
     active_context_tokens: u64,
+    container: Option<String>,
 }
 struct State {
     client: ClaudeClient,
@@ -299,6 +384,7 @@ impl State {
         cancel: &Cancellation,
         events: Option<&AgentEventPublisher>,
         index: u32,
+        container: Option<&str>,
     ) -> Result<crate::MessageResponse> {
         let request = MessagesRequest {
             model: self.model.clone(),
@@ -307,6 +393,7 @@ impl State {
             output_config: self.effort.map(|effort| crate::OutputConfig { effort }),
             system: (!self.system.is_empty()).then(|| self.system.clone()),
             messages,
+            container: container.map(str::to_owned),
             tools,
         };
         let mut stream = tokio::select! { result=self.client.stream(&request)=>result.map_err(provider_error)?, ()=cancel.cancelled()=>return Err(NanocodexError::TurnCancelled) };
@@ -382,7 +469,16 @@ impl State {
         }
         let mut messages = context.messages.clone();
         messages.push(Message::text(Role::User,"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Summarize the conversation so far, preserving user goals, constraints, decisions and tool results."));
-        let response = self.response(messages, Vec::new(), cancel, None, 0).await?;
+        let response = self
+            .response(
+                messages,
+                Vec::new(),
+                cancel,
+                None,
+                0,
+                context.container.as_deref(),
+            )
+            .await?;
         if response.stop_reason != Some(StopReason::EndTurn) || response.role != Role::Assistant {
             return Err(provider_error("compaction summary did not end normally"));
         }
@@ -425,10 +521,14 @@ impl State {
         let began = Instant::now();
         let (content, is_error) = match handler(input.clone()).await {
             Ok(content) => (content, false),
-            Err(reason) => (reason, true),
+            Err(reason) => (ToolResultContent::Text(reason), true),
         };
-        self.emit(events, AgentEventKind::ToolResult, json!({"call_id":id,"tool":name,"status":if is_error {"failed"}else{"completed"},"duration_ns":began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,"started_after_ns":null,"result":{"text":content},"structured_result":null,"metadata":null}));
-        ContentBlock::tool_result(id, content, is_error)
+        let event_content = match &content {
+            ToolResultContent::Text(text) => json!({"text": text}),
+            ToolResultContent::Blocks(blocks) => json!({"content_blocks": blocks}),
+        };
+        self.emit(events, AgentEventKind::ToolResult, json!({"call_id":id,"tool":name,"status":if is_error {"failed"}else{"completed"},"duration_ns":began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,"started_after_ns":null,"result":event_content,"structured_result":null,"metadata":null}));
+        ContentBlock::tool_result_content(id, content, is_error)
     }
     async fn run_locked(
         &self,
@@ -486,21 +586,36 @@ impl State {
                     cancel,
                     Some(&request.events),
                     index,
+                    conversation.container.as_deref(),
                 )
                 .await?;
             input = input.saturating_add(response.usage.input_tokens);
             cache_read = cache_read.saturating_add(response.usage.cache_read_input_tokens);
             cache_write = cache_write.saturating_add(response.usage.cache_creation_input_tokens);
             output = output.saturating_add(response.usage.output_tokens);
+            if let Some(container) = &response.container {
+                let id = container
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty() && id.len() <= 512)
+                    .ok_or_else(|| provider_error("malformed Claude container id"))?;
+                conversation.container = Some(id.to_owned());
+            }
             if response.role != Role::Assistant {
                 return Err(provider_error("response role is not assistant"));
             }
             let mut tool_calls = Vec::new();
             let mut seen_ids = HashSet::new();
             let mut text = String::new();
+            let mut citations = Vec::new();
             for block in &response.content {
                 match block {
-                    ContentBlock::Text { text: part, .. } => text.push_str(part),
+                    ContentBlock::Text { text: part, extra } => {
+                        text.push_str(part);
+                        if let Some(Value::Array(items)) = extra.get("citations") {
+                            citations.extend(items.iter().cloned());
+                        }
+                    }
                     ContentBlock::ToolUse {
                         id, name, input, ..
                     } => {
@@ -523,7 +638,12 @@ impl State {
                     | ContentBlock::WebSearchToolResult { .. }
                     | ContentBlock::WebFetchToolResult { .. }
                     | ContentBlock::ToolSearchToolResult { .. }
-                    | ContentBlock::CodeExecutionToolResult { .. } => {}
+                    | ContentBlock::CodeExecutionToolResult { .. }
+                    | ContentBlock::BashCodeExecutionToolResult { .. }
+                    | ContentBlock::TextEditorCodeExecutionToolResult { .. }
+                    | ContentBlock::McpToolUse { .. }
+                    | ContentBlock::McpToolResult { .. }
+                    | ContentBlock::McpToolListing { .. } => {}
                     ContentBlock::ToolResult { .. } => {
                         return Err(provider_error("assistant emitted user tool_result"));
                     }
@@ -533,7 +653,7 @@ impl State {
                 return Err(provider_error("tool_use stop without tool call"));
             }
             if !text.is_empty() {
-                self.emit(&request.events,AgentEventKind::AssistantMessage,json!({"model_call_index":index,"item_id":response.id,"phase":null,"text":text}));
+                self.emit(&request.events,AgentEventKind::AssistantMessage,json!({"model_call_index":index,"item_id":response.id,"phase":null,"text":text,"citations":citations}));
             }
             let tool_results = if self.parallel_tools {
                 let calls = tool_calls.iter().map(|(id, name, input, handler)| {

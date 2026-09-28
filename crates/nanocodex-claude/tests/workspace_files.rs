@@ -140,3 +140,97 @@ async fn completed_file_write_survives_followup_transport_error_in_session() {
     assert_eq!(r[2]["messages"][2]["content"][0]["tool_use_id"], "w1");
     server.abort();
 }
+
+#[tokio::test]
+async fn opt_in_tasks_notebook_and_sandbox_bash_route_without_host_shell() {
+    use nanocodex_tools::{
+        claude_bash::{BashRequest, BashResult, ClaudeBash, SandboxBashExecutor},
+        claude_notebook::ClaudeNotebook,
+        claude_tasks::ClaudeTasks,
+    };
+    struct FakeSandbox;
+    impl SandboxBashExecutor for FakeSandbox {
+        async fn execute(&self, request: BashRequest) -> Result<BashResult, String> {
+            assert_eq!(request.command, "printf safe");
+            Ok(BashResult {
+                stdout: "safe".into(),
+                stderr: String::new(),
+                exit_code: 0,
+                truncated: false,
+            })
+        }
+    }
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("demo.ipynb"),serde_json::to_vec(&json!({"nbformat":4,"cells":[{"id":"a","cell_type":"markdown","source":["old"],"metadata":{}}]})).unwrap()).unwrap();
+    let tasks = Arc::new(ClaudeTasks::new());
+    let notebook = Arc::new(ClaudeNotebook::new(dir.path()).unwrap());
+    let bash = Arc::new(ClaudeBash::new(FakeSandbox));
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let log = requests.clone();
+    let app=Router::new().route("/v1/messages",post(move |Json(body):Json<Value>| {
+        let log=log.clone();
+        async move {
+            let idx={let mut r=log.lock().unwrap();r.push(body);r.len()};
+            let (block,stop)=match idx {
+                1 => (json!({"type":"tool_use","id":"t1","name":"TaskCreate","input":{"subject":"Write notes","description":"Use notebook"}}),"tool_use"),
+                2 => (json!({"type":"tool_use","id":"n1","name":"NotebookEdit","input":{"notebook_path":"demo.ipynb","new_source":"new","cell_id":"a"}}),"tool_use"),
+                3 => (json!({"type":"tool_use","id":"b1","name":"Bash","input":{"command":"printf safe"}}),"tool_use"),
+                _ => (json!({"type":"text","text":"complete"}),"end_turn"),
+            };
+            ([ ("content-type","text/event-stream") ],sse(block,stop))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .tasks(tasks)
+        .notebook(notebook)
+        .sandbox_bash(bash)
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("test tools")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "complete"
+    );
+    let log = requests.lock().unwrap();
+    let names: Vec<_> = log[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"TaskCreate") && names.contains(&"NotebookEdit") && names.contains(&"Bash")
+    );
+    assert!(!names.contains(&"exec_command") && !names.contains(&"apply_patch"));
+    assert_eq!(log[3]["messages"][6]["content"][0]["tool_use_id"], "b1");
+    assert_eq!(
+        serde_json::from_str::<Value>(
+            log[3]["messages"][6]["content"][0]["content"]
+                .as_str()
+                .unwrap()
+        )
+        .unwrap()["stdout"],
+        "safe"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(dir.path().join("demo.ipynb")).unwrap())
+            .unwrap()["cells"][0]["source"],
+        json!(["new"])
+    );
+    server.abort();
+}

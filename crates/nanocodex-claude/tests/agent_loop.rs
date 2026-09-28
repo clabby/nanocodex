@@ -582,3 +582,49 @@ async fn compaction_accepts_latest_model_thinking_before_text_summary() {
             .contains("Summary of first turn")
     );
 }
+
+#[tokio::test]
+async fn claude_client_tool_can_return_multimodal_blocks_without_codex_result_shape() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let log = requests.clone();
+    let app=Router::new().route("/v1/messages",post(move |Json(body):Json<Value>| {
+        let log=log.clone();
+        async move {
+            let index={let mut r=log.lock().unwrap();r.push(body);r.len()};
+            let (blocks,reason)=if index==1 {(vec![json!({"type":"tool_use","id":"toolu_media","name":"ReadImage","input":{"path":"illustration.png"}})],"tool_use")}
+                else {(vec![json!({"type":"text","text":"seen"})],"end_turn")};
+            ([ ("content-type","text/event-stream") ],stream(blocks,reason)).into_response()
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent,_)=Nanocodex::builder(Claude::new(client,"test"))
+        .tool_blocks(ToolDefinition { name:"ReadImage".into(), description:"Test image".into(), input_schema:json!({"type":"object"}),strict:None,defer_loading:false }, |_| async {
+            Ok(vec![json!({"type":"text","text":"image follows"}),json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}})])
+        }).build().unwrap();
+    assert_eq!(
+        agent
+            .prompt("read image")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "seen"
+    );
+    let log = requests.lock().unwrap();
+    assert_eq!(
+        log[1]["messages"][2]["content"][0]["content"][1]["source"]["data"],
+        "cG5n"
+    );
+    assert_eq!(log[1]["messages"][2]["content"][0]["type"], "tool_result");
+    server.abort();
+}

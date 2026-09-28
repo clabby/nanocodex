@@ -48,6 +48,7 @@ fn request() -> MessagesRequest {
         output_config: None,
         system: Some("Use tools".into()),
         messages: vec![Message::text(Role::User, "What's the weather?")],
+        container: None,
         tools: vec![
             ToolDefinition {
                 name: "weather".into(),
