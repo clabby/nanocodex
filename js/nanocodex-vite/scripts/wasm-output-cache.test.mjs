@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { test } from "node:test";
-import { check, fingerprint, fingerprintInputs, save } from "./wasm-output-cache.mjs";
+import { check, fingerprintInputs, save } from "./wasm-output-cache.mjs";
 
 const repository = new URL("../../../", import.meta.url);
 test("content key, attestation integrity, and pre-Cargo reuse", async () => {
@@ -24,44 +24,46 @@ test("content key, attestation integrity, and pre-Cargo reuse", async () => {
     await put("crates/core/src/lib.rs", "core source");
     await put("js/nanocodex/package.json", '{"devDependencies":{"binaryen":"132.0.0"}}');
     await put(".cargo/config.toml", "# config");
-    const key = await fingerprint(root);
-    assert.equal(await fingerprintInputs(root), key);
-    assert.equal(await fingerprint(root, "release", { ...process.env, RUSTUP_TOOLCHAIN: "1.97", CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0", CARGO_INCREMENTAL: "0" }), key);
+    await put("turbo.json", JSON.stringify({ tasks: { "nanocodex#build": { inputs: ["$TURBO_DEFAULT$", "$TURBO_ROOT$/Cargo.toml", "$TURBO_ROOT$/Cargo.lock", "$TURBO_ROOT$/.cargo/**", "$TURBO_ROOT$/js/nanocodex-vite/scripts/**", "$TURBO_ROOT$/crates/core/**"] } } }));
+    const key = await fingerprintInputs(root);
+    assert.equal(await fingerprintInputs(root, "release", { ...process.env, RUSTUP_TOOLCHAIN: "1.97", CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0", CARGO_INCREMENTAL: "0" }), key);
     const manifestPath = "js/nanocodex/Cargo.toml";
     const oldManifest = await readFile(resolve(root, manifestPath));
     await put(manifestPath, '[dependencies.core]\nworkspace = true\n');
-    const dottedKey = await fingerprint(root);
+    const dottedKey = await fingerprintInputs(root);
     await put("crates/core/src/lib.rs", "changed dotted dependency");
-    assert.notEqual(await fingerprint(root), dottedKey);
+    assert.notEqual(await fingerprintInputs(root), dottedKey);
     await put("crates/core/src/lib.rs", "core source");
     await put(manifestPath, oldManifest);
     await put("shared/prompt.md", "embedded prompt");
     await put("js/nanocodex/src/lib.rs", 'const PROMPT: &str = include_str!("../../../shared/prompt.md");');
-    const includeKey = await fingerprint(root);
+    const includeKey = await fingerprintInputs(root);
     await put("shared/prompt.md", "changed embedded prompt");
-    assert.notEqual(await fingerprint(root), includeKey);
+    assert.notEqual(await fingerprintInputs(root), includeKey);
     await put("js/nanocodex/src/lib.rs", "wasm source");
     await put(manifestPath, '[dependencies."core"]\nworkspace = true\n');
-    assert.equal(await fingerprint(root), await fingerprint(root), "quoted dependency table is supported");
+    assert.equal(await fingerprintInputs(root), await fingerprintInputs(root), "quoted dependency table is supported");
     await put(manifestPath, '[dependencies]\n  core = { workspace = true }\n');
-    const indentedKey = await fingerprint(root);
+    const indentedKey = await fingerprintInputs(root);
     await put("crates/core/src/lib.rs", "changed indented dependency");
-    assert.notEqual(await fingerprint(root), indentedKey);
+    assert.notEqual(await fingerprintInputs(root), indentedKey);
     await put("crates/core/src/lib.rs", "core source");
     await put(manifestPath, '[invalid TOML');
     await assert.rejects(fingerprintInputs(root), "release identity must surface resolution failures");
-    assert.notEqual(await fingerprint(root), await fingerprint(root), "invalid manifest disables reuse");
+    const buildScript = resolve(root, "js/nanocodex-vite/scripts/build-js-package.sh");
+    assert.throws(() => execFileSync("bash", [buildScript, "--release"], { cwd: root, stdio: "pipe", env: { ...process.env, NANOCODEX_WASM_LOCK_HELD: root } }),
+      /invalid TOML/, "an unresolvable input set stops the build before Cargo instead of disabling the cache");
     await put(manifestPath, oldManifest);
     await put("js/nanocodex/cloudflare/worker.mjs", "unrelated worker change");
-    assert.equal(await fingerprint(root), key);
+    assert.equal(await fingerprintInputs(root), key);
     for (const path of ["crates/core/src/lib.rs", "Cargo.lock", ".cargo/config.toml", "js/nanocodex-vite/scripts/wasm-memory-views.mjs"]) {
       const before = await readFile(resolve(root, path));
       await put(path, `${before}\nchanged`);
-      assert.notEqual(await fingerprint(root), key, path);
+      assert.notEqual(await fingerprintInputs(root), key, path);
       await put(path, before);
     }
-    assert.notEqual(await fingerprint(root, "development"), key);
-    assert.notEqual(await fingerprint(root, "release", { RUSTFLAGS: "-C opt-level=1" }), key);
+    assert.notEqual(await fingerprintInputs(root, "development"), key);
+    assert.notEqual(await fingerprintInputs(root, "release", { RUSTFLAGS: "-C opt-level=1" }), key);
     for (const dir of ["pkg-web", "pkg-node"]) {
       for (const name of ["nanocodex.js", "nanocodex.d.ts", "package.json", ...(dir === "pkg-web" ? ["nanocodex_bg.js", "nanocodex_bg.wasm", "nanocodex_worker.js"] : [])]) await put(`js/nanocodex/${dir}/${name}`, name);
     }
