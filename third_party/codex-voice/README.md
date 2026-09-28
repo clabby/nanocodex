@@ -64,6 +64,7 @@ asset fails installation, retaining the previously active version.
 Validation:
 
 ```sh
+python3 third_party/codex-voice/patches/webrtc-sys/prepare.py
 cargo test --locked --manifest-path third_party/codex-voice/Cargo.toml -p nanocodex-webrtc-voice-host
 cargo test --locked -p nanocodex-voice-native
 pnpm build:voice-native
@@ -121,8 +122,11 @@ physical-speaker echo-rejection result; synthetic mixer tests verify ingress and
 fencing. Legacy GNU Linux/MSVC GStreamer helpers explicitly return Unsupported for
 external PCM; this path currently ships in the macOS libWebRTC package only.
 
-`vendor/webrtc-sys` is the pinned 0.3.45 crate with a small factory-mixer patch,
-not a different native WebRTC archive. See its `NANOCODEX.md` for patch boundaries.
+webrtc-sys is the pinned crates.io 0.3.45 crate with a small factory-mixer patch,
+not a different native WebRTC archive. Only the patch is tracked, in
+`patches/webrtc-sys`; its `prepare.py` verifies the crates.io archive checksum and
+materializes the patched crate into the gitignored `vendor/webrtc-sys`. See
+`patches/webrtc-sys/NANOCODEX.md` for patch boundaries.
 Build and stage the actual Mac package with:
 
 ```sh
@@ -136,9 +140,11 @@ the staging command places the helper/resources there. Set the same
 Keep the full `nanocodex-resources/voice` directory with the executable. Offline
 builds require the pinned Rust crates and native archive already cached.
 
-Device-free regression checks for the new path:
+Device-free regression checks for the new path (the packaging script prepares
+webrtc-sys itself; direct cargo commands on this workspace need it first):
 
 ```sh
+python3 third_party/codex-voice/patches/webrtc-sys/prepare.py
 cargo test --offline --locked -p nanocodex-voice-native
 cargo test --offline --locked --manifest-path third_party/codex-voice/Cargo.toml -p nanocodex-webrtc-voice-host pcm::tests
 ```
