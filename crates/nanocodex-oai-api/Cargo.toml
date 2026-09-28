@@ -18,7 +18,7 @@ all-features = true
 rustdoc-args = ["-D", "warnings"]
 
 [features]
-default = ["client"]
+default = ["client", "audio-duration"]
 client = [
     "events",
     "native-tls",
@@ -29,7 +29,6 @@ client = [
     "dep:rustls",
     "dep:sha2",
     "dep:image",
-    "dep:symphonia",
     "dep:tokio-tungstenite",
     "dep:tower",
     "dep:tracing",
@@ -37,6 +36,10 @@ client = [
     "dep:uuid",
 ]
 native-tls = ["dep:rustls", "dep:rustls-native-certs", "dep:rustls-platform-verifier", "dep:tokio", "dep:tracing"]
+# Decodes MP3/MP4/Ogg/Matroska audio to measure its duration for context
+# estimates. Without it, PCM WAV is still measured exactly and other audio uses
+# the conservative size-based estimate.
+audio-duration = ["client", "dep:symphonia"]
 events = ["dep:futures-util", "dep:tokio", "dep:web-time"]
 realtime = ["client", "dep:opusic-c", "dep:webrtc"]
 

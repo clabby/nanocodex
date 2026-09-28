@@ -4,7 +4,9 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+#[cfg(feature = "audio-duration")]
 use std::io::Cursor;
+#[cfg(feature = "audio-duration")]
 use symphonia::core::{
     formats::{FormatOptions, TrackType, probe::Hint},
     io::MediaSourceStream,
@@ -69,6 +71,7 @@ pub(super) fn wav_duration_seconds(audio_url: &str) -> Option<f64> {
     None
 }
 
+#[cfg(feature = "audio-duration")]
 const fn canonical_audio_mime(mime: &str) -> Option<&'static str> {
     if mime.eq_ignore_ascii_case("audio/wav")
         || mime.eq_ignore_ascii_case("audio/x-wav")
@@ -93,12 +96,17 @@ const fn canonical_audio_mime(mime: &str) -> Option<&'static str> {
 }
 
 pub(super) fn estimate_audio_token_count(audio_url: &str) -> usize {
-    match audio_duration_seconds(audio_url) {
+    #[cfg(feature = "audio-duration")]
+    let duration = audio_duration_seconds(audio_url);
+    #[cfg(not(feature = "audio-duration"))]
+    let duration = wav_duration_seconds(audio_url);
+    match duration {
         Some(duration) => (duration * 10.0).ceil() as usize,
         None => audio_url.len().div_ceil(4),
     }
 }
 
+#[cfg(feature = "audio-duration")]
 fn audio_duration_seconds(audio_url: &str) -> Option<f64> {
     let (metadata, payload) = audio_url.split_once(',')?;
     let metadata = metadata.get("data:".len()..)?;

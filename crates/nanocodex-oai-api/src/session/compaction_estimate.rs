@@ -2,7 +2,9 @@
 //! Transport envelopes, IDs, citations and JSON escaping do not consume model context.
 use super::*;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+#[cfg(feature = "audio-duration")]
 use std::io::Cursor;
+#[cfg(feature = "audio-duration")]
 use symphonia::core::{
     formats::{FormatOptions, TrackType, probe::Hint},
     io::MediaSourceStream,
@@ -187,6 +189,11 @@ fn audio_duration_seconds(audio_url: &str) -> Option<f64> {
             return None;
         }
     };
+    decoded_audio_duration_seconds(canonical_mime, bytes)
+}
+
+#[cfg(feature = "audio-duration")]
+fn decoded_audio_duration_seconds(canonical_mime: &str, bytes: Vec<u8>) -> Option<f64> {
     let media_source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
     let mut hint = Hint::new();
     hint.mime_type(canonical_mime);
@@ -213,6 +220,46 @@ fn audio_duration_seconds(audio_url: &str) -> Option<f64> {
     let duration_seconds =
         duration.get() as f64 * f64::from(time_base.numer.get()) / f64::from(time_base.denom.get());
     duration_seconds.is_finite().then_some(duration_seconds)
+}
+
+/// Without container decoders, only PCM/float WAV durations are measured; other
+/// audio keeps the conservative size-based estimate.
+#[cfg(not(feature = "audio-duration"))]
+fn decoded_audio_duration_seconds(canonical_mime: &str, bytes: Vec<u8>) -> Option<f64> {
+    if canonical_mime != "audio/wav" || bytes.get(..4)? != b"RIFF" || bytes.get(8..12)? != b"WAVE" {
+        return None;
+    }
+    let mut chunks = bytes.get(12..)?;
+    let mut format = None;
+    while chunks.len() >= 8 {
+        let size = u32::from_le_bytes(chunks[4..8].try_into().ok()?) as usize;
+        let remaining = &chunks[8..];
+        // Streaming WAV headers can declare more data than the file contains.
+        let chunk = &remaining[..size.min(remaining.len())];
+        match &chunks[..4] {
+            b"fmt " => {
+                let mut encoding = u16::from_le_bytes(chunk.get(..2)?.try_into().ok()?);
+                if encoding == 0xfffe {
+                    // WAVE_FORMAT_EXTENSIBLE stores the encoding in a subtype GUID.
+                    encoding = u16::from_le_bytes(chunk.get(24..26)?.try_into().ok()?);
+                }
+                let sample_rate = u32::from_le_bytes(chunk.get(4..8)?.try_into().ok()?);
+                let block_align = u16::from_le_bytes(chunk.get(12..14)?.try_into().ok()?);
+                if !matches!(encoding, 1 | 3) || sample_rate == 0 || block_align == 0 {
+                    return None;
+                }
+                format = Some((sample_rate, block_align));
+            }
+            b"data" => {
+                let (sample_rate, block_align) = format?;
+                let frames = chunk.len() / usize::from(block_align);
+                return Some(frames as f64 / f64::from(sample_rate));
+            }
+            _ => {}
+        }
+        chunks = remaining.get(size.checked_add(size % 2)?..)?;
+    }
+    None
 }
 
 #[cfg(test)]

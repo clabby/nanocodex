@@ -17,8 +17,7 @@
     "@chat-adapter/slack": "4.39.0",
     "@chat-adapter/whatsapp": "4.39.0",
     "chat": "4.39.0",
-    "nanocodex": "workspace:*",
-    "nanocodex-tools": "workspace:*"
+    "nanocodex": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260831.1",

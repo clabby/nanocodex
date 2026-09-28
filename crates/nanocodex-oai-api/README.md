@@ -232,6 +232,10 @@ response-item, and tool wire contracts may disable default features. This
 keeps one canonical contract without linking an unused network client; it does
 not create an alternate provider or transport implementation.
 
+The default `audio-duration` feature decodes compressed audio containers to
+measure their duration for context estimates. Clients that disable it still
+measure PCM WAV exactly and estimate other audio conservatively from its size.
+
 ## Tools and managed sessions
 
 The [`tools`] module defines the model-visible tool contract shared with
