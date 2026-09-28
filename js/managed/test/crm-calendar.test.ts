@@ -54,7 +54,7 @@ it("imports recurring occurrences through fixed GET egress and idempotently resy
   expect(Object.fromEntries(url.searchParams)).toEqual({ singleEvents: "true", showDeleted: "true", maxResults: "100", timeMin: interval.from, timeMax: interval.to });
 });
 
-it("caps a call at five pages, preserves default dates across continuation, and scopes cursors", async () => {
+it("caps a call at one page, preserves default dates across continuation, and scopes cursors", async () => {
   const account = owner();
   const fixedNow = Date.parse("2026-09-25T12:30:00Z");
   const now = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
@@ -65,8 +65,8 @@ it("caps a call at five pages, preserves default dates across continuation, and 
     return page(n === 2 ? [] : [event(`page-${n}`)], n < 6 ? `${n + 1}` : undefined);
   };
   const first = await run(account, fetch, { connection_id: connection });
-  expect(first).toMatchObject({ complete: false, from: "2026-08-26T12:30:00.000Z", to: "2026-10-09T12:30:00.000Z", next_cursor: expect.any(String), progress: { pages: 5, events: 4 } });
-  expect(requests).toHaveLength(5);
+  expect(first).toMatchObject({ complete: false, from: "2026-08-26T12:30:00.000Z", to: "2026-10-09T12:30:00.000Z", next_cursor: expect.any(String), progress: { pages: 1, events: 1 } });
+  expect(requests).toHaveLength(1);
   const noFetch = vi.fn(async () => page());
   for (const [scopeOwner, input] of [
     [owner(), { connection_id: connection, cursor: first.next_cursor }],
@@ -77,7 +77,12 @@ it("caps a call at five pages, preserves default dates across continuation, and 
   ] as const) await expect(run(scopeOwner, noFetch, input)).rejects.toMatchObject({ code: "invalid_input" });
   expect(noFetch).not.toHaveBeenCalled();
   now.mockReturnValue(fixedNow + 7 * 86400_000);
-  const last = await run(account, fetch, { connection_id: connection, cursor: first.next_cursor });
+  let last = first;
+  for (let i = 1; i < 7; i++) {
+    last = await run(account, fetch, { connection_id: connection, cursor: last.next_cursor });
+    expect(last.progress.pages).toBe(i + 1);
+    expect(requests).toHaveLength(i + 1);
+  }
   expect(last).toMatchObject({ complete: true, next_cursor: null, from: first.from, to: first.to, progress: { pages: 7, events: 6 } });
   for (const request of requests) {
     expect(request.searchParams.get("timeMin")).toBe(first.from);
@@ -88,9 +93,11 @@ it("caps a call at five pages, preserves default dates across continuation, and 
 
 it("reports partial progress and resumes exactly the failed page without losing already imported events", async () => {
   const account = owner();
+  const first = await run(account, async () => page([event("first")], "second"));
+  expect(first).toMatchObject({ complete: false, next_cursor: expect.any(String), progress: { pages: 1, events: 1 } });
   const response = await run(account, async request => new URL(request.url).searchParams.has("pageToken")
     ? Response.json({ error: { message: "Private invite content", errors: [{ reason: "rateLimitExceeded" }] } }, { status: 429, headers: { "retry-after": "60" } })
-    : page([event("first")], "second"));
+    : page([event("first")], "second"), { connection_id: connection, cursor: first.next_cursor });
   expect(response).toMatchObject({ complete: false, next_cursor: expect.any(String), progress: { pages: 1, events: 1 }, error: { code: "rate_limited", status: 429, retry_after_seconds: 60 } });
   expect(JSON.stringify(response)).not.toContain("Private invite content");
   expect(await count(account)).toBe(1);
@@ -152,7 +159,9 @@ it("rechecks authority before every subsequent provider request", async () => {
   let requests = 0;
   let checks = 0;
   const authorize = () => { checks++; if (requests === 1 && checks >= 4) throw new Error("authorization revoked"); };
-  await expect(run(account, async () => { requests++; return page([event("authorized-first")], "more"); }, undefined, { authorize })).rejects.toThrow(/revoked/);
+  const first = await run(account, async () => { requests++; return page([event("authorized-first")], "more"); }, undefined, { authorize });
+  expect(first.complete).toBe(false);
+  await expect(run(account, async () => { requests++; return page(); }, { connection_id: connection, cursor: first.next_cursor }, { authorize })).rejects.toThrow(/revoked/);
   expect(requests).toBe(1);
 });
 
@@ -172,7 +181,8 @@ it("bounds streamed bytes and rejects redirects, malformed pages and provider lo
     expect(await count(account)).toBe(0);
   }
   const account = owner();
-  const loop = await run(account, async () => page([event("loop")], "same"));
+  const first = await run(account, async () => page([event("loop")], "same"));
+  const loop = await run(account, async () => page([event("loop")], "same"), { connection_id: connection, cursor: first.next_cursor });
   expect(loop).toMatchObject({ complete: false, error: { code: "invalid_response" }, progress: { pages: 1, events: 1 } });
   expect(await count(account)).toBe(1);
 });
@@ -203,4 +213,28 @@ it("distinguishes completed pagination from limited attendee coverage", async ()
   const result = await run(account, async () => page([event("large", { attendees: Array.from({ length: 201 }, (_, i) => ({ email: `guest-${i}@example.test` })) }), event("ordinary")]));
   expect(result).toMatchObject({ complete: true, limited: true, progress: { events: 2, limited_events: 1, imported: 1, skipped: 1 } });
   expect(await count(account)).toBe(1);
+});
+
+it("bounds a dense historical backfill to one 100-event D1 page per invocation", async () => {
+  const account = owner();
+  const requests: string[] = [];
+  const fetch = async (request: Request) => {
+    const token = new URL(request.url).searchParams.get("pageToken");
+    requests.push(token ?? "first");
+    const index = token === null ? 0 : Number(token);
+    return page(Array.from({ length: 100 }, (_, n) => event(`historical-${index * 100 + n}`, {
+      attendees: [{ email: `guest-${index * 100 + n}@example.test` }],
+    })), index < 2 ? `${index + 1}` : undefined);
+  };
+  let response: any = await run(account, fetch);
+  expect(response).toMatchObject({ complete: false, progress: { pages: 1, events: 100, imported: 100 } });
+  expect(requests).toEqual(["first"]);
+  expect(await count(account)).toBe(100);
+  response = await run(account, fetch, { connection_id: connection, cursor: response.next_cursor });
+  expect(response).toMatchObject({ complete: false, progress: { pages: 2, events: 200, imported: 200 } });
+  expect(requests).toEqual(["first", "1"]);
+  response = await run(account, fetch, { connection_id: connection, cursor: response.next_cursor });
+  expect(response).toMatchObject({ complete: true, next_cursor: null, progress: { pages: 3, events: 300, imported: 300 } });
+  expect(requests).toEqual(["first", "1", "2"]);
+  expect(await count(account)).toBe(300);
 });

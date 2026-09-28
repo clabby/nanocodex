@@ -266,3 +266,10 @@ describe("calendar meetings on real D1", () => {
   });
 
 });
+
+it("imports a full provider page of historical meetings", async () => {
+  const account = owner();
+  const page = Array.from({ length: 100 }, (_, i) => event(`page-${i}`, { attendees: [{ email: `guest-${i}@example.test` }] }));
+  const result = await sync(account, page);
+  expect(result).toMatchObject({ imported: 100, skipped: 0, people_created: 100 });
+});
