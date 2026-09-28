@@ -1,30 +1,33 @@
 # Nanocodex development
 
-- Never add unit tests after implementing the code. Define expected behavior
-  and failure cases before implementation.
-- Strongly prefer end-to-end tests as the only testing layer needed for a
-  feature. Exercise complex features through the relevant runtime and finish
-  each E2E run with an inspectable, reproducible artifact (for example a trace,
-  transcript, or screenshot plus the command, inputs, and expected outcome).
-- When isolation is necessary, enumerate the system's failure modes first,
-  before writing implementation or test code. Keep isolated tests only when
-  they catch concrete bugs the E2E coverage misses, such as protocol violations,
-  authorization failures, races, or recovery errors. Remove tests that merely
-  mirror implementation details, incidental source spelling, or mock setup.
-- Prefer a small set of behavioral scenarios over parallel suites for every
-  helper or wrapper. When a journey or protocol test covers the same failure,
-  remove the redundant lower-level cases, unused fixtures, test-only APIs, and
-  obsolete runner references. Prune mock methods and setup that no surviving
-  scenario uses; a fixture should support the behavior being checked, not
-  reproduce the full production interface.
-- Choose representative inputs for distinct behavior and failure paths. Avoid
-  repeating the same journey for every configuration value or cosmetic variant
-  unless the variation exercises a different failure mode.
-- Do not test source text, private layouts, method presence, fixed prompt/UI
-  copy, or a mock's own behavior. A security or regression label does not make
-  these checks evidence of runtime behavior. Use compiler, lint, and package
-  checks for static contracts; test authorization and recovery by exercising
-  the boundary and observing the result.
+- Define observable behavior and failure cases before implementation. Validate
+  changes with black-box, end-to-end journeys that a real user could perform:
+  invoke the shipped CLI, call the public API over its actual transport, or use
+  both when both surfaces matter. Run the real executable/runtime and assert on
+  user-visible results, including representative errors, authorization, and
+  recovery paths. Use synthetic accounts/data and safe test environments; stub
+  only unavoidable external dependencies, not the behavior under test.
+- Skip low-level unit tests as the default for both new coverage and routine
+  validation. Do not add helper-by-helper or mock-heavy tests to stand in for a
+  user journey. Prefer a small set of representative E2E scenarios over a large
+  matrix of incidental configurations. If a critical failure truly cannot be
+  observed at a public boundary, document that gap and use the narrowest
+  realistic integration check rather than silently substituting unit coverage.
+- Finish each E2E run with reproducible evidence: the command, inputs, expected
+  and observed outcomes, and an inspectable trace, transcript, log, screenshot,
+  or recording where relevant. A passing test name alone is not evidence.
+- Continuously look for ways to improve the developer experience in CI. Inspect
+  the relevant jobs' actual results, duration, failures, and artifacts; favor
+  fast, reliable user-journey feedback, actionable failure output, and easy
+  reproduction locally. Remove redundant work and flaky setup, but do not hide
+  failures, skip required checks, or trade away meaningful E2E coverage merely
+  to make CI green. When changing CI, verify the resulting workflow run.
+- When a journey or protocol check covers the same failure, remove redundant
+  lower-level cases, unused fixtures, test-only APIs, and obsolete runner
+  references. Prune mock setup that no surviving scenario uses. Use compiler,
+  lint, and package checks for static contracts; do not test source text,
+  private layouts, method presence, fixed prompt/UI copy, or a mock's own
+  behavior as a proxy for runtime behavior.
 
 - Keep documentation focused on current APIs, architecture, setup, and operations.
   Remove superseded designs, implementation plans, checklists, and review notes
