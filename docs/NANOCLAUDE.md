@@ -16,12 +16,52 @@ through `BuilderBackend` and `LifecycleBackend`; an external
 | Loop | Responses-specific retained response IDs, Code Mode, tool orchestration | Claude-specific tool loop and usage/cancellation; prompt-cache and retry policy pending |
 | Compaction | Provider opaque compaction item | Claude Code 2.1.283-style client summary and transcript replacement; never treat an OpenAI encrypted item as a Claude block |
 
-The initial `nanocodex-claude` crate now provides `ClaudeClient` and
+The initial `nanocodex-claude` crate provides `ClaudeClient` and
 `Nanocodex::builder(Claude::new(client, model))`: streamed text, caller-
 registered JSON function tools with Claude `tool_use` / user `tool_result`
 ordering, manual and 95%-threshold client-side summarization, cancellation,
-usage, and shared lifecycle events. Its loopback E2E tests do not use a real
-subscription credential. The Claude loop is independent of the OpenAI loop.
+usage, and shared lifecycle events. `Claude::latest(client)` currently chooses
+`claude-opus-5-5` (September 2026); its default context budget is 1M tokens,
+as are the documented Fable 5.1 and Sonnet 5 model IDs. Unknown model IDs
+conservatively default to 200K until configured via `.context_window_tokens()`.
+The `max_tokens` default remains 4096 and includes adaptive thinking, so callers
+should tune it for their workload. Its loopback E2E tests do not use a real
+provider credential. The Claude loop is independent of the OpenAI loop.
+
+## Claude Platform API first
+
+The Messages transport speaks `/v1/messages` directly with
+`anthropic-version: 2023-06-01`; `ClaudeClient::official(http, api_key)`
+accepts an ordinary Console API key supplied by the embedding application.
+No Claude Code credential is read. One minimal integration (with a caller-owned
+Console key) is:
+
+```rust
+let client = nanocodex_claude::ClaudeClient::official(
+    reqwest::Client::new(), console_api_key,
+);
+let (agent, mut events) = nanocodex_agent::Nanocodex::builder(
+    nanocodex_claude::Claude::latest(client),
+)
+.automatic_cache(true) // optional: 5-minute cache writes have different pricing
+.max_tokens(8192)
+.effort(nanocodex_claude::Effort::Medium)
+.build()?;
+let result = agent.prompt("Hello").await?.result().await?;
+println!("{}", result.final_message());
+```
+
+The request shape supports opt-in top-level automatic `cache_control`,
+`output_config.effort` for adaptive thinking, strict client tool definitions, and string or nested block arrays for tool results.
+The transport assembles SSE text, tool input JSON, signed thinking and cache
+usage, validates event names, terminal stop reasons and JSON object tool input,
+and limits each SSE frame to 32 MiB. Thinking/redacted-thinking block fields are
+preserved for replay. Unknown delta types on a known block fail closed, rather
+than returning altered content or executing a partial tool call. The current
+agent handler itself still returns **text** tool results; richer result blocks
+are available only through the protocol API. We have tested this against a
+synthetic loopback server, not a live Platform account.
+
 
 This is **not Claude Code parity**. Bare CLI 2.1.283 advertises native
 `Bash`, `Read`, and `Edit` schemas; this crate currently exposes only explicitly
@@ -66,6 +106,8 @@ custom Claude backend. Avoid conflating these auth and execution modes.
 
 References: [Claude tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls),
 [Messages streaming](https://platform.claude.com/docs/en/build-with-claude/streaming),
+[prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
+[Opus 5.5 migration](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide),
 [compaction on demand](https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand),
 [Claude Code context window](https://code.claude.com/docs/en/context-window),
 [subscription and third-party access](https://support.claude.com/en/articles/13189465-log-in-to-your-claude-account),

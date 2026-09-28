@@ -34,12 +34,19 @@ type Handler = Arc<
 >;
 
 /// Explicit Claude Messages configuration with caller-owned authentication.
+/// Latest documented coding model as of September 2026; callers can pin any model via `new`.
+pub const LATEST_MODEL: &str = "claude-opus-5-5";
+
 #[derive(Clone)]
 pub struct Claude {
     client: ClaudeClient,
     model: String,
 }
 impl Claude {
+    /// Selects the current documented Opus model, without changing authentication.
+    pub fn latest(client: ClaudeClient) -> Self {
+        Self::new(client, LATEST_MODEL)
+    }
     /// Uses the supplied client and provider-native model identifier.
     pub fn new(client: ClaudeClient, model: impl Into<String>) -> Self {
         Self {
@@ -59,6 +66,8 @@ impl BuilderBackend for Claude {
 pub struct ClaudeBuilder {
     claude: Claude,
     max_tokens: u32,
+    effort: Option<crate::Effort>,
+    automatic_cache: bool,
     context_window_tokens: u64,
     system: String,
     workspace: String,
@@ -66,10 +75,16 @@ pub struct ClaudeBuilder {
 }
 impl ClaudeBuilder {
     fn new(claude: Claude) -> Self {
+        let context_window_tokens = match claude.model.as_str() {
+            "claude-opus-5-5" | "claude-fable-5-1" | "claude-sonnet-5" => 1_000_000,
+            _ => 200_000, // Conservative fallback; override for other models.
+        };
         Self {
             claude,
             max_tokens: 4096,
-            context_window_tokens: 200_000,
+            effort: None,
+            automatic_cache: false,
+            context_window_tokens,
             system: String::new(),
             workspace: String::new(),
             tools: Vec::new(),
@@ -78,6 +93,16 @@ impl ClaudeBuilder {
     /// Sets the Messages output-token limit.
     pub const fn max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+    /// Sets the model's adaptive-thinking effort using output_config.effort.
+    pub const fn effort(mut self, effort: crate::Effort) -> Self {
+        self.effort = Some(effort);
+        self
+    }
+    /// Opt in to Claude's automatic prompt caching (cache writes may cost more).
+    pub const fn automatic_cache(mut self, enabled: bool) -> Self {
+        self.automatic_cache = enabled;
         self
     }
     /// Sets the token window used for Claude-side automatic compaction at 95%.
@@ -135,6 +160,8 @@ impl ClaudeBuilder {
                 client: self.claude.client,
                 model: self.claude.model,
                 max_tokens: self.max_tokens,
+                effort: self.effort,
+                automatic_cache: self.automatic_cache,
                 context_window_tokens: self.context_window_tokens,
                 workspace: self.workspace,
                 system: self.system,
@@ -160,6 +187,8 @@ struct State {
     client: ClaudeClient,
     model: String,
     max_tokens: u32,
+    effort: Option<crate::Effort>,
+    automatic_cache: bool,
     context_window_tokens: u64,
     workspace: String,
     system: String,
@@ -226,6 +255,8 @@ impl State {
         let request = MessagesRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
+            cache_control: self.automatic_cache.then(crate::CacheControl::ephemeral),
+            output_config: self.effort.map(|effort| crate::OutputConfig { effort }),
             system: (!self.system.is_empty()).then(|| self.system.clone()),
             messages,
             tools,

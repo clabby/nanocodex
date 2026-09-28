@@ -44,12 +44,15 @@ fn request() -> MessagesRequest {
     MessagesRequest {
         model: "claude-test".into(),
         max_tokens: 128,
+        cache_control: None,
+        output_config: None,
         system: Some("Use tools".into()),
         messages: vec![Message::text(Role::User, "What's the weather?")],
         tools: vec![ToolDefinition {
             name: "weather".into(),
             description: "Find current weather".into(),
             input_schema: json!({"type":"object","properties":{"city":{"type":"string"}}}),
+            strict: None,
         }],
     }
 }
@@ -254,11 +257,11 @@ async fn preserves_signed_thinking_and_cache_usage_across_stream_and_replay() {
     let endpoint = server(|_| {
         (StatusCode::OK, "text/event-stream", [
             "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_t\",\"role\":\"assistant\",\"model\":\"test\",\"content\":[],\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":3,\"output_tokens\":0}}}\n\n",
-            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"check\",\"signature\":\"\"}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"check\",\"signature\":\"\",\"binding\":\"future-preserved\"}}\n\n",
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" result\"}}\n\n",
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"signed-payload\"}}\n\n",
             "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
-            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque-data\"}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque-data\",\"binding\":\"redacted-preserved\"}}\n\n",
             "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n",
             "data: {\"type\":\"message_stop\"}\n\n",
@@ -274,8 +277,8 @@ async fn preserves_signed_thinking_and_cache_usage_across_stream_and_replay() {
     assert_eq!(
         serde_json::to_value(&completed.content).unwrap(),
         json!([
-            {"type":"thinking","thinking":"check result","signature":"signed-payload"},
-            {"type":"redacted_thinking","data":"opaque-data"}
+            {"type":"thinking","thinking":"check result","signature":"signed-payload","binding":"future-preserved"},
+            {"type":"redacted_thinking","data":"opaque-data","binding":"redacted-preserved"}
         ])
     );
     let replay = Message {
@@ -286,4 +289,116 @@ async fn preserves_signed_thinking_and_cache_usage_across_stream_and_replay() {
         serde_json::to_value(replay).unwrap()["content"][0]["signature"],
         "signed-payload"
     );
+}
+
+#[test]
+fn serializes_automatic_cache_strict_tools_and_multimodal_tool_results() {
+    use nanocodex_claude::{CacheControl, Effort, OutputConfig, ToolResultContent};
+    let mut req = request();
+    req.cache_control = Some(CacheControl::ephemeral());
+    req.output_config = Some(OutputConfig {
+        effort: Effort::High,
+    });
+    req.tools[0].strict = Some(true);
+    req.messages.push(Message::tool_results(vec![ContentBlock::tool_result_blocks(
+        "toolu_1",
+        vec![
+            json!({"type":"text","text":"The chart is attached"}),
+            json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}}),
+        ],
+        false,
+    )]));
+    let serialized = serde_json::to_value(&req).unwrap();
+    assert_eq!(serialized["cache_control"], json!({"type":"ephemeral"}));
+    assert_eq!(serialized["output_config"], json!({"effort":"high"}));
+    assert_eq!(serialized["tools"][0]["strict"], true);
+    assert_eq!(
+        serialized["messages"][1]["content"][0]["content"][1]["type"],
+        "image"
+    );
+    let result =
+        serde_json::from_value::<ContentBlock>(serialized["messages"][1]["content"][0].clone())
+            .unwrap();
+    assert!(matches!(
+        result,
+        ContentBlock::ToolResult {
+            content: ToolResultContent::Blocks(_),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn stream_rejects_mismatched_event_name_and_oversize_multiline_frame() {
+    let endpoint = server(|body| {
+        if body["model"] == "mismatch" {
+            (StatusCode::OK, "text/event-stream", "event: message_stop\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"x\",\"role\":\"assistant\",\"model\":\"x\",\"content\":[],\"usage\":{}}}\n\n".into())
+        } else {
+            let mut payload = String::from("event: ping\n");
+            for _ in 0..34 { payload.push_str(&format!("data: {}\n", "x".repeat(1_000_000))); }
+            payload.push('\n');
+            (StatusCode::OK, "text/event-stream", payload)
+        }
+    }).await;
+    let client = ClaudeClient::new(http_client(), endpoint, "synthetic-key");
+    let mut req = request();
+    req.model = "mismatch".into();
+    let mut stream = client.stream(&req).await.unwrap();
+    assert!(matches!(
+        stream.next().await.unwrap(),
+        Err(ClaudeError::Protocol(_))
+    ));
+    req.model = "oversize".into();
+    let mut stream = client.stream(&req).await.unwrap();
+    assert!(matches!(
+        stream.next().await.unwrap(),
+        Err(ClaudeError::Protocol(_))
+    ));
+}
+
+#[tokio::test]
+async fn collector_rejects_non_object_tool_input_and_missing_stop_reason() {
+    let endpoint = server(|body| {
+        let input = if body["model"] == "invalid-input" { "[]" } else { "{}" };
+        let stop = if body["model"] == "invalid-input" { "\"tool_use\"" } else { "null" };
+        let payload = format!(concat!(
+            "data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"x\",\"role\":\"assistant\",\"model\":\"x\",\"content\":[],\"usage\":{{}}}}}}\n\n",
+            "data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"tool_use\",\"id\":\"toolu\",\"name\":\"lookup\",\"input\":{{}}}}}}\n\n",
+            "data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}}}\n\n",
+            "data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n",
+            "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":{}}},\"usage\":{{\"output_tokens\":1}}}}\n\n",
+            "data: {{\"type\":\"message_stop\"}}\n\n"
+        ),input,stop);
+        (StatusCode::OK,"text/event-stream",payload)
+    }).await;
+    let client = ClaudeClient::new(http_client(), endpoint, "synthetic-key");
+    for model in ["invalid-input", "missing-stop"] {
+        let mut req = request();
+        req.model = model.into();
+        let mut stream = client.stream(&req).await.unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        assert!(matches!(
+            collect_stream(first, stream).await,
+            Err(ClaudeError::Protocol(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn collector_does_not_silently_drop_unknown_delta_on_known_block() {
+    let endpoint = server(|_| (StatusCode::OK, "text/event-stream", concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"x\",\"role\":\"assistant\",\"model\":\"x\",\"content\":[],\"usage\":{}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"new_text_delta\",\"text\":\"lost\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    ).into())).await;
+    let client = ClaudeClient::new(http_client(), endpoint, "synthetic-key");
+    let mut stream = client.stream(&request()).await.unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(matches!(
+        collect_stream(first, stream).await,
+        Err(ClaudeError::Protocol(_))
+    ));
 }

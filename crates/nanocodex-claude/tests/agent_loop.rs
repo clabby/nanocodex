@@ -2,7 +2,7 @@
 use axum::{Json, Router, response::IntoResponse, routing::post};
 use futures_util::StreamExt;
 use nanocodex_agent::{Nanocodex, events::AgentEventKind};
-use nanocodex_claude::{Claude, ClaudeClient, ToolDefinition};
+use nanocodex_claude::{Claude, ClaudeClient, Effort, ToolDefinition};
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
@@ -69,11 +69,14 @@ async fn stream_tool_once_compact_and_failed_turn_preserves_history() {
     let claude = Claude::new(client, "test");
     let (agent, mut events) = Nanocodex::builder(claude)
         .max_tokens(128)
+        .automatic_cache(true)
+        .effort(Effort::High)
         .tool(
             ToolDefinition {
                 name: "lookup".into(),
                 description: "Test lookup".into(),
                 input_schema: json!({"type":"object","properties":{"key":{"type":"string"}}}),
+                strict: None,
             },
             move |input| {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -152,6 +155,9 @@ async fn stream_tool_once_compact_and_failed_turn_preserves_history() {
     let log = received.lock().unwrap();
     assert_eq!(log.len(), 6);
     assert_eq!(log[0]["stream"], true);
+    assert_eq!(log[0]["cache_control"], json!({"type":"ephemeral"}));
+    assert_eq!(log[0]["output_config"], json!({"effort":"high"}));
+    assert_eq!(log[3]["cache_control"], json!({"type":"ephemeral"}));
     assert_eq!(log[2]["messages"][3]["role"], "assistant");
     assert_eq!(log[2]["messages"][4]["role"], "user");
     assert_eq!(log[2]["messages"][4]["content"][0]["type"], "tool_result");
@@ -358,4 +364,85 @@ async fn auto_compacts_at_usage_threshold_before_next_prompt() {
     assert!(next.contains("second"));
     assert!(!next.contains("first answer\n\nfirst answer"));
     server.abort();
+}
+
+#[tokio::test]
+async fn latest_model_sends_opus_5_5_without_legacy_thinking_parameters() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let received = Arc::new(Mutex::new(None::<Value>));
+    let captured = received.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(body): Json<Value>| {
+            let captured = captured.clone();
+            async move {
+                *captured.lock().unwrap() = Some(body);
+                (
+                    [("content-type", "text/event-stream")],
+                    stream(vec![json!({"type":"text","text":"ok"})], "end_turn"),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::latest(client)).build().unwrap();
+    assert_eq!(
+        agent
+            .prompt("hello")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "ok"
+    );
+    let body = received.lock().unwrap().clone().unwrap();
+    assert_eq!(body["model"], "claude-opus-5-5");
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("tool_choice").is_none());
+}
+
+#[tokio::test]
+async fn latest_model_does_not_compact_at_legacy_200k_window() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(_): Json<Value>| {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                let output = stream(vec![json!({"type":"text","text":"ok"})], "end_turn")
+                    .replace("\"input_tokens\":3", "\"input_tokens\":250000");
+                ([("content-type", "text/event-stream")], output).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::latest(client)).build().unwrap();
+    let first = agent.prompt("one").await.unwrap().result().await.unwrap();
+    assert_eq!(first.usage().unwrap().input_tokens(), 250_000);
+    agent.prompt("two").await.unwrap().result().await.unwrap();
+    assert_eq!(
+        received.load(Ordering::SeqCst),
+        2,
+        "unexpected early compaction"
+    );
 }

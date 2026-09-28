@@ -48,7 +48,7 @@ pub enum ContentBlock {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: ToolResultContent,
         #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
     },
@@ -56,10 +56,23 @@ pub enum ContentBlock {
         thinking: String,
         #[serde(default)]
         signature: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
     },
     RedactedThinking {
         data: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
     },
+}
+
+/// Claude accepts a plain string or an array of nested text/image/document blocks.
+/// Blocks retain the provider JSON shape for media and future block variants.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolResultContent {
+    Text(String),
+    Blocks(Vec<Value>),
 }
 
 fn is_false(value: &bool) -> bool {
@@ -82,7 +95,15 @@ impl ContentBlock {
     pub fn tool_result(id: impl Into<String>, content: impl Into<String>, is_error: bool) -> Self {
         Self::ToolResult {
             tool_use_id: id.into(),
-            content: content.into(),
+            content: ToolResultContent::Text(content.into()),
+            is_error,
+        }
+    }
+
+    pub fn tool_result_blocks(id: impl Into<String>, blocks: Vec<Value>, is_error: bool) -> Self {
+        Self::ToolResult {
+            tool_use_id: id.into(),
+            content: ToolResultContent::Blocks(blocks),
             is_error,
         }
     }
@@ -115,12 +136,61 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+}
+
+/// Request-level automatic prompt caching. Explicit block breakpoints are not yet modeled.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub kind: CacheType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<CacheTtl>,
+}
+impl CacheControl {
+    pub const fn ephemeral() -> Self {
+        Self {
+            kind: CacheType::Ephemeral,
+            ttl: None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheType {
+    Ephemeral,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheTtl {
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+/// Adaptive-thinking depth on current Claude models. No legacy thinking budget is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputConfig {
+    pub effort: Effort,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct MessagesRequest {
     pub model: String,
     pub max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
     pub messages: Vec<Message>,
@@ -339,10 +409,31 @@ impl ClaudeClient {
                         }
                     };
                     if let Some(line) = line {
+                        state.frame_bytes += line.len() + 1;
+                        if state.frame_bytes > MAX_SSE_FRAME_BYTES {
+                            state.done = true;
+                            return Some((
+                                Err(ClaudeError::Protocol("SSE frame exceeds 32 MiB".into())),
+                                state,
+                            ));
+                        }
                         if line.is_empty() {
+                            state.frame_bytes = 0;
+                            let event_name = state.event_name.take();
                             if let Some(data) = state.take_data() {
-                                let parsed = serde_json::from_str::<StreamEvent>(&data)
-                                    .map_err(ClaudeError::from);
+                                let parsed = serde_json::from_str::<Value>(&data)
+                                    .map_err(ClaudeError::from)
+                                    .and_then(|value| {
+                                        if event_name.as_deref().is_some_and(|name| {
+                                            value.get("type").and_then(Value::as_str) != Some(name)
+                                        }) {
+                                            return Err(ClaudeError::Protocol(
+                                                "SSE event name disagrees with data type".into(),
+                                            ));
+                                        }
+                                        serde_json::from_value::<StreamEvent>(value)
+                                            .map_err(ClaudeError::from)
+                                    });
                                 let event = match parsed {
                                     Ok(StreamEvent::Error { error }) => {
                                         Err(ClaudeError::StreamError {
@@ -365,6 +456,8 @@ impl ClaudeClient {
                                     Ok(event) => return Some((Ok(event), state)),
                                 }
                             }
+                        } else if let Some(name) = line.strip_prefix("event:") {
+                            state.event_name = Some(name.trim_start().to_owned());
                         } else if let Some(data) = line.strip_prefix("data:") {
                             state
                                 .data
@@ -375,7 +468,7 @@ impl ClaudeClient {
                     match state.response.chunk().await {
                         Ok(Some(chunk)) => {
                             state.bytes.extend_from_slice(&chunk);
-                            if state.bytes.len() > 32 * 1024 * 1024 {
+                            if state.bytes.len() + state.frame_bytes > MAX_SSE_FRAME_BYTES {
                                 state.done = true;
                                 return Some((
                                     Err(ClaudeError::Protocol("SSE frame exceeds 32 MiB".into())),
@@ -401,11 +494,15 @@ impl ClaudeClient {
 pub type ClaudeStream =
     std::pin::Pin<Box<dyn Stream<Item = Result<StreamEvent, ClaudeError>> + Send>>;
 
+const MAX_SSE_FRAME_BYTES: usize = 32 * 1024 * 1024;
+
 struct SseState {
     response: reqwest::Response,
     bytes: Vec<u8>,
     data: Vec<String>,
     done: bool,
+    frame_bytes: usize,
+    event_name: Option<String>,
 }
 
 impl SseState {
@@ -415,6 +512,8 @@ impl SseState {
             bytes: Vec::new(),
             data: Vec::new(),
             done: false,
+            frame_bytes: 0,
+            event_name: None,
         }
     }
 
@@ -454,6 +553,7 @@ enum BlockAccumulator {
     Thinking {
         thinking: String,
         signature: String,
+        extra: BTreeMap<String, Value>,
     },
     Other(ContentBlock),
 }
@@ -495,9 +595,11 @@ where
                     ContentBlock::Thinking {
                         thinking,
                         signature,
+                        extra,
                     } => BlockAccumulator::Thinking {
                         thinking,
                         signature,
+                        extra,
                     },
                     other => BlockAccumulator::Other(other),
                 };
@@ -521,7 +623,11 @@ where
                         Some(BlockAccumulator::Thinking { signature, .. }),
                         ContentDelta::SignatureDelta { signature: chunk },
                     ) => signature.push_str(&chunk),
-                    (Some(_), ContentDelta::Other) => {}
+                    (Some(_), ContentDelta::Other) => {
+                        return Err(ClaudeError::Protocol(format!(
+                            "unsupported delta for content block {index}"
+                        )));
+                    }
                     _ => {
                         return Err(ClaudeError::Protocol(format!(
                             "unexpected delta for content block {index}"
@@ -546,14 +652,21 @@ where
                         } else {
                             serde_json::from_str(&fragments)?
                         };
+                        if !input.is_object() {
+                            return Err(ClaudeError::Protocol(
+                                "tool input must be a JSON object".into(),
+                            ));
+                        }
                         ContentBlock::tool_use(id, name, input)
                     }
                     BlockAccumulator::Thinking {
                         thinking,
                         signature,
+                        extra,
                     } => ContentBlock::Thinking {
                         thinking,
                         signature,
+                        extra,
                     },
                     BlockAccumulator::Other(block) => block,
                 };
@@ -577,6 +690,9 @@ where
                 }
             }
             StreamEvent::MessageStop => {
+                if message.stop_reason.is_none() {
+                    return Err(ClaudeError::Protocol("missing final stop_reason".into()));
+                }
                 if !active.is_empty() {
                     return Err(ClaudeError::IncompleteStream);
                 }
