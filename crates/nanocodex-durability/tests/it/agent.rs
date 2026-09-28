@@ -248,31 +248,31 @@ async fn six_hundred_turns_cross_retention_and_twenty_four_owner_changes() -> Re
 
 #[derive(Clone)]
 struct FailReplaceOnce {
-    inner: crate::MemoryStore,
+    inner: self::MemoryStore,
     expected_revision: u64,
     failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone)]
 struct CountingAcquires {
-    inner: crate::MemoryStore,
+    inner: self::MemoryStore,
     acquisitions: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
-impl crate::StateStore for CountingAcquires {
+impl self::StateStore for CountingAcquires {
     fn read_record<'a>(
         &'a mut self,
         state_id: &'a str,
         key: &'a str,
-    ) -> crate::StoreFuture<'a, std::result::Result<Option<String>, crate::StoreError>> {
+    ) -> self::StoreFuture<'a, std::result::Result<Option<String>, self::StoreError>> {
         self.inner.read_record(state_id, key)
     }
 
     fn acquire<'a>(
         &'a mut self,
         state_id: &'a str,
-        owner_id: crate::OwnerId,
-    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedState, crate::StoreError>> {
+        owner_id: self::OwnerId,
+    ) -> self::StoreFuture<'a, std::result::Result<self::OwnedState, self::StoreError>> {
         self.acquisitions
             .lock()
             .expect("acquisition recorder lock is not poisoned")
@@ -283,11 +283,11 @@ impl crate::StateStore for CountingAcquires {
     fn replace<'a>(
         &'a mut self,
         state_id: &'a str,
-        owner: &'a crate::OwnerToken,
+        owner: &'a self::OwnerToken,
         expected_revision: u64,
         payload: &'a str,
         records: &'a [nanocodex_durability::StoreRecord],
-    ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
+    ) -> self::StoreFuture<'a, std::result::Result<u64, self::StoreError>> {
         self.inner
             .replace(state_id, owner, expected_revision, payload, records)
     }
@@ -300,37 +300,37 @@ fn checkpoint_value(payload: &str) -> serde_json::Value {
 
 #[derive(Clone)]
 struct FailEntryOnce {
-    inner: crate::MemoryStore,
+    inner: self::MemoryStore,
     entry_tag: &'static str,
     operation_id: &'static str,
     failed: Arc<AtomicBool>,
 }
 
-impl crate::StateStore for FailEntryOnce {
+impl self::StateStore for FailEntryOnce {
     fn read_record<'a>(
         &'a mut self,
         state_id: &'a str,
         key: &'a str,
-    ) -> crate::StoreFuture<'a, std::result::Result<Option<String>, crate::StoreError>> {
+    ) -> self::StoreFuture<'a, std::result::Result<Option<String>, self::StoreError>> {
         self.inner.read_record(state_id, key)
     }
 
     fn acquire<'a>(
         &'a mut self,
         state_id: &'a str,
-        owner_id: crate::OwnerId,
-    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedState, crate::StoreError>> {
+        owner_id: self::OwnerId,
+    ) -> self::StoreFuture<'a, std::result::Result<self::OwnedState, self::StoreError>> {
         self.inner.acquire(state_id, owner_id)
     }
 
     fn replace<'a>(
         &'a mut self,
         state_id: &'a str,
-        owner: &'a crate::OwnerToken,
+        owner: &'a self::OwnerToken,
         expected_revision: u64,
         payload: &'a str,
         records: &'a [nanocodex_durability::StoreRecord],
-    ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
+    ) -> self::StoreFuture<'a, std::result::Result<u64, self::StoreError>> {
         let state = checkpoint_value(payload);
         let operation_status =
             &state["nanocodex_durable_state"]["operations"][self.operation_id]["status"];
@@ -341,7 +341,7 @@ impl crate::StateStore for FailEntryOnce {
         };
         if matches_entry && !self.failed.swap(true, Ordering::SeqCst) {
             return Box::pin(async {
-                Err(crate::StoreError::NotCommitted(
+                Err(self::StoreError::NotCommitted(
                     "injected state replacement failure".to_owned(),
                 ))
             });
@@ -353,36 +353,36 @@ impl crate::StateStore for FailEntryOnce {
 
 #[derive(Clone)]
 struct GateCompactionAuthorization {
-    inner: crate::MemoryStore,
+    inner: self::MemoryStore,
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
 
-impl crate::StateStore for GateCompactionAuthorization {
+impl self::StateStore for GateCompactionAuthorization {
     fn read_record<'a>(
         &'a mut self,
         state_id: &'a str,
         key: &'a str,
-    ) -> crate::StoreFuture<'a, std::result::Result<Option<String>, crate::StoreError>> {
+    ) -> self::StoreFuture<'a, std::result::Result<Option<String>, self::StoreError>> {
         self.inner.read_record(state_id, key)
     }
 
     fn acquire<'a>(
         &'a mut self,
         state_id: &'a str,
-        owner_id: crate::OwnerId,
-    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedState, crate::StoreError>> {
+        owner_id: self::OwnerId,
+    ) -> self::StoreFuture<'a, std::result::Result<self::OwnedState, self::StoreError>> {
         self.inner.acquire(state_id, owner_id)
     }
 
     fn replace<'a>(
         &'a mut self,
         state_id: &'a str,
-        owner: &'a crate::OwnerToken,
+        owner: &'a self::OwnerToken,
         expected_revision: u64,
         payload: &'a str,
         records: &'a [nanocodex_durability::StoreRecord],
-    ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
+    ) -> self::StoreFuture<'a, std::result::Result<u64, self::StoreError>> {
         let state = checkpoint_value(payload).to_string();
         if state.contains("\"status\":\"effect_pending\"")
             && state.contains("\"kind\":\"compaction\"")
@@ -402,36 +402,36 @@ impl crate::StateStore for GateCompactionAuthorization {
     }
 }
 
-impl crate::StateStore for FailReplaceOnce {
+impl self::StateStore for FailReplaceOnce {
     fn read_record<'a>(
         &'a mut self,
         state_id: &'a str,
         key: &'a str,
-    ) -> crate::StoreFuture<'a, std::result::Result<Option<String>, crate::StoreError>> {
+    ) -> self::StoreFuture<'a, std::result::Result<Option<String>, self::StoreError>> {
         self.inner.read_record(state_id, key)
     }
 
     fn acquire<'a>(
         &'a mut self,
         state_id: &'a str,
-        owner_id: crate::OwnerId,
-    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedState, crate::StoreError>> {
+        owner_id: self::OwnerId,
+    ) -> self::StoreFuture<'a, std::result::Result<self::OwnedState, self::StoreError>> {
         self.inner.acquire(state_id, owner_id)
     }
 
     fn replace<'a>(
         &'a mut self,
         state_id: &'a str,
-        owner: &'a crate::OwnerToken,
+        owner: &'a self::OwnerToken,
         expected_revision: u64,
         payload: &'a str,
         records: &'a [nanocodex_durability::StoreRecord],
-    ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
+    ) -> self::StoreFuture<'a, std::result::Result<u64, self::StoreError>> {
         if expected_revision == self.expected_revision
             && !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             return Box::pin(async {
-                Err(crate::StoreError::NotCommitted(
+                Err(self::StoreError::NotCommitted(
                     "injected replacement failure".to_owned(),
                 ))
             });
@@ -1614,8 +1614,8 @@ async fn durability_attached_builder_is_safe_single_use_across_clones() -> Resul
 
 #[tokio::test]
 async fn configured_durability_automatically_persists_plain_prompts() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
-    let state = crate::DurableSession::open(store, "automatic-prompt").await?;
+    let store = self::MemoryStore::new()?;
+    let state = self::DurableSession::open(store, "automatic-prompt").await?;
     let durable_state = state.clone();
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = OpenAi::builder("test-key")
@@ -1661,8 +1661,8 @@ async fn configured_durability_automatically_persists_plain_prompts() -> Result<
 
 #[tokio::test]
 async fn acknowledged_developer_context_survives_a_cold_reopen() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
-    let state = crate::DurableSession::open(store.clone(), "durable-developer-context").await?;
+    let store = self::MemoryStore::new()?;
+    let state = self::DurableSession::open(store.clone(), "durable-developer-context").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = || {
         let generations = Arc::clone(&generations);
@@ -1691,7 +1691,7 @@ async fn acknowledged_developer_context_survives_a_cold_reopen() -> Result<()> {
         .ok_or_else(|| eyre!("developer context was acknowledged without a checkpoint"))?;
     assert!(serde_json::to_string(&retained)?.contains("durable adapter marker"));
 
-    let reopened = crate::DurableSession::open(store, "durable-developer-context").await?;
+    let reopened = self::DurableSession::open(store, "durable-developer-context").await?;
     let (resumed, resumed_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .durability(reopened)
@@ -1750,8 +1750,8 @@ async fn execution_policy_authority_defaults_fail_closed() -> Result<()> {
 
 #[tokio::test]
 async fn developer_context_during_an_active_turn_acks_only_after_durable_commit() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
-    let state = crate::DurableSession::open(store, "active-developer-context").await?;
+    let store = self::MemoryStore::new()?;
+    let state = self::DurableSession::open(store, "active-developer-context").await?;
     let started = Arc::new(AtomicBool::new(false));
     let openai = OpenAi::builder("test-key")
         .service({
@@ -1805,7 +1805,7 @@ async fn developer_context_during_an_active_turn_acks_only_after_durable_commit(
 #[tokio::test]
 async fn developer_context_waits_for_all_admitted_turns_to_settle() -> Result<()> {
     for cancel_queued in [false, true] {
-        let store = crate::MemoryStore::new()?;
+        let store = self::MemoryStore::new()?;
         let state = DurableSession::open(store.clone(), "queued-developer-context").await?;
         let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let started = Arc::new(tokio::sync::Notify::new());
@@ -1880,7 +1880,7 @@ async fn developer_context_waits_for_all_admitted_turns_to_settle() -> Result<()
 
 #[tokio::test]
 async fn queued_developer_context_waits_for_provider_retry_to_terminalize() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let failing = FailReplaceOnce {
         inner: store.clone(),
         expected_revision: 6,
@@ -1971,7 +1971,7 @@ async fn queued_developer_context_waits_for_provider_retry_to_terminalize() -> R
 
 #[tokio::test]
 async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
         expected_revision: 7,
@@ -1988,7 +1988,7 @@ async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -
     };
     let workspace = temporary_workspace("routed-durability-cold-reopen")?;
 
-    let state = crate::DurableSession::open(failing_store, "routed-cold-reopen").await?;
+    let state = self::DurableSession::open(failing_store, "routed-cold-reopen").await?;
     let (first, first_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -2011,7 +2011,7 @@ async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -
     first.shutdown().await?;
     drop((first, first_events));
 
-    let state = crate::DurableSession::open(store, "routed-cold-reopen").await?;
+    let state = self::DurableSession::open(store, "routed-cold-reopen").await?;
     let (reopened, reopened_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -2040,7 +2040,7 @@ async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -
 #[tokio::test]
 async fn cold_reopened_started_prompt_cancels_with_a_checkpoint_without_model_replay() -> Result<()>
 {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
         expected_revision: 7,
@@ -2058,7 +2058,7 @@ async fn cold_reopened_started_prompt_cancels_with_a_checkpoint_without_model_re
     let workspace = temporary_workspace("cancel-durability-cold-reopen")?;
     let request = || PromptRequest::new("cancel recovered input").request_id("recovered-cancel");
 
-    let state = crate::DurableSession::open(failing_store, "cancel-cold-reopen").await?;
+    let state = self::DurableSession::open(failing_store, "cancel-cold-reopen").await?;
     let (first, first_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -2079,7 +2079,7 @@ async fn cold_reopened_started_prompt_cancels_with_a_checkpoint_without_model_re
     first.shutdown().await?;
     drop((first, first_events));
 
-    let state = crate::DurableSession::open(store, "cancel-cold-reopen").await?;
+    let state = self::DurableSession::open(store, "cancel-cold-reopen").await?;
     let (reopened, reopened_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -2116,8 +2116,8 @@ async fn cold_reopened_started_prompt_cancels_with_a_checkpoint_without_model_re
 
 #[tokio::test]
 async fn active_routed_input_is_retained_in_the_durable_checkpoint() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
-    let state = crate::DurableSession::open(store, "active-routed-input").await?;
+    let store = self::MemoryStore::new()?;
+    let state = self::DurableSession::open(store, "active-routed-input").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let started = Arc::new(AtomicBool::new(false));
     let release_first = Arc::new(tokio::sync::Notify::new());
@@ -2173,13 +2173,13 @@ async fn active_routed_input_is_retained_in_the_durable_checkpoint() -> Result<(
 
 #[tokio::test]
 async fn exact_id_retry_replays_steer_at_its_original_model_boundary() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let failing = FailReplaceOnce {
         inner: store.clone(),
         expected_revision: 12,
         failed: Arc::new(AtomicBool::new(false)),
     };
-    let state = crate::DurableSession::open(failing, "steered-exact-id-retry").await?;
+    let state = self::DurableSession::open(failing, "steered-exact-id-retry").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let started = Arc::new(AtomicBool::new(false));
     let release_first = Arc::new(tokio::sync::Notify::new());
@@ -2245,7 +2245,7 @@ async fn exact_id_retry_replays_steer_at_its_original_model_boundary() -> Result
 
 #[tokio::test]
 async fn shutdown_reclaims_a_definitely_uncommitted_queued_terminalization() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let failing = FailReplaceOnce {
         inner: store.clone(),
         expected_revision: 10,
@@ -2303,8 +2303,8 @@ async fn shutdown_reclaims_a_definitely_uncommitted_queued_terminalization() -> 
 
 #[tokio::test]
 async fn durable_terminal_replays_emit_one_terminal_without_model_execution() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
-    let state = crate::DurableSession::open(store, "terminal-replay-events").await?;
+    let store = self::MemoryStore::new()?;
+    let state = self::DurableSession::open(store, "terminal-replay-events").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = || {
         let generations = Arc::clone(&generations);
@@ -2415,8 +2415,8 @@ fn assert_replay_terminal(
 
 #[tokio::test]
 async fn newer_agent_acquisition_fences_an_older_live_model_before_execution() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
-    let state = crate::DurableSession::open(store, "fenced-live-agents").await?;
+    let store = self::MemoryStore::new()?;
+    let state = self::DurableSession::open(store, "fenced-live-agents").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = || {
         let generations = Arc::clone(&generations);
@@ -2490,8 +2490,8 @@ async fn newer_agent_acquisition_fences_an_older_live_model_before_execution() -
 #[tokio::test]
 async fn independent_session_takeover_fences_standalone_compaction_before_execution() -> Result<()>
 {
-    let store = crate::MemoryStore::new()?;
-    let state = crate::DurableSession::open(store.clone(), "independent-compaction-fence").await?;
+    let store = self::MemoryStore::new()?;
+    let state = self::DurableSession::open(store.clone(), "independent-compaction-fence").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = OpenAi::builder("test-key")
         .service({
@@ -2508,7 +2508,7 @@ async fn independent_session_takeover_fences_standalone_compaction_before_execut
         .await?
         .build()?;
 
-    let takeover = crate::DurableSession::open(store, "independent-compaction-fence").await?;
+    let takeover = self::DurableSession::open(store, "independent-compaction-fence").await?;
     let error = older
         .compact()
         .await
@@ -2667,7 +2667,7 @@ async fn live_replacement_resubmits_a_pending_standalone_compaction() -> Result<
 #[tokio::test]
 async fn takeover_after_warmup_authorization_fences_the_result_not_the_in_flight_call() -> Result<()>
 {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let state = DurableSession::open(store, "warmup-authorization-takeover").await?;
     let warmups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2723,8 +2723,8 @@ async fn takeover_after_warmup_authorization_fences_the_result_not_the_in_flight
 
 #[tokio::test]
 async fn sequential_model_owners_preserve_history_and_cache_lineage() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
-    let state = crate::DurableSession::open(store, "sequential-model-owners").await?;
+    let store = self::MemoryStore::new()?;
+    let state = self::DurableSession::open(store, "sequential-model-owners").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = || {
         let generations = Arc::clone(&generations);
@@ -3230,7 +3230,7 @@ async fn takeover_during_automatic_compaction_authorization_fences_before_provid
 }
 
 async fn assert_cold_model_replay_forces_full_history(store_responses: bool) -> Result<()> {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
         expected_revision: 7,
@@ -3263,7 +3263,7 @@ async fn assert_cold_model_replay_forces_full_history(store_responses: bool) -> 
     let state_id = format!("cold-model-replay-{suffix}");
     let workspace = temporary_workspace(&state_id)?;
 
-    let state = crate::DurableSession::open(failing_store, state_id.clone()).await?;
+    let state = self::DurableSession::open(failing_store, state_id.clone()).await?;
     let (first, first_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -3286,7 +3286,7 @@ async fn assert_cold_model_replay_forces_full_history(store_responses: bool) -> 
     first.shutdown().await?;
     drop((first, first_events));
 
-    let state = crate::DurableSession::open(store, state_id).await?;
+    let state = self::DurableSession::open(store, state_id).await?;
     let (reopened, reopened_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -3526,7 +3526,7 @@ async fn follow_on_turn_replays_after_cold_reopen() -> Result<()> {
 #[tokio::test]
 async fn portable_state_replays_a_completed_model_step_after_terminal_commit_failure() -> Result<()>
 {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
         expected_revision: 7,
@@ -3542,7 +3542,7 @@ async fn portable_state_replays_a_completed_model_step_after_terminal_commit_fai
             .build()
     };
     let workspace = temporary_workspace("portable-durability-model-replay")?;
-    let state = crate::DurableSession::open(failing_store, "portable-model-replay").await?;
+    let state = self::DurableSession::open(failing_store, "portable-model-replay").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -3569,7 +3569,7 @@ async fn portable_state_replays_a_completed_model_step_after_terminal_commit_fai
     agent.shutdown().await?;
     drop((agent, events));
 
-    let state = crate::DurableSession::open(store, "portable-model-replay").await?;
+    let state = self::DurableSession::open(store, "portable-model-replay").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -3599,7 +3599,7 @@ async fn portable_state_replays_a_completed_model_step_after_terminal_commit_fai
 
 #[tokio::test]
 async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_replace() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store,
         expected_revision: 7,
@@ -3615,7 +3615,7 @@ async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_replace() -> 
             .build()?
     };
     let workspace = temporary_workspace("portable-durability-live-retry")?;
-    let state = crate::DurableSession::open(failing_store, "portable-model-live-retry").await?;
+    let state = self::DurableSession::open(failing_store, "portable-model-live-retry").await?;
     let builder = Nanocodex::builder(openai)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -3651,7 +3651,7 @@ async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_replace() -> 
 
 #[tokio::test]
 async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
         expected_revision: 8,
@@ -3676,7 +3676,7 @@ async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
             .build()
     };
     let workspace = temporary_workspace("portable-durability-ambiguous-tool")?;
-    let state = crate::DurableSession::open(failing_store, "ambiguous-tool").await?;
+    let state = self::DurableSession::open(failing_store, "ambiguous-tool").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -3696,7 +3696,7 @@ async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
     agent.shutdown().await?;
     drop((agent, events));
 
-    let state = crate::DurableSession::open(store.clone(), "ambiguous-tool").await?;
+    let state = self::DurableSession::open(store.clone(), "ambiguous-tool").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -3718,7 +3718,7 @@ async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
     resumed.shutdown().await?;
     drop((resumed, resumed_events));
 
-    let state = crate::DurableSession::open(store, "ambiguous-tool").await?;
+    let state = self::DurableSession::open(store, "ambiguous-tool").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -3752,7 +3752,7 @@ async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
 
 #[tokio::test]
 async fn completed_tool_output_replays_after_tool_is_removed() -> Result<()> {
-    let store = crate::MemoryStore::new()?;
+    let store = self::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
         expected_revision: 9,
@@ -3779,7 +3779,7 @@ async fn completed_tool_output_replays_after_tool_is_removed() -> Result<()> {
             nanocodex_agent::tools::ToolExposure::Hidden,
         )
         .build()?;
-    let state = crate::DurableSession::open(failing_store, "removed-tool-recovery").await?;
+    let state = self::DurableSession::open(failing_store, "removed-tool-recovery").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -3808,7 +3808,7 @@ async fn completed_tool_output_replays_after_tool_is_removed() -> Result<()> {
     agent.shutdown().await?;
     drop((agent, events));
 
-    let state = crate::DurableSession::open(store, "removed-tool-recovery").await?;
+    let state = self::DurableSession::open(store, "removed-tool-recovery").await?;
     let recovered_tools = Tools::builder().without_defaults().build()?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
@@ -3847,7 +3847,7 @@ async fn completed_tool_output_replays_after_tool_is_removed() -> Result<()> {
 async fn model_recovery_uses_current_conversation_across_runtime_changes() -> Result<()> {
     for (warmup, pending) in [(false, false), (false, true), (true, false), (true, true)] {
         let expected_revision = 8 + u64::from(warmup) * 2 + u64::from(pending);
-        let store = crate::MemoryStore::new()?;
+        let store = self::MemoryStore::new()?;
         let failing_store = FailReplaceOnce {
             inner: store.clone(),
             expected_revision,
@@ -3874,7 +3874,7 @@ async fn model_recovery_uses_current_conversation_across_runtime_changes() -> Re
                 calls: Arc::clone(&tool_calls),
             })
             .build()?;
-        let state = crate::DurableSession::open(failing_store, "changed-tool-profile").await?;
+        let state = self::DurableSession::open(failing_store, "changed-tool-profile").await?;
         let builder = Nanocodex::builder(openai()?)
             .workspace(&workspace)
             .session_id(test_session_id())
@@ -3899,7 +3899,7 @@ async fn model_recovery_uses_current_conversation_across_runtime_changes() -> Re
         agent.shutdown().await?;
         drop((agent, events));
 
-        let state = crate::DurableSession::open(store, "changed-tool-profile").await?;
+        let state = self::DurableSession::open(store, "changed-tool-profile").await?;
         let recovered_tools = Tools::builder().without_defaults().build()?;
         let builder = Nanocodex::builder(openai()?)
             .workspace(&workspace)

@@ -1,13 +1,28 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-// WASM means an artifact is needed, including cache reuse for JS-only checks.
-// Rust separately controls workspace quality and WASM-target Clippy.
-const families = ["native", "voice", "python", "rust", "wasm", "bindings", "apps", "preview", "policy", "codeql"];
-const full = () => Object.fromEntries(families.map(name => [name, true]));
-const none = () => Object.fromEntries(families.map(name => [name, false]));
+// Each family gates one or more jobs in .github/workflows/ci.yml (see `gate`).
+// The heavy lane (native matrices, Python wheels, docs/contracts, previews,
+// CodeQL) is skipped for draft pull requests, which get the fast lane: fmt and
+// Clippy on affected crates, WASM Clippy, dependency policy, and JS
+// typecheck/build.
+export const families = [
+  "hands", "windows", "vm", "voice", "python", "rust", "rust_extra", "wasm_rust",
+  "wasm", "bindings", "apps", "preview", "policy", "codeql",
+];
+const heavyFamilies = ["hands", "windows", "vm", "voice", "python", "rust_extra", "preview", "codeql"];
+// Workspace packages whose build a job exercises. A change to any package in
+// their dependency closure (normal, build, or dev) selects the job.
+const jobRoots = {
+  hands: ["nanocodex2-bin"],
+  windows: ["nanocodex-bin", "nanocodex2-bin"],
+  vm: ["nanocodex-vm"],
+  voice: ["nanocodex-voice-native"],
+  python: ["nanocodex-python"],
+  wasm_rust: ["nanocodex-wasm"],
+};
 const appPackages = new Set([
   "account", "chief-of-staff", "connect-dialog", "connect-playground", "email",
 ]);
@@ -16,59 +31,119 @@ const sharedPackages = new Set([
   "nanocodex", "nanocodex-tools", "nanocodex-react", "nanocodex-vite",
   "nanocodex-terminal", "nanocodex-connect-ui", "nanocodex-connect-protocol",
 ]);
+// Deployed by the Cloudflare workflow; no ci.yml job builds or consumes them.
+const cloudflarePackages = new Set(["managed2", "egress2", "media"]);
 const bindingExamples = new Set(["node", "react-vite", "browser-cdn", "privy", "better-auth"]);
-const jsSource = /\.(?:[cm]?[jt]sx?|jsonc?|css|html|svg|png|jpe?g|gif|webp|ico|woff2?)$/;
+const jsSource = /\.(?:[cm]?[jt]sx?|jsonc?|css|html|svg|png|jpe?g|gif|webp|ico|woff2?|sql)$/;
 const binaryAsset = /\.(?:png|jpe?g|gif|webp|ico|mp4|wav|woff2?)$/;
+const rustInput = /(?:\.rs|\/Cargo\.toml)$/;
+// Files read by a package outside its own directory.
+const crossPackageInputs = {
+  "bin/nanocodex/build_version.rs": "nanocodex2-bin", // nanocodex2/build.rs
+  "js/nanocodex-tools/runtime/code-tools.mjs": "nanocodex-tools", // embedded copy
+};
+// Workflow definitions and actions that ci.yml runs. Any change runs everything.
+const ciDefinitions = /^\.github\/(?:actions\/|workflows\/(?:ci|js-preview)\.yml$)/;
 
-// These bridge scripts are embedded by provision.rs in the native Hand helper.
-// Keep its platform matrix, but they do not feed voice or Python artifacts.
-// Exact paths leave new build inputs and unknown CUA files conservative.
-const cuaNativePaths = new Set([
-  "crates/experimental/nanocodex-computer/src/openai-cua-app-server.mjs",
-  "crates/experimental/nanocodex-computer/src/openai-cua-native-host.mjs",
-  "crates/experimental/nanocodex-computer/src/openai-cua-gui-readiness.mjs",
-  "scripts/tests/openai-cua-app-server.test.mjs",
-  "scripts/tests/openai-cua-native-host.test.mjs",
-  "scripts/tests/openai-cua-gui-readiness.test.mjs",
-  "scripts/tests/openai-cua-headless-upstream.test.mjs",
-]);
+const all = value => Object.fromEntries(families.map(name => [name, value]));
+const full = () => ({ jobs: all(true), packages: "*" });
 
-export function selectJobs(paths) {
-  const jobs = none();
+/** Workspace package graph from `cargo metadata --no-deps` (no registry access). */
+export function loadGraph(cwd = process.cwd()) {
+  const meta = JSON.parse(execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1", "--offline"], {
+    cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"],
+  }));
+  const root = meta.workspace_root;
+  const names = new Set(meta.packages.map(p => p.name));
+  const dirs = [];
+  const external = Object.entries(crossPackageInputs);
+  const dependents = new Map([...names].map(name => [name, new Set()]));
+  for (const pkg of meta.packages) {
+    const dir = relative(root, dirname(pkg.manifest_path));
+    dirs.push([dir, pkg.name]);
+    // Targets outside their package directory (nanocodex2's
+    // `../src/nanocodex2/main.rs`) own the modules beside their root file
+    // under crates/ and bin/; elsewhere (examples/) only the target file.
+    for (const target of pkg.targets) {
+      const src = relative(root, target.src_path);
+      if (src.startsWith(dir + "/")) continue;
+      external.push([/^(?:crates|bin)\//.test(src) ? dirname(src) + "/" : src, pkg.name]);
+    }
+    for (const dep of pkg.dependencies) {
+      if (dep.path && names.has(dep.name)) dependents.get(dep.name).add(pkg.name);
+    }
+  }
+  dirs.sort((a, b) => b[0].length - a[0].length);
+  return { dirs, external, dependents };
+}
+
+function owners(path, graph) {
+  const found = new Set(graph.external
+    .filter(([prefix]) => prefix.endsWith("/") ? path.startsWith(prefix) : path === prefix)
+    .map(([, name]) => name));
+  const owner = graph.dirs.find(([dir]) => path.startsWith(dir + "/"));
+  // js/, py/ and the examples root mix Rust with other languages; only Rust
+  // inputs there feed Cargo. Crate directories embed arbitrary assets.
+  const mixed = owner && (owner[0] === "examples" || /^(?:js|py)\//.test(owner[0]));
+  if (owner && (!mixed || rustInput.test(path))) found.add(owner[1]);
+  return found;
+}
+
+function withDependents(changed, graph) {
+  const seen = new Set(changed);
+  const queue = [...changed];
+  while (queue.length) for (const next of graph.dependents.get(queue.pop()) ?? []) {
+    if (!seen.has(next)) { seen.add(next); queue.push(next); }
+  }
+  return seen;
+}
+
+/** Map changed paths to CI families. `graph` null means Cargo is unavailable. */
+export function selectJobs(paths, graph) {
+  if (!graph) return full();
+  const jobs = all(false);
+  const changed = new Set();
   for (const path of paths) {
     const parts = path.split("/");
     const name = parts.at(-1);
-    // Resolve unsafe/unknown configuration before any directory allowlist.
+    // Workspace-wide inputs and unsafe paths run everything.
     if (parts.some(part => part === ".." || part === "." || part === "")
-      || /^(Cargo\.(toml|lock)|rust-toolchain(?:\.toml)?)$/.test(name)
-      || /^(package(?:-lock)?\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lockb?|\.npmrc|\.pnpmfile\.cjs|turbo\.json)$/.test(name)) return full();
+      || /^(Cargo\.lock|rust-toolchain(?:\.toml)?)$/.test(name) || path === "Cargo.toml" || path.startsWith(".cargo/")
+      || /^(package(?:-lock)?\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lockb?|\.npmrc|\.pnpmfile\.cjs|turbo\.json)$/.test(name)
+      || ciDefinitions.test(path) || path.startsWith("scripts/ci/")) return full();
     if (!binaryAsset.test(path)) jobs.policy = true; // Retain spelling checks for source and prose.
-    if (cuaNativePaths.has(path)) {
-      jobs.native = true;
-    } else if (/^(crates|bin|scripts|\.github|\.cargo|third_party)\//.test(path)) {
-      return full();
+    const packages = owners(path, graph);
+    for (const pkg of packages) changed.add(pkg);
+    if (packages.size && !/^(?:js|py|examples)\//.test(path)) continue;
+    if (path === "js/nanocodex-tools/runtime/code-tools.mjs") {
+      jobs.apps = jobs.bindings = jobs.preview = true;
+    } else if (packages.size && rustInput.test(path)) {
+      // Rust inside js/, py/ or examples/ is fully described by its package.
+    } else if (path.startsWith("scripts/tests/openai-cua-")) {
+      jobs.hands = jobs.windows = jobs.vm = true; // Bridges embedded by the native Hand.
+    } else if (path.startsWith("scripts/cloudflare/")) {
+      // Cloudflare workflow inputs; their script tests run in the policy job.
+    } else if (path.startsWith("third_party/codex-voice/") || path === "scripts/build-voice-native.py") {
+      jobs.voice = true;
     } else if (path.startsWith("py/") || path.startsWith("examples/python/")) {
       jobs.python = true;
-      if (path.endsWith(".rs")) jobs.rust = true;
-    } else if (path.endsWith(".rs")) {
-      return full();
     } else if (path.startsWith("docs/")
       || /^(README\.md|CHANGELOG\.md|AGENTS\.md|LICENSE-APACHE|LICENSE-MIT)$/.test(path)) {
       // Documentation does not require compiled artifacts.
     } else if (/^(apple|macos)\//.test(path)) {
       // Native Apple source/build inputs are checked by the separate Apple workflows.
-    } else if (path.startsWith("js/desktop-runtime/") || path.startsWith("windows/")) {
-      jobs.native = true;
+    } else if (path.startsWith("js/desktop-runtime/")) {
+      jobs.hands = jobs.windows = true;
+    } else if (path.startsWith("windows/") || path === "install.ps1") {
+      jobs.windows = true;
+    } else if (path.startsWith(".github/")) {
+      jobs.codeql = true; // Other workflows run separately; CodeQL still audits them.
+    } else if (parts[0] === "js" && parts.length > 2 && cloudflarePackages.has(parts[1])) {
+      // Checked by the Cloudflare workflow's own path filter.
     } else if (parts[0] === "js" && parts.length > 2
       && (appPackages.has(parts[1]) || bindingPackages.has(parts[1]) || sharedPackages.has(parts[1]))) {
       if (/\.md$/.test(path)) continue;
-      // The SDK embeds a generated copy in Rust; keep its canonical source conservative.
-      if (path === "js/nanocodex-tools/runtime/code-tools.mjs") return full();
-      if (path.startsWith("js/nanocodex-vite/scripts/")) {
-        jobs.rust = true; // WASM build/cache orchestration is Rust build input.
-      } else if (!jsSource.test(path)) {
-        return full();
-      }
+      if (!path.startsWith("js/nanocodex-vite/scripts/") && !jsSource.test(path)) return full();
       if (appPackages.has(parts[1]) || sharedPackages.has(parts[1])) jobs.apps = true;
       if (bindingPackages.has(parts[1]) || sharedPackages.has(parts[1])) jobs.bindings = true;
       if (["nanocodex", "nanocodex-vite", "nanocodex-tools"].includes(parts[1])) jobs.preview = true;
@@ -80,10 +155,15 @@ export function selectJobs(paths) {
       return full();
     }
   }
-  // Every selected consumer downloads the same-run WASM artifact. Never allow
-  // an intentionally skipped producer to silently skip a required consumer.
+  const hit = withDependents(changed, graph);
+  for (const [family, roots] of Object.entries(jobRoots)) {
+    if (roots.some(root => hit.has(root))) jobs[family] = true;
+  }
+  jobs.rust = jobs.rust_extra = hit.size > 0;
+  // WASM consumers must retest against changed Rust bindings.
+  if (jobs.wasm_rust) jobs.apps = jobs.bindings = jobs.preview = true;
   jobs.wasm = jobs.bindings || jobs.apps || jobs.preview;
-  return jobs;
+  return { jobs, packages: [...hit].sort().join(" ") };
 }
 
 export function changedPaths(eventName, event, cwd = process.cwd()) {
@@ -97,6 +177,7 @@ export function changedPaths(eventName, event, cwd = process.cwd()) {
     head = event.after;
     separator = "..";
   } else {
+    // merge_group, schedule and dispatch always verify everything.
     throw new Error(`full CI for event ${eventName || "unknown"}`);
   }
   for (const sha of [base, head]) {
@@ -113,31 +194,92 @@ export function changedPaths(eventName, event, cwd = process.cwd()) {
 }
 
 export function selectionForEvent(eventName, event, cwd) {
+  let result;
   try {
     const paths = changedPaths(eventName, event, cwd);
-    return { jobs: selectJobs(paths), reason: `classified ${paths.length} changed path(s)` };
+    let graph = null;
+    try { graph = loadGraph(cwd); } catch { /* full CI below */ }
+    result = { ...selectJobs(paths, graph), reason: graph ? `classified ${paths.length} changed path(s)` : "full CI: cargo metadata unavailable" };
   } catch {
     // Missing history, malformed events and unsupported event types fail open.
-    return { jobs: full(), reason: "full CI: event or diff unavailable/unsupported" };
+    result = { ...full(), reason: "full CI: event or diff unavailable/unsupported" };
   }
+  // Draft pull requests get the fast lane; marking ready reruns everything.
+  result.heavy = !(eventName === "pull_request" && event?.pull_request?.draft === true);
+  if (!result.heavy) for (const family of heavyFamilies) result.jobs[family] = false;
+  // Commit previews are published for PR heads; a merge-queue candidate
+  // becomes the next master push, which publishes its own.
+  if (eventName === "merge_group") result.jobs.preview = false;
+  result.jobs.wasm = result.jobs.bindings || result.jobs.apps || result.jobs.preview;
+  return result;
+}
+
+// ci.yml job id -> whether the selection requires it. Selected jobs must
+// succeed; every other job must be skipped. Paused tests stay skipped until
+// the workflow's NANOCODEX_CI_TESTS switch is turned on.
+const gate = {
+  changes: () => true,
+  test: o => o.tests && o.rust_extra,
+  "shared-hands": o => o.hands,
+  "voice-native": o => o.voice,
+  "windows-hand": o => o.windows,
+  clippy: o => o.rust,
+  "rust-extra": o => o.rust_extra,
+  "vm-guest": o => o.vm,
+  policy: o => o.policy,
+  "wasm-build": o => o.wasm,
+  "js-preview": o => o.preview,
+  "wasm-quality": o => o.wasm_rust,
+  bindings: o => o.bindings,
+  python: o => o.python,
+  apps: o => o.apps,
+  codeql: o => o.codeql,
+};
+
+/** Check `toJSON(needs)` against the selection. Returns a list of violations. */
+export function verify(needs) {
+  const raw = needs?.changes?.outputs ?? {};
+  const outputs = {};
+  for (const key of [...families, "tests"]) {
+    if (raw[key] !== "true" && raw[key] !== "false") return [`selection output ${key} is ${JSON.stringify(raw[key])}`];
+    outputs[key] = raw[key] === "true";
+  }
+  const problems = [];
+  for (const job of new Set([...Object.keys(gate), ...Object.keys(needs)])) {
+    if (!gate[job]) { problems.push(`${job} is not mapped in select-jobs.mjs`); continue; }
+    const want = gate[job](outputs) ? "success" : "skipped";
+    const got = needs[job]?.result;
+    if (got !== want) problems.push(`${job}: expected ${want}, got ${got ?? "missing"}`);
+  }
+  return problems;
 }
 
 export function main(env = process.env) {
+  if (process.argv[2] === "verify") {
+    const problems = verify(JSON.parse(env.NEEDS ?? "{}"));
+    for (const problem of problems) console.error(`::error title=ci success::${problem}`);
+    if (problems.length) process.exit(1);
+    console.log("every selected job succeeded and every other job was skipped");
+    return;
+  }
   let result;
   try {
     result = selectionForEvent(env.GITHUB_EVENT_NAME, JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")));
   } catch {
-    result = { jobs: full(), reason: "full CI: event payload unavailable/invalid" };
+    result = { ...full(), heavy: true, reason: "full CI: event payload unavailable/invalid" };
   }
   // The reusable publisher only runs in the upstream repository. Reflect that
   // restriction in the required-job gate instead of accepting unexpected skips.
   if (env.GITHUB_REPOSITORY && env.GITHUB_REPOSITORY !== "gakonst/nanocodex") result.jobs.preview = false;
-  const outputs = Object.entries(result.jobs).map(([key, value]) => `${key}=${value}`).join("\n") + "\n";
+  // Owner switch for the paused test steps; independent of path selection.
+  const tests = env.NANOCODEX_CI_TESTS === "on";
+  const outputs = [...Object.entries(result.jobs), ["tests", tests], ["packages", result.packages], ["heavy", result.heavy]]
+    .map(([key, value]) => `${key}=${value}`).join("\n") + "\n";
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, outputs);
   const summary = `CI job selection (${result.reason})\n${outputs}`;
   console.log(summary);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `\n\`\`\`text\n${summary}\`\`\`\n`);
-  return result.jobs;
+  return result;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main();

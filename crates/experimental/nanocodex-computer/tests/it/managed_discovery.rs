@@ -36,7 +36,11 @@ fn linux_managed_launcher_discovery_respects_explicit_selection() {
     let check = |explicit: Option<&str>, expected: &std::ffi::OsStr| {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
-            .args(["--exact", "discovery_child", "--nocapture"])
+            .args([
+                "--exact",
+                "managed_discovery::discovery_child",
+                "--nocapture",
+            ])
             .env("NANOCODEX_DIR", &root)
             .env("TEST_EXPECTED_PROVIDER", expected)
             .env_remove("NANOCODEX_COMPUTER");

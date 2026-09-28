@@ -1,0 +1,20 @@
+# `cargo nextest run --profile ci` in .github/workflows/ci.yml.
+[profile.ci]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 5 }
+failure-output = "immediate-final"
+
+# Hand identity, IPC lease, and reconnect tests share host sockets and were
+# already serialized with --test-threads=1; retries report them as FLAKY
+# instead of failing unrelated changes. Add other known-flaky tests here.
+[test-groups]
+host-ipc = { max-threads = 1 }
+
+[[profile.ci.overrides]]
+filter = "package(nanocodex2-bin) & kind(bin) & test(/hand/)"
+test-group = "host-ipc"
+retries = 2
+
+[[profile.ci.overrides]]
+filter = "package(nanocodex-remote) | package(nanocodex-tui-control)"
+retries = 1

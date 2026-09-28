@@ -108,6 +108,10 @@ serves the same names with `:1355` appended. Portless's proxy is user-global,
 while app routes, processes, and Wrangler state remain isolated per checkout
 and worktree.
 
+Before pushing Rust changes, `pnpm check:fast` runs `cargo fmt` and the CI
+Clippy command on the crates changed since `origin/master` and their workspace
+dependents.
+
 Or install the native CLI/TUI on Apple Silicon macOS or x86-64 glibc Linux:
 
 ```sh
