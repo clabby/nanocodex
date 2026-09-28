@@ -149,3 +149,9 @@ References: [Claude tool calls](https://platform.claude.com/docs/en/agents-and-t
 [Agent SDK subscription access](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan),
 [third-party approval language](https://code.claude.com/docs/en/agent-sdk/quickstart),
 [Claude Code auth guidance](https://code.claude.com/docs/en/legal-and-compliance).
+
+## Authenticated Claude Code 2.1.284 wire follow-up
+
+A controlled live run using the already authenticated Claude Code CLI and a short-lived process-scoped TLS measurement relay confirmed the client-managed compaction exchange, tool-result ordering, deferred tool discovery and the two-layer client `WebSearch` to nested server `web_search_20250305` path. It sampled 20 successful `-p` prompts plus valid persisted continuation and two compactions under an explicit 100k-token auto-compact window. Main subscription requests had four system text blocks (two cached with `ttl:1h`), adaptive thinking `display:updates`, `diagnostics.previous_message_id` on follow-ups and ordinary Claude content-block history. The CLI used an Authorization header, with no value captured.
+
+The current crate remains a **partial** implementation: it does not authenticate via the subscription, implement client `ToolSearch`, provide Claude Code's nested `WebSearch` flow, or match full compaction thresholds/cache layout. `ClaudeAuthProvider` is a seam for an explicitly approved integration; first-party CLI headers observed in the research are not a recipe to impersonate the CLI.
