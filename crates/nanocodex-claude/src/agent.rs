@@ -244,6 +244,27 @@ impl ClaudeBuilder {
         }
         self
     }
+    /// Opt in to Claude Code client-side WebSearch and WebFetch using only an
+    /// embedding-provided, per-request approved web capability. This is separate
+    /// from Anthropic-executed `web_search` and `web_fetch` server tools.
+    #[cfg(feature = "workspace-files")]
+    pub fn approved_web<P>(mut self, web: Arc<nanocodex_tools::claude_web::ClaudeWeb<P>>) -> Self
+    where
+        P: nanocodex_tools::claude_web::ApprovedWebProvider + 'static,
+    {
+        for schema in nanocodex_tools::claude_web::ClaudeWeb::<P>::definitions() {
+            let definition: ToolDefinition = serde_json::from_value(schema)
+                .expect("built-in Claude client web schema must remain valid");
+            let name = definition.name.clone();
+            let web = web.clone();
+            self = self.tool(definition, move |input| {
+                let web = web.clone();
+                let name = name.clone();
+                async move { web.execute(&name, input).await }
+            });
+        }
+        self
+    }
     /// Explicitly enable an Anthropic-executed server tool. The backend never
     /// invokes a local client handler for `server_tool_use` blocks.
     pub fn server_tool(mut self, definition: ServerToolDefinition) -> Self {
