@@ -27,6 +27,8 @@ mod launcher;
 mod linux_hand_install;
 mod managed2;
 mod native_hand;
+#[cfg(target_os = "macos")]
+mod native_secure_input;
 mod observation_providers;
 mod reload;
 mod screen_audio;

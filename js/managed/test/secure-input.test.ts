@@ -1,7 +1,7 @@
 import { jsonSchema, tool } from 'ai';
 import type { BrowserRuntime } from 'agents/browser/ai';
 import { describe, expect, it, vi } from 'vitest';
-import { PrivateBrowserCdp } from '../src/browser-vault';
+import { sanitizeBrowserVaultText, parsePrivateSecureInput, parseSecureFormFields, PrivateBrowserCdp } from '../src/browser-vault';
 import { createManagedBrowserRuntime } from '../src/browser-runtime';
 
 // Failure cases defined before implementation: destination/session/document changes,
@@ -20,7 +20,7 @@ describe('one-time browser password boundary', () => {
       if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'top', loaderId: loader, url: 'https://login.example/' } } };
       if (method === 'Page.createIsolatedWorld') { if (race) loader = 'replacement-during-world'; return { executionContextId: 7 }; }
       if (params?.arguments?.[1]?.value === 'snapshot') return {result:{value:{status:'unknown',flags:[false,false,false],snapshot_id:params?.arguments?.[2]?.value,title:'synthetic-password',text:'Welcome synthetic-password',elements:[]}}};
-      if (params?.arguments?.[6]?.value === true) return {result:{value:true}};
+      if (params?.arguments?.[2]?.value === null || params?.arguments?.[6]?.value === true) return {result:{value:true}};
       return inject();
     });
     const spy = vi.spyOn(PrivateBrowserCdp, 'connect').mockResolvedValue({ send, close() {} } as unknown as PrivateBrowserCdp);
@@ -35,6 +35,49 @@ describe('one-time browser password boundary', () => {
     const request = () => runtime.tools.find(t => t.name === 'request_secure_input')!.handler({ target_id: 'tab', expected_origin: 'https://login.example', password_selector: '#pass', submit: true }, context) as Promise<{request_id: string}>;
     return { runtime, request, create, context, stored, inject, spy, close, setLoader: () => { loader = 'changed'; }, setSession: () => { session = 'changed'; }, fail: () => { fail = true; }, race: () => { race = true; }, failStorage: () => { storageFailure = true; } };
   }
+  it('typed fields describe only metadata, reject unknown values, fill once without submission, redact and fail closed after restart', async () => {
+    const f = await fixture();
+    try {
+      const fields = [{id:'pan',kind:'card_number',selector:'#pan',label:'Card number'},{id:'cvc',kind:'card_cvc',selector:'#cvc'}];
+      const request = (extra = {}) => f.runtime.tools.find(t=>t.name === 'request_secure_input')!.handler({target_id:'tab',expected_origin:'https://login.example',fields,submit:false,...extra},f.context) as Promise<{request_id:string}>;
+      await expect(request({submit:true})).rejects.toThrow();
+      await expect(request({fields:[{...fields[0],value:'secret'}]})).rejects.toThrow();
+      const r = await request();
+      const metadata = await f.runtime.submitSecureInput({request_id:r.request_id,action:'describe'},f.context.signal);
+      expect(metadata).toMatchObject({request_id:r.request_id,origin:'https://login.example',fields:[{id:'pan',kind:'card_number',selector:'#pan'},{id:'cvc',kind:'card_cvc',selector:'#cvc'}]});
+      expect(JSON.stringify(metadata)).not.toContain('label');
+      await expect(f.runtime.submitSecureInput({request_id:r.request_id,values:{pan:'4242',unknown:'123'}},f.context.signal)).rejects.toThrow();
+      expect(f.inject).not.toHaveBeenCalled();
+      const values = {pan:'4242 4242 4242 4242',cvc:'123'};
+      expect(await f.runtime.submitSecureInput({request_id:r.request_id,values},f.context.signal)).toMatchObject({status:'filled'});
+      expect(f.inject).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify([...f.stored.values()])).not.toContain('4242');
+      await expect(f.runtime.submitSecureInput({request_id:r.request_id,values},f.context.signal)).rejects.toThrow();
+      const restored = await f.create();
+      await expect(restored.tools.find(t=>t.name==='secure_input_snapshot')!.handler({request_id:r.request_id},f.context)).rejects.toThrow();
+    } finally { f.spy.mockRestore(); }
+  });
+  it.each(['document','world-race','session','restart'] as const)('typed submission fails closed on %s', async mode => {
+    const f = await fixture();
+    try {
+      const r = await f.runtime.tools.find(t=>t.name==='request_secure_input')!.handler({target_id:'tab',expected_origin:'https://login.example',submit:false,fields:[{id:'pan',kind:'card_number',selector:'#pan'}]},f.context) as {request_id:string};
+      if (mode === 'document') f.setLoader();
+      if (mode === 'world-race') f.race();
+      if (mode === 'session') f.setSession();
+      const runtime = mode === 'restart' ? await f.create() : f.runtime;
+      await expect(runtime.submitSecureInput({request_id:r.request_id,values:{pan:'4242424242424242'}},f.context.signal)).rejects.toThrow();
+      expect(f.inject).not.toHaveBeenCalled();
+    } finally {f.spy.mockRestore();}
+  });
+  it('redacts numeric card values despite page separator normalization', () => {
+    expect(sanitizeBrowserVaultText('Card 4242-4242-4242-4242 expiry 09 / 29 code 1 2 3',['4242 4242 4242 4242','09/29','123'],1000)).toBe('Card [redacted] expiry [redacted] code [redacted]');
+  });
+  it('rejects private payload pollution and unsupported field descriptors', () => {
+    const request_id = '12345678-1234-1234-1234-123456789abc';
+    expect(()=>parsePrivateSecureInput({request_id,values:{pan:'4242'},extra:'secret'})).toThrow();
+    expect(()=>parsePrivateSecureInput({request_id,values:{pan:''}})).toThrow();
+    expect(()=>parseSecureFormFields([{id:'pan',kind:'card_number',selector:'#pan'},{id:'pan',kind:'card_cvc',selector:'#cvc'}])).toThrow();
+  });
   it('injects only once, persists no password, and gates observation across restart', async () => {
     const f = await fixture();
     try {

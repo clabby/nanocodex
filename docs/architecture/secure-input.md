@@ -1,4 +1,4 @@
-# One-time browser password input
+# One-time private secure input
 
 `request_secure_input({target_id, expected_origin, password_selector, submit})`
 creates a five-minute request for a visible password field on a same-origin HTTPS
@@ -48,10 +48,106 @@ redaction is defense in depth, not a confidentiality guarantee against a
 malicious credential destination. Private snapshots never return input values,
 cookies, raw DOM, provider URLs, or screenshots.
 
-This API does not support sudo, terminal stdin, native CUA input, arbitrary
-application fields, or CAPTCHA. Ordinary Hand RPC persists tool input, and
-same-user shell access could observe a FIFO or helper process. Secure native
-input requires a separately protected native execution boundary.
+The browser API does not support terminal stdin, native CUA input, arbitrary
+application fields, or CAPTCHA. Native sudo uses the separate enrolled helper
+boundary below; ordinary Hand RPC must never receive a plaintext password.
+
+## Typed browser forms
+
+The same conversation bottom sheet supports multiple private fields:
+
+```js
+request_secure_input({
+  target_id, expected_origin, submit: false,
+  fields: [
+    {id: "card", kind: "card_number", selector: "#card-number"},
+    {id: "expiry", kind: "card_expiry", selector: "#expiry"},
+    {id: "cvc", kind: "card_cvc", selector: "#security-code"}
+  ]
+})
+```
+
+Supported kinds are `password`, `card_number`, `card_expiry`, `card_cvc`, and
+`sensitive_text`. One to eight fields must be unique visible native inputs in
+one same-origin top-frame HTTPS POST form. Password fields require password
+inputs; other kinds accept text, tel, or password inputs. Iframes, custom controls,
+readonly/disabled/inert, transparent, offscreen or occluded fields, duplicate
+selectors and cross-origin form actions fail closed. Card number, expiry and CVC
+inputs must also advertise the corresponding `cc-number`, `cc-exp` and `cc-csc`
+HTML autocomplete tokens; generic text/contact fields cannot be relabeled as
+card destinations. Page markup can still be malicious, so users must trust the
+verified website origin. This is not universal form or native-app support.
+
+The tool returns metadata only with `kind: "browser_form"`. The authenticated
+client posts `{request_id, action: "describe"}` to the private endpoint and gets
+exactly `{request_id, origin, expires_at, fields:[{id,kind,selector}]}`. Display labels
+are app-owned. The client submits `{request_id, values:{card,expiry,cvc}}`; the map
+must match the bound field IDs exactly. The aggregate encoded JSON limit is
+32 KiB, including envelope and escaping, in addition to each 4096-character limit.
+Legacy password requests still use `{request_id,value}`.
+
+Typed requests require `submit:false` and never invoke form submission or click
+a payment button. They dispatch native input/change events, so the approved
+website's own handlers still run and can have side effects; a verified origin is
+not a guarantee of benign site behavior. Receipts are `filled`, `outcome_unknown`, or
+`cancelled`; downstream sign-in/payment actions need separate authorization.
+The same quarantine, one-use consumption, loader binding and restart failure
+behavior apply. All entered values stay transient; snapshots also redact numeric
+values after common space, slash, dot or hyphen formatting changes.
+
+The iOS sheet rises from the conversation, starts at medium height, expands for
+review, and clears masked inputs on submission, dismissal or backgrounding.
+Password-manager AutoFill metadata is supplied without requiring a Vault item;
+third-party password-manager behavior still needs physical-device verification.
+The simulator password/card/native journeys use synthetic inputs and share the
+production sheet shell. The card receipt is a fixture; actual browser fill and
+zero explicit submission are separately exercised by the Chrome/runtime journey.
+
+## Enrolled native sudo
+
+`request_native_secure_input({machine_id, executable, arguments, cwd})` prepares
+one exact command on a supported native Mac Hand. Paths are absolute and
+arguments are an array. The model receives only an opaque `native_sudo` request
+receipt, Hand ID, and expiry. The protected helper returns a signed ephemeral
+recipient key bound to the command digest, uid, request ID, and expiry. The
+backend verifies both its independently enrolled helper identity and the digest
+of the requested command before storing metadata. See the
+[native protocol](../../macos/secure-input/PROTOCOL.md) for canonical encodings.
+
+The private client posts to `/v1/agents/{agent_id}/native-secure-input`:
+
+- `{request_id, action:"describe"}` returns the authenticated command, uid,
+  expiry, digest and recipient key (nine fields).
+- `{request_id, ephemeral_public_key, ciphertext}` submits the client-encrypted
+  envelope. No plaintext `value` field is accepted.
+- `{request_id, action:"cancel"}` consumes the request and cancels its helper ticket.
+
+Both HTTP boundaries enforce the existing owner, capability, Connect denial,
+CSRF and body-size checks. Only this authenticated endpoint can sign the
+ciphertext approval. Model tools cannot obtain a server approval signature.
+The exact Hand route is pinned; replay, expiry, changed routes and missing
+configuration fail closed. Submission is consumed before dispatch, and an
+uncertain dispatch returns `outcome_unknown` without retry. Receipts contain
+only type, request ID and status (`completed`, `failed`, `outcome_unknown`, `cancelled`).
+Completed means exit status zero; failed means nonzero. Command output is never returned.
+
+Deployment requires two operator-controlled Worker bindings:
+`NATIVE_SECURE_INPUT_SIGNING_KEY` (secret P256 private JWK JSON) and
+`NATIVE_SECURE_INPUT_HELPERS` (JSON mapping native machine IDs to independently
+enrolled helper P256 x963 public keys in standard base64). The helper must pin
+the corresponding backend signing public key through its locally approved
+installation/enrollment. Neither binding is agent configuration, tool input,
+or discovered from untrusted Hand output. Missing bindings leave this feature
+unavailable. Repository tests do not provision keys, enroll a machine, install
+a privileged helper, change sudoers, or deploy a Worker.
+
+The phone encrypts directly to the helper. The backend and persisted Hand RPC
+see only metadata, ciphertext and signatures. Ordinary Hand RPC durably retains
+the ciphertext and approval signature in its input records; it never receives
+plaintext. The native adapter forwards those
+to the root-owned helper; arbitrary terminal input and native application fields
+remain unsupported. This requires the separately installed protected helper;
+an ordinary same-user process or FIFO is not a supported substitute.
 
 ## Local verification
 
@@ -74,3 +170,26 @@ the native client contract. The `InboxUITests.testPrivatePasswordFieldAndSafeRec
 simulator test exercises the production secure field and receipt presentation
 using synthetic input; it does not authenticate with a password-manager app or
 exercise a live account. Invoke Xcode through `scripts/xcodebuild-guard.sh`.
+
+Native backend protocol failures and direct HTTP admission are exercised with
+`cd js/managed && node_modules/.bin/vitest run test/native-secure-input.test.ts test/browser-vault-route.test.ts test/account-hosted-tools.test.ts`.
+These use synthetic keys and a simulated Hand boundary; they do not prove a live
+privileged installation or end-to-end sudo on an enrolled Mac. Native installation
+and IPC details are in the native protocol linked above.
+
+Native validation:
+
+- `swift test --package-path macos/secure-input --jobs 3` checks the helper's
+  cryptographic boundary without root or enrollment.
+- `swift test --package-path macos/secure-input-integration --jobs 3` exercises
+  the production Swift client and helper together with a synthetic authenticated
+  transport. It does not exercise the JavaScript backend or real sudo.
+- `cargo test -p nanocodex2-bin --bin nanocodex2 native_secure_input --jobs 3`
+  on macOS verifies the native adapter's plaintext rejection and bounded framing.
+- Managed `native-secure-input`, `browser-vault-route`, and the native cases in
+  `hosted-tools-broker` / `account-hosted-tools` cover private HTTP admission,
+  signatures, stale routes, replay and fixed receipts.
+- `InboxUITests.testNativeCommandReviewAndDeniedAuthentication` exercises the
+  production review and authorization gate using a simulated denial. Actual
+  Face ID success, third-party password-manager AutoFill, signed installation,
+  and privileged sudo remain separate device validation requirements.

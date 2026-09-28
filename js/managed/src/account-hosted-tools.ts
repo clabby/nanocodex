@@ -613,7 +613,8 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
           handler: (
             input: unknown,
             context: InvocationContext,
-          ) => this.#invoke(route.name, route.route_token, input, context, entry.machine.id),
+          ) => this.#invoke(route.name, route.route_token, input, context, entry.machine.id,
+            route.name === "native_secure_input" ? "fixed" : "refresh"),
         }));
       }
     }

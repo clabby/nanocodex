@@ -4,7 +4,9 @@
 // - duplicate submission consumes once; navigation invalidates pending input;
 // - same-origin navigation during isolated-world creation fails before injection;
 // - runtime recreation retains quarantine but cannot restore in-memory redaction;
-// - cancellation revokes pending input.
+// - cancellation revokes pending input;
+// - typed card fields fill without submitting; normalized/separated PAN echoes are redacted;
+// - typed metadata contains no values, unexpected fields reject, and secrets never persist.
 // This exercises the production runtime in workerd with actual Chrome CDP.
 // SDK session discovery/lifecycle is injected for a pre-created local Chrome tab;
 // storage is real Durable Object storage, but restart is runtime recreation, not eviction.
@@ -98,5 +100,55 @@ export default {fetch(req,env){return env.TEST.getByName('test').fetch(req);}};`
   assert.equal((await call('/action',{request_id:next.request_id,action:'click',snapshot_id:actionSnapshot.value.snapshot_id,ref:actionSnapshot.value.elements[0].ref})).status,200);
   assert.equal(await page.evaluate(()=>window.clicked),true);
   assert.equal((await call('/submit',{request_id:next.request_id,action:'cancel'})).status,200);
-  console.log('PASS: workerd production secure-input runtime -> real Chrome fill -> actual receipt -> redacted continuation; ordinary CDP event quarantine, duplicate consumption, restart quarantine, navigation and world-creation races, cancellation, action_required receipt/private click. Account HTTP authentication routes are covered separately, not by this harness.');
+  // Typed secure forms: actual DOM updates, synthetic payment data, no payment action.
+  await page.goto(origin);
+  await page.setContent(`<form method="post"><input id="pan" autocomplete="cc-number"><input id="expiry" autocomplete="cc-exp"><input id="cvc" autocomplete="cc-csc"><button>Pay</button></form><div id="echo"></div><script>window.payments=0;document.querySelector('form').onsubmit=e=>{e.preventDefault();window.payments++;};document.querySelector('#pan').oninput=e=>{document.querySelector('#echo').textContent=e.target.value.replace(/\\D/g,'').replace(/(.{4})/g,'$1-');};</script>`);
+  const fields=[{id:'pan',kind:'card_number',selector:'#pan'},{id:'expiry',kind:'card_expiry',selector:'#expiry'},{id:'cvc',kind:'card_cvc',selector:'#cvc'}];
+  const cardRequest={target_id:targetInfo.targetId,expected_origin:origin,fields,submit:false};
+  assert.equal((await call('/request',{...cardRequest,submit:true})).status,409);
+  const cardPending=await call('/request',cardRequest);assert.equal(cardPending.status,200);assert.equal(cardPending.value.kind,'browser_form');
+  const cardID=cardPending.value.request_id;
+  const description=await call('/submit',{request_id:cardID,action:'describe'});
+  assert.equal(description.status,200);assert.deepEqual(description.value.fields,fields);
+  const cardValues={pan:'4242 4242 4242 4242',expiry:'12/30',cvc:'123'};
+  assert.equal((await call('/submit',{request_id:cardID,values:{...cardValues,extra:'unexpected'}})).status,409);
+  const cardReceipt=await call('/submit',{request_id:cardID,values:cardValues});
+  assert.equal(cardReceipt.status,200);assert.equal(cardReceipt.value.status,'filled');
+  for(const field of fields)assert.equal(await page.locator(field.selector).inputValue(),cardValues[field.id]);
+  assert.equal(await page.evaluate(()=>window.payments),0);
+  const cardSnapshot=await call('/snapshot',{request_id:cardID});assert.equal(cardSnapshot.status,200);
+  const visible=JSON.stringify(cardSnapshot.value);
+  assert.ok(!visible.includes('4242'));assert.ok(!visible.includes(cardValues.expiry));assert.ok(!visible.includes(cardValues.cvc));
+  for(const boundary of ['/stored','/events']){const text=JSON.stringify((await call(boundary)).value);assert.ok(!text.includes(cardValues.pan));assert.ok(!text.includes('4242424242424242'));}
+  assert.equal((await call('/submit',{request_id:cardID,values:cardValues})).status,409);
+  assert.equal((await call('/submit',{request_id:cardID,action:'cancel'})).status,200);
+  // Unsupported or changed forms fail closed against actual browser DOM.
+  for (const markup of [
+    '<form method="post"><input id="pan" autocomplete="cc-number" hidden></form>',
+    '<form method="post"><input id="pan" autocomplete="cc-number" readonly></form>',
+    '<form method="post"><input id="pan" autocomplete="cc-number" style="opacity:0"></form>',
+    '<form method="post"><input id="pan" autocomplete="cc-number" style="position:absolute;left:-500px"></form>',
+    '<form method="post"><div inert><input id="pan" autocomplete="cc-number"></div></form>',
+    '<form method="post"><div style="position:relative"><input id="pan" autocomplete="cc-number"><div style="position:absolute;inset:0;background:white"></div></div></form>',
+    '<form method="post"><input id="pan" autocomplete="off"></form>',
+    '<form method="get"><input id="pan" autocomplete="cc-number"></form>',
+    '<form method="post" action="https://example.org/pay"><input id="pan" autocomplete="cc-number"></form>',
+    '<form method="post"><input id="pan" autocomplete="cc-number"><input id="pan" autocomplete="cc-number"></form>',
+    '<iframe srcdoc="<form method=post><input id=pan></form>"></iframe>'
+  ]) {
+    await page.goto(origin);await page.setContent(markup);
+    assert.equal((await call('/request',{...cardRequest,fields:[fields[0]]})).status,409);
+  }
+  await page.goto(origin);await page.setContent('<form method="post"><input id="pan" autocomplete="cc-number"></form><form method="post"><input id="cvc" autocomplete="cc-csc"></form>');
+  assert.equal((await call('/request',{...cardRequest,fields:[fields[0],fields[2]]})).status,409);
+  // A model cannot label a generic contact input as a card-number destination.
+  await page.goto(origin);await page.setContent('<form method="post"><input id="message" autocomplete="off"></form>');
+  assert.equal((await call('/request',{...cardRequest,fields:[{...fields[0],selector:'#message'}]})).status,409);
+  await page.goto(origin);await page.setContent('<form method="post"><input id="pan" autocomplete="cc-number"></form>');
+  const changed=await call('/request',{...cardRequest,fields:[fields[0]]});assert.equal(changed.status,200);
+  await page.locator('#pan').evaluate(el=>el.readOnly=true);
+  assert.equal((await call('/submit',{request_id:changed.value.request_id,values:{pan:cardValues.pan}})).value.status,'outcome_unknown');
+  assert.equal(await page.locator('#pan').inputValue(),'');
+  assert.equal((await call('/submit',{request_id:changed.value.request_id,action:'cancel'})).status,200);
+  console.log('PASS: workerd production secure-input runtime -> real Chrome fill -> actual receipt -> redacted continuation; ordinary CDP event quarantine, duplicate consumption, restart quarantine, navigation and world-creation races, cancellation, action_required receipt/private click; typed card fields fill without form submission, private describe, normalized card redaction and strict values. Account HTTP authentication routes are covered separately, not by this harness.');
 } finally {await mf?.dispose();await browser?.close();if(server)await new Promise(r=>server.close(r));rmSync(temp,{recursive:true,force:true});}

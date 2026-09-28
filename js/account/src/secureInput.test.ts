@@ -38,3 +38,26 @@ test('cancel revokes the exact request without a value', async () => {
   });
   assert.equal(JSON.parse(receipt).status,'cancelled');
 });
+
+test('typed descriptions reject unsafe or mismatched schemas', async () => {
+  const {describeSecureInput} = await import('./secureInput.ts');
+  const request = decodeSecureInput(tool({...hint(),kind:'browser_form'}))!;
+  const schema = {request_id:id,origin:request.origin,expires_at:request.expires_at,fields:[{id:'card',kind:'card_number',selector:'#card'}]};
+  assert.deepEqual(await describeSecureInput(request,async (_url,init) => {
+    assert.equal(init?.credentials,'same-origin');
+    assert.deepEqual(JSON.parse(String(init?.body)),{request_id:id,action:'describe'});
+    return Response.json(schema);
+  }),schema);
+  for (const patch of [{origin:'https://other.test'},{expires_at:request.expires_at+1},{submit:true},{value:'synthetic-only'},{fields:[{id:'card',kind:'unknown'}]},{fields:[schema.fields[0],schema.fields[0]]},{fields:[schema.fields[0],{...schema.fields[0],id:'other'}]},{fields:[{...schema.fields[0],value:'synthetic-only'}]}]) await assert.rejects(describeSecureInput(request,async()=>Response.json({...schema,...patch})));
+});
+test('typed values use exact private payload and never request submission', async () => {
+  const {submitSecureFields} = await import('./secureInput.ts');
+  const request = decodeSecureInput(tool({...hint(),kind:'browser_form'}))!;
+  const schema = {request_id:id,origin:request.origin,expires_at:request.expires_at,fields:[{id:'private',kind:'sensitive_text' as const,selector:'#private'}]};
+  let calls = 0;
+  const transport:typeof fetch = async (_url,init) => { calls++; assert.deepEqual(JSON.parse(String(init?.body)),{request_id:id,values:{private:'synthetic-only'}}); return Response.json({type:'secure_input_receipt',request_id:id,status:'filled'}); };
+  assert.equal(JSON.parse(await submitSecureFields(request,schema,{private:'synthetic-only'},transport)).status,'filled');
+  for (const values of ([{},{private:'synthetic-only',extra:'synthetic-only'},{private:''}] as Record<string,string>[])) await assert.rejects(submitSecureFields(request,schema,values,transport));
+  assert.equal(calls,1);
+  await assert.rejects(submitSecureFields(request,schema,{private:'synthetic-only'},async()=>Response.json({type:'secure_input_receipt',request_id:id,status:'submitted'})));
+});

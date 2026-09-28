@@ -26,7 +26,7 @@ async function fixture(resource = "challenge", networkDisabled = false) {
     await state.storage.deleteAlarm();
   });
   const call = (actor = principal, init: RequestInit = {}, query = "") => worker.fetch(
-    new Request(`https://nanocodex.example/v1/agents/${id}/${resource === "secure-input" ? resource : `browser-vault/${resource}`}${query}`, {
+    new Request(`https://nanocodex.example/v1/agents/${id}/${(resource === "secure-input" || resource === "native-secure-input") ? resource : `browser-vault/${resource}`}${query}`, {
       method: "POST", body: JSON.stringify({ challenge_id: "opaque-fixture", code: "123456" }),
       ...init, headers: { "content-type": "application/json", ...init.headers },
     }), env as Parameters<typeof worker.fetch>[1], createExecutionContext(), actor,
@@ -175,5 +175,27 @@ describe("standalone secure input endpoint", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.text()).not.toContain(payload.value);
     expect((await stub.fetch("https://session.internal/secure-input",{method:"POST",headers:{"content-type":"application/json"},...init})).status).toBe(403);
+  });
+});
+
+// Native ingress failures defined before route implementation: plaintext, Connect,
+// CSRF, wrong owner, internal forgery, oversized bodies, and missing enrollment.
+describe("native ciphertext-only private endpoint", () => {
+  it("requires direct authority and rejects plaintext at both boundaries", async () => {
+    const {principal,call,stub}=await fixture("native-secure-input");
+    const payload={request_id:crypto.randomUUID(),action:"describe"};
+    const init={body:JSON.stringify(payload)};
+    expect((await call({...principal,capabilities:[]},init)).status).toBe(403);
+    expect((await call({...principal,kind:"account_session"},init)).status).toBe(403);
+    expect((await call({...principal,userId:crypto.randomUUID()},init)).status).toBe(404);
+    expect((await call({...principal,connectGrant:{grantId:`0x${"a".repeat(64)}`,connectors:[],mcpIds:[]}},init)).status).toBe(403);
+    expect((await call(principal,{body:JSON.stringify({request_id:payload.request_id,value:"synthetic-secret"})})).status).toBe(400);
+    expect((await call(principal,{body:"x".repeat(32769)})).status).toBe(413);
+    expect((await call(principal,init,"?value=secret")).status).toBe(400);
+    const response=await call(principal,init);
+    expect(response.status).toBe(409);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({error:"challenge_unavailable"});
+    expect((await stub.fetch("https://session.internal/native-secure-input",{method:"POST",headers:{"content-type":"application/json"},...init})).status).toBe(403);
   });
 });

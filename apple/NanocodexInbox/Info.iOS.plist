@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Authenticate before approving a protected command on your computer.</string>
     <key>NSContactsUsageDescription</key>
     <string>Allow Nanocodex to access the contacts you choose for tasks you request.</string>
     <key>NSLocationWhenInUseUsageDescription</key>

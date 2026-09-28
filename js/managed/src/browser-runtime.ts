@@ -14,6 +14,7 @@ import type { NamedTool, ToolContext } from "nanocodex";
 import { privateVaultTakeover, releasePrivateVaultTakeover, validateBrowserVaultTakeoverAction, type BrowserVaultTakeoverAction, type BrowserVaultTouchState } from "./browser-vault-takeover";
 
 import {
+  parseSecureFormFields, parsePrivateSecureInput, secureBrowserForm, type SecureFormField,
   fillBrowserVault, inspectBrowserVault, parseBrowserVaultRequest, PrivateBrowserCdp, PrivateBrowserContinuationSession,
   snapshotBrowserVault, actBrowserVault, BrowserVaultActionRejected, captureBrowserVaultBinding, captureBrowserVaultDocumentBinding, captureBrowserPasswordBinding, fillBrowserVaultOtp,
   type BrowserVaultIdentity, type BrowserVaultAction,
@@ -467,8 +468,9 @@ export async function createManagedBrowserRuntime(
       return tool.handler(input, context);
     }),
   }));
-  type PendingSecureInput = { id: string; expiresAt: number; sessionId: string; loaderId: string; request: ReturnType<typeof parseBrowserVaultRequest> };
-  let oneTime: {pending: PendingSecureInput; password: string} | undefined;
+  type PendingSecureInput = { id: string; expiresAt: number; sessionId: string; loaderId: string; fields?: SecureFormField[]; request: ReturnType<typeof parseBrowserVaultRequest> };
+  const pendingInputIds = new Set<string>();
+  let oneTime: {pending: PendingSecureInput; password: string[]} | undefined;
   const clearOneTime = async (sessionId: string) => {
     privateContinuation.close();
     const info = await runtime.connector.sessionInfo();
@@ -479,7 +481,7 @@ export async function createManagedBrowserRuntime(
     isolated = false;
   };
   const withOneTime = async <T>(input: unknown, context: ToolContext, extra: string[],
-    operation: (cdp: PrivateBrowserCdp, pending: PendingSecureInput, password: string) => Promise<T>): Promise<T> => {
+    operation: (cdp: PrivateBrowserCdp, pending: PendingSecureInput, password: string[]) => Promise<T>): Promise<T> => {
     options.authorizeVaultAccess!(context);
     if (!input || typeof input !== "object" || Array.isArray(input)
       || Object.keys(input).some(key => !["request_id",...extra].includes(key))) throw new Error("Invalid secure continuation");
@@ -499,7 +501,7 @@ export async function createManagedBrowserRuntime(
     supportsParallelToolCalls:false,
     parameters:{type:"object",additionalProperties:false,properties:{request_id:{type:"string"}},required:["request_id"]},
     handler:(input,context) => exclusive(async () => {
-      try { return await withOneTime(input,context,[],(cdp,pending,password) => snapshotBrowserVault(cdp,pending.request,[...secrets,password])); }
+      try { return await withOneTime(input,context,[],(cdp,pending,password) => snapshotBrowserVault(cdp,pending.request,[...secrets,...password])); }
       catch { throw new Error("Private continuation unavailable; close the browser and start again"); }
     }),
   }, {
@@ -520,18 +522,22 @@ export async function createManagedBrowserRuntime(
   });
   if (options.authorizeVaultAccess) tools.push({
     name: "request_secure_input",
-    description: "Ask the user for a one-time browser password without saving it to Vault. Requires a visible password field on an exact HTTPS origin. The authenticated client sends it directly to the private browser, outside chat. The request expires in five minutes and is consumed once. Use secure_input_snapshot and secure_input_action to continue privately with the request_id. Ordinary browser observations remain blocked until browser_vault_close discards the session. This does not support shell or sudo input. Never ask the user to type a password in chat.",
+    description: "Ask for one-time private browser inputs without Vault storage. Use fields with id, kind (password/card_number/card_expiry/card_cvc/sensitive_text), selector and optional label, and submit=false. Supported controls are visible native inputs in one top-frame same-origin HTTPS POST form; iframe and custom controls are unsupported. Each value allows up to 4096 characters within a 32768-byte total private JSON body limit. Typed fields only fill and never submit. Legacy password_selector with submit remains supported. The authenticated client sends it directly to the private browser, outside chat. The request expires in five minutes and is consumed once. Use secure_input_snapshot and secure_input_action to continue privately with the request_id. Ordinary browser observations remain blocked until browser_vault_close discards the session. This does not support shell or sudo input. Never ask the user to type a password in chat.",
     supportsParallelToolCalls: false,
     parameters: { type: "object", additionalProperties: false, properties: {
-      target_id: {type:"string"}, expected_origin: {type:"string"}, password_selector: {type:"string"}, submit: {type:"boolean"}
-    }, required: ["target_id", "expected_origin", "password_selector", "submit"] },
+      target_id: {type:"string"}, expected_origin: {type:"string"}, password_selector: {type:"string"}, fields:{type:"array",minItems:1,maxItems:8,items:{type:"object",additionalProperties:false,properties:{id:{type:"string"},kind:{type:"string",enum:["password","card_number","card_expiry","card_cvc","sensitive_text"]},selector:{type:"string"},label:{type:"string"}},required:["id","kind","selector"]}}, submit: {type:"boolean"}
+    }, required: ["target_id", "expected_origin", "submit"] },
     handler: (input, context) => exclusive(async () => {
       options.authorizeVaultAccess!(context);
       if (!input || typeof input !== "object" || Array.isArray(input)
-        || Object.keys(input).some(key => !["target_id", "expected_origin", "password_selector", "submit"].includes(key))) throw new Error("Invalid secure input request");
+        || Object.keys(input).some(key => !["target_id", "expected_origin", "password_selector", "fields", "submit"].includes(key))) throw new Error("Invalid secure input request");
       const id = crypto.randomUUID();
       // A private isolation identity, never a Vault reference or persisted secret.
-      const request = parseBrowserVaultRequest({...input, vault_id: id});
+      const raw = input as Record<string,unknown>;
+      const fields = raw.fields === undefined ? undefined : parseSecureFormFields(raw.fields);
+      if (fields && (raw.password_selector !== undefined || raw.submit !== false)) throw new Error("Secure forms support filling only");
+      const {fields:_fields,...legacy} = raw;
+      const request = parseBrowserVaultRequest({...legacy, ...(fields ? {password_selector:fields[0].selector}:{}), vault_id: id});
       if (!request.password_selector) throw new Error("Invalid secure input request");
       await checkQuarantine();
       let cdp: PrivateBrowserCdp | undefined;
@@ -540,18 +546,17 @@ export async function createManagedBrowserRuntime(
         const info = await runtime.connector.sessionInfo();
         if (!info) throw new Error();
         cdp = await PrivateBrowserCdp.connect(privateBrowser, info.sessionId, context.signal);
-        const binding = await captureBrowserPasswordBinding(cdp, request);
-        const pending: PendingSecureInput = {id, expiresAt: Date.now() + 300_000, sessionId: info.sessionId, loaderId: binding.loaderId, request};
+        const binding = fields ? await secureBrowserForm({cdp,request,fields,signal:context.signal}) : await captureBrowserPasswordBinding(cdp, request);
+        const pending: PendingSecureInput = {id, expiresAt: Date.now() + 300_000, sessionId: info.sessionId, loaderId: binding.loaderId, request, ...(fields ? {fields}:{})};
         await options.ctx.storage.put(secureInputKey, pending);
-        return {type:"secure_input",status:"input_required",request_id:id,agent_id:options.sessionId,origin:request.expected_origin,expires_at:pending.expiresAt,kind:"browser_password"};
+        pendingInputIds.clear(); pendingInputIds.add(id);
+        return {type:"secure_input",status:"input_required",request_id:id,agent_id:options.sessionId,origin:request.expected_origin,expires_at:pending.expiresAt,kind:fields ? "browser_form":"browser_password"};
       } catch { throw new Error("Secure input destination is unavailable"); }
       finally { cdp?.close(); }
     }),
   });
   const submitSecureInput = (input: unknown, signal: AbortSignal): Promise<unknown> => exclusive(async () => {
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Invalid secure input");
-    const value = input as Record<string, unknown>;
-    if (Object.keys(value).length !== 2 || typeof value.request_id !== "string" || !/^[0-9a-f-]{36}$/.test(value.request_id)) throw new Error("Invalid secure input");
+    const value = parsePrivateSecureInput(input);
     signal.throwIfAborted();
     const pending = await options.ctx.storage.get<PendingSecureInput>(secureInputKey);
     if (value.action === "cancel") {
@@ -561,10 +566,12 @@ export async function createManagedBrowserRuntime(
       else throw new Error("Secure input unavailable");
       return {type:"secure_input_receipt",request_id:value.request_id,status:"cancelled"};
     }
-    if (typeof value.value !== "string" || !value.value.length || value.value.length > 4096
-      || /[\u0000-\u001f\u007f]/.test(value.value)) throw new Error("Invalid secure input");
-    if (!pending || pending.id !== value.request_id || pending.expiresAt <= Date.now()) throw new Error("Secure input unavailable or expired");
+    if (!pending || !pendingInputIds.has(pending.id) || pending.id !== value.request_id || pending.expiresAt <= Date.now()) throw new Error("Secure input unavailable or expired");
+    if (value.action === "describe") return {request_id:pending.id,origin:pending.request.expected_origin,expires_at:pending.expiresAt,fields:pending.fields ? pending.fields.map(({id,kind,selector})=>({id,kind,selector})) : [{id:"password",kind:"password",selector:pending.request.password_selector}]};
+    const values = value.values as Record<string,string> | undefined;
+    if (pending.fields ? (!values || Object.keys(values).length !== pending.fields.length || pending.fields.some(f=>!Object.hasOwn(values,f.id))) : typeof value.value !== "string") throw new Error("Invalid secure input");
     // Consume before connection or injection; an ambiguous outcome must never replay.
+    pendingInputIds.delete(pending.id);
     await options.ctx.storage.delete(secureInputKey);
     await checkQuarantine();
     let cdp: PrivateBrowserCdp | undefined;
@@ -574,10 +581,13 @@ export async function createManagedBrowserRuntime(
       const info = await runtime.connector.sessionInfo();
       if (!info || info.sessionId !== pending.sessionId) throw new Error();
       cdp = await PrivateBrowserCdp.connect(privateBrowser, info.sessionId, signal);
-      const result = await fillBrowserVault({cdp, sessionId:info.sessionId, request:pending.request,
+      const privateValues = values ? Object.values(values).flatMap(v=>[v,v.replace(/[\s-]/g,"")]) : [value.value as string];
+      const quarantineInput = async (quarantine:BrowserVaultQuarantine) => { await options.ctx.storage.put(quarantineKey,{...quarantine,mode:"one_time"}); isolated = true; oneTime = {pending,password:privateValues}; };
+      const result = pending.fields ? await secureBrowserForm({cdp,request:pending.request,fields:pending.fields,values,signal,expectedLoaderId:pending.loaderId,
+        quarantine:loaderId=>quarantineInput({sessionId:info.sessionId,targetId:pending.request.target_id,origin:pending.request.expected_origin,vaultId:pending.id,loaderId})}) : await fillBrowserVault({cdp, sessionId:info.sessionId, request:pending.request,
         expectedLoaderId:pending.loaderId, signal,
         resolve: async () => ({username:"",password:value.value as string}),
-        quarantine: async quarantine => { await options.ctx.storage.put(quarantineKey,{...quarantine,mode:"one_time"}); isolated = true; oneTime = {pending,password:value.value as string}; },
+        quarantine: quarantineInput,
       });
       return {type:"secure_input_receipt",request_id:pending.id,status:"submission" in result && result.submission === "action_required" ? "action_required" : result.status};
     } catch { throw new Error("Secure input could not be confirmed; inspect the private destination before any further attempt"); }

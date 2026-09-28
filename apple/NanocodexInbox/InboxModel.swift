@@ -1318,6 +1318,34 @@ final class InboxModel: ObservableObject {
         guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
         return receipt
     }
+    func describeNativeSecureInput(_ intake: SecureInputRequest, account: UUID) async throws -> NativeSecureInputDescription {
+        guard let client, connected, !isDemo, generation == account,
+              intake.isCurrent(agentID: focused?.id ?? "") else { throw APIError.invalidCredential }
+        let description = try await client.describeNativeSecureInput(intake)
+        guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
+        return description
+    }
+    func submitNativeSecureInput(_ intake: SecureInputRequest, description: NativeSecureInputDescription, value: String, account: UUID) async throws -> SecureInputReceipt {
+        guard let client, connected, !isDemo, generation == account,
+              intake.isCurrent(agentID: focused?.id ?? "") else { throw APIError.invalidCredential }
+        let receipt = try await client.submitNativeSecureInput(intake, description: description, value: value)
+        guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
+        return receipt
+    }
+    func describeSecureInput(_ intake: SecureInputRequest, account: UUID) async throws -> BrowserSecureInputDescription {
+        guard let client, connected, !isDemo, generation == account,
+              intake.isCurrent(agentID: focused?.id ?? "") else { throw APIError.invalidCredential }
+        let description = try await client.describeSecureInput(intake)
+        guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
+        return description
+    }
+    func submitSecureInput(_ intake: SecureInputRequest, description: BrowserSecureInputDescription, values: [String: String], account: UUID) async throws -> SecureInputReceipt {
+        guard let client, connected, !isDemo, generation == account,
+              intake.isCurrent(agentID: focused?.id ?? "") else { throw APIError.invalidCredential }
+        let receipt = try await client.submitSecureInput(intake, description: description, values: values)
+        guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
+        return receipt
+    }
     func submitSecureInput(_ intake: SecureInputRequest, value: String, account: UUID) async throws -> SecureInputReceipt {
         guard let client, connected, !isDemo, generation == account,
               intake.isCurrent(agentID: focused?.id ?? "") else { throw APIError.invalidCredential }
