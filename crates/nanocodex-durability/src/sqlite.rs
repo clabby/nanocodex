@@ -1,164 +1,322 @@
-use std::path::Path;
+use std::{path::Path, sync::mpsc, thread, time::Duration};
 
-use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params, params_from_iter};
 
 use crate::{OwnedState, OwnerId, OwnerToken, StateStore, StoreError, StoreFuture, StoredState};
 
 // SQLite INTEGER revisions deliberately stop at the signed 64-bit SQL ceiling.
 // Owner fences use a textual encoding so the public u64 token remains lossless.
 const MAX_SQL_REVISION: u64 = i64::MAX as u64;
+// Well below SQLite's default host-parameter limit.
+const READ_BATCH: usize = 256;
+
+/// Commit durability of a file-backed [`SqliteStore`] in WAL mode.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SqliteSynchronous {
+    /// Every commit is fsynced before it is acknowledged (`synchronous=FULL`).
+    #[default]
+    Full,
+    /// Commits stay atomic and consistent, but the most recent acknowledged
+    /// commits may roll back after an OS crash or power loss
+    /// (`synchronous=NORMAL`). Recovery then resumes from an older boundary.
+    Normal,
+}
+
+/// Connection settings applied by [`SqliteStore::open_with`].
+#[derive(Clone, Copy, Debug)]
+pub struct SqliteOptions {
+    /// Commit durability. Defaults to [`SqliteSynchronous::Full`].
+    pub synchronous: SqliteSynchronous,
+    /// How long a write waits for another connection's lock before failing.
+    pub busy_timeout: Duration,
+}
+
+impl Default for SqliteOptions {
+    fn default() -> Self {
+        Self {
+            synchronous: SqliteSynchronous::Full,
+            busy_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 
 /// SQLite-backed state store.
+///
+/// The connection lives on a dedicated thread, so store operations never
+/// block the async executor; operations run in submission order.
 pub struct SqliteStore {
-    connection: Connection,
+    jobs: Option<mpsc::Sender<Job>>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl SqliteStore {
-    /// Opens a SQLite database and initializes the current state schema.
+    /// Opens a SQLite database in WAL mode with [`SqliteOptions::default`]
+    /// and initializes the current state schema.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with(path, SqliteOptions::default())
+    }
+
+    /// Opens a SQLite database in WAL mode with explicit connection options
+    /// and initializes the current state schema.
+    pub fn open_with(path: impl AsRef<Path>, options: SqliteOptions) -> Result<Self, StoreError> {
         let connection = Connection::open(path).map_err(backend)?;
+        connection
+            .busy_timeout(options.busy_timeout)
+            .map_err(backend)?;
+        // In-memory databases report `memory`; file databases switch to WAL.
+        let _mode: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .map_err(backend)?;
+        connection
+            .execute_batch(match options.synchronous {
+                SqliteSynchronous::Full => "PRAGMA synchronous = FULL",
+                SqliteSynchronous::Normal => "PRAGMA synchronous = NORMAL",
+            })
+            .map_err(backend)?;
         Self::from_connection(connection)
     }
 
-    /// Initializes a caller-owned SQLite connection.
+    /// Initializes a caller-owned SQLite connection. Journal mode, sync
+    /// level, and busy timeout remain the caller's choice.
     pub fn from_connection(connection: Connection) -> Result<Self, StoreError> {
-        connection
-            .execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 CREATE TABLE IF NOT EXISTS nanocodex_durable_records (
-                   state_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
-                   PRIMARY KEY (state_id, key)
-                 ) WITHOUT ROWID;
-                 CREATE TABLE IF NOT EXISTS nanocodex_durable_owners (
-                   state_id TEXT PRIMARY KEY,
-                   owner_id TEXT NOT NULL,
-                   fence TEXT NOT NULL
-                 );
-                 CREATE TABLE IF NOT EXISTS nanocodex_durable_states (
-                   state_id TEXT PRIMARY KEY,
-                   revision INTEGER NOT NULL CHECK (revision > 0),
-                   payload TEXT NOT NULL
-                 );",
-            )
-            .map_err(backend)?;
-        validate_owner_schema(&connection)?;
-        validate_state_schema(&connection)?;
-        Ok(Self { connection })
+        initialize(&connection)?;
+        let (jobs, receiver) = mpsc::channel::<Job>();
+        let worker = thread::Builder::new()
+            .name("nanocodex-sqlite".to_owned())
+            .spawn(move || {
+                let mut connection = connection;
+                while let Ok(job) = receiver.recv() {
+                    job(&mut connection);
+                }
+            })
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        Ok(Self {
+            jobs: Some(jobs),
+            worker: Some(worker),
+        })
     }
 
-    fn acquire_transactional(
-        &mut self,
-        state_id: &str,
-        owner_id: OwnerId,
-        after_begin: impl FnOnce(),
-    ) -> Result<OwnedState, StoreError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(backend)?;
-        after_begin();
-        let retained_fence = transaction
-            .query_row(
-                "SELECT fence FROM nanocodex_durable_owners WHERE state_id = ?1",
-                [state_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(backend)?;
-        let fence = match retained_fence {
-            Some(retained) => {
-                let retained = parse_u64(&retained, "SQLite owner fence")?;
-                retained.checked_add(1).ok_or_else(|| {
-                    StoreError::NotCommitted("SQLite durability owner fence overflow".to_owned())
-                })?
+    /// Runs `operation` on the connection thread. An operation whose future
+    /// is dropped still runs to completion, like a request already sent to a
+    /// remote database.
+    fn run<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T, StoreError> + Send + 'static,
+    ) -> StoreFuture<'static, Result<T, StoreError>> {
+        let (result, receiver) = tokio::sync::oneshot::channel();
+        let job: Job = Box::new(move |connection| {
+            drop(result.send(operation(connection)));
+        });
+        let sent = self
+            .jobs
+            .as_ref()
+            .is_some_and(|jobs| jobs.send(job).is_ok());
+        Box::pin(async move {
+            if !sent {
+                return Err(StoreError::NotCommitted(
+                    "SQLite connection thread stopped".to_owned(),
+                ));
             }
-            None => 1,
-        };
-        transaction
-            .execute(
-                "INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT (state_id) DO UPDATE
-                 SET owner_id = excluded.owner_id, fence = excluded.fence",
-                params![state_id, owner_id.as_str(), fence.to_string()],
+            receiver
+                .await
+                .map_err(|_| StoreError::Backend("SQLite connection thread stopped".to_owned()))?
+        })
+    }
+}
+
+impl Drop for SqliteStore {
+    fn drop(&mut self) {
+        // Close the connection deterministically so a reopened store observes
+        // every acknowledged commit and the WAL is checkpointed.
+        drop(self.jobs.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn initialize(connection: &Connection) -> Result<(), StoreError> {
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE IF NOT EXISTS nanocodex_durable_records (
+               state_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+               PRIMARY KEY (state_id, key)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS nanocodex_durable_owners (
+               state_id TEXT PRIMARY KEY,
+               owner_id TEXT NOT NULL,
+               fence TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS nanocodex_durable_states (
+               state_id TEXT PRIMARY KEY,
+               revision INTEGER NOT NULL CHECK (revision > 0),
+               payload TEXT NOT NULL
+             );",
+        )
+        .map_err(backend)?;
+    validate_owner_schema(connection)?;
+    validate_state_schema(connection)
+}
+
+fn acquire_transactional(
+    connection: &mut Connection,
+    state_id: &str,
+    owner_id: OwnerId,
+    after_begin: impl FnOnce(),
+) -> Result<OwnedState, StoreError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(backend)?;
+    after_begin();
+    let retained_fence = transaction
+        .prepare_cached("SELECT fence FROM nanocodex_durable_owners WHERE state_id = ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_row([state_id], |row| row.get::<_, String>(0))
+                .optional()
+        })
+        .map_err(backend)?;
+    let fence = match retained_fence {
+        Some(retained) => {
+            let retained = parse_u64(&retained, "SQLite owner fence")?;
+            retained.checked_add(1).ok_or_else(|| {
+                StoreError::NotCommitted("SQLite durability owner fence overflow".to_owned())
+            })?
+        }
+        None => 1,
+    };
+    transaction
+        .prepare_cached(
+            "INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (state_id) DO UPDATE
+             SET owner_id = excluded.owner_id, fence = excluded.fence",
+        )
+        .and_then(|mut statement| {
+            statement.execute(params![state_id, owner_id.as_str(), fence.to_string()])
+        })
+        .map_err(backend)?;
+    let state = load_state(&transaction, state_id)?;
+    let owner = OwnerToken::new(owner_id, fence);
+    transaction.commit().map_err(backend)?;
+    Ok(OwnedState { owner, state })
+}
+
+/// Verifies authority and revision, then publishes records and the new head
+/// in one transaction: a crash at any point leaves either nothing or all of
+/// it visible.
+fn replace_transactional(
+    connection: &mut Connection,
+    state_id: &str,
+    owner: &OwnerToken,
+    expected_revision: u64,
+    payload: &str,
+    records: &[crate::StoreRecord],
+    after_begin: impl FnOnce(),
+) -> Result<u64, StoreError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(backend)?;
+    after_begin();
+    let retained_owner = transaction
+        .prepare_cached("SELECT owner_id, fence FROM nanocodex_durable_owners WHERE state_id = ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_row([state_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .optional()
+        })
+        .map_err(backend)?;
+    let owns_state = match retained_owner {
+        Some((owner_id, fence)) => {
+            owner_id == owner.owner_id().as_str()
+                && parse_u64(&fence, "SQLite owner fence")? == owner.fence()
+        }
+        None => false,
+    };
+    if !owns_state {
+        return Err(StoreError::Fenced);
+    }
+    let actual = transaction
+        .prepare_cached("SELECT revision FROM nanocodex_durable_states WHERE state_id = ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_row([state_id], |row| row.get::<_, i64>(0))
+                .optional()
+        })
+        .map_err(backend)?
+        .unwrap_or(0);
+    let actual = to_u64(actual)?;
+    if actual != expected_revision {
+        return Err(StoreError::Conflict {
+            expected: expected_revision,
+            actual,
+        });
+    }
+    let revision = actual.checked_add(1).ok_or_else(|| {
+        StoreError::NotCommitted("SQLite durability revision overflow".to_owned())
+    })?;
+    {
+        let mut insert = transaction
+            .prepare_cached(
+                "INSERT INTO nanocodex_durable_records (state_id, key, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (state_id, key) DO NOTHING",
             )
             .map_err(backend)?;
-        let state = load_state(&transaction, state_id)?;
-        let owner = OwnerToken::new(owner_id, fence);
-        transaction.commit().map_err(backend)?;
-        Ok(OwnedState { owner, state })
+        for record in records {
+            insert
+                .execute(params![state_id, record.key, record.value])
+                .map_err(backend)?;
+        }
     }
+    let sql_revision = sql_counter(revision, "SQLite durability revision overflow")?;
+    transaction
+        .prepare_cached(
+            "INSERT INTO nanocodex_durable_states (state_id, revision, payload)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (state_id) DO UPDATE
+             SET revision = excluded.revision, payload = excluded.payload",
+        )
+        .and_then(|mut statement| statement.execute(params![state_id, sql_revision, payload]))
+        .map_err(backend)?;
+    transaction.commit().map_err(backend)?;
+    Ok(revision)
+}
 
-    fn replace_transactional(
-        &mut self,
-        state_id: &str,
-        owner: &OwnerToken,
-        expected_revision: u64,
-        payload: &str,
-        records: &[crate::StoreRecord],
-        after_begin: impl FnOnce(),
-    ) -> Result<u64, StoreError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+fn read_records(
+    connection: &Connection,
+    state_id: &str,
+    keys: &[String],
+) -> Result<Vec<Option<String>>, StoreError> {
+    let mut values = std::collections::HashMap::with_capacity(keys.len());
+    for batch in keys.chunks(READ_BATCH) {
+        let placeholders = (2..batch.len() + 2)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = connection
+            .prepare_cached(&format!(
+                "SELECT key, value FROM nanocodex_durable_records
+                 WHERE state_id = ?1 AND key IN ({placeholders})"
+            ))
             .map_err(backend)?;
-        after_begin();
-        let retained_owner = transaction
-            .query_row(
-                "SELECT owner_id, fence FROM nanocodex_durable_owners WHERE state_id = ?1",
-                [state_id],
+        let rows = statement
+            .query_map(
+                params_from_iter(std::iter::once(state_id).chain(batch.iter().map(String::as_str))),
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
-            .optional()
             .map_err(backend)?;
-        let owns_state = match retained_owner {
-            Some((owner_id, fence)) => {
-                owner_id == owner.owner_id().as_str()
-                    && parse_u64(&fence, "SQLite owner fence")? == owner.fence()
-            }
-            None => false,
-        };
-        if !owns_state {
-            return Err(StoreError::Fenced);
+        for row in rows {
+            let (key, value) = row.map_err(backend)?;
+            values.insert(key, value);
         }
-        let actual = transaction
-            .query_row(
-                "SELECT revision FROM nanocodex_durable_states WHERE state_id = ?1",
-                [state_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(backend)?
-            .unwrap_or(0);
-        let actual = to_u64(actual)?;
-        if actual != expected_revision {
-            return Err(StoreError::Conflict {
-                expected: expected_revision,
-                actual,
-            });
-        }
-        let revision = actual.checked_add(1).ok_or_else(|| {
-            StoreError::NotCommitted("SQLite durability revision overflow".to_owned())
-        })?;
-        for record in records {
-            transaction.execute(
-                "INSERT INTO nanocodex_durable_records (state_id, key, value) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (state_id, key) DO NOTHING", params![state_id, record.key, record.value],
-            ).map_err(backend)?;
-        }
-        let sql_revision = sql_counter(revision, "SQLite durability revision overflow")?;
-        transaction
-            .execute(
-                "INSERT INTO nanocodex_durable_states (state_id, revision, payload)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT (state_id) DO UPDATE
-                 SET revision = excluded.revision, payload = excluded.payload",
-                params![state_id, sql_revision, payload],
-            )
-            .map_err(backend)?;
-        transaction.commit().map_err(backend)?;
-        Ok(revision)
     }
+    // Duplicate keys each receive the same record.
+    Ok(keys.iter().map(|key| values.get(key).cloned()).collect())
 }
 
 impl StateStore for SqliteStore {
@@ -167,16 +325,28 @@ impl StateStore for SqliteStore {
         state_id: &'a str,
         key: &'a str,
     ) -> StoreFuture<'a, Result<Option<String>, StoreError>> {
-        let result = self
-            .connection
-            .query_row(
-                "SELECT value FROM nanocodex_durable_records WHERE state_id = ?1 AND key = ?2",
-                params![state_id, key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(backend);
-        Box::pin(async move { result })
+        let (state_id, key) = (state_id.to_owned(), key.to_owned());
+        self.run(move |connection| {
+            connection
+                .prepare_cached(
+                    "SELECT value FROM nanocodex_durable_records WHERE state_id = ?1 AND key = ?2",
+                )
+                .and_then(|mut statement| {
+                    statement
+                        .query_row(params![state_id, key], |row| row.get(0))
+                        .optional()
+                })
+                .map_err(backend)
+        })
+    }
+
+    fn read_records<'a>(
+        &'a mut self,
+        state_id: &'a str,
+        keys: &'a [String],
+    ) -> StoreFuture<'a, Result<Vec<Option<String>>, StoreError>> {
+        let (state_id, keys) = (state_id.to_owned(), keys.to_vec());
+        self.run(move |connection| read_records(connection, &state_id, &keys))
     }
 
     fn acquire<'a>(
@@ -184,8 +354,8 @@ impl StateStore for SqliteStore {
         state_id: &'a str,
         owner_id: OwnerId,
     ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
-        let result = self.acquire_transactional(state_id, owner_id, || {});
-        Box::pin(async move { result })
+        let state_id = state_id.to_owned();
+        self.run(move |connection| acquire_transactional(connection, &state_id, owner_id, || {}))
     }
 
     fn replace<'a>(
@@ -196,9 +366,23 @@ impl StateStore for SqliteStore {
         payload: &'a str,
         records: &'a [crate::StoreRecord],
     ) -> StoreFuture<'a, Result<u64, StoreError>> {
-        let result =
-            self.replace_transactional(state_id, owner, expected_revision, payload, records, || {});
-        Box::pin(async move { result })
+        let (state_id, owner, payload, records) = (
+            state_id.to_owned(),
+            owner.clone(),
+            payload.to_owned(),
+            records.to_vec(),
+        );
+        self.run(move |connection| {
+            replace_transactional(
+                connection,
+                &state_id,
+                &owner,
+                expected_revision,
+                &payload,
+                &records,
+                || {},
+            )
+        })
     }
 }
 
@@ -368,10 +552,11 @@ mod tests {
 
     use super::*;
 
-    fn open_concurrent_store(path: &Path) -> SqliteStore {
+    fn open_concurrent_store(path: &Path) -> Connection {
         let connection = Connection::open(path).unwrap();
         connection.busy_timeout(Duration::from_secs(2)).unwrap();
-        SqliteStore::from_connection(connection).unwrap()
+        initialize(&connection).unwrap();
+        connection
     }
 
     fn retained_owner(path: &Path) -> (String, String) {
@@ -513,7 +698,7 @@ mod tests {
         let mut second_store = open_concurrent_store(&path);
         let first_id = first_owner;
         let first = thread::spawn(move || {
-            first_store.acquire_transactional("state", first_id, || {
+            acquire_transactional(&mut first_store, "state", first_id, || {
                 locked_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
             })
@@ -524,7 +709,7 @@ mod tests {
         let second_id = second_owner.clone();
         let second = thread::spawn(move || {
             started_tx.send(()).unwrap();
-            second_store.acquire_transactional("state", second_id, || {})
+            acquire_transactional(&mut second_store, "state", second_id, || {})
         });
         assert_contender_waits(started_rx, &second);
         release_tx.send(()).unwrap();
@@ -541,7 +726,7 @@ mod tests {
 
         let mut stale = open_concurrent_store(&path);
         assert_eq!(
-            stale.replace_transactional("state", &first.owner, 0, "stale", &[], || {}),
+            replace_transactional(&mut stale, "state", &first.owner, 0, "stale", &[], || {}),
             Err(StoreError::Fenced)
         );
     }
@@ -551,9 +736,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let path = file.path().to_owned();
         let mut seeded = open_concurrent_store(&path);
-        let old = seeded
-            .acquire_transactional("state", OwnerId::new(), || {})
-            .unwrap();
+        let old = acquire_transactional(&mut seeded, "state", OwnerId::new(), || {}).unwrap();
         drop(seeded);
 
         let new_owner = OwnerId::new();
@@ -563,7 +746,7 @@ mod tests {
         let mut replace_store = open_concurrent_store(&path);
         let acquire_id = new_owner.clone();
         let acquire = thread::spawn(move || {
-            acquire_store.acquire_transactional("state", acquire_id, || {
+            acquire_transactional(&mut acquire_store, "state", acquire_id, || {
                 locked_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
             })
@@ -574,7 +757,15 @@ mod tests {
         let old_owner = old.owner;
         let replace = thread::spawn(move || {
             started_tx.send(()).unwrap();
-            replace_store.replace_transactional("state", &old_owner, 99, "stale", &[], || {})
+            replace_transactional(
+                &mut replace_store,
+                "state",
+                &old_owner,
+                99,
+                "stale",
+                &[],
+                || {},
+            )
         });
         assert_contender_waits(started_rx, &replace);
         release_tx.send(()).unwrap();
@@ -594,9 +785,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let path = file.path().to_owned();
         let mut seeded = open_concurrent_store(&path);
-        let old = seeded
-            .acquire_transactional("state", OwnerId::new(), || {})
-            .unwrap();
+        let old = acquire_transactional(&mut seeded, "state", OwnerId::new(), || {}).unwrap();
         drop(seeded);
 
         let (locked_tx, locked_rx) = mpsc::channel();
@@ -605,10 +794,18 @@ mod tests {
         let mut acquire_store = open_concurrent_store(&path);
         let old_owner = old.owner.clone();
         let replace = thread::spawn(move || {
-            replace_store.replace_transactional("state", &old_owner, 0, "committed", &[], || {
-                locked_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            })
+            replace_transactional(
+                &mut replace_store,
+                "state",
+                &old_owner,
+                0,
+                "committed",
+                &[],
+                || {
+                    locked_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            )
         });
         locked_rx.recv().unwrap();
 
@@ -617,7 +814,7 @@ mod tests {
         let acquire_id = new_owner.clone();
         let acquire = thread::spawn(move || {
             started_tx.send(()).unwrap();
-            acquire_store.acquire_transactional("state", acquire_id, || {})
+            acquire_transactional(&mut acquire_store, "state", acquire_id, || {})
         });
         assert_contender_waits(started_rx, &acquire);
         release_tx.send(()).unwrap();
@@ -635,7 +832,7 @@ mod tests {
 
         let mut stale = open_concurrent_store(&path);
         assert_eq!(
-            stale.replace_transactional("state", &old.owner, 999, "stale", &[], || {}),
+            replace_transactional(&mut stale, "state", &old.owner, 999, "stale", &[], || {}),
             Err(StoreError::Fenced)
         );
     }
@@ -645,9 +842,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let path = file.path().to_owned();
         let mut seeded = open_concurrent_store(&path);
-        let owned = seeded
-            .acquire_transactional("state", OwnerId::new(), || {})
-            .unwrap();
+        let owned = acquire_transactional(&mut seeded, "state", OwnerId::new(), || {}).unwrap();
         drop(seeded);
 
         let (locked_tx, locked_rx) = mpsc::channel();
@@ -656,10 +851,18 @@ mod tests {
         let mut second_store = open_concurrent_store(&path);
         let first_owner = owned.owner.clone();
         let first = thread::spawn(move || {
-            first_store.replace_transactional("state", &first_owner, 0, "first", &[], || {
-                locked_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            })
+            replace_transactional(
+                &mut first_store,
+                "state",
+                &first_owner,
+                0,
+                "first",
+                &[],
+                || {
+                    locked_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            )
         });
         locked_rx.recv().unwrap();
 
@@ -667,7 +870,15 @@ mod tests {
         let second_owner = owned.owner.clone();
         let second = thread::spawn(move || {
             started_tx.send(()).unwrap();
-            second_store.replace_transactional("state", &second_owner, 0, "second", &[], || {})
+            replace_transactional(
+                &mut second_store,
+                "state",
+                &second_owner,
+                0,
+                "second",
+                &[],
+                || {},
+            )
         });
         assert_contender_waits(started_rx, &second);
         release_tx.send(()).unwrap();
@@ -760,12 +971,16 @@ mod tests {
             SqliteStore::from_connection(Connection::open_in_memory().unwrap()).unwrap();
         let prior_owner = OwnerId::new();
         store
-            .connection
-            .execute(
-                "INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence)
-                 VALUES (?1, ?2, ?3)",
-                params!["state", prior_owner.as_str(), (u64::MAX - 1).to_string()],
-            )
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence)
+                         VALUES (?1, ?2, ?3)",
+                        params!["state", prior_owner.as_str(), (u64::MAX - 1).to_string()],
+                    )
+                    .map_err(backend)
+            })
+            .await
             .unwrap();
 
         let installed_owner = OwnerId::new();
@@ -779,12 +994,16 @@ mod tests {
             Err(StoreError::NotCommitted(_))
         ));
         let retained = store
-            .connection
-            .query_row(
-                "SELECT owner_id, fence FROM nanocodex_durable_owners WHERE state_id = ?1",
-                ["state"],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
+            .run(|connection| {
+                connection
+                    .query_row(
+                        "SELECT owner_id, fence FROM nanocodex_durable_owners WHERE state_id = ?1",
+                        ["state"],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .map_err(backend)
+            })
+            .await
             .unwrap();
         assert_eq!(
             retained,
@@ -798,12 +1017,16 @@ mod tests {
             SqliteStore::from_connection(Connection::open_in_memory().unwrap()).unwrap();
         let owned = store.acquire("state", OwnerId::new()).await.unwrap();
         store
-            .connection
-            .execute(
-                "INSERT INTO nanocodex_durable_states (state_id, revision, payload)
-                 VALUES (?1, ?2, ?3)",
-                params!["state", i64::MAX, "retained"],
-            )
+            .run(|connection| {
+                connection
+                    .execute(
+                        "INSERT INTO nanocodex_durable_states (state_id, revision, payload)
+                         VALUES (?1, ?2, ?3)",
+                        params!["state", i64::MAX, "retained"],
+                    )
+                    .map_err(backend)
+            })
+            .await
             .unwrap();
 
         assert!(matches!(
@@ -813,23 +1036,62 @@ mod tests {
             Err(StoreError::NotCommitted(message))
                 if message == "SQLite durability revision overflow"
         ));
+        let retained = store
+            .run(|connection| load_state(connection, "state"))
+            .await
+            .unwrap();
         assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT revision FROM nanocodex_durable_states WHERE state_id = 'state'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            i64::MAX
+            retained,
+            StoredState {
+                revision: MAX_SQL_REVISION,
+                payload: Some("retained".to_owned()),
+            }
         );
+    }
+
+    /// A takeover can race an old owner's commit on another connection; the
+    /// new owner must wait for the lock instead of failing with SQLITE_BUSY.
+    #[tokio::test]
+    async fn opened_stores_wait_for_another_writer_and_batch_reads_in_order() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut first = SqliteStore::open(file.path()).unwrap();
+        let owned = first.acquire("state", OwnerId::new()).await.unwrap();
+        let records = [("a", "=1"), ("b", "=2")].map(|(key, value)| crate::StoreRecord {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        });
         assert_eq!(
-            load_state(&store.connection, "state")
-                .unwrap()
-                .payload
-                .as_deref(),
-            Some("retained")
+            first
+                .replace("state", &owned.owner, 0, "head", &records)
+                .await,
+            Ok(1)
+        );
+        let keys = ["b", "missing", "a", "b"].map(str::to_owned);
+        assert_eq!(
+            first.read_records("state", &keys).await.unwrap(),
+            [Some("=2"), None, Some("=1"), Some("=2")].map(|value| value.map(str::to_owned))
+        );
+
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let path = file.path().to_owned();
+        let writer = thread::spawn(move || {
+            let mut connection = Connection::open(path).unwrap();
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            locked_tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(200));
+            transaction.commit().unwrap();
+        });
+        locked_rx.recv().unwrap();
+        let mut second = SqliteStore::open(file.path()).unwrap();
+        let acquired = second.acquire("state", OwnerId::new()).await.unwrap();
+        writer.join().unwrap();
+        assert_eq!(acquired.owner.fence(), 2);
+        assert_eq!(acquired.state.payload.as_deref(), Some("head"));
+        assert_eq!(
+            first.replace("state", &owned.owner, 1, "stale", &[]).await,
+            Err(StoreError::Fenced)
         );
     }
 }

@@ -66,6 +66,29 @@ impl StateStore for PostgresStore {
         })
     }
 
+    fn read_records<'a>(
+        &'a mut self,
+        state_id: &'a str,
+        keys: &'a [String],
+    ) -> StoreFuture<'a, Result<Vec<Option<String>>, StoreError>> {
+        Box::pin(async move {
+            let rows = self
+                .client
+                .query(
+                    "SELECT key, value FROM nanocodex_durable_records
+                     WHERE state_id = $1 AND key = ANY($2)",
+                    &[&state_id, &keys],
+                )
+                .await
+                .map_err(backend)?;
+            let values = rows
+                .into_iter()
+                .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+                .collect::<std::collections::HashMap<_, _>>();
+            Ok(keys.iter().map(|key| values.get(key).cloned()).collect())
+        })
+    }
+
     fn acquire<'a>(
         &'a mut self,
         state_id: &'a str,
@@ -158,11 +181,25 @@ impl StateStore for PostgresStore {
                     actual,
                 });
             }
-            for record in records {
-                transaction.execute(
-                    "INSERT INTO nanocodex_durable_records (state_id, key, value) VALUES ($1, $2, $3)
-                     ON CONFLICT (state_id, key) DO NOTHING", &[&state_id, &record.key, &record.value],
-                ).await.map_err(backend)?;
+            if !records.is_empty() {
+                let keys = records
+                    .iter()
+                    .map(|record| record.key.as_str())
+                    .collect::<Vec<_>>();
+                let values = records
+                    .iter()
+                    .map(|record| record.value.as_str())
+                    .collect::<Vec<_>>();
+                transaction
+                    .execute(
+                        "INSERT INTO nanocodex_durable_records (state_id, key, value)
+                         SELECT $1, record.key, record.value
+                         FROM unnest($2::text[], $3::text[]) AS record(key, value)
+                         ON CONFLICT (state_id, key) DO NOTHING",
+                        &[&state_id, &keys, &values],
+                    )
+                    .await
+                    .map_err(backend)?;
             }
             let revision = actual.checked_add(1).ok_or_else(|| {
                 StoreError::NotCommitted("Postgres durability revision overflow".to_owned())
@@ -171,7 +208,7 @@ impl StateStore for PostgresStore {
             transaction
                 .execute(
                     "INSERT INTO nanocodex_durable_states (state_id, revision, payload)
-                     VALUES ($1, $2::numeric, $3)
+                     VALUES ($1, $2::text::numeric, $3)
                      ON CONFLICT (state_id) DO UPDATE
                      SET revision = excluded.revision, payload = excluded.payload",
                     &[&state_id, &revision_text, &payload],

@@ -3,6 +3,9 @@ pub use preservation::{
     BeforeCompaction, BeforeCompactionRequest, CompactionMessage, CompactionReceipt,
 };
 
+/// Context types carried by an [`ExecutionContinuation`].
+pub use nanocodex_oai_api::responses::{ResponseHistory, ResponseItem};
+
 #[cfg(not(target_family = "wasm"))]
 #[path = "native.rs"]
 mod platform;
@@ -66,13 +69,19 @@ pub enum ExecutionStepAdmission {
 
 /// Current execution metadata and the active model context.
 /// Hosts persist context records independently from the small execution position.
+///
+/// The context is shared with the live agent rather than copied: cloning
+/// either field is O(1), and a host that retains the previous boundary's
+/// values can use allocation identity
+/// ([`ResponseHistory::shared_prefix_len`]
+/// and [`Arc::ptr_eq`]) to persist only what changed.
 pub struct ExecutionContinuation {
     /// Serialized execution position and settings, excluding conversation bodies.
     pub state_json: String,
     /// Active conversation items in model order.
-    pub history: Vec<nanocodex_oai_api::responses::ResponseItem>,
+    pub history: ResponseHistory,
     /// Frozen request prefix for the current execution.
-    pub prefix: Vec<nanocodex_oai_api::responses::ResponseItem>,
+    pub prefix: Arc<[ResponseItem]>,
 }
 
 /// One live steering input retained for deterministic operation recovery.
@@ -631,7 +640,7 @@ struct StandaloneCompactionBase {
     lineage_id: String,
     prompt_cache_key: String,
     workspace: String,
-    history: Vec<nanocodex_oai_api::responses::ResponseItem>,
+    history: Vec<ResponseItem>,
 }
 
 impl Execution {
@@ -950,13 +959,7 @@ impl ExecutionSteps {
 
     pub(crate) async fn continuation<T: DeserializeOwned>(
         &self,
-    ) -> Result<
-        Option<(
-            T,
-            Vec<nanocodex_oai_api::responses::ResponseItem>,
-            Vec<nanocodex_oai_api::responses::ResponseItem>,
-        )>,
-    > {
+    ) -> Result<Option<(T, ResponseHistory, Arc<[ResponseItem]>)>> {
         self.policy
             .continuation(self.operation_id.clone())
             .await?
@@ -967,8 +970,8 @@ impl ExecutionSteps {
     pub(crate) async fn advance<T: Serialize>(
         &self,
         state: &T,
-        history: Vec<nanocodex_oai_api::responses::ResponseItem>,
-        prefix: Vec<nanocodex_oai_api::responses::ResponseItem>,
+        history: ResponseHistory,
+        prefix: Arc<[ResponseItem]>,
     ) -> Result<()> {
         self.policy
             .advance(

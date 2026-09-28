@@ -3937,7 +3937,7 @@ async fn model_recovery_uses_current_conversation_across_runtime_changes() -> Re
                 .unwrap()
                 .clone();
             expected.extend(
-                serde_json::to_value(&input.history)?
+                serde_json::to_value(input.history.iter().collect::<Vec<_>>())?
                     .as_array()
                     .unwrap()
                     .iter()
