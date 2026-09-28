@@ -1,4 +1,5 @@
-// Uses only Node built-ins; no Python, Rust, or pnpm setup needed.
+// Needs Node and Cargo (`cargo metadata`); no Rust target or pnpm setup.
+import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
@@ -25,295 +26,60 @@ async function walk(directory, skipStandaloneTests = false) {
   return result;
 }
 
-// Strict TOML 1.0 reader for Cargo manifests. Invalid documents and
-// unsupported values (date-times) throw instead of approximating the grammar.
-export function parseToml(text) {
-  const root = Object.create(null);
-  const headed = new WeakSet(); // defined by [header] or [[header]]
-  const dotted = new WeakSet(); // defined by a dotted key
-  const frozen = new WeakSet(); // inline tables and value arrays
-  const control = /[\x00-\x08\x0a-\x1f\x7f]/;
-  let position = 0;
-  const fail = (message) => {
-    throw new SyntaxError(`invalid TOML: ${message} at line ${text.slice(0, position).split("\n").length}`);
-  };
-  const spaces = () => { while (text[position] === " " || text[position] === "\t") position++; };
-  const newline = () => {
-    if (text[position] === "\n") position++;
-    else if (text[position] === "\r" && text[position + 1] === "\n") position += 2;
-    else return false;
-    return true;
-  };
-  const comment = () => {
-    if (text[position] !== "#") return;
-    for (position++; position < text.length && text[position] !== "\n"; position++) {
-      if (control.test(text[position]) && text[position] !== "\t" && !(text[position] === "\r" && text[position + 1] === "\n")) fail("control character in comment");
-    }
-  };
-  const blank = () => { do { spaces(); comment(); } while (newline()); };
-  const endOfLine = () => { spaces(); comment(); if (position < text.length && !newline()) fail("expected end of line"); };
-  const escape = () => {
-    const character = text[position++];
-    const simple = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", '"': '"', "\\": "\\" }[character];
-    if (simple !== undefined) return simple;
-    const length = character === "u" ? 4 : character === "U" ? 8 : fail("invalid escape");
-    const digits = text.slice(position, position + length);
-    if (!/^[0-9A-Fa-f]+$/.test(digits) || digits.length !== length) fail("invalid unicode escape");
-    position += length;
-    const code = Number.parseInt(digits, 16);
-    if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) fail("invalid unicode scalar");
-    return String.fromCodePoint(code);
-  };
-  const string = (allowMultiline) => {
-    const quote = text[position];
-    const literal = quote === "'";
-    if (text.startsWith(quote.repeat(3), position)) {
-      if (!allowMultiline) fail("multi-line string key");
-      position += 3;
-      newline();
-      let value = "";
-      for (;;) {
-        if (position >= text.length) fail("unterminated multi-line string");
-        if (text.startsWith(quote.repeat(3), position)) {
-          let extra = 0;
-          while (extra < 2 && text[position + 3 + extra] === quote) extra++;
-          position += 3 + extra;
-          return value + quote.repeat(extra);
-        }
-        if (newline()) { value += "\n"; continue; }
-        if (!literal && text[position] === "\\") {
-          const start = ++position;
-          spaces();
-          if (newline()) {
-            while (text[position] === " " || text[position] === "\t" || newline()) if (text[position] === " " || text[position] === "\t") position++;
-            continue;
-          }
-          position = start;
-          value += escape();
-          continue;
-        }
-        if (control.test(text[position]) && text[position] !== "\t") fail("control character in string");
-        value += text[position++];
-      }
-    }
-    let value = "";
-    for (position++; ;) {
-      const character = text[position++];
-      if (character === quote) return value;
-      if (character === undefined || character === "\n" || character === "\r") fail("unterminated string");
-      if (!literal && character === "\\") value += escape();
-      else if (control.test(character) && character !== "\t") fail("control character in string");
-      else value += character;
-    }
-  };
-  const key = () => {
-    const parts = [];
-    for (;;) {
-      spaces();
-      if (text[position] === '"' || text[position] === "'") parts.push(string(false));
-      else {
-        const start = position;
-        while (/[A-Za-z0-9_-]/.test(text[position] ?? "")) position++;
-        if (start === position) fail("expected key");
-        parts.push(text.slice(start, position));
-      }
-      spaces();
-      if (text[position] !== ".") return parts;
-      position++;
-    }
-  };
-  // Returns the table stored at table[name], creating it when absent.
-  const child = (table, name) => {
-    if (!Object.hasOwn(table, name)) table[name] = Object.create(null);
-    let next = table[name];
-    if (Array.isArray(next) && !frozen.has(next)) next = next.at(-1);
-    if (next === null || typeof next !== "object" || Array.isArray(next)) fail(`key ${name} is not a table`);
-    if (frozen.has(next)) fail(`cannot extend inline table ${name}`);
-    return next;
-  };
-  const value = () => {
-    const character = text[position];
-    if (character === '"' || character === "'") return string(true);
-    if (character === "[") {
-      const array = [];
-      frozen.add(array);
-      for (position++; ;) {
-        blank();
-        if (text[position] === "]") { position++; return array; }
-        array.push(value());
-        blank();
-        if (text[position] === ",") position++;
-        else if (text[position] === "]") { position++; return array; }
-        else fail("expected , or ] in array");
-      }
-    }
-    if (character === "{") {
-      const table = Object.create(null);
-      position++;
-      spaces();
-      if (text[position] !== "}") {
-        for (;;) {
-          assign(table, key());
-          spaces();
-          if (text[position] === "}") break;
-          if (text[position] !== ",") fail("expected , or } in inline table");
-          position++;
-        }
-      }
-      position++;
-      frozen.add(table);
-      return table;
-    }
-    const match = /^(?:true|false|[+-]?(?:inf|nan)|0x[0-9A-Fa-f](?:_?[0-9A-Fa-f])*|0o[0-7](?:_?[0-7])*|0b[01](?:_?[01])*|[+-]?(?:0|[1-9](?:_?\d)*)(?:\.\d(?:_?\d)*)?(?:[eE][+-]?\d(?:_?\d)*)?)(?=[ \t\r\n,\]}#]|$)/
-      .exec(text.slice(position, position + 256));
-    if (!match) fail("unsupported value (TOML date-times are not supported)");
-    position += match[0].length;
-    const token = match[0].replaceAll("_", "");
-    if (token === "true" || token === "false") return token === "true";
-    if (token.endsWith("inf")) return token.startsWith("-") ? -Infinity : Infinity;
-    return token.endsWith("nan") ? Number.NaN : Number(token);
-  };
-  function assign(table, parts) {
-    spaces();
-    if (text[position] !== "=") fail("expected =");
-    position++;
-    spaces();
-    for (const part of parts.slice(0, -1)) {
-      table = child(table, part);
-      if (headed.has(table)) fail(`dotted key cannot extend table ${part}`);
-      dotted.add(table);
-    }
-    const name = parts.at(-1);
-    if (Object.hasOwn(table, name)) fail(`duplicate key ${name}`);
-    table[name] = value();
-  }
-  let current = root;
-  for (;;) {
-    blank();
-    if (position >= text.length) return root;
-    if (text[position] !== "[") {
-      assign(current, key());
-      endOfLine();
-      continue;
-    }
-    const array = text[position + 1] === "[";
-    position += array ? 2 : 1;
-    const parts = key();
-    if (!text.startsWith(array ? "]]" : "]", position)) fail("unterminated table header");
-    position += array ? 2 : 1;
-    endOfLine();
-    let parent = root;
-    for (const part of parts.slice(0, -1)) parent = child(parent, part);
-    const name = parts.at(-1);
-    if (array) {
-      if (!Object.hasOwn(parent, name)) parent[name] = [];
-      if (!Array.isArray(parent[name]) || frozen.has(parent[name])) fail(`key ${name} is not an array of tables`);
-      current = Object.create(null);
-      parent[name].push(current);
-    } else {
-      if (Object.hasOwn(parent, name) && Array.isArray(parent[name])) fail(`duplicate table ${parts.join(".")}`);
-      current = child(parent, name);
-      if (headed.has(current) || dotted.has(current)) fail(`duplicate table ${parts.join(".")}`);
-    }
-    headed.add(current);
-  }
-}
-
 // Three-valued cfg evaluation for wasm32-unknown-unknown: true, false, or null
-// (unknown). Unsupported predicates/syntax stay null, so their dependencies
-// remain included. Cargo target predicates do not depend on feature activation.
+// (unknown). Unknown predicates keep their dependencies in the input set.
 function wasmCfg(platform) {
-  const expression = /^cfg\s*\(([\s\S]*)\)$/.exec(platform.trim());
-  if (!expression) return /^cfg\b/.test(platform.trim()) ? null : platform === "wasm32-unknown-unknown";
-  const tokens = [];
-  for (let text = expression[1].trim(); text;) {
-    const match = /^\s*([A-Za-z_][A-Za-z_0-9]*|"(?:[^"\\]|\\.)*"|[(),=])/.exec(text);
-    if (!match) return null;
-    tokens.push(match[1]);
-    text = text.slice(match[0].length).trim();
-  }
+  const cfg = /^cfg\s*\(([\s\S]*)\)$/.exec(platform.trim());
+  if (!cfg) return /^cfg\b/.test(platform.trim()) ? null : platform === "wasm32-unknown-unknown";
   const known = { target_arch: "wasm32", target_os: "unknown", target_family: "wasm", target_env: "", target_vendor: "unknown", target_pointer_width: "32", target_endian: "little" };
-  let index = 0;
-  const take = () => { if (index >= tokens.length) throw new RangeError("truncated cfg"); return tokens[index++]; };
-  const parse = () => {
-    const name = take();
-    if (!/^[A-Za-z_][A-Za-z_0-9]*$/.test(name)) throw new SyntaxError("unknown cfg syntax");
-    if (tokens[index] === "=") {
-      take();
-      const value = JSON.parse(take());
-      return Object.hasOwn(known, name) ? known[name] === value : null;
-    }
-    if (tokens[index] === "(") {
-      take();
-      const values = [];
-      while (tokens[index] !== ")") {
-        values.push(parse());
-        if (tokens[index] !== ",") break;
-        take();
-      }
-      if (take() !== ")") throw new SyntaxError("unterminated cfg");
-      if (name === "all") return values.includes(false) ? false : values.includes(null) ? null : true;
-      if (name === "any") return values.includes(true) ? true : values.includes(null) ? null : false;
-      if (name === "not" && values.length === 1) return values[0] === null ? null : !values[0];
-      return null;
-    }
-    return name === "unix" || name === "windows" ? false : null;
-  };
-  try {
-    const value = parse();
-    return index === tokens.length ? value : null;
-  } catch {
-    return null;
+  // Reduce leaves to 1/0/?, then fold all/any/not from the inside out.
+  let expression = cfg[1]
+    .replace(/([A-Za-z_]\w*)\s*=\s*"([^"\\]*)"/g, (_, name, value) => (Object.hasOwn(known, name) ? (known[name] === value ? "1" : "0") : "?"))
+    .replace(/\b([A-Za-z_]\w*)\b(?!\s*\()/g, (_, name) => (name === "unix" || name === "windows" ? "0" : "?"));
+  for (let previous; previous !== expression;) {
+    previous = expression;
+    expression = expression.replace(/\b([A-Za-z_]\w*)\s*\(\s*((?:[01?]\s*,?\s*)*)\)/g, (_, name, list) => {
+      const values = list.split(",").map((value) => value.trim()).filter(Boolean);
+      if (name === "all") return values.includes("0") ? "0" : values.includes("?") ? "?" : "1";
+      if (name === "any") return values.includes("1") ? "1" : values.includes("?") ? "?" : "0";
+      if (name === "not" && values.length === 1) return { 1: "0", 0: "1", "?": "?" }[values[0]];
+      return "?";
+    });
   }
+  return { 1: true, 0: false }[expression.trim()] ?? null;
 }
 
-// Retain optional dependencies and unknown cfgs, excluding only target tables
-// proven inapplicable to wasm32. Host build/proc-macro dependencies stay broad.
-// Registry/git dependencies are pinned by Cargo.lock. No Cargo metadata call.
+// Local packages the WASM crate can compile, from Cargo's own manifest view.
+// Only target tables proven inapplicable to wasm32 are skipped; optional,
+// build, and proc-macro dependencies stay included. Cargo.lock pins the rest.
 function dependencyDirectories(repository) {
-  const isTable = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-  const table = (value) => (isTable(value) ? value : {});
-  const manifest = (directory) => {
-    const path = resolve(directory, "Cargo.toml");
-    try { return parseToml(readFileSync(path, "utf8")); }
-    catch (error) { throw new Error(`${relative(repository, path)}: ${error.message}`, { cause: error }); }
-  };
-  const workspace = table(table(manifest(repository).workspace).dependencies);
+  const { packages } = JSON.parse(execFileSync("cargo", ["metadata", "--format-version", "1", "--no-deps", "--offline"],
+    { cwd: repository, encoding: "utf8", maxBuffer: 64 << 20, stdio: ["ignore", "pipe", "pipe"] }));
+  const byDirectory = new Map(packages.map((pkg) => [realpathSync(dirname(pkg.manifest_path)), pkg]));
   const visited = new Set();
   const inputs = new Map();
   const visit = (directory, target) => {
     directory = realpathSync(directory);
     const location = relative(repository, directory);
     if (location.startsWith("..") || isAbsolute(location)) throw new Error(`local Rust dependency ${directory} must remain inside repository`);
-    const data = manifest(directory);
-    const library = table(data.lib);
+    const pkg = byDirectory.get(directory);
+    if (!pkg) throw new Error(`local Rust dependency ${location} is not a workspace member`);
+    const kinds = pkg.targets.flatMap((entry) => entry.kind);
     // A proc macro and its dependency tree compile for the build host.
-    target = target && !library["proc-macro"];
+    target &&= !kinds.includes("proc-macro");
     if (visited.has(`${target}:${directory}`)) return;
     visited.add(`${target}:${directory}`);
-    const buildScript = existsSync(resolve(directory, "build.rs")) || Boolean(table(data.package).build);
+    const buildScript = kinds.includes("custom-build");
     // Explicit production entry points can live in normally test-only folders.
-    const firstSegment = (path) => (path.startsWith("/") ? "/" : path.split("/").find((part) => part && part !== "."));
-    const entryPoints = [library, ...(Array.isArray(data.bin) ? data.bin : [])];
-    const keepTests = buildScript || entryPoints.some((entry) => ["tests", "benches"].includes(firstSegment(String(table(entry).path ?? ""))));
+    const keepTests = buildScript || pkg.targets.some((entry) => !entry.kind.some((kind) => ["test", "bench", "example"].includes(kind))
+      && ["tests", "benches"].includes(relative(directory, entry.src_path).split(/[\\/]/)[0]));
     inputs.set(directory, { directory, buildScript, skipStandaloneTests: !keepTests });
-    for (const [platform, section] of [[null, data], ...Object.entries(table(data.target))]) {
-      for (const kind of ["dependencies", "build-dependencies"]) {
-        // Target-specific build dependencies are selected for the host.
-        const dependencyTarget = target && kind !== "build-dependencies";
-        if (dependencyTarget && platform !== null && wasmCfg(platform) === false) continue;
-        for (const [name, declared] of Object.entries(table(table(section)[kind]))) {
-          if (!isTable(declared)) continue;
-          let dependency = declared;
-          let base = directory;
-          if (dependency.workspace) {
-            if (!Object.hasOwn(workspace, name)) throw new Error(`${directory}/Cargo.toml: ${name} is not a workspace dependency`);
-            dependency = workspace[name];
-            base = repository;
-          }
-          if (isTable(dependency) && Object.hasOwn(dependency, "path")) visit(resolve(base, dependency.path), dependencyTarget);
-        }
-      }
+    for (const dependency of pkg.dependencies) {
+      if (!dependency.path || dependency.kind === "dev") continue;
+      // Build dependencies, including target-specific ones, are built for the host.
+      const dependencyTarget = target && dependency.kind !== "build";
+      if (dependencyTarget && dependency.target && wasmCfg(dependency.target) === false) continue;
+      visit(dependency.path, dependencyTarget);
     }
   };
   visit(resolve(repository, "js/nanocodex"), true);
@@ -370,8 +136,7 @@ async function inputFiles(repository) {
   return [...files].sort();
 }
 
-// Resolution errors propagate: an input set this script cannot prove complete
-// must fail the build loudly instead of silently reusing or skipping the cache.
+// Resolution errors propagate: an unprovable input set fails the build loudly.
 export async function fingerprintInputs(repository = root, mode = "release", environment = process.env) {
   repository = await realpath(repository);
   assert.ok(["release", "development"].includes(mode));
@@ -399,22 +164,17 @@ async function outputs(repository) {
   return { artifacts, node, sourceWasmSha256: sha(await readFile(resolve(repository, rawPath))) };
 }
 
-// Computing the key happens first so resolution errors are never mistaken for
-// an ordinary cache miss (for example a fresh checkout without metadata).
+// Resolution errors propagate before the try, so they are never mistaken for a miss.
 export async function check(repository = root, mode = "release") {
   const key = await fingerprintInputs(repository, mode);
-  let retained;
-  try { retained = JSON.parse(await readFile(resolve(repository, metadataPath), "utf8")); }
-  catch (error) { throw new CacheMiss(error.code === "ENOENT" ? "no retained outputs" : error.message); }
   try {
+    const retained = JSON.parse(await readFile(resolve(repository, metadataPath), "utf8"));
     assert.equal(retained.schema, 1);
     assert.equal(retained.fingerprint, key, "WASM inputs changed");
-  } catch (error) { throw new CacheMiss(error.message.split("\n")[0]); }
-  try {
     const current = await outputs(repository);
-    assert.deepEqual(retained.outputs, current);
+    assert.deepEqual(retained.outputs, current, "outputs do not match retained metadata");
     assertCachedManagedWasmAttestation(JSON.parse(await readFile(resolve(repository, "js/nanocodex/pkg-web/nanocodex-build.json"), "utf8")), current);
-  } catch (error) { throw new CacheMiss(`outputs do not match retained metadata: ${error.message.split("\n")[0]}`); }
+  } catch (error) { throw new CacheMiss(error.message.split("\n")[0]); }
 }
 
 export class CacheMiss extends Error {}

@@ -669,12 +669,9 @@ API key. Pass an MPP session with a `ws(endpoint)` method; an `mppx` Tempo
 session manager has this shape. Nanocodex defaults the socket to
 `wss://openai.mpp.tempo.xyz/v1/responses` when `mpp` is present.
 
-Tempo/MPP payment helpers live in the `nanocodex/tempo` subpath. Its runtime
-dependencies, `mppx` and `viem`, are optional peer dependencies: install them
-only when you import `nanocodex/tempo`. The core entry points (`nanocodex`,
-`nanocodex/node`, `nanocodex/browser`, `nanocodex/host`, `nanocodex/connect`)
-never reference `mppx`, `viem`, or `ox`, so bundlers such as Vite build them
-without those packages installed.
+Tempo/MPP helpers live in `nanocodex/tempo`, whose optional peer dependencies
+`mppx` and `viem` are needed only when you import it; the core entry points
+never reference them.
 
 ```sh
 npm install nanocodex mppx viem

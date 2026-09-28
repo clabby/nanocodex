@@ -122,11 +122,8 @@ physical-speaker echo-rejection result; synthetic mixer tests verify ingress and
 fencing. Legacy GNU Linux/MSVC GStreamer helpers explicitly return Unsupported for
 external PCM; this path currently ships in the macOS libWebRTC package only.
 
-webrtc-sys is the pinned crates.io 0.3.45 crate with a small factory-mixer patch,
-not a different native WebRTC archive. Only the patch is tracked, in
-`patches/webrtc-sys`; its `prepare.py` verifies the crates.io archive checksum and
-materializes the patched crate into the gitignored `vendor/webrtc-sys`. See
-`patches/webrtc-sys/NANOCODEX.md` for patch boundaries.
+webrtc-sys is the pinned 0.3.45 crate with a small factory-mixer patch, not a
+different native WebRTC archive. See `patches/webrtc-sys/NANOCODEX.md`.
 Build and stage the actual Mac package with:
 
 ```sh
@@ -140,8 +137,7 @@ the staging command places the helper/resources there. Set the same
 Keep the full `nanocodex-resources/voice` directory with the executable. Offline
 builds require the pinned Rust crates and native archive already cached.
 
-Device-free regression checks for the new path (the packaging script prepares
-webrtc-sys itself; direct cargo commands on this workspace need it first):
+Device-free regression checks for the new path:
 
 ```sh
 python3 third_party/codex-voice/patches/webrtc-sys/prepare.py

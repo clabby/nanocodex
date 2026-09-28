@@ -66,11 +66,9 @@ cleanup() {
 trap cleanup EXIT
 
 cache_helper="js/nanocodex-vite/scripts/wasm-output-cache.mjs"
-# Turbo keys downstream Worker bundles on nanocodex#build inputs; refuse to
-# build when those inputs no longer cover every WASM source.
+# Downstream Turbo caches key on nanocodex#build inputs, which must cover every WASM source.
 node "$cache_helper" check-turbo
-# Exit 1 is an ordinary cache miss. Any other status means the input set could
-# not be resolved, so stop rather than silently rebuilding without a cache.
+# Exit 1 is a cache miss; any other failure means the input set is unresolvable.
 cache_status=0
 node "$cache_helper" check "$build_mode" || cache_status=$?
 if [[ "$cache_status" -eq 0 ]]; then

@@ -24,9 +24,7 @@ env:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  # Superseded PR pushes are cancelled. Master and merge-queue runs finish so
-  # every landed commit is verified and master keeps warming the caches; a
-  # newer master push only replaces a run that has not started.
+  # Only superseded PR runs are cancelled; master and merge-queue runs finish.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -61,7 +59,6 @@ jobs:
       - name: Validate CI job selection
         run: node --test scripts/ci/select-jobs.test.mjs
       - id: select
-        # Crate-graph selection reads `cargo metadata --no-deps` (no downloads).
         run: node scripts/ci/select-jobs.mjs
 
   test:
@@ -322,9 +319,7 @@ jobs:
           toolchain: "1.97"
           components: clippy, rustfmt
       - uses: ./.github/actions/rust-compiler-cache
-      # Same command as `pnpm check:fast`: fmt, then Clippy on the changed
-      # crates and their workspace dependents ("*" = whole workspace). The CLI
-      # binary and benchmark reuse the library artifacts in the same target.
+      # Same command as `pnpm check:fast` ("*" = whole workspace).
       - name: Clippy affected crates
         env:
           PACKAGES: ${{ needs.changes.outputs.packages }}
@@ -365,8 +360,7 @@ jobs:
 
   vm-guest:
     needs: changes
-    # Selected by nanocodex-vm's closure. Re-enabling the paused Docker Hand
-    # tests below, which also run nanocodex2, needs "hands" added to this gate.
+    # Add "hands" here when re-enabling the paused Docker Hand tests (nanocodex2).
     if: needs.changes.outputs.vm == 'true'
     name: static Linux guest and Docker Hand (${{ matrix.arch }})
     strategy:
@@ -515,8 +509,6 @@ jobs:
       - run: ./scripts/check-rustls-provider.sh
         if: needs.changes.outputs.rust == 'true'
       - uses: crate-ci/typos@96d9af6217dc2855210655af7e1ff19d23d4e593 # v1
-      # Formerly ran before selection and delayed every job. The Cloudflare
-      # workflow's own copy of these tests is paused.
       - name: Check Cloudflare release and image policies
         run: >-
           node --test
@@ -857,8 +849,6 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: scripts/ci
-      # Selected jobs must succeed and every other job must be skipped; missing
-      # selection outputs or an unmapped job fail the gate.
       - name: Require every applicable CI job
         env:
           NEEDS: ${{ toJSON(needs) }}

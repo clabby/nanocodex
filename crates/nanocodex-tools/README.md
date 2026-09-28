@@ -127,8 +127,8 @@ includes a complete host implementation.
 
 ## MCP
 
-MCP is part of the default `native` feature (the `mcp` feature). Native
-consumers configure stdio or Streamable HTTP servers and install the provider into the same registry:
+MCP is the `mcp` feature, part of the default `native`. Native consumers
+configure stdio or Streamable HTTP servers and install the provider into the same registry:
 
 ```rust
 use nanocodex_tools::{
@@ -208,12 +208,8 @@ must never imply synchronization.
 ## Companion workspace runtimes
 
 The default `native` feature remains the complete tools crate: registry, Code
-Mode, MCP, web/image tools, macros, and standard workspace tools. It is the
-union of two narrower features:
-
-- `code-mode` — the registry, Code Mode/QuickJS runtime, web/image tools,
-  macros, and standard workspace tools that the agent loop requires.
-- `mcp` — MCP servers, OAuth login, and deferred-tool search.
+Mode, MCP, web/image tools, macros, and standard workspace tools: `code-mode`
+(everything the agent loop needs) plus `mcp` (MCP, OAuth, deferred-tool search).
 
 The narrower `workspace-runtime` feature exists only for process companions
 such as `nanocodex-vm-guest`. With default features disabled, it exposes the

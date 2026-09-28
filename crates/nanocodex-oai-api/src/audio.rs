@@ -1,13 +1,6 @@
 //! Duration-based audio token estimates, ported verbatim from codex-rs
-//! `utils/audio/src/lib.rs` (openai/codex 1427825c40). Upstream 011f803f3c only
-//! makes the cache single-flight; estimates are unchanged.
-//!
-//! Audio data URLs are decoded with the same Symphonia 0.6 container set as
-//! codex (`isomp4`, `mkv`, `mp3`, `ogg`, `wav`) and charged
-//! `ceil(duration_seconds * 10)` tokens. Anything that cannot be measured
-//! (remote URLs, non-base64 payloads, unsupported MIME types, undecodable
-//! bytes, or containers without a known duration) falls back to the
-//! whole-URL size estimate `ceil(url.len() / 4)`.
+//! `utils/audio/src/lib.rs` (openai/codex 1427825c40): `ceil(seconds * 10)`,
+//! or `ceil(url.len() / 4)` when the duration cannot be measured.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;

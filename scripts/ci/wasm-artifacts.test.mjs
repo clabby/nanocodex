@@ -121,9 +121,9 @@ async function outputFixture(t) {
     await mkdir(resolve(repository, path, ".."), { recursive: true });
     await writeFile(resolve(repository, path), value);
   };
-  await put("Cargo.toml", "[workspace]\n");
+  await put("Cargo.toml", "[workspace]\nmembers = [\"js/nanocodex\"]\n");
   await put("Cargo.lock", "locked");
-  await put("js/nanocodex/Cargo.toml", '[package]\nname = "fixture"\n');
+  await put("js/nanocodex/Cargo.toml", "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\n");
   await put("js/nanocodex/src/lib.rs", "fixture Rust input");
   await put("js/nanocodex/package.json", '{"devDependencies":{"binaryen":"132.0.0"}}');
   for (const path of ["js/nanocodex-vite/scripts/build-js-package.sh", "js/nanocodex-vite/scripts/wasm-output-cache.mjs", "js/nanocodex-vite/scripts/wasm-memory-views.mjs", "js/nanocodex/scripts/deduplicate-wasm.mjs", "js/nanocodex/scripts/write-package-types.mjs", "js/nanocodex/scripts/write-wasm-attestation.mjs", "js/nanocodex/scripts/check-managed-wasm.mjs"]) await put(path, "fixture build policy");

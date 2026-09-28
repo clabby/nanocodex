@@ -20,45 +20,25 @@ Jobs are selected by the packages they build:
 | `policy` | cargo-deny, boundaries, typos, Cloudflare script policy | any non-binary path |
 | `codeql` | Actions analysis | `.github/` |
 
-Root `Cargo.toml`, `Cargo.lock`, toolchain and `.cargo/` files, JS lockfiles and
-workspace manifests, `ci.yml`, `js-preview.yml`, `.github/actions/`, `scripts/ci/`,
-unknown paths, an unavailable diff or Cargo graph, and `merge_group`, scheduled and
-manual runs select everything (`packages=*`). Keep the allowlist conservative when
-adding new cross-language inputs; files a crate reads outside its own directory
-belong in `crossPackageInputs`.
+Workspace-wide inputs (root Cargo/JS manifests and locks, toolchain, `.cargo/`,
+`ci.yml`, `js-preview.yml`, `.github/actions/`, `scripts/ci/`), unknown paths, an
+unavailable diff or Cargo graph, and non-PR/push events select everything
+(`packages=*`). Files a crate reads outside its directory belong in
+`crossPackageInputs`.
 
-Draft pull requests get the fast lane only: fmt/Clippy on affected crates, WASM
-Clippy, policy and JS typecheck/build. Marking the PR ready for review reruns CI
-with the heavy lane (native matrices, Python, docs/contracts, preview, CodeQL).
-Superseded PR pushes cancel their previous run; master and merge-queue runs are
-not cancelled once started. The workflow accepts `merge_group`, so a merge queue
-can be enabled in repository settings.
+Draft PRs get only the fast lane (fmt/Clippy on affected crates, WASM Clippy,
+policy, JS typecheck/build); marking ready reruns CI with the heavy lane. Only
+superseded PR runs are cancelled. `pnpm check:fast` runs the fast-lane
+fmt + Clippy command locally for crates changed since `origin/master`.
 
-`pnpm check:fast` runs the same fmt + Clippy command as the fast-lane job for the
-crates changed since the merge base with `origin/master` (including uncommitted
-and untracked files). Run it before pushing.
+Automatic tests are paused: they run only when `NANOCODEX_CI_TESTS` in `ci.yml`
+is `on`. Rust tests use `cargo nextest run --profile ci` (`.config/nextest.toml`).
+When re-enabling, add `hands` to `vm-guest`'s condition (its Docker tests run
+`nanocodex2`).
 
-## Paused tests
-
-Automatic CI tests are paused. Every paused step and the workspace `test` job is
-gated on the `tests` selection output, which is `true` only when the workflow
-env `NANOCODEX_CI_TESTS` is `on`. Re-enabling is that one line in `ci.yml`.
-Rust test steps use `cargo nextest run --profile ci` (`.config/nextest.toml`):
-host IPC tests are serialized and retried, and retried passes are reported as
-flaky. The `vm-guest` Docker Hand tests also exercise `nanocodex2`; add `hands` to
-that job's condition when re-enabling them.
-
-## Final gate
-
-`ci success` runs `select-jobs.mjs verify` with `toJSON(needs)`. Every selected
-job must succeed and every other job must be skipped. Missing selection outputs
-or a job without a mapping in `select-jobs.mjs` fail the gate, so update the
-`gate` table when adding a job. The upstream-only package preview is never
-selected in forks.
-
-Run `node --test scripts/ci/select-jobs.test.mjs` and
-`actionlint .github/workflows/ci.yml` after changing selection. The test drives
-the real CLI against Git histories and a Cargo workspace fixture.
+`ci success` runs `select-jobs.mjs verify` on `toJSON(needs)`: selected jobs must
+succeed and all others must be skipped; add new jobs to its `gate` table. Run
+`node --test scripts/ci/select-jobs.test.mjs` and `actionlint` after changes.
 
 For measured run and step timings:
 
@@ -73,19 +53,11 @@ CI suite have different scopes.
 ## Rust compilation
 
 Every Rust job uses `.github/actions/rust-compiler-cache`: a Cargo registry
-cache plus pinned sccache on GitHub's cache backend. Per-job target archives
-(0.8-1.4 GB each) exceeded the 10 GB repository cache budget and evicted one
-another, so the Clippy lane usually started cold. sccache entries are shared by
-every job and survive lockfile changes; proc-macros, build scripts and links still
-run. The Windows job, which is the longest, also keeps its target archive.
-
-The fast lane runs fmt, library Clippy on the affected packages, and CLI/benchmark
-Clippy in one job so both invocations share dependency artifacts. The independent
-crate checks remain separate Cargo invocations: merging their package flags would
-unify features and weaken that check.
-
-JavaScript jobs restore Turborepo's local cache from the Actions cache
-(`.github/actions/turbo-cache`); only master writes it.
+cache plus sccache shared by all jobs. Per-job target archives (0.8-1.4 GB each)
+overflowed the 10 GB cache budget; only the Windows critical path keeps one.
+The independent crate checks stay separate Cargo invocations so feature
+unification cannot weaken them. JavaScript jobs reuse Turborepo's cache through
+`.github/actions/turbo-cache`; only master writes it.
 
 The Windows Hand lifecycle and installer share one Windows 2025 runner and one
 CLI build. The real installer build validates its definition.
@@ -113,8 +85,6 @@ caches seed on master dispatch; Cloudflare seeds when a trusted deployment needs
 an image build. Successful cache availability checks emit a Docker registry cache
 notice. Compare a later run after seeding before attributing a speedup to reuse.
 Old Actions cache entries can expire normally; no cache deletion is required.
-
-The policy job runs the Wrangler Docker, image and release-plan script tests.
 
 ## Cloudflare preview latency
 
@@ -147,7 +117,3 @@ Preview image validation uses BuildKit's `cacheonly` output. It still evaluates
 the complete Dockerfile, including its checks, but does not export and load an
 unused image into Docker Engine. Production publication retains `--load` for
 its runtime verification, registry push, and immutable digest receipt.
-
-The native Linux, macOS, and Windows jobs gate their Node/pnpm setup on the
-same `tests` switch as their JavaScript lifecycle suites. Their active Cargo
-builds and Windows installer do not consume the pnpm workspace.

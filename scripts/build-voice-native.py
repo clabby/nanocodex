@@ -121,7 +121,6 @@ def main():
         command.append("--release")
     if args.target:
         command += ["--target", target]
-    # The workspace patches webrtc-sys from a gitignored, verified materialization.
     subprocess.run([sys.executable, VENDOR / "patches/webrtc-sys/prepare.py"], cwd=ROOT, check=True)
     subprocess.run(command, cwd=ROOT, check=True)
     build = Path(os.environ.get("CARGO_TARGET_DIR", VENDOR / "target"))

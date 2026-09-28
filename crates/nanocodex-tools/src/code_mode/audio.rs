@@ -1,7 +1,5 @@
 //! Audio handling ported from openai/codex 1427825c40 `code-mode-runtime/src/runtime/audio.rs`.
-//! Measures tool-generated PCM WAV clips using the audio bytes actually present
-//! (short-clip guard). Output budgets use the shared codex-utils-audio port in
-//! `nanocodex_oai_api::audio`, exactly as codex code mode does.
+//! Output budgets use the shared estimator in `nanocodex_oai_api::audio`.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;

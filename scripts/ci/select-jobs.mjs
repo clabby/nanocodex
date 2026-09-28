@@ -3,11 +3,8 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-// Each family gates one or more jobs in .github/workflows/ci.yml (see `gate`).
-// The heavy lane (native matrices, Python wheels, docs/contracts, previews,
-// CodeQL) is skipped for draft pull requests, which get the fast lane: fmt and
-// Clippy on affected crates, WASM Clippy, dependency policy, and JS
-// typecheck/build.
+// Each family gates jobs in .github/workflows/ci.yml (see `gate`). Draft PRs
+// skip the heavy families. See README.md for the selection policy.
 export const families = [
   "hands", "windows", "vm", "voice", "python", "rust", "rust_extra", "wasm_rust",
   "wasm", "bindings", "apps", "preview", "policy", "codeql",
@@ -61,9 +58,8 @@ export function loadGraph(cwd = process.cwd()) {
   for (const pkg of meta.packages) {
     const dir = relative(root, dirname(pkg.manifest_path));
     dirs.push([dir, pkg.name]);
-    // Targets outside their package directory (nanocodex2's
-    // `../src/nanocodex2/main.rs`) own the modules beside their root file
-    // under crates/ and bin/; elsewhere (examples/) only the target file.
+    // Out-of-directory targets own their sibling modules under crates/ and
+    // bin/ (nanocodex2's ../src/nanocodex2/main.rs); elsewhere only the file.
     for (const target of pkg.targets) {
       const src = relative(root, target.src_path);
       if (src.startsWith(dir + "/")) continue;
@@ -162,7 +158,6 @@ export function selectJobs(paths, graph) {
   jobs.rust = jobs.rust_extra = hit.size > 0;
   // WASM consumers must retest against changed Rust bindings.
   if (jobs.wasm_rust) jobs.apps = jobs.bindings = jobs.preview = true;
-  jobs.wasm = jobs.bindings || jobs.apps || jobs.preview;
   return { jobs, packages: [...hit].sort().join(" ") };
 }
 
@@ -214,9 +209,7 @@ export function selectionForEvent(eventName, event, cwd) {
   return result;
 }
 
-// ci.yml job id -> whether the selection requires it. Selected jobs must
-// succeed; every other job must be skipped. Paused tests stay skipped until
-// the workflow's NANOCODEX_CI_TESTS switch is turned on.
+// ci.yml job id -> whether the selection requires it (success) or not (skipped).
 const gate = {
   changes: () => true,
   test: o => o.tests && o.rust_extra,

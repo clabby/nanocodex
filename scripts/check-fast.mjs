@@ -1,10 +1,7 @@
 #!/usr/bin/env node
-// Formatting plus Clippy for the Rust packages a change affects (and their
-// workspace dependents). CI's Clippy job runs this same command, so a clean
-// `pnpm check:fast` before pushing means that job will pass.
-//
-//   pnpm check:fast                    # diff vs merge-base with origin/master, incl. uncommitted and new .rs
-//   pnpm check:fast -- --base <ref>    # diff vs another base
+// fmt + Clippy for the Rust packages a change affects and their dependents;
+// CI's Clippy job runs the same command.
+//   pnpm check:fast [-- --base <ref>]   # changes since merge-base with origin/master
 //   node scripts/check-fast.mjs --packages "a b" | "*"   # explicit selection (CI)
 import { execFileSync, spawnSync } from "node:child_process";
 import { loadGraph, selectJobs } from "./ci/select-jobs.mjs";
@@ -21,8 +18,7 @@ function localPackages() {
   if (!base) return "*";
   const paths = [...new Set([
     ...git("diff", "--name-only", "--no-renames", base).split("\n"),
-    // New Rust sources count; other untracked files (agent worktrees, local
-    // notes) would otherwise look unknown and select the whole workspace.
+    // Only untracked Rust inputs; other untracked files would select everything.
     ...git("ls-files", "--others", "--exclude-standard").split("\n").filter(path => /(?:\.rs|Cargo\.toml)$/.test(path)),
   ].filter(Boolean))];
   const { packages } = selectJobs(paths, loadGraph());

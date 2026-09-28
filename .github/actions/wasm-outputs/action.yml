@@ -19,8 +19,7 @@ runs:
     - name: Fingerprint WASM inputs
       id: inputs
       shell: bash
-      # Assign first so a fingerprint failure fails this step instead of
-      # producing an empty key inside echo's command substitution.
+      # Assign first so a fingerprint failure fails the step (not an empty key).
       run: |
         key="$(node js/nanocodex-vite/scripts/wasm-output-cache.mjs key release)"
         echo "key=wasm-outputs-v1-${{ runner.os }}-${{ runner.arch }}-$key" >> "$GITHUB_OUTPUT"

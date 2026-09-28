@@ -10,11 +10,7 @@ inputs:
 runs:
   using: composite
   steps:
-    # By default only ~/.cargo (registry, git, installed tools) is archived.
-    # Per-job target tarballs (0.8-1.4 GB each) overflowed the 10 GB repository
-    # budget and evicted one another, so most jobs rely on the sccache entries
-    # below, which every job shares. The Windows critical path keeps its target
-    # archive because sccache cannot reuse proc-macros, build scripts or links.
+    # Archives ~/.cargo only by default; see scripts/ci/README.md.
     - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
       with:
         cache-targets: ${{ inputs.cache-targets }}
