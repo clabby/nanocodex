@@ -1,4 +1,17 @@
-import type { McpPayment, McpServers, MppSession } from "../types.mjs";
+import type { McpPayment, McpServers, MppSession, PaidMcpPayment } from "../types.mjs";
+
+/**
+ * `nanocodex/tempo` owns Tempo/MPP payments. Install the optional peers
+ * `mppx` and `viem` to use it; core Nanocodex entry points never import them.
+ */
+export type { McpPayment, PaidMcpPayment } from "../types.mjs";
+
+/**
+ * Marks MCP payment options as MPPx-backed so Nanocodex wraps the server's MCP
+ * client with `McpClient.wrap` from `mppx/mcp/client`. Required for every
+ * `McpServer.payment`; plain payment objects are rejected.
+ */
+export function mcpPayment<Payment extends McpPayment>(payment: Payment): Payment & PaidMcpPayment;
 
 export declare const DEFAULT_MERCATOR_MCP_URL = "https://mercator.sh/mcp";
 
@@ -123,3 +136,4 @@ export function resolveMcpServers(
   provider: MppSession | undefined,
   configured: McpServers | false | undefined,
 ): McpServers | undefined;
+

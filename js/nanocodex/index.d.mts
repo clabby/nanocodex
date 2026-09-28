@@ -8,16 +8,6 @@ export { createTools } from "./tools/Tools.mjs";
 export type { Tools, AttachmentClient, AttachmentTarget, AttachmentTransport } from "./tools/Tools.mjs";
 export type { HostedMachine } from "./tools/hostedCatalog.mjs";
 export type { AsyncQuickJsModule, QuickJsEvaluatorOptions } from "./runtime/quickjs-evaluator.mjs";
-export {
-  createTempoProvider,
-  createTempoProviderFromAccounts,
-  DEFAULT_MERCATOR_MCP_URL,
-} from "./runtime/tempo-provider.mjs";
-export type {
-  AccountsTempoProviderOptions,
-  AccountsWallet,
-  TempoProvider,
-} from "./runtime/tempo-provider.mjs";
 export type {
   Agent,
   AgentActions,
@@ -43,6 +33,7 @@ export type {
   ForkOptions,
   McpClient,
   McpPayment,
+  PaidMcpPayment,
   McpServer,
   McpServers,
   McpTool,

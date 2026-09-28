@@ -5,8 +5,3 @@ export {
 } from "./runtime/subscription-store.mjs";
 export { createQuickJsEvaluator } from "./runtime/quickjs-evaluator.mjs";
 export { createTools } from "./tools/Tools.mjs";
-export {
-  createTempoProvider,
-  createTempoProviderFromAccounts,
-  DEFAULT_MERCATOR_MCP_URL,
-} from "./runtime/tempo-provider.mjs";

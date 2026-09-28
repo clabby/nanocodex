@@ -669,8 +669,20 @@ API key. Pass an MPP session with a `ws(endpoint)` method; an `mppx` Tempo
 session manager has this shape. Nanocodex defaults the socket to
 `wss://openai.mpp.tempo.xyz/v1/responses` when `mpp` is present.
 
+Tempo/MPP payment helpers live in the `nanocodex/tempo` subpath. Its runtime
+dependencies, `mppx` and `viem`, are optional peer dependencies: install them
+only when you import `nanocodex/tempo`. The core entry points (`nanocodex`,
+`nanocodex/node`, `nanocodex/browser`, `nanocodex/host`, `nanocodex/connect`)
+never reference `mppx`, `viem`, or `ox`, so bundlers such as Vite build them
+without those packages installed.
+
+```sh
+npm install nanocodex mppx viem
+```
+
 ```js
-import { Agent, createTempoProviderFromAccounts, Transport } from "nanocodex/node";
+import { Agent, Transport } from "nanocodex/node";
+import { createTempoProviderFromAccounts } from "nanocodex/tempo";
 import { Expiry } from "accounts";
 import { Provider } from "accounts/cli";
 import { parseUnits } from "viem";
@@ -789,6 +801,9 @@ supports Tempo charge and session challenges, so paid services composed behind
 Mercator use the same signer and spending policy as the model:
 
 ```js
+import { tempo } from "mppx/client";
+import { createTempoProvider } from "nanocodex/tempo";
+
 const mcpMethod = tempo({
   account,
   channelStore,
@@ -809,6 +824,17 @@ const agent = await Agent.create({
 
 Explicit `mcp` entries are merged over the Tempo defaults, so an application
 can replace `mercator` or add other servers without rebuilding the provider.
+A paid server configured directly must wrap its options with `mcpPayment()` from
+`nanocodex/tempo`, which loads `mppx/mcp/client` on first connection; a plain
+`payment` object is rejected with a `TypeError`:
+
+```js
+import { mcpPayment } from "nanocodex/tempo";
+
+const mcp = {
+  paid: { url: "https://paid.example/mcp", payment: mcpPayment({ methods: [mcpMethod] }) },
+};
+```
 
 Each server also accepts `headers`, `fetch`, allow/deny tool lists, a timeout,
 or an already initialized MCP SDK-compatible `client`. Nanocodex closes clients
@@ -838,7 +864,7 @@ keeps deferred MCP plus Code Mode functional in Cloudflare Workers:
 
 ```js
 import asyncVariant from "@jitl/quickjs-wasmfile-release-asyncify";
-import { Agent, createQuickJsEvaluator, createTempoProvider, Transport } from "nanocodex/host";
+import { Agent, createQuickJsEvaluator, Transport } from "nanocodex/host";
 import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
 
 const quickJs = await newQuickJSAsyncWASMModuleFromVariant(asyncVariant);

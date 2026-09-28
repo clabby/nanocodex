@@ -1,12 +1,36 @@
-const tempoMcp = Symbol.for("nanocodex.tempo.mcp");
+// Tempo/MPP payments live behind `nanocodex/tempo` so core entry points never
+// reference mppx or viem. Both are optional peer dependencies of this subpath
+// and are loaded lazily, only when a paid path is actually used.
+import { DEFAULT_MERCATOR_MCP_URL } from "../runtime/mercator.mjs";
+import { mcpPaymentWrap } from "../runtime/mcp-payment.mjs";
 
-export const DEFAULT_MERCATOR_MCP_URL = "https://mercator.sh/mcp";
+export { DEFAULT_MERCATOR_MCP_URL };
+
+const tempoMcp = Symbol.for("nanocodex.tempo.mcp");
 
 const defaultMercator = (payment) => ({
   url: DEFAULT_MERCATOR_MCP_URL,
   description: "Discovers and composes paid Tempo services and MPP flows.",
-  payment,
+  payment: mcpPayment(payment),
 });
+
+/**
+ * Marks MCP payment options as MPPx-backed. Nanocodex core connects paid MCP
+ * servers only through this wrapper, which loads `mppx/mcp/client` on demand.
+ */
+export function mcpPayment(payment) {
+  if (!payment || !Array.isArray(payment.methods) || !payment.methods.length) {
+    throw new TypeError("MCP payment requires at least one MPPx method");
+  }
+  if (typeof payment[mcpPaymentWrap] === "function") return payment;
+  return {
+    ...payment,
+    async [mcpPaymentWrap](client, options) {
+      const { McpClient } = await import("mppx/mcp/client");
+      McpClient.wrap(client, options);
+    },
+  };
+}
 
 /**
  * Marks an MPP session as a Tempo provider and uses the same wallet policy for
