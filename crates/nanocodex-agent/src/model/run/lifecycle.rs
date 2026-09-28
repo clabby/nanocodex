@@ -126,20 +126,10 @@ where
         if !self.force_compaction && active_context_tokens < auto_compact_token_limit {
             return Ok(false);
         }
-        let (history, prompt_repaired) = conversation.prompt_history_with_repair();
-        let previous_response_id = conversation
-            .previous_response_id()
-            .filter(|_| !prompt_repaired);
         let (item, _usage, server_reasoning_included) = self
             .perform_compaction(
                 after_model_call_index,
-                history,
-                if prompt_repaired {
-                    0
-                } else {
-                    conversation.delta_start()
-                },
-                previous_response_id,
+                conversation.managed.compaction_request(),
                 active_context_tokens,
                 auto_compact_token_limit,
                 factory,
@@ -345,13 +335,10 @@ where
         Err(error)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn perform_compaction(
         &mut self,
         after_model_call_index: u32,
-        history: nanocodex_oai_api::responses::ResponseHistory,
-        incremental_start: usize,
-        previous_response_id: Option<&str>,
+        mut history: RequestHistory,
         active_context_tokens: u64,
         auto_compact_token_limit: u64,
         factory: &ResponsesAttemptFactory,
@@ -379,7 +366,7 @@ where
                 boundary_id,
                 self.events.request_id().to_owned(),
                 self.provider_session_id.to_string(),
-                &history,
+                history.full(),
             );
             let recovered = if let Some(steps) = &self.execution_steps {
                 match steps
@@ -407,9 +394,7 @@ where
                 }
             }
         }
-        let mut history = history;
-        let rewritten = compaction::trim_tool_outputs_to_fit_context_window(
-            &mut history,
+        history.fit_context_window(
             factory.profile().prefix(),
             self.config.context_window_tokens,
         );
@@ -421,15 +406,12 @@ where
                 after_model_call_index,
                 active_context_tokens,
                 auto_compact_token_limit,
-                previous_response_id,
+                previous_response_id: history.previous_response_id(),
             },
         )?;
         let request = factory.compaction(
             after_model_call_index,
-            history.clone(),
-            history.clone(),
-            if rewritten == 0 { incremental_start } else { 0 },
-            previous_response_id.filter(|_| rewritten == 0),
+            &history,
             trigger,
             model,
             thinking,

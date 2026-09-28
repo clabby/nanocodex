@@ -114,7 +114,10 @@ pub mod __private {
             context::{
                 ContextManager, assign_missing_response_item_id, responses_lite_request_prefix,
             },
-            state::{ManagedSessionState, ManagedSessionStateError},
+            state::{
+                ManagedSessionState, ManagedSessionStateError, RejectedRequestRepair,
+                RequestHistory,
+            },
         },
         tower::attempt::ResponsesAttemptFactory,
     };

@@ -24,6 +24,7 @@ use super::{
     builder::{ResponseTurn, Session},
     compaction,
     context::{assign_missing_response_item_ids, is_canonical_context_item},
+    state::RejectedRequestRepair,
 };
 
 /// Typed input accepted by `response.create`.
@@ -554,12 +555,7 @@ where
         candidate.append(session.canonical_context.iter().cloned());
     }
     candidate.append_client(input.items);
-    let (prompt_history, prompt_repaired) = candidate.prompt_history_with_repair();
-    let previous_response_id = if prompt_repaired {
-        None
-    } else {
-        candidate.previous_response_id().map(str::to_owned)
-    };
+    let request_history = candidate.generation_request();
 
     let factory = ResponsesAttemptFactory::new(
         session.profile.clone(),
@@ -570,30 +566,28 @@ where
     .for_logical_turn(turn.logical_turn);
     let request = factory.generation(
         call_index,
-        prompt_history.clone(),
-        candidate.shared_history(),
-        candidate.delta_start(),
-        previous_response_id.as_deref(),
+        &request_history,
         session.model,
         session.thinking,
         session.fast_mode,
     );
-    let success = session.client.execute(request).await.map_err(Into::into)?;
-    candidate.observe_server_reasoning(success.server_reasoning_included());
+    let success = execute(session, request).await?;
+    let server_reasoning_included = success.server_reasoning_included();
     let ResponsesOutput::Generation(response) = success.into_output() else {
         return Err(ResponseError::protocol(
             "response.create returned a non-generation output",
         ));
     };
 
-    if prompt_repaired {
-        candidate.adopt_prompt_history(prompt_history);
-    }
-    candidate.append(response.output_items.clone());
-    candidate.update_token_info(response.usage.as_ref());
-    candidate.set_previous_response_id(response.id);
     candidate
-        .commit()
+        .complete_generation(
+            request_history,
+            Some(response.id),
+            response.output_items.iter().cloned(),
+            response.usage.as_ref(),
+            server_reasoning_included,
+        )
+        .and_then(|()| candidate.commit())
         .map_err(|error| ResponseError::protocol(error.to_string()))?;
     session.state = candidate;
     if !observed_canonical_context.is_empty() {
@@ -700,31 +694,17 @@ where
         Arc::clone(&session.transport_stats),
     )
     .for_logical_turn(turn.logical_turn);
-    let (mut history, prompt_repaired) = session.state.prompt_history_with_repair();
-    let rewritten = compaction::trim_tool_outputs_to_fit_context_window(
-        &mut history,
-        session.profile.prefix(),
-        session.context_window_tokens,
-    );
+    let mut request_history = session.state.compaction_request();
+    request_history.fit_context_window(session.profile.prefix(), session.context_window_tokens);
     let request = factory.compaction(
         call_index,
-        history.clone(),
-        history,
-        if rewritten == 0 && !prompt_repaired {
-            session.state.delta_start()
-        } else {
-            0
-        },
-        session
-            .state
-            .previous_response_id()
-            .filter(|_| rewritten == 0 && !prompt_repaired),
+        &request_history,
         compaction::trigger(),
         session.model,
         session.thinking,
         session.fast_mode,
     );
-    let success = session.client.execute(request).await.map_err(Into::into)?;
+    let success = execute(session, request).await?;
     let server_reasoning_included = success.server_reasoning_included();
     let ResponsesOutput::Compaction(response) = success.into_output() else {
         return Err(ResponseError::protocol(
@@ -751,6 +731,29 @@ where
         estimated_cost,
         cost_status,
     })
+}
+
+/// Executes one provider request. A provider rejection that requires a
+/// client-owned history repair is applied to committed state, so the next
+/// request replays repaired history instead of resending the rejected payload.
+async fn execute<S>(
+    session: &mut Session<S>,
+    request: ResponsesAttempt,
+) -> Result<ResponsesServiceResponse, ResponseError>
+where
+    S: Service<ResponsesAttempt, Response = ResponsesServiceResponse>,
+    S::Error: Into<ResponseError>,
+{
+    let error: ResponseError = match session.client.execute(request).await {
+        Ok(success) => return Ok(success),
+        Err(error) => error.into(),
+    };
+    if let Some(source) = error.responses_error() {
+        session
+            .state
+            .repair_rejected_request(RejectedRequestRepair::for_error(source));
+    }
+    Err(error)
 }
 
 fn response_call_span<S>(
