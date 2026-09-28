@@ -54,6 +54,7 @@ fn request() -> MessagesRequest {
                 description: "Find current weather".into(),
                 input_schema: json!({"type":"object","properties":{"city":{"type":"string"}}}),
                 strict: None,
+                defer_loading: false,
             }
             .into(),
         ],
@@ -493,4 +494,29 @@ async fn streaming_web_citation_delta_survives_followup_replay() {
         replay["content"][0]["citations"][0]["encrypted_index"],
         "opaque-index"
     );
+}
+
+#[tokio::test]
+async fn streamed_client_tool_preserves_opaque_caller_metadata() {
+    let endpoint = server(|_| {
+        let mut body = String::new();
+        for event in [
+            json!({"type":"message_start","message":{"id":"msg","role":"assistant","model":"test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"weather","input":{},"caller":{"type":"code_execution_20260120","tool_id":"srvtoolu_parent"}}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Paris\"}"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}),
+            json!({"type":"message_stop"}),
+        ] {
+            body.push_str(&format!("data: {event}\n\n"));
+        }
+        (StatusCode::OK, "text/event-stream", body)
+    }).await;
+    let client = ClaudeClient::new(http_client(), endpoint, "synthetic-key");
+    let mut events = client.stream(&request()).await.unwrap();
+    let first = events.next().await.unwrap().unwrap();
+    let reply = collect_stream(first, events).await.unwrap();
+    let replay = serde_json::to_value(&reply.content).unwrap();
+    assert_eq!(replay[0]["input"], json!({"city":"Paris"}));
+    assert_eq!(replay[0]["caller"]["tool_id"], "srvtoolu_parent");
 }

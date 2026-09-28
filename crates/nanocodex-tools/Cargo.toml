@@ -36,6 +36,7 @@ workspace-runtime = [
     "dep:base64",
     "dep:getrandom",
     "dep:portable-pty",
+    "dep:regex",
     "dep:schemars",
     "dep:thiserror",
     "dep:tokio",
@@ -80,6 +81,7 @@ oauth2 = { workspace = true, optional = true }
 nanocodex-tools-macros = { workspace = true, optional = true }
 portable-pty = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
 rquickjs = { workspace = true, optional = true }
 symphonia = { version = "0.6.0", default-features = false, features = ["isomp4", "mkv", "mp3", "ogg", "wav"], optional = true }
 rmcp = { workspace = true, optional = true }

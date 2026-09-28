@@ -79,6 +79,7 @@ async fn stream_tool_once_compact_and_failed_turn_preserves_history() {
                 description: "Test lookup".into(),
                 input_schema: json!({"type":"object","properties":{"key":{"type":"string"}}}),
                 strict: None,
+                defer_loading: false,
             },
             move |input| {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -490,6 +491,7 @@ async fn independent_tools_can_execute_concurrently_but_results_remain_one_order
                 description: "Read a key".into(),
                 input_schema: json!({"type":"object"}),
                 strict: None,
+                defer_loading: false,
             },
             move |input| {
                 let barrier = barrier.clone();

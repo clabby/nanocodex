@@ -7,7 +7,12 @@ license.workspace = true
 publish.workspace = true
 description = "Typed Anthropic Messages protocol and streaming transport"
 
+[features]
+default = []
+workspace-files = ["dep:nanocodex-tools", "nanocodex-tools/workspace-runtime"]
+
 [dependencies]
+nanocodex-tools = { path = "../nanocodex-tools", default-features = false, optional = true }
 futures-util.workspace = true
 nanocodex-agent = { path = "../nanocodex-agent", default-features = false }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
@@ -17,6 +22,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 rustls.workspace = true
 
 axum.workspace = true

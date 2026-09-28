@@ -140,6 +140,26 @@ impl ClaudeBuilder {
             .push((definition, Arc::new(move |args| Box::pin(function(args)))));
         self
     }
+    /// Register only the five Claude-native text file tools (Read, Edit, Write,
+    /// Glob, Grep) for a previously host-authorized, OS-isolated workspace.
+    /// This is opt-in. In-process path checks are not a sandbox; a hostile
+    /// concurrent process can race filesystem operations. No Codex tool name or
+    /// definition is ever forwarded to the model.
+    #[cfg(feature = "workspace-files")]
+    pub fn workspace_files(mut self, files: Arc<nanocodex_tools::ClaudeWorkspaceFiles>) -> Self {
+        for schema in nanocodex_tools::ClaudeWorkspaceFiles::definitions() {
+            let definition: ToolDefinition = serde_json::from_value(schema)
+                .expect("built-in Claude file tool schema must remain valid");
+            let name = definition.name.clone();
+            let files = files.clone();
+            self = self.tool(definition, move |input| {
+                let files = files.clone();
+                let name = name.clone();
+                async move { files.execute(&name, input).await }
+            });
+        }
+        self
+    }
     /// Explicitly enable an Anthropic-executed server tool. The backend never
     /// invokes a local client handler for `server_tool_use` blocks.
     pub fn server_tool(mut self, definition: ServerToolDefinition) -> Self {
@@ -481,7 +501,9 @@ impl State {
             for block in &response.content {
                 match block {
                     ContentBlock::Text { text: part, .. } => text.push_str(part),
-                    ContentBlock::ToolUse { id, name, input } => {
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => {
                         if response.stop_reason != Some(StopReason::ToolUse) {
                             return Err(provider_error(
                                 "tool_use block without tool_use stop reason",
@@ -538,6 +560,19 @@ impl State {
             });
             if response.stop_reason == Some(StopReason::ToolUse) {
                 pending.push(Message::tool_results(tool_results));
+                // A client tool may already have changed external state. Commit
+                // its completed assistant/result pair before attempting the next
+                // provider request, so a transport failure or cancellation does
+                // not erase the evidence from this in-process session. Hosts
+                // still need durable effect receipts across process restarts.
+                conversation.messages = pending.clone();
+                conversation.summary.clear();
+                conversation.active_context_tokens = response
+                    .usage
+                    .input_tokens
+                    .saturating_add(response.usage.cache_read_input_tokens)
+                    .saturating_add(response.usage.cache_creation_input_tokens)
+                    .saturating_add(response.usage.output_tokens);
                 continue;
             }
             if response.stop_reason == Some(StopReason::PauseTurn) {

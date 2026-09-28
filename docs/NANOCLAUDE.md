@@ -129,8 +129,7 @@ Claude Code's local credentials, fake its identity, or infer authorization from
 a working bearer token. The protocol
 and agent-loop tests use only a synthetic localhost service.
 
-See [the tool implementation matrix](CLAUDE_TOOL_MATRIX.md) for all known
-Claude Code families and the unimplemented native executor/permission work.
+The `workspace-files` Cargo feature adds an **explicit** `ClaudeBuilder::workspace_files(Arc<ClaudeWorkspaceFiles>)` registration for `Read`, `Edit`, `Write`, `Glob`, and bounded-regex `Grep`. Construct `ClaudeWorkspaceFiles::new` only for a host-authorized, OS-isolated root; no file or Codex tool registry is installed by default. These are bounded text prototypes, not full Claude Code tool parity or a sandbox. See [the tool implementation matrix](CLAUDE_TOOL_MATRIX.md) for every known family and remaining native executor/permission work.
 
 The official Claude Agent SDK is a distinct subscription-backed alternative,
 but that SDK owns the tool/model loop; it is not interchangeable with the

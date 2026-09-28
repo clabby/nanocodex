@@ -129,3 +129,102 @@ async fn pause_turn_resends_server_tools_and_assistant_blocks_without_user_resul
     assert_eq!(reqs[1]["messages"].as_array().unwrap().len(), 2);
     assert_eq!(reqs[1]["messages"][1]["content"][0]["id"], "srvtoolu_1");
 }
+
+#[test]
+fn deferred_client_and_native_tool_search_specs_have_claude_shape() {
+    use nanocodex_claude::{ClaudeToolSpec, ToolDefinition};
+    let deferred = ToolDefinition {
+        name: "lookup".into(),
+        description: "Lookup a record".into(),
+        input_schema: json!({"type":"object","properties":{"key":{"type":"string"}}}),
+        strict: Some(true),
+        defer_loading: true,
+    };
+    let specs: Vec<ClaudeToolSpec> = vec![
+        ServerToolDefinition::tool_search_bm25().into(),
+        deferred.into(),
+    ];
+    let data = serde_json::to_value(specs).unwrap();
+    assert_eq!(
+        data[0],
+        json!({"type":"tool_search_tool_bm25_20251119","name":"tool_search_tool_bm25"})
+    );
+    assert_eq!(data[1]["defer_loading"], true);
+    assert_eq!(data[1]["input_schema"]["type"], "object");
+}
+
+#[tokio::test]
+async fn server_tool_search_reference_and_discovered_client_tool_continue_without_server_result() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests = received.clone();
+    let app = Router::new().route("/v1/messages",post(move |Json(body): Json<Value>| {
+        let requests=requests.clone();
+        async move {
+            let index={let mut r=requests.lock().unwrap();r.push(body);r.len()};
+            let (blocks,stop)=if index==1 {
+                (vec![
+                    json!({"type":"server_tool_use","id":"srvtoolu_search","name":"tool_search_tool_bm25","input":{"query":"find lookup"}}),
+                    json!({"type":"tool_search_tool_result","tool_use_id":"srvtoolu_search","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"lookup"}]}}),
+                    json!({"type":"tool_use","id":"toolu_lookup","name":"lookup","input":{"key":"x"}}),
+                ],"tool_use")
+            } else {(vec![json!({"type":"text","text":"done"})],"end_turn")};
+            ([ ("content-type","text/event-stream") ],stream(blocks,stop)).into_response()
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .server_tool(ServerToolDefinition::tool_search_bm25())
+        .tool(
+            nanocodex_claude::ToolDefinition {
+                name: "ping".into(),
+                description: "Ping".into(),
+                input_schema: json!({"type":"object"}),
+                strict: None,
+                defer_loading: false,
+            },
+            |_| async { Ok("pong".into()) },
+        )
+        .tool(
+            nanocodex_claude::ToolDefinition {
+                name: "lookup".into(),
+                description: "Find a record".into(),
+                input_schema: json!({"type":"object","properties":{"key":{"type":"string"}}}),
+                strict: None,
+                defer_loading: true,
+            },
+            |_| async { Ok("value x".into()) },
+        )
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("find x")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "done"
+    );
+    let r = received.lock().unwrap();
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[1]["tools"], r[0]["tools"]);
+    assert_eq!(
+        r[1]["messages"][1]["content"][1]["content"]["tool_references"][0]["tool_name"],
+        "lookup"
+    );
+    assert_eq!(r[1]["messages"][2]["content"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        r[1]["messages"][2]["content"][0]["tool_use_id"],
+        "toolu_lookup"
+    );
+}

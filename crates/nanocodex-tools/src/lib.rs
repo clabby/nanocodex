@@ -17,6 +17,11 @@ pub mod apply_patch;
 #[cfg(all(not(target_family = "wasm"), feature = "attachment"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod attachment;
+#[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
+#[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
+pub mod claude_workspace_files;
+#[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
+pub use claude_workspace_files::ClaudeWorkspaceFiles;
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod code_mode;

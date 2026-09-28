@@ -49,6 +49,8 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: Value,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
     },
     ServerToolUse {
         id: String,
@@ -132,6 +134,7 @@ impl ContentBlock {
             id: id.into(),
             name: name.into(),
             input,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -181,6 +184,8 @@ pub struct ToolDefinition {
     pub input_schema: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub defer_loading: bool,
 }
 
 /// Request-level automatic prompt caching. Explicit block breakpoints are not yet modeled.
@@ -194,6 +199,20 @@ pub struct ServerToolDefinition {
     pub options: BTreeMap<String, Value>,
 }
 impl ServerToolDefinition {
+    pub fn tool_search_bm25() -> Self {
+        Self {
+            kind: "tool_search_tool_bm25_20251119".into(),
+            name: "tool_search_tool_bm25".into(),
+            options: BTreeMap::new(),
+        }
+    }
+    pub fn tool_search_regex() -> Self {
+        Self {
+            kind: "tool_search_tool_regex_20251119".into(),
+            name: "tool_search_tool_regex".into(),
+            options: BTreeMap::new(),
+        }
+    }
     pub fn web_search_basic(max_uses: u32) -> Self {
         Self {
             kind: "web_search_20250305".into(),
@@ -684,6 +703,7 @@ enum BlockAccumulator {
         name: String,
         initial: Value,
         fragments: String,
+        extra: BTreeMap<String, Value>,
     },
     Thinking {
         thinking: String,
@@ -728,11 +748,17 @@ where
                 }
                 let block = match content_block {
                     ContentBlock::Text { text, extra } => BlockAccumulator::Text { text, extra },
-                    ContentBlock::ToolUse { id, name, input } => BlockAccumulator::ToolUse {
+                    ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        extra,
+                    } => BlockAccumulator::ToolUse {
                         id,
                         name,
                         initial: input,
                         fragments: String::new(),
+                        extra,
                     },
                     ContentBlock::ServerToolUse {
                         id,
@@ -817,6 +843,7 @@ where
                         name,
                         initial,
                         fragments,
+                        extra,
                     } => {
                         let input = if fragments.is_empty() {
                             initial
@@ -828,7 +855,12 @@ where
                                 "tool input must be a JSON object".into(),
                             ));
                         }
-                        ContentBlock::tool_use(id, name, input)
+                        ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input,
+                            extra,
+                        }
                     }
                     BlockAccumulator::ServerToolUse {
                         id,
