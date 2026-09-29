@@ -8,7 +8,7 @@ it("direct ingress preserves real session ownership, ready socket and prepare ac
   const namespace = (env as unknown as { NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession> }).NANOCODEX_SESSIONS;
   await runInDurableObject(namespace.getByName(crypto.randomUUID()), async (session, state) => {
     const token = `ncx_live_${"k".repeat(12)}_${"s".repeat(43)}`;
-    const request = new Request("https://nanocodex.example/v1/agents/live?model=gpt-6-sol&thinking=high", { headers: {
+    const request = new Request("https://nanocodex.example/v1/agents/live?model=gpt-6.1-sol&thinking=high", { headers: {
       authorization: `Bearer ${token}`, upgrade: "websocket", "x-nanocodex-prepare": "active-conversation",
     } });
     const owner = crypto.randomUUID(), organization = crypto.randomUUID(), team = crypto.randomUUID();
@@ -46,7 +46,7 @@ it("direct ingress preserves real session ownership, ready socket and prepare ac
       const ready = new Promise<unknown>(resolve => socket!.addEventListener("message", event => resolve(JSON.parse(event.data as string)), { once: true }));
       socket.accept();
       expect(await ready).toMatchObject({ type: "ready", session_id: selectedId, active_turns: [], settings: {
-        model: "gpt-6-sol", thinking: "high", reasoning_mode: "standard", fast_mode: false,
+        model: "gpt-6.1-sol", thinking: "high", reasoning_mode: "standard", fast_mode: false,
       } });
       expect(creates).toBe(1);
       expect(state.storage.sql.exec("SELECT session_id, owner_id, organization_id, team_id, authorization_epoch, public_origin FROM session_state").one()).toMatchObject({

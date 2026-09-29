@@ -607,7 +607,7 @@ it("keeps a real managed automatic compaction owned across three recovery alarms
     state.storage.sql.exec(`INSERT INTO session_state (singleton, session_id, owner_id, organization_id, team_id, authorization_epoch, public_origin, runtime_profile, last_active)
       VALUES (1, ?, 'fixture-owner', 'fixture-org', 'fixture-team', 1, 'https://nanocodex.example/', 'managed', ?)`, crypto.randomUUID(), now);
     state.storage.sql.exec("INSERT INTO managed_configuration VALUES (1, ?)", JSON.stringify({ tools: [], environment: { files: [], skills: [], setup_commands: [], network: { access: "disabled" } } }));
-    state.storage.sql.exec("UPDATE managed_agent_settings SET model = 'gpt-6-sol', thinking = 'low'");
+    state.storage.sql.exec("UPDATE managed_agent_settings SET model = 'gpt-6.1-sol', thinking = 'low'");
     const seed = (id: string) => {
       state.storage.sql.exec(`INSERT INTO managed_turns (id, request_hash, input_json, authorization_json, state, accepted_cursor, dispatch_input_chunks, may_have_inner_operation, attempt_count, created_at, accepted_at, updated_at)
         VALUES (?, 'hash', '"fixture"', '{"capabilities":[]}', 'accepted', 0, 1, 0, 0, ?, ?, ?)`, id, now, now, now);

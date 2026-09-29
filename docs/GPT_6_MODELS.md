@@ -1,6 +1,6 @@
 # GPT-6 model integration
 
-The supported OpenAI models are `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`.
+The supported OpenAI models are `gpt-6-astra`, `gpt-6.1-sol`, and `gpt-6-luna`.
 The `astra`, `sol`, and `luna` aliases resolve to those IDs. GPT-5.6 Sol, Terra,
 and Luna are not selectable models. Astra remains the default. Model selection
 is fixed for an active conversation; existing provider checkpoints must not be
@@ -9,24 +9,32 @@ resuming a retired snapshot or rollout fails explicitly instead of switching mod
 
 ## Upstream contract
 
-The Sol and Luna integration follows the Codex
+The Luna integration follows the Codex
 [launch commit](https://github.com/openai/codex/commit/49e95cc73f4eb2999b1d14f863c009168df6122b),
 including its
 [model catalog](https://github.com/openai/codex/blob/49e95cc73f4eb2999b1d14f863c009168df6122b/codex-rs/models-manager/models.json),
 [picker snapshot](https://github.com/openai/codex/blob/49e95cc73f4eb2999b1d14f863c009168df6122b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__model_selection_popup.snap),
 and [catalog tests](https://github.com/openai/codex/blob/49e95cc73f4eb2999b1d14f863c009168df6122b/codex-rs/tui/src/app/tests/model_catalog.rs).
+Sol follows the [GPT-6.1 Sol upstream revision](https://github.com/openai/codex/commit/5937592c07e7321f6b0469ef34dd58a03c39a84c)
+and its [model catalog](https://github.com/openai/codex/blob/5937592c07e7321f6b0469ef34dd58a03c39a84c/codex-rs/models-manager/models.json).
+The corresponding [catalog implementation](https://github.com/openai/codex/blob/5937592c07e7321f6b0469ef34dd58a03c39a84c/codex-rs/models-manager/src/manager.rs)
+and [catalog tests](https://github.com/openai/codex/blob/5937592c07e7321f6b0469ef34dd58a03c39a84c/codex-rs/models-manager/src/manager_tests.rs)
+define upstream model discovery; Nanocodex consumes the pinned Sol entry.
 Sol and Luna each use an exact copy of their own upstream instruction template.
 The [prompt manifest](../scripts/codex-parity/prompts.json) records their source
 and hashes. Astra and the permission, voice, and goal prompts remain pinned to
-`36430b36881cf5c289cb48e671cfc9e8b542ae7b`; only Sol and Luna use the launch pin.
+`36430b36881cf5c289cb48e671cfc9e8b542ae7b`; Luna uses the launch pin.
 Caller-supplied replacement and additive instructions remain supported.
 
-The SDK model defaults are low effort for Astra and medium for Sol and Luna.
+The SDK model defaults are low effort for Astra and Sol and medium for Luna,
+following the Codex catalog. The public GPT-6.1 Sol API defaults to medium effort.
 The `nanocodex` and `nanocodex2` CLIs default to Sol with xhigh effort and fast
-mode enabled. Explicit caller effort wins. The public effort range ends at `max`; Codex's Sol `ultra` mode
-requires orchestration beyond this model integration. Sol and Luna also retain
-`none`, supported by the official [Sol](https://developers.openai.com/api/docs/models/gpt-6-sol)
-and [Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) API contracts.
+mode enabled. Explicit caller effort wins. The public effort range ends at `max`;
+Codex's Sol `ultra` mode requires orchestration beyond this model integration.
+GPT-6.1 Sol supports `low` through `max` and rejects `none` and `minimal`, as specified by the official
+[Sol model contract](https://developers.openai.com/api/docs/models/gpt-6.1-sol).
+Luna also supports `none` under its
+[model contract](https://developers.openai.com/api/docs/models/gpt-6-luna).
 Sol and Luna support standard and Pro reasoning independently of effort, following
 the [reasoning-mode contract](https://developers.openai.com/api/docs/guides/reasoning#reasoning-mode).
 
@@ -55,12 +63,13 @@ not retry or roll back earlier external actions.
 
 ## Gateway transports
 
-The SDK gateway adapter accepts all six Sol/Luna reasoning efforts. Cloudflare
-Responses preserves explicit standard/Pro mode; Chat Completions gateways reject
-Pro instead of silently dropping it. Sol/Luna tool calling through Chat
+The SDK gateway adapter accepts Sol efforts from `low` through `max` and Luna
+efforts from `none` through `max`. Cloudflare Responses preserves explicit
+standard/Pro mode; Chat Completions gateways reject
+Pro instead of silently dropping it. GPT-6.1 Sol tool calling requires Responses;
+Chat Completions supports Sol without tools. Luna tool calling through Chat
 Completions requires `none` effort. Managed tool-capable routing therefore offers
-Sol and Luna only through native ChatGPT and Cloudflare Responses; explicit SDK
-Chat adapters remain available with the compatible effort. Retired GPT-5.6 IDs
+Sol and Luna only through native ChatGPT and Cloudflare Responses. Retired GPT-5.6 IDs
 remain rejected.
 
 ## Costs and service tier
@@ -75,24 +84,33 @@ tokens at standard short-context rates:
 | Model | Input | Cached input | Cache write | Output |
 | --- | ---: | ---: | ---: | ---: |
 | Astra | $10 | $1 | $12.50 | $50 |
-| Sol | $2 | $0.20 | $2.50 | $10 |
+| Sol | $2 | $0.10 | $2.50 | $10 |
 | Luna | $0.10 | $0.01 | $0.125 | $0.50 |
 
 Above 272,000 input tokens, the whole request uses twice the input and cache
 rates and 1.5 times the output rate. Fast mode doubles those applicable rates.
 Provider-reported usage drives result and trace estimates. API-equivalent
 subscription estimates are not subscription charges. Historical measurements
-retain their original model IDs and do not establish GPT-6 Sol or Luna performance.
+retain their original model IDs and do not establish GPT-6.1 Sol performance.
 
 ## Live validation
 
 Local subscription-authenticated SDK checks on September 22, 2026 completed tool
-calls and follow-on turns for Astra, Sol, and Luna, retained each requested model
-in snapshots, and reported `estimated_from_usage` costs at the rates above.
-Sol and Luna also completed those checks with `none` effort.
+calls and follow-on turns for Astra, GPT-6 Sol, and Luna, retained each requested model
+in snapshots, and reported `estimated_from_usage` costs at their configured rates.
+GPT-6 Sol and Luna also completed those checks with `none` effort. These checks
+precede GPT-6.1 Sol.
 
-The ChatGPT endpoint rejected Pro requests for both new models with
+The ChatGPT endpoint rejected Pro requests for GPT-6 Sol and Luna with
 `unsupported_value` on `reasoning.mode`. The public Responses API documentation
 lists Pro support; this subscription endpoint result does not establish API-key
 availability. Nanocodex preserves the explicit API setting and surfaces provider
 rejections without changing the requested mode or model.
+
+On September 29, 2026, the rebuilt Node/WASM SDK rejected `gpt-6-sol` and
+GPT-6.1 Sol with `none` effort before transport. A GPT-6.1 Sol tool-turn request
+at low effort reached the ChatGPT endpoint, which returned HTTP 400:
+"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."
+The available account could not complete a live tool call or follow-on turn.
+API-key access was not configured for this run. Provider errors remain visible;
+Nanocodex does not substitute another model.

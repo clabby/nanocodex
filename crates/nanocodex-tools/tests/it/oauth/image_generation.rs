@@ -90,7 +90,7 @@ async fn chatgpt_auth_recovers_across_generation_and_edit_routes() -> Result<()>
 
 const fn context(call_id: &str) -> ToolContext<'_> {
     ToolContext::new(
-        "gpt-6-sol",
+        "gpt-6.1-sol",
         "oauth-session",
         call_id,
         &[],

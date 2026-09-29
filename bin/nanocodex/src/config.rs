@@ -134,7 +134,7 @@ pub(crate) struct AgentArgs {
     #[command(flatten)]
     model_policy: ModelArgs,
 
-    /// Coding model: gpt-6-astra, gpt-6-sol, or gpt-6-luna.
+    /// Coding model: gpt-6-astra, gpt-6.1-sol, or gpt-6-luna.
     #[arg(long, env = "OPENAI_MODEL")]
     model: Option<Model>,
 

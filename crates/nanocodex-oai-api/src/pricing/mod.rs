@@ -4,14 +4,14 @@
 //! provider-reported token usage and the selected standard or fast service tier.
 //!
 //! Rates are sourced from OpenAI's [pricing page](https://developers.openai.com/api/docs/pricing)
-//! and the model pages for [Sol](https://developers.openai.com/api/docs/models/gpt-6-sol),
+//! and the model pages for [Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol),
 //! [Luna](https://developers.openai.com/api/docs/models/gpt-6-luna), and
 //! [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra).
 //!
 //! | Model | Service tier | Input | Cached input | Cache write | Output |
 //! | --- | --- | ---: | ---: | ---: | ---: |
-//! | Sol | Standard | $2.00 | $0.20 | $2.50 | $10.00 |
-//! | Sol | Fast (`priority`) | $4.00 | $0.40 | $5.00 | $20.00 |
+//! | Sol | Standard | $2.00 | $0.10 | $2.50 | $10.00 |
+//! | Sol | Fast (`priority`) | $4.00 | $0.20 | $5.00 | $20.00 |
 //! | Luna | Standard | $0.10 | $0.01 | $0.125 | $0.50 |
 //! | Luna | Fast (`priority`) | $0.20 | $0.02 | $0.25 | $1.00 |
 //! | Astra | Standard | $10.00 | $1.00 | $12.50 | $50.00 |

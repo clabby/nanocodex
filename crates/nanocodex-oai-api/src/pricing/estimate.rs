@@ -7,25 +7,25 @@ use crate::{Model, responses::Usage};
 // exactly to nano-USD per token, avoiding floating point and division.
 const SOL_STANDARD: TokenRates = TokenRates {
     input: 2_000,
-    cached_input: 200,
+    cached_input: 100,
     cache_write_input: 2_500,
     output: 10_000,
 };
 const SOL_PRIORITY: TokenRates = TokenRates {
     input: 4_000,
-    cached_input: 400,
+    cached_input: 200,
     cache_write_input: 5_000,
     output: 20_000,
 };
 const SOL_LONG_CONTEXT_STANDARD: TokenRates = TokenRates {
     input: 4_000,
-    cached_input: 400,
+    cached_input: 200,
     cache_write_input: 5_000,
     output: 15_000,
 };
 const SOL_LONG_CONTEXT_PRIORITY: TokenRates = TokenRates {
     input: 8_000,
-    cached_input: 800,
+    cached_input: 400,
     cache_write_input: 10_000,
     output: 30_000,
 };
@@ -267,7 +267,7 @@ impl EstimatedUsdCost {
 /// };
 /// let cost = estimate(&usage, ServiceTier::Standard);
 ///
-/// assert_eq!(cost.amount().decimal(), "0.00111");
+/// assert_eq!(cost.amount().decimal(), "0.00103");
 /// ```
 #[must_use]
 pub fn estimate(usage: &Usage, service_tier: ServiceTier) -> EstimatedUsdCost {
@@ -392,10 +392,10 @@ mod tests {
         );
 
         assert_eq!(estimate.input().decimal(), "2.6");
-        assert_eq!(estimate.cached_input().decimal(), "0.1");
+        assert_eq!(estimate.cached_input().decimal(), "0.05");
         assert_eq!(estimate.cache_write_input().decimal(), "0.5");
         assert_eq!(estimate.output().decimal(), "3");
-        assert_eq!(estimate.amount().decimal(), "6.2");
+        assert_eq!(estimate.amount().decimal(), "6.15");
     }
 
     #[test]
@@ -484,7 +484,7 @@ mod tests {
         let estimate = estimate_tokens(10, 8, 8, 0, Model::Sol, ServiceTier::Standard);
 
         assert_eq!(estimate.input().nano_usd(), 0);
-        assert_eq!(estimate.cached_input().nano_usd(), 1_600);
+        assert_eq!(estimate.cached_input().nano_usd(), 800);
         assert_eq!(estimate.cache_write_input().nano_usd(), 5_000);
     }
 }

@@ -30,7 +30,7 @@ async function run(req: Request, env: ManagedProxyEnv) { return (await routeMana
 
 test("native creation uses live key authority once and the existing internal route/settings/prepare contract", async () => {
   const f = fixture();
-  const req = request("?model=gpt-6-sol&thinking=high&reasoning_mode=pro&fast_mode=true", {
+  const req = request("?model=gpt-6.1-sol&thinking=high&reasoning_mode=pro&fast_mode=true", {
     "x-nanocodex-prepare": "active-conversation", "x-nanocodex-create-session-id": "forged", "x-nanocodex-owner-id": "forged",
     "x-nanocodex-session-organization-id": "forged", "x-nanocodex-session-team-id": "forged",
     "x-nanocodex-authorization-epoch": "999", "x-nanocodex-capabilities": '["organization:write"]',
@@ -43,7 +43,7 @@ test("native creation uses live key authority once and the existing internal rou
   assert.deepEqual(f.calls, { auth: 1, session: 1, fallback: 0 });
   const internal = f.forwarded(), target = new URL(internal.url);
   assert.equal(target.origin, "https://session.internal"); assert.equal(target.pathname, "/create-live");
-  assert.deepEqual(Object.fromEntries(target.searchParams), { model: "gpt-6-sol", thinking: "high", reasoning_mode: "pro", fast_mode: "true", public_origin: "https://nanocodex.example" });
+  assert.deepEqual(Object.fromEntries(target.searchParams), { model: "gpt-6.1-sol", thinking: "high", reasoning_mode: "pro", fast_mode: "true", public_origin: "https://nanocodex.example" });
   assert.match(f.sessionId(), /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(internal.headers.get("x-nanocodex-create-session-id"), f.sessionId());
   assert.equal(internal.headers.get("x-nanocodex-owner-id"), record.userId);
@@ -59,7 +59,7 @@ test("native creation uses live key authority once and the existing internal rou
 });
 
 test("query and upgrade errors occur before auth or creation", async () => {
-  for (const query of ["?model=gpt-6-astra&model=gpt-6-sol", "?unknown=1", "?thinking=bad", "?fast_mode=1", "?public_origin=https://evil", "?reasoning_mode=pro"]) {
+  for (const query of ["?model=gpt-6-sol", "?model=gpt-6-astra&model=gpt-6.1-sol", "?unknown=1", "?thinking=bad", "?fast_mode=1", "?public_origin=https://evil", "?reasoning_mode=pro"]) {
     const f = fixture(); assert.equal((await run(request(query), f.env)).status, 400); assert.deepEqual(f.calls, { auth: 0, session: 0, fallback: 0 });
   }
   const f = fixture(), req = request(); req.headers.delete("upgrade");

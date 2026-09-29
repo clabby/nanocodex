@@ -20,7 +20,7 @@ class BindingTests(unittest.TestCase):
         secret = "private-test-value"
         agent, events = Nanocodex(
             secret,
-            model="gpt-6-sol",
+            model="gpt-6.1-sol",
             thinking="medium",
             reasoning_mode="standard",
         )

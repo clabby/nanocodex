@@ -224,7 +224,7 @@ function context(sessionId: string) {
     callId: "call",
     parentCallId: "cell",
     sessionId,
-    model: "gpt-6-sol",
+    model: "gpt-6.1-sol",
     signal: new AbortController().signal,
   };
 }

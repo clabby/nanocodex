@@ -820,8 +820,8 @@ export function estimatedCostUsd(
     outputTokens?: number | null;
   } | undefined,
 ): number | null {
-  const rates = model === "sol" || model === "gpt-6-sol"
-    ? { input: 2, cached: 0.2, output: 10 }
+  const rates = model === "sol" || model === "gpt-6.1-sol"
+    ? { input: 2, cached: 0.1, output: 10 }
     : model === "luna" || model === "gpt-6-luna"
         ? { input: 0.1, cached: 0.01, output: 0.5 }
         : model === "astra" || model === "gpt-6-astra"
