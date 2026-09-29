@@ -7,7 +7,7 @@ import { CalendarPushDelivery } from "./calendar-push-delivery";
 export { CalendarPushDelivery };
 import { importCrmEmailPush } from "./crm-email";
 import { gmailPushConfig } from "./gmail-push-config";
-import { parseGmailPushWake, gmailPushPrompt, type GmailPushWakeResult } from "./gmail-push-wake";
+import { parseGmailPushWake, type GmailPushWake, type GmailPushWakeResult } from "./gmail-push-wake";
 import { proposeGmailReplyDecisions } from "./gmail-firehose-decisions";
 import { enabledGmailDecisionOwner, jevGatewayBinding, routeGmailDecisionBacktest } from "./gmail-firehose-backtest";
 import { OutputCheckpoints } from "./output-checkpoints";
@@ -4018,9 +4018,23 @@ export class DurableAgentSession extends DurableComputerObject {
       }};
   }
 
-  /** Account-bound, idempotent and idle-only Gmail event admission. */
+  #gmailPushQueue: Promise<unknown> = Promise.resolve();
+
+  /** Account-bound Gmail processing. Receipts never create a conversation turn. */
   async gmailPushWake(value: unknown): Promise<GmailPushWakeResult> {
     const wake = parseGmailPushWake(value);
+    const result = this.#gmailPushQueue.then(() => this.#processGmailPush(wake));
+    this.#gmailPushQueue = result.catch(() => {});
+    try { return await result; }
+    catch (error) {
+      if (error instanceof ManagedRequestError && error.code === "durability_transfer_pending") {
+        return { status: "busy" };
+      }
+      throw error;
+    }
+  }
+
+  async #processGmailPush(wake: GmailPushWake): Promise<GmailPushWakeResult> {
     const assertOwner = (epoch?: number) => {
       const session = this.#session();
       if (!session || this.#deleting || this.#deleted || session.runtime_profile !== "managed"
@@ -4028,15 +4042,46 @@ export class DurableAgentSession extends DurableComputerObject {
         || (epoch !== undefined && session.authorization_epoch !== epoch)) {
         throw new Error("gmail_push_owner_forbidden");
       }
+      this.#assertDurabilityAdmissionActive();
       return session;
     };
     const epoch = assertOwner().authorization_epoch;
     const id = `gmail:${await hashManagedInput(JSON.stringify([wake.userId, wake.agentId, wake.eventId]))}`;
-    const input = gmailPushPrompt(wake.input);
-    const requestHash = await hashManagedInput(input);
+    const requestHash = await hashManagedInput(wake.input);
     assertOwner(epoch);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS gmail_push_receipts (
+      id TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
+      completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)), created_at INTEGER NOT NULL
+    )`);
+    const receipt = this.ctx.storage.sql.exec<{request_hash:string; completed:number}>(
+      "SELECT request_hash, completed FROM gmail_push_receipts WHERE id = ?", id).toArray()[0];
+    if (receipt && receipt.request_hash !== requestHash) {
+      throw new Error("gmail_push_idempotency_conflict: the idempotent request has different input");
+    }
+    if (receipt?.completed) return { status: "duplicate" };
+    if (!receipt) {
+      // Older deliveries stored their receipt as a chat turn. Preserve replay
+      // and conflict detection across the upgrade without rescheduling that turn.
+      const legacy = await this.#findManagedTurn(id);
+      assertOwner(epoch);
+      if (legacy) {
+        const prompt: unknown = JSON.parse(legacy.input_json);
+        if (typeof prompt !== "string" || !prompt.includes("\n\n")
+          || prompt.slice(prompt.indexOf("\n\n") + 2) !== wake.input) {
+          throw new Error("gmail_push_idempotency_conflict: the idempotent request has different input");
+        }
+        this.ctx.storage.sql.exec(
+          "INSERT INTO gmail_push_receipts(id,request_hash,completed,created_at) VALUES(?,?,1,?)",
+          id, requestHash, Date.now());
+        return { status: "duplicate" };
+      }
+    }
+    // Bind input before side effects, including partial CRM progress. Interrupted
+    // work resumes with the same input after eviction; completion alone deduplicates it.
+    this.ctx.storage.sql.exec(
+      "INSERT INTO gmail_push_receipts(id,request_hash,created_at) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING",
+      id, requestHash, Date.now());
     // Only the authenticated broker's explicit configuration opt-in enables CRM.
-    // Generic/legacy notification text continues to use normal wake admission.
     let emailEvent: unknown;
     try { emailEvent = JSON.parse(wake.input); } catch { /* legacy text */ }
     if (this.env.AI && enabledGmailDecisionOwner(this.env) === wake.userId) {
@@ -4072,29 +4117,9 @@ export class DurableAgentSession extends DurableComputerObject {
       assertOwner(epoch);
       if (!imported.complete) return { status: "busy", progress: true };
     }
-    try {
-      // Existing receipts are resolved before this fence, so a duplicate remains
-      // a duplicate while another turn is active. The fence runs in the same
-      // storage transaction as admission, including after archive lookup yields.
-      const submission = await this.#submitManagedTurn(id, input, requestHash, id, true,
-        { capabilities: ["agents:read", "agents:write", "tools:use"] }, () => {
-          assertOwner(epoch);
-          if (this.#recoverableTurnCount() > 0) {
-            throw new ManagedRequestError(409, "gmail_push_busy", "agent is busy");
-          }
-        }, undefined, "schedule", {}, false);
-      return { status: submission.created ? "accepted" : "duplicate", turnId: submission.row.id };
-    } catch (error) {
-      // Durable Object RPC preserves standard Error messages, not subclass fields.
-      if (error instanceof ManagedRequestError && error.code === "idempotency_conflict") {
-        throw new Error(`gmail_push_idempotency_conflict: ${error.message}`);
-      }
-      if (error instanceof ManagedRequestError && (error.code === "gmail_push_busy"
-        || error.code === "event_stream_failed" || error.code === "durability_transfer_pending")) {
-        return { status: "busy" };
-      }
-      throw error;
-    }
+    assertOwner(epoch);
+    this.ctx.storage.sql.exec("UPDATE gmail_push_receipts SET completed = 1 WHERE id = ?", id);
+    return { status: "accepted" };
   }
 
   /** Called only by the private EmailAgentBackend binding, never by fetch routing. */
