@@ -880,3 +880,66 @@ async fn large_tool_result_compacts_within_turn_without_rerunning_effect() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn queued_user_text_counts_toward_next_compaction_decision() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests = received.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(body): Json<Value>| {
+            let requests = requests.clone();
+            async move {
+                let index = {
+                    let mut log = requests.lock().unwrap();
+                    log.push(body);
+                    log.len()
+                };
+                let mut output = stream(
+                    vec![json!({"type":"text","text":if index==2 {"summary"} else {"answer"}})],
+                    "end_turn",
+                );
+                if index == 1 {
+                    output = output.replace("\"input_tokens\":3", "\"input_tokens\":66500");
+                }
+                ([("content-type", "text/event-stream")], output)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::latest(client))
+        .auto_compact_window_tokens(100_000)
+        .build()
+        .unwrap();
+    agent.prompt("one").await.unwrap().result().await.unwrap();
+    let second = "synthetic text ".repeat(150); // 2250 UTF-16 units, crosses 67k
+    assert_eq!(
+        agent
+            .prompt(second.clone())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "answer"
+    );
+    let log = received.lock().unwrap();
+    assert_eq!(log.len(), 3, "summary precedes the next main request");
+    assert!(log[1]["messages"].as_array().unwrap().len() >= 2);
+    assert!(
+        log[2]["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains(&second)
+    );
+    server.abort();
+}

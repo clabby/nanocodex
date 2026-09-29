@@ -1134,12 +1134,30 @@ impl State {
         if request.cancel_on_admission || cancel.flag.load(Ordering::SeqCst) {
             return Err(NanocodexError::TurnCancelled);
         }
+        let mut prompt = prompt_messages(&request.prompt)?;
+        // The provider's last usage is anchored before the new user message.
+        // Account for that queued text before deciding to send another turn.
+        // Claude Code estimates JS string length at roughly four units/token
+        // for current models; this is a safe text-only approximation, not an
+        // exact replica of its multimodal/feature-gated estimator.
+        let incoming_tokens = prompt
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => {
+                    Some((text.encode_utf16().count() as u64).div_ceil(4))
+                }
+                _ => None,
+            })
+            .fold(0u64, u64::saturating_add);
         if !conversation.messages.is_empty()
-            && conversation.active_context_tokens >= self.compaction_threshold()
+            && conversation
+                .active_context_tokens
+                .saturating_add(incoming_tokens)
+                >= self.compaction_threshold()
         {
             self.compact_locked(conversation, cancel).await?;
         }
-        let mut prompt = prompt_messages(&request.prompt)?;
         let mut pending = conversation.messages.clone();
         if pending.is_empty() && !conversation.summary.is_empty() {
             let Some(Message {
