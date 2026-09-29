@@ -100,21 +100,20 @@ async fn client_tool_search_then_nested_web_search_then_compaction() {
         "nested search is an independent request"
     );
     assert_eq!(r[5]["diagnostics"], json!({"previous_message_id":"msg"}));
-    assert_eq!(r[0]["tools"].as_array().unwrap().len(), 2);
-    assert_eq!(r[0]["tools"][0]["name"], "ToolSearch");
+    // Custom search returns references; definitions remain deferred in a
+    // stable catalog so discovery does not invalidate the cached tool prefix.
+    assert_eq!(r[0]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(r[0]["tools"], r[1]["tools"]);
+    assert_eq!(r[0]["tools"], r[3]["tools"]);
+    assert_eq!(r[0]["tools"], r[5]["tools"]);
+    assert_eq!(r[0]["tools"][0]["name"], "WebSearch");
+    assert_eq!(r[0]["tools"][0]["defer_loading"], true);
     assert!(
         r[1]["tools"]
             .as_array()
             .unwrap()
             .iter()
             .any(|t| t["name"] == "WebSearch")
-    );
-    assert!(
-        r[1]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|t| t.get("defer_loading").is_none())
     );
     assert_eq!(
         r[1]["messages"][2]["content"][0]["content"][0],
@@ -277,6 +276,25 @@ async fn failed_nested_search_yields_one_error_result_without_retrying_it() {
 #[cfg(feature = "workspace-files")]
 #[tokio::test]
 async fn web_fetch_uses_approved_page_then_auxiliary_haiku_not_server_fetch() {
+    assert_approved_fetch(
+        "What is its title?\nInclude\tthe source.",
+        "Fixture title".into(),
+    )
+    .await;
+}
+
+#[cfg(feature = "workspace-files")]
+#[tokio::test]
+async fn web_fetch_long_answer_keeps_complete_source() {
+    assert_approved_fetch(
+        "What is its title?",
+        format!("Fixture title {}", "💡".repeat(10_000)),
+    )
+    .await;
+}
+
+#[cfg(feature = "workspace-files")]
+async fn assert_approved_fetch(prompt: &str, answer: String) {
     use nanocodex_tools::claude_web::{ApprovedPage, ApprovedWebFetchSource, WebFetchRequest};
     struct FixtureSource(Arc<Mutex<Vec<WebFetchRequest>>>);
     impl ApprovedWebFetchSource for FixtureSource {
@@ -292,13 +310,16 @@ async fn web_fetch_uses_approved_page_then_auxiliary_haiku_not_server_fetch() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let log = requests.clone();
+    let question = prompt.to_owned();
     let app=Router::new().route("/v1/messages",post(move |Json(body):Json<Value>| {
         let log=log.clone();
+        let question=question.clone();
+        let answer=answer.clone();
         async move {
             let index={let mut r=log.lock().unwrap();r.push(body);r.len()};
             let (blocks,stop)=match index {
-                1=>(vec![json!({"type":"tool_use","id":"fetch","name":"WebFetch","input":{"url":"https://example.org/start","prompt":"What is its title?"}})],"tool_use"),
-                2=>(vec![json!({"type":"text","text":"Fixture title"})],"end_turn"),
+                1=>(vec![json!({"type":"tool_use","id":"fetch","name":"WebFetch","input":{"url":"https://example.org/start","prompt":question}})],"tool_use"),
+                2=>(vec![json!({"type":"text","text":answer})],"end_turn"),
                 _=>(vec![json!({"type":"text","text":"Fetched"})],"end_turn"),
             };
             ([ ("content-type","text/event-stream") ],stream(blocks,stop)).into_response()
@@ -330,6 +351,7 @@ async fn web_fetch_uses_approved_page_then_auxiliary_haiku_not_server_fetch() {
     let call = calls.lock().unwrap();
     assert_eq!(call.len(), 1);
     assert_eq!(call[0].max_output_bytes, 128 * 1024);
+    assert_eq!(call[0].prompt, prompt);
     let r = requests.lock().unwrap();
     assert_eq!(r.len(), 3);
     assert_eq!(r[0]["tools"][0]["name"], "WebFetch");
@@ -342,6 +364,18 @@ async fn web_fetch_uses_approved_page_then_auxiliary_haiku_not_server_fetch() {
     assert_eq!(r[1]["model"], "claude-haiku-4-5-20251001");
     assert_eq!(r[1]["thinking"], json!({"type":"disabled"}));
     assert!(r[1].get("tools").is_none());
+    assert!(
+        r[1]["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains(prompt)
+    );
+    let result = &r[2]["messages"][2]["content"][0];
+    assert_ne!(result["is_error"], true);
+    let text = result["content"].as_str().unwrap();
+    assert!(text.len() <= 32 * 1024);
+    assert!(text.starts_with("Fixture title"));
+    assert!(text.ends_with("\nSource: https://example.org/final"));
     assert!(
         r[1]["messages"][0]["content"][0]["text"]
             .as_str()
@@ -361,5 +395,134 @@ async fn web_fetch_uses_approved_page_then_auxiliary_haiku_not_server_fetch() {
             .iter()
             .all(|t| t["name"] != "web_fetch")
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn rejected_discovery_options_do_not_activate_a_deferred_tool() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let log = requests.clone();
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+        let log = log.clone();
+        async move {
+            let n = { let mut r = log.lock().unwrap(); r.push(body); r.len() };
+            let (blocks, reason) = match n {
+                1 => (vec![json!({"type":"tool_use","id":"bad-discovery","name":"ToolSearch","input":{"query":"select:effect","max_results":1,"unsupported":true}})], "tool_use"),
+                2 => (vec![json!({"type":"tool_use","id":"unloaded-effect","name":"effect","input":{}})], "tool_use"),
+                _ => (vec![json!({"type":"text","text":"done"})], "end_turn"),
+            };
+            ([("content-type", "text/event-stream")], stream(blocks, reason))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let count = Arc::new(AtomicUsize::new(0));
+    let counter = count.clone();
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .client_tool_search()
+        .tool(
+            nanocodex_claude::ToolDefinition {
+                name: "effect".into(),
+                description: "Counted synthetic effect".into(),
+                input_schema: json!({"type":"object"}),
+                strict: None,
+                defer_loading: true,
+            },
+            move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("committed".into()) }
+            },
+        )
+        .build()
+        .unwrap();
+    assert!(
+        agent
+            .prompt("discover")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .is_err()
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["messages"][2]["content"][0]["is_error"], true);
+    server.abort();
+}
+
+#[tokio::test]
+async fn nested_web_search_long_answer_and_title_keep_source_urls() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let log = requests.clone();
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+        let log = log.clone();
+        async move {
+            let index = { let mut r = log.lock().unwrap(); r.push(body); r.len() };
+            let (blocks, stop) = match index {
+                1 => (vec![json!({"type":"tool_use","id":"search","name":"WebSearch","input":{"query":"bounded sources","allowed_domains":["example.org"]}})], "tool_use"),
+                2 => (vec![
+                    json!({"type":"text","text":format!("Answer {}", "💡".repeat(10_000)),"citations":[{"type":"web_search_result_location","url":"https://example.org/citation","encrypted_index":"opaque"}]}),
+                    json!({"type":"server_tool_use","id":"srv","name":"web_search","input":{"query":"bounded sources"}}),
+                    json!({"type":"web_search_tool_result","tool_use_id":"srv","content":[
+                        {"type":"web_search_result","url":"https://example.org/result","title":"huge".repeat(10_000),"encrypted_content":"opaque"},
+                        {"type":"web_search_result","url":"https://example.org/last","title":"Last source","encrypted_content":"opaque"}
+                    ]}),
+                ], "end_turn"),
+                _ => (vec![json!({"type":"text","text":"Done"})], "end_turn"),
+            };
+            ([("content-type", "text/event-stream")], stream(blocks, stop)).into_response()
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .nested_web_search(false)
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("search")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "Done"
+    );
+    let r = requests.lock().unwrap();
+    assert_eq!(r.len(), 3);
+    assert_eq!(r[1]["tools"][0]["allowed_domains"], json!(["example.org"]));
+    let result = &r[2]["messages"][2]["content"][0];
+    assert_ne!(result["is_error"], true);
+    let text = result["content"].as_str().unwrap();
+    assert!(text.len() <= 32 * 1024);
+    assert!(text.starts_with("Answer "));
+    for url in [
+        "https://example.org/citation",
+        "https://example.org/result",
+        "https://example.org/last",
+    ] {
+        assert!(
+            text.contains(&format!("\nSource: {url}")),
+            "lost source {url}"
+        );
+    }
     server.abort();
 }

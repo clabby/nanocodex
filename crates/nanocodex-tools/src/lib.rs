@@ -123,10 +123,7 @@ pub mod runtime {
     };
 }
 
-#[cfg(all(
-    not(target_family = "wasm"),
-    any(feature = "native", all(test, feature = "workspace-runtime"))
-))]
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
 pub(crate) use contract::ToolOutputBody;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 pub(crate) use contract::ToolOutputContent;

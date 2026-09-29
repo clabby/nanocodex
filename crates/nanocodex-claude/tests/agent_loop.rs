@@ -875,12 +875,16 @@ async fn tool_result_compaction(receipt: String, should_compact: bool) {
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     let log = requests.lock().unwrap();
     assert_eq!(log.len(), model_calls as usize);
+    let continuation = if should_compact { 2 } else { 1 };
     assert_eq!(
-        log[1]["messages"][2]["content"][0]["content"],
+        log[continuation]["messages"][2]["content"][0]["content"],
         expected_receipt
     );
     if should_compact {
-        assert_eq!(log[2]["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(log[1]["messages"].as_array().unwrap().len(), 2);
+        assert!(!log[1]["messages"].to_string().contains("toolu_effect"));
+        assert_eq!(log[2]["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(log[2]["messages"][1]["content"][0]["id"], "toolu_effect");
         assert!(
             log[2]["messages"][0]["content"][0]["text"]
                 .as_str()

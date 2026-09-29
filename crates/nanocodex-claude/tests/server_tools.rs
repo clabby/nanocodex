@@ -266,11 +266,11 @@ async fn provider_code_container_id_is_reused_on_next_turn_without_local_bash() 
             let index={let mut log=requests.lock().unwrap();log.push(body);log.len()};
             let mut out=String::new();
             let mut emit=|frame:Value|out.push_str(&format!("data: {frame}\n\n"));
-            emit(json!({"type":"message_start","message":{"id":"m","role":"assistant","model":"test","content":[],"usage":{"input_tokens":1,"output_tokens":0},"container":{"id":"container-fixture","expires_at":"synthetic"}}}));
+            emit(json!({"type":"message_start","message":{"id":"m","role":"assistant","model":"test","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}));
             emit(json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}));
             emit(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":if index==1 {"one"}else{"two"}}}));
             emit(json!({"type":"content_block_stop","index":0}));
-            emit(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}));
+            emit(json!({"type":"message_delta","delta":{"stop_reason":"end_turn","container":{"id":"container-fixture","expires_at":"synthetic"}},"usage":{"output_tokens":1}}));
             emit(json!({"type":"message_stop"}));
             ([ ("content-type","text/event-stream") ],out).into_response()
         }
@@ -385,6 +385,13 @@ async fn failed_pause_turn_continuation_keeps_opaque_server_tool_boundary() {
     let log = requests.lock().unwrap();
     assert_eq!(log.len(), 3);
     assert_eq!(log[2]["messages"][1]["content"][0]["id"], "srvtoolu_paused");
-    assert_eq!(log[2]["messages"][2]["content"][0]["text"], "continue");
+    assert_eq!(log[2]["messages"][1], log[1]["messages"][1]);
+    assert!(
+        log[2]["messages"][2]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("outcome unknown")
+    );
+    assert_eq!(log[2]["messages"][3]["content"][0]["text"], "continue");
     server.abort();
 }

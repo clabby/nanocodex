@@ -55,7 +55,8 @@ impl ClaudeNotebook {
                     "cell_type": {"type": "string", "enum": ["code", "markdown"]},
                     "edit_mode": {"type": "string", "enum": ["replace", "insert", "delete"], "default": "replace"}
                 },
-                "required": ["notebook_path", "new_source"]
+                "required": ["notebook_path", "new_source"],
+                "additionalProperties": false
             }
         })]
     }
@@ -119,6 +120,17 @@ impl ClaudeNotebook {
     }
 
     fn edit(&self, input: &Value) -> Result<String, String> {
+        let fields = input
+            .as_object()
+            .ok_or("NotebookEdit input must be an object")?;
+        if let Some(key) = fields.keys().find(|key| {
+            !matches!(
+                key.as_str(),
+                "notebook_path" | "new_source" | "cell_id" | "cell_type" | "edit_mode"
+            )
+        }) {
+            return Err(format!("unsupported NotebookEdit option: {key}"));
+        }
         let path = self.notebook_path(Self::field(input, "notebook_path")?)?;
         let new_source = Self::field(input, "new_source")?;
         if new_source.len() > 32 * 1024 {
@@ -384,6 +396,21 @@ mod tests {
         })).unwrap()).unwrap();
         let adapter = ClaudeNotebook::new(dir.path()).unwrap();
         (dir, adapter, path)
+    }
+
+    #[tokio::test]
+    async fn unsupported_mutation_options_do_not_change_notebook() {
+        let (_dir, api, path) = setup();
+        let before = fs::read(&path).unwrap();
+        assert!(
+            api.execute(
+                "NotebookEdit",
+                json!({"notebook_path":path,"new_source":"bad","cell_id":"a","editMode":"insert"})
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[tokio::test]

@@ -122,6 +122,8 @@ pub enum ContentBlock {
         content: ToolResultContent,
         #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
     },
     Thinking {
         thinking: String,
@@ -176,6 +178,7 @@ impl ContentBlock {
             tool_use_id: id.into(),
             content: ToolResultContent::Text(content.into()),
             is_error,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -188,6 +191,7 @@ impl ContentBlock {
             tool_use_id: id.into(),
             content,
             is_error,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -196,6 +200,7 @@ impl ContentBlock {
             tool_use_id: id.into(),
             content: ToolResultContent::Blocks(blocks),
             is_error,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -233,7 +238,6 @@ pub struct ToolDefinition {
     pub defer_loading: bool,
 }
 
-/// Request-level automatic prompt caching. Explicit block breakpoints are not yet modeled.
 /// Anthropic-executed API tools do not have client handlers or tool_result replies.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ServerToolDefinition {
@@ -339,6 +343,8 @@ pub enum CacheType {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CacheTtl {
+    #[serde(rename = "5m")]
+    FiveMinutes,
     #[serde(rename = "1h")]
     OneHour,
 }
@@ -382,6 +388,184 @@ pub struct MessagesRequest {
     pub container: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ClaudeToolSpec>,
+}
+
+impl CacheControl {
+    const fn effective_ttl(&self) -> CacheTtl {
+        match self.ttl {
+            Some(ttl) => ttl,
+            None => CacheTtl::FiveMinutes,
+        }
+    }
+}
+
+#[derive(Default)]
+struct CacheLayout {
+    explicit: Vec<CacheTtl>,
+    // None means no eligible block; Some(None) means an unmarked final block.
+    last_eligible: Option<Option<CacheTtl>>,
+}
+
+impl CacheLayout {
+    fn block(&mut self, control: Option<&Value>, eligible: bool) -> Result<(), ClaudeError> {
+        let ttl = control
+            .map(|value| {
+                if !eligible {
+                    return Err(ClaudeError::Protocol(
+                        "cache_control cannot target thinking or empty text blocks".into(),
+                    ));
+                }
+                serde_json::from_value::<CacheControl>(value.clone())
+                    .map(|control| control.effective_ttl())
+                    .map_err(|_| ClaudeError::Protocol("invalid cache_control type or TTL".into()))
+            })
+            .transpose()?;
+        if let Some(ttl) = ttl {
+            self.explicit.push(ttl);
+        }
+        if eligible {
+            self.last_eligible = Some(ttl);
+        }
+        Ok(())
+    }
+
+    fn validate(mut self, automatic: Option<&CacheControl>) -> Result<(), ClaudeError> {
+        if let (Some(automatic), Some(last)) = (automatic, self.last_eligible) {
+            let ttl = automatic.effective_ttl();
+            if let Some(explicit) = last {
+                if explicit != ttl {
+                    return Err(ClaudeError::Protocol(
+                        "automatic cache TTL conflicts with the final cache breakpoint".into(),
+                    ));
+                }
+            } else {
+                self.explicit.push(ttl);
+            }
+        }
+        if self.explicit.len() > 4 {
+            return Err(ClaudeError::Protocol(
+                "at most four cache breakpoints are allowed".into(),
+            ));
+        }
+        let mut short_ttl = false;
+        for ttl in self.explicit {
+            match ttl {
+                CacheTtl::FiveMinutes => short_ttl = true,
+                CacheTtl::OneHour if short_ttl => {
+                    return Err(ClaudeError::Protocol(
+                        "1h cache breakpoints must precede 5m cache breakpoints".into(),
+                    ));
+                }
+                CacheTtl::OneHour => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl MessagesRequest {
+    /// Validate the documented cache marker limit, TTL order, and targets.
+    /// Cache order is tools -> system -> messages, independent of JSON key order.
+    /// Does not predict cache hits, token thresholds, or model-specific eviction.
+    pub fn validate_cache_control(&self) -> Result<(), ClaudeError> {
+        let mut layout = CacheLayout::default();
+        for tool in &self.tools {
+            let control = match tool {
+                ClaudeToolSpec::Server(tool) => tool.options.get("cache_control"),
+                ClaudeToolSpec::Client(_) => None,
+            };
+            layout.block(control, true)?;
+        }
+        match self.system.as_ref() {
+            Some(Value::String(text)) => layout.block(None, !text.is_empty())?,
+            Some(Value::Array(blocks)) => {
+                for block in blocks {
+                    layout.block(block.get("cache_control"), cacheable_json_block(block))?;
+                }
+            }
+            _ => {}
+        }
+        for message in &self.messages {
+            for block in &message.content {
+                let (control, eligible) = match block {
+                    ContentBlock::Text { text, extra } => {
+                        (extra.get("cache_control"), !text.is_empty())
+                    }
+                    ContentBlock::Thinking { extra, .. }
+                    | ContentBlock::RedactedThinking { extra, .. } => {
+                        (extra.get("cache_control"), false)
+                    }
+                    ContentBlock::ToolResult { extra, .. } => (extra.get("cache_control"), true),
+                    ContentBlock::ToolUse { extra, .. }
+                    | ContentBlock::ServerToolUse { extra, .. }
+                    | ContentBlock::WebSearchToolResult { extra, .. }
+                    | ContentBlock::WebFetchToolResult { extra, .. }
+                    | ContentBlock::ToolSearchToolResult { extra, .. }
+                    | ContentBlock::CodeExecutionToolResult { extra, .. }
+                    | ContentBlock::BashCodeExecutionToolResult { extra, .. }
+                    | ContentBlock::TextEditorCodeExecutionToolResult { extra, .. }
+                    | ContentBlock::McpToolUse { extra, .. }
+                    | ContentBlock::McpToolResult { extra, .. }
+                    | ContentBlock::McpToolListing { extra, .. } => {
+                        (extra.get("cache_control"), true)
+                    }
+                };
+                layout.block(control, eligible)?;
+            }
+        }
+        layout.validate(self.cache_control.as_ref())
+    }
+
+    /// When automatic caching is enabled, also write a stable system prefix so
+    /// it can survive replacement of message history during compaction. Existing
+    /// system breakpoints are caller policy and are never moved. This optional
+    /// optimization is skipped when it would exceed the marker budget or violate
+    /// TTL ordering. Only this request's system representation is changed.
+    pub fn cache_system_prefix(&mut self) -> Result<(), ClaudeError> {
+        self.validate_cache_control()?;
+        let Some(control) = self.cache_control.as_ref() else {
+            return Ok(());
+        };
+        let mut blocks = match self.system.as_ref() {
+            Some(Value::String(text)) if !text.is_empty() => {
+                vec![serde_json::json!({"type":"text","text":text})]
+            }
+            Some(Value::Array(blocks)) => blocks.clone(),
+            _ => return Ok(()),
+        };
+        if blocks
+            .iter()
+            .any(|block| block.get("cache_control").is_some())
+        {
+            return Ok(());
+        }
+        let Some(block) = blocks.iter_mut().rev().find(|block| {
+            block.get("type").and_then(Value::as_str) == Some("text")
+                && block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+        }) else {
+            return Ok(());
+        };
+        block["cache_control"] = serde_json::to_value(control)?;
+        let previous = self.system.replace(Value::Array(blocks));
+        if self.validate_cache_control().is_err() {
+            self.system = previous;
+        }
+        Ok(())
+    }
+}
+
+fn cacheable_json_block(block: &Value) -> bool {
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking" | "redacted_thinking") => false,
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        _ => true,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,6 +679,8 @@ pub enum StreamEvent {
 pub struct MessageChange {
     #[serde(default)]
     pub stop_reason: Option<StopReason>,
+    #[serde(default)]
+    pub container: Option<Value>,
 }
 
 /// An embedding-owned, approved credential broker. It can refresh/rotate OAuth
@@ -586,6 +772,8 @@ impl ClaudeClient {
         request: &MessagesRequest,
         streaming: bool,
     ) -> Result<reqwest::Response, ClaudeError> {
+        // Reject invalid cache policy before resolving credentials or sending HTTP.
+        request.validate_cache_control()?;
         #[derive(Serialize)]
         struct Body<'a> {
             #[serde(flatten)]
@@ -1034,6 +1222,9 @@ where
                 completed.insert(index, block);
             }
             StreamEvent::MessageDelta { delta, usage } => {
+                if let Some(container) = delta.container {
+                    message.container = Some(container);
+                }
                 if let Some(reason) = delta.stop_reason {
                     message.stop_reason = Some(reason);
                 }

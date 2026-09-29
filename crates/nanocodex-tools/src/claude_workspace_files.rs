@@ -6,7 +6,6 @@
 use regex::RegexBuilder;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
     fs::{self, OpenOptions},
     io::{Read as _, Write as _},
     path::{Component, Path, PathBuf},
@@ -52,11 +51,11 @@ impl ClaudeWorkspaceFiles {
     #[must_use]
     pub fn definitions() -> Vec<Value> {
         vec![
-            json!({"name":"Read","description":"Read a UTF-8 workspace file with numbered lines.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["file_path"]}}),
-            json!({"name":"Edit","description":"Replace exact text in a workspace file, requiring one occurrence unless replace_all is true.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["file_path","old_string","new_string"]}}),
-            json!({"name":"Write","description":"Atomically replace a UTF-8 workspace file, creating parent directories as needed.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"]}}),
-            json!({"name":"Glob","description":"List matching workspace files using *, ? and ** wildcards.","input_schema":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}}),
-            json!({"name":"Grep","description":"Search UTF-8 files with a bounded Rust regex. Default output is matching file paths; glob supports only *, ? and **. Unsupported type filters are rejected.","input_schema":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string","description":"Simple file glob: *, ? and ** only (no braces or character classes)."},"output_mode":{"type":"string","enum":["content","files_with_matches","count"],"default":"files_with_matches"},"-B":{"type":"integer","minimum":0,"maximum":2000},"-A":{"type":"integer","minimum":0,"maximum":2000},"-C":{"type":"integer","minimum":0,"maximum":2000},"context":{"type":"integer","minimum":0,"maximum":2000},"-n":{"type":"boolean","default":true},"-i":{"type":"boolean"},"-o":{"type":"boolean"},"head_limit":{"type":"integer","minimum":0,"default":250},"offset":{"type":"integer","minimum":0,"default":0},"multiline":{"type":"boolean"}},"required":["pattern"]}}),
+            json!({"name":"Read","description":"Read a UTF-8 workspace file with numbered lines.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["file_path"],"additionalProperties":false}}),
+            json!({"name":"Edit","description":"Replace exact text in a workspace file, requiring one occurrence unless replace_all is true.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["file_path","old_string","new_string"],"additionalProperties":false}}),
+            json!({"name":"Write","description":"Atomically replace a UTF-8 workspace file, creating parent directories as needed.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false}}),
+            json!({"name":"Glob","description":"List matching workspace files using *, ? and ** wildcards.","input_schema":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"],"additionalProperties":false}}),
+            json!({"name":"Grep","description":"Search UTF-8 files with a bounded Rust regex. Default output is matching file paths; glob supports only *, ? and **. Unsupported type filters are rejected.","input_schema":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string","description":"Simple file glob: *, ? and ** only (no braces or character classes)."},"output_mode":{"type":"string","enum":["content","files_with_matches","count"],"default":"files_with_matches"},"-B":{"type":"integer","minimum":0,"maximum":2000},"-A":{"type":"integer","minimum":0,"maximum":2000},"-C":{"type":"integer","minimum":0,"maximum":2000},"context":{"type":"integer","minimum":0,"maximum":2000},"-n":{"type":"boolean","default":true},"-i":{"type":"boolean"},"-o":{"type":"boolean"},"head_limit":{"type":"integer","minimum":0,"default":250},"offset":{"type":"integer","minimum":0,"default":0},"multiline":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false}}),
         ]
     }
 
@@ -76,6 +75,21 @@ impl ClaudeWorkspaceFiles {
     }
 
     fn execute_sync(&self, name: &str, input: &Value) -> Result<String, String> {
+        let allowed: &[&str] = match name {
+            "Read" => &["file_path", "offset", "limit", "pages"],
+            "Write" => &["file_path", "content"],
+            "Edit" => &["file_path", "old_string", "new_string", "replace_all"],
+            "Glob" => &["pattern", "path"],
+            // Grep validates its larger option set below.
+            "Grep" => return self.grep(input),
+            _ => return Err(format!("unknown workspace tool: {name}")),
+        };
+        let fields = input
+            .as_object()
+            .ok_or("workspace input must be an object")?;
+        if let Some(key) = fields.keys().find(|key| !allowed.contains(&key.as_str())) {
+            return Err(format!("unsupported {name} option: {key}"));
+        }
         match name {
             "Read" => self.read(input),
             "Write" => self.write(input),
@@ -237,14 +251,22 @@ impl ClaudeWorkspaceFiles {
         if count != 1 && !replace_all {
             return Err(format!("old_string occurs {count} times; set replace_all"));
         }
+        // Validate expansion before allocating: a tiny repeated match can otherwise
+        // amplify a bounded input into an unbounded replacement allocation.
+        let replacements = if replace_all { count } else { 1 };
+        let updated_len = content.len() - old.len() * replacements;
+        let updated_len = new
+            .len()
+            .checked_mul(replacements)
+            .and_then(|added| updated_len.checked_add(added))
+            .filter(|&len| len <= MAX_FILE)
+            .ok_or("edited content exceeds 1 MiB text limit")?;
         let updated = if replace_all {
             content.replace(old, new)
         } else {
             content.replacen(old, new, 1)
         };
-        if updated.len() > MAX_FILE {
-            return Err("edited content exceeds 1 MiB text limit".into());
-        }
+        debug_assert_eq!(updated.len(), updated_len);
         let (_, path) = self.write_target(text)?;
         // Best-effort stale-read check before the atomic replacement.
         if Self::read_text(&path)? != content {
@@ -279,6 +301,11 @@ impl ClaudeWorkspaceFiles {
                 files.push(next);
             } else if meta.is_dir() {
                 for entry in fs::read_dir(&next).map_err(|e| format!("walk: {e}"))? {
+                    // Count discovered entries before enqueuing, not only after
+                    // popping: one wide directory must not bypass the memory cap.
+                    if visits + stack.len() >= MAX_VISITS {
+                        return Err("search exceeds 10000 entries".into());
+                    }
                     stack.push(entry.map_err(|e| format!("walk: {e}"))?.path());
                 }
             }
@@ -297,7 +324,7 @@ impl ClaudeWorkspaceFiles {
         } else {
             raw_pattern.to_owned()
         };
-        validate_pattern(&pattern)?;
+        let matcher = glob_regex(&pattern)?;
         // An explicit literal prefix denoting a symlink escape is an error, not an empty match.
         let literal_prefix = pattern
             .split('/')
@@ -321,7 +348,7 @@ impl ClaudeWorkspaceFiles {
                 .strip_prefix(&root)
                 .map_err(|_| "search path changed")?
                 .to_string_lossy();
-            if glob_matches(pattern.as_bytes(), rel.as_bytes()) {
+            if matcher.is_match(&rel) {
                 let shown = file
                     .strip_prefix(&self.root)
                     .map_err(|_| "search escaped workspace")?
@@ -417,12 +444,7 @@ impl ClaudeWorkspaceFiles {
             Some(value) => Some(value.as_str().ok_or("invalid glob")?),
             None => None,
         };
-        if let Some(glob) = glob {
-            validate_pattern(glob)?;
-            if glob.contains(['[', ']', '{', '}', '\\']) {
-                return Err("unsupported glob syntax: only *, ? and ** are available".into());
-            }
-        }
+        let glob_matcher = glob.map(glob_regex).transpose()?;
         let re = RegexBuilder::new(pattern)
             .case_insensitive(!sensitive)
             .multi_line(multiline)
@@ -440,13 +462,16 @@ impl ClaudeWorkspaceFiles {
                 .strip_prefix(&self.root)
                 .map_err(|_| "search escaped workspace")?
                 .to_string_lossy();
-            if let Some(glob) = glob {
-                let target = if glob.contains('/') {
-                    shown.as_ref()
+            if let (Some(glob), Some(matcher)) = (glob, &glob_matcher) {
+                let relative = file
+                    .strip_prefix(&root)
+                    .map_err(|_| "search path changed")?;
+                let target = if glob.contains('/') && !relative.as_os_str().is_empty() {
+                    relative.to_string_lossy()
                 } else {
-                    file.file_name().and_then(|s| s.to_str()).unwrap_or("")
+                    file.file_name().unwrap_or_default().to_string_lossy()
                 };
-                if !glob_matches(glob.as_bytes(), target.as_bytes()) {
+                if !matcher.is_match(&target) {
                     continue;
                 }
             }
@@ -682,38 +707,37 @@ fn validate_pattern(pattern: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn glob_matches(pattern: &[u8], text: &[u8]) -> bool {
-    fn check(
-        p: &[u8],
-        t: &[u8],
-        i: usize,
-        j: usize,
-        memo: &mut HashMap<(usize, usize), bool>,
-    ) -> bool {
-        if let Some(&answer) = memo.get(&(i, j)) {
-            return answer;
-        }
-        let answer = if i == p.len() {
-            j == t.len()
-        } else if p[i] == b'*' {
-            if p.get(i + 1) == Some(&b'*') {
-                let next = i + 2;
-                (p.get(next) == Some(&b'/') && check(p, t, next + 1, j, memo))
-                    || check(p, t, next, j, memo)
-                    || (j < t.len() && check(p, t, i, j + 1, memo))
-            } else {
-                check(p, t, i + 1, j, memo)
-                    || (j < t.len() && t[j] != b'/' && check(p, t, i, j + 1, memo))
-            }
-        } else if j < t.len() && (p[i] == t[j] || (p[i] == b'?' && t[j] != b'/')) {
-            check(p, t, i + 1, j + 1, memo)
-        } else {
-            false
-        };
-        memo.insert((i, j), answer);
-        answer
+// Compile once per search. Regex Unicode semantics make ? one character, and
+// its bounded automaton avoids recursive matching proportional to path length.
+fn glob_regex(pattern: &str) -> Result<regex::Regex, String> {
+    validate_pattern(pattern)?;
+    if pattern.contains(['[', ']', '{', '}', '\\']) {
+        return Err("unsupported glob syntax: only *, ? and ** are available".into());
     }
-    check(pattern, text, 0, 0, &mut HashMap::new())
+    let mut expression = String::from("\\A");
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                if chars.peek() == Some(&'/') {
+                    chars.next();
+                    expression.push_str("(?:.*/)?");
+                } else {
+                    expression.push_str(".*");
+                }
+            }
+            '*' => expression.push_str("[^/]*"),
+            '?' => expression.push_str("[^/]"),
+            literal => expression.push_str(&regex::escape(&literal.to_string())),
+        }
+    }
+    expression.push_str("\\z");
+    RegexBuilder::new(&expression)
+        .dot_matches_new_line(true)
+        .size_limit(4 * 1024 * 1024)
+        .build()
+        .map_err(|e| format!("invalid or oversized glob: {e}"))
 }
 
 #[cfg(test)]
@@ -721,6 +745,77 @@ mod tests {
     use super::ClaudeWorkspaceFiles;
     use serde_json::json;
     use std::fs;
+
+    #[tokio::test]
+    async fn mutation_options_and_expansion_fail_without_clobbering() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = ClaudeWorkspaceFiles::new(dir.path()).unwrap();
+        let path = dir.path().join("original");
+        fs::write(&path, "aa").unwrap();
+        for (name, input) in [
+            (
+                "Write",
+                json!({"file_path":"original","content":"bad","append":true}),
+            ),
+            (
+                "Edit",
+                json!({"file_path":"original","old_string":"aa","new_string":"bad","replaceAll":true}),
+            ),
+            (
+                "Edit",
+                json!({"file_path":"original","old_string":"a","new_string":"x".repeat(super::MAX_FILE),"replace_all":true}),
+            ),
+        ] {
+            assert!(
+                files.execute(name, input).await.is_err(),
+                "{name} accepted invalid mutation"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), "aa");
+        }
+        files.execute("Edit", json!({"file_path":"original","old_string":"a","new_string":"é".repeat(super::MAX_FILE / 4),"replace_all":true})).await.unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), super::MAX_FILE as u64);
+    }
+
+    #[tokio::test]
+    async fn scoped_search_and_unicode_glob() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = ClaudeWorkspaceFiles::new(dir.path()).unwrap();
+        fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        fs::write(dir.path().join("src/nested/é.rs"), "needle").unwrap();
+        assert_eq!(
+            files
+                .execute(
+                    "Grep",
+                    json!({"path":"src","glob":"nested/*.rs","pattern":"needle"})
+                )
+                .await
+                .unwrap(),
+            "src/nested/é.rs\n"
+        );
+        assert_eq!(
+            files
+                .execute(
+                    "Grep",
+                    json!({"path":"src/nested/é.rs","glob":"*.rs","pattern":"needle"})
+                )
+                .await
+                .unwrap(),
+            "src/nested/é.rs\n"
+        );
+        assert_eq!(
+            files
+                .execute("Glob", json!({"path":"src","pattern":"**/?.rs"}))
+                .await
+                .unwrap(),
+            "src/nested/é.rs\n"
+        );
+        assert!(
+            files
+                .execute("Glob", json!({"pattern":"**/*.{rs,txt}"}))
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn round_trip_and_exact_edit() {

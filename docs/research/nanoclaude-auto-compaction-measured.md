@@ -1,5 +1,7 @@
 # Interactive automatic compaction measured — 2026-09-29
 
+Current implementation details are in [the runtime reference](../CLAUDE_RUNTIME.md). The later deep pass added pending-round preservation, cache/discovery corrections and additional recovery checks; the implementation-gap paragraphs below describe the state when this measurement was collected.
+
 This run closes the previous expired-login blocker: the actual interactive Claude Code CLI authenticated and completed three automatic compactions. No `-p` or manual `/compact` command was used.
 
 ## Configuration and evidence

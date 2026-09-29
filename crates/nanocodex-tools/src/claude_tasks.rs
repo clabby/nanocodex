@@ -137,7 +137,10 @@ impl ClaudeTasks {
         // A successful create has a bounded response; a failed request does not mutate state.
         let result = json!({"task":{"id":id,"subject":subject}});
         ensure_output(&result)?;
-        state.tasks.insert(id, task);
+        let mut tasks = state.tasks.clone();
+        tasks.insert(id, task);
+        ensure_readable(&tasks)?;
+        state.tasks = tasks;
         state.next_id = next_id;
         Ok(result)
     }
@@ -145,20 +148,12 @@ impl ClaudeTasks {
     fn get(&self, fields: &Map<String, Value>) -> Result<Value, String> {
         let id = required_text(fields, "taskId")?;
         let state = self.state.lock().map_err(|_| "task board lock poisoned")?;
-        Ok(json!({"task": state.tasks.get(id).map(|t| json!({
-            "id":t.id,"subject":t.subject,"description":t.description,
-            "status":t.status,"blocks":t.blocks,"blockedBy":t.blocked_by
-        }))}))
+        Ok(task_result(state.tasks.get(id)))
     }
 
     fn list(&self) -> Result<Value, String> {
         let state = self.state.lock().map_err(|_| "task board lock poisoned")?;
-        let tasks: Vec<Value> = state.tasks.values().map(|t| {
-            let mut task = json!({"id":t.id,"subject":t.subject,"status":t.status,"blockedBy":t.blocked_by});
-            if let Some(owner) = &t.owner { task["owner"] = json!(owner); }
-            task
-        }).collect();
-        Ok(json!({"tasks":tasks}))
+        Ok(list_result(&state.tasks))
     }
 
     fn update(&self, fields: &Map<String, Value>) -> Result<Value, String> {
@@ -277,21 +272,24 @@ impl ClaudeTasks {
             result["statusChange"] = json!({"from":old_status,"to":status});
         }
         ensure_output(&result)?;
-        state.tasks.insert(id, candidate);
+        let mut tasks = state.tasks.clone();
+        tasks.insert(id, candidate);
         for (source, target) in edges {
-            state
-                .tasks
+            tasks
                 .get_mut(&source)
                 .expect("validated source")
                 .blocks
                 .insert(target.clone());
-            state
-                .tasks
+            tasks
                 .get_mut(&target)
                 .expect("validated target")
                 .blocked_by
                 .insert(source);
         }
+        // Reciprocal dependency updates affect other task reads as well. Validate
+        // the complete proposal before publishing any field or edge changes.
+        ensure_readable(&tasks)?;
+        state.tasks = tasks;
         Ok(result)
     }
 
@@ -327,6 +325,38 @@ impl ClaudeTasks {
         state.todos = todos.clone();
         Ok(result)
     }
+}
+
+fn task_result(task: Option<&Task>) -> Value {
+    json!({"task": task.map(|t| json!({
+        "id":t.id,"subject":t.subject,"description":t.description,
+        "status":t.status,"blocks":t.blocks,"blockedBy":t.blocked_by
+    }))})
+}
+
+fn list_result(tasks: &BTreeMap<String, Task>) -> Value {
+    let tasks: Vec<Value> = tasks
+        .values()
+        .map(|t| {
+            let mut task =
+                json!({"id":t.id,"subject":t.subject,"status":t.status,"blockedBy":t.blocked_by});
+            if let Some(owner) = &t.owner {
+                task["owner"] = json!(owner);
+            }
+            task
+        })
+        .collect();
+    json!({"tasks":tasks})
+}
+
+fn ensure_readable(tasks: &BTreeMap<String, Task>) -> Result<(), String> {
+    // A bounded mutation receipt is insufficient: successful writes must not
+    // make subsequent public reads fail, leaving the board undiscoverable.
+    ensure_output(&list_result(tasks))?;
+    for task in tasks.values() {
+        ensure_output(&task_result(Some(task)))?;
+    }
+    Ok(())
 }
 
 fn required_text<'a>(fields: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
@@ -419,6 +449,73 @@ mod tests {
 
     async fn run(board: &ClaudeTasks, tool: &str, input: Value) -> Value {
         serde_json::from_str(&board.execute(tool, input).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn successful_mutations_keep_reads_bounded_and_rejections_are_atomic() {
+        let board = ClaudeTasks::new();
+        assert!(board.execute("TaskCreate", json!({"subject":"\u{0000}".repeat(MAX_TEXT),"description":"\u{0000}".repeat(MAX_TEXT)})).await.is_err());
+        assert_eq!(
+            run(
+                &board,
+                "TaskCreate",
+                json!({"subject":"first","description":"details"})
+            )
+            .await["task"]["id"],
+            "1"
+        );
+        // Each create's small receipt fits, but the aggregate task list must also fit.
+        for _ in 0..7 {
+            run(
+                &board,
+                "TaskCreate",
+                json!({"subject":"x".repeat(MAX_TEXT),"description":"details"}),
+            )
+            .await;
+        }
+        let before = run(&board, "TaskList", json!({})).await;
+        assert!(
+            board
+                .execute(
+                    "TaskCreate",
+                    json!({"subject":"x".repeat(MAX_TEXT),"description":"details"})
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            board
+                .execute(
+                    "TaskUpdate",
+                    json!({"taskId":"1","subject":"x".repeat(MAX_TEXT),"addBlocks":["2"]})
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(run(&board, "TaskList", json!({})).await, before);
+        assert_eq!(
+            run(&board, "TaskGet", json!({"taskId":"2"})).await["task"]["blockedBy"],
+            json!([])
+        );
+        assert_eq!(
+            run(&board, "TaskGet", json!({"taskId":"1"})).await["task"]["subject"],
+            "first"
+        );
+        run(
+            &board,
+            "TaskUpdate",
+            json!({"taskId":"8","status":"deleted"}),
+        )
+        .await;
+        assert_eq!(
+            run(
+                &board,
+                "TaskCreate",
+                json!({"subject":"replacement","description":"details"})
+            )
+            .await["task"]["id"],
+            "9"
+        );
     }
 
     #[tokio::test]

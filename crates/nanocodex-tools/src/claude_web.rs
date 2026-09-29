@@ -190,9 +190,14 @@ fn required_text<'a>(
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("missing or invalid {key}"))?;
-    if value.trim().is_empty() || value.len() > max || value.chars().any(char::is_control) {
+    if value.trim().is_empty()
+        || value.len() > max
+        || value
+            .chars()
+            .any(|ch| ch.is_control() && !(key == "prompt" && matches!(ch, '\n' | '\r' | '\t')))
+    {
         return Err(format!(
-            "{key} must be nonblank, at most {max} bytes, and contain no control characters"
+            "{key} must be nonblank, at most {max} bytes, and contain no unsupported control characters"
         ));
     }
     Ok(value)
@@ -244,7 +249,9 @@ fn validate_url(url: &str) -> Result<(), String> {
     }
     let (host, port) = authority.split_once(':').unwrap_or((authority, ""));
     if !valid_host(host)
-        || (!port.is_empty() && (port.len() > 5 || !port.bytes().all(|b| b.is_ascii_digit())))
+        || (!port.is_empty()
+            && (port.parse::<u16>().ok().filter(|&n| n > 0).is_none()
+                || !port.bytes().all(|b| b.is_ascii_digit())))
         || authority.ends_with(':')
     {
         return Err("invalid web fetch host".into());
@@ -302,6 +309,31 @@ mod tests {
             self.fetches.lock().unwrap().push(request);
             Ok("page answer".into())
         }
+    }
+
+    #[tokio::test]
+    async fn multiline_prompts_are_text_but_url_ports_are_validated() {
+        let web = ClaudeWeb::new(FakeProvider::default());
+        let prompt = "Answer these:\n- first\n- second\twith sources";
+        web.execute(
+            "WebFetch",
+            json!({"url":"https://example.org:443/page","prompt":prompt}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(web.provider.fetches.lock().unwrap()[0].prompt, prompt);
+        for url in [
+            "https://example.org:99999",
+            "https://example.org:0",
+            "https://example.org/\nsecret",
+        ] {
+            assert!(
+                web.execute("WebFetch", json!({"url":url,"prompt":"read"}))
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(web.provider.fetches.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
