@@ -1,6 +1,8 @@
-//! Session-local Claude-style task and todo tracking. This is deliberately not an
-//! adapter for Codex plans, agents, schedulers, or any durable account service.
+//! Session-scoped Claude-style task and todo tracking with portable checkpoints.
+//! Hosts persist checkpoints with tool receipts and restore before dispatch; this
+//! is not an account scheduler or a cross-agent task service.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,7 +16,8 @@ const MAX_OUTPUT: usize = 64 * 1024;
 const MAX_TEXT: usize = 8 * 1024;
 const MAX_METADATA: usize = 16 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Task {
     id: String,
     subject: String,
@@ -27,15 +30,24 @@ struct Task {
     blocked_by: BTreeSet<String>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct State {
     next_id: u64,
     tasks: BTreeMap<String, Task>,
     todos: Vec<Value>,
 }
 
-/// In-memory task board scoped to one host-created session. Clones share the
-/// same board; independently constructed boards never share data.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Checkpoint {
+    version: u32,
+    state: State,
+}
+
+/// Task board scoped to one host-created session. Clones share the same board;
+/// independently constructed boards never share data. Persistence is explicit:
+/// the host checkpoints and restores the board together with session receipts.
 #[derive(Clone, Default, Debug)]
 pub struct ClaudeTasks {
     state: Arc<Mutex<State>>,
@@ -46,6 +58,29 @@ impl ClaudeTasks {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Capture a versioned portable checkpoint, including todos and the task-ID
+    /// watermark. Persist it with the corresponding tool receipt before the next
+    /// dispatch. This method alone performs no durable storage write.
+    pub fn snapshot(&self) -> Result<Value, String> {
+        let state = self.state.lock().map_err(|_| "task board lock poisoned")?;
+        Ok(json!({"version":1,"state":&*state}))
+    }
+
+    /// Validate and atomically replace the board from a portable checkpoint.
+    /// Existing cloned handles observe the restored state. The host must suspend
+    /// tool dispatch while restoring; this does not merge concurrent mutations.
+    /// Unknown versions and invalid states leave the live board unchanged.
+    pub fn restore(&self, checkpoint: Value) -> Result<(), String> {
+        let checkpoint: Checkpoint = serde_json::from_value(checkpoint)
+            .map_err(|e| format!("invalid task checkpoint: {e}"))?;
+        if checkpoint.version != 1 {
+            return Err("unsupported task checkpoint version".into());
+        }
+        validate_state(&checkpoint.state)?;
+        *self.state.lock().map_err(|_| "task board lock poisoned")? = checkpoint.state;
+        Ok(())
     }
 
     /// Model-visible input schemas for task and todo tracking only.
@@ -298,33 +333,99 @@ impl ClaudeTasks {
             .get("todos")
             .and_then(Value::as_array)
             .ok_or("missing or invalid todos")?;
-        if todos.len() > MAX_TODOS {
-            return Err("session todo limit reached".into());
-        }
-        for todo in todos {
-            let object = todo.as_object().ok_or("todo must be an object")?;
-            if object.len() != 3
-                || object
-                    .keys()
-                    .any(|key| !["content", "status", "activeForm"].contains(&key.as_str()))
-            {
-                return Err("todo must contain only content, status, activeForm".into());
-            }
-            required_text(object, "content")?;
-            required_text(object, "activeForm")?;
-            if !matches!(
-                required_text(object, "status")?,
-                "pending" | "in_progress" | "completed"
-            ) {
-                return Err("invalid todo status".into());
-            }
-        }
+        validate_todos(todos)?;
         let mut state = self.state.lock().map_err(|_| "task board lock poisoned")?;
         let result = json!({"oldTodos":state.todos,"newTodos":todos});
         ensure_output(&result)?;
         state.todos = todos.clone();
         Ok(result)
     }
+}
+
+fn validate_state(state: &State) -> Result<(), String> {
+    if state.tasks.len() > MAX_TASKS {
+        return Err("session task limit reached".into());
+    }
+    for (id, task) in &state.tasks {
+        let numeric = id
+            .parse::<u64>()
+            .map_err(|_| "invalid checkpoint task ID")?;
+        if numeric == 0 || numeric > state.next_id || numeric.to_string() != *id || task.id != *id {
+            return Err("invalid checkpoint task ID watermark or identity".into());
+        }
+        for text in [&task.subject, &task.description]
+            .into_iter()
+            .chain(task.active_form.iter())
+            .chain(task.owner.iter())
+        {
+            if text.len() > MAX_TEXT {
+                return Err("checkpoint task text exceeds 8 KiB".into());
+            }
+        }
+        if !matches!(
+            task.status.as_str(),
+            "pending" | "in_progress" | "completed"
+        ) {
+            return Err("invalid checkpoint task status".into());
+        }
+        metadata(&Map::from_iter([("metadata".into(), json!(task.metadata))]))?;
+        for target in &task.blocks {
+            if target == id
+                || !state
+                    .tasks
+                    .get(target)
+                    .is_some_and(|t| t.blocked_by.contains(id))
+            {
+                return Err("invalid checkpoint dependency".into());
+            }
+        }
+        for source in &task.blocked_by {
+            if source == id
+                || !state
+                    .tasks
+                    .get(source)
+                    .is_some_and(|t| t.blocks.contains(id))
+            {
+                return Err("invalid checkpoint dependency".into());
+            }
+        }
+    }
+    let adjacency = state
+        .tasks
+        .iter()
+        .map(|(id, t)| (id.clone(), t.blocks.clone()))
+        .collect();
+    if has_cycle(&adjacency) {
+        return Err("checkpoint dependency cycle".into());
+    }
+    validate_todos(&state.todos)?;
+    ensure_output(&json!({"oldTodos":state.todos,"newTodos":[]}))?;
+    ensure_readable(&state.tasks)
+}
+
+fn validate_todos(todos: &[Value]) -> Result<(), String> {
+    if todos.len() > MAX_TODOS {
+        return Err("session todo limit reached".into());
+    }
+    for todo in todos {
+        let object = todo.as_object().ok_or("todo must be an object")?;
+        if object.len() != 3
+            || object
+                .keys()
+                .any(|key| !["content", "status", "activeForm"].contains(&key.as_str()))
+        {
+            return Err("todo must contain only content, status, activeForm".into());
+        }
+        required_text(object, "content")?;
+        required_text(object, "activeForm")?;
+        if !matches!(
+            required_text(object, "status")?,
+            "pending" | "in_progress" | "completed"
+        ) {
+            return Err("invalid todo status".into());
+        }
+    }
+    Ok(())
 }
 
 fn task_result(task: Option<&Task>) -> Value {
@@ -449,6 +550,99 @@ mod tests {
 
     async fn run(board: &ClaudeTasks, tool: &str, input: Value) -> Value {
         serde_json::from_str(&board.execute(tool, input).await.unwrap()).unwrap()
+    }
+
+    // Recovery failures: lost metadata/todos/dependencies, ID reuse after deletion,
+    // shared handles not observing restore, and corrupt checkpoints clobbering live state.
+    #[tokio::test]
+    async fn portable_checkpoint_restores_board_todos_and_id_watermark() {
+        let board = ClaudeTasks::new();
+        for subject in ["first", "second", "deleted"] {
+            run(&board, "TaskCreate", json!({"subject":subject,"description":"details","activeForm":"working","metadata":{"keep":1}})).await;
+        }
+        run(
+            &board,
+            "TaskUpdate",
+            json!({"taskId":"1","owner":"worker","status":"in_progress","addBlocks":["2"]}),
+        )
+        .await;
+        run(
+            &board,
+            "TaskUpdate",
+            json!({"taskId":"3","status":"deleted"}),
+        )
+        .await;
+        let todo = json!({"content":"pending work","status":"pending","activeForm":"working"});
+        run(&board, "TodoWrite", json!({"todos":[todo]})).await;
+        let checkpoint = board.snapshot().unwrap();
+        let serialized = serde_json::to_vec(&checkpoint).unwrap();
+        drop(board);
+        let restored = ClaudeTasks::new();
+        let registered_handle = restored.clone();
+        restored
+            .restore(serde_json::from_slice(&serialized).unwrap())
+            .unwrap();
+        assert_eq!(registered_handle.snapshot().unwrap(), checkpoint);
+        assert_eq!(
+            run(&registered_handle, "TaskGet", json!({"taskId":"2"})).await["task"]["blockedBy"],
+            json!(["1"])
+        );
+        assert_eq!(
+            run(&registered_handle, "TodoWrite", json!({"todos":[]})).await["oldTodos"],
+            json!([todo])
+        );
+        assert_eq!(
+            run(
+                &registered_handle,
+                "TaskCreate",
+                json!({"subject":"new","description":"details"})
+            )
+            .await["task"]["id"],
+            "4"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_checkpoints_fail_without_mutating_registered_board() {
+        let board = ClaudeTasks::new();
+        for subject in ["first", "second"] {
+            run(
+                &board,
+                "TaskCreate",
+                json!({"subject":subject,"description":"details"}),
+            )
+            .await;
+        }
+        run(
+            &board,
+            "TaskUpdate",
+            json!({"taskId":"1","addBlocks":["2"]}),
+        )
+        .await;
+        let checkpoint = board.snapshot().unwrap();
+        let mut corruptions = Vec::new();
+        for (pointer, value) in [
+            ("/version", json!(999)),
+            ("/state/next_id", json!(0)),
+            ("/state/tasks/1/id", json!("2")),
+            ("/state/tasks/1/status", json!("deleted")),
+            ("/state/tasks/1/blocks", json!(["missing"])),
+            ("/state/tasks/2/blocked_by", json!([])),
+            ("/state/tasks/1/subject", json!("x".repeat(MAX_TEXT + 1))),
+            ("/state/todos", json!([{"content":"invalid"}])),
+        ] {
+            let mut bad = checkpoint.clone();
+            *bad.pointer_mut(pointer).unwrap() = value;
+            corruptions.push(bad);
+        }
+        let mut cycle = checkpoint.clone();
+        cycle["state"]["tasks"]["2"]["blocks"] = json!(["1"]);
+        cycle["state"]["tasks"]["1"]["blocked_by"] = json!(["2"]);
+        corruptions.push(cycle);
+        for bad in corruptions {
+            assert!(board.restore(bad).is_err());
+            assert_eq!(board.snapshot().unwrap(), checkpoint);
+        }
     }
 
     #[tokio::test]

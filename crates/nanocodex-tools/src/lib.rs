@@ -27,6 +27,9 @@ pub use claude_workspace_files::ClaudeWorkspaceFiles;
 pub mod claude_bash;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
+pub mod claude_host;
+#[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
+#[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod claude_notebook;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]

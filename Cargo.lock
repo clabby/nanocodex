@@ -5858,6 +5858,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
+ "wasm-bindgen-futures",
+ "web-time",
 ]
 
 [[package]]
@@ -5900,11 +5903,16 @@ dependencies = [
 name = "nanocodex-durability"
 version = "0.6.5"
 dependencies = [
+ "axum",
  "eyre",
+ "futures-util",
  "nanocodex-agent",
+ "nanocodex-claude",
  "nanocodex-oai-api",
  "nanocodex-tools",
+ "reqwest",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",

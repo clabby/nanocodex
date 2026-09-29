@@ -19,10 +19,12 @@ rustdoc-args = ["-D", "warnings"]
 
 [features]
 default = []
+claude = ["dep:nanocodex-claude"]
 sqlite = ["dep:rusqlite"]
 postgres = ["dep:tokio-postgres"]
 
 [dependencies]
+nanocodex-claude = { workspace = true, optional = true }
 nanocodex-agent.workspace = true
 sha2.workspace = true
 serde.workspace = true
@@ -39,11 +41,16 @@ rusqlite = { workspace = true, optional = true }
 tokio-postgres = { workspace = true, optional = true }
 
 [dev-dependencies]
+futures-util.workspace = true
+nanocodex-claude = { workspace = true, features = ["workspace-files"] }
+axum.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
 eyre.workspace = true
 nanocodex-oai-api.workspace = true
 nanocodex-tools.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 tower.workspace = true
 
 [lints]

@@ -1,5 +1,7 @@
 # Nanoclaude architecture
 
+For current behavior and recovery guarantees, see [runtime](CLAUDE_RUNTIME.md), [tool coverage](CLAUDE_TOOL_MATRIX.md), and [authentication](claude-authentication.md). Dated CLI observations below describe their measured fixtures.
+
 Nanoclaude is a separate Claude agent-loop backend, **not** a Claude model flag in
 Nanocodex's OpenAI Responses loop and not an Anthropic-to-OpenAI proxy. The
 common `nanocodex-agent::Nanocodex` handle already erases lifecycle operations
@@ -13,7 +15,7 @@ through `BuilderBackend` and `LifecycleBackend`; an external
 | --- | --- | --- |
 | Model wire | Responses items/events | Messages `system`, `messages`, content blocks, SSE events |
 | Tools | Responses function/custom calls and function outputs | Claude `tools[].input_schema`, assistant `tool_use`, subsequent **user** `tool_result` with the same ID |
-| Loop | Responses-specific retained response IDs, Code Mode, tool orchestration | Claude-specific tool loop, opt-in cache, usage/cancellation; retries and durable effects pending |
+| Loop | Responses-specific retained response IDs, Code Mode, tool orchestration | Claude-specific tool loop, cache, usage/cancellation; shared durable admission, checkpoints and effect receipts |
 | Compaction | Provider opaque compaction item | Claude Code 2.1.283-style client summary and transcript replacement; never treat an OpenAI encrypted item as a Claude block |
 
 The initial `nanocodex-claude` crate provides `ClaudeClient` and
@@ -71,8 +73,10 @@ synthetic loopback server, not a live Platform account.
 This is **not Claude Code parity**. Native tools remain explicit opt-ins; the
 `workspace-files` feature supplies only bounded adapters, not the full CLI. Multi-modal user inputs, automatic instruction reload,
 full thinking policy,
-steering, spawn/fork, snapshots, durability/preservation hooks and live auth
-remain unimplemented; unsupported lifecycle operations return errors. In
+steering, core spawn/fork, OpenAI-shaped snapshot APIs and subscription login
+remain unimplemented; unsupported lifecycle operations return errors. The Claude
+builder now attaches to the existing durability crate through `.durability(state)`
+and restores provider-native checkpoints, tool receipts and compaction state. In
 particular, do not double-execute Claude Code CLI built-ins through an
 OpenAI-style dispatcher. A native tool layer needs explicit execution,
 permissions, effect receipts and cancellation semantics.
@@ -114,12 +118,12 @@ Authentication is a separately injected transport capability. The ordinary
 integration uses documented Claude Platform API credentials. An embedding with
 approved subscription authority can implement `ClaudeAuthProvider`, which
 resolves fresh request headers at each call and reports an intentionally
-redacted failure. This is a transport seam, **not** an OAuth login/refresh
-implementation or proof of subscription billing. The account owner
-reports access to an Anthropic trusted subscription program for custom agent
-clients; that mode requires the program's approved client identity, token
-acquisition/refresh protocol, scope, and billing/routing terms before live
-traffic is enabled. Anthropic's public SDK guidance says third-party Claude.ai
+redacted failure. `RefreshingClaudeAuth` adds expiry-aware token caching,
+serialized host refresh and bounded HTTP 401 recovery. The host owns secure
+credential storage and the actual exchange protocol. This is not a subscription
+login flow or proof of subscription billing. A separately approved integration
+requires its client registration, acquisition/refresh protocol, scopes and routing
+specification. See [authentication](claude-authentication.md) for current setup. Anthropic's public SDK guidance says third-party Claude.ai
 login/rate limits require prior approval, but does not publish the trusted
 program's client-registration/redirect/scope/refresh contract. Obtain that
 non-secret integration spec from the program before live traffic. Do not copy

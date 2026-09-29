@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+mod auth;
+pub use auth::{ClaudeAccessToken, ClaudeTokenSource, RefreshingClaudeAuth};
+
 pub const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -365,7 +368,7 @@ pub struct OutputConfig {
     pub effort: Effort,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessagesRequest {
     pub model: String,
     pub max_tokens: u32,
@@ -386,7 +389,7 @@ pub struct MessagesRequest {
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ClaudeToolSpec>,
 }
 
@@ -582,7 +585,7 @@ pub enum StopReason {
     Unknown,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
     pub input_tokens: u64,
@@ -594,7 +597,7 @@ pub struct Usage {
     pub output_tokens: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageResponse {
     pub id: String,
     pub role: Role,
@@ -683,19 +686,30 @@ pub struct MessageChange {
     pub container: Option<Value>,
 }
 
+/// Authentication future on a native runtime.
+#[cfg(not(target_family = "wasm"))]
+pub type ClaudeAuthFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+/// Authentication future on an isolate-local runtime, allowing browser fetch.
+#[cfg(target_family = "wasm")]
+pub type ClaudeAuthFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
 /// An embedding-owned, approved credential broker. It can refresh/rotate OAuth
 /// headers before each request without exposing tokens to the agent loop.
 /// This trait does not perform OAuth registration or define a subscription grant.
 pub trait ClaudeAuthProvider: Send + Sync {
     fn headers(
         &self,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<reqwest::header::HeaderMap, ClaudeAuthUnavailable>>
-                + Send
-                + '_,
-        >,
-    >;
+    ) -> ClaudeAuthFuture<'_, Result<reqwest::header::HeaderMap, ClaudeAuthUnavailable>>;
+
+    /// Recover a rejected credential before one bounded retry. The default does
+    /// not retry. Implementations must compare the rejected headers with their
+    /// current credential so late 401 responses cannot evict a newer token.
+    fn recover_unauthorized<'a>(
+        &'a self,
+        _rejected: &'a reqwest::header::HeaderMap,
+    ) -> ClaudeAuthFuture<'a, Result<bool, ClaudeAuthUnavailable>> {
+        Box::pin(async { Ok(false) })
+    }
 }
 
 /// An intentionally detail-free failure; do not put access/refresh tokens in errors.
@@ -780,36 +794,57 @@ impl ClaudeClient {
             request: &'a MessagesRequest,
             stream: bool,
         }
-        let mut builder = self
-            .http
-            .post(&self.endpoint)
-            .header("anthropic-version", ANTHROPIC_VERSION);
-        if request.context_management.is_some() {
-            builder = builder.header("anthropic-beta", "context-management-2025-06-27");
-        }
-        let builder = match &self.auth {
-            ClientAuth::ApiKey(key) => builder.header("x-api-key", key),
-            ClientAuth::Headers(headers) => builder.headers(headers.clone()),
-            ClientAuth::Provider(provider) => builder.headers(
-                provider
-                    .headers()
+        let mut retried = false;
+        loop {
+            let mut builder = self
+                .http
+                .post(&self.endpoint)
+                .header("anthropic-version", ANTHROPIC_VERSION);
+            if request.context_management.is_some() {
+                builder = builder.header("anthropic-beta", "context-management-2025-06-27");
+            }
+            let mut provider_headers = None;
+            let builder = match &self.auth {
+                ClientAuth::ApiKey(key) => builder.header("x-api-key", key),
+                ClientAuth::Headers(headers) => builder.headers(headers.clone()),
+                ClientAuth::Provider(provider) => {
+                    let headers = provider
+                        .headers()
+                        .await
+                        .map_err(|_| ClaudeError::AuthUnavailable)?;
+                    provider_headers = Some(headers.clone());
+                    builder.headers(headers)
+                }
+            };
+            let response = builder
+                .json(&Body {
+                    request,
+                    stream: streaming,
+                })
+                .send()
+                .await?;
+            // Only an explicit HTTP authentication rejection is recoverable. Do
+            // not replay requests after transport errors, 403/429/5xx, or any
+            // accepted stream (including an error partway through that stream).
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                && !retried
+                && let (ClientAuth::Provider(provider), Some(headers)) =
+                    (&self.auth, provider_headers.as_ref())
+                && provider
+                    .recover_unauthorized(headers)
                     .await
-                    .map_err(|_| ClaudeError::AuthUnavailable)?,
-            ),
-        };
-        let response = builder
-            .json(&Body {
-                request,
-                stream: streaming,
-            })
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await?;
-            return Err(ClaudeError::Http { status, body });
+                    .map_err(|_| ClaudeError::AuthUnavailable)?
+            {
+                retried = true;
+                continue;
+            }
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let body = response.text().await?;
+                return Err(ClaudeError::Http { status, body });
+            }
+            return Ok(response);
         }
-        Ok(response)
     }
 
     pub async fn create(&self, request: &MessagesRequest) -> Result<MessageResponse, ClaudeError> {
@@ -889,8 +924,8 @@ impl ClaudeClient {
                         }
                         continue;
                     }
-                    match state.response.chunk().await {
-                        Ok(Some(chunk)) => {
+                    match state.response.next().await {
+                        Some(Ok(chunk)) => {
                             state.bytes.extend_from_slice(&chunk);
                             if state.bytes.len() + state.frame_bytes > MAX_SSE_FRAME_BYTES {
                                 state.done = true;
@@ -900,11 +935,11 @@ impl ClaudeClient {
                                 ));
                             }
                         }
-                        Ok(None) => {
+                        None => {
                             state.done = true;
                             return Some((Err(ClaudeError::IncompleteStream), state));
                         }
-                        Err(error) => {
+                        Some(Err(error)) => {
                             state.done = true;
                             return Some((Err(ClaudeError::Transport(error)), state));
                         }
@@ -915,13 +950,33 @@ impl ClaudeClient {
     }
 }
 
-pub type ClaudeStream =
-    std::pin::Pin<Box<dyn Stream<Item = Result<StreamEvent, ClaudeError>> + Send>>;
+#[cfg(not(target_family = "wasm"))]
+pub type ClaudeStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, ClaudeError>> + Send>>;
+#[cfg(target_family = "wasm")]
+pub type ClaudeStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, ClaudeError>>>>;
+
+/// Future accepted by a registered tool on the current execution target.
+#[doc(hidden)]
+#[cfg(not(target_family = "wasm"))]
+pub trait ToolFuture: Future + Send {}
+#[cfg(not(target_family = "wasm"))]
+impl<T: Future + Send> ToolFuture for T {}
+/// Future accepted by an isolate-local tool.
+#[doc(hidden)]
+#[cfg(target_family = "wasm")]
+pub trait ToolFuture: Future {}
+#[cfg(target_family = "wasm")]
+impl<T: Future> ToolFuture for T {}
 
 const MAX_SSE_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
+#[cfg(not(target_family = "wasm"))]
+type ResponseBytes = Pin<Box<dyn Stream<Item = Result<Vec<u8>, reqwest::Error>> + Send>>;
+#[cfg(target_family = "wasm")]
+type ResponseBytes = Pin<Box<dyn Stream<Item = Result<Vec<u8>, reqwest::Error>>>>;
+
 struct SseState {
-    response: reqwest::Response,
+    response: ResponseBytes,
     bytes: Vec<u8>,
     data: Vec<String>,
     done: bool,
@@ -930,9 +985,13 @@ struct SseState {
 }
 
 impl SseState {
-    const fn new(response: reqwest::Response) -> Self {
+    fn new(response: reqwest::Response) -> Self {
         Self {
-            response,
+            response: Box::pin(
+                response
+                    .bytes_stream()
+                    .map(|chunk| chunk.map(|bytes| bytes.to_vec())),
+            ),
             bytes: Vec::new(),
             data: Vec::new(),
             done: false,
@@ -1322,4 +1381,7 @@ fn is_user_turn_start(message: &Message) -> bool {
 }
 
 mod agent;
-pub use agent::{Claude, ClaudeBuilder};
+pub use agent::{Claude, ClaudeBuilder, ClaudeToolInvocation, ClaudeToolReply};
+
+/// Portable durability integration with provider-native state.
+pub mod execution;
