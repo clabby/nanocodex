@@ -1,5 +1,7 @@
 # Interactive Claude Code 2.1.284: tool receipts and auto-compaction follow-up (2026-09-29)
 
+**Later live evidence:** [The resumed interactive trial](nanoclaude-auto-compaction-measured.md) measured three automatic compactions with Claude Code 2.1.283 on the returning Mac. The expired-login limitation below describes the earlier 2.1.284 attempt. The new trial confirms retained tool suffixes and turn-boundary behavior, not an exact 67k trigger or universal feature-gate selection.
+
 ## Evidence boundaries
 
 - The authenticated **interactive** `claude` TTY trace from 2026-09-28 is in [nanoclaude-interactive-tty.md](nanoclaude-interactive-tty.md) with sanitized structural JSONL. It proves the observed **manual** `/compact` wire and tool call/result packaging, **not** an automatic interactive trigger.

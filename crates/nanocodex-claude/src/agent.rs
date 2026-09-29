@@ -1,7 +1,7 @@
 //! Provider-specific Messages agent loop. No OpenAI transport or CLI credentials.
 use crate::{
     ClaudeClient, ClaudeToolSpec, ContentBlock, ContentDelta, Message, MessagesRequest, Role,
-    ServerToolDefinition, StopReason, StreamEvent, ToolDefinition, ToolResultContent,
+    ServerToolDefinition, StopReason, StreamEvent, ToolDefinition, ToolResultContent, Usage,
     collect_stream,
 };
 use futures_util::StreamExt;
@@ -27,6 +27,21 @@ use std::{
     time::Instant,
 };
 use tokio::sync::{Mutex, Notify, oneshot};
+
+fn estimate_text_tokens(text: &str) -> u64 {
+    (text.encode_utf16().count() as u64).div_ceil(4)
+}
+
+const fn add_usage(total: &mut Usage, usage: &Usage) {
+    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+    total.cache_read_input_tokens = total
+        .cache_read_input_tokens
+        .saturating_add(usage.cache_read_input_tokens);
+    total.cache_creation_input_tokens = total
+        .cache_creation_input_tokens
+        .saturating_add(usage.cache_creation_input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+}
 
 type Handler = Arc<
     dyn Fn(
@@ -1054,7 +1069,7 @@ impl State {
         &self,
         context: &mut Conversation,
         cancel: &Cancellation,
-    ) -> Result<()> {
+    ) -> Result<Usage> {
         if context.messages.is_empty() {
             return Err(unsupported("Claude cannot compact empty history"));
         }
@@ -1097,7 +1112,7 @@ impl State {
         context.previous_message_id = Some(response.id);
         context.summary = summary;
         context.active_context_tokens = 0;
-        Ok(())
+        Ok(response.usage)
     }
     async fn call_tool(
         &self,
@@ -1135,6 +1150,7 @@ impl State {
             return Err(NanocodexError::TurnCancelled);
         }
         let mut prompt = prompt_messages(&request.prompt)?;
+        let mut usage = Usage::default();
         // The provider's last usage is anchored before the new user message.
         // Account for that queued text before deciding to send another turn.
         // Claude Code estimates JS string length at roughly four units/token
@@ -1144,9 +1160,7 @@ impl State {
             .iter()
             .flat_map(|message| message.content.iter())
             .filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => {
-                    Some((text.encode_utf16().count() as u64).div_ceil(4))
-                }
+                ContentBlock::Text { text, .. } => Some(estimate_text_tokens(text)),
                 _ => None,
             })
             .fold(0u64, u64::saturating_add);
@@ -1156,7 +1170,10 @@ impl State {
                 .saturating_add(incoming_tokens)
                 >= self.compaction_threshold()
         {
-            self.compact_locked(conversation, cancel).await?;
+            add_usage(
+                &mut usage,
+                &self.compact_locked(conversation, cancel).await?,
+            );
         }
         let mut pending = conversation.messages.clone();
         if pending.is_empty() && !conversation.summary.is_empty() {
@@ -1176,12 +1193,11 @@ impl State {
             );
         }
         pending.extend(prompt);
-        let mut input = 0u64;
-        let mut cache_read = 0u64;
-        let mut cache_write = 0u64;
-        let mut output = 0u64;
         let mut previous_message_id = conversation.previous_message_id.clone();
         for index in 0..16 {
+            if cancel.flag.load(Ordering::SeqCst) {
+                return Err(NanocodexError::TurnCancelled);
+            }
             if index > 0
                 && !conversation.messages.is_empty()
                 && conversation.active_context_tokens >= self.compaction_threshold()
@@ -1190,7 +1206,10 @@ impl State {
                 // large tool result, not just when the next user turn starts.
                 // The checkpointed assistant/result pair is summarized once;
                 // the pending tool call is never executed a second time.
-                self.compact_locked(conversation, cancel).await?;
+                add_usage(
+                    &mut usage,
+                    &self.compact_locked(conversation, cancel).await?,
+                );
                 pending = vec![Message::text(
                     Role::User,
                     format!(
@@ -1215,10 +1234,7 @@ impl State {
                 )
                 .await?;
             previous_message_id = Some(response.id.clone());
-            input = input.saturating_add(response.usage.input_tokens);
-            cache_read = cache_read.saturating_add(response.usage.cache_read_input_tokens);
-            cache_write = cache_write.saturating_add(response.usage.cache_creation_input_tokens);
-            output = output.saturating_add(response.usage.output_tokens);
+            add_usage(&mut usage, &response.usage);
             if let Some(container) = &response.container {
                 let id = container
                     .get("id")
@@ -1302,11 +1318,17 @@ impl State {
                 let mut calls = futures_util::stream::FuturesUnordered::new();
                 for (position, (id, name, input, handler)) in tool_calls.iter().enumerate() {
                     calls.push(async move {
-                        (
-                            position,
-                            self.call_tool(id, name, input, handler, &request.events, index)
-                                .await,
-                        )
+                        // A prior completion can cancel before this queued
+                        // future is first polled. Do not start its handler.
+                        let result = if cancel.flag.load(Ordering::SeqCst) {
+                            None
+                        } else {
+                            Some(
+                                self.call_tool(id, name, input, handler, &request.events, index)
+                                    .await,
+                            )
+                        };
+                        (position, result)
                     });
                 }
                 let mut remaining = tool_calls.len();
@@ -1315,7 +1337,8 @@ impl State {
                         biased;
                         next = calls.next() => {
                             let Some((position, result)) = next else { break };
-                            results[position] = Some(result);
+                            interrupted |= result.is_none();
+                            results[position] = result;
                             remaining -= 1;
                         }
                         () = cancel.cancelled() => { interrupted = true; break; }
@@ -1323,6 +1346,12 @@ impl State {
                 }
             } else {
                 for (position, (id, name, input, handler)) in tool_calls.iter().enumerate() {
+                    // Retain a completed receipt even if its handler cancelled
+                    // the turn, but never poll the next sequential handler.
+                    if cancel.flag.load(Ordering::SeqCst) {
+                        interrupted = true;
+                        break;
+                    }
                     let result = tokio::select! {
                         biased;
                         value = self.call_tool(id, name, input, handler, &request.events, index) => value,
@@ -1375,8 +1404,8 @@ impl State {
                     // Usage belongs to the just-completed request and does
                     // not include the newly appended tool-result message.
                     .saturating_add(
-                        serde_json::to_vec(pending.last().expect("tool result was appended"))
-                            .map(|bytes| (bytes.len() as u64).div_ceil(4))
+                        serde_json::to_string(pending.last().expect("tool result was appended"))
+                            .map(|text| estimate_text_tokens(&text))
                             .unwrap_or(0),
                     );
                 if interrupted {
@@ -1422,15 +1451,16 @@ impl State {
                 request.request_id.clone(),
                 text,
                 Some(TurnUsage::from_reported(ReportedTurnUsage {
-                    input_tokens: input,
-                    cached_input_tokens: cache_read,
-                    cache_write_input_tokens: cache_write,
-                    output_tokens: output,
+                    input_tokens: usage.input_tokens,
+                    cached_input_tokens: usage.cache_read_input_tokens,
+                    cache_write_input_tokens: usage.cache_creation_input_tokens,
+                    output_tokens: usage.output_tokens,
                     reasoning_output_tokens: 0,
-                    total_tokens: input
-                        .saturating_add(cache_read)
-                        .saturating_add(cache_write)
-                        .saturating_add(output),
+                    total_tokens: usage
+                        .input_tokens
+                        .saturating_add(usage.cache_read_input_tokens)
+                        .saturating_add(usage.cache_creation_input_tokens)
+                        .saturating_add(usage.output_tokens),
                     estimated_cost: None,
                     cost_status: CostStatus::Other,
                 })),

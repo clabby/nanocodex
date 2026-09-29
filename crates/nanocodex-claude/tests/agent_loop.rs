@@ -347,17 +347,21 @@ async fn auto_compacts_at_usage_threshold_before_next_prompt() {
             .final_message(),
         "first answer"
     );
-    assert_eq!(
-        agent
-            .prompt("second")
-            .await
-            .unwrap()
-            .result()
-            .await
-            .unwrap()
-            .final_message(),
-        "second answer"
-    );
+    let second = agent
+        .prompt("second")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    assert_eq!(second.final_message(), "second answer");
+    // Both the automatic summary and the answer belong to this turn's usage.
+    let usage = second.usage().unwrap();
+    assert_eq!(usage.input_tokens(), 6);
+    assert_eq!(usage.cached_input_tokens(), 4);
+    assert_eq!(usage.cache_write_input_tokens(), 2);
+    assert_eq!(usage.output_tokens(), 10);
+    assert_eq!(usage.total_tokens(), 22);
     let log = requests.lock().unwrap();
     assert_eq!(
         log.len(),
@@ -798,8 +802,7 @@ async fn configured_auto_window_reserves_model_output_not_request_max_tokens() {
     }
 }
 
-#[tokio::test]
-async fn large_tool_result_compacts_within_turn_without_rerunning_effect() {
+async fn tool_result_compaction(receipt: String, should_compact: bool) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let received = requests.clone();
@@ -815,12 +818,12 @@ async fn large_tool_result_compacts_within_turn_without_rerunning_effect() {
                 };
                 let (blocks, reason) = match index {
                     1 => (vec![json!({"type":"tool_use","id":"toolu_effect","name":"effect","input":{}})], "tool_use"),
-                    2 => (vec![json!({"type":"text","text":"Effect completed once; continue task."})], "end_turn"),
+                    2 if should_compact => (vec![json!({"type":"text","text":"Effect completed once; continue task."})], "end_turn"),
                     _ => (vec![json!({"type":"text","text":"done"})], "end_turn"),
                 };
                 let mut body = stream(blocks, reason);
                 if index == 1 {
-                    body = body.replace("\"input_tokens\":3", "\"input_tokens\":67000");
+                    body = body.replace("\"input_tokens\":3", "\"input_tokens\":66500");
                 }
                 ([ ("content-type", "text/event-stream") ], body)
             }
@@ -836,6 +839,7 @@ async fn large_tool_result_compacts_within_turn_without_rerunning_effect() {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
+    let expected_receipt = receipt.clone();
     let (agent, _) = Nanocodex::builder(Claude::latest(client))
         .auto_compact_window_tokens(100_000)
         .tool(
@@ -848,37 +852,55 @@ async fn large_tool_result_compacts_within_turn_without_rerunning_effect() {
             },
             move |_| {
                 counter.fetch_add(1, Ordering::SeqCst);
-                async { Ok("effect receipt".into()) }
+                let receipt = receipt.clone();
+                async move { Ok(receipt) }
             },
         )
         .build()
         .unwrap();
+    let result = agent
+        .prompt("perform once")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    assert_eq!(result.final_message(), "done");
+    let model_calls = if should_compact { 3 } else { 2 };
     assert_eq!(
-        agent
-            .prompt("perform once")
-            .await
-            .unwrap()
-            .result()
-            .await
-            .unwrap()
-            .final_message(),
-        "done"
+        result.usage().unwrap().input_tokens(),
+        66_500 + 3 * (model_calls - 1)
     );
+    assert_eq!(result.usage().unwrap().output_tokens(), 5 * model_calls);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     let log = requests.lock().unwrap();
-    assert_eq!(log.len(), 3);
+    assert_eq!(log.len(), model_calls as usize);
     assert_eq!(
         log[1]["messages"][2]["content"][0]["content"],
-        "effect receipt"
+        expected_receipt
     );
-    assert_eq!(log[2]["messages"].as_array().unwrap().len(), 1);
-    assert!(
-        log[2]["messages"][0]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Effect completed once")
-    );
+    if should_compact {
+        assert_eq!(log[2]["messages"].as_array().unwrap().len(), 1);
+        assert!(
+            log[2]["messages"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Effect completed once")
+        );
+    }
     server.abort();
+}
+
+// Usage alone is below the threshold; the newly returned receipt crosses it.
+#[tokio::test]
+async fn large_tool_result_compacts_within_turn_without_rerunning_effect() {
+    tool_result_compaction("x".repeat(2_200), true).await;
+}
+
+// UTF-8 byte length would incorrectly trigger compaction for this receipt.
+#[tokio::test]
+async fn unicode_tool_result_uses_same_text_estimate_as_queued_prompt() {
+    tool_result_compaction("😀".repeat(600), false).await;
 }
 
 #[tokio::test]
@@ -942,4 +964,109 @@ async fn queued_user_text_counts_toward_next_compaction_decision() {
             .contains(&second)
     );
     server.abort();
+}
+
+// A completed handler can observe cancellation before returning its receipt.
+// Preserve that receipt, but do not start the following side effect.
+async fn cancellation_at_completed_handler_boundary(parallel: bool) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (control_tx, control) = tokio::sync::watch::channel(None::<nanocodex_agent::TurnControl>);
+    let request_control = control.clone();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let received = requests.clone();
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+        let received = received.clone();
+        let mut request_control = request_control.clone();
+        async move {
+            // Publish the control before any tool handler can be polled.
+            request_control.wait_for(Option::is_some).await.unwrap();
+            let index = { let mut log = received.lock().unwrap(); log.push(body); log.len() };
+            let (blocks, reason) = if index == 1 {
+                (vec![
+                    json!({"type":"tool_use","id":"a","name":"effect","input":{"first":true}}),
+                    json!({"type":"tool_use","id":"b","name":"effect","input":{"first":false}}),
+                ], "tool_use")
+            } else { (vec![json!({"type":"text","text":"recovered"})], "end_turn") };
+            ([("content-type", "text/event-stream")], stream(blocks, reason))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let effects = Arc::new(AtomicUsize::new(0));
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .parallel_tools(parallel)
+        .tool(
+            ToolDefinition {
+                name: "effect".into(),
+                description: "Synthetic effect".into(),
+                input_schema: json!({"type":"object"}),
+                strict: None,
+                defer_loading: false,
+            },
+            {
+                let control = control.clone();
+                let effects = effects.clone();
+                move |input| {
+                    let mut control = control.clone();
+                    let effects = effects.clone();
+                    async move {
+                        effects.fetch_add(1, Ordering::SeqCst);
+                        if input["first"] == true {
+                            let turn = control
+                                .wait_for(Option::is_some)
+                                .await
+                                .unwrap()
+                                .clone()
+                                .unwrap();
+                            turn.cancel().await.unwrap();
+                        }
+                        Ok("committed".into())
+                    }
+                }
+            },
+        )
+        .build()
+        .unwrap();
+    let turn = agent.prompt("perform effects").await.unwrap();
+    control_tx.send(Some(turn.control())).unwrap();
+    assert!(turn.result().await.is_err());
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        1,
+        "second side effect must not start after cancellation"
+    );
+    agent
+        .prompt("recover")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let log = requests.lock().unwrap();
+    assert_eq!(
+        log.len(),
+        2,
+        "cancelled turn must not send another provider request"
+    );
+    let results = log[1]["messages"][2]["content"].as_array().unwrap();
+    assert_eq!(results[0]["content"], "committed");
+    assert_eq!(results[1]["tool_use_id"], "b");
+    assert_eq!(results[1]["is_error"], true);
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancellation_at_completed_handler_boundary_stops_next_effect() {
+    cancellation_at_completed_handler_boundary(false).await;
+}
+
+#[tokio::test]
+async fn parallel_cancellation_at_completed_handler_boundary_stops_unstarted_effect() {
+    cancellation_at_completed_handler_boundary(true).await;
 }
