@@ -88,7 +88,7 @@ impl<P: ApprovedWebProvider> ClaudeWeb<P> {
     }
 
     /// Claude Code 2.1.284 client tool input shapes, not Messages API server tools.
-    /// See https://code.claude.com/docs/en/permissions for the distinct
+    /// See <https://code.claude.com/docs/en/permissions> for the distinct
     /// WebSearch and per-domain WebFetch permission boundaries.
     #[must_use]
     pub fn definitions() -> Vec<Value> {
