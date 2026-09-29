@@ -2,6 +2,140 @@ import XCTest
 import SwiftUI
 @testable import NanocodexUI
 
+#if os(iOS)
+import MarkdownUI
+
+final class ChatMarkdownTests: XCTestCase {
+    func testStructuredMarkdownAndIncompleteCodeSurviveBackgroundParsing() async throws {
+        let parser = ChatMarkdownParser()
+        let parsed = try await parser.content(for: "- Outer\n  - **Inner**\n\n| Name | Value |\n| --- | --- |\n| A | B |\n\n```swift\nlet value =")
+        let html = parsed.content.renderHTML()
+        XCTAssertTrue(html.contains("<table>"))
+        XCTAssertTrue(html.contains("<strong>Inner</strong>"))
+        XCTAssertTrue(html.contains("let value ="))
+        XCTAssertEqual(html.components(separatedBy: "<ul>").count - 1, 2)
+    }
+
+    @MainActor
+    func testWorkerKeepsMainActorAvailableAndCancellationWinsForCachedContent() async throws {
+        let parser = ChatMarkdownParser()
+        let source = String(repeating: "## Heading\n\nA **bold** paragraph.\n\n", count: 1500)
+        let task = Task { try await parser.content(for: source) }
+        let responsive = expectation(description: "Main actor available")
+        DispatchQueue.main.async { responsive.fulfill() }
+        await fulfillment(of: [responsive], timeout: 1)
+        let parsed = try await task.value
+        XCTAssertTrue(parsed.content.renderPlainText().contains("A bold paragraph."))
+        let cancelled = Task { try await parser.content(for: source) }
+        cancelled.cancel()
+        do { _ = try await cancelled.value; XCTFail("Cancelled cached work must not publish") }
+        catch is CancellationError { }
+    }
+
+    @MainActor
+    func testContinuousStreamingPublishesAndReplacementWins() async throws {
+        let renderer = ChatMarkdownRenderer()
+        defer { renderer.cancel() }
+        var source = "# Streaming\n\n", advanced = false
+        for index in 0..<60 {
+            source += "word "; renderer.update(source)
+            try await Task.sleep(for: .milliseconds(5))
+            if index > 5 && index < 59 && (renderer.rendered?.source.count ?? 0) > 30 { advanced = true }
+        }
+        XCTAssertTrue(advanced)
+        renderer.update("obsolete"); renderer.cancel(); renderer.update("replacement")
+        let deadline = Date().addingTimeInterval(2)
+        while renderer.rendered?.source != "replacement", Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(renderer.rendered?.source, "replacement")
+        XCTAssertEqual(renderer.rendered?.content.renderPlainText(), "replacement")
+    }
+
+    // Recycled chat hosts must show the already-parsed document on first paint,
+    // without exposing source markers while an asynchronous cache lookup runs.
+    @MainActor
+    func testRecycledRendererStartsWithCachedMarkdown() async throws {
+        let source = "## Recycled heading\n\nA **formatted** response."
+        _ = try await ChatMarkdownParser.shared.content(for: source)
+        let renderer = ChatMarkdownRenderer(initialSource: source)
+        XCTAssertEqual(renderer.rendered?.source, source)
+        XCTAssertTrue(renderer.rendered?.content.renderHTML().contains("<h2>Recycled heading</h2>") == true)
+        XCTAssertTrue(renderer.rendered?.content.renderHTML().contains("<strong>formatted</strong>") == true)
+    }
+
+    @MainActor
+    func testColdRendererParsesBeforeNativeCellAppearance() async throws {
+        let source = "## Cold cell " + UUID().uuidString
+        let renderer = ChatMarkdownRenderer(initialSource: source)
+        defer { renderer.cancel() }
+        let deadline = Date().addingTimeInterval(2)
+        while renderer.rendered == nil, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(renderer.rendered?.source, source,
+                       "A prefetched native host cannot depend on SwiftUI appearance to start parsing")
+    }
+
+    func testInlineMarkdownImagesDoNotLoad() async {
+        do {
+            _ = try await ChatMarkdownInlineImageProvider().image(
+                with: URL(string: "https://example.invalid/tracker.png")!, label: "Diagram")
+            XCTFail("Markdown images must not load remote content")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .unsupportedURL)
+        } catch { XCTFail("Unexpected error: \(error)") }
+    }
+
+    @MainActor
+    func testCancelledParseCanResumeSameSourceOnReappearance() async throws {
+        let renderer = ChatMarkdownRenderer()
+        defer { renderer.cancel() }
+        let source = String(repeating: "A paragraph.\n\n", count: 200)
+        renderer.update(source)
+        renderer.cancel()
+        renderer.update(source)
+        let deadline = Date().addingTimeInterval(2)
+        while renderer.rendered?.source != source, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(renderer.rendered?.source, source)
+    }
+
+    @MainActor
+    func testPhoneTableWrapsAndGrowsWithDynamicType() throws {
+        func height(_ long: Bool, _ size: DynamicTypeSize) throws -> Int {
+            let cell = long ? String(repeating: "Readable table content ", count: 8) : "Short"
+            let source = "| First | Second | Third |\n| --- | --- | --- |\n| \(cell) | \(cell) | \(cell) |"
+            let view = ChatMarkdownDocument(content: MarkdownContent(source), compact: false)
+                .environment(\.dynamicTypeSize, size).frame(width: 343)
+            let image = try XCTUnwrap(ImageRenderer(content: view).cgImage)
+            XCTAssertEqual(image.width, 343)
+            return image.height
+        }
+        let short = try height(false, .large)
+        let wrapped = try height(true, .large)
+        XCTAssertGreaterThan(wrapped, short + 100)
+        XCTAssertGreaterThan(try height(true, .accessibility2), wrapped)
+    }
+
+    @MainActor
+    func testLinksStayBlueUnderMonochromeTint() throws {
+        for scheme in [ColorScheme.light, .dark] {
+            let view = ChatMarkdownDocument(content: MarkdownContent("[Their explanation](https://example.com/source)"), compact: false)
+                .tint(.primary).padding().frame(width: 343)
+                .background(scheme == .light ? Color.white : Color.black).environment(\.colorScheme, scheme)
+            let image = try XCTUnwrap(ImageRenderer(content: view).cgImage)
+            var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+            let context = try XCTUnwrap(CGContext(data: &pixels, width: image.width, height: image.height,
+                bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            XCTAssertGreaterThan(stride(from: 0, to: pixels.count, by: 4).filter {
+                Int(pixels[$0 + 2]) > Int(pixels[$0]) + 40 && pixels[$0 + 2] > 100
+            }.count, 30)
+        }
+    }
+}
+#else
 final class ChatMarkdownTests: XCTestCase {
     func testStreamingCodeAndUnsupportedLanguagesKeepLiteralContent() async {
         let partial = "\tconst value = \"unfinished"
@@ -138,3 +272,5 @@ final class ChatMarkdownTests: XCTestCase {
         XCTAssertNil(ChatCodeHighlighter.cachedText(source, language: "bash", dark: false))
     }
 }
+
+#endif

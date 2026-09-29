@@ -1,4 +1,5 @@
 import AVFoundation
+import DSWaveformImageViews
 import InboxCore
 import SwiftUI
 
@@ -34,6 +35,9 @@ struct MeetingView: View {
                         Label("Recording · \(Duration.seconds(recorder.seconds).formatted())", systemImage: "mic.fill")
                             .foregroundStyle(.red)
                             .accessibilityIdentifier("meeting-recording-indicator")
+                        if scenePhase == .active {
+                            recordingWaveform
+                        }
                     }
                     if let sendError { Text(sendError).font(.caption).foregroundStyle(.red) }
                     HStack {
@@ -145,6 +149,30 @@ struct MeetingView: View {
                 model.retainLockedVoiceRecovery(text, captureID: UUID().uuidString, accountScope: scope)
             }
             recorder.discard()
+        }
+    }
+
+    private var recordingWaveform: some View {
+        GeometryReader { geometry in
+            WaveformLiveCanvas(
+                samples: waveformSamples(count: max(1, Int(geometry.size.width))),
+                configuration: .init(style: .filled(.systemRed), scale: 1, verticalScalingFactor: 0.45)
+            )
+        }
+        .frame(height: 44)
+        .clipped()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func waveformSamples(count: Int) -> [Float] {
+        // Recorder levels are quantized peaks (1...15), not dB. The renderer
+        // expects inverted amplitude: 1 is silence and 0 is full height.
+        let levels = Array(recorder.waveform.suffix(28))
+        let history = Array(repeating: UInt8(0), count: 28 - levels.count) + levels
+        // Expand the bounded history across the canvas; missing history is silent.
+        return (0..<count).map { index in
+            1 - Float(min(history[index * history.count / count], 15)) / 15
         }
     }
 

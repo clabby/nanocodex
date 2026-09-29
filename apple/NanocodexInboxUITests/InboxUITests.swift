@@ -192,6 +192,38 @@ final class InboxUITests: XCTestCase {
     }
     override func setUp() { super.setUp(); continueAfterFailure = false }
 
+    // A wide markdown table must not widen the transcript or hide the final
+    // paragraph beneath the composer, before or after the keyboard appears.
+    func testWideTableKeepsTailAboveComposer() {
+        let app = launch(["NANOCODEX_DEMO_WIDE_TABLE": "1"])
+        let input = composer(app)
+        let tail = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "End of table review")).firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 10))
+        let table = app.scrollViews["markdown-table"].firstMatch
+        XCTAssertTrue(table.waitForExistence(timeout: 5))
+        let conversation = app.descendants(matching: .any)["conversation"].firstMatch
+        for _ in 0..<5 {
+            if table.staticTexts["Library"].isHittable { break }
+            conversation.swipeDown()
+        }
+        XCTAssertTrue(table.staticTexts["Library"].isHittable)
+        table.swipeLeft()
+        let license = table.staticTexts["License"]
+        XCTAssertTrue(license.isHittable, "The final column must be reachable inside the table")
+        capture(app, "wide-table-final-columns")
+        table.swipeRight()
+        let latest = app.buttons["latest-messages"]
+        if latest.isHittable { latest.tap() }
+        for typing in [false, true] {
+            if typing { input.tap(); input.typeText("Keep this draft") }
+            let visibleTail = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                tail.exists && tail.frame.maxY <= input.frame.minY && tail.frame.minX >= app.frame.minX && tail.frame.maxX <= app.frame.maxX
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [visibleTail], timeout: 5), .completed)
+            capture(app, typing ? "wide-table-keyboard" : "wide-table-idle")
+        }
+    }
+
     func testSelectionBarStaysBelowComposerWhileTyping() {
         let app = launch()
         let input = composer(app)
@@ -1347,7 +1379,7 @@ final class InboxUITests: XCTestCase {
     private func launch(_ environment: [String: String] = [:], arguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--demo"] + arguments
-        app.launchEnvironment = ["NANOCODEX_DEMO_COMPLETE_AFTER_MS": "120000", "NANOCODEX_DEMO_DELAY_MS": "600"].merging(environment) { _, new in new }
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString, "NANOCODEX_DEMO_COMPLETE_AFTER_MS": "120000", "NANOCODEX_DEMO_DELAY_MS": "600"].merging(environment) { _, new in new }
         app.launch()
         XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 10))
         if environment["NANOCODEX_DEMO_EMPTY_AGENTS"] != "1" {
@@ -2644,9 +2676,12 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(card.staticTexts["First item"].exists)
         XCTAssertFalse(card.staticTexts["# Markdown check"].exists)
         capture(app, "markdown-inbox")
-        for _ in 0..<3 {
+        for _ in 0..<12 {
             if card.buttons["Copy code"].isHittable { break }
-            card.swipeUp()
+            // Short drags locate the code header without flinging past it as
+            // renderer typography and the keyboard-safe viewport change.
+            card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7))
+                .press(forDuration: 0.01, thenDragTo: card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
         }
         XCTAssertTrue(card.buttons["Copy code"].isHittable)
         XCTAssertTrue(card.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "let marker = \"**literal**\"")).firstMatch.exists)
@@ -2673,13 +2708,17 @@ final class InboxUITests: XCTestCase {
         let latest = conversation.staticTexts["Review note 80"]
         XCTAssertTrue(latest.waitForExistence(timeout: 5))
         XCTAssertTrue(latest.isHittable, "Lazy rich messages must open at the latest reply")
-        let initialY = latest.frame.minY
         capture(app, "long-markdown-before-keyboard")
         composer(app).tap()
         composer(app).typeText("Keep the latest reply in view")
         capture(app, "long-markdown-after-keyboard")
-        XCTAssertTrue(latest.isHittable)
-        XCTAssertEqual(latest.frame.minY, initialY, accuracy: 4, "Opening the keyboard retains the visible reply")
+        // Following keeps the reply's tail above the keyboard. The heading of
+        // a reply taller than this viewport may legitimately move offscreen.
+        // Reading-anchor stability is exercised separately while browsing history.
+        let tail = conversation.staticTexts.matching(NSPredicate(format: "label == %@", "Retained")).allElementsBoundByIndex.last
+        XCTAssertNotNil(tail)
+        XCTAssertTrue(tail?.isHittable == true)
+        XCTAssertLessThanOrEqual(tail?.frame.maxY ?? .infinity, composer(app).frame.minY)
         capture(app, "long-markdown-latest-with-keyboard")
 
         XCTAssertEqual(composer(app).value as? String, "Keep the latest reply in view")
@@ -3192,6 +3231,33 @@ final class InboxUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed)
         capture(app, "12-activity-failure")
     }
+    // Streaming Markdown and an expanding tool must share one timeline without
+    // overlapping rows, losing tool state, or covering the final answer.
+    func testStreamingMarkdownAndToolProgressShareTimeline() {
+        let app = launch(["NANOCODEX_DEMO_RICH_STREAM": "1"]); selectInbox(app)
+        let conversation = app.descendants(matching: .any)["conversation"].firstMatch
+        let tool = conversation.buttons["tool-disclosure-demo-rich-tool"]
+        XCTAssertTrue(tool.waitForExistence(timeout: 10))
+        XCTAssertTrue(tool.label.contains("Running"))
+        tool.tap()
+        XCTAssertEqual(tool.value as? String, "Expanded")
+        let done = conversation.staticTexts["Rich streaming review complete."]
+        XCTAssertTrue(done.waitForExistence(timeout: 30))
+        let latest = app.buttons["latest-messages"]
+        if latest.isHittable { latest.tap() }
+        XCTAssertTrue(done.isHittable)
+        XCTAssertLessThanOrEqual(done.frame.maxY, composer(app).frame.minY)
+        for _ in 0..<8 { if tool.isHittable { break }; conversation.swipeDown() }
+        XCTAssertTrue(tool.isHittable)
+        XCTAssertTrue(tool.label.contains("Completed"))
+        XCTAssertEqual(tool.value as? String, "Expanded")
+        XCTAssertTrue(conversation.staticTexts["Synthetic checks passed."].exists)
+        capture(app, "rich-stream-tool-completed")
+        if latest.isHittable { latest.tap() }
+        XCTAssertTrue(done.isHittable)
+        capture(app, "rich-stream-final-markdown")
+    }
+
     func testSuccessiveToolCardsFollowTailWithoutFlashingJump() {
         let app = launch(["NANOCODEX_DEMO_TOOL_ARRIVALS": "1",
                           "NANOCODEX_DEMO_PROFILE": UUID().uuidString]); selectInbox(app)
@@ -3327,7 +3393,7 @@ final class InboxUITests: XCTestCase {
     }
 
     func testLongThreadKeepsPlaceAcrossUpdatesHistoryAndForeground() {
-        let app = launch(["NANOCODEX_DEMO_LONG_THREAD": "1", "NANOCODEX_DEMO_HISTORY_DELAY_MS": "6000"]); selectInbox(app)
+        let app = launch(["NANOCODEX_DEMO_LONG_THREAD": "1", "NANOCODEX_DEMO_HISTORY_DELAY_MS": "6000", "NANOCODEX_RENDER_COUNTER": "1"]); selectInbox(app)
 
         XCTAssertTrue(app.descendants(matching: .any)["conversation"].firstMatch.waitForExistence(timeout: 5))
         let conversation = app.descendants(matching: .any)["conversation"].firstMatch
@@ -3356,9 +3422,24 @@ final class InboxUITests: XCTestCase {
         // catching a transient progress indicator after the request finished.
         XCTAssertTrue(loading.exists || earlier.exists, "Reaching earlier history loads the next page automatically")
         if loading.exists {
-            let first = conversation.staticTexts.allElementsBoundByIndex.first {
-                $0.isHittable && $0.label.hasPrefix("Progress note ") && $0.frame.minY >= conversation.frame.minY
-            }!
+            var visibleAnchor: XCUIElement?
+            let materialized = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                // Filter in the accessibility query before resolving per-element
+                // attributes. Slow CI snapshots can otherwise exhaust the wait
+                // while pagination changes the unfiltered element indices.
+                visibleAnchor = conversation.staticTexts.matching(
+                    NSPredicate(format: "label BEGINSWITH %@", "Progress note ")
+                ).allElementsBoundByIndex.first {
+                    $0.frame.minY >= conversation.frame.minY && $0.isHittable
+                }
+                return visibleAnchor != nil
+            }, object: nil)
+            guard XCTWaiter.wait(for: [materialized], timeout: 10) == .completed,
+                  let first = visibleAnchor else {
+                capture(app, "history-loading-missing-anchor")
+                return XCTFail("Existing messages must remain readable while older history loads: "
+                    + app.staticTexts["conversation-native-scroll-state"].label + "\n" + conversation.debugDescription)
+            }
             let firstLabel = first.label
             let before = first.frame.minY
             gone(loading)
@@ -4000,6 +4081,68 @@ final class InboxUITests: XCTestCase {
             object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [invalidated], timeout: 5), .completed,
                        "A submitted message must invalidate the render projection")
+    }
+
+    // Synthetic, opt-in measurements. XCTest interaction time includes driver
+    // waits; these are simulator diagnostics, not physical-device FPS claims.
+    func testPerformanceChatTimelineScrolling() throws {
+        guard ProcessInfo.processInfo.environment["NANOCODEX_INBOX_PERFORMANCE"] == "1" else {
+            throw XCTSkip("Opt-in synthetic chat profiling")
+        }
+        let app = launch(["NANOCODEX_DEMO_RENDER_PROFILE": "1",
+                          "NANOCODEX_DEMO_RENDER_ROWS": "500",
+                          "NANOCODEX_RENDER_COUNTER": "1"])
+        let conversation = app.descendants(matching: .any)["conversation"].firstMatch
+        XCTAssertTrue(conversation.waitForExistence(timeout: 10))
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        var metrics: [XCTMetric] = [XCTClockMetric(), XCTCPUMetric(application: app), XCTMemoryMetric(application: app)]
+        if #available(iOS 26.0, *) { metrics.append(XCTHitchMetric(application: app)) }
+        measure(metrics: metrics, options: options) {
+            for _ in 0..<6 { conversation.swipeDown() }
+            let latest = app.buttons["latest-messages"]
+            XCTAssertTrue(latest.isHittable)
+            latest.tap()
+            gone(latest)
+            let counter = app.staticTexts["conversation-native-mounted-count"]
+            XCTAssertEqual(counter.value as? String, "500")
+            let mounted = Int(counter.label) ?? 0
+            XCTAssertGreaterThan(mounted, 0)
+            XCTAssertLessThanOrEqual(mounted, 64)
+            print("PROFILE_CHAT_MOUNTED \(mounted)/500")
+        }
+        capture(app, "profile-500-message-scroll")
+    }
+
+    func testPerformanceStreamingMarkdownAndTools() throws {
+        guard ProcessInfo.processInfo.environment["NANOCODEX_INBOX_PERFORMANCE"] == "1" else {
+            throw XCTSkip("Opt-in synthetic chat profiling")
+        }
+        let app = launch(["NANOCODEX_DEMO_RICH_STREAM": "1",
+                          "NANOCODEX_DEMO_STREAMING_GROWTH": "1",
+                          "NANOCODEX_DEMO_STREAM_INTERVAL_MS": "1000"])
+        selectInbox(app)
+        let conversation = app.descendants(matching: .any)["conversation"].firstMatch
+        let tool = conversation.buttons["tool-disclosure-demo-rich-tool"]
+        XCTAssertTrue(tool.waitForExistence(timeout: 10))
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        var metrics: [XCTMetric] = [XCTClockMetric(), XCTCPUMetric(application: app), XCTMemoryMetric(application: app)]
+        if #available(iOS 26.0, *) { metrics.append(XCTHitchMetric(application: app)) }
+        // Sequential windows over a growing document, not identical replays.
+        // Keep one process alive so XCTest can harvest its CPU counters.
+        measure(metrics: metrics, options: options) {
+            for _ in 0..<8 { if tool.isHittable { break }; conversation.swipeDown() }
+            XCTAssertTrue(tool.isHittable)
+            tool.tap()
+            let latest = app.buttons["latest-messages"]
+            if latest.isHittable { latest.tap() }
+            Thread.sleep(forTimeInterval: 5)
+        }
+        for _ in 0..<8 { if tool.isHittable { break }; conversation.swipeDown() }
+        XCTAssertTrue(tool.isHittable)
+        XCTAssertTrue(tool.label.contains("Completed"))
+        capture(app, "profile-streaming-markdown-and-tools")
     }
 
     func testPerformanceDemoConversationRendering() throws {

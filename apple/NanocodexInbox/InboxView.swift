@@ -324,16 +324,12 @@ struct InboxView: View {
             }
             .frame(maxWidth: InboxChrome.maximumWidth)
             .frame(maxWidth: .infinity)
-            // Continue the chrome behind the home indicator instead of leaving
-            // a white strip below the floating composer and picker.
-            .background {
-                LinearGradient(colors: [.clear, ChatPalette.background, ChatPalette.background],
-                               startPoint: .top, endPoint: .bottom)
-                    .ignoresSafeArea(.container, edges: .bottom)
+            .background(Ink.background.ignoresSafeArea(edges: .bottom))
+            .overlay(alignment: .top) {
+                LinearGradient(colors: [Ink.background.opacity(0), Ink.background], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 16).offset(y: -16).allowsHitTesting(false)
             }
-            // The dock is an overlay rather than a system tab bar. Let its
-            // controls sit nearer the home indicator while a draft is idle;
-            // return to the keyboard-safe position as soon as an editor focuses.
+            // Keep the idle dock near the home indicator, restoring keyboard clearance on focus.
             .offset(y: composerFocused || todoInputFocused ? 0 : 14)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomDockHeight = $0 }
         }
@@ -728,6 +724,16 @@ struct InboxView: View {
                     Label("Device access", systemImage: "hand.raised")
                 }.accessibilityIdentifier("settings-device-access")
             }
+            Section {
+                NavigationLink("Open-source licenses") {
+                    ScrollView {
+                        Text(Self.mobileDependencyNotices)
+                            .font(.caption.monospaced()).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding()
+                    }
+                    .navigationTitle("Open-source licenses")
+                }.accessibilityIdentifier("settings-open-source")
+            }
             Section("Controls") {
                 Text("Open Conversations at the top to switch agents. The compose button creates a conversation. Back, Screens, and captured context are in the more menu.")
                 Text("The sidebar lists your conversations. Green identifies running agents. Drafts and reading positions stay with each conversation.").font(.caption)
@@ -738,6 +744,11 @@ struct InboxView: View {
         .navigationTitle("Settings")
         .accessibilityIdentifier("inbox-settings")
     }
+    private static let mobileDependencyNotices: String = {
+        guard let url = Bundle.main.url(forResource: "MOBILE_DEPENDENCY_NOTICES", withExtension: "md"),
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return "License notices are unavailable." }
+        return text
+    }()
     private func createAgent() {
         composerFocused = false
         #if os(iOS)
@@ -1592,6 +1603,7 @@ private struct AttachmentImageView: View {
     var contentMode: ContentMode = .fill
     var imageRatio: Binding<CGFloat>? = nil
     @State private var thumbnail: CGImage?
+    @State private var failed = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -1602,6 +1614,15 @@ private struct AttachmentImageView: View {
                         .interpolation(.high).aspectRatio(contentMode: contentMode)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
+                } else if failed {
+                    VStack(spacing: 6) {
+                        Image(systemName: "photo.badge.exclamationmark").font(.title3)
+                        Text("Image unavailable").font(.caption).lineLimit(1).minimumScaleFactor(0.75)
+                    }
+                    .foregroundStyle(Ink.muted)
+                    .padding(8)
+                    .frame(maxWidth: geometry.size.width, maxHeight: geometry.size.height)
+                    .clipped()
                 } else {
                     ProgressView().controlSize(.small).tint(Ink.muted)
                 }
@@ -1611,57 +1632,36 @@ private struct AttachmentImageView: View {
         .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(.primary.opacity(0.06), lineWidth: 0.5))
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .accessibilityElement(children: .ignore).accessibilityLabel("Attached image")
-        .accessibilityValue(thumbnail == nil ? "Loading image" : "Image loaded")
+        .accessibilityValue(failed ? "Image unavailable" : thumbnail == nil ? "Loading image" : "Image loaded")
         .task(id: visible ? source : nil) {
-            guard visible, let source else { thumbnail = nil; return }
-            if let cached = Self.cache.object(forKey: ThumbnailKey(source)) {
-                thumbnail = cached
-                imageRatio?.wrappedValue = CGFloat(cached.width) / CGFloat(cached.height)
-                return
+            thumbnail = nil
+            failed = false
+            guard visible, let source else { return }
+            do {
+                let decoded: CGImage
+                switch source {
+                case .file(let url): decoded = try await ChatImagePipeline.thumbnail(url: url, maxPixelSize: 960)
+                case .data(let data): decoded = try await ChatImagePipeline.thumbnail(data: data)
+                case .inline(let value):
+                    guard value.hasPrefix("data:image/"), let separator = value.firstIndex(of: ","),
+                          value[..<separator].hasSuffix(";base64"),
+                          let data = Data(base64Encoded: String(value[value.index(after: separator)...])) else {
+                        throw ChatImagePipeline.Failure.unavailable
+                    }
+                    decoded = try await ChatImagePipeline.thumbnail(data: data)
+                }
+                try Task.checkCancellation()
+                thumbnail = decoded
+                imageRatio?.wrappedValue = CGFloat(decoded.width) / CGFloat(decoded.height)
+            } catch is CancellationError {
+                // Cancellation from scrolling or source replacement is not a failure.
+            } catch {
+                guard !Task.isCancelled else { return }
+                failed = true
             }
-            let decoded = await Task.detached(priority: .userInitiated) { Self.decode(source) }.value
-            guard !Task.isCancelled else { return }
-            if let decoded { Self.cache.setObject(decoded, forKey: ThumbnailKey(source), cost: decoded.bytesPerRow * decoded.height) }
-            thumbnail = decoded
-            if let decoded { imageRatio?.wrappedValue = CGFloat(decoded.width) / CGFloat(decoded.height) }
         }
     }
 
-    private final class ThumbnailKey: NSObject {
-        let source: AttachmentImageSource
-        init(_ source: AttachmentImageSource) { self.source = source }
-        override var hash: Int { source.hashValue }
-        override func isEqual(_ other: Any?) -> Bool { (other as? ThumbnailKey)?.source == source }
-    }
-    private static let cache: NSCache<ThumbnailKey, CGImage> = {
-        let cache = NSCache<ThumbnailKey, CGImage>()
-        cache.totalCostLimit = 24 * 1024 * 1024
-        cache.countLimit = 32
-        return cache
-    }()
-
-    private nonisolated static func decode(_ source: AttachmentImageSource?) -> CGImage? {
-        let image: CGImageSource?
-        switch source {
-        case .file(let url):
-            guard url.isFileURL else { return nil }
-            image = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
-        case .inline(let value):
-            guard value.hasPrefix("data:image/"), let separator = value.firstIndex(of: ","),
-                  value[..<separator].hasSuffix(";base64"),
-                  let data = Data(base64Encoded: String(value[value.index(after: separator)...])) else { return nil }
-            image = CGImageSourceCreateWithData(data as CFData, nil)
-        case .data(let data): image = CGImageSourceCreateWithData(data as CFData, nil)
-        case nil: return nil
-        }
-        guard let image else { return nil }
-        return CGImageSourceCreateThumbnailAtIndex(image, 0, [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 960,
-            kCGImageSourceShouldCacheImmediately: true,
-        ] as CFDictionary)
-    }
 }
 
 private struct ConnectView: View {
@@ -2736,15 +2736,15 @@ private struct ConversationContentView: View {
     var body: some View {
         Group {
             ZStack(alignment: .bottom) {
-            // The transcript fills the viewport and scrolls beneath the controls
-            // and composer. Content margins keep the final message reachable.
+            // Bound the native viewport above the dock. Occluded rows must not
+            // remain tappable or exposed as visible accessibility elements.
             GeometryReader { viewport in
             let boundaryItemID = historyBoundaryItemID
             ZStack(alignment: .top) {
             NativeConversationTranscript(
                 rows: nativeRows(in: viewport), proxy: scroll,
                 followsLatest: followsLatest && pendingReadingRestore == nil && !model.needsLatestHistory && !navigationActive,
-                bottomInset: composerHeight + 52,
+                bottomInset: 0,
                 onFrames: { frames in
                     // Native frames contain only realized cells in viewport coordinates.
                     var visible = frames
@@ -2792,6 +2792,7 @@ private struct ConversationContentView: View {
                     followLatest(using: scroll)
                 }
                 })
+            .padding(.bottom, composerHeight + 52)
             .contentShape(Rectangle())
             .onChange(of: revision.projectionRevision) { _, _ in
                 continueUserNavigation(using: scroll)
