@@ -165,7 +165,7 @@ private struct GeneratedAppScreen: View {
                     description: Text("Try reloading, editing the app, or restoring its previous version."))
             }
             if recovery != nil, let session {
-                GeneratedAgentRecoveryControls(session: session, openChat: {
+                GeneratedAgentRecoveryControls(session: session, allowNewAttempt: recovery?.allowNewAttempt == true, openChat: {
                     guard let recovery else { return }
                     let account = model.generatedAppAccount
                     Task {
@@ -195,7 +195,7 @@ private struct GeneratedAppScreen: View {
                 guard let recovery else { return }
                 do {
                     try model.releaseGeneratedAppAgentReceipt(id: appID, prompt: recovery.prompt, account: model.generatedAppAccount)
-                    recovery = nil
+                    self.recovery = nil
                 } catch { self.error = error.localizedDescription }
             }
         } message: {
@@ -301,7 +301,10 @@ private final class GeneratedAppStore {
             let receipt = try await model.runGeneratedAppAgent(id: app.id, title: app.title, purpose: app.description,
                 prompt: prompt, account: account, isActive: { [weak self] in self?.active == true })
             try check()
-            if ["completed", "failed", "cancelled"].contains(receipt["status"].string) { agentRecovery(GeneratedAgentRecovery(prompt: prompt, agentID: receipt["agent_id"].string)) }
+            if !receipt["agent_id"].string.isEmpty {
+                agentRecovery(GeneratedAgentRecovery(prompt: prompt, agentID: receipt["agent_id"].string,
+                    allowNewAttempt: ["completed", "failed", "cancelled"].contains(receipt["status"].string)))
+            }
             switch receipt["status"].string {
             case "completed": return receipt["result"].string
             case "pending": throw GeneratedAppFailure("Your agent is still working. Continue in Chat, or tap the same action again to check its result.")
@@ -328,13 +331,14 @@ private struct GeneratedAppFailure: LocalizedError {
 
 private struct GeneratedAgentRecoveryControls: View {
     @ObservedObject var session: NativeAppSession
+    let allowNewAttempt: Bool
     let openChat: () -> Void
     let newAttempt: () -> Void
     var body: some View {
         HStack {
             Button("View agent work", action: openChat)
             Spacer()
-            Button("Start a new attempt…", action: newAttempt)
+            if allowNewAttempt { Button("Start a new attempt…", action: newAttempt) }
         }.font(.footnote).padding(12).disabled(session.isBusy)
     }
 }
@@ -342,4 +346,5 @@ private struct GeneratedAgentRecoveryControls: View {
 private struct GeneratedAgentRecovery {
     let prompt: String
     let agentID: String
+    let allowNewAttempt: Bool
 }
