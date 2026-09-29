@@ -121,6 +121,35 @@ device-local resource identities show an unavailable message, and tool details h
 embedded binary data. Result parsing and image decoding stay outside view bodies,
 and repeated inner/outer tool outputs share a stable content identity.
 
+## Personal apps
+
+The Apps menu beside TODO, Chat and CRM lists saved apps and **Create an app**.
+Describe a tracker or another utility, follow generation in Chat, then open it
+from Apps. The pencil requests a change to the same app. The app menu can reload
+or restore its previous source without reverting saved data. Deleting an app
+also deletes its data after confirmation.
+
+Apps are self-contained HTML/CSS/JavaScript in an isolated WebKit view. Code and
+JSON state live in account-owned cloud storage, independent of the creating
+conversation. Storage requires a network connection; this version does not
+provide offline synchronization, photo/file input, external dependencies or a
+Swift interpreter. Each account supports 100 apps; each app has up to 256 KiB of
+HTML and 256 KiB of JSON state.
+
+Generated apps use `window.nanocodex.data.get()` and
+`window.nanocodex.data.set(value, revision)` for versioned state. A real tap or
+keyboard action can call `window.nanocodex.agent.request(prompt)` to invoke the
+logged-in agent and its available tools. This returns
+`{agent_id, turn_id, status, result}`; `result` is text or null. After five minutes,
+a running turn returns `pending` and remains available in Chat. Closing the app
+stops its foreground wait, while an admitted agent turn can continue in Chat.
+Reconciliation IDs are retained while the native process remains alive.
+Credentials remain in the native client; there is no arbitrary authenticated URL
+bridge. Normal agent action permissions remain in effect.
+
+See the [persistent app HTTP contract](../js/managed/README.md#persistent-prompt-apps)
+for source publication, state conflicts and deployment migration requirements.
+
 ## App identity
 
 The App Store Connect listing is [Centaur by Paradigm](https://appstoreconnect.apple.com/apps/6809176380),

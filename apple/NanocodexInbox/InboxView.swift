@@ -160,7 +160,9 @@ struct InboxView: View {
     @State private var mainSurface: MainSurface = (ProcessInfo.processInfo.arguments.contains("--demo")
         && !ProcessInfo.processInfo.arguments.contains("--todo-ui-fixture")) ? .chat : .todo
     @State private var todoInputFocused = false
-    private enum MainSurface { case todo, chat, crm }
+    private enum MainSurface { case todo, chat, crm, apps }
+    @State private var selectedGeneratedApp: String?
+    @State private var showCreateApp = false
     @State private var showConversations = false
     @State private var showRunningAgents = false
     @State private var drawerTranslation: CGFloat = 0
@@ -191,6 +193,9 @@ struct InboxView: View {
                 } else if model.connected && mainSurface == .crm {
                     CRMView(model: model)
                         .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
+                } else if model.connected && mainSurface == .apps {
+                    GeneratedAppsView(model: model, selection: $selectedGeneratedApp, create: { showCreateApp = true }, openChat: { mainSurface = .chat; model.openThread() })
+                        .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
                 } else { inbox }
             }
                 .environment(\.conversationComposerHeight, bottomDockHeight)
@@ -216,6 +221,15 @@ struct InboxView: View {
                         .navigationBarTitleDisplayMode(.inline)
                         #endif
                 }
+        }
+        .sheet(isPresented: $showCreateApp) {
+            CreateGeneratedAppSheet(model: model) { mainSurface = .chat; model.openThread() }
+        }
+        .task(id: model.screenScope) {
+            while !Task.isCancelled {
+                if model.connected && updateScenePhase == .active { await model.refreshGeneratedApps() }
+                do { try await Task.sleep(for: .seconds(15)) } catch { return }
+            }
         }
         // Account changes discard navigation destinations and their private state.
         .id(model.screenScope)
@@ -305,7 +319,7 @@ struct InboxView: View {
         }
         .onChange(of: model.connected) { _, connected in
             if connected && model.musicConnectorToOpen != nil { showConnectors = true }
-            if !connected { mainSurface = .todo; screenThreads.removeAll(); screenExpanded = false; showConversations = false; showScreens = false; showScheduledJobs = false; showConnectors = false; showSettings = false; readingPositions.values.removeAll() }
+            if !connected { selectedGeneratedApp = nil; showCreateApp = false; mainSurface = .todo; screenThreads.removeAll(); screenExpanded = false; showConversations = false; showScreens = false; showScheduledJobs = false; showConnectors = false; showSettings = false; readingPositions.values.removeAll() }
         }
 
     }
@@ -343,13 +357,27 @@ struct InboxView: View {
             mainNavigationButton(.todo, title: "TODO", symbol: "checkmark.square", identifier: "main-tab-todo")
             mainNavigationButton(.chat, title: "Chat", symbol: "bubble.left", identifier: "main-tab-chat")
             mainNavigationButton(.crm, title: "CRM", symbol: "person.2", identifier: "main-tab-crm")
+            if !model.isDemo {
+                Menu {
+                    ForEach(model.generatedApps) { app in
+                        Button(app.title) { selectedGeneratedApp = app.id; mainSurface = .apps }
+                    }
+                    if !model.generatedApps.isEmpty { Divider() }
+                    Button { selectedGeneratedApp = nil; mainSurface = .apps } label: { Label("Your apps", systemImage: "square.grid.2x2") }
+                    Button { showCreateApp = true } label: { Label("Create an app", systemImage: "plus") }
+                } label: {
+                    Image(systemName: "square.grid.2x2").font(.system(size: 19, weight: .medium))
+                        .frame(width: InboxChrome.touchTarget, height: InboxChrome.touchTarget)
+                        .background(mainSurface == .apps ? Color.primary.opacity(0.09) : .clear, in: Capsule())
+                }.accessibilityLabel("Apps").accessibilityIdentifier("main-tab-apps")
+            }
         }
     }
 
     private var mainNavigation: some View {
         InboxNavigationLayout {
             navigationTabs
-            if model.focused != nil && mainSurface != .crm { MobileModelControls(model: model) }
+            if model.focused != nil && (mainSurface == .chat || mainSurface == .todo) { MobileModelControls(model: model) }
         }
         .padding(.horizontal, 5).padding(.vertical, 3)
         .accessibilityElement(children: .contain)
