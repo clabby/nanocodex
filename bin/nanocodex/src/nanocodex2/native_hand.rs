@@ -272,6 +272,10 @@ pub(super) async fn run_observed(
     let mut tools = Tools::builder()
         .without_defaults()
         .add(WorkspaceTools::new(state.machine.workspace()));
+    #[cfg(target_os = "macos")]
+    if super::native_secure_input::NativeSecureInput::installed() {
+        tools = tools.add(super::native_secure_input::NativeSecureInput);
+    }
     if let Some(config) = nanocodex_computer::ComputerConfig::discover_or_install()
         .await
         .map_err(ManagedError::Configuration)?

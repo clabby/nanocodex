@@ -155,9 +155,11 @@ jobs:
           -derivedDataPath apple/build/ios
           -clonedSourcePackagesDirPath "$RUNNER_TEMP/inbox-packages-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           -disablePackageRepositoryCache CODE_SIGNING_ALLOWED=NO build
-      - name: Native iPhone journey
+      # Keep the full suite paused; these bounded review journeys produce
+      # successful-test recordings for the mobile rendering/media changes.
+      - name: Record mobile chat timeline and media review journeys
         id: native-tests
-        if: ${{ false }}
+        if: github.event_name == 'pull_request'
         run: |
           device=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for ds in json.load(sys.stdin)["devices"].values() for d in ds if d["name"].startswith("iPhone")))')
           xcodebuild -project apple/NanocodexInbox.xcodeproj -scheme NanocodexInbox -configuration Debug -destination "platform=iOS Simulator,id=$device" -derivedDataPath apple/build/ios -clonedSourcePackagesDirPath "$RUNNER_TEMP/inbox-packages-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" -disablePackageRepositoryCache CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- build-for-testing
@@ -194,7 +196,21 @@ jobs:
           )
           # Preserve the full XCTest transcript as evidence while keeping the
           # Actions log focused enough that late-suite failures are not cut off.
-          xcodebuild -xctestrun "$xctestrun" -destination "platform=iOS Simulator,id=$device" -parallel-testing-enabled NO -retry-tests-on-failure -test-iterations 2 -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300 -resultBundlePath apple/build/inbox.xcresult test-without-building 2>&1 \
+          xcodebuild -xctestrun "$xctestrun" -destination "platform=iOS Simulator,id=$device" -parallel-testing-enabled NO -retry-tests-on-failure -test-iterations 2 -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300 -resultBundlePath apple/build/inbox.xcresult \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testMarkdownRendersInConversationAndAfterTabSwitch \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testWideTableKeepsTailAboveComposer \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testStreamingMarkdownAndToolProgressShareTimeline \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeMediaPreviewZoomPlaybackAndDraftRestoration \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testStreamingGrowthDoesNotMoveReaderInEarlierParagraphs \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testLatestButtonResumesFollowingSubsequentStreamingArrivals \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testSuccessiveToolCardsFollowTailWithoutFlashingJump \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeTranscriptPreservesExpandedToolAfterCellRecycling \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testConversationComposerKeepsReadingPositionAndSharesDraft \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeTranscriptBoundsMountedCellsFor500Rows \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testLongThreadKeepsPlaceAcrossUpdatesHistoryAndForeground \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testSwitchingTabsRestoresEarlierReadingPosition \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testDrawerButtonsAndEdgeSwipePreserveMiddleTranscriptAnchor \
+            test-without-building 2>&1 \
             | tee apple/build/evidence/inbox-xcodebuild.log \
             | grep -E 'Test Case .* (started|passed|failed|skipped)|\.swift:[0-9]+: error:|Testing failed:|\*\* TEST (SUCCEEDED|FAILED) \*\*'
       - name: Export native XCTest recordings and screenshots
@@ -202,6 +218,27 @@ jobs:
         run: |
           if [ -f apple/build/inbox.xcresult/Info.plist ]; then
             xcrun xcresulttool export attachments --path apple/build/inbox.xcresult --output-path apple/build/evidence/attachments
+            python3 - <<'PYTHON'
+          import json, pathlib, shutil
+          source = pathlib.Path("apple/build/evidence/attachments")
+          destination = pathlib.Path("apple/build/evidence/recordings")
+          destination.mkdir(exist_ok=True)
+          names = {
+              "testStreamingMarkdownAndToolProgressShareTimeline": "streaming-markdown-and-tools",
+              "testStreamingGrowthDoesNotMoveReaderInEarlierParagraphs": "reading-during-streaming",
+              "testLatestButtonResumesFollowingSubsequentStreamingArrivals": "resume-following-stream",
+              "testWideTableKeepsTailAboveComposer": "table-and-keyboard",
+          }
+          for test in json.loads((source / "manifest.json").read_text()):
+              identifier = test.get("testIdentifier", "")
+              name = next((name for method, name in names.items() if method + "()" in identifier), None)
+              if not name:
+                  continue
+              for index, attachment in enumerate(test["attachments"]):
+                  filename = attachment["exportedFileName"]
+                  if filename.endswith(".mp4"):
+                      shutil.copy2(source / filename, destination / f"{name}-{index}.mp4")
+          PYTHON
           else
             echo "Skipping attachment export because the result bundle is incomplete"
           fi

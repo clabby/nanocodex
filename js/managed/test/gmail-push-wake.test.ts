@@ -4,7 +4,7 @@ import { ManagedAgentOwnership, type Env, type DurableAgentSession } from "../sr
 import { ensureAccount } from "../src/account-auth";
 
 // Boundary failure modes: foreign ownership, invalid/unbounded payloads, duplicate
-// deliveries (including races), conflicting replay, and active-turn backpressure.
+// deliveries (including races/eviction), conflicting replay, and quiet processing while busy.
 const sessions = () => (env as unknown as {
   NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
 }).NANOCODEX_SESSIONS;
@@ -15,7 +15,7 @@ afterEach(async () => {
   for (const agentId of fixtureAgents) {
     const stub = sessions().getByName(agentId);
     await runInDurableObject(stub, async (_, state) => {
-      // This suite owns admission; terminate fixture retries before teardown.
+      // Terminate the explicitly busy fixture before teardown.
       state.storage.sql.exec("UPDATE managed_turns SET state='cancelled', retry_at=NULL WHERE state='accepted'");
       await state.storage.deleteAlarm();
     });
@@ -28,7 +28,7 @@ const input = (agentId: string) => ({ userId: "gmail-fixture-owner", agentId,
 function initialize(state: DurableObjectState, agentId: string, session: DurableAgentSession, ownerId = "gmail-fixture-owner") {
   fixtureAgents.add(agentId);
   // Gate mandatory credential-subject startup, not optional account discovery.
-  // This suite owns admission and stops before model execution.
+  // Provider dependencies are synthetic; Gmail processing must never execute a chat turn.
   const current = (session as unknown as {env:Env}).env;
   Object.defineProperty(session,"env",{value:{...current,NANOCODEX:{fetch:async(request:RequestInfo | URL)=>{
     if (new URL(request instanceof Request ? request.url : String(request)).pathname.startsWith("/subjects/")) {
@@ -41,7 +41,12 @@ function initialize(state: DurableObjectState, agentId: string, session: Durable
     VALUES(1,? ,?,'org','team',1,'https://nanocodex.example','managed',?)`, agentId, ownerId, Date.now());
 }
 
-describe("private Gmail wake admission", () => {
+function expectQuiet(state: DurableObjectState) {
+  expect(state.storage.sql.exec("SELECT id FROM managed_turns").toArray()).toHaveLength(0);
+  expect(state.storage.sql.exec("SELECT cursor FROM managed_events").toArray()).toHaveLength(0);
+}
+
+describe("private quiet Gmail processing", () => {
   it("exposes the wake only on the private ownership host and validates before dispatch", async () => {
     const entrypoint = new ManagedAgentOwnership(createExecutionContext(), env as unknown as Env);
     const agentId = crypto.randomUUID();
@@ -56,9 +61,13 @@ describe("private Gmail wake admission", () => {
     await runInDurableObject(sessions().getByName(agentId), async (session, state) => initialize(state, agentId, session));
     const accepted = await entrypoint.fetch(request());
     expect(accepted.status).toBe(200);
-    expect(await accepted.json()).toMatchObject({status:"accepted",turnId:expect.any(String)});
+    expect(await accepted.json()).toEqual({status:"accepted"});
     expect(await (await entrypoint.fetch(request())).json()).toMatchObject({status:"duplicate"});
     expect((await entrypoint.fetch(request(url, {...input(agentId),input:"changed"}))).status).toBe(409);
+    await abortAllDurableObjects();
+    expect(await (await entrypoint.fetch(request())).json()).toEqual({status:"duplicate"});
+    expect((await entrypoint.fetch(request(url, {...input(agentId),input:"changed"}))).status).toBe(409);
+    await runInDurableObject(sessions().getByName(agentId), async (_, state) => expectQuiet(state));
   });
 
   it("rejects foreign/missing owners and unbounded payloads without admission", async () => {
@@ -76,7 +85,7 @@ describe("private Gmail wake admission", () => {
     });
   });
 
-  it("does not enqueue while busy and allows the same event to retry when idle", async () => {
+  it("processes quietly while a chat turn is busy and keeps its receipt when idle", async () => {
     const agentId = crypto.randomUUID();
     await runInDurableObject(sessions().getByName(agentId), async (session, state) => {
       initialize(state, agentId, session);
@@ -84,32 +93,51 @@ describe("private Gmail wake admission", () => {
         accepted_cursor,created_at,accepted_at,updated_at,retry_at)
         VALUES('busy','hash','"busy"','{"capabilities":[]}','accepted',1,?,?,?,?)`,
       Date.now(),Date.now(),Date.now(),Date.now()+60_000);
-      expect(await session.gmailPushWake(input(agentId))).toEqual({status:"busy"});
+      expect(await session.gmailPushWake(input(agentId))).toEqual({status:"accepted"});
       expect(state.storage.sql.exec("SELECT id FROM managed_turns").toArray()).toHaveLength(1);
       state.storage.sql.exec("UPDATE managed_turns SET state='completed' WHERE id='busy'");
-      expect(await session.gmailPushWake(input(agentId))).toMatchObject({status:"accepted",turnId:expect.any(String)});
+      expect(await session.gmailPushWake(input(agentId))).toEqual({status:"duplicate"});
+      expect(state.storage.sql.exec("SELECT id FROM managed_turns").toArray()).toEqual([{id:"busy"}]);
+      expect(state.storage.sql.exec("SELECT cursor FROM managed_events").toArray()).toHaveLength(0);
     });
   });
 
-  it("admits a concurrent event once, replays its receipt and rejects changed input", async () => {
+  it("replays historical Gmail turn receipts quietly and preserves conflicts", async () => {
+    const agentId = crypto.randomUUID();
+    const wake = input(agentId);
+    const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(JSON.stringify([wake.userId,wake.agentId,wake.eventId]))));
+    const id = "gmail:" + Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2,"0")).join("");
+    await runInDurableObject(sessions().getByName(agentId), async (session, state) => {
+      initialize(state, agentId, session);
+      state.storage.sql.exec(`INSERT INTO managed_turns(id,request_key,request_hash,input_json,authorization_json,state,
+        accepted_cursor,created_at,accepted_at,updated_at)
+        VALUES(?,?,'legacy-hash',?,'{"capabilities":[]}','completed',1,?,?,?)`,
+        id,id,JSON.stringify("Historical Gmail notification instructions.\n\n"+wake.input),Date.now(),Date.now(),Date.now());
+      await expect(session.gmailPushWake({...wake,input:"Changed"})).rejects.toThrow("different input");
+      expect(await session.gmailPushWake(wake)).toEqual({status:"duplicate"});
+      expect(await session.gmailPushWake(wake)).toEqual({status:"duplicate"});
+      expect(state.storage.sql.exec("SELECT id FROM managed_turns").toArray()).toEqual([{id}]);
+      expect(state.storage.sql.exec("SELECT cursor FROM managed_events").toArray()).toHaveLength(0);
+    });
+  });
+
+  it("processes a concurrent event once, replays its receipt and rejects changed input", async () => {
     const agentId = crypto.randomUUID();
     await runInDurableObject(sessions().getByName(agentId), async (session, state) => {
       initialize(state, agentId, session);
       const results = await Promise.all([session.gmailPushWake(input(agentId)),session.gmailPushWake(input(agentId))]);
       expect(results.map(r=>r.status).sort()).toEqual(["accepted","duplicate"]);
-      expect(results[0].turnId).toBe(results[1].turnId);
-      expect(await session.gmailPushWake(input(agentId))).toMatchObject({status:"duplicate",turnId:results[0].turnId});
+      expect(results).toEqual([{status:"accepted"},{status:"duplicate"}]);
+      expect(await session.gmailPushWake(input(agentId))).toEqual({status:"duplicate"});
       await expect(session.gmailPushWake({...input(agentId),input:"Changed"})).rejects.toThrow("different input");
-      const rows = state.storage.sql.exec<{input_json:string}>("SELECT input_json FROM managed_turns").toArray();
-      expect(rows).toHaveLength(1);
-      expect(JSON.parse(rows[0].input_json)).toContain(input(agentId).input);
+      expectQuiet(state);
     });
   });
 });
 
-// Opt-in ingestion must complete before admission; otherwise the broker retries
-// this event without an accepted turn that would strand its remaining messages.
-it("advances opted-in CRM mail in bounded wake retries before admitting a turn", async () => {
+// Opt-in ingestion must complete before acknowledging the event; partial work
+// binds the input durably and remains retryable without creating chat events.
+it("advances opted-in CRM mail in bounded retries without chat events", async () => {
   const agentId = crypto.randomUUID(); const connectionId = "C".repeat(43);
   await runInDurableObject(sessions().getByName(agentId), async (session, state) => {
     initialize(state, agentId, session);
@@ -129,15 +157,18 @@ it("advances opted-in CRM mail in bounded wake retries before admitting a turn",
     const envelope = {...input(agentId),input:JSON.stringify({connectionId,email:"self@example.test",type:"gmail.history",startHistoryId:"1",historyId:"2",messageIds:Array.from({length:7},(_,i)=>`m${i}`),truncated:false,crm:true})};
     expect(await session.gmailPushWake(envelope)).toEqual({status:"busy",progress:true});
     expect(reads).toBe(5);
-    expect(state.storage.sql.exec("SELECT id FROM managed_turns").toArray()).toHaveLength(0);
+    expectQuiet(state);
+    await expect(session.gmailPushWake({...envelope,input:JSON.stringify({crm:false})})).rejects.toThrow("different input");
+    expect(reads).toBe(5);
     expect(await session.gmailPushWake(envelope)).toMatchObject({status:"accepted"});
     expect(reads).toBe(7);
     expect(await session.gmailPushWake(envelope)).toMatchObject({status:"duplicate"});
     expect(reads).toBe(7);
+    expectQuiet(state);
   });
 });
 
-it("rejects opted-in wakes when CRM is unavailable while preserving legacy admission", async () => {
+it("keeps failed CRM wakes retryable without blocking unrelated quiet notifications", async () => {
   const agentId = crypto.randomUUID();
   await runInDurableObject(sessions().getByName(agentId), async (session,state) => {
     initialize(state,agentId,session);
@@ -145,35 +176,55 @@ it("rejects opted-in wakes when CRM is unavailable while preserving legacy admis
     Object.defineProperty(session,"env",{value:{...current,NANOCODEX_CRM:undefined}});
     await expect(session.gmailPushWake({...input(agentId),input:JSON.stringify({crm:true})})).rejects.toThrow("gmail_push_crm_unavailable");
     expect(state.storage.sql.exec("SELECT id FROM managed_turns").toArray()).toHaveLength(0);
-    expect(await session.gmailPushWake(input(agentId))).toMatchObject({status:"accepted"});
+    await expect(session.gmailPushWake({...input(agentId),input:JSON.stringify({crm:true})})).rejects.toThrow("gmail_push_crm_unavailable");
+    await expect(session.gmailPushWake(input(agentId))).rejects.toThrow("different input");
+    expect(await session.gmailPushWake({...input(agentId),eventId:"unrelated"})).toEqual({status:"accepted"});
+    expectQuiet(state);
   });
 });
 
-// The producer is behind an exact owner flag; normal wake/CRM paths stay intact.
-it("proposes an account-owned intent-only card after a confident Gmail classification", async () => {
+// TODO publication is retained and serialized independently of chat admission.
+it("proposes a single TODO for concurrent reply notifications and stays quiet for non-replies", async () => {
   const agentId = crypto.randomUUID(), userId = crypto.randomUUID();
   await ensureAccount(env as unknown as Env, userId, true);
   await runInDurableObject(sessions().getByName(agentId), async (session, state) => {
     initialize(state, agentId, session, userId);
     const current = (session as unknown as {env:Env}).env;
+    let classifications = 0;
+    let choice = "reply_requested";
     Object.defineProperty(session, "env", {value: { ...current, NANOCODEX_FIREHOSE_DECISIONS_OWNER_ID:userId,
-      AI: {run:async () => ({state:"Completed",result:{answers:{action:{choice:"reply_requested",confidence:0.95}}}})} }});
+      AI: {run:async () => {
+        classifications++;
+        return {state:"Completed",result:{answers:{action:{choice,confidence:0.95}}}};
+      }} }});
     const inputValue = JSON.stringify({connectionId:"fixture-connection",email:"self@example.test",type:"gmail.history",
       messageIds:["m1"],messages:[{id:"m1",status:"ok",headers:{from:"Sender <sender@example.test>",
         subject:"Please reply"},body:"Can you reply to me?"}]});
     const wake = {...input(agentId), userId, input:inputValue};
-    expect(await session.gmailPushWake(wake)).toMatchObject({status:"accepted"});
-    expect(await session.gmailPushWake(wake)).toMatchObject({status:"duplicate"});
+    expect(await Promise.all([session.gmailPushWake(wake),session.gmailPushWake(wake)]))
+      .toEqual([{status:"accepted"},{status:"duplicate"}]);
+    expect(classifications).toBe(1);
+    expect(await session.gmailPushWake(wake)).toEqual({status:"duplicate"});
+    await expect(session.gmailPushWake({...wake,input:inputValue.replace("Please reply", "Changed")})).rejects.toThrow("different input");
+    expect(classifications).toBe(1);
     expect(state.storage.sql.exec("SELECT source_key, outcome FROM gmail_firehose_decision_receipts").toArray())
       .toMatchObject([{outcome:"reply"}]);
+    choice = "no_reply";
+    expect(await session.gmailPushWake({...wake,eventId:"no-reply",input:inputValue.replaceAll('"m1"','"m2"')}))
+      .toEqual({status:"accepted"});
+    expect(classifications).toBe(2);
+    expectQuiet(state);
     const inbox = await (await (env as unknown as Env).NANOCODEX_USERS.getByName(userId).fetch("https://user.internal/todo")).json() as
       {decisions: Array<{title:string;choices:unknown[];source_url:string}>};
     expect(inbox.decisions).toHaveLength(1);
     expect(inbox.decisions[0]).toMatchObject({title:"Reply requested: Please reply",source_url:"https://mail.google.com/"});
     const audit = await (await (env as unknown as Env).NANOCODEX_USERS.getByName(userId)
       .fetch("https://user.internal/todo/traces?limit=5")).json() as {traces: Array<{outcome:string;decision_id:string}>};
-    expect(audit.traces).toHaveLength(1);
-    expect(audit.traces[0]).toMatchObject({outcome:"reply",decision_id:expect.any(String)});
-    expect(JSON.stringify(audit)).not.toContain("sender@example.test");
+    expect(audit.traces).toHaveLength(2);
+    expect(audit.traces).toEqual(expect.arrayContaining([
+      expect.objectContaining({outcome:"reply",decision_id:expect.any(String)}),
+      expect.objectContaining({outcome:"no_reply",decision_id:null}),
+    ]));
+    expect(JSON.stringify(audit)).not.toContain("Can you reply to me?");
   });
 });

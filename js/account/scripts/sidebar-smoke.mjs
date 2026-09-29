@@ -18,9 +18,11 @@ const conversations = [
 {id:'four',title:'Analyze query performance',presentation:{status:'stopping',activeTurnIds:['d']}},
 {id:'five',title:'Plan documentation',presentation:{status:'idle',activeTurnIds:[]}},
 {id:'six',title:'Older conversation'}];
-createRoot(document.getElementById('root')).render(<MemoryRouter><div className="nanocodex-demo chat-workspace"><div className="conversation-workspace"><AgentSidebar active conversations={conversations}
+function AgentSidebarDemo(){const [runningOnly,setRunningOnly]=React.useState(false);return <AgentSidebar active conversations={conversations}
 landing={false} collapsed={false} open={window.innerWidth<761} persistent pending={false} selectedId="one" triggerRef={{current:null}}
-onClose={()=>{}} onCollapse={()=>{}} onCreate={()=>{}} onRetry={()=>{}} onSelect={()=>{}} onPrefetch={()=>{}} /></div></div></MemoryRouter>);
+runningOnly={runningOnly} onRunningOnlyChange={setRunningOnly}
+onClose={()=>{}} onCollapse={()=>{}} onCreate={()=>{}} onRetry={()=>{}} onSelect={()=>{}} onPrefetch={()=>{}} />;}
+createRoot(document.getElementById('root')).render(<MemoryRouter><div className="nanocodex-demo chat-workspace"><div className="conversation-workspace"><AgentSidebarDemo /></div></div></MemoryRouter>);
 `, resolveDir: new URL('..', import.meta.url).pathname, loader:'tsx' }, bundle:true, write:false, outfile:'app.js', jsx:'automatic' });
 const server = createServer((_req,res) => { res.setHeader('Content-Type','text/html'); res.end(`<meta name="viewport" content="width=device-width,initial-scale=1"><div id="root"></div><style>html,body,#root{height:100%;margin:0} .chat-workspace,.conversation-workspace{height:100%;display:grid} .chat-workspace button{font:inherit;border:0} ${bundle.outputFiles.find(f=>f.path.endsWith('.css')).text}</style><script>${bundle.outputFiles.find(f=>f.path.endsWith('.js')).text}</script>`); });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -35,6 +37,12 @@ try {
     await page.getByText("I'm checking agent state", {exact:true}).waitFor();
     for (const status of ['Running','Ready','Failed','Stopping','Idle','Status unavailable']) assert.equal(await page.getByText(status,{exact:true}).count(),1);
     assert.equal(await page.getByText('Stale activity must be hidden').count(),0);
+    await page.getByRole('button',{name:'Running (2)'}).click();
+    assert.equal(await page.getByRole('button',{name:/Improve agent sidebar/}).count(),1);
+    assert.equal(await page.getByRole('button',{name:/Analyze query performance/}).count(),1);
+    assert.equal(await page.getByText('Review deployment changes').count(),0);
+    await page.getByRole('button',{name:'All',exact:true}).click();
+    assert.equal(await page.getByText('Review deployment changes').count(),1);
     assert.deepEqual(errors,[]);
     await page.screenshot({path:new URL(`${width}-${theme}.png`,output).pathname});
     await page.close();

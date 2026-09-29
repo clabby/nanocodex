@@ -777,6 +777,12 @@ export default defineConfig({
           }
           if (url.hostname === "rpc.tempo.xyz" && request.method === "POST") {
             const body = await request.json() as { id?: unknown; method?: unknown; params?: unknown };
+            if (body.method === "eth_chainId") return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x1079" });
+            if (body.method === "eth_estimateGas") return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x186a0" });
+            if (body.method === "eth_gasPrice" || body.method === "eth_maxPriorityFeePerGas") return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x1" });
+            if (body.method === "eth_getTransactionCount") return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x0" });
+            if (body.method === "eth_getBlockByNumber") return Response.json({ jsonrpc: "2.0", id: body.id, result: { number: "0x1", timestamp: "0x1", baseFeePerGas: "0x1", gasLimit: "0x1000000", gasUsed: "0x0" } });
+            if (body.method === "eth_call" && Array.isArray(body.params) && body.params[0] && typeof body.params[0] === "object" && "calls" in body.params[0]) return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x" });
             const call = Array.isArray(body.params) && body.params[0] && typeof body.params[0] === "object"
               ? body.params[0] as { data?: unknown; to?: unknown }
               : undefined;
@@ -784,7 +790,7 @@ export default defineConfig({
               && Array.isArray(body.params)
               && body.params[1] === "latest"
               && typeof call?.to === "string"
-              && call.to.toLowerCase() === "0x20c000000000000000000000f37de3740adec032"
+              && ["0x20c000000000000000000000f37de3740adec032", "0x20c000000000000000000000b9537d11c60e8b50", "0x20c0000000000000000000006637932de5413804"].includes(call.to.toLowerCase())
               && typeof call.data === "string"
               && /^0x70a082310{24}[0-9a-f]{40}$/i.test(call.data)
               && request.headers.get("content-type")?.startsWith("application/json") === true
@@ -796,7 +802,7 @@ export default defineConfig({
             return Response.json({
               jsonrpc: "2.0",
               id: body.id,
-              result: "0x0000000000000000000000000000000000000000000000000000000000bc614e",
+              result: String(call.to).toLowerCase() === "0x20c000000000000000000000f37de3740adec032" ? "0x0000000000000000000000000000000000000000000000000000000000bc614e" : "0x" + "0".repeat(64),
             });
           }
           if (url.hostname === "api.openai.com" || url.hostname === "chatgpt.com") {

@@ -31,7 +31,10 @@ meeting observation all use this same model.
 Metadata is a JSON object, at most 16 KiB on native writes. Useful conventions
 include `occurred_at`, `origin`, `sources`, `confidence`, and `rationale`. There is
 no required semantic category. Omission on edit preserves metadata; an object
-replaces it; `{}` clears it. Preserve supplied year/month/day/timestamp precision,
+replaces it; `{}` clears it for unprovenanced nodes. Once an assertion has
+`origin`, edits cannot change or remove it. Source and inferred assertions must
+retain valid evidence; save a separate correction instead of erasing provenance.
+Preserve supplied year/month/day/timestamp precision,
 and do not invent a date for an undated relationship. Creation time describes when
 the CRM recorded a node, not when its statement occurred.
 
@@ -63,7 +66,9 @@ when linking a new statement to an existing profile.
 
 Projected nodes are source-managed: edit/delete them through their originating
 CRM tools so the graph and existing profile/calendar/email integrations cannot
-diverge. Native statements can connect to projected nodes without copying them.
+diverge. Native statements can connect to projected nodes without copying them. An edge
+already owned by a legacy source cannot also be saved as a native edge; edit its
+source record, or create a separate explicit statement.
 Legacy tables remain a compatibility layer; this release does not physically
 replace every existing table or make legacy profile screens read native graph
 nodes. New knowledge can use the generic model without adding new typed tables.

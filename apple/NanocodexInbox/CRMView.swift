@@ -11,7 +11,13 @@ struct CRMView: View {
     @State private var loading = false
     @State private var error: String?
     @State private var revision = 0
-    private var searchKey: String { "\(kind):\(query):\(revision)" }
+    @State private var displayedSelection = ""
+    @State private var savedSearchOnly = false
+    @State private var requestID = UUID()
+    private var selection: String { "\(model.vaultIntakeAccount):\(kind):\(query)" }
+    private var searchKey: String { "\(selection):\(revision)" }
+    private var visibleRecords: [JSON] { displayedSelection == selection ? records : [] }
+
 
     var body: some View {
         ScrollView {
@@ -36,8 +42,12 @@ struct CRMView: View {
                     }
                 }
                 VStack(alignment: .leading, spacing: 12) {
+                    if savedSearchOnly && displayedSelection == selection {
+                        Text("Searching saved records. Results may be incomplete until you’re online.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     VStack(spacing: 0) {
-                        ForEach(records, id: \.crmID) { record in
+                        ForEach(visibleRecords, id: \.crmID) { record in
                             NavigationLink { CRMProfileView(model: model, recordID: record.crmID) } label: {
                                 HStack(spacing: 12) {
                                     CRMAvatar(name: record["name"].string, company: record["kind"].string == "company", size: 36)
@@ -49,26 +59,30 @@ struct CRMView: View {
                                     Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
                                 }.padding(.horizontal, 12).padding(.vertical, 10).contentShape(Rectangle())
                             }.buttonStyle(.plain).accessibilityIdentifier("crm-record-\(record.crmID)")
-                            if record.crmID != records.last?.crmID { Divider().padding(.leading, 60) }
+                            if record.crmID != visibleRecords.last?.crmID { Divider().padding(.leading, 60) }
                         }
                     }.background(ChatPalette.composer, in: RoundedRectangle(cornerRadius: 16))
-                    if loading { ProgressView().frame(maxWidth: .infinity).padding(24) }
-                    if let error {
-                        CRMEmptyState(symbol: "wifi.exclamationmark", title: "Couldn’t load your CRM", detail: error)
+                    if loading {
+                        if visibleRecords.isEmpty { ProgressView().frame(maxWidth: .infinity).padding(24) }
+                        else { ProgressView("Refreshing…").controlSize(.small).font(.caption).foregroundStyle(.secondary) }
+                    }
+                    if let error, displayedSelection == selection {
+                        if visibleRecords.isEmpty { CRMEmptyState(symbol: "wifi.exclamationmark", title: "Couldn’t load your CRM", detail: error) }
+                        else { Label("Couldn’t refresh. Showing saved records.", systemImage: "wifi.exclamationmark").font(.subheadline).foregroundStyle(.secondary) }
                         Button("Retry") { revision += 1 }.buttonStyle(.bordered).frame(maxWidth: .infinity)
-                    } else if !loading && records.isEmpty {
+                    } else if !loading && visibleRecords.isEmpty {
                         CRMEmptyState(symbol: query.isEmpty ? "person.crop.rectangle.stack" : "magnifyingglass",
                             title: query.isEmpty ? "A little context goes a long way" : "No matches",
                             detail: query.isEmpty ? "Ask in chat to save someone. Their story and connections will live here." : "Try another name, company, or detail.")
                     }
-                    if !cursor.isEmpty && !loading { Button("Load more") { Task { await load(more: true) } }.buttonStyle(.bordered).frame(maxWidth: .infinity) }
+                    if displayedSelection == selection && !cursor.isEmpty && !loading { Button("Load more") { Task { await load(more: true) } }.buttonStyle(.bordered).frame(maxWidth: .infinity) }
                 }
             }.padding(.horizontal, 16).padding(.bottom, 28).frame(maxWidth: 620).frame(maxWidth: .infinity)
         }
         .scrollDismissesKeyboard(.interactively)
         .background(ChatPalette.background)
-        .task(id: searchKey) { records = []; cursor = ""; error = nil; await load(more: false) }
-        .refreshable { revision += 1 }
+        .task(id: searchKey) { await restoreSavedSelection(); guard !Task.isCancelled else { return }; await load(more: false, debounce: true) }
+        .refreshable { await load(more: false) }
     }
 
     private func filterButton(_ title: String, value: String, symbol: String) -> some View {
@@ -80,21 +94,39 @@ struct CRMView: View {
         }.buttonStyle(.plain).accessibilityAddTraits(kind == value ? .isSelected : [])
             .accessibilityIdentifier("crm-filter-\(value)")
     }
-    @MainActor private func load(more: Bool) async {
+    @MainActor private func restoreSavedSelection() async {
+        guard displayedSelection != selection || records.isEmpty else { return }
+        let key = searchKey, token = requestID
+        let saved = await CRMReadSnapshot.directory(model: model, query: ["q": query, "kind": kind])
+        guard key == searchKey, token == requestID, !Task.isCancelled else { return }
+        savedSearchOnly = saved?["saved_search_only"] == .bool(true)
+        records = saved?["records"].array ?? []
+        cursor = saved?["next_cursor"].string ?? ""
+        displayedSelection = selection
+        error = nil
+    }
+
+    @MainActor private func load(more: Bool, debounce: Bool = false) async {
+        if more && (loading || displayedSelection != selection || cursor.isEmpty) { return }
         let key = searchKey
+        let token = UUID()
+        requestID = token
+        let requestedQuery = query, requestedKind = kind, requestedCursor = more ? cursor : ""
         loading = true; error = nil
-        defer { if key == searchKey { loading = false } }
+        defer { if requestID == token { loading = false } }
         do {
-            if !more { try await Task.sleep(for: .milliseconds(200)) }
-            let result = try await model.crmRead(query: ["q": query, "kind": kind, "cursor": more ? cursor : ""])
+            if debounce && !requestedQuery.isEmpty { try await Task.sleep(for: .milliseconds(200)) }
+            let result = try await model.crmRead(query: ["q": requestedQuery, "kind": requestedKind, "cursor": requestedCursor])
             try Task.checkCancellation()
-            guard key == searchKey else { return }
+            guard key == searchKey, requestID == token else { return }
             if case .array(let rows) = result["records"] {
                 records = more ? records + rows.filter { row in !records.contains { $0.crmID == row.crmID } } : rows
                 cursor = result["next_cursor"].string
+                displayedSelection = selection
+                savedSearchOnly = false
             } else { throw APIError.invalidResponse }
         } catch is CancellationError {} catch {
-            if key == searchKey { self.error = error.localizedDescription }
+            if key == searchKey, requestID == token { self.error = error.localizedDescription }
         }
     }
 }
@@ -135,11 +167,16 @@ private struct CRMProfileView: View {
     @State private var loading = false
     @State private var error: String?
     @State private var revision = 0
+    @State private var requestID = UUID()
+    @State private var timelineError: String?
+    @State private var displayedAccount: UUID?
+    private var loadKey: String { "\(model.vaultIntakeAccount):\(recordID):\(revision)" }
+
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                if detail != .null {
+                if displayedAccount == model.vaultIntakeAccount && detail != .null {
                     hero
                     if !detail["research"]["summary"].string.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
@@ -203,6 +240,32 @@ private struct CRMProfileView: View {
                             moreButton("relationships")
                         }
                     }
+                    if detail["record"]["kind"].string == "person" {
+                        profileSection("History", symbol: "clock.arrow.circlepath") {
+                            if (pages["timeline"] ?? []).isEmpty && timelineError == nil {
+                                Text("No activity yet. Imported Calendar invitations and other CRM activity will appear here.")
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("crm-timeline-empty")
+                            }
+                            ForEach(pages["timeline"] ?? [], id: \.crmTimelineID) { entry in
+                                CRMTimelineEntryView(entry: entry)
+                                if entry.crmTimelineID != pages["timeline"]?.last?.crmTimelineID {
+                                    Divider().padding(.vertical, 4)
+                                }
+                            }
+                            if let timelineError {
+                                Text("Couldn’t load more history: \(timelineError)")
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("crm-timeline-error")
+                                Button("Retry history") { Task { await load(section: "timeline") } }
+                                    .disabled(loading).accessibilityIdentifier("crm-timeline-retry")
+                            } else if !(cursors["timeline"] ?? "").isEmpty {
+                                Button("Load more history") { Task { await load(section: "timeline") } }
+                                    .disabled(loading).font(.subheadline)
+                                    .accessibilityIdentifier("crm-timeline-more")
+                            }
+                        }
+                    }
                     if !(pages["notes"] ?? []).isEmpty {
                         profileSection("Notes", symbol: "text.bubble") {
                             ForEach(pages["notes"] ?? [], id: \.crmID) { note in
@@ -214,12 +277,15 @@ private struct CRMProfileView: View {
                             moreButton("notes")
                         }
                     }
-                    if ["identities", "facts", "relationships", "notes"].allSatisfy({ (pages[$0] ?? []).isEmpty }) && detail["research"]["summary"].string.isEmpty {
+                    if ["identities", "facts", "relationships", "notes", "timeline"].allSatisfy({ (pages[$0] ?? []).isEmpty }) && detail["research"]["summary"].string.isEmpty {
                         CRMEmptyState(symbol: "text.bubble", title: "Their story starts here", detail: "Ask in chat to add a note, a link, or a little background.")
                     }
                 }
-                if loading { ProgressView().frame(maxWidth: .infinity).padding(24) }
-                if let error { Text(error).foregroundStyle(.secondary); Button("Retry") { revision += 1 }.buttonStyle(.bordered) }
+                if loading {
+                    if displayedAccount != model.vaultIntakeAccount || detail == .null { ProgressView().frame(maxWidth: .infinity).padding(24) }
+                    else { ProgressView("Refreshing…").controlSize(.small).font(.caption).foregroundStyle(.secondary) }
+                }
+                if displayedAccount == model.vaultIntakeAccount, let error { Text(error).foregroundStyle(.secondary); Button("Retry") { revision += 1 }.buttonStyle(.bordered) }
             }.padding(16).frame(maxWidth: 620).frame(maxWidth: .infinity)
         }
         .background(ChatPalette.background)
@@ -227,7 +293,23 @@ private struct CRMProfileView: View {
         .navigationTitle("Profile").navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .toolbarBackground(ChatPalette.background, for: .navigationBar)
-        .task(id: revision) { await load() }
+        .task(id: loadKey) {
+            if displayedAccount != model.vaultIntakeAccount || detail == .null {
+                let key = loadKey, token = requestID
+                let saved = await CRMReadSnapshot.profile(model: model, id: recordID)
+                guard key == loadKey, token == requestID, !Task.isCancelled else { return }
+                detail = saved ?? .null
+                for key in ["notes", "identities", "facts", "relationships", "timeline"] {
+                    pages[key] = detail[key].array
+                    cursors[key] = detail[key == "notes" ? "next_cursor" : "\(key)_next_cursor"].string
+                }
+                displayedAccount = model.vaultIntakeAccount
+                timelineError = nil
+                error = nil
+            }
+            guard !Task.isCancelled else { return }
+            await load()
+        }
         .refreshable { await load() }
     }
 
@@ -296,32 +378,143 @@ private struct CRMProfileView: View {
         if !(cursors[section] ?? "").isEmpty { Button("Load more \(section)") { Task { await load(section: section) } }.disabled(loading).font(.subheadline) }
     }
     @MainActor private func load(section: String? = nil) async {
-        guard !loading else { return }
-        loading = true; error = nil
-        defer { loading = false }
+        if section != nil && loading { return }
+        let token = UUID(), key = loadKey
+        requestID = token
+        loading = true
+        if section == "timeline" { timelineError = nil } else { error = nil }
+        defer { if requestID == token { loading = false } }
         do {
             let result: JSON
             if let section {
                 if section == "notes" {
                     result = try await model.crmRead(id: recordID, query: ["notes_cursor": cursors[section] ?? ""])
+                } else if section == "timeline" {
+                    result = try await model.crmRead(id: recordID, query: ["timeline_limit": "20", "timeline_cursor": cursors[section] ?? ""])
                 } else {
                     result = try await model.crmRead(id: recordID, section: section, query: ["cursor": cursors[section] ?? ""])
                 }
                 try Task.checkCancellation()
-                pages[section, default: []] += result[section].array
-                cursors[section] = result["next_cursor"].string
+                guard key == loadKey, requestID == token else { return }
+                guard case .array(let rows) = result[section] else { throw APIError.invalidResponse }
+                let existing = pages[section] ?? []
+                pages[section] = existing + rows.filter { row in !existing.contains { $0.crmTimelineID == row.crmTimelineID } }
+                cursors[section] = result[section == "timeline" ? "timeline_next_cursor" : "next_cursor"].string
             } else {
                 result = try await model.crmRead(id: recordID)
                 try Task.checkCancellation()
+                guard key == loadKey, requestID == token else { return }
                 guard !result["record"].crmID.isEmpty else { throw APIError.invalidResponse }
+                if result["record"]["kind"].string == "person" {
+                    guard case .array = result["timeline"] else { throw APIError.invalidResponse }
+                }
                 detail = result
-                for key in ["notes", "identities", "facts", "relationships"] {
+                timelineError = nil
+                displayedAccount = model.vaultIntakeAccount
+                for key in ["notes", "identities", "facts", "relationships", "timeline"] {
                     pages[key] = result[key].array
                     cursors[key] = result[key == "notes" ? "next_cursor" : "\(key)_next_cursor"].string
                 }
             }
-        } catch is CancellationError {} catch { self.error = error.localizedDescription }
+        } catch is CancellationError {} catch {
+            if key == loadKey, requestID == token {
+                if section == "timeline" { timelineError = error.localizedDescription }
+                else { self.error = error.localizedDescription }
+            }
+        }
     }
+}
+
+private struct CRMTimelineEntryView: View {
+    let entry: JSON
+
+    private var kind: String { entry["kind"].string }
+    private var title: String {
+        let summary = entry["summary"].string
+        if !summary.isEmpty { return summary }
+        let name = entry["title"].string
+        if !name.isEmpty { return name }
+        if kind == "interaction" { return entry["type"].string.isEmpty ? "Interaction" : entry["type"].string.crmTitle }
+        switch kind {
+        case "calendar_meeting": return "Calendar invitation"
+        case "meeting_note": return "Meeting note"
+        case "email": return "Email note"
+        case "note": return "CRM note"
+        default: return "Activity"
+        }
+    }
+    private var source: String {
+        switch kind {
+        case "calendar_meeting": return "Calendar"
+        case "email": return "Email"
+        case "meeting_note": return "Your meeting note"
+        case "note": return "CRM note" // Legacy notes do not record an origin.
+        default:
+            switch entry["origin"].string {
+            case "user": return "Your entry"
+            case "source": return "Sourced entry"
+            case "inferred": return "Inferred entry"
+            default: return "CRM"
+            }
+        }
+    }
+    private var status: String? {
+        if kind == "calendar_meeting" {
+            if entry["status"].string == "cancelled" || entry["status"].string == "canceled" { return "Canceled" }
+            if entry["response_status"].string == "declined" || entry["participation_status"].string == "declined" || entry["self_declined"] == .bool(true) { return "Declined" }
+            return "Scheduled / invited · Attendance unconfirmed"
+        }
+        if kind == "event_participation" {
+            switch entry["participation_status"].string {
+            case "attended": return "Attended"
+            case "expected": return "Expected"
+            case "invited": return "Invited"
+            case "declined": return "Declined"
+            default: return "Attendance unknown"
+            }
+        }
+        return nil
+    }
+    private var date: String {
+        let value = entry["occurred_at"].string
+        if entry["precision"].string == "date", let day = value.split(separator: "T").first,
+           let parsed = DateFormatter.crmDay.date(from: String(day)) {
+            return parsed.formatted(date: .abbreviated, time: .omitted)
+        }
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let parsed = parser.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        guard let parsed else { return "Date unavailable" }
+        // Calendar's timestamp doesn't expose whether an event is all-day; don't invent a time.
+        return parsed.formatted(date: .abbreviated, time: kind == "calendar_meeting" ? .omitted : .shortened)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(date).font(.caption).foregroundStyle(.tertiary)
+            Text(title).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+            if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
+            let body = entry["body"].string
+            if !body.isEmpty && body != title {
+                Text(body).font(.subheadline).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+            }
+            Text(kind == "email" && entry["timestamp_basis"].string == "imported_at" ? "\(source) · Import date" : source)
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("crm-timeline-\(kind)-\(entry.crmID)")
+    }
+}
+
+private extension DateFormatter {
+    static let crmDay: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 }
 
 private struct CRMFactValue: View {
@@ -353,6 +546,7 @@ private extension String {
 }
 private extension JSON {
     var crmID: String { self["id"].string }
+    var crmTimelineID: String { "\(self["kind"].string):\(crmID)" }
     var crmDate: String {
         if case .number(let milliseconds) = self { return Date(timeIntervalSince1970: milliseconds / 1000).formatted(date: .abbreviated, time: .omitted) }
         return string
@@ -365,5 +559,58 @@ private extension JSON {
         case .array(let values): return values.map(\.crmReadable).joined(separator: "\n\n")
         default: return pretty
         }
+    }
+}
+
+// Rehydrate previously fetched pages before starting a network read. Cursor cycle checks bound corrupt
+// or expired pagination chains; every response remains scoped by the model's cache.
+@MainActor private enum CRMReadSnapshot {
+    static func directory(model: InboxModel, query: [String: String]) async -> JSON? {
+        guard let first = await model.crmCachedRead(query: query), case .array = first["records"] else {
+            guard let term = query["q"], !term.isEmpty else { return nil }
+            var directoryQuery = query
+            directoryQuery.removeValue(forKey: "q")
+            directoryQuery.removeValue(forKey: "cursor")
+            let saved = await directory(model: model, query: directoryQuery)
+            let matches = (saved?["records"].array ?? []).filter { $0.crmReadable.localizedCaseInsensitiveContains(term) }
+            return .object(["records": .array(matches), "next_cursor": .string(""), "saved_search_only": .bool(true)])
+        }
+        var rows = first["records"].array, cursor = first["next_cursor"].string
+        var visited = Set<String>()
+        while !cursor.isEmpty && visited.insert(cursor).inserted && visited.count <= 100 {
+            var nextQuery = query
+            nextQuery["cursor"] = cursor
+            guard let next = await model.crmCachedRead(query: nextQuery), case .array = next["records"] else { break }
+            append(next["records"].array, to: &rows)
+            cursor = next["next_cursor"].string
+        }
+        return .object(["records": .array(rows), "next_cursor": .string(cursor)])
+    }
+
+    static func profile(model: InboxModel, id: String) async -> JSON? {
+        guard let first = await model.crmCachedRead(id: id), case .object(var fields) = first,
+              !first["record"].crmID.isEmpty else { return nil }
+        for section in ["notes", "identities", "facts", "relationships", "timeline"] {
+            let cursorKey = section == "notes" ? "next_cursor" : "\(section)_next_cursor"
+            var rows = first[section].array, cursor = first[cursorKey].string
+            var visited = Set<String>()
+            while !cursor.isEmpty && visited.insert(cursor).inserted && visited.count <= 100 {
+                let next: JSON?
+                if section == "notes" { next = await model.crmCachedRead(id: id, query: ["notes_cursor": cursor]) }
+                else if section == "timeline" { next = await model.crmCachedRead(id: id, query: ["timeline_limit": "20", "timeline_cursor": cursor]) }
+                else { next = await model.crmCachedRead(id: id, section: section, query: ["cursor": cursor]) }
+                guard let next, case .array = next[section] else { break }
+                append(next[section].array, to: &rows, timeline: section == "timeline")
+                cursor = next[section == "timeline" ? "timeline_next_cursor" : "next_cursor"].string
+            }
+            fields[section] = .array(rows)
+            fields[cursorKey] = .string(cursor)
+        }
+        return .object(fields)
+    }
+
+    private static func append(_ incoming: [JSON], to rows: inout [JSON], timeline: Bool = false) {
+        var ids = Set(rows.map { timeline ? $0.crmTimelineID : $0.crmID })
+        rows.append(contentsOf: incoming.filter { ids.insert(timeline ? $0.crmTimelineID : $0.crmID).inserted })
     }
 }

@@ -1,3 +1,4 @@
+import { createMercatorMcpCredential, MercatorPaymentInputError } from "./mercator-payment";
 import type { CloudflareAccountVaultResult } from "nanocodex/cloudflare/egress";
 import { createSshKeyPair, sshPublicKey } from "nanocodex/tools/ssh";
 import { DurableObject } from "cloudflare:workers";
@@ -675,6 +676,24 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
           symbol: "MACH",
           token: MACHINE_USD,
         }, 200);
+      }
+      if (url.pathname === "/v1/wallet/mercator/credential") {
+        if (request.method !== "POST") return jsonError(405, "method_not_allowed");
+        if (!isJsonContentType(request.headers.get("content-type"))) return jsonError(415, "invalid_content_type");
+        const wallet = this.#credentials.wallet;
+        if (!wallet) return jsonError(404, "wallet_not_configured");
+        let paymentRequest: unknown;
+        try { paymentRequest = await readJson(request, 64 * 1024); }
+        catch { return jsonError(400, "invalid_mercator_payment_request"); }
+        try {
+          return json({ credential: await createMercatorMcpCredential(paymentRequest, {
+            store: this.#state.storage, wallet: rootWalletProvider(wallet), signal: request.signal,
+          }) }, 200);
+        } catch (error) {
+          return error instanceof MercatorPaymentInputError
+            ? jsonError(error.status, error.code)
+            : jsonError(503, "mercator_outcome_unknown");
+        }
       }
       if (url.pathname === "/v1/wallet/connect") {
         if (request.method !== "POST") return jsonError(405, "method_not_allowed");

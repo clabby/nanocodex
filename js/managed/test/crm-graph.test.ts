@@ -117,3 +117,33 @@ it("truncates submillisecond fractions for timeline filtering without rewriting 
  expect(page.nodes.map((n:any)=>n.id)).toEqual(["fractional"]);
  expect(page.nodes[0].metadata.occurred_at).toBe(occurred_at);
 });
+
+// A replacement metadata object must not turn a sourced claim into an
+// unprovenanced one. Anchors with no origin retain the documented clear path.
+it("preserves statement origin across edits and rejects provenance erasure",async()=>{
+ const owner=crypto.randomUUID();
+ const evidence=[{kind:"web",reference:"https://example.test/source"}];
+ for(const origin of ["user","source","inferred"] as const){
+  const metadata={origin,...(origin==="user"?{}:{sources:evidence}),...(origin==="inferred"?{confidence:"medium",rationale:"Evidence suggests a connection."}:{})};
+  await request(owner,"save",{text:`${origin} claim`,metadata},origin);
+  await request(owner,"save",{id:origin,text:`Updated ${origin} claim`});
+  for(const replacement of [{}, {origin:origin==="user"?"source":"user"}, {origin:"other"}, ...(origin==="inferred"?[{origin:"inferred",sources:evidence}]:[])])
+   await expect(request(owner,"save",{id:origin,metadata:replacement})).rejects.toMatchObject({code:"invalid_input"});
+  expect((await request(owner,"get",{id:origin})).node.metadata).toEqual(metadata);
+ }
+ await request(owner,"save",{text:"Anchor",metadata:{note:"temporary"}},"anchor");
+ expect((await request(owner,"save",{id:"anchor",metadata:{}})).node.metadata).toEqual({});
+});
+it("does not acknowledge a native edge over a source-managed edge",async()=>{
+ const owner=crypto.randomUUID();
+ await db.prepare("INSERT INTO crm_records(owner_id,id,kind,name,created_at,updated_at) VALUES (?,'person','person','Person',1,1)").bind(owner).run();
+ await db.prepare("INSERT INTO crm_notes(owner_id,id,record_id,body,created_at,updated_at) VALUES (?,'note','person','Note',1,1)").bind(owner).run();
+ const from_id='legacy:crm_records:["person"]',to_id='legacy:crm_notes:["note"]';
+ await expect(request(owner,"link_save",{from_id,to_id})).rejects.toThrow(/source.managed/i);
+ await db.prepare("UPDATE crm_notes SET body='Revised' WHERE owner_id=? AND id='note'").bind(owner).run();
+ expect((await request(owner,"links",{id:from_id})).links).toEqual([{from_id:to_id,to_id:from_id}]);
+ await request(owner,"save",{text:"Independent statement"},"statement");
+ const native=(await request(owner,"link_save",{from_id,to_id:"statement"})).link;
+ expect((await request(owner,"link_save",{from_id,to_id:"statement"})).link).toEqual(native);
+ expect((await request(owner,"links",{id:"statement"})).links).toEqual([native]);
+});

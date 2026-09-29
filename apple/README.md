@@ -44,8 +44,10 @@ Locked recording, speech recognition, and hardware activation still require
 physical-device verification; simulator tests do not establish these behaviors.
 
 The local `apple/NanocodexUI` package owns the shared chat palette, Markdown
-block rendering, and copy feedback. Both Apple apps render headings, lists,
-links, quotes, tables, and code using Foundation’s Markdown parser. Copy
+block rendering, and copy feedback. The mobile app uses MarkdownUI for headings, lists, links, quotes, tables, and
+code; wide tables scroll within the message. Desktop retains Foundation’s
+Markdown parser. See [mobile dependencies](MOBILE_DEPENDENCIES.md) for pinned
+packages and license notices. Copy
 controls work on complete responses and individual code blocks. Thinking blocks
 use the same Markdown renderer, including code fences highlighted locally with
 HighlightSwift in light and dark mode. Unsupported languages remain readable
@@ -267,6 +269,8 @@ Live changes preserve the selected conversation;
 new work does not steal focus while typing. Drafts belong to agent IDs. Multiple
 active turns get an explicit selector. Navigation never approves tools, stops an
 agent, or deletes history. No approval endpoints are invented by this client.
+
+Saved accounts restore their roster and retained conversation data from local storage before refreshing. CRM, To Do, schedules, and connector screens also restore saved snapshots; opened files can be reused offline. See [Local-first behavior](LOCAL_FIRST.md) for retention, account isolation, and offline boundaries.
 
 The selected agent receives live updates. Other agents refresh in the background.
 Opening or resuming a conversation fetches its latest history page and starts

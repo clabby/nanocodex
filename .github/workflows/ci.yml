@@ -527,16 +527,20 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          cache: pnpm
+          # Reused WASM outputs skip install, so no pnpm store exists to save.
+          cache: ${{ steps.wasm.outputs.hit != 'true' && 'pnpm' || '' }}
           cache-dependency-path: pnpm-lock.yaml
       - name: Check CI orchestration and timing reports
         # Temporarily disabled: CI tests are paused.
         if: ${{ false }}
         run: node --test scripts/ci/*.test.mjs
-      - name: Build WASM package
-        run: |
-          pnpm install --frozen-lockfile
-          ./js/nanocodex-vite/scripts/build-js-package.sh --release
+      # The composite action verifies restored bindings against current inputs.
+      # Its hit path needs Node built-ins, not the full pnpm workspace install.
+      - name: Install JavaScript dependencies for a WASM cache miss
+        if: steps.wasm.outputs.hit != 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Build or verify WASM package
+        run: ./js/nanocodex-vite/scripts/build-js-package.sh --release
       - name: Retain verified WASM outputs
         if: github.ref == 'refs/heads/master'
         uses: ./.github/actions/save-wasm-outputs

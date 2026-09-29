@@ -476,7 +476,6 @@ describe("private browser verification lifecycle", () => {
   });
 });
 
-
 describe("hosted browser account authority", () => {
   it("checks current authority on every ordinary browser call before provider execution", async () => {
     let allowed = true;

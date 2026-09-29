@@ -23,6 +23,9 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
     public var status: String
     public var input: [ToolField]
     public var output: [ToolField] = []
+    public var secureInput: SecureInputRequest?
+    var secureInputEligible: Bool?
+    var nativeSecureInputEligible: Bool?
     public var vaultIntake: VaultIntake?
     var vaultIntakeEligible: Bool?
     var terminalCommand: Bool?
@@ -49,6 +52,8 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
         if family.hasPrefix("mcp__") { family = family.components(separatedBy: "__").dropFirst(2).joined(separator: "_") }
         if family.hasPrefix("functions.") { family = String(family.dropFirst(10)) }
         generatedIsComputerScreen = Self.isComputerCapture(name: attributedName, family: family, arguments: Self.decoded(arguments))
+        secureInputEligible = family == "request_secure_input"
+        nativeSecureInputEligible = family == "request_native_secure_input"
         vaultIntakeEligible = family == "request_vault_intake" || family == "browser_vault_request_challenge" || family == "browser_vault_request_takeover"
         terminalCommand = ["exec_command", "write_stdin"].contains(family)
         generatedIncludesText = ["exec", "wait"].contains(family)
@@ -90,10 +95,17 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
         status = state == "cancelled" ? "Stopped" : isFailure ? "Failed" : processRunning ? "Running" : "Completed"
         if !metadata["tool_name"].string.isEmpty || !metadata["toolName"].string.isEmpty {
             let presentation = ToolPresentation(name: "", arguments: .null, metadata: metadata)
+            secureInputEligible = presentation.secureInputEligible
+            nativeSecureInputEligible = presentation.nativeSecureInputEligible
             vaultIntakeEligible = presentation.vaultIntakeEligible
             generatedIsComputerScreen = generatedIsComputerScreen == true || presentation.generatedIsComputerScreen == true
             title = presentation.title; generatedIncludesText = presentation.generatedIncludesText
             generatedIsInspection = generatedIsInspection == true || presentation.generatedIsInspection == true
+        }
+        secureInput = nil
+        if status == "Completed", let request = SecureInputRequest.parse(value) ?? SecureInputRequest.parse(rawResult),
+           request.isNative ? nativeSecureInputEligible == true : secureInputEligible == true {
+            secureInput = request
         }
         vaultIntake = vaultIntakeEligible == true && status == "Completed" ? (VaultIntake.parse(value) ?? VaultIntake.parse(rawResult)) : nil
         var displayedResult = result

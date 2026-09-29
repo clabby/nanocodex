@@ -159,6 +159,9 @@ describe("private research profiles and refresh queue in D1", () => {
   it("rejects malformed provenance, unbounded input and nonexistent records without partial writes", async () => {
     const account = owner();
     await create(account, { kind: "person", name: "Synthetic unchanged" }, "unchanged");
+    await create(account, { kind: "company", name: "Not a person" }, "company-only");
+    await missing(call(account, "save", complete("company-only")));
+    expect((await call(account, "get", { record_id: "company-only" })).research).toBeNull();
     const saved = await call(account, "save", complete("unchanged"));
     const invalidSources: unknown[] = [null, {}, [], [{ kind: "other", reference: "synthetic" }], [{ kind: "web", reference: "javascript:alert(1)" }],
       [{ kind: "web", reference: "file:///secret" }], [{ kind: "web", reference: "https://user:pass@example.test" }],

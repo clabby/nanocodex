@@ -1,11 +1,13 @@
-# Rust dependency layers for the sandbox and phone images
+# Rust dependency layers for the sandbox, phone, and Linux Hand images
 
-Both Dockerfiles install `cargo-chef 0.1.78` with `cargo install --locked` before
-copying application sources. This installation is itself a reusable image layer.
+The sandbox, phone, and Linux Hand Dockerfiles install `cargo-chef 0.1.78` with
+`cargo install --locked` before copying application sources. This installation
+is itself a reusable image layer.
 The sandbox keeps Ubuntu 22.04 and Rust 1.97.0; the phone keeps
-`rust:1.97.0-bookworm`. The runtime images, default features, package/binary
-selection, release profile, two-job limit, and `CI_TESTS_ENABLED` check remain
-unchanged.
+`rust:1.97.0-bookworm`; the Linux Hand keeps `rust:1.97-slim-trixie`.
+Runtime images, default features, package/binary selection, release profile,
+and two-job limits remain unchanged. The sandbox/phone `CI_TESTS_ENABLED` check
+is unchanged.
 
 The planner sees the original complete Rust context and creates `recipe.json`.
 The builder starts again from the toolchain stage, copies only that recipe, and
@@ -25,7 +27,7 @@ local package versions; those edits need not invalidate external dependencies.
 
 We use unfiltered `prepare` on the workspace's existing lockfile. This avoids the
 full dependency resolution/network access required by `prepare --bin`. Cooking
-still uses exactly the package/binary flags of the final build. The current
+still uses exactly the package/binary flags of the final build. All three
 Docker contexts omit `.cargo` and rust-toolchain files, as before.
 
 The pin and behavior were checked against the upstream
@@ -51,7 +53,7 @@ CARGO_CHEF_TEST_BIN="$PWD/.cache/docker-chef-tool/bin/cargo-chef" node --test sc
 ```
 
 This test regenerates the sandbox's ignored build context, then mutates only
-throwaway copies under `.cache`. It checks recipe equality between both Docker
+throwaway copies under `.cache`. It checks recipe equality across all three Docker
 contexts; source and embedded-asset edits; dependency manifest, release profile,
 registry checksum, and new build-script invalidation; and the `../` target paths
 for `nanocodex2` and `phone-voice-cloud`. `cook --no-build` reconstructs the real
@@ -59,7 +61,7 @@ workspace skeleton in an empty directory and Cargo validates its target metadata
 Overlay checks confirm the original assets and entrypoints return. It does not
 compile production dependencies and does not enable any paused CI test suite.
 
-Hosted validation must still build both complete Linux images and run the
+Hosted validation must still build all three complete Linux images and run the
 existing image checks. Record a cold run and a run with only an existing Rust
 source edited; the second must import the registry cache on a fresh builder and
 show the `cargo chef cook` step cached. Compare final Rust compilation and total

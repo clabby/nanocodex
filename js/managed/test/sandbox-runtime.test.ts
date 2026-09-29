@@ -302,7 +302,7 @@ describe("managed sandbox preview wiring", () => {
 function toolContext() {
   return {
     callId: "call",
-    model: "gpt-6-sol",
+    model: "gpt-6.1-sol",
     parentCallId: "parent",
     sessionId: "session",
     signal: new AbortController().signal,

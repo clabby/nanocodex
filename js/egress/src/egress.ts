@@ -2046,7 +2046,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   }
 
   const walletMatch = url.pathname.match(
-    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/wallet(?:\/(balance|connect|revoke-access-key))?$/,
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/wallet(?:\/(balance|connect|revoke-access-key|mercator\/credential))?$/,
   );
   if (walletMatch) {
     const userId = walletMatch[1]!;
@@ -2072,6 +2072,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
         method: "POST",
         headers: { "content-type": "application/json" },
         body: request.body,
+        signal: request.signal,
       });
     }
     return jsonError(405, "method_not_allowed");

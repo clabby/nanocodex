@@ -102,7 +102,7 @@ function applyResponseControls(body, controls) {
 function responseRequestShape(body, encodedLength) {
   const choose = (value, allowed) => allowed.includes(value) ? value : "other_or_absent";
   const shape = {
-    model: choose(body.model, ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]),
+    model: choose(body.model, ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]),
     reasoning_effort: choose(body.reasoning?.effort, ["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
     reasoning_context: choose(body.reasoning?.context, ["all_turns", "last_turn"]),
     service_tier: choose(body.service_tier, ["default", "auto", "priority", "flex", "fast"]),

@@ -81,7 +81,7 @@ function semanticExecutionDetails(
 function toolTitle(tool: ToolActivity, family: string, input: unknown, output: unknown): string {
   if (family === "spawn_agent") {
     const role = recordString(output, "role") ?? recordString(input, "role");
-    if (role) return `${tool.status === "completed" ? "Spawned" : "Spawn"} ${compact(role)}`;
+    if (role) return `${tool.status === "completed" ? "Spawned" : tool.status === "failed" ? "Failed to spawn" : "Spawn"} ${compact(role)}`;
   }
   if (family === "submit_result") {
     const status = recordString(output, "status");

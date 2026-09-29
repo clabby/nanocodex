@@ -768,6 +768,7 @@ export function terminalEvent(
     payload: {
       text: promptText(envelope.data.input),
       turn_id: envelope.data.id,
+      ...(envelope.data.author === "guest" ? { author: "guest" } : {}),
     },
   };
 }

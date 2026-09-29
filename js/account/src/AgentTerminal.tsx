@@ -25,6 +25,7 @@ import {
   type ModelSessionStatus,
   type CredentialSource,
 } from "./modelSession";
+import { SecureInputCard } from "./SecureInputCard";
 import { VaultIntakeCard } from "./VaultIntakeCard";
 import { ArtifactDock } from "./ArtifactDock";
 import { PhoneCallsPanel } from "./PhoneCallsPanel";
@@ -166,15 +167,15 @@ const BrowserAgentTerminal = memo(function BrowserAgentTerminal({
   }, [onConversationActivity]);
   const updateModel = useCallback(async (model: Model) => {
     if (!agent || conversationStarted) return;
-    const thinking = model === "gpt-6-astra" && settings.thinking === "none"
-      ? "high"
+    const thinking = settings.thinking === "none" && ["gpt-6-astra", "gpt-6.1-sol"].includes(model)
+      ? model === "gpt-6-astra" ? "high" : "low"
       : settings.thinking;
     if (thinking !== settings.thinking) await agent.session.setThinking(thinking);
     await agent.session.setModel(model);
     setSettings((current) => ({ ...current, model, thinking }));
   }, [agent, conversationStarted, settings.thinking]);
   const updateThinking = useCallback(async (thinking: Thinking) => {
-    if (!agent || (settings.model === "gpt-6-astra" && thinking === "none")) return;
+    if (!agent || (["gpt-6-astra", "gpt-6.1-sol"].includes(settings.model) && thinking === "none")) return;
     await agent.session.setThinking(thinking);
     setSettings((current) => ({ ...current, thinking }));
   }, [agent, settings.model]);
@@ -345,7 +346,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
       onConversationActivity={recordConversationActivity}
       onStateChange={onStateChange}
       retryAgent={retryAgent}
-      renderTool={(tool, { submit }) => <VaultIntakeCard key={tool.callId} tool={tool} onReceipt={submit} />}
+      renderTool={(tool, { submit }) => <><SecureInputCard key={`secure:${tool.callId}`} tool={tool} agentId={agentId} onReceipt={submit} /><VaultIntakeCard key={tool.callId} tool={tool} onReceipt={submit} /></>}
       voice={voiceEnabled}
       welcome={settingsReady && !conversationStarted ? "# What should we work on?" : undefined}
       composerPlaceholder="Ask Nanocodex"
@@ -358,8 +359,8 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
             onFastMode={(fastMode) => updateManagedSettings({ fastMode })}
             onModel={(model) => updateManagedSettings({
               model,
-              ...(model === "gpt-6-astra" && settings.thinking === "none"
-                ? { thinking: "high" }
+              ...(settings.thinking === "none" && ["gpt-6-astra", "gpt-6.1-sol"].includes(model)
+                ? { thinking: model === "gpt-6-astra" ? "high" : "low" }
                 : {}),
             })}
             onThinking={(thinking) => updateManagedSettings({ thinking })}

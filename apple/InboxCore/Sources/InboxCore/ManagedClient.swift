@@ -69,6 +69,29 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     }
 }
 
+/// A download task writes into URLSession's temporary file, not memory. Stop it
+/// during transfer rather than waiting for the entire response to reach disk.
+private final class BoundedOutputDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    let maximumBytes: Int64
+    private let lock = NSLock()
+    private var exceeded = false
+    init(maximumBytes: Int64) { self.maximumBytes = maximumBytes }
+    var sizeExceeded: Bool { lock.lock(); defer { lock.unlock() }; return exceeded }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil) // Task-specific delegates must preserve NoRedirects.
+    }
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        if totalBytesWritten > maximumBytes || totalBytesExpectedToWrite > maximumBytes {
+            lock.lock(); exceeded = true; lock.unlock()
+            downloadTask.cancel()
+        }
+    }
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {}
+}
+
 /// Foundation owns HTTP freshness, validators, disk eviction and cache I/O.
 /// Account-separated stores prevent credentials sharing a history cache, even
 /// when callers create short-lived clients for Shortcuts or reconnects.
@@ -97,13 +120,27 @@ enum ManagedResponseCache {
 /// Native HTTP/SSE adapter for the existing /v1/agents contract. No embedded
 /// runtime, model credentials, or execution environment is owned by this client.
 public final class ManagedClient: @unchecked Sendable {
+    static let maximumOutputDownloadSize: Int64 = 256 * 1024 * 1024
     let credential: AccountCredential
     private let session: URLSession
     private let responseCache: URLCache?
+    private let snapshots: PersistentReadCache
+    private let snapshotLifetimeLock = NSLock()
+    private var snapshotWritesRetired = false
+    private func snapshotTicket() -> UInt64? {
+        snapshotLifetimeLock.lock(); defer { snapshotLifetimeLock.unlock() }
+        return snapshotWritesRetired ? nil : snapshots.ticket()
+    }
+    private func retireSnapshots(clear: Bool) {
+        snapshotLifetimeLock.lock(); defer { snapshotLifetimeLock.unlock() }
+        snapshotWritesRetired = true
+        if clear { snapshots.clear() }
+    }
     private let requestOrigin: [String: String]
     private let locationContext: (@Sendable () async -> JSON?)?
     public init(credential: AccountCredential, configuration: URLSessionConfiguration? = nil, locationContext: (@Sendable () async -> JSON?)? = nil) {
         self.credential = credential
+        snapshots = PersistentReadCache.scoped(to: credential)
         self.locationContext = locationContext
         #if os(iOS)
         let clientName = "ios"
@@ -122,11 +159,14 @@ public final class ManagedClient: @unchecked Sendable {
         config.timeoutIntervalForResource = 3600
         session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
     }
-    public func close() { session.invalidateAndCancel() }
+    public func close() { retireSnapshots(clear: false); session.invalidateAndCancel() }
     /// Call on explicit sign-out, not when suspending an observer.
-    public func clearCachedResponses() { responseCache?.removeAllCachedResponses(); ManagedAccess.clear() }
+    public func clearCachedResponses() { retireSnapshots(clear: true); responseCache?.removeAllCachedResponses(); ManagedAccess.clear() }
     public func request(path: String, method: String = "GET", body: JSON? = nil, idempotencyKey: String? = nil, location: JSON? = nil) throws -> URLRequest {
-        guard path.hasPrefix("/v1/"), !path.contains(".."), !path.contains("#"),
+        // Query values are data: a perfectly valid output filename may contain "..".
+        // Keep the traversal guard on the endpoint path, not the encoded query.
+        let endpoint = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        guard endpoint.hasPrefix("/v1/"), !endpoint.contains(".."), !path.contains("#"),
               let url = URL(string: credential.origin + path) else { throw APIError.invalidResponse }
         var request = URLRequest(url: url, timeoutInterval: 20)
         // Spotify's shared registration may ask the broker to wait for quota
@@ -152,7 +192,18 @@ public final class ManagedClient: @unchecked Sendable {
         if let idempotencyKey { request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key") }
         return request
     }
+    /// A local snapshot for immediate presentation, possibly stale. This never
+    /// performs network I/O; callers must refresh before relying on live state.
+    public func cachedJSON(path: String) async -> JSON? {
+        await Task.detached(priority: .userInitiated) { self.cachedJSONSnapshot(path: path) }.value
+    }
+    private func cachedJSONSnapshot(path: String) -> JSON? {
+        guard PersistentReadCache.allows(path),
+              let data = snapshots.read(path: path) else { return nil }
+        return try? JSONDecoder().decode(JSON.self, from: data)
+    }
     public func json(path: String, method: String = "GET", body: JSON? = nil, idempotencyKey: String? = nil) async throws -> JSON {
+        let snapshotTicket = snapshotTicket()
         let isAdmission = method == "POST" && (path == "/v1/agents" || (path.hasPrefix("/v1/agents/") && path.hasSuffix("/turns")))
         let location = isAdmission ? await locationContext?() : nil
         try Task.checkCancellation()
@@ -181,10 +232,32 @@ public final class ManagedClient: @unchecked Sendable {
         }
         if isHistory { os_signpost(.begin, log: historyPerformanceLog, name: "HistoryJSONDecode", signpostID: signpostID, "bytes=%d", data.count) }
         defer { if isHistory { os_signpost(.end, log: historyPerformanceLog, name: "HistoryJSONDecode", signpostID: signpostID) } }
-        return data.isEmpty ? .null : try JSONDecoder().decode(JSON.self, from: data)
+        let decoded = data.isEmpty ? JSON.null : try JSONDecoder().decode(JSON.self, from: data)
+        if method != "GET", method != "HEAD" {
+            let store = snapshots
+            await Task.detached(priority: .utility) {
+                if let snapshotTicket,
+                   store.applyTodoMutation(path: path, method: method, response: decoded, ticket: snapshotTicket) { return }
+                // A retired client must not recreate a Todo projection.
+                if snapshotTicket == nil, path == "/v1/todo" || path.hasPrefix("/v1/todo/") { return }
+                store.invalidate(path: path, method: method)
+            }.value
+        }
+        if method == "GET", body == nil, let snapshotTicket {
+            try Task.checkCancellation()
+            let store = snapshots
+            await Task.detached(priority: .utility) { store.save(data, path: path, ticket: snapshotTicket) }.value
+        }
+        return decoded
+    }
+    public func cachedList() async -> [AgentCard]? {
+        guard let body = await cachedJSON(path: "/v1/agents") else { return nil }
+        return try? Self.agentCards(body)
     }
     public func list() async throws -> [AgentCard] {
-        let body = try await json(path: "/v1/agents")
+        try Self.agentCards(await json(path: "/v1/agents"))
+    }
+    private static func agentCards(_ body: JSON) throws -> [AgentCard] {
         guard case .array(let ids) = body["data"] else { throw APIError.invalidResponse }
         return try ids.map { value in
             let id = value.string
@@ -264,8 +337,14 @@ public final class ManagedClient: @unchecked Sendable {
             }
         }
     }
+    public func cachedScheduledJobs(_ agentID: String) async -> [ScheduledJob]? {
+        guard let path = try? Self.agentPath(agentID), let body = await cachedJSON(path: path + "/triggers") else { return nil }
+        return try? Self.parseScheduledJobs(body, agentID: agentID)
+    }
     public func scheduledJobs(_ agentID: String) async throws -> [ScheduledJob] {
-        let body = try await json(path: Self.agentPath(agentID) + "/triggers")
+        try Self.parseScheduledJobs(await json(path: Self.agentPath(agentID) + "/triggers"), agentID: agentID)
+    }
+    private static func parseScheduledJobs(_ body: JSON, agentID: String) throws -> [ScheduledJob] {
         guard case .array(let values) = body["data"] else { throw APIError.invalidResponse }
         let jobs = try values.map { try ScheduledJob($0, agentID: agentID) }
         guard Set(jobs.map(\.id)).count == jobs.count else { throw APIError.invalidResponse }
@@ -338,7 +417,16 @@ public final class ManagedClient: @unchecked Sendable {
         guard before == nil || after == nil else { throw APIError.invalidResponse }
         let path = try Self.agentPath(id) + "/events/history?limit=128"
             + (before.map { "&before=" + $0.rawValue } ?? "") + (after.map { "&after=" + $0.rawValue } ?? "")
-        let body = try await json(path: path)
+        let body: JSON
+        do {
+            body = try await json(path: path)
+        } catch let error as URLError where [URLError.notConnectedToInternet, .networkConnectionLost,
+                                              .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+                                              .timedOut].contains(error.code) {
+            try Task.checkCancellation()
+            guard let cached = await cachedJSON(path: path) else { throw error }
+            body = cached
+        }
         let signpostID = OSSignpostID(log: historyPerformanceLog)
         os_signpost(.begin, log: historyPerformanceLog, name: "HistoryEventPreparation", signpostID: signpostID)
         defer { os_signpost(.end, log: historyPerformanceLog, name: "HistoryEventPreparation", signpostID: signpostID) }
@@ -346,12 +434,38 @@ public final class ManagedClient: @unchecked Sendable {
     }
     /// Prepare the latest page so stream observation can begin without waiting
     /// for older history. Callers backfill from the first retained event's cursor.
+    /// Save a contiguous streamed tail using the same durable page as an opening read.
+    public func saveConversationSnapshot(_ id: String, events: [AgentEvent], latest: Cursor, hasMore: Bool) async {
+        guard let path = try? Self.agentPath(id) else { return }
+        guard let ticket = snapshotTicket() else { return }
+        let store = snapshots
+        await Task.detached(priority: .utility) {
+            let values: [JSON] = events.compactMap { event in
+                guard case .object(var value) = event.data else { return nil }
+                value["cursor"] = .string(event.cursor.rawValue)
+                return .object(value)
+            }
+            guard values.count == events.count else { return }
+            let page = JSON.object(["data": .array(values), "latest_cursor": .string(latest.rawValue), "has_more": .bool(hasMore)])
+            guard let data = try? JSONEncoder().encode(page) else { return }
+            store.save(data, path: path + "/events/history?limit=128", ticket: ticket)
+        }.value
+    }
+    public func cachedConversationHistory(_ id: String) async -> ConversationHistory? {
+        guard let path = try? Self.agentPath(id),
+              let body = await cachedJSON(path: path + "/events/history?limit=128"),
+              let page = try? EventPage(body) else { return nil }
+        return try? await Self.prepareConversation(page)
+    }
     public func conversationHistory(_ id: String) async throws -> ConversationHistory {
         let signpostID = OSSignpostID(log: historyPerformanceLog)
         os_signpost(.begin, log: historyPerformanceLog, name: "HistoryOpening", signpostID: signpostID)
         defer { os_signpost(.end, log: historyPerformanceLog, name: "HistoryOpening", signpostID: signpostID) }
         try Task.checkCancellation()
         let page = try await history(id)
+        return try await Self.prepareConversation(page)
+    }
+    private static func prepareConversation(_ page: EventPage) async throws -> ConversationHistory {
         guard !page.hasMore || !page.events.isEmpty else { throw APIError.invalidResponse }
         var events = page.events
         var counts = try await TranscriptPreparation.byteCounts(events)
@@ -444,6 +558,44 @@ public final class ManagedClient: @unchecked Sendable {
         let (_, response) = try await session.upload(for: request, fromFile: source)
         guard let response = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard response.statusCode == 200 else { throw APIError.http(response.statusCode) }
+    }
+
+    /// Download a private /brain/outputs link with this account's credentials.
+    /// The sandbox URI itself is never passed to URLSession or an external app.
+    public func downloadOutput(agentID: String, path: String) async throws -> URL {
+        guard PublishedOutputLink.validPath(path) else { throw APIError.invalidResponse }
+        var query = URLComponents()
+        query.queryItems = [URLQueryItem(name: "path", value: path)]
+        guard let encoded = query.percentEncodedQuery else { throw APIError.invalidResponse }
+        var request = try request(path: Self.agentPath(agentID) + "/files?" + encoded)
+        request.timeoutInterval = 300
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+        let limiter = BoundedOutputDownload(maximumBytes: Self.maximumOutputDownloadSize)
+        let download: URL
+        let response: URLResponse
+        do { (download, response) = try await session.download(for: request, delegate: limiter) }
+        catch { if limiter.sizeExceeded { throw APIError.invalidResponse }; throw error }
+        defer { try? FileManager.default.removeItem(at: download) }
+        guard !limiter.sizeExceeded else { throw APIError.invalidResponse }
+        guard let response = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        guard response.statusCode == 200 else { throw APIError.http(response.statusCode) }
+        guard response.mimeType == "application/octet-stream" else { throw APIError.invalidResponse }
+        let size = try download.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        guard let size, size >= 0, Int64(size) <= Self.maximumOutputDownloadSize,
+              response.expectedContentLength <= Self.maximumOutputDownloadSize,
+              response.expectedContentLength < 0 || Int64(size) == response.expectedContentLength else {
+            throw APIError.invalidResponse
+        }
+        // An isolated folder keeps the original filename in Quick Look and
+        // Save to Files without colliding with another download of that name.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NanocodexOutput-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let local = directory.appendingPathComponent((path as NSString).lastPathComponent)
+        do { try FileManager.default.moveItem(at: download, to: local) }
+        catch { try? FileManager.default.removeItem(at: directory); throw error }
+        if Task.isCancelled { try? FileManager.default.removeItem(at: directory); throw CancellationError() }
+        return local
     }
 
     /// Account-scoped URLCache retains immutable previews; original bytes never

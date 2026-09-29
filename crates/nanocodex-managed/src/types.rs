@@ -431,6 +431,8 @@ impl AgentSettings {
             return Err(ManagedError::Configuration(
                 (if self.model == Model::Glm53 {
                     "GLM-5.3 requires low, medium, or high reasoning effort"
+                } else if self.model == Model::Sol {
+                    "GPT-6.1 Sol requires low, medium, high, xhigh, or max reasoning effort"
                 } else {
                     "GPT-6 Astra requires low, medium, high, xhigh, or max reasoning effort"
                 })
@@ -538,7 +540,7 @@ mod model_serde {
         D: Deserializer<'de>,
     {
         match String::deserialize(deserializer)?.as_str() {
-            "gpt-6-sol" => Ok(Model::Sol),
+            "gpt-6.1-sol" => Ok(Model::Sol),
             "gpt-6-luna" => Ok(Model::Luna),
             "gpt-6-astra" => Ok(Model::Astra),
             "@cf/zai-org/glm-5.3" => Ok(Model::Glm53),
@@ -547,7 +549,7 @@ mod model_serde {
             value => Err(de::Error::unknown_variant(
                 value,
                 &[
-                    "gpt-6-sol",
+                    "gpt-6.1-sol",
                     "gpt-6-luna",
                     "gpt-6-astra",
                     "@cf/zai-org/glm-5.3",
@@ -824,7 +826,13 @@ mod settings_tests {
 
     #[test]
     fn settings_reject_aliases_and_patch_only_selected_fields() {
-        for model in ["sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        for model in [
+            "sol",
+            "gpt-6-sol",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ] {
             assert!(
                 serde_json::from_value::<AgentSettings>(json!({
                     "model": model,

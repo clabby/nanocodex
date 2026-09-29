@@ -3,6 +3,226 @@ import os
 
 private let markdownPerformanceLog = OSLog(subsystem: "xyz.paradigm.centaur", category: .pointsOfInterest)
 
+#if os(iOS)
+import MarkdownUI
+
+public struct ChatMarkdown: View {
+    private let text: String
+    private let compact: Bool
+    public init(text: String, compact: Bool = false) { self.text = text; self.compact = compact }
+    public var body: some View { ChatMarkdownContent(text: text, compact: compact).equatable() }
+}
+
+private struct ChatMarkdownContent: View, Equatable {
+    let text: String
+    let compact: Bool
+    @StateObject private var renderer: ChatMarkdownRenderer
+    init(text: String, compact: Bool) {
+        self.text = text
+        self.compact = compact
+        _renderer = StateObject(wrappedValue: ChatMarkdownRenderer(initialSource: text))
+    }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.text == rhs.text && lhs.compact == rhs.compact }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let rendered = renderer.rendered, text.hasPrefix(rendered.source) {
+                ChatMarkdownDocument(content: rendered.content, compact: compact)
+                // Keep the last parsed tree until its replacement is ready.
+                // Displaying an unparsed suffix leaks fences and table syntax.
+            } else {
+                // Reserve approximate space on a cold parse without flashing
+                // Markdown source. Recycled messages use the synchronous cache.
+                Text(text).hidden().accessibilityHidden(true)
+            }
+        }
+        .frame(maxWidth: compact ? nil : .infinity, alignment: .leading)
+        .onChange(of: text) { _, source in renderer.update(source) }
+        // A native collection can prefetch then temporarily detach a host.
+        // Finish its bounded parse so reattachment has formatted content; there
+        // is no ongoing subscription once the latest source has been parsed.
+    }
+}
+
+/// Styling is applied at display time so cached parsing follows Dynamic Type.
+struct ChatMarkdownDocument: View {
+    let content: MarkdownContent
+    let compact: Bool
+    @ScaledMetric(relativeTo: .body) private var textSize = 17
+
+    var body: some View {
+        Markdown(content)
+            .markdownTheme(theme)
+            .markdownImageProvider(ChatMarkdownImageProvider())
+            .markdownInlineImageProvider(ChatMarkdownInlineImageProvider())
+            .markdownTextStyle { FontSize(textSize) }
+            .textSelection(.enabled)
+            .frame(maxWidth: compact ? nil : .infinity, alignment: .leading)
+    }
+
+    private var theme: Theme {
+        Theme.basic
+            .image { configuration in
+                Text(configuration.content.renderPlainText())
+            }
+            .link { ForegroundColor(.blue); UnderlineStyle(Text.LineStyle(pattern: .solid, color: .blue)) }
+            .code { FontFamilyVariant(.monospaced); BackgroundColor(Color.primary.opacity(0.06)) }
+            .paragraph { configuration in
+                configuration.label
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineSpacing(compact ? 3 : 5)
+                    .markdownMargin(top: .zero, bottom: .em(compact ? 0.6 : 0.8))
+            }
+            .table { configuration in
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Scroll horizontally for more columns", systemImage: "arrow.left.and.right")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ScrollView(.horizontal) {
+                        configuration.label
+                            .markdownTableBorderStyle(.init(.horizontalBorders, color: .primary.opacity(0.12), width: 0.5))
+                            .markdownTableBackgroundStyle(.alternatingRows(Color.clear, Color.primary.opacity(0.025), header: Color.primary.opacity(0.06)))
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .scrollIndicators(.visible)
+                    .accessibilityIdentifier("markdown-table")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .markdownMargin(top: .zero, bottom: .em(1))
+            }
+            .tableCell { configuration in
+                configuration.label
+                    .markdownTextStyle { if configuration.row == 0 { FontWeight(.semibold) } }
+                    .frame(width: textSize * 8, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+            }
+            .codeBlock { configuration in
+                code(configuration.content, language: configuration.language ?? "")
+                    .markdownMargin(top: .zero, bottom: .em(1))
+            }
+    }
+
+    private func code(_ source: String, language: String) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(language.isEmpty ? "Code" : language).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                ChatCopyButton(text: source, label: "Copy code", showsLabel: true)
+            }.padding(.leading, 16).padding(.trailing, 6).padding(.vertical, 3)
+            Divider().opacity(0.35)
+            ScrollView(.horizontal) {
+                ChatCodeText(source: source, language: language)
+                    .font(.system(size: textSize - 3, design: .monospaced)).lineSpacing(4)
+                    .textSelection(.enabled).fixedSize(horizontal: true, vertical: true)
+                    .padding(16)
+            }
+        }
+        .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.primary.opacity(0.06)))
+    }
+}
+
+/// The previous text renderer never fetched Markdown image URLs. Preserve that
+/// boundary for model-authored content; generated images use the separate,
+/// explicitly configured image pipeline. Cover both standalone and inline images.
+private struct ChatMarkdownImageProvider: ImageProvider {
+    func makeImage(url: URL?) -> some View { EmptyView() }
+}
+
+struct ChatMarkdownInlineImageProvider: InlineImageProvider {
+    func image(with url: URL, label: String) async throws -> Image {
+        // MarkdownUI omits unloaded inline images; do not initiate network I/O.
+        throw URLError(.unsupportedURL)
+    }
+}
+
+/// MarkdownUI 2.4.1's MarkdownContent is an immutable value tree, but predates
+/// Sendable annotations. Transfer only this immutable snapshot across executors.
+struct ChatMarkdownSnapshot: @unchecked Sendable {
+    let source: String
+    let content: MarkdownContent
+}
+
+/// NSCache synchronizes access; only immutable parsed snapshots cross threads.
+private final class ChatMarkdownSnapshotCache: @unchecked Sendable {
+    static let shared = ChatMarkdownSnapshotCache()
+    private final class Cached {
+        let snapshot: ChatMarkdownSnapshot
+        init(_ snapshot: ChatMarkdownSnapshot) { self.snapshot = snapshot }
+    }
+    private let cache: NSCache<NSString, Cached> = {
+        let cache = NSCache<NSString, Cached>()
+        cache.countLimit = 64
+        cache.totalCostLimit = 8 * 1024 * 1024
+        return cache
+    }()
+    func snapshot(for source: String) -> ChatMarkdownSnapshot? {
+        cache.object(forKey: source as NSString)?.snapshot
+    }
+    func insert(_ snapshot: ChatMarkdownSnapshot) {
+        guard snapshot.source.utf8.count <= 1_000_000 else { return }
+        let key = snapshot.source as NSString
+        cache.setObject(Cached(snapshot), forKey: key, cost: max(1, key.length * 16))
+    }
+}
+
+actor ChatMarkdownParser {
+    static let shared = ChatMarkdownParser()
+    func content(for source: String) throws -> ChatMarkdownSnapshot {
+        assert(!Thread.isMainThread)
+        try Task.checkCancellation()
+        if let cached = ChatMarkdownSnapshotCache.shared.snapshot(for: source) { return cached }
+        let signpost = OSSignpostID(log: markdownPerformanceLog)
+        os_signpost(.begin, log: markdownPerformanceLog, name: "ChatMarkdownParse", signpostID: signpost)
+        let snapshot = ChatMarkdownSnapshot(source: source, content: MarkdownContent(source))
+        os_signpost(.end, log: markdownPerformanceLog, name: "ChatMarkdownParse", signpostID: signpost)
+        try Task.checkCancellation()
+        // Approximate immutable tree/string cost; NSCache also evicts on pressure.
+        ChatMarkdownSnapshotCache.shared.insert(snapshot)
+        return snapshot
+    }
+}
+
+/// Coalesce deltas without cancelling every parse (which can starve a stream).
+@MainActor
+final class ChatMarkdownRenderer: ObservableObject {
+    @Published private(set) var rendered: ChatMarkdownSnapshot?
+    private var latest = ""
+    private var task: Task<Void, Never>?
+    private var generation = 0
+
+    init(initialSource: String = "") {
+        rendered = ChatMarkdownSnapshotCache.shared.snapshot(for: initialSource)
+        // UIHostingConfiguration can size a prefetched host before SwiftUI runs
+        // its appearance task. Start cold parsing when the owned renderer is
+        // created, so a reused cell cannot remain an empty placeholder.
+        if rendered == nil, !initialSource.isEmpty { update(initialSource) }
+    }
+
+    func update(_ text: String) {
+        latest = text
+        guard task == nil, rendered?.source != text else { return }
+        let generation = generation
+        task = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.generation == generation { self.task = nil } }
+            do {
+                if self.rendered != nil { try await Task.sleep(for: .milliseconds(32)) }
+                while !Task.isCancelled {
+                    let source = self.latest
+                    let snapshot = try await ChatMarkdownParser.shared.content(for: source)
+                    try Task.checkCancellation()
+                    if self.latest.hasPrefix(source) { self.rendered = snapshot }
+                    if self.latest == source { return }
+                    try await Task.sleep(for: .milliseconds(32))
+                }
+            } catch { }
+        }
+    }
+    func cancel() { generation += 1; task?.cancel(); task = nil }
+}
+#else
 /// Foundation owns Markdown parsing, including incomplete streamed replies.
 /// This view supplies the block layout that SwiftUI Text does not render.
 public struct ChatMarkdown: View {
@@ -334,3 +554,5 @@ struct ChatMarkdownBlock: Identifiable, Sendable {
         return result
     }
 }
+
+#endif

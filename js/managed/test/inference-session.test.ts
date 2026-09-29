@@ -182,6 +182,11 @@ describe("standalone inference session isolation", () => {
 });
 
 describe("strict Responses boundary", () => {
+  it("preserves strict function declarations without opening the inference API to hosted tools", () => {
+    const strict = { type: "function", name: "spawn_agent", strict: true,
+      parameters: { type: "object", properties: { role: { type: "string" } }, required: ["role"], additionalProperties: false } };
+    expect(validateInferenceRequest({ model: OSS_MODEL, input: "x", tools: [strict] }).tools).toEqual([strict]);
+  });
   it.each(["web_search", "web_search_preview", "file_search", "computer", "computer_use_preview", "code_interpreter", "mcp", "tool_search", "namespace"])("rejects server tool %s before routing", async type => {
     const f = fixture(); await f.create();
     expect((await f.call("POST", "/responses", { input: "x", tools: [{ type, name: "unsafe" }] })).status).toBe(400);
@@ -192,7 +197,6 @@ describe("strict Responses boundary", () => {
     { account_id: "other" }, { api_key: "secret" }, { base_url: "https://attacker.invalid" }, { headers: {} },
     { context_management: [] }, { background: true }, { store: true }, { metadata: { arbitrary: "x" } },
     { text: { format: { type: "json_schema", schema: {} } } },
-    { tools: [{ type: "function", name: "f", strict: true }] },
     { input: [{ type: "configuration_update", reasoning: { effort: "high" } }] },
     { input: [{ type: "additional_tools", tools: [{ type: "mcp" }] }] },
     { input: [{ role: "user", content: [{ type: "input_image", image_url: "file:///private/image.png" }] }] },
@@ -581,7 +585,7 @@ describe("stateless standard Responses", () => {
   });
 
   it.each([
-    { model: "unknown-model" }, { model: "gpt-6-astra:high" }, { session_id: sessionId },
+    { model: "unknown-model" }, { model: "gpt-6-sol" }, { model: "gpt-6-astra:high" }, { session_id: sessionId },
     { previous_response_id: "resp_unknown" }, { previous_response_id: null },
     { model: `${OSS_MODEL}:low`, reasoning: { effort: "high" } },
     { max_output_tokens: 33 }, { account_id: "synthetic-account" },
@@ -798,7 +802,7 @@ describe("Cloudflare frontier public Responses compatibility", () => {
       expect(f.commits.at(-1)?.route).toEqual(pin);
     }
     const count = f.ai.mock.calls.length;
-    for (const extra of [{ model: "gpt-6-sol" }, { model: "openrouter:openai/gpt-6-astra:low" },
+    for (const extra of [{ model: "gpt-6.1-sol" }, { model: "openrouter:openai/gpt-6-astra:low" },
       { model: "cloudflare:openai/gpt-6-astra:high" }, { reasoning: { effort: "high" } }]) {
       expect((await f.call("POST", "/responses", { input: history, ...extra })).status).toBe(409);
     }
@@ -819,7 +823,7 @@ describe("Cloudflare frontier public Responses compatibility", () => {
 
 
 describe("Cloudflare REST inference transport", () => {
-  const exact = "cloudflare:openai/gpt-6-sol:low";
+  const exact = "cloudflare:openai/gpt-6.1-sol:low";
   const accountId = "a".repeat(32), token = "private-deployment-inference-token";
   const native = (output: unknown[]) => ({ object: "response", status: "completed", output });
   it("repeats stateless requests without using the model binding or retaining account credentials", async () => {
@@ -829,7 +833,7 @@ describe("Cloudflare REST inference transport", () => {
     const send = vi.fn(async (url: string, init: RequestInit) => {
       expect(url).toBe(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/responses`);
       expect(init.redirect).toBe("manual"); expect((init.headers as any).authorization).toBe(`Bearer ${token}`);
-      expect(JSON.parse(init.body as string)).toMatchObject({ model: "openai/gpt-6-sol", stream: false,
+      expect(JSON.parse(init.body as string)).toMatchObject({ model: "openai/gpt-6.1-sol", stream: false,
         store: false, reasoning: { effort: "low" }, max_output_tokens: 512 });
       return Response.json(native([{ type: "message", role: "assistant", content: [{ type: "output_text", text: "fixture answer" }] }]));
     });
@@ -849,7 +853,7 @@ describe("Cloudflare REST inference transport", () => {
     let count=0;
     const send=vi.fn(async (_url: string, init: RequestInit) => {
       const body=JSON.parse(init.body as string); count++;
-      expect(f.commits.at(-1)?.route).toMatchObject({backend:"cloudflare",model:"gpt-6-sol",thinking:"low"});
+      expect(f.commits.at(-1)?.route).toMatchObject({backend:"cloudflare",model:"gpt-6.1-sol",thinking:"low"});
       if(count===1) return Response.json(native([{type:"function_call",call_id:"fixture_call",name:body.tools[0].name,arguments:'{"value":42}'}]));
       expect(body.input.at(-1)).toEqual({type:"function_call_output",call_id:"fixture_call",output:"42"});
       return Response.json(native([{type:"message",role:"assistant",content:[{type:"output_text",text:"42"}]}]));
@@ -871,7 +875,7 @@ describe("Cloudflare REST inference transport", () => {
 });
 
 describe("incremental inference lifecycle", () => {
-  const exact = "cloudflare:openai/gpt-6-sol:low";
+  const exact = "cloudflare:openai/gpt-6.1-sol:low";
   function streamingFixture() {
     const f = fixture({ NANOCODEX_CLOUDFLARE_FRONTIER_ENABLED: "true", CLOUDFLARE_AI_API_TOKEN: "synthetic-token",
       NANOCODEX_CLOUDFLARE_ACCOUNT_ID: "a".repeat(32) });

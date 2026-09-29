@@ -53,7 +53,7 @@ renamed, edited, incomplete, missing, or stale plans and jobs.
     }
   ],
   "policy": {
-    "model": "gpt-6-sol",
+    "model": "gpt-6.1-sol",
     "effort": "high",
     "systemInstructionsDigest": "sha256:<64 hex>",
     "environmentDigest": "sha256:<64 hex>",

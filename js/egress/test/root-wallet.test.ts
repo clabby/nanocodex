@@ -120,10 +120,21 @@ describe("per-user root wallets", () => {
     const missing = await SELF.fetch(`https://broker.internal/users/${user}/wallet`);
     expect(missing.status).toBe(404);
 
-    const malformed = await walletConnect(user, {
-      request: { method: "personal_sign", params: [] },
-    });
-    expect(malformed.status).toBe(400);
+    // A discovered payment challenge or model-produced RPC request must never
+    // turn the login-only bridge into root-wallet signing authority. Rejections
+    // must happen before wallet provisioning, not just before transmission.
+    for (const request of [
+      { method: "personal_sign", params: ["0x68656c6c6f", "0x0000000000000000000000000000000000000001"] },
+      { method: "eth_signTypedData_v4", params: ["0x0000000000000000000000000000000000000001", "{}"] },
+      { method: "eth_sendTransaction", params: [{ to: "0x0000000000000000000000000000000000000002", value: "0x1" }] },
+      { method: "wallet_sendCalls", params: [{ version: "2.0.0", chainId: "0x1079", calls: [{ to: "0x0000000000000000000000000000000000000002", data: "0x" }] }] },
+    ]) {
+      const rejected = await walletConnect(user, { request });
+      expect(rejected.status, request.method).toBe(400);
+      await expect(rejected.json()).resolves.toEqual({ error: "invalid_wallet_connect_request" });
+    }
+    const afterRejectedSigning = await SELF.fetch(`https://broker.internal/users/${user}/wallet`);
+    expect(afterRejectedSigning.status).toBe(404);
 
     const wrongChain = await walletConnect(user, {
       request: {

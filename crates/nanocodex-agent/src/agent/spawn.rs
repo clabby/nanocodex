@@ -289,6 +289,8 @@ pub(super) fn validate_model_thinking(model: Model, thinking: Thinking) -> Resul
         Err(NanocodexError::InvalidRequest(
             (if model == Model::Glm53 {
                 "GLM-5.3 requires low, medium, or high reasoning effort"
+            } else if model == Model::Sol {
+                "GPT-6.1 Sol requires low, medium, high, xhigh, or max reasoning effort"
             } else {
                 "GPT-6 Astra requires low, medium, high, xhigh, or max reasoning effort"
             })

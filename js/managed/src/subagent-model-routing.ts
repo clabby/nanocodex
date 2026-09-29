@@ -20,7 +20,7 @@ const bindingSchema = z.object({
 }).strict();
 const aliases = new Map([
   ["kimi", "kimi-k3"], ["mimo", "mimo-v2.6-pro"],
-  ["sol", "gpt-6-sol"], ["luna", "gpt-6-luna"],
+  ["sol", "gpt-6.1-sol"], ["luna", "gpt-6-luna"],
   ["astra", "gpt-6-astra"], ["glm-5.3", "@cf/zai-org/glm-5.3"],
 ]);
 export type RetainedChildRoute = {
@@ -80,8 +80,9 @@ export function createSubagentRouteController(options: {
     async resolve(raw: unknown) {
       const request = requestSchema.parse(raw);
       const model = request.model === undefined ? undefined : aliases.get(request.model) ?? request.model;
+      if (model === "gpt-6.1-sol" && request.thinking === "none") throw new Error("GPT-6.1 Sol requires reasoning effort");
       const native = options.native?.parentIsNative(request.parentSessionId) === true
-        && (model === undefined || ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"].includes(model));
+        && (model === undefined || ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(model));
       if (native) options.native!.authorize(request.parentSessionId, request.hostContextRef);
       else options.authorize(request.parentSessionId, request.hostContextRef);
       expirePending();

@@ -8,7 +8,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && node --experimental-strip-types --test test/mercator-payment.node.test.mjs",
     "dry-run:agent": "wrangler deploy --dry-run --config wrangler.agent.jsonc",
     "deploy:agent": "wrangler deploy --config wrangler.agent.jsonc",
     "dry-run:broker": "wrangler deploy --dry-run --config wrangler.broker.jsonc",
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "accounts": "0.17.0",
+    "mppx": "0.11.0",
     "nanocodex": "workspace:*",
     "viem": "^2.54.0"
   },

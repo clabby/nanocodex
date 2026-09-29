@@ -410,6 +410,17 @@ test("TODO reads, captures and decision responses retain the exact managed reque
   const decision = "11111111-1111-4111-8111-111111111111";
   for (const [method, path, body] of [
     ["GET", "/v1/todo", undefined],
+    ["GET", "/v1/todo/mail/accounts", undefined],
+    ["GET", "/v1/todo/mail/threads?connection_id=fixture&q=review&page_token=next", undefined],
+    ["GET", "/v1/todo/mail/threads/thread_1?connection_id=fixture", undefined],
+    ["POST", "/v1/todo/mail/threads/thread_1/modify", JSON.stringify({connection_id:"fixture",archive:false})],
+    ["GET", "/v1/todo/mail/messages/message_1/attachments/attachment_1?connection_id=fixture", undefined],
+    ["GET", "/v1/todo/mail/drafts?connection_id=fixture&thread_id=thread_1", undefined],
+    ["GET", "/v1/todo/mail/drafts/11111111-1111-4111-8111-111111111111", undefined],
+    ["POST", "/v1/todo/mail/drafts", JSON.stringify({id:decision,version:0})],
+    ["POST", "/v1/todo/mail/send", JSON.stringify({draft_id:decision,version:1,operation_id:decision})],
+    ["POST", "/v1/todo/mail/suggest", JSON.stringify({connection_id:"fixture",thread_id:"thread_1",reply_message_id:"message_1"})],
+    ["GET", "/v1/todo/schedule?from=2026-09-28T00:00:00Z&to=2026-10-05T00:00:00Z", undefined],
     ["POST", "/v1/todo", JSON.stringify({ body: "Follow up", operation_id: decision })],
     ["POST", `/v1/todo/decisions/${decision}/respond`, JSON.stringify({ version: 1, choice_id: "yes", operation_id: decision })],
   ] as const) {
@@ -439,7 +450,7 @@ test("TODO reads, captures and decision responses retain the exact managed reque
 
 test("TODO forwarding excludes unsupported adjacent endpoints", async () => {
   for (const path of ["/v1/todos", "/v1/todo/", "/v1/todo/decisions", "/v1/todo/decisions/invalid/respond",
-    "/v1/todo/decisions/11111111-1111-4111-8111-111111111111/respond/extra"]) {
+    "/v1/todo/decisions/11111111-1111-4111-8111-111111111111/respond/extra", "/v1/todo/mail/raw", "/v1/todo/mail/send/extra", "/v1/todo/mail/threads/id/delete", "/v1/todo/schedule/extra"]) {
     const request = new Request(`https://nanocodex.example${path}`);
     assert.equal(await routeManaged(request, { NANOCODEX_BACKEND: {
       async fetch() { throw Error("unsupported route reached managed"); }, connect() { throw Error("unused"); },
@@ -457,4 +468,25 @@ test("CRM reads reach the managed authorization boundary with pagination intact"
     assert.equal(result, response);
   }
   assert.equal(isManagedRoutePath("/v1/crm/example/delete"), false);
+});
+
+test("shared thread streams and real turn submissions forward bearer to managed", async () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  for (const suffix of ["", "/events/history", "/events", "/turns"])
+    assert.equal(isManagedRoutePath(`/v1/shared/${id}${suffix}`), true);
+  for (const path of [`/v1/shared/${id}/comments`, `/v1/shared/${id}/turns/forged/cancel`, "/v1/shared/not-an-id"])
+    assert.equal(isManagedRoutePath(path), false);
+  const requests: Request[] = [];
+  const env = { NANOCODEX_BACKEND: {
+    fetch(request: Request) { requests.push(request); return Promise.resolve(Response.json({ state: "accepted" }, { status: 202 })); },
+    connect() { throw Error("unused"); },
+  } };
+  const path = `/v1/shared/${id}/turns`;
+  const url = new URL(`https://nanocodex.localhost${path}`);
+  const request = new Request(url, { method: "POST", headers: { authorization: "Bearer nsl_synthetic",
+    origin: url.origin, "content-type": "application/json" }, body: JSON.stringify({ id: "guest-turn", input: "hello" }) });
+  assert.equal((await routeManaged(request, env, url))?.status, 202);
+  assert.deepEqual(requests, [request]);
+  assert.equal((await routeManaged(new Request(url, { method: "POST", headers: { authorization: "Bearer nci_test" } }), env, url))?.status, 403);
+  assert.equal(requests.length, 1);
 });

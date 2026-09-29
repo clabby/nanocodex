@@ -25,6 +25,7 @@ export function projectEnvironment(info, { runtime, default_cwd }) {
     }])),
     apis: info.apis, identity: info.identity, stablecoins: info.stablecoins,
     authorizations: info.authorizations, vault: info.vault,
+    ...(info.wallet === undefined ? {} : { wallet: projectWallet(info.wallet) }),
   };
 }
 
@@ -71,4 +72,15 @@ export function requestOriginLocation(value, now = Date.now()) {
     || timestamp_ms < now - 300_000 || timestamp_ms > now + 30_000
     || typeof approximate !== "boolean") return undefined;
   return { latitude, longitude, accuracy_meters, timestamp_ms, approximate };
+}
+
+/** Keep wallet metadata separate from payment authority. Never spread signer data. */
+function projectWallet(wallet) {
+  if (wallet.status !== "ready") return { status: wallet.status };
+  const balance = wallet.balance.status === "ready" ? {
+    status: "ready", amount: wallet.balance.amount, decimals: wallet.balance.decimals,
+    symbol: wallet.balance.symbol, token: wallet.balance.token,
+  } : { status: "unavailable" };
+  return { status: "ready", address: wallet.address, created_at: wallet.created_at,
+    chain: wallet.chain, chain_id: wallet.chain_id, balance };
 }

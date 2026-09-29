@@ -627,23 +627,35 @@ or Durable Object migration.
 
 ### Managed browser provider
 
-`MANAGED_BROWSER_PROVIDER` is deployment policy and accepts `cloudflare` or
-`browserbase`; it is never a browser-tool argument. Cloudflare is the default
-and uses the `BROWSER` binding. Browserbase uses the same official Agents CDP
-runtime through a Worker-side binding adapter. Set its API key only as a
-Wrangler secret (never in `vars`, logs, or tool configuration):
+The managed Worker exposes `browser_execute` through `env.BROWSER` and the
+Agents SDK CDP runtime, without provisioning a VM or desktop Hand. Production
+and development Wrangler configuration select `MANAGED_BROWSER_PROVIDER=kitesurf`.
+Local development uses a remote Browser Run binding and requires Cloudflare access.
 
-```bash
-pnpm exec wrangler secret put BROWSERBASE_API_KEY --config wrangler.jsonc
-```
+`MANAGED_BROWSER_PROVIDER` is host deployment policy, never a tool argument:
 
-`BROWSERBASE_PROJECT_ID` is optional and can also be supplied as a secret.
-Browserbase sessions explicitly disable CAPTCHA solving, advanced stealth,
-verified-browser mode, proxies, and provider recording. Both providers retain
-one session per durable agent for bounded reuse. Signed CDP/Live View URLs and
-cookie-bearing CDP fields are redacted at the tool adapter boundary; human
-handoff remains disabled until there is an account-authenticated first-party
-handoff route that can resolve provider URLs without crossing model results.
+- `kitesurf`: Browser Run with `browser=kitesurf` on its CDP requests.
+- `cloudflare`: Browser Run's default Chromium engine.
+- `browserbase`: the existing Browserbase binding adapter; requires the
+  `BROWSERBASE_API_KEY` Wrangler secret and optionally `BROWSERBASE_PROJECT_ID`.
+
+Kitesurf uses a one-shot connection: complete navigation and extraction in one
+`browser_execute` call. It cannot retain page state between calls or pause/resume.
+Chromium and Browserbase retain bounded sessions per durable agent, with separate
+storage for each provider. Credential-bearing CDP commands remain blocked.
+Kitesurf exposes ordinary browsing; private Vault and one-time secure input
+tools are unavailable with this provider. Chromium and Browserbase retain their
+existing private browser flows. Use workdir-scoped CUA when operating an
+existing computer's browser.
+
+[Kitesurf is currently beta](https://developers.cloudflare.com/browser-run/kitesurf/).
+It does not support every Chromium feature or long-running authenticated state.
+Unsupported sites return their browser errors; there is no automatic VM allocation
+or silent provider fallback. Operators can select `cloudflare` when Chromium is
+needed. Neither Browser Run engine requires a Nanocodex VM.
+
+Run the [local Kitesurf smoke test](scripts/kitesurf-smoke.md) to verify the real
+remote binding through the managed runtime before rollout.
 
 ### Spotify on iPhone
 

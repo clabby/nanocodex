@@ -2,7 +2,7 @@ import { toolAliasFailure } from "./tool-alias-diagnostic.mjs";
 import { chatReasoningText } from "./chat-reasoning.mjs";
 import { providerStream, streamResponse } from "./provider-stream.mjs";
 const MODEL = "@cf/zai-org/glm-5.3";
-const MODELS = [MODEL, "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "kimi-k3", "mimo-v2.6-pro"];
+const MODELS = [MODEL, "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "kimi-k3", "mimo-v2.6-pro"];
 const BASE = "https://workers-ai.invalid/v1";
 const fail = (message) => { throw new Error(`Workers AI Responses: ${message}`); };
 const json = (value) => typeof value === "string" ? value : JSON.stringify(value);
@@ -68,7 +68,7 @@ function translate(body, model) {
   if (!body || typeof body !== "object" || Array.isArray(body)) fail("expected a Responses request object");
   if (body.model !== undefined && body.model !== model) fail("unsupported model override; expected pinned model");
   const effort = (value) => {
-    if (value !== undefined && !(["gpt-6-sol", "gpt-6-luna"].includes(model) ? ["none", "low", "medium", "high", "xhigh", "max"] : model === "kimi-k3" ? ["low", "high"] : ["low", "medium", "high"]).includes(value)) fail("unsupported reasoning effort for pinned model");
+    if (value !== undefined && !(model === "gpt-6-luna" ? ["none", "low", "medium", "high", "xhigh", "max"] : model === "gpt-6.1-sol" ? ["low", "medium", "high", "xhigh", "max"] : model === "kimi-k3" ? ["low", "high"] : ["low", "medium", "high"]).includes(value)) fail("unsupported reasoning effort for pinned model");
     return value;
   };
   if (body.previous_response_id) fail("previous_response_id is unsupported; send the complete Responses history");
@@ -100,6 +100,7 @@ function translate(body, model) {
       description: [namespace ? `${namespace}.${name}` : name, description, tool.description,
         tool.type === "custom" ? "Pass the exact free-form tool input as the JSON string field input. Preserve all code and newlines." : "",
         tool.format?.definition ? `Input grammar (${tool.format.syntax}): ${tool.format.definition}` : ""].filter(Boolean).join("\n"),
+      ...(tool.type === "function" && tool.strict === true ? { strict: true } : {}),
       parameters: tool.type === "custom" ? {
         type: "object", properties: { input: { type: "string" } }, required: ["input"], additionalProperties: false,
       } : tool.parameters ?? { type: "object", properties: {} },

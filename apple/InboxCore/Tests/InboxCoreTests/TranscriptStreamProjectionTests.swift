@@ -12,6 +12,43 @@ final class TranscriptStreamProjectionTests: XCTestCase {
             "text": .string(text), "phase": .string("final_answer"), "item_id": .string("answer")])])])
     }
 
+    // Worker publication can race a state refresh or another overview projection.
+    // Exercise those invalidations separately from new deltas, which may keep
+    // publishing coherent prefixes while the next snapshot catches up.
+    @MainActor
+    func testPreparedPublicationPreservesStreamAndRejectsReplacedState() async throws {
+        let revision = UUID()
+        let card = AgentCard(id: "synthetic-overview", title: "Overview")
+        let initial = [try delta(1, "```swift\nlet value =")]
+        let initialRows = transcript(initial)
+        let prepared = await Task.detached {
+            XCTAssertFalse(Thread.isMainThread)
+            return TranscriptPublicationPreparation(events: initial, rows: initialRows,
+                previousRows: [], card: card, rowsRevision: revision)
+        }.value
+        XCTAssertTrue(prepared.rowsChanged)
+        XCTAssertTrue(prepared.isCurrent(rowsRevision: revision, card: card))
+        XCTAssertFalse(prepared.isCurrent(rowsRevision: UUID(), card: card))
+        var refreshed = card
+        refreshed.title = "Refreshed title"
+        XCTAssertFalse(prepared.isCurrent(rowsRevision: revision, card: refreshed))
+        XCTAssertFalse(prepared.isCurrent(rowsRevision: revision, card: nil))
+
+        let history = initial + [try delta(2, " 42\n```"), try event(3, "turn_completed")]
+        let rows = transcript(history)
+        let finished = await Task.detached {
+            TranscriptPublicationPreparation(events: history, rows: rows,
+                previousRows: initialRows, card: prepared.card, rowsRevision: revision)
+        }.value
+        XCTAssertTrue(finished.rowsChanged)
+        XCTAssertEqual(rows.first?.text, "```swift\nlet value = 42\n```")
+        XCTAssertFalse(rows.contains(where: \.running))
+        XCTAssertEqual(finished.card?.appliedHistoryCursor, history.last?.cursor)
+        let unchanged = TranscriptPublicationPreparation(events: history, rows: rows,
+            previousRows: rows, card: finished.card, rowsRevision: revision)
+        XCTAssertFalse(unchanged.rowsChanged)
+    }
+
     func testHistoryGapSeparatesTextUntilMissingEventsAreLoaded() async throws {
         let first = try delta(1, "Before")
         let tail = try delta(4, " after")

@@ -155,7 +155,7 @@ test("accepted turns lock model and mode while effort and Fast use a minimal pat
   const updated = await runtime.settings({ agentId, settings: { ...current, thinking: "max", fast_mode: true } });
   assert.equal(updated.thinking, "max");
   assert.deepEqual(patches, [{ thinking: "max", fast_mode: true }]);
-  await assert.rejects(runtime.settings({ agentId, settings: { ...current, model: "gpt-6-sol" } }), /new tab/);
+  await assert.rejects(runtime.settings({ agentId, settings: { ...current, model: "gpt-6.1-sol" } }), /new tab/);
   assert.equal(patches.length, 1);
 });
 test("Hand scope and VM resource validation preserve explicit grants", () => {

@@ -25,3 +25,5 @@ The iOS journey uses `--demo` plus `NANOCODEX_DEMO_SCREENS=1`; this loopback
 service is available only in the Debug demo. Normal launches retain the
 account-owned screen service. The desktop journey injects the loopback service
 into an isolated model with runtime requests stubbed.
+
+`FrontiersMerchSample.mp4` is a four-second, low-resolution excerpt of the user-requested Paradigm Frontiers merch launch video, used solely to exercise Quick Look and the share sheet in the output-link UI test. The full video stays in private Brain outputs, not the app bundle.

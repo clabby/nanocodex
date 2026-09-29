@@ -5,7 +5,7 @@ use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 
 use super::ResponseItem;
-use crate::{ModelConfig, Thinking};
+use crate::{ModelConfig, Thinking, responses::StrictJsonSchema};
 
 /// Stable request metadata and prefix shared by every operation in a session.
 #[derive(Clone)]
@@ -608,7 +608,7 @@ pub(crate) struct ResponseCreate<'a> {
     stream: bool,
     include: [&'static str; 1],
     prompt_cache_key: &'a str,
-    text: TextControls,
+    text: TextControls<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     service_tier: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -723,7 +723,10 @@ impl<'a> ResponseCreate<'a> {
             stream: true,
             include: ["reasoning.encrypted_content"],
             prompt_cache_key: profile.prompt_cache_key(),
-            text: TextControls { verbosity: "low" },
+            text: TextControls {
+                verbosity: "low",
+                format: config.strict_json_schema.as_ref(),
+            },
             // The API accepts both `fast` and `priority`. Codex currently uses
             // `priority` as the compatibility request value for Fast mode.
             // GPT-6 standard mode is explicit so a project-level Fast default
@@ -789,8 +792,10 @@ struct ReasoningControls {
 }
 
 #[derive(Clone, Copy, Serialize)]
-struct TextControls {
+struct TextControls<'a> {
     verbosity: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'a StrictJsonSchema>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -989,6 +994,7 @@ mod tests {
         assert_eq!(request["client_metadata"]["thread_id"], json!("branch-a"));
         assert_eq!(request["store"], false);
         assert_eq!(request["generate"], false);
+        assert!(request["text"].get("format").is_none());
         assert_eq!(request["parallel_tool_calls"], false);
         assert!(request.get("tools").is_none());
         assert!(request.get("instructions").is_none());
@@ -1176,7 +1182,7 @@ mod tests {
     #[test]
     fn supported_models_serialize_as_selected() {
         for (model, expected) in [
-            (Model::Sol, "gpt-6-sol"),
+            (Model::Sol, "gpt-6.1-sol"),
             (Model::Luna, "gpt-6-luna"),
             (Model::Astra, "gpt-6-astra"),
             (Model::Glm53, "@cf/zai-org/glm-5.3"),
@@ -1214,7 +1220,7 @@ mod tests {
         ))
         .expect("request should serialize");
 
-        assert_eq!(request["model"], json!("openai/gpt-6-sol"));
+        assert_eq!(request["model"], json!("openai/gpt-6.1-sol"));
     }
 
     #[test]
@@ -1241,7 +1247,7 @@ mod tests {
             None,
         ))
         .unwrap();
-        assert_eq!(request["model"], "original/gpt-6-sol");
+        assert_eq!(request["model"], "original/gpt-6.1-sol");
         assert_eq!(request["reasoning"]["mode"], "pro");
         assert_eq!(request["reasoning"]["effort"], "max");
         assert_eq!(request["service_tier"], "priority");
@@ -1265,7 +1271,6 @@ mod tests {
         let profile = RequestProfile::new("pro-agent", "pro-lineage", prefix);
 
         for (thinking, expected) in [
-            (Thinking::None, "none"),
             (Thinking::Low, "low"),
             (Thinking::Medium, "medium"),
             (Thinking::High, "high"),

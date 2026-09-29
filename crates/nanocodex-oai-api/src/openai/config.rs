@@ -2,7 +2,7 @@ use std::{borrow::Cow, sync::Arc};
 
 use crate::{
     CONTEXT_WINDOW_TOKENS, Model, OpenAiAuth, ReasoningMode, ResponsesHistory, ResponsesTransport,
-    Thinking,
+    Thinking, responses::StrictJsonSchema,
 };
 
 const SOL_SYSTEM_PROMPT: &str = include_str!("../../prompts/sol.md");
@@ -24,7 +24,7 @@ pub struct ModelConfig {
     /// Optional namespace prepended to the model identifier on the wire.
     ///
     /// This preserves Nanocodex's closed typed model policy while allowing an
-    /// OpenAI routing gateway to require IDs such as `openai/gpt-6-sol`.
+    /// OpenAI routing gateway to require IDs such as `openai/gpt-6.1-sol`.
     pub model_id_prefix: Option<Arc<str>>,
     /// Authentication source resolved for each transport connection.
     pub auth: OpenAiAuth,
@@ -51,6 +51,8 @@ pub struct ModelConfig {
     pub responses_history: ResponsesHistory,
     /// Whether the provider may retain response checkpoints.
     pub store_responses: bool,
+    /// Optional strict JSON Schema required for model output.
+    pub strict_json_schema: Option<StrictJsonSchema>,
     /// Responses WebSocket endpoint.
     pub websocket_url: String,
     /// Base URL used for HTTPS Responses calls and related endpoints.
@@ -128,6 +130,7 @@ impl Default for ModelConfig {
             raw_api_events: true,
             responses_history: ResponsesHistory::default(),
             store_responses: false,
+            strict_json_schema: None,
             websocket_url: "wss://api.openai.com/v1/responses".to_owned(),
             api_base_url: "https://api.openai.com/v1".to_owned(),
             #[cfg(any(target_family = "wasm", docsrs))]

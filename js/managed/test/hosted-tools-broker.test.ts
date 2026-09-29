@@ -578,6 +578,27 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     expect(fixture.persistence.callBySource("session:1", "source:stale")).toBeUndefined();
   });
 
+  it("routes native encrypted approvals only through the selected machine", async () => {
+    const fixture = createFixture();
+    const host = fixture.socket();
+    await fixture.broker.message(host.webSocket, JSON.stringify({
+      type: "catalog", capabilities: ["turn_metadata"], attachment_id: "machine-a",
+      tools: [entry("native_secure_input")],
+      machines: [{ id: "machine-a", name: "Machine A", workspace: "/a", capabilities: ["shell"] }],
+    }));
+    expect(fixture.broker.provider().definitions()).toEqual([]);
+    expect(fixture.broker.machineTool("machine-b", "native_secure_input")).toBeUndefined();
+    const selected = fixture.broker.machineTool("machine-a", "native_secure_input");
+    expect(selected).toBeDefined();
+    const pending = selected!.handler({ operation: "submit", ciphertext: "synthetic-ciphertext" }, {
+      sessionId: "session", callId: "native-approval",
+    });
+    const frame = host.sent.find(frame => frame.type === "call")!;
+    expect(frame).toMatchObject({ name: "native_secure_input", input: { operation: "submit", ciphertext: "synthetic-ciphertext" } });
+    await fixture.broker.message(host.webSocket, result(String(frame.call_id), "completed"));
+    await expect(pending).resolves.toMatchObject({ success: true });
+  });
+
   it("admits only canonical selector-free machine primitive schemas", async () => {
     const fixture = createFixture();
     const host = fixture.socket();

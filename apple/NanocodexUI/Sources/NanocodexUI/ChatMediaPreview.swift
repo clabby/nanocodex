@@ -10,6 +10,7 @@ public struct ChatMediaPreview<Label: View>: View {
     @State private var loading = false
     @State private var selection: URL?
     @State private var files: [URL] = []
+    @State private var lease = PreviewFileLease()
     @State private var failure: String?
 
     public init(title: String? = nil, load: @escaping () async throws -> [URL], @ViewBuilder label: () -> Label) {
@@ -29,18 +30,31 @@ public struct ChatMediaPreview<Label: View>: View {
                 let loaded = try await load()
                 guard !Task.isCancelled else { Self.remove(loaded); return }
                 guard !loaded.isEmpty else { throw CocoaError(.fileReadUnknown) }
-                files = loaded; selection = loaded.first
+                lease.files = loaded; files = loaded; selection = loaded.first
             } catch { if !Task.isCancelled { failure = "Couldn’t open attachment. Tap to retry." } }
             loading = false
         }
         .onChange(of: selection) { _, value in
-            if value == nil { Self.remove(files); files = [] }
+            if value == nil { Self.remove(files); files = []; lease.files = [] }
         }
-        .onDisappear { if selection == nil { Self.remove(files); files = [] } }
+        .onDisappear { if selection == nil { Self.remove(files); files = []; lease.files = [] } }
     }
-    private static func remove(_ urls: [URL]) {
-        for url in urls where url.isFileURL { try? FileManager.default.removeItem(at: url) }
+    fileprivate static func remove(_ urls: [URL]) {
+        for url in urls where url.isFileURL {
+            let parent = url.deletingLastPathComponent()
+            if parent.lastPathComponent.hasPrefix("NanocodexOutput-"),
+               parent.deletingLastPathComponent().standardizedFileURL == FileManager.default.temporaryDirectory.standardizedFileURL {
+                try? FileManager.default.removeItem(at: parent)
+            } else { try? FileManager.default.removeItem(at: url) }
+        }
     }
+}
+
+/// State can be discarded without a selection change if the whole chat row is
+/// removed while Quick Look is presented. Retain an owner for those temp files.
+private final class PreviewFileLease {
+    var files: [URL] = []
+    deinit { ChatMediaPreview<EmptyView>.remove(files) }
 }
 
 public extension View {

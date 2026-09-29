@@ -12,6 +12,9 @@ or a second agent backend.
   agents include native `browseX` public X browsing, listed in `accountInfo.apis`
   without an X connection. **Durable Agent** retains a
   thread only after the user connects their own ChatGPT or OpenAI credential.
+- **Thread sharing** creates revocable view or write links for a durable
+  agent conversation. Guests see the normal Chat transcript; write links admit
+  real AI turns with attenuated account-tool permissions. See [thread sharing](../../docs/THREAD_SHARING.md).
 - **Attached Tools**, **Multiplayer**, and **World** demonstrate browser-hosted
   tools, a shared managed-agent room, and an agent-populated world.
 - **Account** and **Connect** handle SMS OTP account login, connection, device,

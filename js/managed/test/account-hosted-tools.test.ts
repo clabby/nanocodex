@@ -52,6 +52,22 @@ const snapshot = {
 };
 
 describe("account Hosted Tools provider", () => {
+  // A pending approval belongs to one helper route; discovery must not retarget it.
+  it("never refreshes a rejected native secure input route", async () => {
+    let discoveries=0, invocations=0;
+    const catalog={tools:[],machines:[{...snapshot.machines[0],tools:[{name:"native_secure_input",parallel_safe:false,route_token:"native-route"}]}]};
+    const provider=new AccountHostedToolsProvider(fakeNamespace(new Map([[ACCOUNT_A,async (request:Request)=>{
+      if(new URL(request.url).pathname==="/invoke"){invocations++;return new Response(null,{status:409});}
+      discoveries++;return Response.json(catalog);
+    }]])),ACCOUNT_A,()=>true);
+    await provider.refresh();
+    const tool=provider.machineTool("laptop","native_secure_input");
+    expect(tool).toBeDefined();
+    await tool!.handler({operation:"submit",request_id:crypto.randomUUID(),ciphertext:"encrypted"},{sessionId:"agent",callId:"private-submit"});
+    expect(invocations).toBe(1);
+    expect(discoveries).toBe(1);
+  });
+
   it("joins screen discovery by machine identity without promoting an offline factory", async () => {
     const target = { machine_id: "laptop", machine_name: "Build laptop", id: "desktop", name: "Desktop",
       kind: "desktop", generation: "screen-generation", width: 1280, height: 800, controllable: true, agent_tools: true };

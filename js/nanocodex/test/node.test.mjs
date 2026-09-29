@@ -19,7 +19,7 @@ const SESSION_IDS = Object.freeze({
 });
 
 const createWarmAgent = ({ apiKey, websocketUrl, ...options }) => Agent.create({
-  model: "gpt-6-sol",
+  model: "gpt-6.1-sol",
   ...options,
   transport: Transport.openAi({ apiKey, websocketUrl, websocketWarmup: true }),
 });
@@ -190,7 +190,7 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
   const agent = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
-    thinking: "none",
+    thinking: "low",
     reasoningMode: "pro",
     sessionId: SESSION_IDS.primary,
     tools: {
@@ -221,14 +221,14 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
     const warmup = await reader.next();
     assert.equal(warmup.generate, false);
     assert.equal(warmup.reasoning.mode, "pro");
-    assert.equal(warmup.reasoning.effort, "none");
+    assert.equal(warmup.reasoning.effort, "low");
     assert.equal(warmup.input[0].tools[0].name, "exec");
     assert.match(warmup.input[0].tools[0].description, /multiply\(args:/);
     sendWarmup(socket, "resp-warmup");
 
     const generation = await reader.next();
     assert.equal(generation.previous_response_id, "resp-warmup");
-    assert.equal(generation.reasoning.effort, "none");
+    assert.equal(generation.reasoning.effort, "low");
     assert.equal(generation.service_tier, "default");
     sendCompleted(socket, "resp-tool", [{
       type: "custom_tool_call",
@@ -239,7 +239,7 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
 
     const continuation = await reader.next();
     assert.equal(continuation.previous_response_id, "resp-tool");
-    assert.equal(continuation.reasoning.effort, "none");
+    assert.equal(continuation.reasoning.effort, "low");
     assert.match(JSON.stringify(continuation.input), /42/);
     sendFinal(socket, "resp-first", "42");
 
@@ -266,9 +266,9 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
     reasoning_output_tokens: 2,
     total_tokens: 24,
     estimated_cost: {
-      usd: "0.000062",
+      usd: "0.000061",
       input_usd: "0.00002",
-      cached_input_usd: "0.000002",
+      cached_input_usd: "0.000001",
       cache_write_input_usd: "0",
       output_usd: "0.00004",
       service_tier: "standard",
@@ -289,7 +289,7 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
   assert.equal(events.filter((event) => event.type === "run.completed").length, 2);
   assert.equal(
     events.find((event) => event.type === "run.completed")?.payload.estimated_cost.usd,
-    "0.000062",
+    "0.000061",
   );
   assert.ok(events.some((event) => event.type === "tool.call" && event.payload.tool === "multiply"));
   watch.off();
@@ -801,7 +801,7 @@ test("Node can load an application-owned web module and resume Codex rollout his
   };
   const snapshot = {
     version: 1,
-    model: "gpt-6-sol",
+    model: "gpt-6.1-sol",
     lineage_id: "codex-rollout-lineage",
     prompt_cache_key: "codex-rollout-lineage",
     workspace: process.cwd(),

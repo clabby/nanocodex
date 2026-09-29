@@ -20,7 +20,10 @@ const progressKeys = ["pages", "events", "imported", "skipped", "people_created"
 const stateKeys = ["connection_id", "calendar_id", "from", "to", "page_token", "progress"] as const;
 const MAX_BYTES = 1024 * 1024;
 const PAGE_TIMEOUT_MS = 30_000;
-const MAX_PAGES = 5;
+// Each Calendar page can trigger hundreds of D1 statements and graph projection
+// writes. Return a cursor after one page rather than concentrating a historical
+// backfill into one Worker invocation; the next call resumes the exact page token.
+const MAX_PAGES = 1;
 
 class ProviderFailure extends Error {
   constructor(readonly failure: Failure) { super(failure.message); this.name = "CalendarProviderError"; }
@@ -237,7 +240,7 @@ export async function syncCrmCalendar(options: Options, input: unknown): Promise
       throw error;
     }
     authorize(options);
-    if (page.next !== null && tokens.has(page.next)) return result(options.ownerId, state, false, { code: "invalid_response", message: "Google Calendar repeated a page token. Resume the unfinished page or start a new sync." });
+    if (page.next !== null && (page.next === state.page_token || tokens.has(page.next))) return result(options.ownerId, state, false, { code: "invalid_response", message: "Google Calendar repeated a page token. Resume the unfinished page or start a new sync." });
     let imported: ImportResult;
     try { imported = await importCalendarEvents(options.db, options.ownerId, { connection_id: state.connection_id, calendar_id: state.calendar_id, events: page.items }) as ImportResult; }
     catch (error) {

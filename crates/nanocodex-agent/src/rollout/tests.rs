@@ -427,7 +427,7 @@ fn loads_the_latest_supported_model_from_codex_turn_context() {
                 "cwd": home.path(),
                 "approval_policy": "on-request",
                 "sandbox_policy": {"type": "workspace-write"},
-                "model": "gpt-6-sol",
+                "model": "gpt-6.1-sol",
                 "effort": "high",
                 "summary": "auto"
             }
@@ -480,7 +480,7 @@ fn rejects_rollout_continuation_for_obsolete_model_ids() {
         &serde_json::json!({
             "timestamp": "2026-07-24T12:00:01Z",
             "type": "turn_context",
-            "payload": {"model": "gpt-5.6-luna"}
+            "payload": {"model": "gpt-6-sol"}
         }),
     )
     .expect("write obsolete model");
@@ -622,7 +622,7 @@ async fn writes_codex_rollout_envelope_and_committed_items() {
     assert_eq!(lines[2]["payload"]["message"], "remember amber");
     assert_eq!(lines[3]["type"], "turn_context");
     assert_eq!(lines[3]["payload"]["cwd"], "/worktree");
-    assert_eq!(lines[3]["payload"]["model"], "gpt-6-sol");
+    assert_eq!(lines[3]["payload"]["model"], "gpt-6.1-sol");
     assert_eq!(lines[3]["payload"]["effort"], "high");
     assert_eq!(lines[4]["type"], "response_item");
     assert_eq!(lines[4]["payload"]["type"], "message");

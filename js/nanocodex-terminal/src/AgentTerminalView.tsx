@@ -57,6 +57,7 @@ export function AgentTerminalView({
   promptIntent,
   retryAgent,
   renderTool,
+  userLabel,
   showToolCalls = true,
   voice = false,
   voiceOptions,
@@ -84,6 +85,7 @@ export function AgentTerminalView({
   promptIntent?: "queue" | "steer";
   retryAgent(): void;
   renderTool?(tool: ToolActivity, controls: AgentTerminalAccessory): ReactNode;
+  userLabel?(entry: Extract<import("nanocodex-react/agent").AgentEntry, { kind: "user" }>): string | undefined;
   showToolCalls?: boolean;
   /** Enables the package-owned microphone control. */
   voice?: boolean;
@@ -230,7 +232,15 @@ export function AgentTerminalView({
 
   const terminal = (
     <TerminalTranscriptSurface
-      composer={composer === undefined ? (
+      composer={composer === undefined ? (<>
+        {controller.pendingPrompts.length ? <div className="agent-prompt-queue" aria-label="Queued messages">
+          {controller.pendingPrompts.map((prompt) => <div className="agent-prompt-queue-row" key={prompt.id}>
+            <span className="agent-prompt-queue-label">{prompt.state === "cancelling" ? "Cancelling" : controller.running ? "Queued" : "Sending"}</span>
+            <span className="agent-prompt-queue-text" title={prompt.text}>{prompt.text}</span>
+            <button type="button" aria-label={`Cancel queued message: ${prompt.text.slice(0, 80)}`}
+              disabled={prompt.state === "cancelling"} onClick={() => { void controller.cancelPrompt(prompt.id); }}><X aria-hidden="true" /></button>
+          </div>)}
+        </div> : null}
         <TerminalComposer
           controls={(voice || controls) ? <>
             {voice ? <VoiceControl agentReady={agentStatus === "ready"} voice={voiceState} initialSettings={voiceOptions} elevenLabsManager={elevenLabsManager} /> : null}
@@ -248,7 +258,7 @@ export function AgentTerminalView({
           }}
           onSubmit={submitTouchPrompt}
         />
-      ) : composer}
+      </>) : composer}
       canLoadOlder={controller.canLoadOlder}
       entries={controller.entries}
       followTailRequest={followTailRequest}
@@ -257,6 +267,7 @@ export function AgentTerminalView({
       mode={mode}
       renderTool={renderTool ? (tool) => renderTool(tool, { agentReady: agentStatus === "ready", submit: submitAccessoryPrompt }) : undefined}
       showToolCalls={showToolCalls}
+      userLabel={userLabel}
       status={agentStatus}
       voiceEntries={voiceEntries}
       welcome={welcome}

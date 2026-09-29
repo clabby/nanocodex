@@ -1,6 +1,6 @@
 export type Thinking = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ReasoningMode = "standard" | "pro";
-export type Model = "gpt-6-sol" | "gpt-6-luna" | "gpt-6-astra" | "@cf/zai-org/glm-5.3" | "kimi-k3" | "mimo-v2.6-pro";
+export type Model = "gpt-6.1-sol" | "gpt-6-luna" | "gpt-6-astra" | "@cf/zai-org/glm-5.3" | "kimi-k3" | "mimo-v2.6-pro";
 
 export type PromptItem =
   | { type: "text"; text: string }
@@ -523,7 +523,8 @@ export type CodeEvaluator = (
 export type McpPayment = {
   /** MPPx client methods, such as `tempo.session({ account, getClient, channelStore })`. */
   methods: readonly unknown[];
-  /** Optional MPP method context forwarded for each paid MCP tool call. */
+  /** Static MPP method context, or an async per-tool function called before MCP execution.
+   * A function receives the remote tool, ToolContext, and its connected MCP client. */
   context?: unknown;
   /** Called before MPPx creates a payment credential. */
   onPaymentRequired?: ((challenge: unknown) => boolean | Promise<boolean>) | undefined;

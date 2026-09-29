@@ -39,6 +39,7 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for FailFirstWar
             nanocodex_oai_api::tower::ResponsesOutput::Generation(
                 nanocodex_oai_api::tower::GenerationOutput {
                     id: "resp-recovered".to_owned(),
+                    reported_model: None,
                     status: "completed".to_owned(),
                     end_turn: Some(true),
                     final_message: Some("done".to_owned()),
@@ -153,6 +154,7 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
         let (stream, _) = listener.accept().await?;
         let mut original = accept_async(stream).await?;
         let warmup = next_json(&mut original).await?;
+        assert_eq!(warmup["model"], "gpt-6.1-sol");
         assert_eq!(warmup["prompt_cache_key"], "durable-cache");
         let original_tools_id = warmup["input"][0]["id"].clone();
         let original_instructions_id = warmup["input"][1]["id"].clone();
@@ -165,6 +167,7 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
         let mut resumed = accept_async(stream).await?;
         let replay = next_json(&mut resumed).await?;
         assert!(replay.get("previous_response_id").is_none());
+        assert_eq!(replay["model"], "gpt-6.1-sol");
         assert_eq!(replay["prompt_cache_key"], "durable-cache");
         assert_eq!(replay["input"][0]["type"], "additional_tools");
         assert_eq!(
@@ -346,9 +349,29 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
             if message.contains("GPT-6 Astra requires")
     ));
 
+    let mut retired: Value = serde_json::from_slice(&encoded)?;
+    retired["model"] = json!("gpt-6-sol");
+    let retired: SessionSnapshot = serde_json::from_value(retired)?;
+    assert!(
+        Nanocodex::builder(openai()?)
+            .resume(retired)
+            .build()
+            .is_err()
+    );
+
+    let incompatible = Nanocodex::builder(openai()?)
+        .thinking(Thinking::None)
+        .resume(snapshot.clone())
+        .build();
+    assert!(matches!(
+        incompatible,
+        Err(NanocodexError::InvalidRequest(message))
+            if message.contains("GPT-6.1 Sol requires")
+    ));
+
     let (compatible, compatible_events) = Nanocodex::builder(openai()?)
         .model(Model::Astra)
-        .thinking(Thinking::None)
+        .thinking(Thinking::Low)
         .resume(snapshot.clone())
         .build()?;
     compatible.shutdown().await?;

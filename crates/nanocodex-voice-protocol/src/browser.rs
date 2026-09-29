@@ -325,7 +325,7 @@ impl BrowserVoiceProtocol {
         &self.settings.voice
     }
 
-    pub fn settings(&self) -> &VoiceSettings {
+    pub const fn settings(&self) -> &VoiceSettings {
         &self.settings
     }
 

@@ -16,7 +16,7 @@ describe("managed account info", () => {
     const controller = new AbortController();
     const reason = new Error("turn cancelled");
     const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      expect(init?.signal).toBe(controller.signal);
+      if (!String(input).includes("/wallet")) expect(init?.signal).toBe(controller.signal);
       if (String(input).endsWith("/connectors")) return Promise.resolve(Response.json(statuses()));
       return new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
@@ -31,7 +31,7 @@ describe("managed account info", () => {
     controller.abort(reason);
 
     await expect(pending).rejects.toBe(reason);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it("filters exact grant connection IDs and withholds selectors from legacy grants", async () => {
@@ -194,6 +194,7 @@ describe("managed accountInfo vault projection", () => {
       connectorAccounts: {},
       connectorTools: connectorToolMetadata(["github"]),
       machines: [],
+      wallet: { status: "disabled" },
       identity: {},
       stablecoins: [],
       authorizations: [],

@@ -13,6 +13,7 @@
     "sync": "node scripts/sync-nanocodex.mjs",
     "publish:repository": "node scripts/publish-repository.mjs",
     "test": "npm run test:web",
+    "test:wallet": "node scripts/wallet-smoke.mjs",
     "test:web": "node --experimental-strip-types --test src/*.test.ts worker/*.test.ts container/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "check:docs": "node scripts/check-docs.mjs",

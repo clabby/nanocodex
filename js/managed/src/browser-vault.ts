@@ -15,7 +15,7 @@ export type BrowserVaultResolver = (
   request: BrowserVaultRequest, context: ToolContext,
 ) => Promise<BrowserVaultLogin>;
 export type BrowserVaultQuarantine = Readonly<{
-  sessionId: string; targetId: string; loaderId: string; origin: string; vaultId: string;
+  sessionId: string; targetId: string; loaderId: string; origin: string; vaultId: string; mode?: "one_time";
 }>;
 
 export function parseBrowserVaultRequest(value: unknown): BrowserVaultRequest {
@@ -210,7 +210,7 @@ export class PrivateBrowserContinuationSession {
  * Restrict to a visible, same-origin POST login form in the top frame. Atomic checks
  * and native setters are followed by input/change events and destination rechecks.
  */
-export const BROWSER_VAULT_FILL_FUNCTION = `function(origin, usernameSelector, passwordSelector, username, password, submit) {
+export const BROWSER_VAULT_FILL_FUNCTION = `function(origin, usernameSelector, passwordSelector, username, password, submit, dryRun = false) {
   if (window !== window.top || location.origin !== origin || location.protocol !== "https:") return false;
   ${VAULT_FORM_SUBMISSION}
   const one = selector => { const nodes = document.querySelectorAll(selector); return nodes.length === 1 ? nodes[0] : null; };
@@ -239,6 +239,7 @@ export const BROWSER_VAULT_FILL_FUNCTION = `function(origin, usernameSelector, p
   const valid = () => !challenge() && safeLoginForm(form)
     && (!user || (one(usernameSelector) === user && user.form === form && visible(user) && ['text','email'].includes(user.type)))
     && (!pass || (one(passwordSelector) === pass && pass.form === form && visible(pass) && pass.type === 'password'));
+  if (dryRun) return valid();
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
   for (const [input, value] of [[user, username], [pass, password]]) {
     if (!input) continue;
@@ -267,6 +268,7 @@ export async function fillBrowserVault(options: {
   cdp: PrivateBrowserChannel;
   sessionId: string;
   request: BrowserVaultRequest;
+  expectedLoaderId?: string;
   resolve: () => Promise<BrowserVaultLogin>;
   quarantine: (value: BrowserVaultQuarantine) => Promise<void>;
   signal?: AbortSignal;
@@ -283,9 +285,19 @@ export async function fillBrowserVault(options: {
     const tree = await cdp.send("Page.getFrameTree", {}, sid);
     const frame = tree?.frameTree?.frame;
     if (!frame || frame.parentId || typeof frame.id !== "string" || typeof frame.loaderId !== "string"
-      || new URL(frame.url).origin !== request.expected_origin) throw new Error();
+      || new URL(frame.url).origin !== request.expected_origin
+      || (options.expectedLoaderId !== undefined && frame.loaderId !== options.expectedLoaderId)) throw new Error();
     const world = await cdp.send("Page.createIsolatedWorld", { frameId: frame.id, worldName: "nanocodex-vault", grantUniveralAccess: false }, sid);
     if (!Number.isInteger(world?.executionContextId)) throw new Error();
+    if (options.expectedLoaderId !== undefined) {
+      // Creating a world can race navigation in the same top-level frame. The
+      // world must have been created before a second matching document check;
+      // subsequent navigation destroys that world instead of retargeting input.
+      const current = (await cdp.send("Page.getFrameTree", {}, sid))?.frameTree?.frame;
+      if (!current || current.parentId || current.id !== frame.id
+        || current.loaderId !== options.expectedLoaderId
+        || new URL(current.url).origin !== request.expected_origin) throw new Error();
+    }
     const login = await options.resolve();
     checkAbort();
     if ((request.username_selector && !login.username) || (request.password_selector && !login.password)) throw new Error();
@@ -519,6 +531,10 @@ export function sanitizeBrowserVaultText(value: string, secrets: readonly string
     const escaped = [...variant].map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*');
     safe = safe.replace(new RegExp(escaped, 'giu'), '[redacted]');
   }
+  for (const secret of secrets) {
+    const digits = secret.replace(/[\s/.-]/g, '');
+    if (/^[0-9]{3,32}$/.test(digits)) safe = safe.replace(new RegExp([...digits].join('[\\s/.-]*'), 'g'), '[redacted]');
+  }
   safe = safe.replace(/\b[A-Za-z0-9+/_-]{6,16}={0,2}/g, encoded => {
     try { return /^[0-9]{4,10}$/.test(atob(encoded.replace(/-/g, '+').replace(/_/g, '/'))) ? '[redacted]' : encoded; }
     catch { return encoded; }
@@ -648,4 +664,104 @@ export async function captureBrowserVaultDocumentBinding(cdp: PrivateBrowserChan
     if (!world) throw new Error();
     return { loaderId: world.loaderId };
   } catch { throw new Error("Private browser document is unavailable"); }
+}
+
+/** Validate the exact password selector before asking the user for private input. */
+export async function captureBrowserPasswordBinding(cdp: PrivateBrowserChannel, request: BrowserVaultRequest): Promise<{loaderId: string}> {
+  try {
+    const world = await privateWorld(cdp, request);
+    if (!world || !request.password_selector) throw new Error();
+    const result = await cdp.send("Runtime.callFunctionOn", {
+      executionContextId:world.executionContextId, functionDeclaration:BROWSER_VAULT_FILL_FUNCTION,
+      arguments:[request.expected_origin,null,request.password_selector,null,null,false,true].map(value => ({value})),
+      returnByValue:true,silent:true,
+    },world.sessionId);
+    if (result?.exceptionDetails || result?.result?.value !== true) throw new Error();
+    return {loaderId:world.loaderId};
+  } catch { throw new Error("Supported password form is unavailable"); }
+}
+
+export type SecureFormField = {id:string; kind:'password'|'card_number'|'card_expiry'|'card_cvc'|'sensitive_text'; selector:string; label?:string};
+export function parseSecureFormFields(value:unknown): SecureFormField[] {
+  if (!Array.isArray(value) || !value.length || value.length > 8) throw new Error('Invalid secure fields');
+  const ids = new Set(), selectors = new Set();
+  for (const f of value) {
+    if (!f || typeof f !== 'object' || Array.isArray(f) || Object.keys(f).some(k => !['id','kind','selector','label'].includes(k))
+      || typeof f.id !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(f.id)
+      || !['password','card_number','card_expiry','card_cvc','sensitive_text'].includes(f.kind)
+      || typeof f.selector !== 'string' || !f.selector.trim() || f.selector.length > 512
+      || (f.label !== undefined && (typeof f.label !== 'string' || !f.label.trim() || f.label.length > 80 || /[\u0000-\u001f\u007f]/.test(f.label)))
+      || ids.has(f.id) || selectors.has(f.selector)) throw new Error('Invalid secure fields');
+    ids.add(f.id); selectors.add(f.selector);
+  }
+  return value;
+}
+export function parsePrivateSecureInput(value:unknown): Record<string,unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid secure input');
+  const v = value as Record<string,unknown>;
+  if (Object.keys(v).length !== 2 || typeof v.request_id !== 'string' || !/^[0-9a-f-]{36}$/.test(v.request_id)) throw new Error('Invalid secure input');
+  const secret = (s:unknown) => typeof s === 'string' && s.length > 0 && s.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(s);
+  if (Object.hasOwn(v,'action') && ['cancel','describe'].includes(String(v.action))) return v;
+  if (Object.hasOwn(v,'value') && secret(v.value)) return v;
+  if (Object.hasOwn(v,'values') && v.values && typeof v.values === 'object' && !Array.isArray(v.values)) {
+    const entries = Object.entries(v.values);
+    if (entries.length > 0 && entries.length <= 8 && entries.every(([k,s]) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(k) && secret(s))) return v;
+  }
+  throw new Error('Invalid secure input');
+}
+
+// Only native, visible, top-frame input elements in one same-origin POST form.
+// No page-provided return values or exception details leave this private boundary.
+export const SECURE_FORM_FILL_FUNCTION = `function(origin, fields, values) {
+  if (location.origin !== origin || window.top !== window) return false;
+  const visible = el => {
+    if (!(el instanceof HTMLInputElement) || !el.isConnected || el.disabled || el.matches(':disabled') || el.readOnly
+      || el.getRootNode() !== document || el.closest('[inert]')) return false;
+    const style = getComputedStyle(el), rect = el.getBoundingClientRect();
+    if (style.visibility !== 'visible' || style.display === 'none' || Number(style.opacity) === 0
+      || rect.width <= 0 || rect.height <= 0 || rect.left < 0 || rect.top < 0
+      || rect.right > innerWidth || rect.bottom > innerHeight) return false;
+    if (!el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return false;
+    return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === el;
+  };
+  // Never let a model-described card value land in a generic contact/text field.
+  const autocomplete = {card_number:'cc-number',card_expiry:'cc-exp',card_cvc:'cc-csc'};
+  const matchesKind = (el, kind) => kind === 'password' ? el.type === 'password'
+    : ['text','tel','password'].includes(el.type)
+      && (!autocomplete[kind] || el.autocomplete.trim().toLowerCase().split(/\\s+/).includes(autocomplete[kind]));
+  const inputs = fields.map(f => { const nodes = document.querySelectorAll(f.selector); return nodes.length === 1 ? nodes[0] : null; });
+  const form = inputs[0] && inputs[0].form;
+  const valid = () => {
+    if (!(form instanceof HTMLFormElement) || form.method.toLowerCase() !== 'post' || (form.target && form.target !== '_self')) return false;
+    const action = new URL(form.action, location.href);
+    return location.origin === origin && action.origin === origin && !action.username && !action.password && new Set(inputs).size === inputs.length && inputs.every((el,i) => {
+      const nodes = document.querySelectorAll(fields[i].selector);
+      return nodes.length === 1 && nodes[0] === el && visible(el) && el.form === form && matchesKind(el, fields[i].kind);
+    });
+  };
+  if (!valid()) return false;
+  if (values === null) return true;
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+  for (let i=0;i<inputs.length;i++) {
+    if (!valid()) return false;
+    setter.call(inputs[i],values[fields[i].id]);
+    inputs[i].dispatchEvent(new Event('input',{bubbles:true}));
+    inputs[i].dispatchEvent(new Event('change',{bubbles:true}));
+  }
+  return true;
+}`;
+export async function secureBrowserForm(options:{cdp:PrivateBrowserChannel; request:BrowserVaultIdentity; fields:SecureFormField[]; signal?:AbortSignal; expectedLoaderId?:string; values?:Record<string,string>; quarantine?: (loaderId:string)=>Promise<void>}):Promise<{loaderId:string;status:'filled'|'ready'|'outcome_unknown'}> {
+  try {
+    options.signal?.throwIfAborted();
+    const world = await privateWorld(options.cdp, options.request);
+    if (!world || (options.expectedLoaderId !== undefined && world.loaderId !== options.expectedLoaderId)) throw new Error();
+    if (options.values) { if (!options.quarantine) throw new Error(); await options.quarantine(world.loaderId); }
+    options.signal?.throwIfAborted();
+    let result;
+    try { result = await options.cdp.send('Runtime.callFunctionOn', {executionContextId:world.executionContextId,functionDeclaration:SECURE_FORM_FILL_FUNCTION,
+      arguments:[options.request.expected_origin,options.fields,options.values ?? null].map(value=>({value})),returnByValue:true,silent:true},world.sessionId); }
+    catch { if (options.values) return {loaderId:world.loaderId,status:'outcome_unknown'}; throw new Error(); }
+    if (result?.exceptionDetails || result?.result?.value !== true) { if (options.values) return {loaderId:world.loaderId,status:'outcome_unknown'}; throw new Error(); }
+    return {loaderId:world.loaderId,status:options.values ? 'filled':'ready'};
+  } catch { throw new Error('Supported secure form is unavailable'); }
 }

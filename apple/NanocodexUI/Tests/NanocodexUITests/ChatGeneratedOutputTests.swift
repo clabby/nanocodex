@@ -78,6 +78,18 @@ final class ChatGeneratedOutputTests: XCTestCase {
         XCTAssertEqual(outputs.map(\.kind), [.text, .image, .file], "Markdown assets keep their emitted order")
     }
 
+    func testBrowsePaginationDoesNotBecomeGeneratedFiles() throws {
+        let markdown = "[Continue →](/search?q=swift&cursor=abc) · [Next page (2) →](/search?q=swift&page=2)"
+        let payload = try json(["content": [["type": "text", "text": markdown]]])
+        XCTAssertTrue(ChatGeneratedOutput.parse(results: [payload]).isEmpty)
+        let emitted = ChatGeneratedOutput.parse(results: [payload], includeText: true)
+        XCTAssertEqual(emitted.map(\.kind), [.text])
+        XCTAssertEqual(emitted.first?.text, markdown)
+
+        let files = try json(["content": [["type": "text", "text": markdown + "\n[Report](/reports/report.pdf)\n![Preview](/images/chart.png)"]]])
+        XCTAssertEqual(ChatGeneratedOutput.parse(results: [files]).map(\.kind), [.unsupported, .unsupported])
+    }
+
     func testEmbeddedTextAndDownloadBothRetainFullContents() throws {
         let original = "a,b\n" + String(repeating: "1,2\n", count: 50_001)
         let encoded = try json(["type": "resource", "resource": ["uri": "file:///report.csv", "mimeType": "text/csv", "text": original]])

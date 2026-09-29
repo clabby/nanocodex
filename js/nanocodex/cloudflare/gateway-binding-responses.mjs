@@ -23,9 +23,9 @@ export function toBindingResponsesInput(chat, effort) {
   }
   const payload = { input, stream: chat.stream === true, store: false, reasoning: { effort } };
   if (chat.tools) payload.tools = chat.tools.map(tool => ({ type: "function", ...tool.function,
-    // Preserve optional/loose managed schemas; Responses otherwise normalizes
-    // omitted strict to true, unlike the existing Chat transport.
-    strict: false }));
+    // Responses normalizes omitted strict to true; preserve explicit strict
+    // functions while leaving legacy optional/loose schemas non-strict.
+    strict: tool.function.strict === true }));
   if (chat.tool_choice !== undefined) payload.tool_choice = typeof chat.tool_choice === "string"
     ? chat.tool_choice : { type: "function", name: chat.tool_choice.function.name };
   if (chat.max_completion_tokens !== undefined) payload.max_output_tokens = chat.max_completion_tokens;

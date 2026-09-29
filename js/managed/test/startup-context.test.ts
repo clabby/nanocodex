@@ -28,6 +28,7 @@ const environment: StartupEnvironment = {
     status: "ready", apis: [X_API], authenticated: ["github"], accounts: { github: "work" },
     connectorTools: {},
     connectorAccounts: { github: [{ id: "github-work", label: "work" }] },
+    wallet: { status: "not_configured" },
     identity: {}, stablecoins: [], authorizations: [], vault: [],
     machines: [{ id: "user:hand", name: "laptop", kind: "user", mount: "/hand",
       workspace: "/hand", capabilities: ["exec_command"] }],

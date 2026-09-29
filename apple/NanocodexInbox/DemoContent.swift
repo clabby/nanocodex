@@ -85,7 +85,7 @@ enum DemoContent {
                 | --- | --- |
                 | **Result** | `42` |
 
-                """ + String(repeating: "Keep the beginning of this long response intact. ", count: 35)
+                """ + "\n\n" + String(repeating: "Keep the beginning of this long response intact. ", count: 35)
             }
             card.latestCursor = Cursor(rawValue: "12")!; card.stateCursor = card.latestCursor
             if value.2 == "Running" { card.activeTurns = ["demo-turn-" + value.0] }
@@ -276,7 +276,29 @@ enum DemoContent {
         #if DEBUG
         if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_LOCAL_PHOTOS"] == "1" { return localPhotoRows() }
         #endif
+        if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_OUTPUT_LINKS"] == "1" {
+            return [.init(id: "user-" + id, role: "You", text: "Show the videos"),
+                    .init(id: "agent-" + id, role: "Agent", text: """
+                    [Main launch video](sandbox:/brain/outputs/frontiers-next/frontiers-merch-launch-actual-character.mp4)
+                    [Complete bundle](sandbox:/brain/outputs/frontiers-next/frontiers-launch-and-drops.zip)
+                    [Web reference](https://example.com)
+                    [Not an output](sandbox:/brain/tmp/secret.mp4)
+                    """)]
+        }
         if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_GENERATED_OUTPUTS"] == "1" { return generatedOutputRows() }
+        if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_WIDE_TABLE"] == "1" {
+            return [.init(id: "wide-table", role: "Agent", text: """
+            ## Library review
+
+            | Library | Replaces | Mobile behavior | License |
+            | --- | --- | --- | --- |
+            | MarkdownUI | Custom Markdown parser and table layout | Long descriptive cells wrap; wide tables scroll horizontally | MIT |
+            | Nuke | Duplicate attachment download and thumbnail caches | Shared decoding, cancellation and bounded image memory | MIT |
+            | GRDB | Separate pending-command preference writes | Atomic recovery of messages and steering after restart | MIT |
+
+            End of table review. The final paragraph remains above the composer.
+            """)]
+        }
         if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_RENDER_PROFILE"] == "1" {
             // Keep the default fixture stable; allow deterministic long-session
             // profiling without account data or a live managed turn.
@@ -406,6 +428,13 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
         Self.queue.async { [self] in
             guard !stopped else { return }
             record("start")
+            // A second process launch reuses the on-disk account cache while
+            // every transport operation fails, including roster and history.
+            if ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_OFFLINE"] == "1" {
+                record("offline")
+                client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+                return
+            }
             let path = request.url!.path
             let id = request.url!.pathComponents.dropFirst(3).first ?? "saved"
             let isStream = path.hasSuffix("/events")
@@ -421,9 +450,14 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
                     body = #"{"records":[{"id":"studio","kind":"company","name":"Example Studio"}],"next_cursor":null}"#
                 }
             } else if path == "/v1/crm/alex" {
-                body = #"{"record":{"id":"alex","kind":"person","name":"Alex Morgan","title":"Product designer · Example Studio"},"identities":[{"id":"social","kind":"github","value":"example"}],"facts":[{"id":"education","predicate":"bio.education","value":"Example University","origin":"user"}],"relationships":[{"id":"friend","from_id":"alex","to_id":"sam","to_name":"Sam Rivera","type":"worked_with","description":"Designed the community garden.","origin":"user"}],"notes":[{"id":"note","body":"Met at the design workshop.","created_at":"2026-09-01"}]}"#
+                let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                if query.contains(where: { $0.name == "timeline_cursor" && $0.value == "demo-timeline-2" }) {
+                    body = #"{"timeline":[{"id":"cancelled-invite","kind":"calendar_meeting","title":"Canceled design sync","occurred_at":"2026-08-28T09:00:00.000Z","status":"cancelled","participation_status":"invited","origin":"source"},{"id":"declined-invite","kind":"calendar_meeting","title":"Declined planning call","occurred_at":"2026-08-27T09:00:00.000Z","status":"confirmed","participation_status":"declined","response_status":"declined","origin":"source"},{"id":"email-note","kind":"email","body":"Sent a follow-up with the sketches.","occurred_at":"2026-08-25T10:00:00.000Z","timestamp_basis":"imported_at","origin":"source"}],"timeline_next_cursor":null}"#
+                } else {
+                    body = #"{"record":{"id":"alex","kind":"person","name":"Alex Morgan","title":"Product designer · Example Studio"},"identities":[{"id":"social","kind":"github","value":"example"}],"facts":[{"id":"education","predicate":"bio.education","value":"Example University","origin":"user"}],"relationships":[{"id":"friend","from_id":"alex","to_id":"sam","to_name":"Sam Rivera","type":"worked_with","description":"Designed the community garden.","origin":"user"}],"notes":[{"id":"note","body":"Met at the design workshop.","created_at":"2026-09-01"}],"timeline":[{"id":"invite","kind":"calendar_meeting","title":"Community garden review","occurred_at":"2026-09-22T10:00:00.000Z","status":"confirmed","participation_status":"invited","attendance_status":"unknown","origin":"source"},{"id":"proposal","kind":"interaction","type":"proposal","summary":"Garden redesign proposal","body":"Shared the first design concept.","occurred_at":"2026-09-20","precision":"date","origin":"user"}],"timeline_next_cursor":"demo-timeline-2"}"#
+                }
             } else if path == "/v1/crm/sam" {
-                body = #"{"record":{"id":"sam","kind":"person","name":"Sam Rivera","title":"Landscape architect"},"identities":[],"facts":[],"relationships":[{"id":"friend","from_id":"alex","from_name":"Alex Morgan","to_id":"sam","to_name":"Sam Rivera","type":"worked_with","description":"Designed the community garden together.","origin":"user"}],"notes":[{"id":"sam-note","body":"Interested in making shared spaces feel more welcoming.","created_at":"2026-09-12"}]}"#
+                body = #"{"record":{"id":"sam","kind":"person","name":"Sam Rivera","title":"Landscape architect"},"identities":[],"facts":[],"relationships":[{"id":"friend","from_id":"alex","from_name":"Alex Morgan","to_id":"sam","to_name":"Sam Rivera","type":"worked_with","description":"Designed the community garden together.","origin":"user"}],"notes":[{"id":"sam-note","body":"Interested in making shared spaces feel more welcoming.","created_at":"2026-09-12"}],"timeline":[],"timeline_next_cursor":null}"#
             } else if path == "/v1/agents" {
                 delay = 6
                 if ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_REJECT"] == "1" { status = 401 }

@@ -141,7 +141,7 @@ export async function crmResearchRequest(db: D1Database, ownerId: string, operat
         // Parent existence and profile replacement happen in one statement, so
         // deletion cannot race a preflight check into creating an orphan.
         const row = await session.prepare(`INSERT INTO crm_research (owner_id,${profileColumns})
-          SELECT ?,?,?,?,?,?,?,?,? FROM crm_records WHERE owner_id = ? AND id = ?
+          SELECT ?,?,?,?,?,?,?,?,? FROM crm_records WHERE owner_id = ? AND id = ? AND kind = 'person'
           ON CONFLICT (owner_id,record_id) DO UPDATE SET summary=excluded.summary,company=excluded.company,title=excluded.title,
             website=excluded.website,sources=excluded.sources,status=excluded.status,checked_at=max(crm_research.checked_at,excluded.checked_at)
           RETURNING ${profileColumns}`).bind(ownerId, recordId, summary, company, title, website, sources, args.status, Date.now(), ownerId, recordId).first<ResearchRow>();

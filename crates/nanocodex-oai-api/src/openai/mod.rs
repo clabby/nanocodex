@@ -7,7 +7,8 @@ mod platform;
 
 use crate::{
     DefaultResponsesService, Model, OpenAiAuth, OpenAiAuthError, OpenAiAuthMode, ReasoningMode,
-    ResponsesHistory, ResponsesRetryPolicy, ResponsesTransport, Thinking, session::SessionBuilder,
+    ResponsesHistory, ResponsesRetryPolicy, ResponsesTransport, Thinking,
+    responses::StrictJsonSchema, session::SessionBuilder,
 };
 
 #[doc(hidden)]
@@ -165,7 +166,7 @@ impl<F> OpenAiBuilder<F> {
     /// Prepends a namespace to supported model identifiers on the wire.
     ///
     /// For example, an OpenAI routing gateway may expose Sol as
-    /// `openai/gpt-6-sol` while Nanocodex continues to retain `Model::Sol`
+    /// `openai/gpt-6.1-sol` while Nanocodex continues to retain `Model::Sol`
     /// for model-specific behavior, pricing, compaction, and snapshots. This
     /// changes only the wire identifier for the closed [`Model`] enum; it is
     /// not an alternate provider or arbitrary-model surface. [`Self::build`]
@@ -243,6 +244,17 @@ impl<F> OpenAiBuilder<F> {
                 ResponsesHistory::FullReplay
             };
         }
+        self
+    }
+
+    /// Requires each Responses request to produce output matching a JSON Schema.
+    ///
+    /// The format is sent as `text.format` with `type: "json_schema"` and
+    /// strict validation enabled. This setting is inherited by sessions and
+    /// agents created from this client.
+    #[must_use]
+    pub fn strict_json_schema(mut self, schema: StrictJsonSchema) -> Self {
+        self.config.strict_json_schema = Some(schema);
         self
     }
 
@@ -381,6 +393,7 @@ impl<F> OpenAiBuilder<F> {
     ///             Ok::<_, ResponseError>(ResponsesServiceResponse::new(
     ///                 ResponsesOutput::Generation(GenerationOutput {
     ///                     id: "resp_adapter_01".to_owned(),
+    ///                     reported_model: None,
     ///                     status: "completed".to_owned(),
     ///                     end_turn: Some(true),
     ///                     final_message: Some("served by the adapter".to_owned()),
@@ -587,6 +600,8 @@ fn validate(config: &ModelConfig) -> Result<(), OpenAiError> {
         return Err(OpenAiError::InvalidConfiguration {
             detail: (if config.model == Model::Glm53 {
                 "GLM-5.3 requires low, medium, or high reasoning effort"
+            } else if config.model == Model::Sol {
+                "GPT-6.1 Sol requires low, medium, high, xhigh, or max reasoning effort"
             } else {
                 "GPT-6 Astra requires low, medium, high, xhigh, or max reasoning effort"
             }),
@@ -669,8 +684,11 @@ mod tests {
 
     use crate::{
         Model, ModelConfig, OpenAiAuthMode, ResponseError, ResponsesAttempt, ResponsesHistory,
-        ResponsesServiceResponse, ResponsesTransport,
+        ResponsesServiceResponse, ResponsesTransport, Thinking,
+        responses::{RequestProfile, StrictJsonSchema},
     };
+    use serde_json::json;
+    use std::sync::Arc;
 
     use super::{OpenAi, apply_mode_defaults};
 
@@ -704,6 +722,43 @@ mod tests {
             apply_mode_defaults(&mut config, mode);
             assert!(!config.store_responses);
         }
+    }
+
+    #[test]
+    fn strict_json_schema_is_sent_in_the_text_format() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let client = OpenAi::builder("test-key")
+            .strict_json_schema(StrictJsonSchema::new("answer", schema.clone()))
+            .build()
+            .unwrap();
+        let profile = RequestProfile::new("schema-session", "schema-cache", Arc::from([]));
+        let request = serde_json::to_value(crate::responses::ResponseCreate::warmup(
+            client.config(),
+            Model::Astra,
+            Thinking::Low,
+            false,
+            &profile,
+            None,
+        ))
+        .expect("request should serialize");
+
+        assert_eq!(
+            request["text"],
+            json!({
+                "verbosity": "low",
+                "format": {
+                    "type": "json_schema",
+                    "strict": true,
+                    "name": "answer",
+                    "schema": schema
+                }
+            })
+        );
     }
 
     #[test]

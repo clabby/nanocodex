@@ -258,8 +258,8 @@ public struct ChatGeneratedOutput: Identifiable, Equatable, Hashable, Sendable {
                     let title = original.substring(with: match.range(at: 2))
                     let isImage = match.range(at: 1).length > 0
                     let isFile = ["pdf", "csv", "zip", "html", "json", "txt", "md", "xlsx", "docx", "pptx"].contains(URL(string: source)?.pathExtension.lowercased() ?? "")
-                    let unsupported = !["https", "http"].contains(URL(string: source)?.scheme?.lowercased() ?? "")
-                    if (isImage || isFile || unsupported), let range = Range(match.range, in: value) {
+                    // Navigation links (including relative tool pagination) are not attachments.
+                    if (isImage || isFile), let range = Range(match.range, in: value) {
                         emitMarkdown(String(value[cursor..<range.lowerBound]))
                         emitSource(source, kind: isImage ? .image : .file, mime: nil, title: title)
                         cursor = range.upperBound

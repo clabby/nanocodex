@@ -1,0 +1,133 @@
+import { jsonSchema, tool } from 'ai';
+import type { BrowserRuntime } from 'agents/browser/ai';
+import { describe, expect, it, vi } from 'vitest';
+import { sanitizeBrowserVaultText, parsePrivateSecureInput, parseSecureFormFields, PrivateBrowserCdp } from '../src/browser-vault';
+import { createManagedBrowserRuntime } from '../src/browser-runtime';
+
+// Failure cases defined before implementation: destination/session/document changes,
+// expiration, replay/concurrent submission, unauthorized request, injected provider
+// errors, restart, and ordinary observations after secret entry must fail closed.
+describe('one-time browser password boundary', () => {
+  async function fixture() {
+    const stored = new Map<string, unknown>();
+    let loader = 'document-1', session = 'browser-1', fail = false, race = false, storageFailure = false;
+    const ordinary = vi.fn(async () => 'ordinary');
+    const close = vi.fn(async () => {});
+    const inject = vi.fn(async () => { if (fail) throw new Error('synthetic-password'); return { result: { value: true } }; });
+    const send = vi.fn(async (method: string, params?: {arguments?: {value: unknown}[]}) => {
+      if (method === 'Target.getTargetInfo') return { targetInfo: { type: 'page', url: 'https://login.example/' } };
+      if (method === 'Target.attachToTarget') return { sessionId: 'attached' };
+      if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'top', loaderId: loader, url: 'https://login.example/' } } };
+      if (method === 'Page.createIsolatedWorld') { if (race) loader = 'replacement-during-world'; return { executionContextId: 7 }; }
+      if (params?.arguments?.[1]?.value === 'snapshot') return {result:{value:{status:'unknown',flags:[false,false,false],snapshot_id:params?.arguments?.[2]?.value,title:'synthetic-password',text:'Welcome synthetic-password',elements:[]}}};
+      if (params?.arguments?.[2]?.value === null || params?.arguments?.[6]?.value === true) return {result:{value:true}};
+      return inject();
+    });
+    const spy = vi.spyOn(PrivateBrowserCdp, 'connect').mockResolvedValue({ send, close() {} } as unknown as PrivateBrowserCdp);
+    const create = () => createManagedBrowserRuntime({
+      ctx: { storage: { get: async (k: string) => stored.get(k), put: async (k: string, v: unknown) => { if (storageFailure && k.startsWith('browser-vault-quarantine')) throw new Error('storage unavailable'); stored.set(k,v); }, delete: async (k: string) => stored.delete(k) } } as unknown as DurableObjectState,
+      env: { BROWSER: { fetch: vi.fn() }, LOADER: {} as WorkerLoader }, sessionId: 'agent-private', authorizeVaultAccess() {},
+      createRuntime: () => ({ connector: { sessionInfo: async () => ({ sessionId: session }), closeSession: close },
+        tools: { browser_execute: tool({ inputSchema: jsonSchema({ type: 'object' }), execute: ordinary }) }, runtime: {} }) as unknown as BrowserRuntime,
+    });
+    const context = { callId: 'input', sessionId: 'root', parentCallId: 'root', model: 'test', signal: new AbortController().signal };
+    const runtime = await create();
+    const request = () => runtime.tools.find(t => t.name === 'request_secure_input')!.handler({ target_id: 'tab', expected_origin: 'https://login.example', password_selector: '#pass', submit: true }, context) as Promise<{request_id: string}>;
+    return { runtime, request, create, context, stored, inject, spy, close, setLoader: () => { loader = 'changed'; }, setSession: () => { session = 'changed'; }, fail: () => { fail = true; }, race: () => { race = true; }, failStorage: () => { storageFailure = true; } };
+  }
+  it('typed fields describe only metadata, reject unknown values, fill once without submission, redact and fail closed after restart', async () => {
+    const f = await fixture();
+    try {
+      const fields = [{id:'pan',kind:'card_number',selector:'#pan',label:'Card number'},{id:'cvc',kind:'card_cvc',selector:'#cvc'}];
+      const request = (extra = {}) => f.runtime.tools.find(t=>t.name === 'request_secure_input')!.handler({target_id:'tab',expected_origin:'https://login.example',fields,submit:false,...extra},f.context) as Promise<{request_id:string}>;
+      await expect(request({submit:true})).rejects.toThrow();
+      await expect(request({fields:[{...fields[0],value:'secret'}]})).rejects.toThrow();
+      const r = await request();
+      const metadata = await f.runtime.submitSecureInput({request_id:r.request_id,action:'describe'},f.context.signal);
+      expect(metadata).toMatchObject({request_id:r.request_id,origin:'https://login.example',fields:[{id:'pan',kind:'card_number',selector:'#pan'},{id:'cvc',kind:'card_cvc',selector:'#cvc'}]});
+      expect(JSON.stringify(metadata)).not.toContain('label');
+      await expect(f.runtime.submitSecureInput({request_id:r.request_id,values:{pan:'4242',unknown:'123'}},f.context.signal)).rejects.toThrow();
+      expect(f.inject).not.toHaveBeenCalled();
+      const values = {pan:'4242 4242 4242 4242',cvc:'123'};
+      expect(await f.runtime.submitSecureInput({request_id:r.request_id,values},f.context.signal)).toMatchObject({status:'filled'});
+      expect(f.inject).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify([...f.stored.values()])).not.toContain('4242');
+      await expect(f.runtime.submitSecureInput({request_id:r.request_id,values},f.context.signal)).rejects.toThrow();
+      const restored = await f.create();
+      await expect(restored.tools.find(t=>t.name==='secure_input_snapshot')!.handler({request_id:r.request_id},f.context)).rejects.toThrow();
+    } finally { f.spy.mockRestore(); }
+  });
+  it.each(['document','world-race','session','restart'] as const)('typed submission fails closed on %s', async mode => {
+    const f = await fixture();
+    try {
+      const r = await f.runtime.tools.find(t=>t.name==='request_secure_input')!.handler({target_id:'tab',expected_origin:'https://login.example',submit:false,fields:[{id:'pan',kind:'card_number',selector:'#pan'}]},f.context) as {request_id:string};
+      if (mode === 'document') f.setLoader();
+      if (mode === 'world-race') f.race();
+      if (mode === 'session') f.setSession();
+      const runtime = mode === 'restart' ? await f.create() : f.runtime;
+      await expect(runtime.submitSecureInput({request_id:r.request_id,values:{pan:'4242424242424242'}},f.context.signal)).rejects.toThrow();
+      expect(f.inject).not.toHaveBeenCalled();
+    } finally {f.spy.mockRestore();}
+  });
+  it('redacts numeric card values despite page separator normalization', () => {
+    expect(sanitizeBrowserVaultText('Card 4242-4242-4242-4242 expiry 09 / 29 code 1 2 3',['4242 4242 4242 4242','09/29','123'],1000)).toBe('Card [redacted] expiry [redacted] code [redacted]');
+  });
+  it('rejects private payload pollution and unsupported field descriptors', () => {
+    const request_id = '12345678-1234-1234-1234-123456789abc';
+    expect(()=>parsePrivateSecureInput({request_id,values:{pan:'4242'},extra:'secret'})).toThrow();
+    expect(()=>parsePrivateSecureInput({request_id,values:{pan:''}})).toThrow();
+    expect(()=>parseSecureFormFields([{id:'pan',kind:'card_number',selector:'#pan'},{id:'pan',kind:'card_cvc',selector:'#cvc'}])).toThrow();
+  });
+  it('injects only once, persists no password, and gates observation across restart', async () => {
+    const f = await fixture();
+    try {
+      const r = await f.request();
+      const input = { request_id: r.request_id, value: 'synthetic-password' };
+      const results = await Promise.allSettled([f.runtime.submitSecureInput(input, f.context.signal), f.runtime.submitSecureInput(input, f.context.signal)]);
+      expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+      expect(f.inject).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify([...f.stored.values()])).not.toContain(input.value);
+      expect(JSON.stringify(results)).not.toContain(input.value);
+      const safe = await f.runtime.tools.find(t => t.name === 'secure_input_snapshot')!.handler({request_id:r.request_id},f.context);
+      expect(JSON.stringify(safe)).not.toContain(input.value);
+      expect(JSON.stringify(safe)).toContain('Welcome');
+      await expect(f.runtime.tools.find(t => t.name === 'secure_input_action')!.handler({request_id:r.request_id,action:'navigate',url:'https://evil.example/'},f.context)).rejects.toThrow();
+      const restored = await f.create();
+      await expect(restored.tools.find(t => t.name === 'secure_input_snapshot')!.handler({request_id:r.request_id},f.context)).rejects.toThrow();
+      await expect(restored.tools.find(t => t.name === 'browser_execute')!.handler({code:'1'}, f.context)).rejects.toThrow('isolated');
+    } finally { f.spy.mockRestore(); }
+  });
+  it('cancels without injection, accepts 4096 characters, and closes private continuation on cancellation', async () => {
+    const f = await fixture();
+    try {
+      const r = await f.request();
+      expect(await f.runtime.submitSecureInput({request_id:r.request_id,action:'cancel'},f.context.signal)).toEqual({type:'secure_input_receipt',request_id:r.request_id,status:'cancelled'});
+      await expect(f.runtime.submitSecureInput({request_id:r.request_id,value:'secret'},f.context.signal)).rejects.toThrow();
+      expect(f.inject).not.toHaveBeenCalled();
+      const next = await f.request();
+      expect(await f.runtime.submitSecureInput({request_id:next.request_id,value:'x'.repeat(4096)},f.context.signal)).toEqual({type:'secure_input_receipt',request_id:next.request_id,status:'submitted'});
+      f.setSession();
+      expect(await f.runtime.submitSecureInput({request_id:next.request_id,action:'cancel'},f.context.signal)).toMatchObject({status:'cancelled'});
+      expect(f.close).not.toHaveBeenCalled();
+      await expect(f.runtime.tools.find(t => t.name === 'secure_input_snapshot')!.handler({request_id:next.request_id},f.context)).rejects.toThrow();
+    } finally { f.spy.mockRestore(); }
+  });
+  it.each(['document','session','expiry','ambiguous','world-race','storage'] as const)('fails closed on %s and never replays', async mode => {
+    const f = await fixture();
+    try {
+      const r = await f.request();
+      if (mode === 'document') f.setLoader();
+      if (mode === 'session') f.setSession();
+      if (mode === 'expiry') { vi.useFakeTimers(); vi.setSystemTime(Date.now() + 301000); }
+      if (mode === 'ambiguous') f.fail();
+      if (mode === 'world-race') f.race();
+      if (mode === 'storage') f.failStorage();
+      const input = {request_id:r.request_id,value:'synthetic-password'};
+      const result = await Promise.allSettled([f.runtime.submitSecureInput(input,f.context.signal)]);
+      expect(JSON.stringify(result)).not.toContain(input.value);
+      if (mode !== 'ambiguous') { expect(result[0].status).toBe('rejected'); expect(f.inject).not.toHaveBeenCalled(); }
+      else expect(result[0]).toMatchObject({status:'fulfilled',value:{status:'outcome_unknown'}});
+      await expect(f.runtime.submitSecureInput(input,f.context.signal)).rejects.toThrow();
+    } finally { f.spy.mockRestore(); vi.useRealTimers(); }
+  });
+});

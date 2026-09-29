@@ -195,6 +195,17 @@ impl ToolDefinition {
         }
     }
 
+    /// Requests provider-enforced strict function arguments. The caller must
+    /// supply a strict-compatible, closed parameter schema (including all
+    /// properties in `required`); the provider rejects incompatible schemas.
+    #[must_use]
+    pub const fn with_strict_parameters(mut self) -> Self {
+        if let Self::Function { strict, .. } = &mut self {
+            *strict = true;
+        }
+        self
+    }
+
     /// Adds an output schema to a function definition.
     ///
     /// Custom and provider-native tool definitions are returned unchanged.
@@ -416,6 +427,20 @@ mod tests {
             .get("async")
             .is_none()
         );
+    }
+
+    #[test]
+    fn function_can_request_strict_provider_arguments() {
+        let definition = ToolDefinition::function(
+            "spawn_agent",
+            "Start child.",
+            json!({ "type": "object", "properties": { "role": { "type": "string" } },
+                "required": ["role"], "additionalProperties": false }),
+        )
+        .with_strict_parameters();
+        let sent = serde_json::to_value(&definition).unwrap();
+        assert_eq!(sent["strict"], true);
+        assert_eq!(sent["parameters"]["required"], json!(["role"]));
     }
 
     #[test]

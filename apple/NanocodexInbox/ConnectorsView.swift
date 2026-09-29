@@ -5,6 +5,17 @@ import UIKit
 
 struct ConnectorsView: View {
     @ObservedObject var model: InboxModel
+
+    var body: some View {
+        // Recreate all connector state, including presented sheets, when the
+        // account changes, even when this screen is opened from Settings.
+        ConnectorContentView(model: model)
+            .id(model.vaultIntakeAccount)
+    }
+}
+
+private struct ConnectorContentView: View {
+    @ObservedObject var model: InboxModel
     @StateObject private var center = ConnectorCenter()
     @State private var query = ""
     @State private var showingAddMcp = false
@@ -475,12 +486,23 @@ private final class ConnectorCenter: NSObject, ObservableObject, ASWebAuthentica
 
     func load(using model: InboxModel) async {
         guard !loading else { return }
+        let account = model.vaultIntakeAccount
         loading = true
         defer { loading = false }
+        if overview == nil {
+            let cached = await model.cachedConnectorOverview()
+            guard !Task.isCancelled, model.vaultIntakeAccount == account else { return }
+            overview = cached
+        }
         do {
-            overview = try await model.connectorOverview()
+            let refreshed = try await model.connectorOverview()
+            guard !Task.isCancelled, model.vaultIntakeAccount == account else { return }
+            overview = refreshed
             error = nil
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            guard !Task.isCancelled, model.vaultIntakeAccount == account else { return }
+            self.error = error.localizedDescription
+        }
     }
 
     func connect(_ provider: ConnectorProviderDefinition, using model: InboxModel) async {
@@ -548,11 +570,11 @@ private final class ConnectorCenter: NSObject, ObservableObject, ASWebAuthentica
             return completed
         } catch let authenticationError as ASWebAuthenticationSessionError
             where authenticationError.code == .canceledLogin {
-            overview = try? await model.connectorOverview()
+            if let refreshed = try? await model.connectorOverview() { overview = refreshed }
             return true
         } catch {
             self.error = error.localizedDescription
-            overview = try? await model.connectorOverview()
+            if let refreshed = try? await model.connectorOverview() { overview = refreshed }
             return false
         }
     }

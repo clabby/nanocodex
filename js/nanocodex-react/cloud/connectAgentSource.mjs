@@ -446,6 +446,7 @@ function envelopeEvents(envelope, rawAssistantTurns, sessionId, firstSequence) {
     return [historyEvent(sessionId, firstSequence, "managed.prompt", {
       text: promptText(envelope.data.input),
       turn_id: envelope.data.id,
+      ...(envelope.data.author === "guest" ? { author: "guest" } : {}),
     })];
   }
 

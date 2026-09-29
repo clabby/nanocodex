@@ -8,7 +8,7 @@ type Model = ManagedCreateSettings["model"];
 type Thinking = ManagedCreateSettings["thinking"];
 const models: readonly [Model, string][] = [
   ["gpt-6-astra", "GPT-6 Astra"],
-  ["gpt-6-sol", "GPT-6 Sol"],
+  ["gpt-6.1-sol", "GPT-6.1 Sol"],
   ["gpt-6-luna", "GPT-6 Luna"],
 ];
 const efforts: readonly [Thinking, string][] = [
@@ -151,7 +151,7 @@ export function AgentModelMenu({
                         value={id}
                         disabled={
                           pending ||
-                          (settings.model === "gpt-6-astra" && id === "none")
+                          (["gpt-6-astra", "gpt-6.1-sol"].includes(settings.model) && id === "none")
                         }
                       >
                         <span>{label}</span>

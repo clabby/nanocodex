@@ -1,4 +1,8 @@
 import SwiftUI
+import LocalAuthentication
+#if DEBUG && targetEnvironment(simulator)
+import CryptoKit
+#endif
 import QuickLook
 import PhotosUI
 import UniformTypeIdentifiers
@@ -183,6 +187,7 @@ struct InboxView: View {
             Group {
                 if model.connected && mainSurface == .todo {
                     TodoBoardView(model: model)
+                        .id(model.todoAccountIdentity)
                         .contentMargins(.bottom, bottomDockHeight, for: .scrollContent)
                 } else if model.connected && mainSurface == .crm {
                     CRMView(model: model)
@@ -319,6 +324,13 @@ struct InboxView: View {
             }
             .frame(maxWidth: InboxChrome.maximumWidth)
             .frame(maxWidth: .infinity)
+            .background(Ink.background.ignoresSafeArea(edges: .bottom))
+            .overlay(alignment: .top) {
+                LinearGradient(colors: [Ink.background.opacity(0), Ink.background], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 16).offset(y: -16).allowsHitTesting(false)
+            }
+            // Keep the idle dock near the home indicator, restoring keyboard clearance on focus.
+            .offset(y: composerFocused || todoInputFocused ? 0 : 14)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomDockHeight = $0 }
         }
     }
@@ -340,6 +352,10 @@ struct InboxView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("main-selection-bar")
         .modifier(InboxNavigationSurface())
+        // Keep the model picker readable without making its glass surface
+        // span the whole phone (or all 620 points on an iPad).
+        .frame(maxWidth: 380)
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, InboxChrome.gutter).padding(.top, 4).padding(.bottom, 2)
     }
 
@@ -708,6 +724,16 @@ struct InboxView: View {
                     Label("Device access", systemImage: "hand.raised")
                 }.accessibilityIdentifier("settings-device-access")
             }
+            Section {
+                NavigationLink("Open-source licenses") {
+                    ScrollView {
+                        Text(Self.mobileDependencyNotices)
+                            .font(.caption.monospaced()).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding()
+                    }
+                    .navigationTitle("Open-source licenses")
+                }.accessibilityIdentifier("settings-open-source")
+            }
             Section("Controls") {
                 Text("Open Conversations at the top to switch agents. The compose button creates a conversation. Back, Screens, and captured context are in the more menu.")
                 Text("The sidebar lists your conversations. Green identifies running agents. Drafts and reading positions stay with each conversation.").font(.caption)
@@ -718,6 +744,11 @@ struct InboxView: View {
         .navigationTitle("Settings")
         .accessibilityIdentifier("inbox-settings")
     }
+    private static let mobileDependencyNotices: String = {
+        guard let url = Bundle.main.url(forResource: "MOBILE_DEPENDENCY_NOTICES", withExtension: "md"),
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return "License notices are unavailable." }
+        return text
+    }()
     private func createAgent() {
         composerFocused = false
         #if os(iOS)
@@ -1572,6 +1603,7 @@ private struct AttachmentImageView: View {
     var contentMode: ContentMode = .fill
     var imageRatio: Binding<CGFloat>? = nil
     @State private var thumbnail: CGImage?
+    @State private var failed = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -1582,6 +1614,15 @@ private struct AttachmentImageView: View {
                         .interpolation(.high).aspectRatio(contentMode: contentMode)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
+                } else if failed {
+                    VStack(spacing: 6) {
+                        Image(systemName: "photo.badge.exclamationmark").font(.title3)
+                        Text("Image unavailable").font(.caption).lineLimit(1).minimumScaleFactor(0.75)
+                    }
+                    .foregroundStyle(Ink.muted)
+                    .padding(8)
+                    .frame(maxWidth: geometry.size.width, maxHeight: geometry.size.height)
+                    .clipped()
                 } else {
                     ProgressView().controlSize(.small).tint(Ink.muted)
                 }
@@ -1591,57 +1632,36 @@ private struct AttachmentImageView: View {
         .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(.primary.opacity(0.06), lineWidth: 0.5))
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .accessibilityElement(children: .ignore).accessibilityLabel("Attached image")
-        .accessibilityValue(thumbnail == nil ? "Loading image" : "Image loaded")
+        .accessibilityValue(failed ? "Image unavailable" : thumbnail == nil ? "Loading image" : "Image loaded")
         .task(id: visible ? source : nil) {
-            guard visible, let source else { thumbnail = nil; return }
-            if let cached = Self.cache.object(forKey: ThumbnailKey(source)) {
-                thumbnail = cached
-                imageRatio?.wrappedValue = CGFloat(cached.width) / CGFloat(cached.height)
-                return
+            thumbnail = nil
+            failed = false
+            guard visible, let source else { return }
+            do {
+                let decoded: CGImage
+                switch source {
+                case .file(let url): decoded = try await ChatImagePipeline.thumbnail(url: url, maxPixelSize: 960)
+                case .data(let data): decoded = try await ChatImagePipeline.thumbnail(data: data)
+                case .inline(let value):
+                    guard value.hasPrefix("data:image/"), let separator = value.firstIndex(of: ","),
+                          value[..<separator].hasSuffix(";base64"),
+                          let data = Data(base64Encoded: String(value[value.index(after: separator)...])) else {
+                        throw ChatImagePipeline.Failure.unavailable
+                    }
+                    decoded = try await ChatImagePipeline.thumbnail(data: data)
+                }
+                try Task.checkCancellation()
+                thumbnail = decoded
+                imageRatio?.wrappedValue = CGFloat(decoded.width) / CGFloat(decoded.height)
+            } catch is CancellationError {
+                // Cancellation from scrolling or source replacement is not a failure.
+            } catch {
+                guard !Task.isCancelled else { return }
+                failed = true
             }
-            let decoded = await Task.detached(priority: .userInitiated) { Self.decode(source) }.value
-            guard !Task.isCancelled else { return }
-            if let decoded { Self.cache.setObject(decoded, forKey: ThumbnailKey(source), cost: decoded.bytesPerRow * decoded.height) }
-            thumbnail = decoded
-            if let decoded { imageRatio?.wrappedValue = CGFloat(decoded.width) / CGFloat(decoded.height) }
         }
     }
 
-    private final class ThumbnailKey: NSObject {
-        let source: AttachmentImageSource
-        init(_ source: AttachmentImageSource) { self.source = source }
-        override var hash: Int { source.hashValue }
-        override func isEqual(_ other: Any?) -> Bool { (other as? ThumbnailKey)?.source == source }
-    }
-    private static let cache: NSCache<ThumbnailKey, CGImage> = {
-        let cache = NSCache<ThumbnailKey, CGImage>()
-        cache.totalCostLimit = 24 * 1024 * 1024
-        cache.countLimit = 32
-        return cache
-    }()
-
-    private nonisolated static func decode(_ source: AttachmentImageSource?) -> CGImage? {
-        let image: CGImageSource?
-        switch source {
-        case .file(let url):
-            guard url.isFileURL else { return nil }
-            image = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
-        case .inline(let value):
-            guard value.hasPrefix("data:image/"), let separator = value.firstIndex(of: ","),
-                  value[..<separator].hasSuffix(";base64"),
-                  let data = Data(base64Encoded: String(value[value.index(after: separator)...])) else { return nil }
-            image = CGImageSourceCreateWithData(data as CFData, nil)
-        case .data(let data): image = CGImageSourceCreateWithData(data as CFData, nil)
-        case nil: return nil
-        }
-        guard let image else { return nil }
-        return CGImageSourceCreateThumbnailAtIndex(image, 0, [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 960,
-            kCGImageSourceShouldCacheImmediately: true,
-        ] as CFDictionary)
-    }
 }
 
 private struct ConnectView: View {
@@ -1804,6 +1824,11 @@ private struct ConversationMessageView: View {
 }
 
 private struct ConversationMessageContent: View, Equatable {
+    @State private var openedOutput: URL?
+    @State private var openedFiles: [URL] = []
+    @State private var outputLease = OutputFileLease()
+    @State private var outputError: String?
+    @State private var outputTask: Task<Void, Never>?
     let row: TranscriptRow
     let model: InboxModel
     let agentID: String
@@ -1841,6 +1866,17 @@ private struct ConversationMessageContent: View, Equatable {
                             }.font(.caption).foregroundStyle(Ink.muted)
                         } else if row.role == "Agent", !row.text.isEmpty {
                             ChatMarkdown(text: row.text, compact: true)
+                                .environment(\.openURL, OpenURLAction { url in
+                                    guard let link = PublishedOutputLink(url: url) else { return .systemAction }
+                                    openOutput(link)
+                                    return .handled
+                                })
+                            if !row.running {
+                                ForEach(PublishedOutputLink.parse(row.text)) { link in
+                                    PublishedOutputCard(link: link, model: model, agentID: agentID)
+                                }
+                            }
+                            if let outputError { Text(outputError).font(.caption).foregroundStyle(.secondary) }
                         } else if !row.text.isEmpty {
                             Text(row.text).font(.system(size: row.role == "Status" ? 14 : 17))
                                 .lineSpacing(5).textSelection(.enabled)
@@ -1883,6 +1919,39 @@ private struct ConversationMessageContent: View, Equatable {
             }
             if row.role != "You" { Spacer(minLength: row.role == "Agent" ? 16 : 0) }
         }.frame(maxWidth: .infinity, alignment: row.role == "You" ? .trailing : .leading)
+            .nativeMediaPreview($openedOutput, in: openedFiles, title: "Generated file")
+            .onChange(of: openedOutput) { _, value in
+                if value == nil {
+                    for file in openedFiles { removeDownloadedOutput(file) }
+                    openedFiles = []
+                    outputLease.files = []
+                }
+            }
+            .onDisappear {
+                outputTask?.cancel()
+                if openedOutput == nil {
+                    for file in openedFiles { removeDownloadedOutput(file) }
+                    openedFiles = []
+                    outputLease.files = []
+                }
+            }
+    }
+
+    private func openOutput(_ link: PublishedOutputLink) {
+        outputTask?.cancel()
+        outputError = nil
+        outputTask = Task {
+            do {
+                let file = try await model.downloadOutput(link, agentID: agentID)
+                guard !Task.isCancelled else { removeDownloadedOutput(file); return }
+                for previous in openedFiles { removeDownloadedOutput(previous) }
+                openedFiles = [file]
+                outputLease.files = [file]
+                openedOutput = file
+            } catch {
+                if !Task.isCancelled { outputError = "Couldn’t open file. Tap to retry." }
+            }
+        }
     }
 
     @ViewBuilder private var media: some View {
@@ -1908,6 +1977,100 @@ private struct ConversationMessageContent: View, Equatable {
             ForEach(row.videos ?? []) { VideoAttachmentView(video: $0, model: model, agentID: agentID) }
         }
     }
+}
+
+/// A private Brain output is not a browser URL. Download only after a tap,
+/// then let the native previewer play, inspect, share or save the local copy.
+private struct PublishedOutputCard: View {
+    let link: PublishedOutputLink
+    let model: InboxModel
+    let agentID: String
+    @State private var sharing = false
+    @State private var shareFile: URL?
+    @State private var shareLease = OutputFileLease()
+    @State private var sharePresented = false
+    @State private var failure: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 0) {
+                ChatMediaPreview(title: link.title, load: { [try await model.downloadOutput(link, agentID: agentID)] }) {
+                    HStack(spacing: 12) {
+                        Image(systemName: link.isVideo ? "play.rectangle.fill" : link.isImage ? "photo" : "doc.zipper")
+                            .font(.title2).frame(width: 38)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(link.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                            Text(link.filename).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer(minLength: 6)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("View " + link.title)
+                    .accessibilityIdentifier("published-output-open")
+                }
+                Button { sharing = true; failure = nil } label: {
+                    if sharing { ProgressView() }
+                    else { Image(systemName: "square.and.arrow.up").font(.body.weight(.medium)) }
+                }
+                .frame(width: 44, height: 52)
+                .buttonStyle(.plain)
+                .disabled(sharing)
+                .accessibilityLabel("Save or share " + link.title)
+                .accessibilityIdentifier("published-output-save")
+            }
+            .padding(.leading, 12).padding(.trailing, 4)
+            .background(Ink.surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Ink.border, lineWidth: 0.5))
+            if let failure { Text(failure).font(.caption).foregroundStyle(.secondary) }
+        }
+        .frame(maxWidth: 440)
+        .task(id: sharing) {
+            guard sharing else { return }
+            do {
+                let file = try await model.downloadOutput(link, agentID: agentID)
+                guard !Task.isCancelled else { removeDownloadedOutput(file); return }
+                shareLease.files = [file]; shareFile = file; sharePresented = true
+            } catch { if !Task.isCancelled { failure = "Couldn’t download file. Tap to retry." } }
+            sharing = false
+        }
+        .sheet(isPresented: $sharePresented, onDismiss: {
+            if let shareFile { removeDownloadedOutput(shareFile) }
+            shareFile = nil
+            shareLease.files = []
+        }) {
+            if let shareFile { OutputActivitySheet(file: shareFile) { sharePresented = false } }
+        }
+        .onDisappear {
+            if !sharePresented, let shareFile { removeDownloadedOutput(shareFile); self.shareFile = nil; shareLease.files = [] }
+        }
+    }
+}
+
+private func removeDownloadedOutput(_ file: URL) {
+    let parent = file.deletingLastPathComponent()
+    if parent.lastPathComponent.hasPrefix("NanocodexOutput-"),
+       parent.deletingLastPathComponent().standardizedFileURL == FileManager.default.temporaryDirectory.standardizedFileURL {
+        try? FileManager.default.removeItem(at: parent)
+    } else { try? FileManager.default.removeItem(at: file) }
+}
+
+/// Cleans up even when SwiftUI tears down a whole row with a presented sheet.
+private final class OutputFileLease {
+    var files: [URL] = []
+    deinit { for file in files { removeDownloadedOutput(file) } }
+}
+
+private struct OutputActivitySheet: UIViewControllerRepresentable {
+    let file: URL
+    let complete: () -> Void
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: [file], applicationActivities: nil)
+        controller.completionWithItemsHandler = { _, _, _, _ in DispatchQueue.main.async(execute: complete) }
+        return controller
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 private final class ConversationReadingPositions {
@@ -2504,6 +2667,14 @@ private struct ConversationContentView: View {
                         onToggle: { nativeToolToggle(item.id) }))
                 }))
             }
+            for activity in content.activity where activity.tool?.secureInput != nil {
+                if let intake = activity.tool?.secureInput {
+                    rows.append(.init(id: item.id + ":secure:" + activity.id, revision: cellRevision, content: {
+                        AnyView(SecureInputCard(model: model, intake: intake)
+                            .id("\(activity.id):\(model.vaultIntakeAccount)"))
+                    }))
+                }
+            }
             // Intake prompts remain reachable even when their group is collapsed.
             for activity in content.activity where activity.tool?.vaultIntake != nil {
                 if let intake = activity.tool?.vaultIntake {
@@ -2565,15 +2736,15 @@ private struct ConversationContentView: View {
     var body: some View {
         Group {
             ZStack(alignment: .bottom) {
-            // The transcript fills the viewport and scrolls beneath the controls
-            // and composer. Content margins keep the final message reachable.
+            // Bound the native viewport above the dock. Occluded rows must not
+            // remain tappable or exposed as visible accessibility elements.
             GeometryReader { viewport in
             let boundaryItemID = historyBoundaryItemID
             ZStack(alignment: .top) {
             NativeConversationTranscript(
                 rows: nativeRows(in: viewport), proxy: scroll,
                 followsLatest: followsLatest && pendingReadingRestore == nil && !model.needsLatestHistory && !navigationActive,
-                bottomInset: composerHeight + 52,
+                bottomInset: 0,
                 onFrames: { frames in
                     // Native frames contain only realized cells in viewport coordinates.
                     var visible = frames
@@ -2621,6 +2792,7 @@ private struct ConversationContentView: View {
                     followLatest(using: scroll)
                 }
                 })
+            .padding(.bottom, composerHeight + 52)
             .contentShape(Rectangle())
             .onChange(of: revision.projectionRevision) { _, _ in
                 continueUserNavigation(using: scroll)
@@ -3839,3 +4011,459 @@ private struct MobileModelControls: View {
         }
     }
 }
+
+private struct SecureInputCard: View {
+    @ObservedObject var model: InboxModel
+    let intake: SecureInputRequest
+    @State private var showing = false
+    @State private var attempted = false
+    @State private var status: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(intake.isNative ? "Approve a root command" : (intake.isForm ? "Fill website fields privately" : "Enter website password privately"), systemImage: "lock.shield").font(.headline)
+            Text(intake.machineID ?? intake.origin).font(.subheadline)
+            if let status { Text(status) }
+            else {
+                Text(intake.isNative ? "Review the machine and exact command, then authenticate to send a password privately. Not saved to Vault." : (intake.isForm ? "Enter sensitive details in a private form. Values fill only the bound browser fields and are not saved to Vault." : "Enter your password privately for the bound browser input. Not saved to Vault.")).font(.subheadline)
+                Button(intake.isNative ? "Review command" : "Open private input") { showing = true }
+                    .disabled(attempted || !intake.isCurrent(agentID: model.focused?.id ?? ""))
+                    .accessibilityIdentifier("secure-input-open")
+            }
+        }.padding(16).background(Ink.surface, in: RoundedRectangle(cornerRadius: 16))
+        .sheet(isPresented: $showing) {
+            SecureInputSheet(model: model, intake: intake, attempted: $attempted) { status = $0 }
+        }
+    }
+}
+private struct SecureInputSheet: View {
+    @ObservedObject var model: InboxModel
+    let intake: SecureInputRequest
+    @Binding var attempted: Bool
+    let completed: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var password = ""
+    @State private var fieldValues: [String: String] = [:]
+    @State private var browserDescription: BrowserSecureInputDescription?
+    @State private var account = UUID()
+    @State private var busy = false
+    @State private var failure: String?
+    @State private var submission: Task<Void, Never>?
+    @State private var resolved = false
+    @State private var cancellationStarted = false
+    @State private var nativeDescription: NativeSecureInputDescription?
+    @State private var authentication: LAContext?
+    @State private var commandReviewed = false
+    private var inputIsValid: Bool {
+        if intake.isNative { return nativeDescription != nil && commandReviewed && Self.validValue(password) }
+        guard let browserDescription else { return false }
+        return browserDescription.fields.allSatisfy { Self.validValue(fieldValues[$0.id] ?? "") }
+    }
+    private static func validValue(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 4096 && !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
+    }
+    private func cancelRequest() {
+        password = ""; fieldValues = [:]
+        guard !resolved, !cancellationStarted else { return }
+        cancellationStarted = true; attempted = true
+        authentication?.invalidate(); authentication = nil
+        submission?.cancel()
+        Task { @MainActor in
+            do {
+                let receipt = try await model.cancelSecureInput(intake, account: account)
+                model.publishSecureInputReceipt(receipt, intake: intake, account: account)
+                completed("Secure input cancelled.")
+            } catch { completed("Cancellation could not be confirmed. Check the destination before continuing.") }
+        }
+    }
+    var body: some View {
+        SecureInputSheetShell(destination: intake.isNative ? "Machine: " + (intake.machineID ?? "") : intake.origin, password: $password,
+                              passwordDisabled: attempted || (intake.isNative ? nativeDescription == nil : browserDescription == nil),
+                              browserFields: intake.isNative ? nil : (browserDescription?.fields ?? []), fieldValues: $fieldValues, reviewFirst: intake.isNative,
+                              privacy: intake.isNative ? "Encrypted for the enrolled helper, outside chat. This runs as root. Trust the executable and any files it reads. Not saved to Vault. Switching apps cancels this request." : (intake.isForm ? "This app fills only bound fields and does not press Pay. The website may react to input. Outside chat and not saved to Vault." : "Sent privately to the bound password field, outside chat. The website may submit its sign-in form. Not saved to Vault."),
+                              cancel: { cancelRequest(); dismiss() }) {
+            if let failure { Text(failure).foregroundStyle(.red) }
+            if intake.isNative {
+                if let nativeDescription {
+                    NativeSecureInputReview(description: nativeDescription)
+                    Toggle("I reviewed this command and trust the files it runs", isOn: $commandReviewed)
+                        .accessibilityIdentifier("native-secure-command-confirm")
+                }
+                else { Text("Verifying the protected command…") }
+            } else if browserDescription == nil { Text("Verifying the private form…") }
+        } action: {
+                Button(busy ? "Sending…" : (intake.isNative ? "Authenticate & run as root" : intake.isForm ? "Fill fields only" : "Send password to website")) {
+                    attempted = true; busy = true
+                    let value = password
+                    let values = fieldValues
+                    password = ""; fieldValues = [:]
+                    submission = Task { @MainActor in
+                        defer { busy = false }
+                        do {
+                            let receipt: SecureInputReceipt
+                            if intake.isNative {
+                                guard let nativeDescription else { throw APIError.invalidResponse }
+                                let context = LAContext()
+                                authentication = context
+                                defer { context.invalidate(); authentication = nil }
+                                receipt = try await NativeSecureInputAuthorization.perform(
+                                    authenticate: { try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Approve the displayed command on " + nativeDescription.machineID) },
+                                    isActive: { scenePhase == .active },
+                                    isCancelled: { cancellationStarted || !model.connected || model.vaultIntakeAccount != account || !intake.isCurrent(agentID: model.focused?.id ?? "") }
+                                ) {
+                                    try await model.submitNativeSecureInput(intake, description: nativeDescription, value: value, account: account)
+                                }
+                            } else {
+                                guard let browserDescription else { throw APIError.invalidResponse }
+                                receipt = try await model.submitSecureInput(intake, description: browserDescription, values: values, account: account)
+                            }
+                            guard !Task.isCancelled, model.vaultIntakeAccount == account else { return }
+                            model.publishSecureInputReceipt(receipt, intake: intake, account: account)
+                            resolved = true
+                            completed(intake.isNative && receipt.status == "outcome_unknown" ? "Submission outcome unknown. Check the machine before any further attempt." : receipt.message)
+                            dismiss()
+                        } catch {
+                            guard !cancellationStarted, model.vaultIntakeAccount == account else { return }
+                            failure = "Couldn’t confirm submission. Check the destination directly before any further attempt."
+                            completed("Submission could not be confirmed. Check the destination directly before any further attempt.")
+                        }
+                    }
+                }.disabled(attempted || !inputIsValid || !intake.isCurrent(agentID: model.focused?.id ?? ""))
+                    .accessibilityIdentifier("secure-input-submit")
+        }
+        .overlay { if scenePhase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
+        .interactiveDismissDisabled(busy)
+        .task(id: intake.requestID) {
+            account = model.vaultIntakeAccount
+            if intake.isNative {
+                do { nativeDescription = try await model.describeNativeSecureInput(intake, account: account) }
+                catch { failure = "Couldn’t verify the protected command. Cancel and request it again."; return }
+            } else {
+                do { browserDescription = try await model.describeSecureInput(intake, account: account) }
+                catch { failure = "Couldn’t verify the private form. Cancel and request it again."; return }
+            }
+            while !Task.isCancelled {
+                let remaining = intake.expiresAt / 1000 - Date().timeIntervalSince1970
+                if remaining <= 0 {
+                    password = ""; fieldValues = [:]
+                    if !resolved { cancelRequest(); dismiss() }
+                    return
+                }
+                do { try await Task.sleep(for: .seconds(min(remaining, 60))) }
+                catch { return }
+            }
+        }
+        .onDisappear { password = ""; fieldValues = [:]; if !resolved { cancelRequest() } }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { password = ""; fieldValues = [:] }
+            if phase == .background { cancelRequest(); dismiss() }
+        }
+        .onChange(of: model.vaultIntakeAccount) { _, _ in submission?.cancel(); password = ""; fieldValues = [:]; dismiss() }
+        .onChange(of: model.connected) { _, connected in if !connected { submission?.cancel(); password = ""; fieldValues = [:]; dismiss() } }
+    }
+}
+
+/// The same native presentation is used by conversation requests and UI journeys.
+private struct SecureInputSheetShell<Review: View, Action: View>: View {
+    let destination: String
+    @Binding var password: String
+    var passwordDisabled = false
+    var browserFields: [BrowserSecureInputField]? = nil
+    var fieldValues: Binding<[String: String]> = .constant([:])
+    var reviewFirst = false
+    let privacy: String
+    let cancel: () -> Void
+    @ViewBuilder let review: () -> Review
+    @ViewBuilder let action: () -> Action
+    @FocusState private var focusedField: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "lock.shield.fill").font(.title2).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Private input").font(.headline)
+                    Text(destination).font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button("Cancel", action: cancel).font(.subheadline)
+            }.padding(.horizontal, 24).padding(.top, 28).padding(.bottom, 16)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if reviewFirst { review() }
+                    if let browserFields {
+                        ForEach(browserFields) { field in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(field.label).font(.subheadline.weight(.medium))
+                                SecureBrowserField(field: field, value: Binding(
+                                    get: { fieldValues.wrappedValue[field.id] ?? "" },
+                                    set: { fieldValues.wrappedValue[field.id] = $0 }))
+                                    .focused($focusedField, equals: field.id)
+                                    .font(.title3).padding(16)
+                                    .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+                                    .disabled(passwordDisabled)
+                            }
+                        }
+                    } else {
+                        SecurePasswordField(password: $password)
+                            .focused($focusedField, equals: "native-password")
+                            .font(.title3).padding(16)
+                            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+                            .disabled(passwordDisabled)
+                    }
+                    if !reviewFirst { review() }
+                    Text(privacy).font(.footnote).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.bottom, 16)
+            }.scrollDismissesKeyboard(.interactively)
+                .accessibilityIdentifier("secure-input-review")
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            action().buttonStyle(SecureInputPrimaryButtonStyle())
+                .padding(.horizontal, 24).padding(.vertical, 12)
+                .background(.regularMaterial)
+        }
+        .background(Color(uiColor: .systemBackground))
+        .onChange(of: password) { _, value in
+            if value.isEmpty { focusedField = nil }
+        }
+        .onChange(of: fieldValues.wrappedValue) { _, values in
+            if values.values.allSatisfy(\.isEmpty) { focusedField = nil }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("secure-input-sheet")
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationCornerRadius(28)
+    }
+}
+
+private struct SecureInputPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.headline)
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .foregroundStyle(Color.white)
+            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 14))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.4)
+    }
+}
+
+private struct NativeSecureInputReview: View {
+    let description: NativeSecureInputDescription
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) { Text("Executable").font(.caption).foregroundStyle(.secondary); Text(NativeSecureInputDescription.displayLiteral(description.executable)).font(.system(.body, design: .monospaced)).fixedSize(horizontal: false, vertical: true) }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("native-secure-command-executable")
+        VStack(alignment: .leading, spacing: 4) { Text("Working directory").font(.caption).foregroundStyle(.secondary); Text(NativeSecureInputDescription.displayLiteral(description.cwd)).font(.system(.body, design: .monospaced)).fixedSize(horizontal: false, vertical: true) }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("native-secure-command-cwd")
+        Text("Local user ID: \(description.uid)")
+        Text("Arguments (ordered)").font(.headline)
+        Text("[" + description.arguments.map(NativeSecureInputDescription.displayLiteral).joined(separator: ",\n") + "]")
+            .font(.system(.body, design: .monospaced)).textSelection(.enabled)
+            .accessibilityIdentifier("native-secure-command-arguments")
+    }
+}
+
+struct SecurePasswordField: View {
+    @Binding var password: String
+    var body: some View {
+        SecureField("Password", text: $password)
+            .textContentType(.password).textInputAutocapitalization(.never)
+            .autocorrectionDisabled().privacySensitive()
+            .accessibilityIdentifier("secure-input-password")
+    }
+}
+/// Every supported field stays masked; field kinds select native keyboard and AutoFill hints.
+private struct SecureBrowserField: View {
+    let field: BrowserSecureInputField
+    @Binding var value: String
+
+    private var keyboard: UIKeyboardType {
+        switch field.kind {
+        case .cardNumber, .cardCVC: return .numberPad
+        case .cardExpiry: return .numbersAndPunctuation
+        case .password, .sensitiveText: return .default
+        }
+    }
+    private var contentType: UITextContentType? {
+        switch field.kind {
+        case .password: return .password
+        case .cardNumber: return .creditCardNumber
+        case .cardExpiry: return .creditCardExpiration
+        case .cardCVC: return .creditCardSecurityCode
+        case .sensitiveText: return nil
+        }
+    }
+    var body: some View {
+        SecureField(field.kind == .cardExpiry ? "MM/YY" : field.label, text: $value)
+            .keyboardType(keyboard).textContentType(contentType)
+            .textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive()
+            .accessibilityIdentifier("secure-input-field:" + field.id)
+    }
+}
+#if DEBUG && targetEnvironment(simulator)
+struct NativeSecureInputUIFixture: View {
+    private let description: NativeSecureInputDescription
+    @State private var password = ""
+    @State private var status = ""
+    @State private var attempts = 0
+    @State private var commandReviewed = false
+    init() {
+        let requestID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let expiry = Date().addingTimeInterval(300).timeIntervalSince1970 * 1000
+        let args = ["-u", "visible\u{202e}hidden"]
+        let binding = try! JSONSerialization.data(withJSONObject: ["arguments": args, "cwd": "/", "executable": "/usr/bin/id", "uid": 501], options: [.sortedKeys, .withoutEscapingSlashes])
+        let hint: JSON = .object(["type": .string("secure_input"), "status": .string("input_required"), "kind": .string("native_sudo"), "request_id": .string(requestID), "agent_id": .string("fixture"), "machine_id": .string("fixture-machine"), "expires_at": .number(expiry)])
+        let request = SecureInputRequest.parse(hint)!
+        let recipient = P256.KeyAgreement.PrivateKey()
+        description = try! NativeSecureInputDescription.parse(.object(["request_id": .string(requestID), "machine_id": .string("fixture-machine"), "uid": .number(501), "executable": .string("/usr/bin/id"), "arguments": .array(args.map(JSON.string)), "cwd": .string("/"), "command_digest": .string(Data(SHA256.hash(data: binding)).base64EncodedString()), "public_key": .string(recipient.publicKey.x963Representation.base64EncodedString()), "expires_at": .number(expiry)]), intake: request)
+    }
+    var body: some View {
+        SecureInputFixtureConversation(destination: "fixture-machine") { close in
+            SecureInputSheetShell(destination: "Machine: " + description.machineID, password: $password, reviewFirst: true,
+                                  privacy: "Encrypted for the enrolled helper, outside chat. Not saved to Vault.", cancel: close) {
+                if !status.isEmpty { Text(status).foregroundStyle(.red) }
+                NativeSecureInputReview(description: description)
+                Toggle("I reviewed this command and trust the files it runs", isOn: $commandReviewed)
+                    .accessibilityIdentifier("native-secure-command-confirm")
+                Text("Submission attempts: \(attempts)").font(.caption).foregroundStyle(.secondary)
+            } action: {
+                Button("Authenticate & run as root") {
+                    password = ""
+                    Task { @MainActor in
+                        do {
+                            let _: Bool = try await NativeSecureInputAuthorization.perform(authenticate: { false }, isActive: { true }, isCancelled: { false }) {
+                                attempts += 1
+                                return true
+                            }
+                            status = "Unexpected submission"
+                        } catch { status = "Authentication denied" }
+                    }
+                }.disabled(!commandReviewed || password.isEmpty)
+                    .accessibilityIdentifier("secure-input-submit")
+            }
+            .onDisappear { password = "" }
+        }
+    }
+}
+
+/// Synthetic UI journey; HTTP protocol coverage lives in InboxCore tests.
+struct SecureInputUIFixture: View {
+    private let description: BrowserSecureInputDescription
+    @State private var unusedPassword = ""
+    @State private var values: [String: String] = [:]
+    @State private var status: String?
+    init() {
+        let requestID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let expiry = Date().addingTimeInterval(300).timeIntervalSince1970 * 1000
+        let intake = SecureInputRequest.parse(.object([
+            "type": .string("secure_input"), "status": .string("input_required"),
+            "kind": .string("browser_form"), "request_id": .string(requestID),
+            "agent_id": .string("fixture"), "origin": .string("https://example.com"), "expires_at": .number(expiry)
+        ]))!
+        description = try! BrowserSecureInputDescription.parse(.object([
+            "request_id": .string(requestID), "origin": .string(intake.origin), "expires_at": .number(expiry),
+            "fields": .array([.object(["id": .string("password"), "kind": .string("password"), "selector": .string("#password")])])
+        ]), intake: intake)
+    }
+    var body: some View {
+        SecureInputFixtureConversation(destination: description.origin) { close in
+            SecureInputSheetShell(destination: description.origin, password: $unusedPassword,
+                                  passwordDisabled: status != nil, browserFields: description.fields, fieldValues: $values,
+                                  privacy: "Sent directly to the bound browser input, outside chat. Not saved to Vault.",
+                                  cancel: { values = [:]; close() }) {
+                if let status { Text(status) }
+            } action: {
+                Button("Send password to website") {
+                    values = [:]
+                    let receipt = try? SecureInputReceipt.parse(.object(["type": .string("secure_input_receipt"), "request_id": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "status": .string("filled")]), requestID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                    status = receipt?.message ?? "Invalid receipt"
+                }.disabled((values["password"] ?? "").isEmpty || status != nil)
+                    .accessibilityIdentifier("secure-input-submit")
+            }.onDisappear { values = [:] }
+        }
+    }
+}
+
+/// Synthetic owner metadata and fill-only receipt; no network or payment submission.
+struct CardSecureInputUIFixture: View {
+    private let description: BrowserSecureInputDescription
+    @State private var unusedPassword = ""
+    @State private var values: [String: String] = [:]
+    @State private var receipt: SecureInputReceipt?
+    private var filled: Bool { receipt != nil }
+    @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        let requestID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        let expiry = Date().addingTimeInterval(300).timeIntervalSince1970 * 1000
+        let intake = SecureInputRequest.parse(.object([
+            "type": .string("secure_input"), "status": .string("input_required"),
+            "kind": .string("browser_form"), "request_id": .string(requestID),
+            "agent_id": .string("fixture"), "origin": .string("https://checkout.example.com"),
+            "expires_at": .number(expiry)
+        ]))!
+        let fields: [JSON] = [("card", "card_number"), ("expiry", "card_expiry"), ("cvc", "card_cvc")].map { id, kind in
+            .object(["id": .string(id), "kind": .string(kind), "selector": .string("#" + id)])
+        }
+        description = try! BrowserSecureInputDescription.parse(.object([
+            "request_id": .string(requestID), "origin": .string(intake.origin),
+            "expires_at": .number(expiry), "fields": .array(fields)
+        ]), intake: intake)
+    }
+    var body: some View {
+        SecureInputFixtureConversation(destination: description.origin) { close in
+            SecureInputSheetShell(destination: description.origin, password: $unusedPassword,
+                                  passwordDisabled: filled, browserFields: description.fields, fieldValues: $values,
+                                  privacy: "This app fills only bound fields and does not press Pay. The website may react to input. Outside chat and not saved to Vault.",
+                                  cancel: { values = [:]; close() }) {
+                if filled {
+                    Text(receipt?.message ?? "")
+                    Text("Fixture: 3 bound fields filled; form submissions: 0").font(.caption).foregroundStyle(.secondary)
+                }
+            } action: {
+                Button("Fill fields only") {
+                    // Exercise the presentation with synthetic values only; protocol coverage uses the owner endpoint.
+                    values = [:]
+                    receipt = try? SecureInputReceipt.parse(.object([
+                        "type": .string("secure_input_receipt"), "request_id": .string(description.requestID), "status": .string("filled")
+                    ]), requestID: description.requestID)
+                }.disabled(filled || !description.fields.allSatisfy { !(values[$0.id] ?? "").isEmpty })
+                    .accessibilityIdentifier("secure-input-submit")
+            }
+            .overlay { if scenePhase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
+            .onDisappear { values = [:] }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active { values = [:] }
+                if phase == .background { close() }
+            }
+        }
+    }
+}
+
+private struct SecureInputFixtureConversation<Sheet: View>: View {
+    let destination: String
+    @ViewBuilder let sheet: (@escaping () -> Void) -> Sheet
+    @State private var showing = false
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack { Spacer(); Text("Please complete this action on my machine.").padding(16).background(Ink.surface, in: RoundedRectangle(cornerRadius: 18)) }
+                Text("I need your approval to continue. Review the destination and enter your password privately.")
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Enter password privately", systemImage: "lock.shield").font(.headline)
+                    Text(destination).font(.subheadline)
+                    Button("Open secure form") { showing = true }.accessibilityIdentifier("secure-input-open")
+                }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(Ink.surface, in: RoundedRectangle(cornerRadius: 16))
+                Spacer()
+                HStack { Text("Message").foregroundStyle(.secondary); Spacer(); Image(systemName: "arrow.up.circle.fill") }.padding(16).background(Ink.surface, in: Capsule())
+            }.padding(20).navigationTitle("Local maintenance").navigationBarTitleDisplayMode(.inline)
+        }
+        .sheet(isPresented: $showing) { sheet { showing = false } }
+    }
+}
+#endif

@@ -43,6 +43,8 @@ jobs:
           done
           cargo metadata --no-deps --format-version 1 | jq -e --arg version "$version" \
             '[.packages[].dependencies[] | select(.source == null and (.name | startswith("nanocodex"))) | .req] | all(. == ("^" + $version))' >/dev/null
+      - name: Validate isolated voice lockfile
+        run: cargo metadata --locked --manifest-path third_party/codex-voice/Cargo.toml --format-version 1 > /dev/null
       - name: Validate installers and crate packages
         shell: bash
         run: |
@@ -277,7 +279,7 @@ jobs:
     name: publish npm packages
     needs: validate
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write
@@ -348,16 +350,16 @@ jobs:
               return 1
             fi
 
-            for attempt in {1..12}; do
+            for attempt in {1..60}; do
               if is_published "$package_name" "$version"; then
                 echo "$package_name@$version is available from the registry"
                 return
               fi
-              echo "Waiting for $package_name@$version registry propagation (attempt $attempt/12)..."
+              echo "Waiting for $package_name@$version registry propagation (attempt $attempt/60)..."
               sleep 10
             done
 
-            echo "$package_name@$version did not propagate within 120 seconds" >&2
+            echo "$package_name@$version did not propagate within 600 seconds" >&2
             return 1
           }
 

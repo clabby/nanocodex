@@ -34,14 +34,18 @@ test('real Docker contexts have stable recipes and reconstruct their external ta
       return readFileSync(join(cwd, 'recipe.json'), 'utf8');
     };
     const baseline = prepare(managed);
-    assert.equal(prepare(phone), baseline, 'both Dockerfiles plan the same tracked Rust workspace');
+    assert.equal(prepare(phone), baseline, 'phone and sandbox plan the same tracked Rust workspace');
+    const remote = join(temporary, 'remote');
+    cpSync(phone, remote, { recursive: true });
+    assert.equal(prepare(remote), baseline, 'remote image plans the same tracked Rust workspace');
     const recipe = JSON.parse(baseline);
     assert.equal(recipe.skeleton.config_file, null, 'preserve the existing Docker contexts, which omit .cargo');
     for (const [directory, entrypoint] of [
       [managed, 'bin/nanocodex/src/nanocodex2/main.rs'],
       [phone, 'examples/phone_voice.rs'],
+      [remote, 'bin/nanocodex/src/nanocodex2/main.rs'],
     ]) {
-      await t.test(`${directory === managed ? 'sandbox' : 'phone'} invalidation boundaries`, () => {
+      await t.test(`${directory === managed ? 'sandbox' : directory === phone ? 'phone' : 'remote'} invalidation boundaries`, () => {
         const source = join(directory, entrypoint);
         const original = readFileSync(source, 'utf8');
         writeFileSync(source, `${original}\n// Recipe cache source-edit probe.\n`);

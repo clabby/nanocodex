@@ -14,12 +14,19 @@ const principal: Principal = {
   authorizationEpoch: 1, capabilities: ["agents:read", "agents:write", "tools:use"],
 };
 const marker = "synthetic-child-tool-proof";
-const schema = { type: "object", properties: { value: { type: "string" }, turn: { type: "integer" } },
-  required: ["value", "turn"], additionalProperties: false };
+const contract = { kind: "object", fields: [
+  { name: "value", schema: { kind: "string" }, required: true },
+  { name: "turn", schema: { kind: "integer" }, required: true },
+] };
 const completion = (message: unknown, tool = false) => ({ choices: [{ finish_reason: tool ? "tool_calls" : "stop", message }] });
 function toolCall(input: any, name: string, args: unknown, id: string) {
   const declaration = input.tools.find((tool: any) => tool.function.description.startsWith(`${name}\n`));
   expect(declaration, `${name} must come from the actual Rust/WASM tool catalog`).toBeDefined();
+  if (name === "spawn_agent") {
+    expect(declaration.function.strict).toBe(true);
+    expect(declaration.function.parameters.properties.output_contract).toBeDefined();
+    expect(declaration.function.parameters.properties.output_schema).toBeUndefined();
+  }
   return completion({ content: null, tool_calls: [{ id, type: "function", function: {
     name: declaration.function.name, arguments: JSON.stringify(args),
   } }] }, true);
@@ -61,8 +68,8 @@ it.each([
     const rootResponse = (body: any) => {
       expect(rootStep).toBeLessThan(10);
       if (rootStep++ === 0) return tool(body, "spawn_agent", {
-        role: "manual fixture", task: "Return the requested schema.", output_schema: schema,
-        ...(model === undefined ? {} : { model }), ...(thinking === undefined ? {} : { thinking }),
+        role: "manual fixture", task: "Return the requested schema.", model: model ?? null, thinking: thinking ?? null,
+        output_contract: contract,
       });
       const last = body.messages.at(-1);
       if (denied) {

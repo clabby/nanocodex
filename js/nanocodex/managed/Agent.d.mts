@@ -222,7 +222,7 @@ export type EventData = Readonly<{
   model_routing_automatic?: boolean;
 }> & (
   | { type: "agent_created"; agent_id: string; capabilities: Capabilities }
-  | { type: "turn_accepted"; id: string; input: PromptInput; replayed: boolean }
+  | { type: "turn_accepted"; id: string; input: PromptInput; replayed: boolean; author?: "guest"; share_link_id?: string }
   | { type: "turn_cancelling"; id: string; error?: string; retry_at?: number }
   | CompletedEventData
   | { type: "turn_cancelled"; id: string }

@@ -12,6 +12,14 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./composer": {
+      "types": "./dist/TerminalComposer.d.ts",
+      "import": "./dist/TerminalComposer.js"
+    },
+    "./transcript": {
+      "types": "./dist/TerminalTranscriptSurface.d.ts",
+      "import": "./dist/TerminalTranscriptSurface.js"
+    },
     "./generated-output": {
       "types": "./dist/GeneratedOutputView.d.ts",
       "import": "./dist/GeneratedOutputView.js"

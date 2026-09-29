@@ -54,6 +54,7 @@ export function TerminalTranscriptSurface({
   mode,
   showToolCalls = true,
   renderTool,
+  userLabel,
   status,
   voiceEntries = EMPTY_VOICE_ENTRIES,
   welcome,
@@ -68,6 +69,7 @@ export function TerminalTranscriptSurface({
   mode: AgentTerminalMode;
   showToolCalls?: boolean;
   renderTool?(tool: ToolActivity): ReactNode;
+  userLabel?(entry: Extract<AgentEntry, { kind: "user" }>): string | undefined;
   status: AgentStatus;
   voiceEntries?: readonly VoiceTerminalEntry[];
   welcome?: string;
@@ -203,7 +205,7 @@ export function TerminalTranscriptSurface({
             </Streamdown>
           </article> : null}
           {transcriptEntries.map((entry) => (
-            <TerminalEntryView entry={entry} key={entry.id} showToolCalls={showToolCalls} renderTool={renderTool} />
+            <TerminalEntryView entry={entry} key={entry.id} showToolCalls={showToolCalls} renderTool={renderTool} userLabel={userLabel} />
           ))}
           {status !== "ready" && inactiveMessage ? (
             <p className="agent-terminal-status" role={status === "error" ? "alert" : "status"}>
@@ -353,20 +355,22 @@ const TerminalEntryView = memo(function TerminalEntryView({
   entry,
   showToolCalls,
   renderTool,
+  userLabel,
 }: {
   entry: TerminalEntry;
   showToolCalls: boolean;
   renderTool?(tool: ToolActivity): ReactNode;
+  userLabel?(entry: Extract<AgentEntry, { kind: "user" }>): string | undefined;
 }) {
   const voice = isVoiceEntry(entry);
   if (!voice && entry.responseIdentity?.agentId != null) return (
     <details className="agent-terminal-child" data-agent-id={entry.responseIdentity.agentId}>
       <summary>Agent {entry.responseIdentity.agentId} activity</summary>
-      <TerminalEntryView entry={{ ...entry, responseIdentity: { ...entry.responseIdentity, agentId: undefined } }} showToolCalls={showToolCalls} renderTool={renderTool} />
+      <TerminalEntryView entry={{ ...entry, responseIdentity: { ...entry.responseIdentity, agentId: undefined } }} showToolCalls={showToolCalls} renderTool={renderTool} userLabel={userLabel} />
     </details>
   );
   if (entry.kind === "user") return <pre className="agent-terminal-user" data-source={voice ? "voice" : undefined}>
-    {voice ? <span className="agent-terminal-entry-label">voice</span> : null}{entry.text}
+    {voice ? <span className="agent-terminal-entry-label">voice</span> : !voice && (userLabel?.(entry) || entry.author === "guest") ? <span className="agent-terminal-entry-label">{userLabel?.(entry) || "Guest"}</span> : null}{entry.text}
   </pre>;
   if (entry.kind === "assistant" || entry.kind === "reasoning") return (
     <article className={`agent-terminal-markdown is-${entry.kind}`} data-source={voice ? "voice" : undefined}>
