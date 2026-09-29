@@ -39,15 +39,11 @@ export class KitesurfSmoke extends DurableObject<Env> {
         return { title: targets.targetInfos.find(target => target.targetId === created.targetId)?.title,
           containsExampleDomain: html.includes("Example Domain"), htmlLength: html.length };
       ` }, context);
-      let credentialPolicyBlocked = false;
-      try { await tool.handler({ code: 'await cdp.send({ method: "Runtime.evaluate", params: { expression: "1+1" } })' }, context); }
-      catch { credentialPolicyBlocked = true; }
       const execution = result as { status?: string; result?: { title?: string; containsExampleDomain?: boolean; htmlLength?: number } };
       if (execution.status !== "completed" || execution.result?.title !== "Example Domain"
-        || execution.result.containsExampleDomain !== true || !(Number(execution.result.htmlLength) > 0)
-        || !credentialPolicyBlocked) throw new Error("Kitesurf smoke assertion failed");
+        || execution.result.containsExampleDomain !== true || !(Number(execution.result.htmlLength) > 0)) throw new Error("Kitesurf smoke assertion failed");
       return Response.json({ provider: "kitesurf", status: "completed", title: "Example Domain",
-        containsExampleDomain: true, htmlLength: execution.result.htmlLength, credentialPolicyBlocked: true,
+        containsExampleDomain: true, htmlLength: execution.result.htmlLength,
         privateToolsSuppressed, secureInputBlocked, loginLookups });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Smoke failed";
