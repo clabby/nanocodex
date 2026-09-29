@@ -527,7 +527,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          cache: pnpm
+          # Reused WASM outputs skip install, so no pnpm store exists to save.
+          cache: ${{ steps.wasm.outputs.hit != 'true' && 'pnpm' || '' }}
           cache-dependency-path: pnpm-lock.yaml
       - name: Check CI orchestration and timing reports
         # Temporarily disabled: CI tests are paused.
