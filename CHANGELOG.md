@@ -5,12 +5,172 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+
+### Bug Fixes
+
+- [apple] Avoid promoting pagination links to file cards ([#672](https://github.com/gakonst/nanocodex/issues/672))
+- Fix subagent test Clippy warning in master CI
+- Fix macOS app foreground activation on launch and reopen
+- [voice] Align ChatGPT voice with Codex app-server lifecycle ([#648](https://github.com/gakonst/nanocodex/issues/648))
+- Fix iPhone update run discovery in scoped sandbox
+- [account] Forward TODO inbox routes to managed backend ([#639](https://github.com/gakonst/nanocodex/issues/639))
+- Fix mobile composer glass, opacity, and white footer edges ([#634](https://github.com/gakonst/nanocodex/issues/634))
+- Fix live Gmail Pub/Sub authentication and numeric history cursors ([#619](https://github.com/gakonst/nanocodex/issues/619))
+- [ios] Load the latest thread tail before streaming ([#615](https://github.com/gakonst/nanocodex/issues/615))
+- Preserve connector scopes in environment projection ([#610](https://github.com/gakonst/nanocodex/issues/610))
+- [managed2] Retain turn trace on alarm reinitialization
+- [managed2] Keep upstream timing headers out of logs
+- Expose granted Google scopes across connector status ([#609](https://github.com/gakonst/nanocodex/issues/609))
+- [managed2] Give concurrent create callers distinct responses
+- [egress2] Atomically replace subscription credentials
+- Request Gmail settings scope for filter management
+- [managed] Align lazy shell runtime import with uploaded module
+- [ci] Generate lazy shell module before managed release ([#597](https://github.com/gakonst/nanocodex/issues/597))
+- [managed] Fence stale screen actions ([#587](https://github.com/gakonst/nanocodex/issues/587))
+
+### Dependencies
+
+- Speed up CI reuse for WASM and Linux Hand images ([#665](https://github.com/gakonst/nanocodex/issues/665))
+
+### Features
+
+- [models] Migrate Sol to GPT-6.1 ([#679](https://github.com/gakonst/nanocodex/issues/679))
+- Fork committed agent boundaries and add side conversations
+- [managed] Add Calendar CRM with sourced profiles and meeting notes
+- [nanocodex2] Add explicit Managed2 text client mode
+- [managed2] Observe every model send and first inbound event
+- [managed2] Time DO handling separately from scheduling
+- [managed2] Correlate durable turn timing across ingress and relay
+- Add parallel Managed2 and credential egress Workers
+- [connect] Grant isolated Cloudflare sandbox execution ([#596](https://github.com/gakonst/nanocodex/issues/596))
+
+### Miscellaneous Tasks
+
+- Build mobile TODO inbox with calendar and reviewable email drafts ([#671](https://github.com/gakonst/nanocodex/issues/671))
+- Serialize Xcode builds on shared macOS hands
+- Run Managed2 CLI HTTP and WebSocket journey on native hosts
+- Remove obsolete docs, artifacts, and low-signal tests ([#568](https://github.com/gakonst/nanocodex/issues/568))
+
+### Other
+
+- Use upstream Kitesurf without custom browser wrappers ([#678](https://github.com/gakonst/nanocodex/issues/678))
+- Keep Gmail firehose processing out of chat turns ([#676](https://github.com/gakonst/nanocodex/issues/676))
+- Enable VM-free managed browsing with Kitesurf ([#675](https://github.com/gakonst/nanocodex/issues/675))
+- Use established OSS for iOS streaming chat, tables, media, and outbox ([#651](https://github.com/gakonst/nanocodex/issues/651))
+- Shared links as multiplayer Chat turns with live web UI ([#669](https://github.com/gakonst/nanocodex/issues/669))
+- Extend iOS composer chrome to home area ([#670](https://github.com/gakonst/nanocodex/issues/670))
+- Harden CRM provenance, source links, research scope, and push timeouts ([#668](https://github.com/gakonst/nanocodex/issues/668))
+- Bound CRM calendar backfill to one provider page per call ([#663](https://github.com/gakonst/nanocodex/issues/663))
+- Use default Mercator MCP with the funded account wallet ([#659](https://github.com/gakonst/nanocodex/issues/659))
+- Add private input sheets for secure forms and enrolled Mac sudo ([#652](https://github.com/gakonst/nanocodex/issues/652))
+- Make mobile reads local first with durable offline snapshots ([#661](https://github.com/gakonst/nanocodex/issues/661))
+- Enforce strict typed subagent spawn contracts and verify live child completion ([#666](https://github.com/gakonst/nanocodex/issues/666))
+- Probe shared pages as document navigations in live smoke ([#667](https://github.com/gakonst/nanocodex/issues/667))
+- Isolate explicitly selected Cloudflare live suites ([#664](https://github.com/gakonst/nanocodex/issues/664))
+- Add one-time browser passwords without Vault storage ([#650](https://github.com/gakonst/nanocodex/issues/650))
+- Clarify end-to-end validation and CI DX guidance
+- Revocable sharing for managed threads and TUI ([#660](https://github.com/gakonst/nanocodex/issues/660))
+- Preview and save private Brain outputs in chat ([#658](https://github.com/gakonst/nanocodex/issues/658))
+- Add untyped CRM graph with source-preserving legacy projections ([#655](https://github.com/gakonst/nanocodex/issues/655))
+- Generalize CRM events with metadata and record participation ([#653](https://github.com/gakonst/nanocodex/issues/653))
+- Add sanitized native Worker exception events and active-span metadata ([#647](https://github.com/gakonst/nanocodex/issues/647))
+- Restore hosted Cloudflare browser sessions and private login continuation ([#646](https://github.com/gakonst/nanocodex/issues/646))
+- Add checkpoint-backed managed forks for nanocodex2 /btw ([#628](https://github.com/gakonst/nanocodex/issues/628))
+- Fit iOS navigation chrome to safe areas and preserve sidebar controls ([#640](https://github.com/gakonst/nanocodex/issues/640))
+- Show ignored email evaluations in the Todo feed ([#644](https://github.com/gakonst/nanocodex/issues/644))
+- Merge pull request [#641](https://github.com/gakonst/nanocodex/issues/641) from gakonst/fix/iphone-update-helper-20260926
+- Merge pull request [#636](https://github.com/gakonst/nanocodex/issues/636) from gakonst/feat/firehose-decisions-20260926
+- Enable owner-scoped Gmail triage for admin account
+- Merge remote-tracking branch 'origin/master' into feat/firehose-decisions-20260926
+- Add CRM events and shared interaction timelines ([#637](https://github.com/gakonst/nanocodex/issues/637))
+- Audit firehose decisions and add labeled Jev backtests
+- Initialize Gmail triage receipts only for enabled owner
+- Add owner-gated Gmail firehose reply decision producer
+- Decision-first mobile TODO and account decision inbox ([#621](https://github.com/gakonst/nanocodex/issues/621))
+- Aggregate retrospective CUA dispatch and kernel errors ([#633](https://github.com/gakonst/nanocodex/issues/633))
+- Separate nested ambiguous Hand outcomes from provider failures ([#632](https://github.com/gakonst/nanocodex/issues/632))
+- Expose owner Hand call aggregates in nanocodex2 CLI ([#630](https://github.com/gakonst/nanocodex/issues/630))
+- Merge pull request [#631](https://github.com/gakonst/nanocodex/issues/631) from gakonst/feat/managed2-vpc-direct-egress-20260926
+- Use direct Gateway egress for Managed2 subscription
+- Project sourced CRM research onto empty person fields
+- Expose owner hosted tool stats through account gateway ([#627](https://github.com/gakonst/nanocodex/issues/627))
+- Simplify iOS chat streaming and viewport ownership ([#625](https://github.com/gakonst/nanocodex/issues/625))
+- Merge pull request [#626](https://github.com/gakonst/nanocodex/issues/626) from gakonst/feat/topology-relay-correlation-20260926
+- Correlate regional relay span with egress request
+- Measure Hand/CUA failures with owner-scoped call aggregates and safe stage timings ([#624](https://github.com/gakonst/nanocodex/issues/624))
+- Materialize Gmail and Calendar notifications before agent wake ([#622](https://github.com/gakonst/nanocodex/issues/622))
+- Merge regional Managed2 relay placement ([#620](https://github.com/gakonst/nanocodex/issues/620))
+- Route Managed2 subscription traffic through fresh regional relays
+- Merge pull request [#618](https://github.com/gakonst/nanocodex/issues/618) from gakonst/feat/managed2-waterfall-spans-20260926
+- Add correlated Cloudflare spans for Managed2 tool waterfall
+- Add continuous Gmail and Calendar events with CRM integration ([#616](https://github.com/gakonst/nanocodex/issues/616))
+- Merge pull request [#617](https://github.com/gakonst/nanocodex/issues/617) from gakonst/feat/managed2-tool-observability
+- Keep lazy Bash module type declaration present before CI typecheck
+- Mark I/O-gated timing so CPU-only Bash zeroes are not mistaken for speed
+- Cover tool phases through full Worker E2E paths
+- Add lazy durable Just Bash to Managed2 with per-call phases
+- Add Managed2 read-only web search via Egress2 with per-call timing
+- Persist per-call tool timeline and phase timings in Managed2
+- Report safe CRM deployment failure stage and HTTP status ([#614](https://github.com/gakonst/nanocodex/issues/614))
+- Merge pull request [#613](https://github.com/gakonst/nanocodex/issues/613) from gakonst/feat/managed2-tools
+- Add first Managed2 tool and per-tool turn timing
+- Merge pull request [#612](https://github.com/gakonst/nanocodex/issues/612) from gakonst/fix/nanocodex2-managed2-tui
+- Satisfy Clippy in Managed2 event forwarding
+- Restore standard TUI presentation for Managed2 text turns
+- Merge pull request [#611](https://github.com/gakonst/nanocodex/issues/611) from gakonst/feat/nanocodex2-managed2-option
+- Merge pull request [#608](https://github.com/gakonst/nanocodex/issues/608) from gakonst/feat/managed2-observability-20260925
+- Merge pull request [#605](https://github.com/gakonst/nanocodex/issues/605) from gakonst/feat/managed2-parallel
+- Merge pull request [#606](https://github.com/gakonst/nanocodex/issues/606) from gakonst/fix/gmail-filter-settings-scope
+- Merge pull request [#604](https://github.com/gakonst/nanocodex/issues/604) from gakonst/codex/voice-widget-meeting-choice-20260925
+- Expose meeting recording in pinned rectangular voice widget
+- Retain Cloudflare process bindings across agent runtime recovery ([#603](https://github.com/gakonst/nanocodex/issues/603))
+- Stream validated output checkpoints to connected apps ([#601](https://github.com/gakonst/nanocodex/issues/601))
+- Merge pull request [#602](https://github.com/gakonst/nanocodex/issues/602) from gakonst/codex/meeting-live-diagnostics-20260925
+- Trace locked meeting intent and preview milestones without transcript content
+- Merge pull request [#600](https://github.com/gakonst/nanocodex/issues/600) from gakonst/perf/thread-01a0d425
+- Verify native child routing support in deployed WASM ([#599](https://github.com/gakonst/nanocodex/issues/599))
+- Merge pull request [#593](https://github.com/gakonst/nanocodex/issues/593) from gakonst/codex/ios-voice-device-diagnostics-20260924
+- Stream finalized meeting speech into rolling preview and recap
+- Show progress rather than failure icon while starting voice agent
+- Preserve stopped meeting drafts and guard incomplete voice delivery
+- Retire stale Lock Screen voice activities before new capture
+- Make meeting capture mixable and trace device startup
+- Use mixable audio sessions for locked recording intents
+- Instrument locked iPhone voice startup with private-free breadcrumbs
+- Add durable grant-scoped Connect inputs and artifacts ([#598](https://github.com/gakonst/nanocodex/issues/598))
+- Enable full Account Worker trace visibility with OAuth URL redaction ([#594](https://github.com/gakonst/nanocodex/issues/594))
+- [managed] Expose fused create and admission waterfall ([#590](https://github.com/gakonst/nanocodex/issues/590))
+- Move managed PDF extraction to private media service ([#586](https://github.com/gakonst/nanocodex/issues/586))
+
+### Performance
+
+- [rust] Move parsed rollout payloads into history
+- [ios] Retain incremental byte count while paging history
+- [web] Defer route-only modules from home entry
+- [managed] Defer Just Bash interpreter to first shell call ([#591](https://github.com/gakonst/nanocodex/issues/591))
+- [managed] Overlap invisible account registration with session activation ([#595](https://github.com/gakonst/nanocodex/issues/595))
+- [managed] Fuse agent run creation and turn admission ([#589](https://github.com/gakonst/nanocodex/issues/589))
+
+### Styling
+
+- Browse CRM people and Calendar history in iOS ([#662](https://github.com/gakonst/nanocodex/issues/662))
+- Add strict JSON Schema output and expose provider-reported model ([#656](https://github.com/gakonst/nanocodex/issues/656))
+- Add iOS CRM browsing and compact CRM/TODO design ([#649](https://github.com/gakonst/nanocodex/issues/649))
+- Make locked voice an explicit stop-to-start recorder with Voice Memos-style controls
+
+### Testing
+
+- Tolerate peer reset after replay fence in CLI E2E
+- [egress2] Preserve active subscription after rejected import
+- Enforce end-to-end coverage for parallel APIs
+
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 
 ### Bug Fixes
 
-- [computer] Keep generated browser bridge configuration outside the signed CUA bundle
-- Gate public bootstrap on stable release
+- Forward combined agent run through account proxy ([#585](https://github.com/gakonst/nanocodex/issues/585))
+- Gate public bootstrap on stable release ([#583](https://github.com/gakonst/nanocodex/issues/583))
 - Fix probe telemetry query variable shadowing
 - [nanocodex2] Include Mercator in local managed tool runtime
 - [tui] Publish tmux overview without blocking input
@@ -166,6 +326,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- Prepare release 0.6.5 ([#584](https://github.com/gakonst/nanocodex/issues/584))
 - Prioritize Worker uploads and skip optional preview images ([#566](https://github.com/gakonst/nanocodex/issues/566))
 - Reduce cache pressure and skip unused native JS setup ([#565](https://github.com/gakonst/nanocodex/issues/565))
 - Reuse Rust dependency layers and reduce cache duplication ([#563](https://github.com/gakonst/nanocodex/issues/563))
@@ -393,7 +554,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [voice] Add opt-in simulator recording fixture
 - Test pinned routing through two real WASM agent turns
 
-
 ## [0.6.4](https://github.com/gakonst/nanocodex/releases/tag/v0.6.4) - 2026-09-19
 
 ### Bug Fixes
@@ -557,7 +717,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
-- Prepare release 0.6.4 with minified QuickJS fix
+- Prepare release 0.6.4 with minified QuickJS fix ([#420](https://github.com/gakonst/nanocodex/issues/420))
 - Prepare corrected release 0.6.3 ([#418](https://github.com/gakonst/nanocodex/issues/418))
 - Prepare release 0.6.2 ([#416](https://github.com/gakonst/nanocodex/issues/416))
 - Select expensive native checks by changed inputs ([#389](https://github.com/gakonst/nanocodex/issues/389))
@@ -1369,6 +1529,14 @@ Read the [0.5 → 0.6 Rust API changelog and migration guide](https://github.com
 - [mcp] Harden OAuth token refresh
 - [tui] Preserve colors under NO_COLOR
 - [cli] Tolerate missing default browser
+- [eval] Preserve recent attempts in control loop
+- [eval] Make worker unit names restart-safe
+- [eval] Distinguish retries from memory recovery
+- [eval] Require exact worker exit signals
+- [eval] Retain worker exit classification
+- [eval] Gate neural admission during recovery
+- [eval] Expose recent controller failure details
+- [eval] Preserve live worker claims
 
 ### Dependencies
 
@@ -1415,6 +1583,10 @@ Read the [0.5 → 0.6 Rust API changelog and migration guide](https://github.com
 - [durability] Show progressive composition
 - Require root-cause fixes and stable loading UI ([#184](https://github.com/gakonst/nanocodex/issues/184))
 - [eval] Define canonical host workflow
+- Clarify stale eval host cleanup
+- Optimize frontier eval iteration loop
+- Reset incompatible experimental eval state
+- Avoid cargo tests during eval iteration
 
 ### Features
 
@@ -1675,6 +1847,8 @@ Read the [0.5 → 0.6 Rust API changelog and migration guide](https://github.com
 - [auth] Support persistent ChatGPT access tokens
 - [tempo] Enable built-in paid Mercator MCP
 - [wasm] Add deferred paid MCP support
+- [eval] Restore durable neural benchmark control
+- [eval] Show cluster utilization in dashboard
 
 ### Miscellaneous Tasks
 
@@ -1850,6 +2024,7 @@ Read the [0.5 → 0.6 Rust API changelog and migration guide](https://github.com
 - Merge remote-tracking branch 'origin/master' into agent/eval-cluster-dashboard
 - Merge pull request [#138](https://github.com/gakonst/nanocodex/issues/138) from Giulio2002/fix/browser-missing-brave
 - Merge pull request [#163](https://github.com/gakonst/nanocodex/issues/163) from gakonst/agent/document-dev-georgios-workflow
+- [eval] Add full GPQA and BrowseComp profiles
 
 ### Performance
 
@@ -1927,6 +2102,7 @@ Read the [0.5 → 0.6 Rust API changelog and migration guide](https://github.com
 - [web] Render eval charts with workset
 - [eval] Speed dashboard and fix timing
 - Reduce agent startup overhead
+- [web] Load eval task details directly
 
 ### Refactor
 
@@ -1974,6 +2150,11 @@ Read the [0.5 → 0.6 Rust API changelog and migration guide](https://github.com
 - [examples] Use built-in durability stores
 - [agent] Unify durable prompt submission
 - [js] Extract reusable artifact packages
+- [web] Collapse healthy eval lifecycle counts
+- [web] Clarify eval lifecycle counts
+- [web] Keep eval overview operational
+- [eval] Reset experimental workset schema
+- [web] Simplify eval dashboard overview
 
 ### Styling
 
@@ -2101,31 +2282,14 @@ Read the [0.5 → 0.6 Rust API changelog and migration guide](https://github.com
 - [events] Preserve structured results universally
 - [events] Retain structured nested tool results
 - [oai] Drop notifications orphaned by compaction
-- [eval] Preserve recent attempts in control loop
-- [eval] Make worker unit names restart-safe
-- [eval] Distinguish retries from memory recovery
-- [eval] Require exact worker exit signals
-- [eval] Retain worker exit classification
-- [eval] Gate neural admission during recovery
-- [eval] Expose recent controller failure details
-- [eval] Preserve live worker claims
 - [eval] Keep neural waits within one tool call
 - [eval] Allow per-attempt evidence directories
 - [eval] Admit only missing neural workers
 - [eval] Disable browser in neural controller
 - [eval] Scope neural occupancy to its board
 
-### Documentation
-
-- Clarify stale eval host cleanup
-- Optimize frontier eval iteration loop
-- Reset incompatible experimental eval state
-- Avoid cargo tests during eval iteration
-
 ### Features
 
-- [eval] Restore durable neural benchmark control
-- [eval] Show cluster utilization in dashboard
 - [eval] Isolate workers in a systemd slice
 
 ### Miscellaneous Tasks
@@ -2140,21 +2304,11 @@ Read the [0.5 → 0.6 Rust API changelog and migration guide](https://github.com
 - Merge pull request [#167](https://github.com/gakonst/nanocodex/issues/167) from clabby/cl/structured-events
 - :broom:
 - Merge pull request [#168](https://github.com/gakonst/nanocodex/issues/168) from clabby/cl/fix-orphaned-notifs
-- [eval] Add full GPQA and BrowseComp profiles
 - Merge pull request [#161](https://github.com/gakonst/nanocodex/issues/161) from gakonst/agent/simple-neural-eval-runtime
 - Merge pull request [#162](https://github.com/gakonst/nanocodex/issues/162) from gakonst/agent/remove-python-harbor
 
-### Performance
-
-- [web] Load eval task details directly
-
 ### Refactor
 
-- [web] Collapse healthy eval lifecycle counts
-- [web] Clarify eval lifecycle counts
-- [web] Keep eval overview operational
-- [eval] Reset experimental workset schema
-- [web] Simplify eval dashboard overview
 - [eval] Combine neural wait and observation
 - [eval] Own canonical task execution
 - [eval] Strip neural controller tools

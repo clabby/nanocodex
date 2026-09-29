@@ -7,16 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 
+### Miscellaneous Tasks
+
+- Prepare release 0.6.5 ([#584](https://github.com/gakonst/nanocodex/issues/584))
+
 ### Other
 
 - Restore unchanged repository files omitted from frontier REST publication
 - Support configured Cloudflare REST transport for frontier inference ([#495](https://github.com/gakonst/nanocodex/issues/495))
 
-
 ## [0.6.4](https://github.com/gakonst/nanocodex/releases/tag/v0.6.4) - 2026-09-19
 
 ### Miscellaneous Tasks
 
+- Prepare release 0.6.4 with minified QuickJS fix ([#420](https://github.com/gakonst/nanocodex/issues/420))
 - Prepare corrected release 0.6.3 ([#418](https://github.com/gakonst/nanocodex/issues/418))
 - Prepare release 0.6.2 ([#416](https://github.com/gakonst/nanocodex/issues/416))
 

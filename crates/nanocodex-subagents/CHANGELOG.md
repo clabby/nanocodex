@@ -5,12 +5,23 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/gakonst/nanocodex/compare/v0.6.5...HEAD)
+## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+
+### Bug Fixes
+
+- Fix subagent test Clippy warning in master CI
+
+### Miscellaneous Tasks
+
+- Remove obsolete docs, artifacts, and low-signal tests ([#568](https://github.com/gakonst/nanocodex/issues/568))
 
 ### Other
 
-- Route non-GPT children while preserving manual GPT spawning ([#536](https://github.com/gakonst/nanocodex/issues/536))
-- Merge remote-tracking branch 'origin/master' into fix/turn-controls-merge
+- Enforce strict typed subagent spawn contracts and verify live child completion ([#666](https://github.com/gakonst/nanocodex/issues/666))
+
+### Styling
+
+- Add strict JSON Schema output and expose provider-reported model ([#656](https://github.com/gakonst/nanocodex/issues/656))
 
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 
@@ -30,9 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - [router] Add Kimi and MiMo with mobile model controls ([#519](https://github.com/gakonst/nanocodex/issues/519))
 
+### Miscellaneous Tasks
+
+- Prepare release 0.6.5 ([#584](https://github.com/gakonst/nanocodex/issues/584))
+
 ### Other
 
 - Merge remote-tracking branch 'origin/master' into remove-legacy-memory
+- Route non-GPT children while preserving manual GPT spawning ([#536](https://github.com/gakonst/nanocodex/issues/536))
+- Merge remote-tracking branch 'origin/master' into fix/turn-controls-merge
 - Integrate GPT-6 Sol and Luna across Nanocodex ([#526](https://github.com/gakonst/nanocodex/issues/526))
 - Restore unchanged repository files omitted from frontier REST publication
 - Support configured Cloudflare REST transport for frontier inference ([#495](https://github.com/gakonst/nanocodex/issues/495))
@@ -44,11 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve unfinished provider routing and subagent integration
 - Add opt-in Jev thread routing with Workers AI GLM transport
 
-
 ## [0.6.4](https://github.com/gakonst/nanocodex/releases/tag/v0.6.4) - 2026-09-19
 
 ### Miscellaneous Tasks
 
+- Prepare release 0.6.4 with minified QuickJS fix ([#420](https://github.com/gakonst/nanocodex/issues/420))
 - Prepare corrected release 0.6.3 ([#418](https://github.com/gakonst/nanocodex/issues/418))
 - Prepare release 0.6.2 ([#416](https://github.com/gakonst/nanocodex/issues/416))
 

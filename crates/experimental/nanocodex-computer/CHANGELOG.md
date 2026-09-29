@@ -9,7 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-- Keep generated browser bridge configuration outside the signed CUA bundle
 - [computer] Collapse nested provision test condition
 - [computer] Enable upstream CUA discovery and turn metadata in Linux VMs ([#520](https://github.com/gakonst/nanocodex/issues/520))
 - Let official CUA own execution deadlines ([#491](https://github.com/gakonst/nanocodex/issues/491))
@@ -24,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - [computer] Manage the official macOS CUA host lifecycle
+
+### Miscellaneous Tasks
+
+- Prepare release 0.6.5 ([#584](https://github.com/gakonst/nanocodex/issues/584))
 
 ### Other
 
@@ -48,7 +51,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - [cli] Cache computer startup and cancel background work on exit
 
-
 ## [0.6.4](https://github.com/gakonst/nanocodex/releases/tag/v0.6.4) - 2026-09-19
 
 ### Bug Fixes
@@ -66,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
-- Prepare release 0.6.4 with minified QuickJS fix
+- Prepare release 0.6.4 with minified QuickJS fix ([#420](https://github.com/gakonst/nanocodex/issues/420))
 - Prepare corrected release 0.6.3 ([#418](https://github.com/gakonst/nanocodex/issues/418))
 - Prepare release 0.6.2 ([#416](https://github.com/gakonst/nanocodex/issues/416))
 
