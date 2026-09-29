@@ -85,7 +85,7 @@ enum DemoContent {
                 | --- | --- |
                 | **Result** | `42` |
 
-                """ + String(repeating: "Keep the beginning of this long response intact. ", count: 35)
+                """ + "\n\n" + String(repeating: "Keep the beginning of this long response intact. ", count: 35)
             }
             card.latestCursor = Cursor(rawValue: "12")!; card.stateCursor = card.latestCursor
             if value.2 == "Running" { card.activeTurns = ["demo-turn-" + value.0] }
@@ -286,6 +286,19 @@ enum DemoContent {
                     """)]
         }
         if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_GENERATED_OUTPUTS"] == "1" { return generatedOutputRows() }
+        if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_WIDE_TABLE"] == "1" {
+            return [.init(id: "wide-table", role: "Agent", text: """
+            ## Library review
+
+            | Library | Replaces | Mobile behavior | License |
+            | --- | --- | --- | --- |
+            | MarkdownUI | Custom Markdown parser and table layout | Long descriptive cells wrap; wide tables scroll horizontally | MIT |
+            | Nuke | Duplicate attachment download and thumbnail caches | Shared decoding, cancellation and bounded image memory | MIT |
+            | GRDB | Separate pending-command preference writes | Atomic recovery of messages and steering after restart | MIT |
+
+            End of table review. The final paragraph remains above the composer.
+            """)]
+        }
         if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_RENDER_PROFILE"] == "1" {
             // Keep the default fixture stable; allow deterministic long-session
             // profiling without account data or a live managed turn.

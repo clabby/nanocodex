@@ -42,7 +42,7 @@ private struct ChatCodeContent: View, Equatable {
         let request = Request(source: source, language: language, dark: dark)
         let current = highlighted?.request == request ? highlighted?.text : nil
         let cached = current ?? ChatCodeHighlighter.cachedText(source, language: language, dark: dark)
-        Text(cached ?? AttributedString(source))
+        (cached.map { Text($0) } ?? Text(verbatim: source))
             .onGeometryChange(for: Bool.self) { geometry in
                 ChatCodeViewport.isNear(size: geometry.size,
                     vertical: geometry.bounds(of: .scrollView(axis: .vertical)),
@@ -95,7 +95,10 @@ enum ChatCodeHighlighter {
     }
 
     static func cachedText(_ source: String, language: String, dark: Bool) -> AttributedString? {
-        cache.object(forKey: key(source, language: language, dark: dark))?.text
+        // Oversized tool output is never highlighted. Avoid copying it into a
+        // cache key and hashing the entire payload on every main-actor layout.
+        guard source.utf8.count <= 16_384 else { return nil }
+        return cache.object(forKey: key(source, language: language, dark: dark))?.text
     }
 
     static func highlight(_ source: String, language: String, dark: Bool) async -> AttributedString {

@@ -85,6 +85,7 @@ final class InboxModel: ObservableObject {
     private var overviewVisible = Set<String>()
     private var overviewTasks: [String: Task<Void, Never>] = [:]
     private var overviewTokens: [String: UUID] = [:]
+    private var overviewRowsRevisions: [String: UUID] = [:]
     private var overviewEvents: [String: [AgentEvent]] = [:]
     private var overviewBytes: [String: [Int]] = [:]
     private var overviewByteCounts: [String: Int] = [:]
@@ -103,6 +104,65 @@ final class InboxModel: ObservableObject {
     @Published private(set) var todoDecisions: [TodoDecision] = []
     @Published private(set) var todoTraces: [TodoTrace] = []
     @Published var todoFilter: TodoFeedFilter = .all
+    let todoWorkspace = TodoWorkspace()
+    // Keep queue state when switching between TODO, Chat and CRM.
+    @Published var todoSplit = "For you"
+    @Published var todoSearch = ""
+    @Published var todoMailQuery = "in:inbox"
+    @Published var todoSelectedAccount = ""
+    @Published var todoSnoozed: [String: Double] = [:]
+    @Published var todoRetainedMail: [TodoMailThreadSummary] = []
+    private var todoRetainedChecks: [String: Date] = [:]
+    func reconcileRetainedTodoMail() async {
+        guard connected, !isDemo, let client else { return }
+        let epoch = generation
+        // Bound each foreground refresh; oldest checks rotate first for large lists.
+        let candidates = todoRetainedMail.sorted {
+            (todoRetainedChecks[$0.connectionID + ":" + $0.id] ?? .distantPast) < (todoRetainedChecks[$1.connectionID + ":" + $1.id] ?? .distantPast)
+        }.filter { (todoRetainedChecks[$0.connectionID + ":" + $0.id] ?? .distantPast) < .now.addingTimeInterval(-60) }.prefix(5)
+        for prior in candidates {
+            let key = prior.connectionID + ":" + prior.id
+            do {
+                let fresh = try await client.todoMailSummary(connectionID: prior.connectionID, threadID: prior.id)
+                guard generation == epoch, connected, !Task.isCancelled else { return }
+                todoRetainedChecks[key] = .now
+                guard let index = todoRetainedMail.firstIndex(where: { $0.id == prior.id && $0.connectionID == prior.connectionID }) else { continue }
+                if prior.inInbox != false && fresh.inInbox == false {
+                    forgetRetainedMail(prior); snoozeTodoRow("mail:" + key, until: nil)
+                } else { todoRetainedMail[index] = fresh; persistRetainedTodoMail() }
+            } catch {
+                guard generation == epoch, connected, !Task.isCancelled else { return }
+                todoRetainedChecks[key] = .now
+                if (error as? APIError) == .http(404) {
+                    forgetRetainedMail(prior); snoozeTodoRow("mail:" + key, until: nil)
+                } else { todoWorkspace.error = "Couldn't refresh snoozed mail. " + error.localizedDescription }
+            }
+        }
+    }
+    func retainSnoozedMail(_ thread: TodoMailThreadSummary) {
+        todoRetainedMail.removeAll { $0.id == thread.id && $0.connectionID == thread.connectionID }
+        todoRetainedMail.append(thread)
+        persistRetainedTodoMail()
+    }
+    func forgetRetainedMail(_ thread: TodoMailThreadSummary) {
+        todoRetainedMail.removeAll { $0.id == thread.id && $0.connectionID == thread.connectionID }
+        persistRetainedTodoMail()
+    }
+    private func persistRetainedTodoMail() {
+        let data = try? JSONEncoder().encode(todoRetainedMail), key = "inbox.todoRetainedMail." + scope
+        preferences.enqueue { $0.set(data, forKey: key) }
+    }
+    var todoMailClient: ManagedClient? { client }
+    var todoAccountIdentity: String { scope }
+
+    func snoozeTodoRow(_ id: String, until: Date?) {
+        todoSnoozed[id] = until?.timeIntervalSince1970
+        let values = todoSnoozed, key = "inbox.todoSnoozed." + scope
+        preferences.enqueue { $0.set(values, forKey: key) }
+    }
+    func todoRowIsSnoozed(_ id: String) -> Bool {
+        (todoSnoozed[id] ?? 0) > Date.now.timeIntervalSince1970
+    }
     @Published private(set) var todoLoading = false
     @Published private(set) var todoLoaded = false
     private var todoRevision = 0
@@ -240,6 +300,22 @@ final class InboxModel: ObservableObject {
     private var eventsRevision = UUID()
     private var projectedFirstCursor: Cursor?
     private let preferences = InboxPreferencesWriter()
+    private var outboxStore: MobileOutboxStore?
+    private var outboxRestoredScope: String?
+    private var committedOutbox: MobileOutboxStore.Snapshot?
+    private var outboxPersistenceError: Error?
+
+    private func durableOutbox() throws -> MobileOutboxStore {
+        if let outboxStore { return outboxStore }
+        let store = try MobileOutboxStore.applicationStore()
+        outboxStore = store
+        return store
+    }
+
+    private func requireDurableOutbox() throws {
+        if let outboxPersistenceError { throw outboxPersistenceError }
+        guard outboxRestoredScope == scope else { throw CocoaError(.coderReadCorrupt) }
+    }
     private var eventBytes: [Int] = []
     private var retainedBytes = 0
     private var projection: Task<Void, Never>?
@@ -436,6 +512,35 @@ final class InboxModel: ObservableObject {
     func openThread() {
         pinnedThreadID = focused?.id
         #if DEBUG
+        if isDemo, ProcessInfo.processInfo.environment["NANOCODEX_DEMO_RICH_STREAM"] == "1", let id = focused?.id,
+           !rows.contains(where: { $0.id == "demo-rich-tool" }) {
+            rows = [.init(id: "demo-rich-intro", role: "Agent", text: "## Reviewing the changes\n\nI’m checking **streaming Markdown** and tool progress together.")]
+            let tool = ToolPresentation(name: "exec_command", arguments: .object(["cmd": .string("synthetic validation; no command executed")]))
+            let turn = focusedTurn
+            var toolRow = TranscriptRow(id: "demo-rich-tool", role: "Tool", text: tool.title, running: true, tool: tool)
+            toolRow.turnID = turn
+            rows.append(toolRow)
+            let epoch = generation
+            Task {
+                try? await Task.sleep(for: .seconds(12))
+                guard generation == epoch, focused?.id == id,
+                      let index = rows.firstIndex(where: { $0.id == "demo-rich-tool" }) else { return }
+                rows[index].running = false
+                rows[index].tool?.finish(.object(["output": .string("Synthetic checks passed."), "exit_code": .number(0)]))
+                var answerRow = TranscriptRow(id: "demo-rich-answer", role: "Agent", text: "## Results\n\n", running: true)
+                answerRow.turnID = turn
+                rows.append(answerRow)
+                let chunks = ["The **layout** keeps rich content readable.\n\n", "- Streaming text\n- Expandable tools\n\n", "```swift\n", "let ready = true\n", "```\n\n", "| Check | Result |\n| --- | --- |\n", "| Markdown | Passed |\n", "| Tool progress | Passed |\n\n", "Rich streaming review complete."]
+                for chunk in chunks {
+                    try? await Task.sleep(for: .milliseconds(700))
+                    guard generation == epoch, focused?.id == id,
+                          let answer = rows.firstIndex(where: { $0.id == "demo-rich-answer" }) else { return }
+                    rows[answer].text += chunk
+                }
+                if let answer = rows.firstIndex(where: { $0.id == "demo-rich-answer" }) { rows[answer].running = false }
+                demoRows[id] = rows
+            }
+        }
         if isDemo, ProcessInfo.processInfo.environment["NANOCODEX_DEMO_TOOL_ARRIVALS"] == "1", let id = focused?.id,
            !rows.contains(where: { $0.id == "demo-tool-history-1" }) {
             // Start beyond one viewport so every arrival exercises tail following.
@@ -857,6 +962,8 @@ final class InboxModel: ObservableObject {
             UserDefaults.standard.set(id, forKey: "inbox.lockedVoiceLastTarget." + scope)
         }
         persist()
+        // Retain voice recovery if the durable command checkpoint failed.
+        guard outboxPersistenceError == nil, outboxRestoredScope == scope else { return }
         // Keep the journal until the normal preferences write has completed.
         Task { [preferences] in
             await preferences.flush()
@@ -930,6 +1037,7 @@ final class InboxModel: ObservableObject {
             try Task.checkCancellation()
             guard generation == epoch, scope == expected,
                   pending.first(where: { $0.id == captureID })?.phase == .submitting else { throw CancellationError() }
+            try requireDurableOutbox()
             let receipt = try await client.command(current.submission)
             guard generation == epoch, scope == expected else { throw APIError.invalidCredential }
             guard receipt["turn_id"].string == captureID,
@@ -965,12 +1073,22 @@ final class InboxModel: ObservableObject {
                     "id": .string("fixture-email"), "title": .string("How should we reply to Maya?"),
                     "context": .string("Maya accepted Tuesday, but the offered slot is no longer free. Review an alternative before anything is sent."),
                     "source_label": .string("Email thread"), "source_url": .string(""),
+                    "source_connection_id": .string(ProcessInfo.processInfo.arguments.contains("--todo-linked-mail-fixture") ? "fixture-mail" : ""),
+                    "source_thread_id": .string(ProcessInfo.processInfo.arguments.contains("--todo-linked-mail-fixture") ? "fixture-thread" : ""),
+                    "source_message_id": .string(ProcessInfo.processInfo.arguments.contains("--todo-linked-mail-fixture") ? "fixture-message-2" : ""),
                     "status": .string("needs_you"), "version": .number(1),
                     "choices": .array([
                         .object(["id": .string("draft"), "title": .string("Draft another time")]),
                         .object(["id": .string("defer"), "title": .string("Not now")]),
                     ]),
                 ]))]) ?? []
+                if ProcessInfo.processInfo.arguments.contains("--todo-multi-message-fixture"), let earlier = try? TodoDecision(.object([
+                    "id": .string("fixture-earlier-email"), "title": .string("Review the launch plan before Thursday"),
+                    "context": .string("The first message asks for feedback on the plan."), "source_label": .string("Email thread"),
+                    "status": .string("needs_you"), "version": .number(1), "source_connection_id": .string("fixture-mail"),
+                    "source_thread_id": .string("fixture-thread"), "source_message_id": .string("fixture-message-1"),
+                    "choices": .array([.object(["id": .string("follow_up"), "title": .string("Follow up")]), .object(["id": .string("dismiss"), "title": .string("Dismiss")])]),
+                ])) { todoDecisions.append(earlier) }
                 if ProcessInfo.processInfo.arguments.contains("--todo-filter-fixture") {
                     todoTraces = (try? [
                         TodoTrace(.object(["id": .number(1), "outcome": .string("no_reply"),
@@ -1080,11 +1198,40 @@ final class InboxModel: ObservableObject {
             todoRevision &+= 1
             todoDecisions.removeAll { $0.id == decision.id }
             await refreshTodo()
+            guard generation == epoch, connected else { return false }
             todoResponding = false
             return true
         } catch {
             if generation == epoch { todoError = error.localizedDescription; todoResponding = false }
             return false
+        }
+    }
+
+    @discardableResult
+    func setTodoCapture(_ capture: TodoCapture, done: Bool, operationID: UUID) async -> TodoCapture? {
+        guard connected else { return nil }
+        let epoch = generation
+        do {
+            let result: TodoCapture
+            if isDemo {
+                result = try TodoCapture(.object([
+                    "id": .string(capture.id), "body": .string(capture.body),
+                    "watch_hint": .string(capture.watchHint), "status": .string(done ? "done" : "captured"),
+                    "version": .number(Double(capture.version + 1)), "created_at": .string(capture.createdAt),
+                ]))
+            } else if let client {
+                result = try await client.updateTodoCapture(capture, status: done ? "done" : "captured", operationID: operationID)
+            } else { return nil }
+            guard epoch == generation, connected else { return nil }
+            todoRevision &+= 1
+            if let index = todoItems.firstIndex(where: { $0.id == result.id }) { todoItems[index] = result }
+            if todoLoading { todoRefreshRequested = true }
+            else if !isDemo { await refreshTodo() }
+            guard epoch == generation, connected else { return nil }
+            return result
+        } catch {
+            if epoch == generation { todoError = error.localizedDescription }
+            return nil
         }
     }
 
@@ -1238,6 +1385,10 @@ final class InboxModel: ObservableObject {
         drafts = UserDefaults.standard.dictionary(forKey: "inbox.drafts." + scope) as? [String: String] ?? [:]
         seen = UserDefaults.standard.dictionary(forKey: "inbox.seen." + scope) as? [String: String] ?? [:]
         restorePending()
+        if let data = UserDefaults.standard.data(forKey: "inbox.todoRetainedMail." + scope) {
+            todoRetainedMail = (try? JSONDecoder().decode([TodoMailThreadSummary].self, from: data)) ?? []
+        }
+        todoSnoozed = UserDefaults.standard.dictionary(forKey: "inbox.todoSnoozed." + scope) as? [String: Double] ?? [:]
         restoringTodoDraft = true
         todoDraft = UserDefaults.standard.string(forKey: "inbox.todoDraft." + scope) ?? ""
         todoWatchHint = UserDefaults.standard.string(forKey: "inbox.todoHint." + scope) ?? ""
@@ -1251,7 +1402,7 @@ final class InboxModel: ObservableObject {
         }
         let retainedImages = Set((Array(attachmentDrafts.values).flatMap { $0 } + pending.flatMap { $0.attachments ?? [] }).map(\.id))
         if let store = try? AttachmentStore(scope: scope) {
-            try? store.prune(keeping: retainedImages)
+            if outboxRestoredScope == scope { try? store.prune(keeping: retainedImages) }
             for attachment in Array(attachmentDrafts.values).flatMap({ $0 }) + pending.flatMap({ $0.attachments ?? [] }) {
                 cacheAttachment(attachment, scope: scope)
             }
@@ -1528,6 +1679,10 @@ final class InboxModel: ObservableObject {
     }
     private func reset() {
         historySnapshotTask?.cancel(); historySnapshotTask = nil
+        if let data = UserDefaults.standard.data(forKey: "inbox.todoRetainedMail." + scope) {
+            todoRetainedMail = (try? JSONDecoder().decode([TodoMailThreadSummary].self, from: data)) ?? []
+        }
+        todoSnoozed = UserDefaults.standard.dictionary(forKey: "inbox.todoSnoozed." + scope) as? [String: Double] ?? [:]
         restoringTodoDraft = true
         defer { restoringTodoDraft = false }
         agentNotificationUpdate?.cancel(); agentNotificationUpdate = nil
@@ -1561,10 +1716,14 @@ final class InboxModel: ObservableObject {
         observedAgentID = nil; threadLoading = false; threadError = nil
         downloadedFiles = nil
         connected = false; restoringAccount = false; restorationError = nil
-        isDemo = false; generatedAgentJournal = nil; generatedApps = []; generatedAppsLoading = false; generatedAppsError = nil; todoItems = []; todoDecisions = []; todoTraces = []; todoFilter = .all; todoDraft = ""; todoWatchHint = ""; todoCaptureOperation = nil; todoResponseOperations.removeAll(); todoError = nil; todoLoading = false; todoLoaded = false; todoRevision = 0; todoRefreshRequested = false; todoFixtureLoaded = false; todoSaving = false; todoResponding = false; cards = []; deck = InboxDeck(); mediaProjection = InboxMediaProjection(); rows = []; events = []; drafts = [:]; seen = [:]
+        generatedAgentJournal = nil; generatedApps = []; generatedAppsLoading = false; generatedAppsError = nil
+        todoWorkspace.reset()
+        todoRetainedChecks = [:]; todoRetainedMail = []; todoSnoozed = [:]; todoSplit = "For you"; todoSearch = ""; todoMailQuery = "in:inbox"; todoSelectedAccount = ""
+        isDemo = false; todoItems = []; todoDecisions = []; todoTraces = []; todoFilter = .all; todoDraft = ""; todoWatchHint = ""; todoCaptureOperation = nil; todoResponseOperations.removeAll(); todoError = nil; todoLoading = false; todoLoaded = false; todoRevision = 0; todoRefreshRequested = false; todoFixtureLoaded = false; todoSaving = false; todoResponding = false; cards = []; deck = InboxDeck(); mediaProjection = InboxMediaProjection(); rows = []; events = []; drafts = [:]; seen = [:]
         for task in attachmentProviderTasks.values { task.cancel() }
         attachmentProviderTasks = [:]
         attachmentDrafts = [:]; attachmentURLs = [:]; attachmentMovieURLs = [:]; attachmentImports = [:]; attachmentErrors = [:]
+        outboxRestoredScope = nil; committedOutbox = nil; outboxPersistenceError = nil
         scope = ""; error = nil; notice = nil; busy = []; retries = [:]; refreshing = false
         newerAfter = nil; latestJumpEvents = nil
         hasOlder = false; hasNewer = false; additionalHistoryGaps = []; loadingOlder = false; loadingNewer = false; followingLatest = true; connection = "Disconnected"; pending = []; pinnedThreadID = nil; demoRows = [:]; demoFaults = []
@@ -2396,6 +2555,7 @@ final class InboxModel: ObservableObject {
         overviewTasks.removeValue(forKey: id)?.cancel(); overviewTokens[id] = nil
         overviewProjections.removeValue(forKey: id)?.cancel()
         overviewProjectors[id] = nil
+        overviewRowsRevisions[id] = nil
         overviewEvents[id] = nil; overviewBytes[id] = nil; overviewByteCounts[id] = nil
     }
     private func resumeOverview() {
@@ -2407,6 +2567,7 @@ final class InboxModel: ObservableObject {
               cards.contains(where: { $0.id == id }), let client else { return }
         let epoch = generation, token = UUID()
         overviewTokens[id] = token
+        overviewRowsRevisions[id] = UUID()
         overviewProjectors[id] = TranscriptStreamProjection()
         overviewTasks[id] = Task { [weak self] in
             // A fast fling should not open a network stream for every card it passes.
@@ -2480,14 +2641,39 @@ final class InboxModel: ObservableObject {
             let history = overviewEvents[id] ?? []
             guard let projected = try? await projector.rows(history),
                   generation == epoch, overviewTokens[id] == token, !Task.isCancelled else { return }
-            if overviewTranscripts[id] != projected { overviewTranscripts[id] = projected }
-            if let index = cards.firstIndex(where: { $0.id == id }) {
-                var card = cards[index]
-                card.apply(events: history, transcriptRows: projected); card.error = nil
-                if cards[index] != card { cards[index] = card }
-                reconcilePending(id: id, events: history, state: card)
-                historyCursors[id] = max(historyCursors[id] ?? .zero, card.appliedHistoryCursor)
-                await reconcileInBackground()
+            // Overview streams can carry the same large tool payloads as the
+            // focused conversation. Compare rows and prepare card previews on a
+            // worker, retaining the main actor only for validated publication.
+            guard let revision = overviewRowsRevisions[id] else { return }
+            let previousRows = overviewTranscripts[id] ?? []
+            let previousCard = cards.first(where: { $0.id == id })
+            let worker = Task.detached(priority: .userInitiated) {
+                TranscriptPublicationPreparation(events: history, rows: projected,
+                    previousRows: previousRows, card: previousCard, rowsRevision: revision)
+            }
+            let prepared = await withTaskCancellationHandler(
+                operation: { await worker.value }, onCancel: { worker.cancel() })
+            guard generation == epoch, overviewTokens[id] == token, !Task.isCancelled else { return }
+            // A refresh, another publication, or retention trimming may have
+            // changed the base while suspended. New tail deltas alone are safe:
+            // publish this prefix, then catch up without starving a live stream.
+            if let currentRevision = overviewRowsRevisions[id],
+               prepared.isCurrent(rowsRevision: currentRevision, card: cards.first(where: { $0.id == id })),
+               history.first?.cursor == overviewEvents[id]?.first?.cursor {
+                if prepared.rowsChanged {
+                    overviewRowsRevisions[id] = UUID()
+                    overviewTranscripts[id] = projected
+                }
+                if var card = prepared.card, let index = cards.firstIndex(where: { $0.id == id }) {
+                    card.error = nil
+                    if cards[index] != card { cards[index] = card }
+                    reconcilePending(id: id, events: history, state: card)
+                    historyCursors[id] = max(historyCursors[id] ?? .zero, card.appliedHistoryCursor)
+                    await reconcileInBackground()
+                }
+            } else {
+                try? await Task.sleep(for: .milliseconds(100))
+                continue
             }
             if overviewEvents[id]?.last?.cursor == history.last?.cursor { return }
             do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
@@ -2996,6 +3182,7 @@ final class InboxModel: ObservableObject {
                       pending[pendingIndex].phase != .cancelling else { throw CancellationError() }
                 let usePhone = pending[pendingIndex].resolveAttachmentTransport(phoneEnabled: deviceHandEnabled)
                 persist()
+                try requireDurableOutbox()
                 await preferences.flush()
                 guard generation == epoch, !Task.isCancelled else { throw CancellationError() }
                 var retained = attachments
@@ -3373,18 +3560,24 @@ final class InboxModel: ObservableObject {
         if pending.count != previousCount { persist() }
     }
     private func restorePending() {
-        if let data = UserDefaults.standard.data(forKey: "inbox.pending." + scope),
-           let saved = try? JSONDecoder().decode([PendingMessage].self, from: data) {
-            pending = saved
+        do {
+            let saved = try durableOutbox().restore(scope: scope)
+            pending = saved.pending
+            cancellations = saved.cancellations
+            steeringTransfers = saved.steeringTransfers
+            pendingCreations = saved.pendingCreations
+            outboxRestoredScope = scope
+            committedOutbox = saved
+            outboxPersistenceError = nil
             for index in pending.indices { pending[index].restore() }
-        }
-        if let data = UserDefaults.standard.data(forKey: "inbox.cancellations." + scope) {
-            cancellations = (try? JSONDecoder().decode([PendingTurnCancellation].self, from: data)) ?? []
             for index in cancellations.indices { cancellations[index].error = nil }
-        }
-        if let data = UserDefaults.standard.data(forKey: "inbox.steering." + scope) {
-            steeringTransfers = (try? JSONDecoder().decode([SteeringTransfer].self, from: data)) ?? []
             for index in steeringTransfers.indices { steeringTransfers[index].restore() }
+        } catch {
+            outboxRestoredScope = nil
+            committedOutbox = nil
+            outboxPersistenceError = error
+            self.error = "Could not restore pending commands: " + error.localizedDescription
+            return
         }
         // A crash can occur after the steering acknowledgement is persisted but
         // before its source leaves pending. Complete that local bookkeeping.
@@ -3404,6 +3597,7 @@ final class InboxModel: ObservableObject {
         }
     }
     private func execute(_ command: AgentCommand) async throws -> JSON {
+        try requireDurableOutbox()
         voice.noteTypedInput(conversationID: command.agentID)
         if isDemo {
             let delayKey = command.kind == .stop ? "NANOCODEX_DEMO_CANCEL_DELAY_MS" : command.kind == .steer ? "NANOCODEX_DEMO_STEER_DELAY_MS" : "NANOCODEX_DEMO_DELAY_MS"
@@ -3567,12 +3761,14 @@ final class InboxModel: ObservableObject {
     }
     func retryCreation() {
         guard let id = focused?.id, pendingCreations.contains(id) else { return }
+        persist()
         prepareAgent(id)
     }
     private func prepareAgent(_ id: String) {
         Task { _ = try? await readyAgent(id) }
     }
     private func readyAgent(_ localID: String) async throws -> String {
+        try requireDurableOutbox()
         if let id = createdAgentIDs[localID] { return id }
         guard pendingCreations.contains(localID) else { return localID }
         if let task = creationTasks[localID] { return try await task.value }
@@ -3656,7 +3852,6 @@ final class InboxModel: ObservableObject {
         persist(); observeFocused()
     }
     private func restoreCreations() {
-        pendingCreations = Set(UserDefaults.standard.stringArray(forKey: "inbox.creations." + scope) ?? [])
         cards.insert(contentsOf: pendingCreations.sorted().map(newConversationCard), at: 0)
     }
     private func persistTodoDraft() {
@@ -3674,7 +3869,21 @@ final class InboxModel: ObservableObject {
         let scope = scope, drafts = drafts, attachmentDrafts = attachmentDrafts, seen = seen
         let closedConversationIDs = closedConversationIDs
         let selectedContext = selectedContext, excludedContext = excludedContext
-        let pending = pending, cancellations = cancellations, steeringTransfers = steeringTransfers, pendingCreations = pendingCreations
+        do {
+            guard outboxRestoredScope == scope else { throw outboxPersistenceError ?? CocoaError(.coderReadCorrupt) }
+            let snapshot = MobileOutboxStore.Snapshot(pending: pending, cancellations: cancellations,
+                                                     steeringTransfers: steeringTransfers, pendingCreations: pendingCreations)
+            // Draft typing also calls persist. Only changed command state needs
+            // JSON encoding and a synchronous SQLite durability checkpoint.
+            if committedOutbox != snapshot {
+                try durableOutbox().save(snapshot, scope: scope)
+                committedOutbox = snapshot
+            }
+            outboxPersistenceError = nil
+        } catch {
+            outboxPersistenceError = error
+            self.error = "Could not save pending commands: " + error.localizedDescription
+        }
         let isDemo = isDemo, demoRows = demoRows
         let demoTurns = isDemo ? Dictionary(uniqueKeysWithValues: cards.map { ($0.id, $0.activeTurns) }) : [:]
         preferences.enqueue { defaults in
@@ -3684,10 +3893,6 @@ final class InboxModel: ObservableObject {
             defaults.set(seen, forKey: "inbox.seen." + scope)
             defaults.set(selectedContext, forKey: "inbox.contextSelection." + scope)
             defaults.set(excludedContext, forKey: "inbox.contextExclusions." + scope)
-            if let data = try? JSONEncoder().encode(pending) { defaults.set(data, forKey: "inbox.pending." + scope) }
-            if let data = try? JSONEncoder().encode(cancellations) { defaults.set(data, forKey: "inbox.cancellations." + scope) }
-            if let data = try? JSONEncoder().encode(steeringTransfers) { defaults.set(data, forKey: "inbox.steering." + scope) }
-            defaults.set(Array(pendingCreations), forKey: "inbox.creations." + scope)
             if isDemo {
                 if let data = try? JSONEncoder().encode(demoRows) { defaults.set(data, forKey: "inbox.demoRows." + scope) }
                 defaults.set(demoTurns, forKey: "inbox.demoTurns." + scope)
@@ -3711,6 +3916,7 @@ final class InboxModel: ObservableObject {
         scope = "demo." + (ProcessInfo.processInfo.environment["NANOCODEX_DEMO_PROFILE"] ?? "default")
         closedConversationIDs = Set(UserDefaults.standard.stringArray(forKey: "inbox.closedTabs." + scope) ?? [])
         cards = DemoContent.cards()
+        restorePending()
         #if DEBUG
         if ProcessInfo.processInfo.environment["NANOCODEX_DEMO_COMPOSER_PHOTOS"] == "1",
            let prepared = try? DemoContent.composerPhotoFixtures(), let store = try? AttachmentStore(scope: scope) {
@@ -3723,7 +3929,6 @@ final class InboxModel: ObservableObject {
         #endif
         if let profile = ProcessInfo.processInfo.environment["NANOCODEX_DEMO_PROFILE"] {
             scope = "demo." + profile
-            restorePending()
             drafts = UserDefaults.standard.dictionary(forKey: "inbox.drafts." + scope) as? [String: String] ?? [:]
             if let data = UserDefaults.standard.data(forKey: "inbox.demoRows." + scope) { demoRows = (try? JSONDecoder().decode([String: [TranscriptRow]].self, from: data)) ?? [:] }
             if let turns = UserDefaults.standard.dictionary(forKey: "inbox.demoTurns." + scope) as? [String: [String]] {

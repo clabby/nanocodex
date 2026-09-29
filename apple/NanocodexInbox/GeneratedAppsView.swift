@@ -125,7 +125,7 @@ private struct GeneratedAppScreen: View {
     @State private var error: String?
     @State private var loading = false
     @State private var loadID = UUID()
-    @State private var recoveryPrompt: String?
+    @State private var recovery: GeneratedAgentRecovery?
     @State private var confirmNewAttempt = false
 
     var body: some View {
@@ -164,8 +164,18 @@ private struct GeneratedAppScreen: View {
                 ContentUnavailableView("Couldn't open this app", systemImage: "app.badge",
                     description: Text("Try reloading, editing the app, or restoring its previous version."))
             }
-            if recoveryPrompt != nil, let session {
-                GeneratedAgentRecoveryControls(session: session, openChat: openChat,
+            if recovery != nil, let session {
+                GeneratedAgentRecoveryControls(session: session, openChat: {
+                    guard let recovery else { return }
+                    let account = model.generatedAppAccount
+                    Task {
+                        do {
+                            try await model.selectScheduledChat(recovery.agentID)
+                            guard model.generatedAppAccount == account else { return }
+                            openChat()
+                        } catch { self.error = error.localizedDescription }
+                    }
+                },
                     newAttempt: { confirmNewAttempt = true })
             }
             if let error {
@@ -182,10 +192,10 @@ private struct GeneratedAppScreen: View {
         }
         .confirmationDialog("Start new agent work?", isPresented: $confirmNewAttempt, titleVisibility: .visible) {
             Button("Allow a new attempt") {
-                guard let prompt = recoveryPrompt else { return }
+                guard let recovery else { return }
                 do {
-                    try model.releaseGeneratedAppAgentReceipt(id: appID, prompt: prompt, account: model.generatedAppAccount)
-                    recoveryPrompt = nil
+                    try model.releaseGeneratedAppAgentReceipt(id: appID, prompt: recovery.prompt, account: model.generatedAppAccount)
+                    recovery = nil
                 } catch { self.error = error.localizedDescription }
             }
         } message: {
@@ -216,7 +226,7 @@ private struct GeneratedAppScreen: View {
             app = manifest // Retain restore/edit controls even if the new source is invalid.
             let adapter = GeneratedAppStore(model: model, app: manifest, account: epoch) { prompt in
                 guard model.generatedAppAccount == epoch else { return }
-                recoveryPrompt = prompt
+                recovery = prompt
             }
             candidateStore = adapter
             let replacement = try NativeAppSession(source: manifest.source, host: adapter.host)
@@ -227,7 +237,7 @@ private struct GeneratedAppScreen: View {
             }
             // Only a validated, initialized app replaces the last working native view.
             session?.invalidate(); store?.invalidate()
-            session = replacement; store = adapter; recoveryPrompt = nil
+            session = replacement; store = adapter; recovery = nil
         } catch {
             candidate?.invalidate(); candidateStore?.invalidate()
             if loadID == ticket, model.generatedAppAccount == epoch, !Task.isCancelled {
@@ -247,9 +257,9 @@ private final class GeneratedAppStore {
     private var revision: Double?
     private var active = true
     private var actionPrompts: [String] = []
-    private let agentRecovery: (String?) -> Void
+    private let agentRecovery: (GeneratedAgentRecovery?) -> Void
 
-    init(model: InboxModel, app: GeneratedAppManifest, account: UUID, agentRecovery: @escaping (String?) -> Void) {
+    init(model: InboxModel, app: GeneratedAppManifest, account: UUID, agentRecovery: @escaping (GeneratedAgentRecovery?) -> Void) {
         self.model = model; self.app = app; self.account = account; self.agentRecovery = agentRecovery
     }
     func invalidate() { active = false }
@@ -287,10 +297,11 @@ private final class GeneratedAppStore {
         }, runAgent: { [self] prompt in
             try check()
             actionPrompts.append(prompt)
+            agentRecovery(nil)
             let receipt = try await model.runGeneratedAppAgent(id: app.id, title: app.title, purpose: app.description,
                 prompt: prompt, account: account, isActive: { [weak self] in self?.active == true })
             try check()
-            if ["completed", "failed", "cancelled"].contains(receipt["status"].string) { agentRecovery(prompt) }
+            if ["completed", "failed", "cancelled"].contains(receipt["status"].string) { agentRecovery(GeneratedAgentRecovery(prompt: prompt, agentID: receipt["agent_id"].string)) }
             switch receipt["status"].string {
             case "completed": return receipt["result"].string
             case "pending": throw GeneratedAppFailure("Your agent is still working. Continue in Chat, or tap the same action again to check its result.")
@@ -326,4 +337,9 @@ private struct GeneratedAgentRecoveryControls: View {
             Button("Start a new attempt…", action: newAttempt)
         }.font(.footnote).padding(12).disabled(session.isBusy)
     }
+}
+
+private struct GeneratedAgentRecovery {
+    let prompt: String
+    let agentID: String
 }

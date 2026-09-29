@@ -1,4 +1,3 @@
-import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -147,11 +146,6 @@ private struct GeneratedFile: View {
 
 enum GeneratedAsset {
     enum Failure: Error { case unavailable }
-    static let thumbnails: NSCache<NSString, CGImage> = {
-        let cache = NSCache<NSString, CGImage>()
-        cache.totalCostLimit = 32 * 1024 * 1024; cache.countLimit = 24
-        return cache
-    }()
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false; configuration.httpCookieStorage = nil
@@ -160,36 +154,8 @@ enum GeneratedAsset {
     }()
 
     static func thumbnail(_ output: ChatGeneratedOutput) async throws -> CGImage? {
-        if let cached = thumbnails.object(forKey: output.id as NSString) { return cached }
-        let url: URL
-        let downloaded: Bool
-        if output.source?.hasPrefix("data:") == true {
-            url = try await playableURL(output); downloaded = false
-        } else {
-            guard let source = output.source, let remote = URL(string: source),
-                  ["https", "http"].contains(remote.scheme) else { throw Failure.unavailable }
-            let (file, response) = try await session.download(from: remote)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                try? FileManager.default.removeItem(at: file); throw Failure.unavailable
-            }
-            url = file; downloaded = true
-        }
-        defer { if downloaded { try? FileManager.default.removeItem(at: url) } }
-        try Task.checkCancellation()
-        let decoding = Task.detached(priority: .utility) { () throws -> CGImage? in
-            try Task.checkCancellation()
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-            return CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: 1600,
-                kCGImageSourceShouldCacheImmediately: true,
-            ] as CFDictionary)
-        }
-        let image = try await withTaskCancellationHandler(operation: { try await decoding.value }, onCancel: { decoding.cancel() })
-        try Task.checkCancellation()
-        if let image { thumbnails.setObject(image, forKey: output.id as NSString, cost: image.bytesPerRow * image.height) }
-        return image
+        let url = try await playableURL(output)
+        return try await ChatImagePipeline.thumbnail(url: url)
     }
 
     static func previewURL(_ output: ChatGeneratedOutput) async throws -> URL {
