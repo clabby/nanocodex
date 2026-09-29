@@ -231,3 +231,106 @@ async fn refresh_failure_after_401_does_not_send_an_unauthenticated_retry() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(source.calls.load(Ordering::SeqCst), 2);
 }
+
+// A subscription auth provider contributes the OAuth beta. Request-specific
+// context management must coexist with it, including repeated header values.
+#[tokio::test]
+async fn authentication_and_request_betas_coexist_without_duplicates() {
+    let endpoint = serve(Router::new().route(
+        "/v1/messages",
+        post(|headers: HeaderMap| async move {
+            let betas: Vec<_> = headers
+                .get_all("anthropic-beta")
+                .iter()
+                .flat_map(|value| value.to_str().unwrap().split(',').map(str::trim))
+                .collect();
+            assert_eq!(betas, ["oauth-2025-04-20", "context-management-2025-06-27"]);
+            assert_eq!(headers["authorization"], "Bearer synthetic");
+            assert!(!headers.contains_key("x-api-key"));
+            Json(json!({"id":"fixture", "role":"assistant", "model":"synthetic", "content":[], "stop_reason":"end_turn", "usage":{"input_tokens":0,"output_tokens":0}}))
+        }),
+    )).await;
+    for duplicate in [false, true] {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer synthetic".parse().unwrap());
+        headers.append("anthropic-beta", "oauth-2025-04-20".parse().unwrap());
+        if duplicate {
+            headers.append(
+                "anthropic-beta",
+                "context-management-2025-06-27, oauth-2025-04-20"
+                    .parse()
+                    .unwrap(),
+            );
+        }
+        let client = ClaudeClient::with_auth_headers(http(), &endpoint, headers);
+        let mut request = request();
+        request.context_management =
+            Some(json!({"edits": [{"type":"clear_thinking_20251015","keep":"all"}]}));
+        client.create(&request).await.unwrap();
+    }
+}
+
+// A gateway can echo credentials in errors even when request headers are marked
+// sensitive. Such text must not reach public errors (and durable failure receipts).
+#[tokio::test]
+async fn reflected_credentials_are_removed_from_errors_for_every_auth_path() {
+    struct HeaderProvider(HeaderMap);
+    impl nanocodex_claude::ClaudeAuthProvider for HeaderProvider {
+        fn headers(
+            &self,
+        ) -> nanocodex_claude::ClaudeAuthFuture<
+            '_,
+            Result<HeaderMap, nanocodex_claude::ClaudeAuthUnavailable>,
+        > {
+            Box::pin(async { Ok(self.0.clone()) })
+        }
+    }
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    ] {
+        let endpoint = serve(Router::new().route("/v1/messages", post(move |headers: HeaderMap| async move {
+            let credential = headers.get("authorization").or_else(|| headers.get("x-api-key")).unwrap().to_str().unwrap();
+            (status, format!("diagnostic: rejected credential {credential}; token=synthetic-reflection-secret"))
+        }))).await;
+        let mut headers = HeaderMap::new();
+        let mut value: reqwest::header::HeaderValue =
+            "Bearer synthetic-reflection-secret".parse().unwrap();
+        value.set_sensitive(true);
+        headers.insert("authorization", value);
+        for client in [
+            ClaudeClient::new(http(), &endpoint, "synthetic-reflection-secret"),
+            ClaudeClient::with_auth_headers(http(), &endpoint, headers.clone()),
+            ClaudeClient::with_auth_provider(
+                http(),
+                &endpoint,
+                Arc::new(HeaderProvider(headers.clone())),
+            ),
+        ] {
+            let error = client.create(&request()).await.unwrap_err();
+            assert!(!format!("{error} {error:?}").contains("synthetic-reflection-secret"));
+            assert!(error.to_string().contains("diagnostic:"));
+            assert!(
+                matches!(error, ClaudeError::Http { status: received, .. } if received == status.as_u16())
+            );
+        }
+    }
+    let endpoint = serve(Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            (
+                StatusCode::UNAUTHORIZED,
+                "rejected synthetic-old and synthetic-new",
+            )
+        }),
+    ))
+    .await;
+    let client = client(
+        endpoint,
+        source(vec![token("synthetic-old"), token("synthetic-new")]),
+    );
+    let error = client.create(&request()).await.unwrap_err();
+    assert!(!error.to_string().contains("synthetic-old"));
+    assert!(!error.to_string().contains("synthetic-new"));
+}

@@ -83,9 +83,10 @@ Claude snapshots use the store's chunked immutable payloads; they do not yet
 use the OpenAI adapter's per-message context pages. Snapshot serialization and
 restoration therefore process the full retained Claude context.
 
-Durability is local to the explicitly configured agent. Spawned subagents and
-all descendants are ephemeral: they receive no durable owner, execution journal,
-or inherited rollout recorder. Their live state ends with the parent runtime.
+Durability belongs to each explicitly configured agent. The core spawn/fork
+lifecycle does not inherit a durable owner or journal. An embedding that hosts
+Claude's Agent tool can construct each child with its own `DurableSession` and
+stable identity; attaching the parent's session alone does not persist children.
 
 Without `.durability(...)`, the same builder is an ordinary non-durable agent.
 An OpenAI-only consumer can stop at `OpenAi::instructions(...).build()`, and a

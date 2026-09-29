@@ -50,6 +50,52 @@ unless an effort was explicitly selected. Astra requires low or greater reasonin
 before the first turn is accepted; it then remains fixed for the thread so follow-on turns can continue from the provider
 checkpoint without replaying the complete retained context.
 
+## Claude
+
+Enable `claude` on the facade to use Anthropic Messages with the same owned
+agent lifecycle and durability extension:
+
+```toml
+[dependencies]
+nanocodex = { version = "0.6.5", features = ["claude"] }
+reqwest = "0.13"
+```
+
+```rust,no_run
+# #[cfg(all(feature = "claude", feature = "durability"))]
+# async fn claude_turn() -> Result<(), Box<dyn std::error::Error>> {
+use nanocodex::{Claude, DurableAgentExt, Nanocodex};
+use nanocodex::claude::ClaudeClient;
+use nanocodex::durability::{DurableSession, MemoryStore};
+
+let client = ClaudeClient::official(
+    reqwest::Client::new(),
+    std::env::var("ANTHROPIC_API_KEY")?,
+);
+let state = DurableSession::open(MemoryStore::new()?, "claude-session").await?;
+let (agent, _events) = Nanocodex::builder(Claude::latest(client))
+    .system("Answer concisely.")
+    .durability(state)
+    .await?
+    .build()?;
+let result = agent.prompt("Explain durable request replay.").await?.await?;
+println!("{}", result.final_message());
+agent.shutdown().await?;
+# Ok(())
+# }
+```
+
+`MemoryStore` retains state in memory; use a persistent host store when state
+must survive process restarts. The facade automatically enables the Claude
+adapter whenever `claude` and `durability` are enabled together.
+
+Default features remain `durability`, `openai`, and `tools`. For the minimal
+Claude provider path, use `default-features = false, features = ["claude"]`.
+Add `durability` for the extension above; durability retains its existing
+OpenAI dependency. On native targets, add `workspace-tools` to expose Claude's optional workspace
+file tools as well as the standard workspace runtime. The `claude` feature
+alone does not enable durability or workspace tools.
+
 ## Usage and USD estimates
 
 When the provider reports aggregate usage for a completed turn, cost remains
@@ -88,6 +134,8 @@ embedding needs more control:
 - [`durability`] — optional durable admission, effect replay, checkpoints, and
   host-store contracts layered over an agent
 - [`oai`] — managed Responses sessions and the concrete Tower boundary
+- `claude` — Anthropic Messages client, builder, protocol, and authentication
+  when the default-off `claude` feature is enabled
 - [`tools`] — tool contracts, built-ins, Code Mode, and MCP
 - `observability` — native tracing and OTLP setup when the default-off
   `observability` feature is enabled

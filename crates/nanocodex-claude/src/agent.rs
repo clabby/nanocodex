@@ -133,7 +133,7 @@ pub struct ClaudeBuilder {
     client_tool_search: bool,
     policy: Option<Arc<dyn ClaudeExecutionPolicy>>,
     restored: Option<Snapshot>,
-    #[cfg(feature = "workspace-files")]
+    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
     task_board: Option<Arc<nanocodex_tools::claude_tasks::ClaudeTasks>>,
 }
 impl ClaudeBuilder {
@@ -162,7 +162,7 @@ impl ClaudeBuilder {
             client_tool_search: false,
             policy: None,
             restored: None,
-            #[cfg(feature = "workspace-files")]
+            #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
             task_board: None,
         }
     }
@@ -305,7 +305,7 @@ impl ClaudeBuilder {
         self
     }
     /// Install explicitly provided host orchestration and UI capabilities.
-    #[cfg(feature = "workspace-files")]
+    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
     pub fn host_tools<H: nanocodex_tools::claude_host::ClaudeHost + 'static>(
         mut self,
         host: Arc<nanocodex_tools::claude_host::ClaudeHostTools<H>>,
@@ -339,7 +339,7 @@ impl ClaudeBuilder {
     /// This is opt-in. In-process path checks are not a sandbox; a hostile
     /// concurrent process can race filesystem operations. No Codex tool name or
     /// definition is ever forwarded to the model.
-    #[cfg(feature = "workspace-files")]
+    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
     pub fn workspace_files(mut self, files: Arc<nanocodex_tools::ClaudeWorkspaceFiles>) -> Self {
         for schema in nanocodex_tools::ClaudeWorkspaceFiles::definitions() {
             let definition: ToolDefinition = serde_json::from_value(schema)
@@ -355,8 +355,9 @@ impl ClaudeBuilder {
         self
     }
     /// Register a separately scoped session-local Claude task board; never a
-    /// Codex plan or account scheduler. Its state is not durable on restart.
-    #[cfg(feature = "workspace-files")]
+    /// Codex plan or account scheduler. With the durability extension attached,
+    /// task state is checkpointed and restored when the host reopens the session.
+    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
     pub fn tasks(mut self, tasks: Arc<nanocodex_tools::claude_tasks::ClaudeTasks>) -> Self {
         self.task_board = Some(tasks.clone());
         for schema in nanocodex_tools::claude_tasks::ClaudeTasks::definitions() {
@@ -374,7 +375,7 @@ impl ClaudeBuilder {
     }
     /// Register a notebook editor for an explicitly host-authorized, isolated
     /// workspace. Its path checks alone do not constitute an OS sandbox.
-    #[cfg(feature = "workspace-files")]
+    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
     pub fn notebook(
         mut self,
         notebook: Arc<nanocodex_tools::claude_notebook::ClaudeNotebook>,
@@ -396,7 +397,7 @@ impl ClaudeBuilder {
     /// capability that enforces permissions, deadlines, and process cleanup.
     /// No ambient shell executor is constructed here; background/bypass modes
     /// are rejected by the adapter.
-    #[cfg(feature = "workspace-files")]
+    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
     pub fn sandbox_bash<E>(mut self, bash: Arc<nanocodex_tools::claude_bash::ClaudeBash<E>>) -> Self
     where
         E: nanocodex_tools::claude_bash::SandboxBashExecutor + 'static,
@@ -417,7 +418,7 @@ impl ClaudeBuilder {
     /// Opt in to Claude Code client-side WebSearch and WebFetch using only an
     /// embedding-provided, per-request approved web capability. This is separate
     /// from Anthropic-executed `web_search` and `web_fetch` server tools.
-    #[cfg(feature = "workspace-files")]
+    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
     pub fn approved_web<P>(mut self, web: Arc<nanocodex_tools::claude_web::ClaudeWeb<P>>) -> Self
     where
         P: nanocodex_tools::claude_web::ApprovedWebProvider + 'static,
@@ -440,7 +441,7 @@ impl ClaudeBuilder {
     /// auxiliary Claude Messages summarization. No ambient fetcher is installed,
     /// and no Anthropic server `web_fetch` is sent. The CLI's private
     /// `/api/web/domain_info` policy service is not reproduced here.
-    #[cfg(feature = "workspace-files")]
+    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
     pub fn web_fetch_with_source<P>(mut self, source: Arc<P>, deferred: bool) -> Self
     where
         P: nanocodex_tools::claude_web::ApprovedWebFetchSource + 'static,
@@ -664,7 +665,7 @@ impl ClaudeBuilder {
             .as_ref()
             .map_or(session_id, |policy| policy.state_id().to_owned());
         let restored = self.restored.unwrap_or_default();
-        #[cfg(feature = "workspace-files")]
+        #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
         if let Some(tasks) = &restored.tasks {
             self.task_board
                 .as_ref()
@@ -672,9 +673,11 @@ impl ClaudeBuilder {
                 .restore(tasks.clone())
                 .map_err(provider_error)?;
         }
-        #[cfg(not(feature = "workspace-files"))]
+        #[cfg(not(all(feature = "workspace-files", not(target_family = "wasm"))))]
         if restored.tasks.is_some() {
-            return Err(unsupported("task restoration requires workspace-files"));
+            return Err(unsupported(
+                "Claude task restoration requires a native target with workspace-files and a task board",
+            ));
         }
         *discovered.try_lock().expect("new discovery lock") = restored.discovered;
         let (runtime, events) = BackendRuntime::new(session_id.clone());
@@ -706,7 +709,7 @@ impl ClaudeBuilder {
                 admission: Mutex::new(()),
                 idle: Notify::new(),
                 compaction_cancel: Mutex::new(None),
-                #[cfg(feature = "workspace-files")]
+                #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
                 task_board: self.task_board,
                 cancellations: Mutex::new(HashMap::new()),
                 stopped: AtomicBool::new(false),
@@ -717,7 +720,7 @@ impl ClaudeBuilder {
     }
 }
 
-#[cfg(feature = "workspace-files")]
+#[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
 fn host_reply(output: nanocodex_tools::ToolOutput) -> std::result::Result<ClaudeToolReply, String> {
     let structured_result = Some(output.structured_result());
     let metadata = output
@@ -857,6 +860,11 @@ async fn nested_web_search(
         return Err("WebSearch cannot combine allow and block lists".into());
     }
     let mut messages = vec![Message::text(Role::User, query)];
+    // A paused response can already contain findings and source receipts.
+    // Accumulate one bounded answer across the whole nested operation.
+    let mut out = String::new();
+    let mut sources = String::new();
+    let mut source_urls = HashSet::new();
     // API server tools can pause mid-operation; replay their opaque blocks
     // without fabricating client tool_result messages.
     for _ in 0..4 {
@@ -884,23 +892,16 @@ async fn nested_web_search(
         if response.role != Role::Assistant {
             return Err("nested search response is not assistant".into());
         }
-        if response.stop_reason == Some(StopReason::PauseTurn) {
-            messages.push(Message {
-                role: Role::Assistant,
-                content: response.content,
-            });
-            continue;
-        }
-        if response.stop_reason != Some(StopReason::EndTurn) {
+        if !matches!(
+            response.stop_reason,
+            Some(StopReason::EndTurn | StopReason::PauseTurn)
+        ) {
             return Err(format!("nested search stopped: {:?}", response.stop_reason));
         }
-        let mut out = String::new();
-        let mut sources = String::new();
-        let mut source_urls = HashSet::new();
-        for block in response.content {
+        for block in &response.content {
             match block {
                 ContentBlock::Text { text, extra } => {
-                    out.push_str(bounded(&text, MAX_OUTPUT - out.len()));
+                    out.push_str(bounded(text, MAX_OUTPUT - out.len()));
                     if let Some(Value::Array(citations)) = extra.get("citations") {
                         for citation in citations {
                             if let Some(url) = citation.get("url").and_then(Value::as_str) {
@@ -926,6 +927,13 @@ async fn nested_web_search(
                 _ => {}
             }
         }
+        if response.stop_reason == Some(StopReason::PauseTurn) {
+            messages.push(Message {
+                role: Role::Assistant,
+                content: response.content,
+            });
+            continue;
+        }
         if out.trim().is_empty() && sources.is_empty() {
             return Err("nested search returned no readable result".into());
         }
@@ -938,7 +946,7 @@ async fn nested_web_search(
     Err("nested search exceeded pause limit".into())
 }
 
-#[cfg(feature = "workspace-files")]
+#[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
 async fn web_fetch_with_source<P: nanocodex_tools::claude_web::ApprovedWebFetchSource>(
     client: &ClaudeClient,
     source: &P,
@@ -1142,7 +1150,7 @@ struct State {
     admission: Mutex<()>,
     idle: Notify,
     compaction_cancel: Mutex<Option<Arc<Cancellation>>>,
-    #[cfg(feature = "workspace-files")]
+    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
     task_board: Option<Arc<nanocodex_tools::claude_tasks::ClaudeTasks>>,
     cancellations: Mutex<HashMap<BackendTurnKey, Arc<Cancellation>>>,
     stopped: AtomicBool,
@@ -1818,6 +1826,16 @@ impl State {
                         | ContentBlock::McpToolResult { .. }
                 )
             });
+            // Server search can load and invoke a client tool in this same
+            // response. Derive its discoveries from authentic retained blocks,
+            // so compaction naturally drops references that are no longer sent.
+            let server_discovered = server_discovered_tools(
+                pending
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .chain(&response.content),
+                &cursor.template.tools,
+            );
             let validated = (|| -> Result<_> {
                 if let Some(container) = &response.container {
                     let id = container
@@ -1861,7 +1879,7 @@ impl State {
                                 ));
                             }
                             if cursor.tool_search
-                                && cursor.template.tools.iter().any(|tool| matches!(tool, ClaudeToolSpec::Client(tool) if tool.name == *name && tool.defer_loading && !discovered.contains(name)))
+                                && cursor.template.tools.iter().any(|tool| matches!(tool, ClaudeToolSpec::Client(tool) if tool.name == *name && tool.defer_loading && !discovered.contains(name) && !server_discovered.contains(name.as_str())))
                             {
                                 return Err(provider_error(
                                     "Claude used deferred tool before discovery",
@@ -2181,6 +2199,53 @@ impl State {
         Err(provider_error("Claude model-call ordinal exhausted"))
     }
 }
+/// Only successful receipts paired with a configured server search load tools.
+/// Keeping this derived from the wire history also handles durable replays and
+/// retained pending rounds without a second mutable discovery checkpoint.
+fn server_discovered_tools<'a>(
+    blocks: impl IntoIterator<Item = &'a ContentBlock>,
+    tools: &[ClaudeToolSpec],
+) -> HashSet<&'a str> {
+    let mut search_ids = HashSet::new();
+    let mut names = HashSet::new();
+    for block in blocks {
+        match block {
+            ContentBlock::ServerToolUse { id, name, .. }
+                if tools.iter().any(|tool| {
+                    matches!(tool, ClaudeToolSpec::Server(tool)
+                    if tool.name == *name && tool.kind.starts_with("tool_search_tool_"))
+                }) =>
+            {
+                search_ids.insert(id.as_str());
+            }
+            ContentBlock::ToolSearchToolResult {
+                tool_use_id,
+                content,
+                ..
+            } if search_ids.contains(tool_use_id.as_str())
+                && content.get("type").and_then(Value::as_str)
+                    == Some("tool_search_tool_search_result") =>
+            {
+                if let Some(references) = content.get("tool_references").and_then(Value::as_array) {
+                    names.extend(
+                        references
+                            .iter()
+                            .filter(|reference| {
+                                reference.get("type").and_then(Value::as_str)
+                                    == Some("tool_reference")
+                            })
+                            .filter_map(|reference| {
+                                reference.get("tool_name").and_then(Value::as_str)
+                            }),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 fn prompt_messages(prompt: &Prompt) -> Result<Vec<Message>> {
     let mut messages = Vec::new();
     for item in prompt.transcript() {

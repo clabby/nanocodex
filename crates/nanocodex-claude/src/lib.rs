@@ -1,7 +1,8 @@
 //! Claude-native Messages protocol and an experimental agent-loop backend.
 //!
-//! Authentication is supplied by the embedding application (Console API key or
-//! explicitly approved headers). The crate never reads Claude Code credentials.
+//! Authentication uses an explicit Console API key, a host header provider, or
+//! the Rust subscription manager with private host storage and HTTP capabilities.
+//! The crate never reads Claude Code credentials.
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 use futures_util::{Stream, StreamExt, stream};
@@ -10,9 +11,13 @@ use serde_json::Value;
 use thiserror::Error;
 
 mod auth;
+pub mod subscription;
 pub use auth::{ClaudeAccessToken, ClaudeTokenSource, RefreshingClaudeAuth};
 
 pub const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+/// Messages route observed in Claude Code's subscription client.
+pub const ANTHROPIC_SUBSCRIPTION_MESSAGES_URL: &str =
+    "https://api.anthropic.com/v1/messages?beta=true";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 #[derive(Debug, Error)]
@@ -781,6 +786,13 @@ impl ClaudeClient {
         Self::new(http, ANTHROPIC_MESSAGES_URL, api_key)
     }
 
+    /// Use a subscription manager on the observed subscription Messages route.
+    /// The provider supplies OAuth headers and owns login/refresh state outside
+    /// agent checkpoints. No local Claude Code login or API key is discovered.
+    pub fn subscription(http: reqwest::Client, provider: Arc<dyn ClaudeAuthProvider>) -> Self {
+        Self::with_auth_provider(http, ANTHROPIC_SUBSCRIPTION_MESSAGES_URL, provider)
+    }
+
     async fn post(
         &self,
         request: &MessagesRequest,
@@ -795,27 +807,81 @@ impl ClaudeClient {
             stream: bool,
         }
         let mut retried = false;
+        // Retain both attempted generations only for this request, so an error
+        // gateway cannot reflect an earlier rejected credential into a durable
+        // failure receipt. Sensitive request headers alone do not scrub bodies.
+        let mut credentials = Vec::<String>::new();
         loop {
-            let mut builder = self
-                .http
-                .post(&self.endpoint)
-                .header("anthropic-version", ANTHROPIC_VERSION);
-            if request.context_management.is_some() {
-                builder = builder.header("anthropic-beta", "context-management-2025-06-27");
-            }
             let mut provider_headers = None;
-            let builder = match &self.auth {
-                ClientAuth::ApiKey(key) => builder.header("x-api-key", key),
-                ClientAuth::Headers(headers) => builder.headers(headers.clone()),
+            let mut headers = match &self.auth {
+                ClientAuth::ApiKey(key) => {
+                    let mut headers = reqwest::header::HeaderMap::new();
+                    let mut value = reqwest::header::HeaderValue::from_str(key)
+                        .map_err(|_| ClaudeError::AuthUnavailable)?;
+                    value.set_sensitive(true);
+                    headers.insert("x-api-key", value);
+                    headers
+                }
+                ClientAuth::Headers(headers) => headers.clone(),
                 ClientAuth::Provider(provider) => {
                     let headers = provider
                         .headers()
                         .await
                         .map_err(|_| ClaudeError::AuthUnavailable)?;
                     provider_headers = Some(headers.clone());
-                    builder.headers(headers)
+                    headers
                 }
             };
+            // Authentication and request features share this comma-separated
+            // header. RequestBuilder::headers replaces a pre-existing value,
+            // which would silently drop context management for OAuth clients.
+            let mut betas = Vec::new();
+            for value in headers.get_all("anthropic-beta") {
+                for beta in value
+                    .to_str()
+                    .map_err(|_| ClaudeError::AuthUnavailable)?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|beta| !beta.is_empty())
+                {
+                    if !betas.contains(&beta) {
+                        betas.push(beta);
+                    }
+                }
+            }
+            if request.context_management.is_some()
+                && !betas.contains(&"context-management-2025-06-27")
+            {
+                betas.push("context-management-2025-06-27");
+            }
+            if !betas.is_empty() {
+                let value = reqwest::header::HeaderValue::from_str(&betas.join(","))
+                    .map_err(|_| ClaudeError::AuthUnavailable)?;
+                headers.insert("anthropic-beta", value);
+            }
+            for (name, value) in &headers {
+                if name == reqwest::header::AUTHORIZATION
+                    || name == "x-api-key"
+                    || value.is_sensitive()
+                {
+                    let value = String::from_utf8_lossy(value.as_bytes());
+                    if !value.is_empty() && !credentials.iter().any(|item| item == &value) {
+                        credentials.push(value.to_string());
+                    }
+                    if name == reqwest::header::AUTHORIZATION
+                        && let Some((_, token)) = value.split_once(' ')
+                        && !token.trim().is_empty()
+                        && !credentials.iter().any(|item| item == token.trim())
+                    {
+                        credentials.push(token.trim().to_owned());
+                    }
+                }
+            }
+            let builder = self
+                .http
+                .post(&self.endpoint)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .headers(headers);
             let response = builder
                 .json(&Body {
                     request,
@@ -840,7 +906,11 @@ impl ClaudeClient {
             }
             if !response.status().is_success() {
                 let status = response.status().as_u16();
-                let body = response.text().await?;
+                let mut body = response.text().await?;
+                credentials.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+                for credential in &credentials {
+                    body = body.replace(credential, "[redacted]");
+                }
                 return Err(ClaudeError::Http { status, body });
             }
             return Ok(response);

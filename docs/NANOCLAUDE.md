@@ -73,7 +73,7 @@ synthetic loopback server, not a live Platform account.
 This is **not Claude Code parity**. Native tools remain explicit opt-ins; the
 `workspace-files` feature supplies only bounded adapters, not the full CLI. Multi-modal user inputs, automatic instruction reload,
 full thinking policy,
-steering, core spawn/fork, OpenAI-shaped snapshot APIs and subscription login
+steering, core spawn/fork and OpenAI-shaped snapshot APIs
 remain unimplemented; unsupported lifecycle operations return errors. The Claude
 builder now attaches to the existing durability crate through `.durability(state)`
 and restores provider-native checkpoints, tool receipts and compaction state. In
@@ -114,22 +114,19 @@ promise that every Claude Code version or model follows the same path.
 
 ## Subscription/authentication boundary
 
-Authentication is a separately injected transport capability. The ordinary
-integration uses documented Claude Platform API credentials. An embedding with
-approved subscription authority can implement `ClaudeAuthProvider`, which
-resolves fresh request headers at each call and reports an intentionally
-redacted failure. `RefreshingClaudeAuth` adds expiry-aware token caching,
-serialized host refresh and bounded HTTP 401 recovery. The host owns secure
-credential storage and the actual exchange protocol. This is not a subscription
-login flow or proof of subscription billing. A separately approved integration
-requires its client registration, acquisition/refresh protocol, scopes and routing
-specification. See [authentication](claude-authentication.md) for current setup. Anthropic's public SDK guidance says third-party Claude.ai
-login/rate limits require prior approval, but does not publish the trusted
-program's client-registration/redirect/scope/refresh contract. Obtain that
-non-secret integration spec from the program before live traffic. Do not copy
-Claude Code's local credentials, fake its identity, or infer authorization from
-a working bearer token. The protocol
-and agent-loop tests use only a synthetic localhost service.
+`ClaudeSubscription` now implements the native subscription OAuth lifecycle over
+host-owned private CAS storage and bounded HTTP. Current client registration,
+PKCE/redirects, scopes, token/profile endpoints and refresh behavior were derived
+from the public Claude Code 2.1.283 executable and an isolated login probe. The
+manager is separate from agent durable state and is attached through
+`ClaudeClient::subscription`. API-key and generic bearer-provider paths remain
+available. See [authentication](claude-authentication.md) for construction,
+persistence, failure handling, measured protocol and live-validation limits.
+
+Native login and rotation are tested with synthetic provider responses, including
+composition with the normal tool/compaction/SQLite lifecycle. This does not assert
+live provider acceptance, billing, or full Claude Code parity. The implementation
+does not discover CLI credential files or install product sign-in UI.
 
 A second isolated CLI probe used the current public `@anthropic-ai/claude-code@2.1.284` npm package with a fake key and localhost-only synthetic SSE. Its published `sdk-tools.d.ts` and captured JSON tool schemas provided 14 conditional CLI client definitions; an older 2.0.76 public package also contains a minified `cli.js` for historical static inspection. See `/brain/outputs/nanoclaude/cli-js-investigation.md`. This is not evidence of live model, OAuth, or web behavior.
 

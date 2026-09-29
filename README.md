@@ -389,7 +389,10 @@ Enable the `claude` feature on `nanocodex-durability` to use the same stores,
 admission rules, and receipts with the Claude builder. Claude checkpoints keep
 native Messages content, including signed thinking and tool results. The
 application supplies its authenticated client again when reopening a session;
-credentials are never part of a checkpoint.
+credentials are never part of a checkpoint. The `nanocodex` facade's `claude`
+feature also enables the adapter when its durability feature is enabled.
+[Subscription login](docs/claude-authentication.md) uses a Rust-owned OAuth manager
+with separate private credential storage and the same agent builder.
 
 ```rust,ignore
 use nanocodex_agent::{Nanocodex, PromptRequest};

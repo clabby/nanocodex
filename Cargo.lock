@@ -4036,9 +4036,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -5695,12 +5697,16 @@ dependencies = [
 name = "nanocodex"
 version = "0.6.5"
 dependencies = [
+ "axum",
  "nanocodex-agent",
+ "nanocodex-claude",
  "nanocodex-durability",
  "nanocodex-managed",
  "nanocodex-oai-api",
  "nanocodex-observability",
  "nanocodex-tools",
+ "reqwest",
+ "rustls",
  "serde_json",
  "tokio",
 ]
@@ -5848,16 +5854,20 @@ name = "nanocodex-claude"
 version = "0.6.5"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "futures-util",
+ "getrandom 0.4.3",
  "nanocodex-agent",
  "nanocodex-tools",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "url",
  "uuid",
  "wasm-bindgen-futures",
  "web-time",

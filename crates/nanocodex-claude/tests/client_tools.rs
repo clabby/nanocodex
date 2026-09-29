@@ -526,3 +526,182 @@ async fn nested_web_search_long_answer_and_title_keep_source_urls() {
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn mixed_discovery_reuses_server_references_until_compaction_then_client_search_recovers() {
+    use nanocodex_claude::{ServerToolDefinition, ToolDefinition};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let log = requests.clone();
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+        let log = log.clone();
+        async move {
+            let index = { let mut r = log.lock().unwrap(); r.push(body); r.len() };
+            let call = |id| json!({"type":"tool_use","id":id,"name":"lookup","input":{}});
+            let (blocks, stop) = match index {
+                1 => (vec![
+                    json!({"type":"server_tool_use","id":"srv-discovery","name":"tool_search_tool_bm25","input":{"query":"lookup"}}),
+                    json!({"type":"tool_search_tool_result","tool_use_id":"srv-discovery","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"lookup"}]}}),
+                    call("same-response"),
+                ], "tool_use"),
+                2 => (vec![call("retained-reference")], "tool_use"),
+                4 => (vec![json!({"type":"text","text":"Lookup work completed."})], "end_turn"),
+                5 => (vec![call("missing-reference")], "tool_use"),
+                6 => (vec![json!({"type":"tool_use","id":"client-discovery","name":"ToolSearch","input":{"query":"select:lookup","max_results":1}})], "tool_use"),
+                7 => (vec![call("client-loaded")], "tool_use"),
+                _ => (vec![json!({"type":"text","text":"done"})], "end_turn"),
+            };
+            ([("content-type", "text/event-stream")], stream(blocks, stop))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let count = Arc::new(AtomicUsize::new(0));
+    let counter = count.clone();
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .client_tool_search()
+        .server_tool(ServerToolDefinition::tool_search_bm25())
+        .tool(
+            ToolDefinition {
+                name: "lookup".into(),
+                description: "Lookup synthetic records".into(),
+                input_schema: json!({"type":"object"}),
+                strict: None,
+                defer_loading: true,
+            },
+            move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("record".into()) }
+            },
+        )
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("lookup twice")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "done"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    agent.compact().await.unwrap();
+    assert!(
+        agent
+            .prompt("lookup again")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        2,
+        "compaction removed the server reference"
+    );
+    assert_eq!(
+        agent
+            .prompt("rediscover")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "done"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 3);
+    let r = requests.lock().unwrap();
+    assert_eq!(r.len(), 8);
+    assert_eq!(
+        r[1]["messages"][1]["content"][1]["content"]["tool_references"][0]["tool_name"],
+        "lookup"
+    );
+    assert_eq!(
+        r[1]["messages"][2]["content"].as_array().unwrap().len(),
+        1,
+        "server search must not receive a client tool result"
+    );
+    assert_eq!(
+        r[1]["messages"][2]["content"][0]["tool_use_id"],
+        "same-response"
+    );
+    assert!(r.iter().all(|request| request["tools"] == r[0]["tools"]));
+    assert!(!r[4]["messages"].to_string().contains("srv-discovery"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn nested_search_preserves_sources_across_pause_and_bounds_the_combined_answer() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let log = requests.clone();
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+        let log = log.clone();
+        async move {
+            let index = { let mut r = log.lock().unwrap(); r.push(body); r.len() };
+            let (blocks, stop) = match index {
+                1 => (vec![json!({"type":"tool_use","id":"research","name":"WebSearch","input":{"query":"synthetic research"}})], "tool_use"),
+                2 => (vec![
+                    json!({"type":"server_tool_use","id":"srv-search","name":"web_search","input":{"query":"synthetic research"}}),
+                    json!({"type":"web_search_tool_result","tool_use_id":"srv-search","content":[{"type":"web_search_result","url":"https://example.org/paused","title":"Paused source","encrypted_content":"opaque"}]}),
+                    json!({"type":"text","text":"Earlier finding. ","citations":[{"type":"web_search_result_location","url":"https://example.org/cited","encrypted_index":"opaque-index"}]}),
+                ], "pause_turn"),
+                3 => (vec![json!({"type":"text","text":"💡".repeat(12_000),"citations":[{"type":"web_search_result_location","url":"https://example.org/cited","encrypted_index":"opaque-index"}]} )], "end_turn"),
+                _ => (vec![json!({"type":"text","text":"done"})], "end_turn"),
+            };
+            ([("content-type", "text/event-stream")], stream(blocks, stop))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .nested_web_search(false)
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("research")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "done"
+    );
+    let r = requests.lock().unwrap();
+    assert_eq!(r.len(), 4);
+    assert_eq!(
+        r[2]["messages"][1]["content"][1]["content"][0]["encrypted_content"],
+        "opaque"
+    );
+    let receipt = &r[3]["messages"][2]["content"][0];
+    assert_ne!(receipt["is_error"], true);
+    let text = receipt["content"].as_str().unwrap();
+    assert!(
+        text.contains("https://example.org/paused"),
+        "paused sources must survive the nested call"
+    );
+    assert_eq!(text.matches("https://example.org/cited").count(), 1);
+    assert!(text.starts_with("Earlier finding. "));
+    assert!(text.len() <= 32 * 1024);
+    server.abort();
+}

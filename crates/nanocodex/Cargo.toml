@@ -19,6 +19,7 @@ rustdoc-args = ["-D", "warnings"]
 
 [features]
 default = ["durability", "openai", "tools"]
+claude = ["dep:nanocodex-claude", "nanocodex-durability?/claude"]
 durability = ["dep:nanocodex-durability", "openai"]
 managed = ["dep:nanocodex-managed"]
 observability = ["dep:nanocodex-observability"]
@@ -29,10 +30,15 @@ tools = [
     "nanocodex-managed?/tools",
     "nanocodex-tools/attachment",
 ]
-workspace-tools = ["tools", "nanocodex-tools/workspace-runtime"]
+workspace-tools = [
+    "tools",
+    "nanocodex-tools/workspace-runtime",
+    "nanocodex-claude?/workspace-files",
+]
 
 [dependencies]
 nanocodex-agent = { path = "../nanocodex-agent", version = "0.6.5", default-features = false }
+nanocodex-claude = { workspace = true, optional = true }
 nanocodex-durability = { workspace = true, optional = true }
 nanocodex-oai-api = { path = "../nanocodex-oai-api", version = "0.6.5", default-features = false, features = ["events"] }
 nanocodex-tools = { path = "../nanocodex-tools", version = "0.6.5", default-features = false, optional = true }
@@ -44,6 +50,12 @@ nanocodex-observability = { workspace = true, optional = true }
 [dev-dependencies]
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+axum.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+tokio = { workspace = true, features = ["net"] }
 
 [lints]
 workspace = true
