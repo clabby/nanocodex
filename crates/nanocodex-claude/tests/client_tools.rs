@@ -121,6 +121,16 @@ async fn client_tool_search_then_nested_web_search_then_compaction() {
         json!({"type":"tool_reference","tool_name":"WebSearch"})
     );
     assert_eq!(
+        r[1]["messages"][2]["content"][0]["content"][1]["type"],
+        "text"
+    );
+    assert!(
+        r[1]["messages"][2]["content"][0]["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("WebSearch")
+    );
+    assert_eq!(
         r[2]["tools"],
         json!([{"type":"web_search_20250305","name":"web_search","max_uses":3,"allowed_domains":["example.org"]}])
     );

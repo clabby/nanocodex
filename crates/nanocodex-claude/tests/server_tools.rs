@@ -322,3 +322,69 @@ async fn provider_code_container_id_is_reused_on_next_turn_without_local_bash() 
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn failed_pause_turn_continuation_keeps_opaque_server_tool_boundary() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let received = requests.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(body): Json<Value>| {
+            let received = received.clone();
+            async move {
+                let index = {
+                    let mut log = received.lock().unwrap();
+                    log.push(body);
+                    log.len()
+                };
+                if index == 2 {
+                    return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "synthetic transport failure".to_string()).into_response();
+                }
+                let (blocks, reason) = if index == 1 {
+                    (vec![json!({"type":"server_tool_use","id":"srvtoolu_paused","name":"web_fetch","input":{"url":"https://example.org"}})], "pause_turn")
+                } else {
+                    (vec![json!({"type":"text","text":"resumed"})], "end_turn")
+                };
+                ([ ("content-type", "text/event-stream") ], stream(blocks, reason)).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .server_tool(ServerToolDefinition::web_fetch_basic(1))
+        .build()
+        .unwrap();
+    assert!(
+        agent
+            .prompt("fetch once")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        agent
+            .prompt("continue")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "resumed"
+    );
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 3);
+    assert_eq!(log[2]["messages"][1]["content"][0]["id"], "srvtoolu_paused");
+    assert_eq!(log[2]["messages"][2]["content"][0]["text"], "continue");
+    server.abort();
+}

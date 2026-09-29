@@ -628,3 +628,255 @@ async fn claude_client_tool_can_return_multimodal_blocks_without_codex_result_sh
     assert_eq!(log[1]["messages"][2]["content"][0]["type"], "tool_result");
     server.abort();
 }
+
+async fn cancelled_tool_batch_retains_completed_and_unknown_results(parallel: bool) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let received = requests.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(body): Json<Value>| {
+            let received = received.clone();
+            async move {
+                let index = {
+                    let mut log = received.lock().unwrap();
+                    log.push(body);
+                    log.len()
+                };
+                let (blocks, reason) = if index == 1 {
+                    (
+                        vec![
+                            json!({"type":"tool_use","id":"toolu_a","name":"effect","input":{"key":"a"}}),
+                            json!({"type":"tool_use","id":"toolu_b","name":"effect","input":{"key":"b"}}),
+                        ],
+                        "tool_use",
+                    )
+                } else {
+                    (vec![json!({"type":"text","text":"recovered"})], "end_turn")
+                };
+                ([ ("content-type", "text/event-stream") ], stream(blocks, reason))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let a_done = Arc::new(tokio::sync::Notify::new());
+    let b_started = Arc::new(tokio::sync::Notify::new());
+    let effect_count = Arc::new(AtomicUsize::new(0));
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .parallel_tools(parallel)
+        .tool(
+            ToolDefinition {
+                name: "effect".into(),
+                description: "synthetic effect".into(),
+                input_schema: json!({"type":"object"}),
+                strict: None,
+                defer_loading: false,
+            },
+            {
+                let a_done = a_done.clone();
+                let b_started = b_started.clone();
+                let effect_count = effect_count.clone();
+                move |input| {
+                    let a_done = a_done.clone();
+                    let b_started = b_started.clone();
+                    let effect_count = effect_count.clone();
+                    async move {
+                        if input["key"] == "a" {
+                            effect_count.fetch_add(1, Ordering::SeqCst);
+                            a_done.notify_one();
+                            Ok("effect a committed".to_string())
+                        } else {
+                            a_done.notified().await;
+                            b_started.notify_one();
+                            std::future::pending().await
+                        }
+                    }
+                }
+            },
+        )
+        .build()
+        .unwrap();
+    let started = b_started.notified();
+    let turn = agent.prompt("perform two effects").await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), started)
+        .await
+        .unwrap();
+    turn.cancel().await.unwrap();
+    assert!(turn.result().await.is_err());
+    assert_eq!(effect_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        agent
+            .prompt("continue without repeating the interrupted operation")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "recovered"
+    );
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 2);
+    let blocks = log[1]["messages"][2]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["tool_use_id"], "toolu_a");
+    assert_eq!(blocks[0]["content"], "effect a committed");
+    assert_eq!(blocks[1]["tool_use_id"], "toolu_b");
+    assert_eq!(blocks[1]["is_error"], true);
+    assert!(
+        blocks[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("outcome unknown")
+    );
+    assert_eq!(effect_count.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn sequential_cancel_keeps_completed_tool_receipt() {
+    cancelled_tool_batch_retains_completed_and_unknown_results(false).await;
+}
+
+#[tokio::test]
+async fn parallel_cancel_keeps_completed_tool_receipt() {
+    cancelled_tool_batch_retains_completed_and_unknown_results(true).await;
+}
+
+#[tokio::test]
+async fn configured_auto_window_reserves_model_output_not_request_max_tokens() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    for (input_tokens, expected_requests) in [(66_990, 2usize), (66_992, 3)] {
+        let count = Arc::new(AtomicUsize::new(0));
+        let calls = count.clone();
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |Json(_): Json<Value>| {
+                let calls = calls.clone();
+                async move {
+                    let index = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    let answer = if index == 2 {
+                        "summary or answer"
+                    } else {
+                        "ok"
+                    };
+                    let mut body = stream(vec![json!({"type":"text","text":answer})], "end_turn");
+                    if index == 1 {
+                        body = body.replace(
+                            "\"input_tokens\":3",
+                            &format!("\"input_tokens\":{input_tokens}"),
+                        );
+                    }
+                    ([("content-type", "text/event-stream")], body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ClaudeClient::new(
+            reqwest::Client::new(),
+            format!("http://{addr}/v1/messages"),
+            "synthetic",
+        );
+        let (agent, _) = Nanocodex::builder(Claude::latest(client))
+            .max_tokens(4_096)
+            .auto_compact_window_tokens(100_000)
+            .build()
+            .unwrap();
+        agent.prompt("first").await.unwrap().result().await.unwrap();
+        agent.prompt("next").await.unwrap().result().await.unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), expected_requests);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn large_tool_result_compacts_within_turn_without_rerunning_effect() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let received = requests.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(body): Json<Value>| {
+            let received = received.clone();
+            async move {
+                let index = {
+                    let mut log = received.lock().unwrap();
+                    log.push(body);
+                    log.len()
+                };
+                let (blocks, reason) = match index {
+                    1 => (vec![json!({"type":"tool_use","id":"toolu_effect","name":"effect","input":{}})], "tool_use"),
+                    2 => (vec![json!({"type":"text","text":"Effect completed once; continue task."})], "end_turn"),
+                    _ => (vec![json!({"type":"text","text":"done"})], "end_turn"),
+                };
+                let mut body = stream(blocks, reason);
+                if index == 1 {
+                    body = body.replace("\"input_tokens\":3", "\"input_tokens\":67000");
+                }
+                ([ ("content-type", "text/event-stream") ], body)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counter = effects.clone();
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, _) = Nanocodex::builder(Claude::latest(client))
+        .auto_compact_window_tokens(100_000)
+        .tool(
+            ToolDefinition {
+                name: "effect".into(),
+                description: "Synthetic side effect".into(),
+                input_schema: json!({"type":"object"}),
+                strict: None,
+                defer_loading: false,
+            },
+            move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("effect receipt".into()) }
+            },
+        )
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("perform once")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "done"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 3);
+    assert_eq!(
+        log[1]["messages"][2]["content"][0]["content"],
+        "effect receipt"
+    );
+    assert_eq!(log[2]["messages"].as_array().unwrap().len(), 1);
+    assert!(
+        log[2]["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Effect completed once")
+    );
+    server.abort();
+}

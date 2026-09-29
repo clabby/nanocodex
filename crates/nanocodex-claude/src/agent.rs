@@ -77,6 +77,7 @@ pub struct ClaudeBuilder {
     keep_thinking: bool,
     message_diagnostics: bool,
     context_window_tokens: u64,
+    auto_compact_window_tokens: Option<u64>,
     system: String,
     system_blocks: Option<Vec<Value>>,
     workspace: String,
@@ -101,6 +102,7 @@ impl ClaudeBuilder {
             keep_thinking: false,
             message_diagnostics: false,
             context_window_tokens,
+            auto_compact_window_tokens: None,
             system: String::new(),
             system_blocks: None,
             workspace: String::new(),
@@ -149,10 +151,17 @@ impl ClaudeBuilder {
         self.message_diagnostics = true;
         self
     }
-    /// Sets the measured model context window. Automatic compaction reserves up
-    /// to 20k output tokens and 13k margin, with a proportional tiny-test fallback.
+    /// Sets the provider model's actual context window.
     pub const fn context_window_tokens(mut self, tokens: u64) -> Self {
         self.context_window_tokens = tokens;
+        self
+    }
+    /// Optional harness auto-compaction window, capped by the model window.
+    /// Claude Code 2.1.284 resolves a window from environment/settings/account
+    /// policy before reserving 20k model output tokens and 13k headroom.
+    /// Its interactive automatic transition is not yet empirically validated.
+    pub const fn auto_compact_window_tokens(mut self, tokens: u64) -> Self {
+        self.auto_compact_window_tokens = Some(tokens);
         self
     }
     /// Sets the model's system instruction.
@@ -384,6 +393,7 @@ impl ClaudeBuilder {
         if self.claude.model.trim().is_empty()
             || self.max_tokens == 0
             || self.context_window_tokens == 0
+            || self.auto_compact_window_tokens == Some(0)
         {
             return Err(unsupported("Claude model and max_tokens must be nonempty"));
         }
@@ -468,13 +478,23 @@ impl ClaudeBuilder {
                             return Ok(ToolResultContent::Text("No matching tools".into()));
                         }
                         let mut discovered = active.lock().await;
-                        let references = matches
+                        let names = matches
+                            .iter()
+                            .map(|tool| tool.name.as_str())
+                            .collect::<Vec<_>>();
+                        let mut references = matches
                             .into_iter()
                             .map(|tool| {
                                 discovered.insert(tool.name.clone());
                                 json!({"type":"tool_reference","tool_name":tool.name})
                             })
-                            .collect();
+                            .collect::<Vec<_>>();
+                        // Interactive Claude Code also includes a short text
+                        // companion after its reference blocks. This is our
+                        // own neutral description, not a copied private prompt.
+                        references.push(json!({"type":"text","text":format!(
+                            "Loaded tools for the next request: {}", names.join(", ")
+                        )}));
                         Ok(ToolResultContent::Blocks(references))
                     })
                 }),
@@ -528,6 +548,7 @@ impl ClaudeBuilder {
                 keep_thinking: self.keep_thinking,
                 message_diagnostics: self.message_diagnostics,
                 context_window_tokens: self.context_window_tokens,
+                auto_compact_window_tokens: self.auto_compact_window_tokens,
                 workspace: self.workspace,
                 system: self.system,
                 system_blocks: self.system_blocks,
@@ -827,6 +848,7 @@ struct State {
     keep_thinking: bool,
     message_diagnostics: bool,
     context_window_tokens: u64,
+    auto_compact_window_tokens: Option<u64>,
     workspace: String,
     system: String,
     system_blocks: Option<Vec<Value>>,
@@ -1013,15 +1035,20 @@ impl State {
             .collect()
     }
     fn compaction_threshold(&self) -> u64 {
-        let reserve = u64::from(self.max_tokens)
-            .min(20_000)
-            .saturating_add(13_000);
+        // The CLI reserves the model's output ceiling (capped at 20k), not
+        // this individual request's max_tokens. Current coding models exceed
+        // that ceiling. Do not treat this as a measured interactive trigger.
+        let reserve = 20_000u64 + 13_000;
+        let window = self
+            .auto_compact_window_tokens
+            .unwrap_or(self.context_window_tokens)
+            .min(self.context_window_tokens);
         // Tiny synthetic windows use a proportional threshold, rather than
         // immediately compacting at zero after saturating subtraction.
-        if self.context_window_tokens <= reserve {
-            return self.context_window_tokens.saturating_mul(95) / 100;
+        if window <= reserve {
+            return window.saturating_mul(95) / 100;
         }
-        self.context_window_tokens - reserve
+        window - reserve
     }
     async fn compact_locked(
         &self,
@@ -1137,6 +1164,24 @@ impl State {
         let mut output = 0u64;
         let mut previous_message_id = conversation.previous_message_id.clone();
         for index in 0..16 {
+            if index > 0
+                && !conversation.messages.is_empty()
+                && conversation.active_context_tokens >= self.compaction_threshold()
+            {
+                // Auto-compaction can be necessary *inside* one turn after a
+                // large tool result, not just when the next user turn starts.
+                // The checkpointed assistant/result pair is summarized once;
+                // the pending tool call is never executed a second time.
+                self.compact_locked(conversation, cancel).await?;
+                pending = vec![Message::text(
+                    Role::User,
+                    format!(
+                        "This session is being continued from a previous conversation. The summary below covers the earlier context:\n\n{}\n\nContinue the current task from this summary.",
+                        conversation.summary
+                    ),
+                )];
+                previous_message_id = conversation.previous_message_id.clone();
+            }
             let discovered = self.discovered.lock().await.clone();
             let response = self
                 .response(
@@ -1229,36 +1274,103 @@ impl State {
             if !text.is_empty() {
                 self.emit(&request.events,AgentEventKind::AssistantMessage,json!({"model_call_index":index,"item_id":response.id,"phase":null,"text":text,"citations":citations}));
             }
-            let tool_results = if self.parallel_tools {
-                let calls = tool_calls.iter().map(|(id, name, input, handler)| {
-                    self.call_tool(id, name, input, handler, &request.events, index)
-                });
-                tokio::select! {
-                    values = futures_util::future::join_all(calls) => values,
-                    () = cancel.cancelled() => return Err(NanocodexError::TurnCancelled),
+            // A handler can perform a side effect before another handler is
+            // cancelled. Keep *every* assistant tool_use paired with a result:
+            // completed results are retained, while interrupted handlers get an
+            // explicit unknown-outcome error. Never silently replay their calls.
+            let mut results = vec![None; tool_calls.len()];
+            let mut interrupted = false;
+            if self.parallel_tools {
+                let mut calls = futures_util::stream::FuturesUnordered::new();
+                for (position, (id, name, input, handler)) in tool_calls.iter().enumerate() {
+                    calls.push(async move {
+                        (
+                            position,
+                            self.call_tool(id, name, input, handler, &request.events, index)
+                                .await,
+                        )
+                    });
+                }
+                let mut remaining = tool_calls.len();
+                while remaining > 0 {
+                    tokio::select! {
+                        biased;
+                        next = calls.next() => {
+                            let Some((position, result)) = next else { break };
+                            results[position] = Some(result);
+                            remaining -= 1;
+                        }
+                        () = cancel.cancelled() => { interrupted = true; break; }
+                    }
                 }
             } else {
-                let mut results = Vec::with_capacity(tool_calls.len());
-                for (id, name, input, handler) in tool_calls {
+                for (position, (id, name, input, handler)) in tool_calls.iter().enumerate() {
                     let result = tokio::select! {
+                        biased;
                         value = self.call_tool(id, name, input, handler, &request.events, index) => value,
-                        () = cancel.cancelled() => return Err(NanocodexError::TurnCancelled),
+                        () = cancel.cancelled() => { interrupted = true; break; },
                     };
-                    results.push(result);
+                    results[position] = Some(result);
                 }
-                results
-            };
+            }
+            if interrupted {
+                for (position, (id, name, _, _)) in tool_calls.iter().enumerate() {
+                    if results[position].is_none() {
+                        let reason = "Tool execution interrupted; outcome unknown. Do not assume it did not run or automatically repeat it.";
+                        self.emit(
+                            &request.events,
+                            AgentEventKind::ToolResult,
+                            json!({
+                                "call_id": id, "tool": name, "status": "failed",
+                                "result": {"text": reason}, "outcome_unknown": true,
+                            }),
+                        );
+                        results[position] = Some(ContentBlock::tool_result_content(
+                            id.as_str(),
+                            ToolResultContent::Text(reason.into()),
+                            true,
+                        ));
+                    }
+                }
+            }
+            let has_tool_calls = !tool_calls.is_empty();
             pending.push(Message {
                 role: Role::Assistant,
                 content: response.content,
             });
             if response.stop_reason == Some(StopReason::ToolUse) {
-                pending.push(Message::tool_results(tool_results));
-                // A client tool may already have changed external state. Commit
-                // its completed assistant/result pair before attempting the next
-                // provider request, so a transport failure or cancellation does
-                // not erase the evidence from this in-process session. Hosts
-                // still need durable effect receipts across process restarts.
+                pending.push(Message::tool_results(
+                    results.into_iter().map(Option::unwrap).collect(),
+                ));
+                // Commit completed effects and explicit unknown-outcome receipts
+                // before returning cancellation or making another provider call.
+                // Process-restart durability still belongs to the embedding host.
+                conversation.messages = pending.clone();
+                conversation.previous_message_id = previous_message_id.clone();
+                conversation.summary.clear();
+                conversation.active_context_tokens = response
+                    .usage
+                    .input_tokens
+                    .saturating_add(response.usage.cache_read_input_tokens)
+                    .saturating_add(response.usage.cache_creation_input_tokens)
+                    .saturating_add(response.usage.output_tokens)
+                    // Usage belongs to the just-completed request and does
+                    // not include the newly appended tool-result message.
+                    .saturating_add(
+                        serde_json::to_vec(pending.last().expect("tool result was appended"))
+                            .map(|bytes| (bytes.len() as u64).div_ceil(4))
+                            .unwrap_or(0),
+                    );
+                if interrupted {
+                    return Err(NanocodexError::TurnCancelled);
+                }
+                continue;
+            }
+            if response.stop_reason == Some(StopReason::PauseTurn) {
+                // Server tools continue with the same tool array and paused
+                // assistant message, without a fabricated user tool result.
+                // Checkpoint the opaque server-tool blocks before continuation;
+                // a failed transport must not silently re-run the prior request.
                 conversation.messages = pending.clone();
                 conversation.previous_message_id = previous_message_id.clone();
                 conversation.summary.clear();
@@ -1270,12 +1382,7 @@ impl State {
                     .saturating_add(response.usage.output_tokens);
                 continue;
             }
-            if response.stop_reason == Some(StopReason::PauseTurn) {
-                // Server tools continue with the same tool array and the paused
-                // assistant message, without a fabricated user tool result.
-                continue;
-            }
-            if !tool_results.is_empty() || response.stop_reason != Some(StopReason::EndTurn) {
+            if has_tool_calls || response.stop_reason != Some(StopReason::EndTurn) {
                 return Err(provider_error(format!(
                     "unsupported Claude stop reason: {:?}",
                     response.stop_reason
