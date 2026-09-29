@@ -1,7 +1,7 @@
 import type { Principal } from "./account-auth";
 import { AppError, appRequest, type AppOperation } from "./prompt-apps";
 
-// Includes JSON escaping overhead for a 256 KiB inline HTML document.
+// Includes JSON escaping overhead for a 256 KiB Swift source document.
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 async function body(request: Request): Promise<Record<string, unknown>> {
   if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") throw new AppError("invalid_content_type", 415);

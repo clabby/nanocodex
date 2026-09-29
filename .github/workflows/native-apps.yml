@@ -1,0 +1,57 @@
+name: Native Swift apps
+on:
+  pull_request:
+    paths: ['apple/NanocodexApps/**', 'apple/Tests/NativeAppsUI/**', 'apple/InboxCore/Sources/InboxCore/GeneratedAppAgentJournal.swift', 'apple/InboxCore/Tests/InboxCoreTests/GeneratedAppAgentJournalTests.swift', '.github/workflows/native-apps.yml']
+  push:
+    branches: [master]
+    paths: ['apple/NanocodexApps/**', 'apple/Tests/NativeAppsUI/**', 'apple/InboxCore/Sources/InboxCore/GeneratedAppAgentJournal.swift', 'apple/InboxCore/Tests/InboxCoreTests/GeneratedAppAgentJournalTests.swift', '.github/workflows/native-apps.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-apps-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  journeys:
+    name: Interpreted Swift and native controls
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Build public runtime executable
+        run: |
+          mkdir -p output/native-apps-ci
+          swift build -j 3 --package-path apple/NanocodexApps --product native-app-journey 2>&1 | tee output/native-apps-ci/build.log
+          echo "NATIVE_APP_BINARY=$(swift build --package-path apple/NanocodexApps --show-bin-path)/native-app-journey" >> "$GITHUB_ENV"
+      - name: Persistence, recovery and bounded execution
+        run: '"$NATIVE_APP_BINARY" --self-test --screenshot output/native-apps-ci/native.png 2>&1 | tee output/native-apps-ci/runtime.log'
+      - name: Independently authored Swift apps
+        run: python3 apple/NanocodexApps/Journeys/run.py --binary "$NATIVE_APP_BINARY" --output output/native-apps-ci/holdouts 2>&1 | tee output/native-apps-ci/holdouts.log
+      - name: Durable agent request recovery
+        run: swift test -j 3 --package-path apple/InboxCore --filter GeneratedAppAgentJournalTests 2>&1 | tee output/native-apps-ci/agent-recovery.log
+      - name: Select one iPhone simulator
+        run: |
+          device=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for ds in json.load(sys.stdin)["devices"].values() for d in ds if "iPhone" in d["name"]))')
+          xcrun simctl boot "$device"
+          xcrun simctl bootstatus "$device" -b
+          echo "NATIVE_APP_SIMULATOR=$device" >> "$GITHUB_ENV"
+      - name: Native typing, taps and process relaunch
+        run: apple/Tests/NativeAppsUI/run.sh
+      - name: Shut down the selected simulator
+        if: always() && env.NATIVE_APP_SIMULATOR != ''
+        run: xcrun simctl shutdown "$NATIVE_APP_SIMULATOR"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-swift-app-journeys
+          path: |
+            output/native-apps-ci/
+            output/native-app-ui/*.log
+            output/native-app-ui/*.xcresult
+            output/native-app-ui/*-attachments/
+            output/native-app-ui/*-state/

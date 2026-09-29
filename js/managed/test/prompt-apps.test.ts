@@ -5,7 +5,22 @@ beforeAll(async () => {
   await applyD1Migrations(bindings.NANOCODEX_CRM, bindings.CRM_MIGRATIONS);
 });
 const origin = "https://apps.example.test";
-const document = { title: "Reading tracker", description: "Books and progress", html: '<!doctype html><h1>Books</h1><script>window.ready=true</script>' };
+const document = {
+  title: "Reading tracker", description: "Books and progress", runtime: "swift-v1",
+  source: String.raw`import SwiftUI
+struct ReadingTracker: View {
+    @Persisted("count") var count = 0
+    var body: some View {
+        VStack {
+            Text("Books")
+            Text("Read: \(count)")
+            Button("Finished a book") { count += 1 }
+        }
+    }
+}
+`,
+};
+const revisedDocument = { ...document, title: "Bookshelf", source: document.source.replace('Text("Books")', 'Text("Bookshelf 📚")') };
 async function call(path: string, method = "GET", body?: unknown, account = "owner", headers: Record<string, string> = {}) {
   const response = await SELF.fetch(`${origin}/v1/apps${path}`, {
     method, headers: { authorization: `Bearer ${account}`, "content-type": "application/json", ...headers },
@@ -13,8 +28,10 @@ async function call(path: string, method = "GET", body?: unknown, account = "own
   });
   const value = await response.json() as any;
   console.info(JSON.stringify({ scenario: "prompt-apps.http", method, path, account, status: response.status,
-    result: value.error ?? { id: value.id, revision: value.revision, apps: value.apps?.length, deleted: value.deleted } }));
+    result: value.error ?? { id: value.id, runtime: value.runtime, source: value.source, revision: value.revision, value: value.value, apps: value.apps?.length, deleted: value.deleted } }));
   expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(response.headers.get("content-type")).toContain("application/json");
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   return { status: response.status, value };
 }
 it("creates a generated app, persists and resolves state conflicts across clients, isolates accounts and atomically deletes", async () => {
@@ -31,10 +48,11 @@ it("creates a generated app, persists and resolves state conflicts across client
   const id = created.value.id, path = `/${id}`;
   const page = await call("?limit=1");
   expect(page.value.apps).toHaveLength(1);
-  expect(page.value.apps[0]).not.toHaveProperty("html");
+  expect(page.value.apps[0]).not.toHaveProperty("source");
+  expect(page.value.apps[0].runtime).toBe("swift-v1");
   expect((await call(path)).value).toEqual(created.value);
   expect((await call("", "GET", undefined, "other")).value.apps).toEqual([]);
-  for (const [suffix, method, body] of [["", "GET"], ["", "PUT", { ...document, revision: 1 }], ["/data", "GET"], ["/data", "PUT", { value: {}, revision: 0 }], ["?revision=1", "DELETE"]] as const)
+  for (const [suffix, method, body] of [["", "GET"], ["", "PUT", { ...document, revision: 1 }], ["/data", "GET"], ["/data", "PUT", { value: {}, revision: 0 }], ["?revision=1", "DELETE"], ["/restore", "POST", { revision: 1 }]] as const)
     expect((await call(`${path}${suffix}`, method, body, "other")).status).toBe(404);
   expect((await call(`${path}/restore`, "POST", { revision: 1 })).value.error).toBe("no_previous_revision");
   expect((await call(`${path}/data`)).value).toEqual({ value: null, revision: 0, updated_at: null });
@@ -43,21 +61,28 @@ it("creates a generated app, persists and resolves state conflicts across client
   const first = (await call(`${path}/data`)).value;
   expect(first.revision).toBe(1);
   expect((await call(`${path}/data`, "PUT", { value: { count: 3 }, revision: first.revision })).value.revision).toBe(2);
-  expect((await call(path, "PUT", { ...document, title: "Bookshelf", revision: 1 })).value.revision).toBe(2);
+  const updated = await call(path, "PUT", { ...revisedDocument, revision: 1 });
+  expect(updated.value).toMatchObject({ ...revisedDocument, revision: 2 });
+  expect((await call(path)).value).toEqual(updated.value);
   expect((await call(path, "PUT", { ...document, revision: 1 })).value.error).toBe("revision_conflict");
   expect((await call(`${path}?revision=1`, "DELETE")).status).toBe(409);
   expect((await call(`${path}/data`)).value.value).toEqual({ count: 3 });
   const restored = await call(`${path}/restore`, "POST", { revision: 2 });
   expect(restored.value).toMatchObject({ ...document, revision: 3 });
   expect((await call(`${path}/data`)).value.value).toEqual({ count: 3 });
+  expect((await call(path)).value).toEqual(restored.value);
   expect((await call(`${path}/restore`, "POST", { revision: 2 })).status).toBe(409);
-  expect((await call(path, "DELETE", { revision: 3 })).value.deleted).toBe(true);
+  // Recovery swaps both retained versions; it never rolls back the independent data.
+  const restoredAgain = await call(`${path}/restore`, "POST", { revision: 3 });
+  expect(restoredAgain.value).toMatchObject({ ...revisedDocument, revision: 4 });
+  expect((await call(`${path}/data`)).value).toMatchObject({ value: { count: 3 }, revision: 2 });
+  expect((await call(path, "DELETE", { revision: 4 })).value.deleted).toBe(true);
   expect((await call(path)).status).toBe(404);
   expect((await call(`${path}/data`)).status).toBe(404);
   expect((await call(`${path}/data`, "PUT", { value: "revive", revision: 2 })).status).toBe(404);
 });
-it("rejects malformed and oversized input, enforces revisions and paginates without HTML", async () => {
-  expect((await call("", "POST", { ...document, html: "🪴".repeat(65537) })).status).toBe(400);
+it("rejects malformed and oversized input, enforces revisions and paginates without source", async () => {
+  expect((await call("", "POST", { ...document, source: "🪴".repeat(65537) })).status).toBe(400);
   expect((await call("", "POST", { ...document, owner_id: "other" })).status).toBe(400);
   expect((await call("", "POST", { ...document, id: "chosen" })).status).toBe(400);
   expect((await call("?limit=1&limit=2")).status).toBe(400);
@@ -76,4 +101,28 @@ it("rejects malformed and oversized input, enforces revisions and paginates with
   expect((await call(`${path}/data`, "PUT", { value: "x".repeat(262144), revision: 0 })).status).toBe(413);
   expect((await call(`${path}/data`, "PUT", { value: null, revision: -1 })).status).toBe(400);
   expect((await call(`${path}/data`, "PUT", { value: null, revision: 0 })).value.revision).toBe(1);
+});
+
+it("rejects legacy and mismatched runtimes on create and update without changing source or recovery", async () => {
+  const { runtime, source, ...metadata } = document;
+  for (const input of [
+    { ...metadata, html: "<!doctype html><h1>Legacy</h1>" },
+    { ...document, html: "<h1>Mixed contract</h1>" },
+  ]) expect((await call("", "POST", input)).value.error).toBe("invalid_input");
+  for (const runtime of [undefined, null, "html-v1", "javascript-v1", "swift-v2", "Swift-v1"])
+    expect((await call("", "POST", { ...document, runtime })).value.error).toBe("unsupported_runtime");
+  expect((await call("", "POST", { ...metadata, runtime })).value.error).toBe("invalid_input");
+  const created = await call("", "POST", document), path = `/${created.value.id}`;
+  const updated = await call(path, "PUT", { ...revisedDocument, revision: 1 });
+  expect(updated.status).toBe(200);
+  for (const input of [
+    { ...document, runtime: "html-v1", revision: 2 },
+    { ...metadata, source, revision: 2 },
+    { ...document, html: "<h1>Legacy</h1>", revision: 2 },
+  ]) expect((await call(path, "PUT", input)).status).toBe(400);
+  expect((await call(path)).value).toEqual(updated.value);
+  const restored = await call(`${path}/restore`, "POST", { revision: 2 });
+  expect(restored.value).toMatchObject({ ...document, revision: 3 });
+  expect((await call(path)).value).toEqual(restored.value);
+  expect(restored.value).not.toHaveProperty("html");
 });

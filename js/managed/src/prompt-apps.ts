@@ -1,9 +1,10 @@
-/** Durable account-owned documents. HTML is untrusted; native hosts must sandbox it. */
+/** Durable account-owned Swift source. Native hosts validate and execute swift-v1. */
 export const APP_DOCUMENT_BYTES = 256 * 1024;
 export const APP_DATA_BYTES = 256 * 1024;
+export const APP_RUNTIME = "swift-v1";
 const MAX_APPS = 100;
-const fields = "id,title,description,html,revision,created_at,updated_at";
-const summaryFields = "id,title,description,revision,created_at,updated_at";
+const fields = "id,title,description,runtime,source,revision,created_at,updated_at";
+const summaryFields = "id,title,description,runtime,revision,created_at,updated_at";
 const encoder = new TextEncoder();
 export type AppOperation = "list" | "get" | "save" | "delete" | "restore" | "data_get" | "data_set";
 export class AppError extends Error {
@@ -54,10 +55,11 @@ export async function appRequest(db: D1Database, owner: string, operation: AppOp
   createId = crypto.randomUUID()): Promise<unknown> {
   const input = object(value);
   const allowed: Record<AppOperation, string[]> = {
-    list: ["limit", "cursor"], get: ["id"], save: ["id", "title", "description", "html", "revision"],
+    list: ["limit", "cursor"], get: ["id"], save: ["id", "title", "description", "runtime", "source", "revision"],
     delete: ["id", "revision"], restore: ["id", "revision"], data_get: ["id"], data_set: ["id", "value", "revision"],
   };
   if (!Object.hasOwn(allowed, operation) || Object.keys(input).some(key => !allowed[operation].includes(key))) throw new AppError("invalid_input");
+  if (operation === "save" && input.runtime !== APP_RUNTIME) throw new AppError("unsupported_runtime");
   const session = db.withSession("first-primary");
   const now = new Date().toISOString();
   if (operation === "list") {
@@ -70,12 +72,12 @@ export async function appRequest(db: D1Database, owner: string, operation: AppOp
   }
   if (operation === "save" && input.id === undefined) {
     if (input.revision !== undefined) throw new AppError("invalid_revision");
-    const title = text(input.title, 256), description = text(input.description ?? "", 2048, true), html = text(input.html, APP_DOCUMENT_BYTES);
+    const title = text(input.title, 256), description = text(input.description ?? "", 2048, true), source = text(input.source, APP_DOCUMENT_BYTES);
     const id = appId(createId);
-    const result = await session.prepare(`INSERT INTO prompt_apps (owner_id,id,title,description,html,created_at,updated_at)
-      SELECT ?,?,?,?,?,?,? WHERE (SELECT count(*) FROM prompt_apps WHERE owner_id=?) < ?
+    const result = await session.prepare(`INSERT INTO prompt_apps (owner_id,id,title,description,runtime,source,created_at,updated_at)
+      SELECT ?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM prompt_apps WHERE owner_id=?) < ?
       ON CONFLICT(owner_id,id) DO NOTHING RETURNING ${fields}`)
-      .bind(owner, id, title, description, html, now, now, owner, MAX_APPS).first();
+      .bind(owner, id, title, description, APP_RUNTIME, source, now, now, owner, MAX_APPS).first();
     if (result) return result;
     // Stable tool call IDs allow a retried creation to return its first result.
     const existing = await session.prepare(`SELECT ${fields} FROM prompt_apps WHERE owner_id=? AND id=?`).bind(owner, id).first();
@@ -97,17 +99,17 @@ export async function appRequest(db: D1Database, owner: string, operation: AppOp
   const expected = revision(input.revision, operation === "data_set" ? 0 : 1);
   let result;
   if (operation === "save") {
-    const title = text(input.title, 256), description = text(input.description ?? "", 2048, true), html = text(input.html, APP_DOCUMENT_BYTES);
-    result = await session.prepare(`UPDATE prompt_apps SET previous_title=title,previous_description=description,previous_html=html,title=?,description=?,html=?,revision=revision+1,updated_at=?
+    const title = text(input.title, 256), description = text(input.description ?? "", 2048, true), source = text(input.source, APP_DOCUMENT_BYTES);
+    result = await session.prepare(`UPDATE prompt_apps SET previous_title=title,previous_description=description,previous_source=source,title=?,description=?,source=?,revision=revision+1,updated_at=?
       WHERE owner_id=? AND id=? AND revision=? RETURNING ${fields}`)
-      .bind(title, description, html, now, owner, id, expected).first();
+      .bind(title, description, source, now, owner, id, expected).first();
   } else if (operation === "restore") {
-    result = await session.prepare(`UPDATE prompt_apps SET title=previous_title,description=previous_description,html=previous_html,
-      previous_title=title,previous_description=description,previous_html=html,revision=revision+1,updated_at=?
-      WHERE owner_id=? AND id=? AND revision=? AND previous_html IS NOT NULL RETURNING ${fields}`)
+    result = await session.prepare(`UPDATE prompt_apps SET title=previous_title,description=previous_description,source=previous_source,
+      previous_title=title,previous_description=description,previous_source=source,revision=revision+1,updated_at=?
+      WHERE owner_id=? AND id=? AND revision=? AND previous_source IS NOT NULL RETURNING ${fields}`)
       .bind(now, owner, id, expected).first();
     if (!result) {
-      const current = await session.prepare("SELECT revision,previous_html IS NOT NULL AS has_previous FROM prompt_apps WHERE owner_id=? AND id=?")
+      const current = await session.prepare("SELECT revision,previous_source IS NOT NULL AS has_previous FROM prompt_apps WHERE owner_id=? AND id=?")
         .bind(owner, id).first<{ revision: number; has_previous: number }>();
       if (current?.revision === expected && !current.has_previous) throw new AppError("no_previous_revision", 409);
     }
