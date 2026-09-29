@@ -303,7 +303,7 @@ async function createPrepared(module, resolved, options, hostAgent, lifecycle, p
   if (typeof prepare !== "function") throw new TypeError("Cloudflare Agent preparation must be a function");
   const configuration = options[INTERNAL_CONFIGURATION];
   validateInternalConfiguration(configuration);
-  if (!configuration || !["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"].includes(configuration.model)) {
+  if (!configuration || !["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(configuration.model)) {
     throw new Error("Cloudflare Agent preparation requires a native root configuration");
   }
   const runtime = options[INTERNAL_RUNTIME];
@@ -532,7 +532,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
             throw new Error("Native inference cannot replace a routed transport");
           }
           const parsed = JSON.parse(body);
-          if (!["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"].includes(parsed.model)
+          if (!["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(parsed.model)
             || !["none", "low", "medium", "high", "xhigh", "max"].includes(parsed.reasoning?.effort)) {
             throw new Error("Native inference requires a supported GPT model and thinking");
           }
@@ -566,7 +566,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
             }
             selected = createWorkersAiResponses(profile.workersAi.ai);
           } else {
-            if (!["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"].includes(profile.model)) {
+            if (!["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(profile.model)) {
               throw new Error("Session model requires an explicit inference binding");
             }
             selected = frontierEndpoint;
@@ -824,14 +824,14 @@ function validateInternalConfiguration(configuration) {
       "reasoning_mode",
       "fast_mode",
     ].includes(key))
-    || !["gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"]
+    || !["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra", "@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"]
       .includes(configuration.model)
     || !["none", "low", "medium", "high", "xhigh", "max"].includes(configuration.thinking)
     || !["standard", "pro"].includes(configuration.reasoning_mode)
     || typeof configuration.fast_mode !== "boolean"
     || (["@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"].includes(configuration.model)
       && (!(configuration.model === "kimi-k3" ? ["low", "high"] : ["low", "medium", "high"]).includes(configuration.thinking) || configuration.reasoning_mode !== "standard"))
-    || (configuration.model === "gpt-6-astra" && configuration.thinking === "none")) {
+    || (["gpt-6-astra", "gpt-6.1-sol"].includes(configuration.model) && configuration.thinking === "none")) {
     throw new TypeError("Cloudflare Agent internal configuration is invalid");
   }
 }

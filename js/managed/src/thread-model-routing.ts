@@ -4,7 +4,7 @@ import { z } from "zod";
 export const OSS_MODEL = "@cf/zai-org/glm-5.3" as const;
 export const FRONTIER_MODEL = "gpt-6-astra" as const;
 export const ROUTING_VERSION = "jev-direct-v4" as const;
-const frontierModel = z.enum(["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]);
+const frontierModel = z.enum(["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]);
 const gatewayModel = z.enum(["kimi-k3", "mimo-v2.6-pro"]);
 const thinking = z.enum(["low", "medium", "high"]);
 export const taskFamily = z.enum([
@@ -34,7 +34,7 @@ const estimate = z.object({
 const gatewayTokenPrices = {
   openrouter: {
     [FRONTIER_MODEL]: [10, 50, 1], [OSS_MODEL]: [.91, 2.86, .169],
-    "gpt-6-luna": [.1, .5, .01], "gpt-6-sol": [2, 10, .2],
+    "gpt-6-luna": [.1, .5, .01],
   },
   vercel: {
     [FRONTIER_MODEL]: [10, 50, 1], [OSS_MODEL]: [1.4, 4.4, .14],
@@ -57,9 +57,9 @@ function catalogPriceHint(backend: z.infer<typeof backendSchema>, model: typeof 
 export const ROUTING_CANDIDATES = [OSS_MODEL, ...frontierModel.options, ...gatewayModel.options].flatMap(model => {
   const nativeBackend = model === OSS_MODEL ? "workers_ai" as const : "chatgpt" as const;
   const gatewayOnly = gatewayModel.safeParse(model).success;
-  // Managed agents advertise tools; Sol/Luna Chat gateways require effort none,
-  // which is outside the managed reasoning policy. Keep their Responses routes.
-  const gateways = model === "gpt-6-sol" || model === "gpt-6-luna"
+  // Managed agents advertise tools; Sol Chat cannot call tools, and Luna Chat
+  // requires effort none, which is outside the managed reasoning policy.
+  const gateways = model === "gpt-6.1-sol" || model === "gpt-6-luna"
     ? [] : ["openrouter" as const, "vercel" as const];
   return [...(gatewayOnly ? [] : [nativeBackend]), ...gateways,
     ...(model === OSS_MODEL || gatewayOnly ? [] : ["cloudflare" as const])].flatMap(backend => {

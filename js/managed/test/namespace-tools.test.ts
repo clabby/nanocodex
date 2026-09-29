@@ -33,7 +33,7 @@ const context = (overrides: Partial<{
   callId: string;
 }> = {}) => ({
   callId: overrides.callId ?? "call",
-  model: "gpt-6-sol",
+  model: "gpt-6.1-sol",
   parentCallId: overrides.parentCallId ?? "cell",
   sessionId: overrides.sessionId ?? "root-session",
   signal: new AbortController().signal,

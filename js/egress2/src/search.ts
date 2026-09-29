@@ -109,7 +109,7 @@ function searchBody(value: unknown): Record<string, unknown> {
   const input = value as Record<string, unknown>;
   if (typeof input.session_id !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(input.session_id)
     || !input.commands || typeof input.commands !== "object" || Array.isArray(input.commands)) throw new Error("invalid request");
-  const model = input.model ?? "gpt-6-sol";
+  const model = input.model ?? "gpt-6.1-sol";
   if (typeof model !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(model)) throw new Error("invalid model");
   return { id: input.session_id, model, commands: input.commands,
     settings: { allowed_callers: ["direct"], external_web_access: true }, max_output_tokens: 10_000 };

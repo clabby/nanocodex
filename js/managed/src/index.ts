@@ -9237,7 +9237,7 @@ export class DurableAgentSession extends DurableComputerObject {
       native: {
         parentIsNative: parentSessionId => !this.#threadRoute()
           && (parentSessionId === rootRoutingSessionId()
-            ? ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"].includes(this.#settings().model)
+            ? ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(this.#settings().model)
             : readChildRoute(parentSessionId)?.route === null),
         authorize: (parentSessionId, hostContextRef) => {
           assertRuntimeOwned();

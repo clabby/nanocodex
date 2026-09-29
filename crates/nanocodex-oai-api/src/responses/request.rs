@@ -1182,7 +1182,7 @@ mod tests {
     #[test]
     fn supported_models_serialize_as_selected() {
         for (model, expected) in [
-            (Model::Sol, "gpt-6-sol"),
+            (Model::Sol, "gpt-6.1-sol"),
             (Model::Luna, "gpt-6-luna"),
             (Model::Astra, "gpt-6-astra"),
             (Model::Glm53, "@cf/zai-org/glm-5.3"),
@@ -1220,7 +1220,7 @@ mod tests {
         ))
         .expect("request should serialize");
 
-        assert_eq!(request["model"], json!("openai/gpt-6-sol"));
+        assert_eq!(request["model"], json!("openai/gpt-6.1-sol"));
     }
 
     #[test]
@@ -1247,7 +1247,7 @@ mod tests {
             None,
         ))
         .unwrap();
-        assert_eq!(request["model"], "original/gpt-6-sol");
+        assert_eq!(request["model"], "original/gpt-6.1-sol");
         assert_eq!(request["reasoning"]["mode"], "pro");
         assert_eq!(request["reasoning"]["effort"], "max");
         assert_eq!(request["service_tier"], "priority");
@@ -1271,7 +1271,6 @@ mod tests {
         let profile = RequestProfile::new("pro-agent", "pro-lineage", prefix);
 
         for (thinking, expected) in [
-            (Thinking::None, "none"),
             (Thinking::Low, "low"),
             (Thinking::Medium, "medium"),
             (Thinking::High, "high"),

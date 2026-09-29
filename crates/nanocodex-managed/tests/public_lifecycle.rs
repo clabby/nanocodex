@@ -866,7 +866,7 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
             lock(&fixture.inner.create_bodies).as_slice(),
             [json!({
                 "settings": {
-                    "model": "gpt-6-sol",
+                    "model": "gpt-6.1-sol",
                     "thinking": "medium",
                     "reasoning_mode": "pro",
                     "fast_mode": true
@@ -1047,7 +1047,7 @@ fn agent_state_json(agent_id: &str, latest_event_cursor: &str) -> Value {
             "native_cross_mounts": false
         },
         "settings": {
-            "model": "gpt-6-sol",
+            "model": "gpt-6.1-sol",
             "thinking": "high",
             "reasoning_mode": "standard",
             "fast_mode": false
@@ -1329,7 +1329,7 @@ fn exact_usage() -> Value {
 
 fn default_settings() -> Value {
     json!({
-        "model": "gpt-6-sol",
+        "model": "gpt-6.1-sol",
         "thinking": "high",
         "reasoning_mode": "standard",
         "fast_mode": false

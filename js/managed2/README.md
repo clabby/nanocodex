@@ -43,7 +43,7 @@ is retained for alarm reconciliation. Egress2 swaps the SDK placeholder for the
 owner's active provider credential, with a 60-second isolate credential cache;
 the credential DO encrypts the stored key and opaque Rust subscription payload.
 
-This slice pins `gpt-6-sol`/low. It runs alongside, rather than replacing,
+This slice pins `gpt-6.1-sol`/low. It runs alongside, rather than replacing,
 the existing managed API. The subscription path uses Egress2’s Cloudflare Gateway VPC binding and skips
 the account-owned `ChatGptEgress` relay/container. That regional relay remains
 a rollback route if the VPC binding is removed from Egress2. Managed2 uses a persistent

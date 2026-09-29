@@ -37,7 +37,7 @@ if let Some(cost) = completed.estimated_cost() {
 ```
 
 This crate supports `gpt-6-astra` (the default, with low reasoning),
-`gpt-6-sol`, and `gpt-6-luna`. Select a client default with
+`gpt-6.1-sol`, and `gpt-6-luna`. Select a client default with
 `OpenAi::builder(auth).model(Model::Sol)`. A session keeps that model for its
 lifetime, and each replayable attempt retains it across retries. Changing
 models would invalidate the provider checkpoint and require an inefficient

@@ -529,7 +529,7 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
       type: "call",
       session_id: "session:app-tool",
       call_id: "call:app-echo",
-      model: "gpt-6-sol",
+      model: "gpt-6.1-sol",
       name: "app_echo",
       input: { value: "hello" },
       output_token_budget: 10_000,

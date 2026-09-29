@@ -496,12 +496,12 @@ export class Session extends DurableObject<Env> {
       context => this.#toolTiming.correlation(context))),
       instructions: "You are a concise assistant. Use exec_command for shell tasks in /brain." };
     Object.defineProperty(options, Symbol.for("nanocodex.cloudflare.internalConfiguration"), { value: {
-      model: "gpt-6-sol", thinking: "low", reasoning_mode: "standard", fast_mode: false,
+      model: "gpt-6.1-sol", thinking: "low", reasoning_mode: "standard", fast_mode: false,
     } });
     Object.defineProperty(options, Symbol.for("nanocodex.cloudflare.internalRuntime"), { value: {
       ...(this.env.RESPONSES_TRANSPORT === "websocket"
         ? { waitForPreconnect: true }
-        : { inferenceForSession: () => ({ model: "gpt-6-sol", thinking: "low" }) }),
+        : { inferenceForSession: () => ({ model: "gpt-6.1-sol", thinking: "low" }) }),
       subagentsEnabled: false,
       onResponseCreateSent: () => this.#modelSent(),
     } });

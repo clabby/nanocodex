@@ -45,7 +45,7 @@ describe("eval-informed thread routing", () => {
     expect(() => policy({ estimates: [...estimates, estimates[0]] })).toThrow();
   });
   it("supports configured ChatGPT model and refuses mixed measurement sources", async () => {
-    expect((await resolveThreadRoute(jev("research"), "task", policy({ frontier_model: "gpt-6-sol", frontier_thinking: "low" }))).model).toBe("gpt-6-sol");
+    expect((await resolveThreadRoute(jev("research"), "task", policy({ frontier_model: "gpt-6.1-sol", frontier_thinking: "low" }))).model).toBe("gpt-6.1-sol");
     const mixed = estimates.map((e, i) => ({ ...e, source: `dataset-${i}` }));
     expect((await resolveThreadRoute(jev(), "task", policy({ estimates: mixed }))).selection).toBe("prior");
   });
@@ -113,9 +113,9 @@ describe("v2 direct candidate routing", () => {
   });
   it("retains a selected supported thinking level and bounds eligibility", async () => {
     for (const thinking of ["low", "medium", "high"]) {
-      const id = `gpt-6-sol:${thinking}`;
+      const id = `gpt-6.1-sol:${thinking}`;
       const route = await resolveThreadRoute(answer(id), "task", direct({ candidates: [id] }));
-      expect(route).toMatchObject({ model: "gpt-6-sol", thinking, selection: "prior" });
+      expect(route).toMatchObject({ model: "gpt-6.1-sol", thinking, selection: "prior" });
       expect(route.audit?.eligible_candidates).toEqual([id]);
     }
     expect(() => direct({ preferences: {completion:0, cost:0, duration:0} })).toThrow();
@@ -125,8 +125,8 @@ describe("v2 direct candidate routing", () => {
     expect(() => direct({ preferences: { text: "x".repeat(2001) } })).toThrow();
   });
   it.each(["Pending", "Failed"])("does not admit %s envelopes", async state => {
-    const route = await resolveThreadRoute({run: async () => ({state, result: await answer().run("", {})})}, "task", direct({ candidates: ["gpt-6-sol:medium"] }));
-    expect(route).toMatchObject({ selection: "fallback", model: "gpt-6-sol", thinking: "medium" });
+    const route = await resolveThreadRoute({run: async () => ({state, result: await answer().run("", {})})}, "task", direct({ candidates: ["gpt-6.1-sol:medium"] }));
+    expect(route).toMatchObject({ selection: "fallback", model: "gpt-6.1-sol", thinking: "medium" });
   });
   it("accepts completed envelopes and retains usage", async () => {
     const route = await resolveThreadRoute({run: async () => ({state: "Completed", result: {...await answer().run("", {}), usage: { input_tokens: 42 }}})}, "task", direct());
@@ -136,7 +136,7 @@ describe("v2 direct candidate routing", () => {
   it("rejects a modality with no eligible model and bounds oversized fallback", async () => {
     const ai = answer();
     await expect(resolveThreadRoute(ai, [{type:"input_image"}], direct({candidates:[`${OSS_MODEL}:low`]}))).rejects.toThrow("no route admitted");
-    expect((await resolveThreadRoute(ai, "x".repeat(24001), direct({candidates:["gpt-6-sol:low"]}))).model).toBe("gpt-6-sol");
+    expect((await resolveThreadRoute(ai, "x".repeat(24001), direct({candidates:["gpt-6.1-sol:low"]}))).model).toBe("gpt-6.1-sol");
     expect(ai.run).not.toHaveBeenCalled();
   });
   it("never substitutes classifier confidence or wrong effort evidence for measured success", async () => {
@@ -152,8 +152,8 @@ describe("v2 direct candidate routing", () => {
   });
   it("labels measured comparisons only for a complete matched source cohort", async () => {
     const base = {family:"terminal", backend:"chatgpt", model:"gpt-6-luna", thinking:"low", success_rate:.8, expected_cost_usd:.1, expected_duration_ms:1000, sample_size:20, source:"heldout-v2"};
-    const candidates = ["gpt-6-luna:low", "gpt-6-sol:low"];
-    const other = {...base, model:"gpt-6-sol"};
+    const candidates = ["gpt-6-luna:low", "gpt-6.1-sol:low"];
+    const other = {...base, model:"gpt-6.1-sol"};
     expect((await resolveThreadRoute(answer(), "task", direct({candidates, estimates:[base, other]}))).selection).toBe("measured");
     expect((await resolveThreadRoute(answer(), "task", direct({candidates, estimates:[base, {...other, source:"different"}]}))).selection).toBe("prior");
   });

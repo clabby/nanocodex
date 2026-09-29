@@ -200,7 +200,7 @@ export function performanceRequestShape(sessionId: string, observation: unknown)
   const input = observation as Record<string, unknown>;
   const safe: Record<string, string | number | boolean> = {};
   const enums: Record<string, readonly string[]> = {
-    model: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+    model: ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"],
     reasoning_effort: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
     reasoning_context: ["all_turns", "last_turn"],
     service_tier: ["default", "auto", "priority", "flex", "fast"],

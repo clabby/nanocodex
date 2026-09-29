@@ -6,7 +6,7 @@ const ENDPOINTS = Object.freeze({
   openrouter: "https://openrouter.ai/api/v1/chat/completions",
   vercel: "https://ai-gateway.vercel.sh/v1/chat/completions",
 });
-const MODELS = ["@cf/zai-org/glm-5.3", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "kimi-k3", "mimo-v2.6-pro"];
+const MODELS = ["@cf/zai-org/glm-5.3", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "kimi-k3", "mimo-v2.6-pro"];
 const fail = message => { throw new Error(`Gateway Responses: ${message}`); };
 
 /** Server-side, full-history transport; no WebSocket or opaque compaction. */
@@ -14,7 +14,7 @@ export function createGatewayResponses(options) {
   const { provider, model, reasoningEffort, apiKey, fetch: fetchImpl = globalThis.fetch } = options;
   if (provider !== "cloudflare" && !Object.hasOwn(ENDPOINTS, provider)) fail("unsupported provider");
   if (!MODELS.includes(model)) fail("unsupported canonical model");
-  if (!(["gpt-6-sol", "gpt-6-luna"].includes(model) ? ["none", "low", "medium", "high", "xhigh", "max"] : model === "kimi-k3" ? ["low", "high"] : ["low", "medium", "high"]).includes(reasoningEffort)) fail("unsupported reasoning effort");
+  if (!(model === "gpt-6-luna" ? ["none", "low", "medium", "high", "xhigh", "max"] : model === "gpt-6.1-sol" ? ["low", "medium", "high", "xhigh", "max"] : model === "kimi-k3" ? ["low", "high"] : ["low", "medium", "high"]).includes(reasoningEffort)) fail("unsupported reasoning effort");
   const cloudflareHttp = provider === "cloudflare" && (options.accountId !== undefined || apiKey !== undefined);
   if (provider === "cloudflare") {
     if (!model.startsWith("gpt-")) fail("Cloudflare gateway requires an OpenAI canonical model");
@@ -36,8 +36,8 @@ export function createGatewayResponses(options) {
   const adapter = (signal, attempt, reasoningMode) => createWorkersAiResponses({
     async run(_model, input) {
       signal?.throwIfAborted();
-      if (provider !== "cloudflare" && ["gpt-6-sol", "gpt-6-luna"].includes(model) && reasoningEffort !== "none" && input.tools?.length) {
-        fail("GPT-6 Sol/Luna function calling requires Responses or reasoning effort none");
+      if (provider !== "cloudflare" && input.tools?.length && (model === "gpt-6.1-sol" || model === "gpt-6-luna" && reasoningEffort !== "none")) {
+        fail("pinned Chat model/effort cannot call tools; use Responses");
       }
       if (input.reasoning_effort !== undefined && input.reasoning_effort !== reasoningEffort) fail("reasoning override does not match pinned effort");
       if (provider === "cloudflare" && !cloudflareHttp) {
@@ -160,7 +160,7 @@ export function createGatewayResponses(options) {
         // The portable Chat translator has no reasoning.mode field. Preserve it
         // explicitly on Responses transports and reject unsupported pro requests.
         const body = JSON.parse(request.body);
-        const supportsMode = ["gpt-6-sol", "gpt-6-luna"].includes(model);
+        const supportsMode = ["gpt-6.1-sol", "gpt-6-luna"].includes(model);
         const validateMode = value => {
           if (value !== undefined && !["standard", "pro"].includes(value)) fail("unsupported reasoning mode");
           if (value === "pro" && (provider !== "cloudflare" || !supportsMode)) fail("pro reasoning requires a supported Responses model");

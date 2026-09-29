@@ -12,9 +12,9 @@ function feed() {
   return { body, send(value) { controller.enqueue(encoder.encode(wire(value))); }, raw(value) { controller.enqueue(value); },
     close() { controller.close(); }, get cancelled() { return cancelled; } };
 }
-function setup(provider, upstream, signal, model = "gpt-6-sol") {
+function setup(provider, upstream, signal, model = "gpt-6-luna") {
   const observed = [], requests = [];
-  const options = { provider, model, reasoningEffort: provider === "cloudflare" || model === "mimo-v2.6-pro" ? "high" : "none", apiKey: "synthetic-secret",
+  const options = { provider, model, reasoningEffort: provider === "cloudflare" || model !== "gpt-6-luna" ? "high" : "none", apiKey: "synthetic-secret",
     ...(provider === "cloudflare" ? { accountId: "a".repeat(32) } : {}),
     fetch: async (_url, init) => { requests.push(JSON.parse(init.body)); return new Response(upstream.body, { headers: { "content-type": "text/event-stream" } }); },
     onRequest: () => ({ headers(status) { observed.push(status); }, firstToken() { observed.push("first"); }, finish(outcome) { observed.push(outcome); } }) };
@@ -185,7 +185,7 @@ test("streaming retains pre-dispatch full-history and tool validation", async ()
 
 test("Cloudflare binding streams native Responses before completion", async () => {
   const upstream = feed(), observed = [];
-  const transport = createGatewayResponses({ provider: "cloudflare", model: "gpt-6-sol", reasoningEffort: "high",
+  const transport = createGatewayResponses({ provider: "cloudflare", model: "gpt-6.1-sol", reasoningEffort: "high",
     ai: { async run(_model, input) { assert.equal(input.stream, true); return upstream.body; } },
     onRequest: () => ({ headers() { assert.fail(); }, firstToken() { observed.push("first"); }, finish(outcome) { observed.push(outcome); } }) });
   const response = await transport.createResponse(`${transport.apiBaseUrl}/responses`, "fixture", {
@@ -205,7 +205,7 @@ test("late binding streams are cancelled after dispatch was aborted", async () =
     let resolve, begin;
     const ready = new Promise(value => { begin = value; });
     const ai = { run() { begin(); return new Promise(value => { resolve = value; }); } };
-    const transport = gateway ? createGatewayResponses({ provider: "cloudflare", model: "gpt-6-sol", reasoningEffort: "high", ai }) : createWorkersAiResponses(ai);
+    const transport = gateway ? createGatewayResponses({ provider: "cloudflare", model: "gpt-6.1-sol", reasoningEffort: "high", ai }) : createWorkersAiResponses(ai);
     const controller = new AbortController();
     const pending = transport.createResponse(`${transport.apiBaseUrl}/responses`, "fixture", {
       authorization: "host_managed", body: JSON.stringify({ input: "hi", stream: true }), signal: controller.signal });
@@ -239,7 +239,7 @@ test("completed binding objects honestly report buffered fallback for stream req
       assert.equal(input.stream, true);
       return gateway ? nativeFinal().response : { choices: [{ message: { content: "hello" }, finish_reason: "stop" }] };
     } };
-    const transport = gateway ? createGatewayResponses({ provider: "cloudflare", model: "gpt-6-sol", reasoningEffort: "high", ai,
+    const transport = gateway ? createGatewayResponses({ provider: "cloudflare", model: "gpt-6.1-sol", reasoningEffort: "high", ai,
       onRequest: () => ({ headers() {}, firstToken() { observed.push("first"); }, finish(outcome) { observed.push(outcome); } }) }) : createWorkersAiResponses(ai);
     const response = await transport.createResponse(`${transport.apiBaseUrl}/responses`, "fixture", {
       authorization: "host_managed", body: JSON.stringify({ input: "hi", stream: true }) });
@@ -255,7 +255,7 @@ test("explicit buffered requests are labeled and HTTP streaming never falls back
     authorization: "host_managed", body: JSON.stringify({ input: "hi" }) });
   assert.equal(response.headers.get("x-nanocodex-inference-buffering"), "buffered");
   for (const provider of ["openrouter", "vercel", "cloudflare"]) {
-    const http = createGatewayResponses({ provider, model: "gpt-6-sol", reasoningEffort: "high", apiKey: "synthetic",
+    const http = createGatewayResponses({ provider, model: "gpt-6.1-sol", reasoningEffort: "high", apiKey: "synthetic",
       ...(provider === "cloudflare" ? { accountId: "a".repeat(32) } : {}), fetch: async () => Response.json(nativeFinal().response) });
     await assert.rejects(() => http.createResponse(`${http.apiBaseUrl}/responses`, "fixture", {
       authorization: "host_managed", body: JSON.stringify({ input: "hi", stream: true }) }), /request failed/);

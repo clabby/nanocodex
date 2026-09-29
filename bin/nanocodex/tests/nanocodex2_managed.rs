@@ -1853,6 +1853,8 @@ async fn headless_settings_and_cron_use_the_managed_contract() {
         vec!["run", "hello", "--agent", AGENT_ID, "--model", "sol"],
         vec!["cron", "get", AGENT_ID, "../escape"],
         vec!["new", "--model", "astra", "--thinking", "none"],
+        vec!["new", "--model", "sol", "--thinking", "none"],
+        vec!["new", "--model", "gpt-6-sol"],
         vec![
             "run",
             "hello",
@@ -1884,7 +1886,7 @@ async fn headless_settings_and_cron_use_the_managed_contract() {
     assert_eq!(requests.len(), before_invalid);
     assert_eq!(
         requests[0].2["settings"],
-        json!({"model": "gpt-6-sol", "thinking": "high", "reasoning_mode": "standard", "fast_mode": true})
+        json!({"model": "gpt-6.1-sol", "thinking": "high", "reasoning_mode": "standard", "fast_mode": true})
     );
     assert_eq!(
         requests[0].2["configuration"],
