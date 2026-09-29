@@ -42,9 +42,12 @@ let package = Package(
             name: target.name,
             dependencies: target.dependencies.map { .product(name: $0.name, package: $0.package) },
             path: "xtool/generated/Sources/\(target.name)",
-            swiftSettings: target.defines.map { .define($0) } +
+            // Linux SwiftBuild needs overlays for PhotosUI/QuickLook + SwiftUI.
+            swiftSettings: [.unsafeFlags(["-Xfrontend", "-enable-cross-import-overlays"])] +
+                target.defines.map { .define($0) } +
                 (target.extensionTarget ? [.unsafeFlags(["-application-extension"])] : []),
-            linkerSettings: [.unsafeFlags(target.linkerFlags)]
+            // Reserve load-command space for xtool/zsign code signatures.
+            linkerSettings: [.unsafeFlags(target.linkerFlags + ["-Xlinker", "-headerpad", "-Xlinker", "0x1000"])]
         )
     },
     swiftLanguageModes: [.v5]

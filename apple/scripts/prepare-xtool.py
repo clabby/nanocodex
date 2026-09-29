@@ -264,7 +264,12 @@ def build(stage, args):
             defines.extend(d for d in conditional.get("SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=iphoneos27.*]", "").split() if d != "$(inherited)")
         linker_flags = ["-Xlinker", "-rpath", "-Xlinker", "@executable_path/Frameworks"]
         if extension:
-            linker_flags += ["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../Frameworks", "-Xlinker", "-application_extension"]
+            # Principal classes are discovered by name, not referenced by the stub.
+            linker_flags += ["-Xlinker", "-ObjC", "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../Frameworks", "-Xlinker", "-application_extension"]
+            if info.get("NSExtension", {}).get("NSExtensionPointIdentifier") == "com.apple.widgetkit-extension":
+                # xtool defaults all extensions to Foundation's NSExtensionMain;
+                # WidgetBundle's @main must run its generated Swift entry point.
+                linker_flags += ["-Xlinker", "-e", "-Xlinker", "_main"]
         package["targets"].append({"name": name, "product": settings["PRODUCT_NAME"], "dependencies": dependencies,
                                    "defines": sorted(set(defines)), "extensionTarget": extension, "linkerFlags": linker_flags})
         report["targets"][name] = {"module": name, "product": settings["PRODUCT_NAME"], "sources": sources,

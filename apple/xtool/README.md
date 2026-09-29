@@ -5,10 +5,11 @@ widgets, and Rust voice library. It produces a full native app, not interpreted
 Swift or a web wrapper. It does not invoke macOS, Xcode, `xcrun`, or `lipo`.
 The existing Xcode build remains available independently.
 
-**Status:** installation and packaging preparation are validated on Linux. A
-complete device build and installation are not yet validated: the development
-Linux environment has no Apple SDK. Do not substitute preparation checks for an
-app compilation or publish an unsigned IPA.
+**Status:** a complete Linux device build and IPA packaging are validated with
+Swift 6.4, xtool 1.20.1 and iPhoneOS SDK 26.2. Binary checks verify ARM64 app and
+extension code, the share principal class, the widget's Swift entry point, and
+the bundled WebRTC framework. Apple signing trust, phone installation, and
+App Intents discovery remain unverified. The default IPA is not installable.
 
 ## Setup
 
@@ -18,10 +19,11 @@ disk during extraction. Use Swift 6.4 or newer; SwiftBuild support in xtool 1.20
 is needed for the app's XCFramework dependencies.
 
 1. Install [Swift for Linux](https://www.swift.org/install/linux/), Rust 1.97,
-   Python 3 with Pillow, and `util-linux` (the `script` command).
+   Python 3 with Pillow, `zip`, and `util-linux` (the `script` command).
 2. Install the Rust device target: `rustup target add aarch64-apple-ios`.
-3. Download Xcode's `.xip` from your Apple Developer downloads account. This is
-   an SDK input; Xcode itself is not run. Keep it in private storage.
+3. Download Xcode's `.xip` from your Apple Developer downloads account, or copy
+   an existing `Xcode.app` to Linux. This is an SDK input; Xcode itself is not
+   run. Keep it in private storage. The installer accepts either input.
 4. Install the pinned xtool release and extract the SDK on Linux:
 
    ```sh
@@ -35,9 +37,18 @@ is needed for the app's XCFramework dependencies.
 ## Build
 
 ```sh
+ulimit -n 65536
 NANOCODEX_IOS_VERSION=0.1.0 NANOCODEX_IOS_BUILD_VERSION=1790650000 \
   bash apple/scripts/build-ios-linux.sh
 ```
+
+Swift dependency scanning can exceed a Linux shell's default 1,024 open files;
+raise the limit before building. Leave space on the system temporary filesystem
+as well as the build volume: SwiftBuild may reset `TMPDIR` for child tools.
+The package enables Swift cross-import overlays for PhotosUI and Quick Look
+SwiftUI APIs. Extension linking retains Objective-C principal classes and uses
+the widget bundle's Swift entry point. The wrapper regenerates SwiftBuild's plan
+after preparing metadata while retaining compiled objects and dependencies.
 
 The default build is unsigned, allowing compilation without Apple credentials
 or a connected iPhone. The script discovers the installed `iPhoneOS.sdk`; set
@@ -49,7 +60,11 @@ writes a device-only XCFramework using Python. It does not require Mac or
 simulator slices. Existing Apple builds can regenerate their multi-platform
 artifact with their original build script.
 
-Build logs, IPA, and SHA-256 are under `output/ios-linux/<build>/`. The staged
+The build runs `verify-ios-linux.py` against the produced IPA and rejects empty
+extension stubs, missing principal classes, and incorrect widget entry points.
+These binary checks do not substitute for testing on the phone.
+
+Build logs, binary verification report, IPA, and SHA-256 are under `output/ios-linux/<build>/`. The staged
 project is under ignored `apple/xtool/generated/`. Generated manifests and plists are derived
 from the existing app's source configuration; changes to the Xcode project must
 also pass the packaging preparation checks. The root SwiftPM lockfile points

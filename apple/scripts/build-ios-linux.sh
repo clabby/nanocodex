@@ -66,6 +66,9 @@ print(data['Version'])
 PYSDK
 )
 python3 apple/scripts/prepare-xtool.py --version "$version" --build-number "$build" --sdk-version "$sdk_version"
+# Package.swift reads generated JSON outside SwiftPM's tracked manifest inputs.
+# Re-plan after preparation while preserving compiled objects and dependencies.
+rm -f apple/.build/manifest.pif
 args=(dev build --configuration release --ipa)
 # Don't leak SDKROOT into host tools and SwiftPM manifest compilation.
 # SwiftNIO's stdin registration needs a terminal with some CI transports.
@@ -74,6 +77,7 @@ printf -v build_command '%q ' env -u SDKROOT "$xtool" "${args[@]}"
 (cd apple && script --quiet --return --command "$build_command" /dev/null < /dev/null)
 mapfile -t ipas < <(find "$root/apple/xtool" -maxdepth 1 -type f -name '*.ipa')
 [[ ${#ipas[@]} == 1 ]] || fail 'Expected exactly one IPA from xtool.'
+python3 apple/scripts/verify-ios-linux.py "${ipas[0]}" > "$output/structure.json"
 kind=unsigned
 $sign && kind=signed
 if $sign; then

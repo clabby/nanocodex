@@ -8,7 +8,7 @@ case $(uname -m) in
   aarch64) arch=aarch64; digest=160faf9dbb3882230800262c1852a9c3269cfbf86405907239123afc9022c9d0;;
   *) echo 'Unsupported architecture' >&2; exit 2;;
 esac
-[[ $# -le 1 ]] || { echo 'Usage: install-xtool-linux.sh [Xcode.xip|darwin.xtoolsdk]' >&2; exit 2; }
+[[ $# -le 1 ]] || { echo 'Usage: install-xtool-linux.sh [Xcode.xip|Xcode.app|darwin.xtoolsdk]' >&2; exit 2; }
 prefix=${NANOCODEX_XTOOL_PREFIX:-"${XDG_DATA_HOME:-$HOME/.local/share}/nanocodex/xtool-$version"}
 mkdir -p "$prefix"
 if [[ ! -x "$prefix/squashfs-root/AppRun" ]]; then
