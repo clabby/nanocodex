@@ -1466,6 +1466,13 @@ final class InboxModel: ObservableObject {
     var generatedAppAccount: UUID { generation }
 
     func refreshGeneratedApps() async {
+        #if DEBUG
+        if usesGeneratedAppsUIFixture {
+            generatedApps = (try? generatedAppsUIFixture.map(GeneratedAppManifest.init)) ?? []
+            generatedAppsError = nil
+            return
+        }
+        #endif
         guard connected, !isDemo, let client, !generatedAppsLoading else { return }
         let account = generation
         generatedAppsLoading = true
@@ -1484,6 +1491,28 @@ final class InboxModel: ObservableObject {
     /// Only the native host constructs paths and attaches account authorization.
     func generatedAppRequest(id: String, account: UUID, data: Bool = false, restore: Bool = false,
                              method: String = "GET", body: JSON? = nil) async throws -> JSON {
+        #if DEBUG
+        if usesGeneratedAppsUIFixture {
+            guard generation == account, !Task.isCancelled else { throw CancellationError() }
+            guard !restore, let manifest = generatedAppsUIFixture.first(where: { $0["id"].string == id }) else {
+                throw APIError.http(404)
+            }
+            if !data {
+                guard method == "GET" else { throw APIError.http(405) }
+                return manifest
+            }
+            let key = "inbox.generatedAppsFixture." + scope + "." + id
+            let saved = UserDefaults.standard.data(forKey: key)
+            let receipt = try saved.map { try JSONDecoder().decode(JSON.self, from: $0) }
+                ?? .object(["revision": .number(0), "value": .null])
+            if method == "GET" { return receipt }
+            guard method == "PUT", let body else { throw APIError.http(405) }
+            guard body["revision"] == receipt["revision"] else { throw APIError.http(409) }
+            let next = JSON.object(["revision": .number(receipt["revision"].number + 1), "value": body["value"]])
+            UserDefaults.standard.set(try JSONEncoder().encode(next), forKey: key)
+            return next
+        }
+        #endif
         guard connected, !isDemo, generation == account, let client,
               id.range(of: #"^[A-Za-z0-9_-]{1,128}$"#, options: .regularExpression) != nil,
               ["GET", "PUT", "DELETE", "POST"].contains(method) else { throw APIError.invalidCredential }
@@ -1491,6 +1520,40 @@ final class InboxModel: ObservableObject {
         guard generation == account, connected, !Task.isCancelled else { throw CancellationError() }
         return result
     }
+
+    #if DEBUG
+    private var usesGeneratedAppsUIFixture: Bool {
+        connected && isDemo && ProcessInfo.processInfo.arguments.contains("--generated-apps-ui-fixture")
+    }
+    /// Replace only the remote apps service. Swift parsing, native rendering,
+    /// actions, and saved-state encoding still use the production app host.
+    private var generatedAppsUIFixture: [JSON] {
+        [("water", "Water", "Glasses", "Add glass"),
+         ("reading", "Reading", "Pages", "Read page"),
+         ("meals", "Meal journal", "Meals", "Add meal"),
+         ("walking", "Walking", "Walks", "Add walk"),
+         ("garden", "Garden planner", "Plants", "Add plant"),
+         ("travel", "Travel checklist", "Packed items", "Pack item")].map { id, title, metric, action in
+            .object(["id": .string(id), "title": .string(title),
+                     "description": .string("Synthetic " + title.lowercased() + " tracker"),
+                     "runtime": .string("swift-v1"), "revision": .number(1),
+                     "source": .string("""
+                        import SwiftUI
+                        struct Tracker: View {
+                            @Persisted("count") var count = 0
+                            var body: some View {
+                                Form {
+                                    Section("\(title)") {
+                                        Text("\(metric): \\(count)")
+                                        Button("\(action)") { count += 1 }
+                                    }
+                                }
+                            }
+                        }
+                        """)])
+        }
+    }
+    #endif
 
     @discardableResult
     func createGeneratedApp(prompt: String, app: GeneratedAppManifest? = nil, diagnostic: String? = nil) -> Bool {

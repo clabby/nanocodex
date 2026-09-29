@@ -481,8 +481,8 @@ public final class NativeAppSession: ObservableObject {
                 } else if modifier == "padding" {
                     if let first = values.first, case .string = first {
                         output[index].properties["paddingEdges"] = first
-                        output[index].properties[modifier] = values.count > 1 ? values[1] : .number(16)
-                    } else { output[index].properties[modifier] = values.first ?? .number(16) }
+                        output[index].properties[modifier] = values.count > 1 ? values[1] : .null
+                    } else { output[index].properties[modifier] = values.first ?? .null }
                 } else { output[index].properties[modifier] = values.first ?? .bool(true) }
             }
             return output

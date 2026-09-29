@@ -60,6 +60,7 @@ struct GeneratedAppsView: View {
                         Section { Text(message).foregroundStyle(.red); Button("Retry") { Task { await model.refreshGeneratedApps() } } }
                     }
                 }
+                .scrollContentBackground(.hidden)
                 .refreshable { await model.refreshGeneratedApps() }
                 .task { await model.refreshGeneratedApps() }
                 .alert("Delete this app and its saved data?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
@@ -77,6 +78,8 @@ struct GeneratedAppsView: View {
                 }
             }
         }
+        .tint(.primary)
+        .background(ChatPalette.background)
     }
 }
 
@@ -110,6 +113,7 @@ struct CreateGeneratedAppSheet: View {
                 }
             }
         }
+        .tint(.primary)
     }
 }
 
@@ -153,10 +157,10 @@ private struct GeneratedAppScreen: View {
                     }.disabled((app?.revision ?? 1) <= 1 || loading)
                 } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
                     .accessibilityLabel("App options")
-            }.padding(.horizontal, 8)
+            }.buttonStyle(.plain).padding(.horizontal, 12)
             Divider()
             if let session {
-                NativeAppView(session: session)
+                NativeAppView(session: session, background: ChatPalette.background)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if loading {
                 ProgressView("Opening app…").frame(maxWidth: .infinity, maxHeight: .infinity)

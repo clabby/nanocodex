@@ -21,7 +21,6 @@ struct PackingChecklist: View {
             Section("Ready when you are") {
                 Label("A calmer departure", systemImage: "suitcase.rolling")
                     .font(.headline)
-                    .foregroundStyle(.indigo)
                 TextField("Trip name", text: $tripName)
                 Text("Build your list, pack a little at a time, and pick up where you left off.")
                     .foregroundStyle(.secondary)
@@ -35,7 +34,6 @@ struct PackingChecklist: View {
                         .foregroundStyle(.secondary)
                 }
                 ProgressView(value: Double(packed.count), total: Double(max(items.count, 1)))
-                    .tint(.indigo)
                 if !items.isEmpty && packed.count == items.count {
                     Label("Everything is in. Enjoy the journey!", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
@@ -54,7 +52,6 @@ struct PackingChecklist: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.indigo)
                 .disabled(newItem.isEmpty || items.contains(newItem))
                 if !newItem.isEmpty && items.contains(newItem) {
                     Text("That item is already on your list.")

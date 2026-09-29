@@ -2,15 +2,29 @@
 import SwiftUI
 import Charts
 
+// Match the Inbox's adaptive system surface and neutral accent without importing
+// the chat renderer. App-authored modifiers remain local overrides of these defaults.
+private enum NativeAppAppearance {
+    static var background: Color {
+        #if os(macOS)
+        Color(nsColor: .windowBackgroundColor)
+        #else
+        Color(uiColor: .systemBackground)
+        #endif
+    }
+}
+
 /// Renders the app's evaluated view tree using platform-native controls.
 @MainActor
 public struct NativeAppView: View {
     @ObservedObject public var session: NativeAppSession
+    private let background: Color
     private struct PendingBinding { var id: UUID; var value: AppValue }
     @State private var pendingBindings: [String: PendingBinding] = [:]
 
-    public init(session: NativeAppSession) {
+    public init(session: NativeAppSession, background: Color? = nil) {
         self.session = session
+        self.background = background ?? NativeAppAppearance.background
     }
 
     public var body: some View {
@@ -26,7 +40,7 @@ public struct NativeAppView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
-                .background(Color.orange.opacity(0.10))
+                .background(Color.primary.opacity(0.06))
                 .accessibilityElement(children: .combine)
             }
             if session.nodes.isEmpty {
@@ -41,6 +55,9 @@ public struct NativeAppView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .font(.body)
+        .tint(.primary)
+        .background(background)
         .overlay(alignment: .topTrailing) {
             if session.isBusy && !session.nodes.isEmpty {
                 ProgressView()
@@ -86,11 +103,11 @@ public struct NativeAppView: View {
             view = AnyView(view.tint(color(value)))
         }
         if let value = props["padding"] {
-            let amount: CGFloat
+            let amount: CGFloat?
             if case .number(let number) = value, number.isFinite {
                 amount = CGFloat(max(0, number))
             } else {
-                amount = value == .bool(false) ? 0 : 16
+                amount = value == .bool(false) ? 0 : nil
             }
             view = AnyView(view.padding(edges(props["paddingEdges"]), amount))
         }
@@ -195,7 +212,6 @@ public struct NativeAppView: View {
                     children(node.children).frame(minHeight: 44)
                 }
             }
-            .controlSize(.large)
             .disabled(session.isBusy || !pendingBindings.isEmpty || node.actionID == nil))
         case "TextField":
             if case .number = current(node) {
@@ -392,8 +408,9 @@ public struct NativeAppView: View {
         return value > 0 ? value : 1
     }
 
-    private func spacing(_ node: AppNode) -> CGFloat {
-        dimension(node.properties["spacing"]) ?? 12
+    private func spacing(_ node: AppNode) -> CGFloat? {
+        // nil preserves SwiftUI's context-sensitive spacing; explicit values win.
+        dimension(node.properties["spacing"])
     }
 
     private func dimension(_ value: AppValue?) -> CGFloat? {
@@ -411,9 +428,9 @@ public struct NativeAppView: View {
 
     private func horizontal(_ value: AppValue?) -> HorizontalAlignment {
         switch value.map(name) {
-        case "center": return .center
+        case "leading": return .leading
         case "trailing": return .trailing
-        default: return .leading
+        default: return .center
         }
     }
 

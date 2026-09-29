@@ -22,6 +22,8 @@ NativeAppView(session: session)
 session.invalidate()
 ```
 
+The optional `NativeAppView(session:background:)` background lets the host supply its shared adaptive surface; omitting it uses the platform system background. The renderer supplies semantic body text and the same neutral primary tint as the Inbox, while app-authored modifiers remain effective.
+
 Session and view operations run on the main actor. `NativeAppSession.validate(source:)` validates source without executing it. `AppValue` encodes ordinary JSON strings, numbers, booleans, nulls, arrays and objects. `@Persisted` keys survive session restarts; `@State` values remain local to the session. Host failures and runtime limits appear in `session.diagnostic` and in the native view. Failed actions restore the preceding state.
 
 ## Run a public journey
@@ -50,7 +52,7 @@ swift run --package-path apple/NanocodexApps native-app-journey \
 
 The example uses the `ReadingTracker` in AUTHORING.md. Repeat `--set NAME JSON` and `--action TITLE` freely: operations execute in the supplied order, against the current rendered controls. A button title must identify exactly one enabled button. `--set` requires a rendered binding; JSON strings need their JSON quotes inside the shell quotes. Arrays and objects are ordinary JSON too. Missing state files use source defaults; malformed existing state fails instead of silently resetting data. Writes are atomic.
 
-`--agent-response` configures the local host's asynchronous external service stub; omitting it causes an explicit error when source calls `Agent.run`. This CLI does not contact a production agent. `--screenshot` uses `NSHostingView<NativeAppView>` and AppKit to save a 900 × 1100 point PNG of actual native controls after all operations. Screenshot rendering requires a macOS graphical session; pixel dimensions follow the display scale. Captures use a light appearance, opaque window background, and active blue controls for consistent local and CI evidence. Without that flag, journeys assert the public rendered tree without requiring a visible window. Errors exit nonzero.
+`--agent-response` configures the local host's asynchronous external service stub; omitting it causes an explicit error when source calls `Agent.run`. This CLI does not contact a production agent. `--screenshot` uses `NSHostingView<NativeAppView>` and AppKit to save a 900 × 1100 point PNG of actual native controls after all operations. Screenshot rendering requires a macOS graphical session; pixel dimensions follow the display scale. Captures use a light appearance, opaque window background, and the renderer’s neutral native controls for consistent local and CI evidence. Without that flag, journeys assert the public rendered tree without requiring a visible window. Errors exit nonzero.
 
 Run the independently authored tracker holdouts through the executable:
 

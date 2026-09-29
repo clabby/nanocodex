@@ -36,7 +36,6 @@ struct CigaretteTracker: View {
             Section("A moment to notice") {
                 Label("Your log, one tap at a time", systemImage: "leaf")
                     .font(.headline)
-                    .foregroundStyle(.teal)
                 Text("Keep a clear picture of your habits without judgment.")
                     .foregroundStyle(.secondary)
             }
@@ -52,7 +51,6 @@ struct CigaretteTracker: View {
                     entries.append(CigaretteEntry(id: UUID().uuidString, timestamp: Date().timeIntervalSince1970))
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.teal)
                 Button("Undo latest cigarette") {
                     if !entries.isEmpty {
                         entries.removeLast()
@@ -72,7 +70,6 @@ struct CigaretteTracker: View {
             Section("Your seven-day picture") {
                 BarChart(weeklyCounts())
                     .frame(height: 140)
-                    .tint(.teal)
                 HStack {
                     Text("Past seven days")
                     Spacer()

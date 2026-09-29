@@ -203,13 +203,11 @@ private func screenshot(_ path: String, session: NativeAppSession) async throws 
     app.appearance = NSAppearance(named: .aqua)
     app.finishLaunching()
     // A detached command-line window has no inherited appearance or active control state.
-    // Supply the same opaque surface and active accent treatment as an ordinary app window.
+    // Supply the same opaque surface and active controls as an ordinary app window.
     let root = NativeAppView(session: session)
         .background(Color(nsColor: .windowBackgroundColor))
         .environment(\.colorScheme, .light)
         .environment(\.controlActiveState, .active)
-        .accentColor(.blue)
-        .tint(.blue)
     let view = NSHostingView(rootView: root)
     view.appearance = NSAppearance(named: .aqua)
     let rect = NSRect(x: 0, y: 0, width: 900, height: 1100)

@@ -38,6 +38,16 @@ struct ReadingTracker: View {
 }
 ```
 
+## Nanocodex appearance
+
+Use the existing Nanocodex design: adaptive neutral surfaces, primary text and accent, secondary supporting text, semantic system typography, and native controls. The renderer defaults to `.body`, a `.primary` tint, and the platform system background. These defaults adapt to light and dark appearance; semantic text styles support Dynamic Type. Explicit supported color, font, spacing, and control-style modifiers still apply normally.
+
+Start with `Form` and `Section` for editable trackers or `List` for collections. Let these controls provide row spacing and surfaces. Use `.headline` for section emphasis, `.title2` or `.title3` for an in-content title, `.body` for content, and `.caption` or `.footnote` with `.foregroundStyle(.secondary)` for supporting text. Prefer `.navigationTitle` over a second decorative hero heading.
+
+For custom layouts, use `VStack(alignment: .leading, spacing: 12)`, 8-point spacing for tightly related content, and `.padding()` for native outer insets. Omitted stack spacing and padding use SwiftUI defaults; omitted stack alignment follows SwiftUI (`VStack` centers horizontally). Avoid fixed text heights so larger text can wrap. Keep the native automatic input and list styles; use `.buttonStyle(.borderedProminent)` for a primary action and `.bordered` for secondary actions when needed. Buttons retain a minimum 44-point label height.
+
+Do not invent an app-specific brand palette, colored page backgrounds, gradients, or decorative tinted cards. Omit `.tint` to use the Nanocodex accent. Use `.primary` and `.secondary` for text; reserve explicit colors for meaningful status or user-requested content, and pair status colors with text or a symbol. Supported explicit colors such as `.blue` retain their SwiftUI meaning; the renderer does not rewrite them into neutral colors.
+
 ## Supported source
 
 - Stored `@State` and `@Persisted("key")` variables, ordinary constants, local `let`/`var`, user functions with positional or labeled calls, and plain record structs with stored fields and memberwise construction.
@@ -45,7 +55,7 @@ struct ReadingTracker: View {
 - `if`/`else`, `for … in`, `while` (actions), `return`. View builders support expressions, local values, conditionals, and for loops. `ForEach(items, id: \.self) { item in … }` honors the supplied identity and diagnoses duplicates; `id: \.id` uses each record's id field.
 - `String`, `Int`, `Double`, `Bool`, `Array`, `min`, `max`, `abs`, `round`, `Date()`, `Date(timeIntervalSince1970:)`, `UUID()`; collection `count`, `isEmpty`, `first`, `last`, `append`, `removeLast`, `removeAll`, `contains`, `joined(separator:)`, `reversed`, `sorted`, `prefix(count)`, `suffix(count)`, `dropFirst(count)`, and trailing-closure `map`, `filter`, `reduce`; string `contains`, `lowercased`, `uppercased`.
 - Views: `VStack`, `HStack`, `ZStack`, `Form`, `Section`, `ScrollView`, `List`, `Group`, `ForEach`, `Text`, `Label`, `Image(systemName:)`, `Button("Title") { … }`, `TextField("Title", text: $field)`, `SecureField`, `TextEditor(text:)`, `Toggle("Title", isOn:)`, `Stepper("Title", value:, in:, step:)`, `Slider(value:, in:)`, `Picker`, `Divider`, `Spacer`, `ProgressView`, `Gauge`, and SDK `BarChart([numbers])`.
-- Modifiers: `padding`, `font`, `fontWeight`, `foregroundStyle`, `foregroundColor`, `tint`, `background`, `frame`, `cornerRadius`, `opacity`, `disabled`, `navigationTitle`, `buttonStyle`, `listStyle`, `textFieldStyle`, `lineLimit`, `multilineTextAlignment`, `tag`. Prefer simple enum values such as `.headline`, `.blue`, `.borderedProminent`.
+- Modifiers: `padding`, `font`, `fontWeight`, `foregroundStyle`, `foregroundColor`, `tint`, `background`, `frame`, `cornerRadius`, `opacity`, `disabled`, `navigationTitle`, `buttonStyle`, `listStyle`, `textFieldStyle`, `lineLimit`, `multilineTextAlignment`, `tag`. Prefer simple enum values such as `.headline`, `.secondary`, `.borderedProminent`.
 - Dates: `Date().timeIntervalSince1970` returns epoch seconds; `Date(timeIntervalSince1970: seconds).formatted()` returns a localized date/time string. `UUID().uuidString` gives stable IDs when created in an action. SDK `Clock.today()` returns the current local calendar day as `yyyy-MM-dd`; `Clock.dayKey(seconds)` converts an epoch timestamp to that same local day format. Store timestamps and stable record IDs; avoid generating new IDs while rendering.
 - `Task { answer = await Agent.run("prompt") }` in an action awaits the host's authenticated agent. The return value is a string. The host owns credentials and logs the request. App source never receives credentials.
 

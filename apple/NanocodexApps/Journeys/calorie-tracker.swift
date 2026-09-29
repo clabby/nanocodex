@@ -26,7 +26,6 @@ struct CalorieTracker: View {
             Section("A little clarity at mealtime") {
                 Label("Food journal", systemImage: "fork.knife")
                     .font(.headline)
-                    .foregroundStyle(.orange)
                 Text("Log a meal, keep perspective, and make the goal your own.")
                     .foregroundStyle(.secondary)
             }
@@ -39,7 +38,6 @@ struct CalorieTracker: View {
                         .foregroundStyle(.secondary)
                 }
                 ProgressView(value: Double(min(todayCalories(), calorieGoal)), total: Double(calorieGoal))
-                    .tint(.orange)
                 if todayCalories() <= calorieGoal {
                     Text("\(calorieGoal - todayCalories()) kcal remaining")
                 } else {
@@ -59,7 +57,6 @@ struct CalorieTracker: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.orange)
                 .disabled(mealName.isEmpty || (Int(calorieInput) ?? 0) <= 0)
                 if !calorieInput.isEmpty && (Int(calorieInput) ?? 0) <= 0 {
                     Text("Enter a positive whole number of calories.")
