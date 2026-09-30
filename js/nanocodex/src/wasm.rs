@@ -3250,7 +3250,7 @@ async fn append_developer_context(agent: &RustNanocodex, text: &str) -> Result<S
     let context = agent
         .append_developer_message(text)
         .await
-        .map_err(js_error)?;
+        .map_err(|error| js_turn_error(turn_failure(&error)))?;
     serialize_session_context(context)
 }
 
