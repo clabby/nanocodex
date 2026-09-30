@@ -5,6 +5,12 @@ fail() { printf 'build-ios-linux: %s\n' "$*" >&2; exit 1; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$root"
 [[ $(uname -s) == Linux ]] || fail 'This build requires Linux.'
+# Dependency scanning exceeds many distros' default 1,024/4,096 open files.
+# Raise this process's soft limit only; no system configuration is changed.
+fd_limit=$(ulimit -Sn)
+if [[ $fd_limit != unlimited && $fd_limit -lt 65536 ]]; then
+  ulimit -Sn 65536 || fail 'The open-file hard limit must allow 65,536 files for Swift dependency scanning.'
+fi
 sign=false
 case ${1:-} in
   --sign) sign=true; shift;;
@@ -22,7 +28,7 @@ command -v python3 >/dev/null || fail 'Python 3 is required.'
 xtool=$(python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$(command -v "$xtool")")
 [[ $("$xtool" --version) == 'xtool 1.20.1' ]] || fail 'Expected xtool 1.20.1.'
 sdk_status=$("$xtool" sdk status)
-[[ $sdk_status != 'Not installed' ]] || fail 'Apple SDK is missing. Run xtool sdk install /path/to/Xcode.xip --slim on Linux.'
+[[ $sdk_status != 'Not installed' ]] || fail 'Apple SDK is missing. Import a checksum-pinned private darwin.xtoolsdk archive with apple/scripts/import-xtool-sdk-linux.sh, or install Xcode SDK input on Linux.'
 # The Rust build needs an SDK path; SwiftPM/xtool select their own installed SDK.
 # Explicit SDKROOT is useful for non-default XDG configurations.
 sdk=${SDKROOT:-}
@@ -40,7 +46,7 @@ elif len(paths) > 1:
 PY
   )
 fi
-[[ -n $sdk && -d $sdk ]] || fail 'Apple SDK is missing. Run xtool sdk install /path/to/Xcode.xip --slim on Linux, or select the installed iPhoneOS.sdk with SDKROOT.'
+[[ -n $sdk && -d $sdk ]] || fail 'Apple SDK is missing. Import a private darwin.xtoolsdk archive, or select the installed iPhoneOS.sdk with SDKROOT.'
 command -v swift >/dev/null || fail 'Swift 6.4 is required.'
 swift --version | python3 -c 'import re,sys; s=sys.stdin.read(); m=re.search(r"Swift version (\d+)\.(\d+)",s); sys.exit(0 if m and tuple(map(int,m.groups())) >= (6,4) else 1)' || fail 'Swift 6.4 or newer is required for the xtool SwiftBuild/XCFramework path.'
 version=${NANOCODEX_IOS_VERSION:-0.1.0}

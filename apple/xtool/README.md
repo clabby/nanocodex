@@ -13,26 +13,88 @@ App Intents discovery remain unverified. The default IPA is not installable.
 
 ## Setup
 
-Use Linux with sufficient local disk for the Swift toolchain, Xcode archive, SDK
-extraction, Cargo and SwiftPM caches. A small ephemeral container can run out of
-disk during extraction. Use Swift 6.4 or newer; SwiftBuild support in xtool 1.20
-is needed for the app's XCFramework dependencies.
+Use Linux with Swift 6.4 or newer; xtool 1.20's SwiftBuild support is
+needed for XCFramework dependencies. Install Rust 1.97, Python 3 with Pillow,
+`curl`, `zip`, and `util-linux` (`flock` and `script`). Install the device target
+with `rustup target add aarch64-apple-ios`.
 
-1. Install [Swift for Linux](https://www.swift.org/install/linux/), Rust 1.97,
-   Python 3 with Pillow, `zip`, and `util-linux` (the `script` command).
-2. Install the Rust device target: `rustup target add aarch64-apple-ios`.
-3. Download Xcode's `.xip` from your Apple Developer downloads account, or copy
-   an existing `Xcode.app` to Linux. This is an SDK input; Xcode itself is not
-   run. Keep it in private storage. The installer accepts either input.
-4. Install the pinned xtool release and extract the SDK on Linux:
+### Reuse a private exported SDK (recommended)
 
-   ```sh
-   bash apple/scripts/install-xtool-linux.sh /path/to/Xcode.xip
-   export NANOCODEX_XTOOL="$HOME/.local/share/nanocodex/xtool-1.20.1/squashfs-root/AppRun"
-   ```
+A setup/build runner does **not** need the full Xcode `.xip`. Build a slim export
+once on Linux from an existing `Xcode.app` tree, including a previously pruned
+tree containing the SDKs/toolchain needed by xtool's builder. The upstream
+builder still requires iPhoneOS, iPhoneSimulator, and MacOSX SDK roots. No macOS
+execution is involved:
 
-   `NANOCODEX_XTOOL_PREFIX` changes the install location. The installer checks the
-   upstream release SHA-256 and extracts its AppImage without requiring FUSE.
+```sh
+bash apple/scripts/install-xtool-linux.sh
+export NANOCODEX_XTOOL="$HOME/.local/share/nanocodex/xtool-1.20.1/squashfs-root/AppRun"
+bash apple/scripts/export-xtool-sdk-linux.sh /private/Xcode.app /private/darwin-sdk.tar.gz
+```
+
+The export prints its SHA-256. Store the compressed archive in private storage
+and pin that digest separately; do not commit, publish, or upload the SDK as a
+public CI artifact. Apple licensing/access requirements still apply. Export
+requires space for the slim SDK directory and compressed archive, not another
+full Xcode copy. It normalizes tar ownership/timestamps and gzip timestamps for
+stable bytes from identical builder output. To target another Linux host CPU,
+use `--architecture x86_64` or `--architecture aarch64` during export.
+
+On a fresh runner with the same architecture and xtool version:
+
+```sh
+bash apple/scripts/install-xtool-linux.sh
+export NANOCODEX_XTOOL="$HOME/.local/share/nanocodex/xtool-1.20.1/squashfs-root/AppRun"
+bash apple/scripts/import-xtool-sdk-linux.sh /private/darwin-sdk.tar.gz --sha256 <pinned-sha256>
+# Alternatively:
+NANOCODEX_IOS_SDK_SHA256=<pinned-sha256> \
+  bash apple/scripts/install-xtool-linux.sh /private/darwin-sdk.tar.gz
+```
+
+`darwin.xtoolsdk` is a **directory**, produced by `xtool sdk build`, and the
+archive contains that directory, with optional export metadata. An installed
+`darwin.artifactbundle` is not interchangeable: installation adds the current
+host clang headers. Do not rename/compress an installed bundle as an export.
+The compressed importer accepts upstream-standard exports too; custom metadata
+is optional, but validated when present. It always verifies the pinned checksum,
+upstream artifact/SDK/toolset metadata, pinned builder version, and the native
+ELF tool architecture before installation. It rejects injected host clang headers
+through both the `usr/lib/swift/clang` symlink and `usr/lib/clang/*/include` layout. All archive members are
+validated before extraction: traversal, absolute paths, escaping/cyclic links,
+link-parent members, special files, and duplicate entries are rejected.
+
+Downloads can use `python3 apple/scripts/xtool-sdk-linux.py download FILE
+--sha256 DIGEST`, with a private HTTPS URL in `SDK_URL`. The helper never prints
+the URL, discards failed/checksum-invalid partial downloads, and atomically
+publishes only verified bytes. Keep tracing (`set -x`) disabled around private
+inputs. Credential-bearing URLs must not be passed as CLI arguments.
+
+`NANOCODEX_XTOOL_PREFIX` changes the binary installation location. The installer
+checks the upstream release SHA-256 and stages AppImage extraction without FUSE.
+SDK installation uses an isolated SwiftPM configuration on the destination
+filesystem, preserving the old SDK on validation or installer failure. A locked,
+recoverable two-rename directory swap publishes the completed bundle; this is
+not a transaction with concurrently running builds, so do not replace an SDK
+while builds are using it. An interrupted swap is recovered on the next valid
+install attempt. The SDK lives under `XDG_CONFIG_HOME/swiftpm/swift-sdks` when
+set, otherwise `~/.swiftpm/swift-sdks`.
+
+### Xcode inputs remain supported
+
+Download Xcode's `.xip` through your Apple Developer account, or copy an existing
+`Xcode.app` to Linux, then run either:
+
+```sh
+bash apple/scripts/install-xtool-linux.sh /private/Xcode.xip
+bash apple/scripts/install-xtool-linux.sh /private/Xcode.app
+```
+
+A trusted local `darwin.xtoolsdk` directory from upstream `xtool sdk build` also
+works as a direct installer input. Xcode inputs use xtool's own SDK builder/validation; local `.xtoolsdk` directories
+also receive the structural/native-tool checks. Compressed inputs additionally
+receive archive-member validation and checksum verification. A full `.xip`
+requires substantially more extraction space; prefer the reusable export for
+routine runners. No signing or publishing occurs during setup.
 
 ## Build
 
@@ -93,17 +155,13 @@ app, extension IDs/entitlements, native libraries, icons, and device installatio
 before publishing. Siri/Shortcuts metadata and all device-only behavior also
 require explicit validation; an executable bundle alone is not feature parity.
 
-## GitHub Actions
+## Local operation (no CI required)
 
-`Linux iPhone build` runs packaging and synthetic signing journeys on relevant
-PRs. The signing journey uses real ARM64 binaries, temporary synthetic profiles,
-and independent OpenSSL CMS checks; it does not use Apple credentials or prove
-device installation. Manual dispatch
-also performs a real unsigned build using the official Swift Linux container.
-Configure `IOS_LINUX_SDK_URL` as a secret pointing to your private Xcode `.xip`
-and `IOS_LINUX_SDK_SHA256` as a repository variable with its checksum. The job
-fails immediately if either is absent. It retains evidence as an Actions
-artifact; it never uploads to TestFlight or publishes OTA.
+The local build, signing, and OTA staging/publication route runs directly on the
+Linux Hand. It does not invoke GitHub Actions, require repository secrets, or
+use a Mac. See [the local release guide](local-release.md) for commands and the
+real signing/device-validation prerequisites. Existing Apple/CI workflows stay
+independent; this route does not change or depend on them.
 
 ## Compatibility boundaries
 
@@ -116,10 +174,21 @@ xtool packages the existing transitive WebRTC binary dependency, but the final
 IPA must still be checked for its actual iPhone framework and all extensions.
 
 SwiftBuild does not itself replace Apple's App Intents metadata processor.
-xtool 1.20.1 does not ship a Linux implementation, and its proposed metadata
-extractor is [unmerged](https://github.com/xtool-org/xtool/pull/217). The Swift
-intent sources stay included; Siri/Shortcuts discovery and intent-driven
-controls are **not validated or claimed complete** by this build route.
+xtool 1.20.1 does not ship a Linux implementation. Its proposed metadata
+extractor is [closed and unmerged](https://github.com/xtool-org/xtool/pull/217),
+not an available processor fix. The validated unsigned IPA has no
+`Metadata.appintents`, although the intent sources compile. Auditing that
+candidate against compiler output exposed lost shortcuts (six of seven),
+parameter/entity/query type information, and explicit authentication policies;
+it is not safe to integrate as a feature-parity solution.
+
+`audit-appintents-linux.py` reads compiler constants and optional IPA/candidate
+metadata without generating or injecting it. Run
+`python3 apple/scripts/test-appintents-linux.py` for its synthetic checks; these
+are auditor tests, not Siri or phone-discovery tests. Siri/Shortcuts indexing,
+entity queries, authentication semantics, and intent-driven controls remain
+**not validated or claimed complete** by this build route. Closing the gap
+requires a verified processor and signed, installed-device discovery tests.
 
 “Unsigned” means unprovisioned: xtool can apply ad-hoc signatures to retain
 entitlements. Such an IPA is still not an installable OTA release.
