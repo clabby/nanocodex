@@ -657,7 +657,12 @@ awaited and an unconfirmed deletion is reported explicitly.
 This does not alter raw `browser_execute` or enable private continuation between
 calls. Kitesurf has no private Vault tools. Generic one-time secure input remains
 unavailable with both one-shot providers. See [the private checkout journey](scripts/private-checkout-smoke.md)
-for opt-in real-browser validation.
+for opt-in real-browser validation. `browser_private_waitlist` adds authenticated
+inspection and an explicitly authorized standalone waitlist join. It verifies
+class identity, refuses purchase/payment and policy-gated controls, persists an
+operation receipt and class fence against duplicates, and requires visible
+confirmation before reporting a join. See [Vault browser operations](../../docs/VAULT_BROWSER.md)
+for the operation contract.
 
 `cloudflare` and `browserbase` retain bounded sessions per durable agent, with
 separate storage for each provider. Their existing CDP restrictions and private

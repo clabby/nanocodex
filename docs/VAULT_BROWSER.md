@@ -54,6 +54,26 @@ provider connection and deletion requests have independent eight-second limits.
 Inspection is not proof of successful sign-in or Link compatibility: a challenge or missing opt-in marker needs further
 authorized work. Generic secure-input and private continuation remain unavailable
 with one-shot providers.
+Authenticated waitlist submission uses `browser_private_waitlist`. Supply a saved,
+explicitly authorized Vault login, the public checkout URL, exact expected class
+title/date/time/instructor, and a stable UUID `operation_id`. `operation: "inspect"`
+returns fixed action and capability fields. `operation: "join"` additionally
+requires `authorize_join: true` and explicit user authorization for that class.
+The host verifies the class and captured control immediately before the one
+submission. It activates only the standalone **Join the Waitlist** control;
+purchase/payment controls, credit spending, guest/recurring booking, and required
+unchecked policies stop submission. Arketa's standalone join action is recognized
+separately from its purchase-and-join flow; other sites require an explicit free
+or zero-total indication. Missing price alone is not treated as a free purchase.
+
+The operation journal persists in the agent's Durable Object. Identical retries
+return the saved result, changed arguments under the same UUID are rejected, and
+an uncertain or confirmed join fences further submission for that Vault/class
+across new UUIDs. Read-only inspection can reconcile an uncertain result without
+submitting again. A click is not a successful join: a visible, class-matched
+waitlist confirmation is required. Credentials and arbitrary private page text
+remain outside tool results; the public upstream browser tools are unchanged.
+
 Deploy the managed Worker to apply the binding and tool changes.
 Deployments without a browser binding can still serve ordinary agent turns.
 

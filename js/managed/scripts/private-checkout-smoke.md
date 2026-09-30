@@ -85,3 +85,35 @@ Stop the local harness and remove the temporary website after the run:
 pnpm --filter nanocodex-managed-service exec wrangler delete \
   --name YOUR_TEMPORARY_FIXTURE_NAME
 ```
+
+## Authenticated waitlist journey
+
+The same fixture and local harness expose `/waitlist` to exercise
+`browser_private_waitlist` through the actual managed runtime and remote Chromium:
+
+```sh
+node js/managed/scripts/private-waitlist-smoke.mjs
+```
+
+This uses only synthetic accounts and reservations. It checks visible confirmation
+against the merchant's independent POST count; cached UUIDs and a new UUID for the
+same class must not submit again. It also exercises changed arguments and URL
+queries, inspection after a confirmed or uncertain join, mismatched and hidden
+class details, unrelated checkout sections, class headers outside action forms,
+family selection, payment and required-policy refusal, native-form blocking,
+credential echo suppression, caller/origin rejection, and cancellation before fill.
+
+After the run, stop and restart the same local harness with its existing Wrangler
+storage directory, then verify that its durable receipt survives the process restart:
+
+```sh
+node js/managed/scripts/private-waitlist-smoke.mjs --replay
+```
+
+Results and the restart seed are stored under ignored `output/waitlist/journey`.
+`PRIVATE_WAITLIST_SMOKE_OUTPUT` selects another evidence directory; use the same
+value for both invocations. No production Vault resolution, real Sage submission,
+or payment is covered by these synthetic journeys. Add
+`../scripts/private-waitlist-smoke.ts` to the temporary harness typecheck config
+above, and run `node --check` on `private-waitlist-smoke.mjs` as well. Remove the
+temporary fixture and stop the local harness after validation.

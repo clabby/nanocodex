@@ -2,9 +2,11 @@
 import { DurableObject } from 'cloudflare:workers';
 import { createManagedBrowserRuntime, type ManagedBrowserEnv } from '../src/browser-runtime';
 import type { ToolContext } from 'nanocodex';
+import { waitlistJourney } from './private-waitlist-smoke';
 interface Env extends ManagedBrowserEnv { PROBE: DurableObjectNamespace<PrivateCheckoutSmoke>; FIXTURE_ORIGIN: string }
 export class PrivateCheckoutSmoke extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname === '/waitlist') return waitlistJourney(request, this.ctx, this.env);
     const input = await request.json() as { path?: string; deny?: boolean; wrongOrigin?: boolean; closeAfterVault?: boolean };
     if (!['/normal','/echo','/get','/direct-get','/challenge','/redirect'].includes(input.path ?? '')) return Response.json({error:'Invalid fixture path'}, {status:400});
     let vaultReads = 0;
@@ -51,7 +53,7 @@ export class PrivateCheckoutSmoke extends DurableObject<Env> {
   }
 }
 export default {fetch(request:Request,env:Env){
-  if(request.method!=='POST'||new URL(request.url).pathname!=='/inspect')return new Response('Use POST /inspect',{status:404});
+  if(request.method!=='POST'||!['/inspect','/waitlist'].includes(new URL(request.url).pathname))return new Response('Use POST /inspect or /waitlist',{status:404});
   return env.PROBE.getByName('private-checkout-smoke').fetch(request);
 }};
 export {CodemodeRuntime} from '@cloudflare/codemode';

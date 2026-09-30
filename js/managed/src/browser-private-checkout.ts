@@ -146,13 +146,27 @@ const stripeOrigin = (url: string) => {
  * agents 0.22 CdpSession's ring contains metadata only, never params/results.
  * Use disconnect + awaited delete instead of close's fire-and-forget disposer,
  * which can log a provider error. Recording is explicitly disabled. */
-export async function inspectPrivateCheckout(options: Readonly<{
+export type PrivateCheckoutOptions = Readonly<{
   browser: BrowserBinding;
   input: unknown;
   context: ToolContext;
   resolveVaultLogin: BrowserVaultResolver;
   authorizeVaultAccess: (context: ToolContext) => void;
-}>): Promise<PrivateCheckoutResult> {
+}>;
+
+export async function inspectPrivateCheckout(options: PrivateCheckoutOptions): Promise<PrivateCheckoutResult> {
+  return runPrivateCheckout(options);
+}
+
+/** Internal host-only extension point. Programs and callbacks are never tool input. */
+export async function runPrivateCheckout<T = never>(options: Readonly<{
+  browser: BrowserBinding;
+  input: unknown;
+  context: ToolContext;
+  resolveVaultLogin: BrowserVaultResolver;
+  authorizeVaultAccess: (context: ToolContext) => void;
+  afterLogin?: (evaluate: (program: string, args: unknown[]) => Promise<unknown>) => Promise<T>;
+}>): Promise<PrivateCheckoutResult | T> {
   let input: PrivateCheckoutInput;
   try { input = parsePrivateCheckoutInput(options.input); }
   catch { return { status: "unavailable", reason: "invalid_request", login_attempted: false }; }
@@ -162,7 +176,7 @@ export async function inspectPrivateCheckout(options: Readonly<{
   let attempted = false;
   let stage: NonNullable<PrivateCheckoutResult["failure_stage"]> = "browser";
   let credentials: Awaited<ReturnType<BrowserVaultResolver>> | undefined;
-  let result: PrivateCheckoutResult = { status: "unavailable", reason: "private_inspection_failed", login_attempted: false };
+  let result: PrivateCheckoutResult | T = { status: "unavailable", reason: "private_inspection_failed", login_attempted: false };
   const origin = new URL(input.url).origin;
   const signal = options.context.signal;
   const deadline = Date.now() + 60_000;
@@ -170,7 +184,11 @@ export async function inspectPrivateCheckout(options: Readonly<{
   // receives env.BROWSER directly and uses the upstream tools unchanged.
   const privateBrowser: BrowserBinding = { fetch: (input, init) => {
     const cleanup = init?.method === "DELETE";
-    const ioSignal = AbortSignal.any([AbortSignal.timeout(8000), ...(!cleanup ? [signal] : [])]);
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    const socket = headers.get("upgrade")?.toLowerCase() === "websocket";
+    // An abort signal stays attached to an upgraded socket after fetch returns.
+    // Bound the socket by the operation, not the ordinary HTTP request timeout.
+    const ioSignal = AbortSignal.any([AbortSignal.timeout(socket ? 60_000 : 8000), ...(!cleanup ? [signal] : [])]);
     return options.browser.fetch(input, {...init, signal:ioSignal});
   } };
   const check = () => { if (signal.aborted || Date.now() >= deadline) throw new Error("Private inspection stopped"); };
@@ -254,39 +272,52 @@ export async function inspectPrivateCheckout(options: Readonly<{
       for (let poll=0;poll<24;poll++) {
         await new Promise(resolve=>setTimeout(resolve,250));
         tree = await frameTree(session);
-        const w = await world(session,tree.frame,origin);
-        flags = await evaluate(w,origin,INSPECT,[origin,false]);
+        validFrame(tree.frame,origin);
+        try {
+          const w = await world(session,tree.frame,origin);
+          flags = await evaluate(w,origin,INSPECT,[origin,false]);
+        } catch {
+          // A JavaScript sign-in may navigate while this read-only observation
+          // is in flight. Reacquire and validate its document on the next poll;
+          // never repeat credential entry or sign-in submission.
+          check(); flags=undefined; continue;
+        }
         if (!flags || Object.values(flags).some(v=>typeof v!=="boolean")) throw new Error("Private inspection unavailable");
-        if (flags.challenge || (!flags.password && flags.checkout)) break;
+        if (flags.challenge || (!flags.password && (flags.checkout || options.afterLogin))) break;
       }
       if (!flags || !tree) throw new Error("Private inspection unavailable");
-      let stripe=false, marker=false, incomplete=false, card=flags.card;
-      const scan = async (t: FrameTree, sid: string, depth=0): Promise<void> => {
-        if (depth>5) { incomplete=true; return; }
-        const frameOrigin = stripeOrigin(t.frame.url);
-        if (frameOrigin) {
+      if (options.afterLogin && !flags.password && !flags.challenge) {
+        const authenticatedWorld = await world(session, tree.frame, origin);
+        result = await options.afterLogin((program, args) => evaluate(authenticatedWorld, origin, program, args));
+      } else {
+        let stripe=false, marker=false, incomplete=false, card=flags.card;
+        const scan = async (t: FrameTree, sid: string, depth=0): Promise<void> => {
+          if (depth>5) { incomplete=true; return; }
+          const frameOrigin = stripeOrigin(t.frame.url);
+          if (frameOrigin) {
+            stripe=true;
+            try {
+              const w = await world(sid,t.frame,frameOrigin);
+              const f = await evaluate(w,frameOrigin,INSPECT,[frameOrigin,true]);
+              marker ||= f?.marker === true; card ||= f?.card === true;
+            } catch { incomplete=true; }
+          }
+          if ((t.childFrames?.length ?? 0)>20) incomplete=true;
+          for (const child of (t.childFrames ?? []).slice(0,20)) await scan(child,sid,depth+1);
+        };
+        await scan(tree,session);
+        // OOPIF Stripe documents may be absent from the parent Page frame tree.
+        const targets = await send("Target.getTargets");
+        for (const t of (targets.targetInfos ?? []).slice(0,100)) {
+          if (t.type !== "iframe" || t.browserContextId !== context.browserContextId || !stripeOrigin(t.url)) continue;
           stripe=true;
-          try {
-            const w = await world(sid,t.frame,frameOrigin);
-            const f = await evaluate(w,frameOrigin,INSPECT,[frameOrigin,true]);
-            marker ||= f?.marker === true; card ||= f?.card === true;
-          } catch { incomplete=true; }
+          try { const sid=await cdp.attachToTarget(t.targetId,{timeoutMs:8000}); await scan(await frameTree(sid),sid); }
+          catch { incomplete=true; }
         }
-        if ((t.childFrames?.length ?? 0)>20) incomplete=true;
-        for (const child of (t.childFrames ?? []).slice(0,20)) await scan(child,sid,depth+1);
-      };
-      await scan(tree,session);
-      // OOPIF Stripe documents may be absent from the parent Page frame tree.
-      const targets = await send("Target.getTargets");
-      for (const t of (targets.targetInfos ?? []).slice(0,100)) {
-        if (t.type !== "iframe" || t.browserContextId !== context.browserContextId || !stripeOrigin(t.url)) continue;
-        stripe=true;
-        try { const sid=await cdp.attachToTarget(t.targetId,{timeoutMs:8000}); await scan(await frameTree(sid),sid); }
-        catch { incomplete=true; }
+        result = {status:flags.challenge ? "challenge" : flags.password ? "login_required" : "inspected",login_attempted:true,
+          checkout:{checkout_detected:flags.checkout,card_fields_present:card,stripe_frame_present:stripe,
+            link_pay_token:marker ? "supported" : incomplete ? "inspection_incomplete" : "not_detected"}};
       }
-      result = {status:flags.challenge ? "challenge" : flags.password ? "login_required" : "inspected",login_attempted:true,
-        checkout:{checkout_detected:flags.checkout,card_fields_present:card,stripe_frame_present:stripe,
-          link_pay_token:marker ? "supported" : incomplete ? "inspection_incomplete" : "not_detected"}};
     }
   } catch {
     result={status:attempted ? "outcome_unknown" : "unavailable",reason:"private_inspection_failed",login_attempted:attempted,failure_stage:stage};

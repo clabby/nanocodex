@@ -12,6 +12,7 @@ import {
 } from "agents/browser/ai";
 import type { NamedTool, ToolContext } from "nanocodex";
 import { inspectPrivateCheckout } from "./browser-private-checkout";
+import { privateWaitlist } from "./browser-private-waitlist";
 import { privateVaultTakeover, releasePrivateVaultTakeover, validateBrowserVaultTakeoverAction, type BrowserVaultTakeoverAction, type BrowserVaultTouchState } from "./browser-vault-takeover";
 
 import {
@@ -426,6 +427,26 @@ export async function createManagedBrowserRuntime(
           context: {...context, signal:AbortSignal.any([context.signal, controller.signal])},
           resolveVaultLogin: options.resolveVaultLogin!, authorizeVaultAccess: options.authorizeVaultAccess! });
         privateCalls.set(controller, operation);
+        try { return await operation; }
+        finally { privateCalls.delete(controller); }
+      },
+    });
+    if (provider === "chromium" && options.resolveVaultLogin && options.authorizeVaultAccess) tools.push({
+      name: "browser_private_waitlist",
+      description: "Privately inspect or join one exact class waitlist with an explicitly user-authorized named Vault login. Supply its public HTTPS checkout URL, exact visible class title/date/time/instructor, and a stable UUID operation_id for every inspection or join. Join requires authorize_join=true and explicit user authority. Credentials and DOM remain inside the host. Only the pure Join the Waitlist control may be activated; payment, purchase, credit consumption, recurring reservations, guest booking and required policy/consent are unsupported. Explicit free or zero-total terms are required, except for Arketa's distinct no-payment waitlist action. Returns fixed capabilities and observed confirmation only. Reuse the identical UUID/arguments to retrieve the result; never retry an outcome_unknown operation under a new UUID. A durable Vault/class fence blocks uncertain or completed joins. Each operation uses and closes its own private browser; no public browser continuation.",
+      supportsParallelToolCalls: false,
+      parameters: { type: "object", additionalProperties: false,
+        properties: { vault_id: {type:"string"}, url:{type:"string"}, username_selector:{type:"string"}, password_selector:{type:"string"},
+          operation:{type:"string",enum:["inspect","join"]}, operation_id:{type:"string"}, authorize_join:{type:"boolean"},
+          expected:{type:"object",additionalProperties:false,properties:{title:{type:"string"},date:{type:"string"},time:{type:"string"},instructor:{type:"string"}},required:["title","date","time","instructor"]}},
+        required:["vault_id","url","operation","operation_id","expected"] },
+      handler: async (input, context) => {
+        if (closing) throw new Error("Browser runtime is closing");
+        const controller = new AbortController();
+        const operation = privateWaitlist({browser:options.env.BROWSER!,input,storage:options.ctx.storage,
+          context:{...context,signal:AbortSignal.any([context.signal,controller.signal])},
+          resolveVaultLogin:options.resolveVaultLogin!,authorizeVaultAccess:options.authorizeVaultAccess!});
+        privateCalls.set(controller,operation);
         try { return await operation; }
         finally { privateCalls.delete(controller); }
       },
