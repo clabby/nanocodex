@@ -249,7 +249,7 @@ describe("Vault browser isolation", () => {
     const resolve = vi.fn(async () => ({ username: "fake-user", password: "fake-password" }));
     const create = () => createManagedBrowserRuntime({
       ctx: { storage: { get: async (key: string) => stored.get(key), put: async (key: string, value: unknown) => { stored.set(key, value); }, delete: async (key: string) => stored.delete(key) } } as unknown as DurableObjectState,
-      env: { BROWSER: { fetch: vi.fn() }, LOADER: {} as WorkerLoader }, sessionId: "agent-vault",
+      env: { MANAGED_BROWSER_PROVIDER: "cloudflare", BROWSER: { fetch: vi.fn() }, LOADER: {} as WorkerLoader }, sessionId: "agent-vault",
       resolveVaultLogin: resolve, authorizeVaultAccess: () => {},
       createRuntime: () => ({ connector: { sessionInfo: async () => ({ sessionId: "browser-1" }), closeSession: close },
         tools: { browser_execute: tool({ inputSchema: jsonSchema({ type: "object" }), execute: ordinary }) }, runtime: {} }) as unknown as BrowserRuntime,
@@ -311,7 +311,7 @@ describe("private browser verification lifecycle", () => {
     const connect = vi.spyOn(PrivateBrowserCdp, "connect").mockResolvedValue({ send, close() {} } as unknown as PrivateBrowserCdp);
     const create = () => createManagedBrowserRuntime({
       ctx: { storage: { get: async (key: string) => stored.get(key), put: async (key: string, value: unknown) => { stored.set(key, structuredClone(value)); }, delete: async (key: string) => stored.delete(key) } } as unknown as DurableObjectState,
-      env: { BROWSER: { fetch: vi.fn() }, LOADER: {} as WorkerLoader }, sessionId: "agent-vault",
+      env: { MANAGED_BROWSER_PROVIDER: "cloudflare", BROWSER: { fetch: vi.fn() }, LOADER: {} as WorkerLoader }, sessionId: "agent-vault",
       resolveVaultLogin: resolve, authorizeVaultAccess: () => {},
       createRuntime: () => ({ connector: { sessionInfo: async () => ({ sessionId: state.session }), closeSession: async () => {} },
         tools: { browser_execute: tool({ inputSchema: jsonSchema({ type: "object" }), execute: async () => ({ page: "ordinary" }) }) }, runtime: {} }) as unknown as BrowserRuntime,
