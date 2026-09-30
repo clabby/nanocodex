@@ -6,8 +6,6 @@ extend-exclude = [
     "examples/wow/web/assets/wow/**/*.TTF",
     "crates/nanocodex-browser/assets/axe.js",
     "crates/nanocodex-browser/assets/react_diagnostics.js",
-    # Preserve vendored upstream source identifiers, comments, and patch filenames.
-    "third_party/codex-voice/vendor/",
     # Preserve upstream sources and captured protocol/encoding fixture bytes.
     "js/account/public/data/",
     "js/account/src/data/harness-repository.json",
@@ -44,6 +42,10 @@ extend-ignore-re = ['\btime_base\.numer\b']
 # Chromium's Page.createIsolatedWorld parameter has this exact wire spelling.
 # Preserve the exact Apple installation URL schemes.
 extend-ignore-re = ['\bwaymote-streamd\b', '\bgrantUniveralAccess\b', '\bitms-beta://', '\bitms-services\b', '\bDuPont\b']
+
+# Apple SF Symbols uses this exact map-pin identifier.
+[type.swift.extend-identifiers]
+mappin = "mappin"
 
 [default.extend-words]
 # PDF's FlateDecode compression filter is a protocol identifier.

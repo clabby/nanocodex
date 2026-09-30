@@ -1,0 +1,44 @@
+name: Protected Linux secure input
+
+permissions: {}
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'linux/secure-input/**'
+      - '.github/workflows/linux-secure-input.yml'
+  pull_request:
+    paths:
+      - 'linux/secure-input/**'
+      - '.github/workflows/linux-secure-input.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: secure-linux-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: '1.97'
+          components: rustfmt, clippy
+      - name: Cryptographic and unprivileged OS boundaries (synthetic inputs)
+        working-directory: linux/secure-input
+        run: |
+          cargo fmt --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          bash -n install-local.sh build-release.sh
+      - name: Build protected helper and askpass without installing
+        working-directory: linux/secure-input
+        run: ./build-release.sh

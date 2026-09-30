@@ -1,0 +1,24 @@
+[Unit]
+Description=Nanocodex protected Linux sudo recipient (locally enrolled)
+After=local-fs.target
+ConditionPathExists=/etc/nanocodex-secure-input/configuration.json
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/libexec/nanocodex-secure-input
+Restart=on-failure
+RestartSec=5
+UMask=0077
+LimitCORE=0
+StandardInput=null
+StandardOutput=null
+StandardError=null
+KillMode=control-group
+TimeoutStopSec=5
+# Do not set NoNewPrivileges or change PAM/sudoers: sudo and the root-only
+# askpass explicitly require their distribution-controlled setuid transition.
+
+[Install]
+WantedBy=multi-user.target

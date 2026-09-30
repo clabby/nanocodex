@@ -26,7 +26,7 @@ tempo = [
 ]
 
 [dependencies]
-nanocodex-tui-control = { path = "tui-control", version = "0.6.5" }
+nanocodex-tui-control = { path = "tui-control", version = "0.6.6" }
 nanocodex-computer.workspace = true
 arboard.workspace = true
 async-trait.workspace = true
@@ -101,7 +101,8 @@ vergen = { workspace = true, features = ["build", "git", "gitcl"] }
 
 [dev-dependencies]
 criterion.workspace = true
-nanocodex-tools.workspace = true
+nanocodex-tools = { workspace = true, features = ["native"] }
+portable-pty.workspace = true
 tokio-tungstenite.workspace = true
 
 [[bench]]
@@ -131,6 +132,10 @@ path = "tests/durable_run.rs"
 [[test]]
 name = "local_managed_server"
 path = "tests/local_managed_server.rs"
+
+[[test]]
+name = "tui_control"
+path = "tests/tui_control.rs"
 
 [[bin]]
 name = "nanocodex"

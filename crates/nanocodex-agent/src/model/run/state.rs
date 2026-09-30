@@ -112,10 +112,6 @@ impl ConversationState {
         self.managed.append_client(items);
     }
 
-    pub(super) fn update_token_info(&mut self, usage: Option<&Usage>) {
-        self.managed.update_token_info(usage);
-    }
-
     pub(super) const fn observe_server_reasoning(&mut self, included: bool) {
         self.managed.observe_server_reasoning(included);
     }
@@ -124,29 +120,8 @@ impl ConversationState {
         self.managed.active_context_tokens()
     }
 
-    pub(super) fn prompt_history_with_repair(
-        &self,
-    ) -> (nanocodex_oai_api::responses::ResponseHistory, bool) {
-        self.managed.prompt_history_with_repair()
-    }
-
-    pub(super) fn adopt_prompt_history(
-        &mut self,
-        history: nanocodex_oai_api::responses::ResponseHistory,
-    ) {
-        self.managed.adopt_prompt_history(history);
-    }
-
     pub(super) fn shared_history(&self) -> nanocodex_oai_api::responses::ResponseHistory {
         self.managed.shared_history()
-    }
-
-    pub(super) const fn delta_start(&self) -> usize {
-        self.managed.delta_start()
-    }
-
-    pub(super) fn previous_response_id(&self) -> Option<&str> {
-        self.managed.previous_response_id()
     }
 
     pub(super) fn set_previous_response_id(&mut self, response_id: impl Into<String>) {
@@ -217,14 +192,6 @@ impl ConversationState {
 
     pub(super) fn commit_interrupted(&mut self) {
         self.managed.commit_interrupted();
-    }
-
-    pub(super) fn replace_rejected_images(&mut self) -> usize {
-        self.managed.replace_rejected_images()
-    }
-
-    pub(super) fn remove_tool_definition(&mut self, definition: &Value) -> usize {
-        self.managed.remove_tool_definition(definition)
     }
 
     pub(super) fn commit_tail(&mut self) {

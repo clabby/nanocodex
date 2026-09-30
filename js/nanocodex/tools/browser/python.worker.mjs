@@ -1,7 +1,23 @@
 /// <reference lib="webworker" />
-import { loadPyodide } from "pyodide";
 import { installBrowserEgressFetch } from "./browserEgress.mjs";
 const PYODIDE_INDEX_URL = "https://cdn.jsdelivr.net/pyodide/v314.0.5/full/";
+// The interpreter, stdlib, and packages already stream from this pinned CDN
+// release. Loading its ESM loader from the same URL keeps loader and runtime
+// versions identical and keeps the 13 MB npm distribution out of installs.
+// The specifier is a variable so bundlers leave the cross-origin import alone.
+const PYODIDE_LOADER_URL = `${PYODIDE_INDEX_URL}pyodide.mjs`;
+async function loadPyodide(options) {
+    let module;
+    try {
+        module = await import(/* @vite-ignore */ /* webpackIgnore: true */ PYODIDE_LOADER_URL);
+    }
+    catch (error) {
+        throw new Error(`Failed to load the Pyodide runtime from ${PYODIDE_LOADER_URL}. `
+            + "Browser python needs network access to cdn.jsdelivr.net and a Content-Security-Policy "
+            + "that allows scripts from it.", { cause: error });
+    }
+    return module.loadPyodide(options);
+}
 let workspaceRoot;
 let egress;
 let runtimePromise;

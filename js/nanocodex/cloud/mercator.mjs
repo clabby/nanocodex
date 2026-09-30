@@ -1,4 +1,4 @@
-import { DEFAULT_MERCATOR_MCP_URL } from "../runtime/tempo-provider.mjs";
+import { DEFAULT_MERCATOR_MCP_URL } from "../runtime/mercator.mjs";
 
 const MERCATOR_ORIGIN = new URL(DEFAULT_MERCATOR_MCP_URL).origin;
 const JOBS_PATH = "/v1/jobs";

@@ -1,0 +1,22 @@
+name: Turbo cache
+description: Turborepo task cache stored in GitHub Actions cache (no remote service or secrets).
+inputs:
+  save:
+    description: Save instead of restore; call once more as the job's last step
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - if: inputs.save != 'true'
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: .turbo/cache
+        key: turbo-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+        restore-keys: turbo-${{ runner.os }}-${{ github.job }}-
+    # Only master writes, so pull requests read one warm entry per job.
+    - if: inputs.save == 'true' && github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      continue-on-error: true
+      with:
+        path: .turbo/cache
+        key: turbo-${{ runner.os }}-${{ github.job }}-${{ github.sha }}

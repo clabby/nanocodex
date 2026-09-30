@@ -23,6 +23,7 @@ openai = [
     "dep:chrono",
     "dep:iana-time-zone",
     "dep:nanocodex-tools",
+    "nanocodex-tools/code-mode",
     "dep:serde_json",
     "dep:sha2",
     "dep:tower",
@@ -37,7 +38,7 @@ openai = [
 chrono = { workspace = true, optional = true }
 futures-util.workspace = true
 iana-time-zone = { workspace = true, optional = true }
-nanocodex-oai-api = { version = "0.6.5", path = "../nanocodex-oai-api", default-features = false, features = ["events"] }
+nanocodex-oai-api = { version = "0.6.6", path = "../nanocodex-oai-api", default-features = false, features = ["events"] }
 nanocodex-tools = { workspace = true, optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
@@ -60,6 +61,7 @@ async-trait.workspace = true
 criterion.workspace = true
 eyre.workspace = true
 futures-util.workspace = true
+nanocodex-tools = { workspace = true, features = ["mcp"] }
 reqwest.workspace = true
 tempfile.workspace = true
 tokio-tungstenite.workspace = true

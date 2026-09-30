@@ -37,7 +37,7 @@ if let Some(cost) = completed.estimated_cost() {
 ```
 
 This crate supports `gpt-6-astra` (the default, with low reasoning),
-`gpt-6-sol`, and `gpt-6-luna`. Select a client default with
+`gpt-6.1-sol`, and `gpt-6-luna`. Select a client default with
 `OpenAi::builder(auth).model(Model::Sol)`. A session keeps that model for its
 lifetime, and each replayable attempt retains it across retries. Changing
 models would invalidate the provider checkpoint and require an inefficient
@@ -231,6 +231,9 @@ pricing. Process companions that only need the dependency-light prompt,
 response-item, and tool wire contracts may disable default features. This
 keeps one canonical contract without linking an unused network client; it does
 not create an alternate provider or transport implementation.
+
+With `client`, [`audio::estimate_audio_token_count`] charges audio inputs by
+decoded duration exactly like codex-rs, for compaction and tool output budgets.
 
 ## Tools and managed sessions
 

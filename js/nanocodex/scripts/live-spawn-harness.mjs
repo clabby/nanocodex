@@ -19,7 +19,7 @@ function setting(name) {
   return value;
 }
 const provider = process.env.NANOCODEX_LIVE_SPAWN_PROVIDER ?? "cloudflare";
-const model = process.env.NANOCODEX_LIVE_SPAWN_MODEL ?? "gpt-6-sol";
+const model = process.env.NANOCODEX_LIVE_SPAWN_MODEL ?? "gpt-6.1-sol";
 const thinking = process.env.NANOCODEX_LIVE_SPAWN_THINKING ?? "low";
 const natural = process.env.NANOCODEX_LIVE_SPAWN_SCENARIO === "natural";
 const transport = createGatewayResponses({

@@ -56,18 +56,18 @@ indirect enum JSONValue: Codable, Equatable, Sendable {
 }
 
 struct AgentSettings: Codable, Equatable, Sendable {
-    var model = "gpt-6-sol"
-    var thinking = "medium"
+    var model = "gpt-6.1-sol"
+    var thinking = "low"
     var reasoning_mode = "standard"
     var fast_mode = false
-    var modelName: String { ["gpt-6-astra": "Astra", "gpt-6-sol": "Sol", "gpt-6-luna": "Luna"][model] ?? model }
+    var modelName: String { ["gpt-6-astra": "Astra", "gpt-6.1-sol": "Sol", "gpt-6-luna": "Luna"][model] ?? model }
     var supportsProReasoning: Bool { model != "gpt-6-astra" }
-    var supportsNoReasoning: Bool { model != "gpt-6-astra" }
+    var supportsNoReasoning: Bool { model == "gpt-6-luna" }
 
     /// Normalize only an explicit model change; retained settings keep their values.
     mutating func selectModel(_ value: String) {
         model = value
-        if !supportsNoReasoning && thinking == "none" { thinking = "high" }
+        if !supportsNoReasoning && thinking == "none" { thinking = model == "gpt-6-astra" ? "high" : "low" }
         if !supportsProReasoning && reasoning_mode == "pro" { reasoning_mode = "standard" }
     }
 }
@@ -266,6 +266,10 @@ struct HandFactory: Codable, Equatable, Sendable {
     var status: String
     var error: String?
 }
+struct HandScreen: Codable, Equatable, Sendable {
+    var status: String
+    var error: String?
+}
 struct Hand: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var name: String
@@ -285,6 +289,7 @@ struct Hand: Codable, Identifiable, Equatable, Sendable {
     var activeCalls: Int?
     var logs: [String]?
     var factory: HandFactory?
+    var screen: HandScreen?
     var isRunning: Bool { status == "connected" || status == "connecting" }
 }
 struct DesktopState: Decodable, Equatable, Sendable {

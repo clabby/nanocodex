@@ -119,6 +119,10 @@ struct HandCard: View {
                     if let factory = hand.factory {
                         Label(factory.status == "connected" ? "Native host · VMs ready" : "Native host · VMs \(factory.status)", systemImage: "shippingbox")
                     }
+                    if let screen = hand.screen {
+                        Label(screen.status == "ready" ? "Screen published" : screen.status == "starting" ? "Screen starting…" : "Screen \(screen.status)", systemImage: "display")
+                            .foregroundStyle(screen.status == "unavailable" ? Color.orange : Color.secondary)
+                    }
                     if let active = hand.activeCalls, active > 0 { Text("\(active) command\(active == 1 ? "" : "s") running").foregroundStyle(.green) }
                     else if let calls = hand.calls, calls > 0 { Text("\(calls) command\(calls == 1 ? "" : "s")").foregroundStyle(.tertiary) }
                 }.font(.system(size: 11)).foregroundStyle(.secondary)
@@ -130,6 +134,7 @@ struct HandCard: View {
                 }.buttonStyle(.bordered).controlSize(.small).disabled(model.busyHands.contains(hand.id)).accessibilityIdentifier("toggle-hand-\(hand.id)")
             }
             if let error = hand.factory?.error { Text(error).font(.system(size: 12)).foregroundStyle(.secondary) }
+            if let error = hand.screen?.error { Text(error).font(.system(size: 12)).foregroundStyle(.orange).textSelection(.enabled) }
             if let error = hand.error { Text(error).font(.system(size: 12)).foregroundStyle(.orange).textSelection(.enabled) }
         }.padding(.vertical, 8).accessibilityElement(children: .contain).accessibilityIdentifier("hand-\(hand.id)")
     }

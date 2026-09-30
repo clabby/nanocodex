@@ -17,39 +17,39 @@ pub mod apply_patch;
 #[cfg(all(not(target_family = "wasm"), feature = "attachment"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod attachment;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod code_mode;
-#[cfg(feature = "native")]
+#[cfg(feature = "code-mode")]
 #[path = "code_mode/description.rs"]
 mod code_mode_description;
-#[cfg(feature = "native")]
+#[cfg(feature = "code-mode")]
 mod code_mode_order;
-#[cfg(feature = "native")]
+#[cfg(feature = "code-mode")]
 #[path = "code_mode/spec.rs"]
 mod code_mode_spec;
-#[cfg(feature = "native")]
+#[cfg(feature = "code-mode")]
 pub mod embedded;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 pub mod extensions;
-#[cfg(feature = "native")]
+#[cfg(feature = "code-mode")]
 pub mod image;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 mod image_generation;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
-#[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
+#[cfg(all(not(target_family = "wasm"), feature = "mcp"))]
+#[cfg_attr(docsrs, doc(cfg(all(not(target_family = "wasm"), feature = "mcp"))))]
 pub mod mcp;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 mod plan;
 #[cfg(all(not(target_family = "wasm"), feature = "attachment"))]
 mod prepared;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod runtime;
-#[cfg(feature = "native")]
+#[cfg(feature = "code-mode")]
 mod runtime_config;
 #[cfg(any(
-    feature = "native",
+    feature = "code-mode",
     all(not(target_family = "wasm"), feature = "attachment")
 ))]
 #[path = "runtime/selection.rs"]
@@ -61,7 +61,7 @@ mod shell;
 pub mod standard;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 mod view_image;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 mod web_search;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
@@ -84,7 +84,7 @@ pub mod contract {
     };
 }
 
-#[cfg(all(target_family = "wasm", feature = "native"))]
+#[cfg(all(target_family = "wasm", feature = "code-mode"))]
 /// Code Mode results and observation contracts for the embedded WASM runtime.
 pub mod code_mode {
     pub use crate::embedded::{
@@ -93,7 +93,7 @@ pub mod code_mode {
     };
 }
 
-#[cfg(all(target_family = "wasm", feature = "native"))]
+#[cfg(all(target_family = "wasm", feature = "code-mode"))]
 /// Embedded tool selection and execution runtime.
 pub mod runtime {
     pub use crate::{
@@ -108,7 +108,7 @@ pub mod runtime {
 
 #[cfg(all(
     not(target_family = "wasm"),
-    any(feature = "native", all(test, feature = "workspace-runtime"))
+    any(feature = "code-mode", all(test, feature = "workspace-runtime"))
 ))]
 pub(crate) use contract::ToolOutputBody;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
@@ -116,28 +116,33 @@ pub(crate) use contract::ToolOutputContent;
 pub use contract::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult};
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 pub(crate) use nanocodex_oai_api::ImageDetail;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub use nanocodex_tools_macros::tool;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
-pub(crate) use runtime::{DynamicToolProvider, ImageGenerationConfig, WebSearchConfig};
+#[cfg(all(not(target_family = "wasm"), feature = "mcp"))]
+pub(crate) use runtime::DynamicToolProvider;
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
+pub(crate) use runtime::{ImageGenerationConfig, WebSearchConfig};
 #[cfg(any(
-    feature = "native",
+    feature = "code-mode",
     all(not(target_family = "wasm"), feature = "attachment")
 ))]
 pub use selection::ToolExposure;
 #[cfg(any(
-    feature = "native",
+    feature = "code-mode",
     all(not(target_family = "wasm"), feature = "attachment")
 ))]
 pub use selection::Tools;
 #[cfg(any(
-    feature = "native",
+    feature = "code-mode",
     all(not(target_family = "wasm"), feature = "attachment")
 ))]
 pub use selection::{ToolSource, ToolsBuildError, ToolsBuilder};
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
-#[cfg_attr(docsrs, doc(cfg(all(not(target_family = "wasm"), feature = "native"))))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(all(not(target_family = "wasm"), feature = "code-mode")))
+)]
 pub use shell::ambient_sensitive_environment;
 #[cfg(feature = "workspace-runtime")]
 pub(crate) use standard::StandardTool;
@@ -151,13 +156,13 @@ pub mod __private {
     #[cfg(not(target_family = "wasm"))]
     pub use serde;
 
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub use crate::runtime::schema_for;
     #[cfg(not(target_family = "wasm"))]
     pub use crate::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult};
 
     /// Builds the direct Responses tool prefix and the nested Code Mode name map together.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "code-mode")]
     pub fn model_contract(
         runtime: &crate::runtime::ToolRuntime,
         session_id: &str,

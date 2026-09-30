@@ -25,6 +25,8 @@ pub async fn native_factory(machine_id: &str) -> Option<SinkFactory> {
 
 // Compiled in tests on macOS too, so Linux code cannot silently bitrot.
 #[cfg(any(target_os = "linux", test))]
+// Its callers are Linux-only, so non-Linux test builds see it as unused.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod linux {
     use super::*;
     use std::{

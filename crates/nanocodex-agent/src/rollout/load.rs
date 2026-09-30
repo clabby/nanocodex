@@ -468,7 +468,7 @@ fn materialize_rollout(path: &Path, thread_id: &str) -> io::Result<MaterializedR
             }
             Some("turn_context") => {
                 if let Some(selected) = value["payload"]["model"].as_str() {
-                    if selected.starts_with("gpt-5.6-") {
+                    if selected == "gpt-6-sol" || selected.starts_with("gpt-5.6-") {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!(

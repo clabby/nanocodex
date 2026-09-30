@@ -1,14 +1,6 @@
 //! Model-visible byte accounting from codex-rs 36430b3688 context_manager/history.rs.
 //! Transport envelopes, IDs, citations and JSON escaping do not consume model context.
 use super::*;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use std::io::Cursor;
-use symphonia::core::{
-    formats::{FormatOptions, TrackType, probe::Hint},
-    io::MediaSourceStream,
-    meta::MetadataOptions,
-};
-
 pub(super) fn model_visible_len(item: &ResponseItem) -> usize {
     match item {
         ResponseItem::Message { content, .. } => content
@@ -140,79 +132,9 @@ fn output_bytes(output: &FunctionOutputBody) -> usize {
             .fold(0, usize::saturating_add),
     }
 }
+/// Mirrors codex `estimate_audio_bytes`: duration tokens times four bytes.
 fn audio_bytes(url: &str) -> usize {
-    let tokens = audio_duration_seconds(url).map_or_else(
-        || approx_tokens(url.len()),
-        |seconds| (seconds * 10.0).ceil() as usize,
-    );
-    tokens.saturating_mul(APPROX_BYTES_PER_TOKEN)
-}
-
-const fn canonical_audio_mime(mime: &str) -> Option<&'static str> {
-    if mime.eq_ignore_ascii_case("audio/wav")
-        || mime.eq_ignore_ascii_case("audio/x-wav")
-        || mime.eq_ignore_ascii_case("audio/wave")
-        || mime.eq_ignore_ascii_case("audio/vnd.wave")
-    {
-        Some("audio/wav")
-    } else if mime.eq_ignore_ascii_case("audio/mpeg") || mime.eq_ignore_ascii_case("audio/mp3") {
-        Some("audio/mpeg")
-    } else if mime.eq_ignore_ascii_case("audio/mp4")
-        || mime.eq_ignore_ascii_case("audio/m4a")
-        || mime.eq_ignore_ascii_case("audio/x-m4a")
-    {
-        Some("audio/mp4")
-    } else if mime.eq_ignore_ascii_case("audio/webm") {
-        Some("audio/webm")
-    } else if mime.eq_ignore_ascii_case("audio/ogg") {
-        Some("audio/ogg")
-    } else {
-        None
-    }
-}
-
-fn audio_duration_seconds(audio_url: &str) -> Option<f64> {
-    let (metadata, payload) = audio_url.split_once(',')?;
-    let metadata = metadata.get("data:".len()..)?;
-    let mut metadata_parts = metadata.split(';');
-    let canonical_mime = canonical_audio_mime(metadata_parts.next()?)?;
-    if !metadata_parts.any(|part| part.eq_ignore_ascii_case("base64")) {
-        return None;
-    }
-
-    let bytes = match BASE64_STANDARD.decode(payload) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::trace!(%error, "failed to decode audio payload for token estimation");
-            return None;
-        }
-    };
-    let media_source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
-    let mut hint = Hint::new();
-    hint.mime_type(canonical_mime);
-    let format = match symphonia::default::get_probe().probe(
-        &hint,
-        media_source,
-        FormatOptions::default(),
-        MetadataOptions::default(),
-    ) {
-        Ok(format) => format,
-        Err(error) => {
-            tracing::trace!(%error, "failed to read audio duration for token estimation");
-            return None;
-        }
-    };
-    let track = format.default_track(TrackType::Audio)?;
-    let timing = track.time_base.zip(track.duration).or_else(|| {
-        format
-            .media_info()
-            .time_base
-            .zip(format.media_info().duration)
-    });
-    let (time_base, duration) = timing?;
-    let duration_seconds =
-        duration.get() as f64 * f64::from(time_base.numer.get()) / f64::from(time_base.denom.get());
-    duration_seconds.is_finite().then_some(duration_seconds)
+    crate::audio::estimate_audio_token_count(url).saturating_mul(APPROX_BYTES_PER_TOKEN)
 }
 
 #[cfg(test)]
@@ -257,28 +179,76 @@ mod tests {
         );
     }
 
+    /// Same fixture builder as codex-rs `core/src/context_manager/history_tests.rs`
+    /// `pcm_wav_data_url`: 8 kHz, mono, 8-bit PCM with `sample_count` frames.
+    fn pcm_wav_data_url(sample_count: u32) -> String {
+        use base64::Engine;
+        let padding = sample_count % 2;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + sample_count + padding).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&8_000u32.to_le_bytes());
+        bytes.extend_from_slice(&8_000u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&8u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&sample_count.to_le_bytes());
+        bytes.resize(bytes.len() + (sample_count + padding) as usize, 0);
+        format!(
+            "data:audio/wav;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    }
+
+    /// Expected values are codex-rs's own (history_tests.rs):
+    /// `audio_data_url_payload_does_not_dominate_{message,function_call_output,
+    /// custom_tool_call_output}_estimate` and
+    /// `malformed_audio_data_url_falls_back_to_whole_url_size_cost`.
     #[test]
-    fn wav_duration_and_invalid_audio_fallback_match_pinned_estimator() {
-        let samples = 8_000u32;
-        let data_len = samples * 2;
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&samples.to_le_bytes());
-        wav.extend_from_slice(&(samples * 2).to_le_bytes());
-        wav.extend_from_slice(&2u16.to_le_bytes());
-        wav.extend_from_slice(&16u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&data_len.to_le_bytes());
-        wav.resize(wav.len() + data_len as usize, 0);
-        let url = format!("data:audio/wav;base64,{}", BASE64_STANDARD.encode(wav));
-        assert_eq!(audio_duration_seconds(&url), Some(1.0));
-        assert_eq!(audio_bytes(&url), 40);
-        let invalid = "data:audio/wav;base64,invalid";
-        assert_eq!(audio_bytes(invalid), approx_tokens(invalid.len()) * 4);
+    fn audio_estimates_match_codex_duration_and_fallback_scenarios() {
+        let message = |audio_url: String| {
+            ResponseItem::message(
+                MessageRole::User,
+                [ContentItem::InputAudio {
+                    audio_url: audio_url.into(),
+                }],
+            )
+        };
+
+        // 801 frames at 8 kHz = 0.100125 s -> ceil(1.00125) = 2 tokens.
+        assert_eq!(model_visible_len(&message(pcm_wav_data_url(801))), 2 * 4);
+        // 800 frames = 0.1 s -> 1 token, plus the model-visible call id.
+        let function_output: ResponseItem = serde_json::from_value(serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "call-audio",
+            "output": [{ "type": "input_audio", "audio_url": pcm_wav_data_url(800) }],
+        }))
+        .unwrap();
+        assert_eq!(model_visible_len(&function_output), "call-audio".len() + 4);
+        // 80 000 frames = 10 s -> 100 tokens.
+        let custom = ResponseItem::custom_tool_output(
+            "call-custom-audio".to_owned(),
+            None,
+            FunctionOutputBody::Content(vec![FunctionOutputContent::InputAudio {
+                audio_url: pcm_wav_data_url(80_000).into(),
+            }]),
+        );
+        assert_eq!(model_visible_len(&custom), "call-custom-audio".len() + 400);
+
+        // Undecodable, remote, unsupported and non-base64 audio all charge
+        // ceil(url.len() / 4) tokens for the whole URL.
+        for url in [
+            format!("data:audio/wav;base64,{}", "A".repeat(100_000)),
+            "https://example.test/clip.mp3".to_owned(),
+            "data:audio/flac;base64,ZkxhQw==".to_owned(),
+            "data:audio/wav,not-base64".to_owned(),
+        ] {
+            let fallback = url.len().div_ceil(4) * 4;
+            assert_eq!(model_visible_len(&message(url)), fallback);
+        }
     }
 }

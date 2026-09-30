@@ -14,7 +14,8 @@ askpass pipe. It never travels through the command's stdin, argv, environment,
 ordinary Hand RPC, or filesystem. Askpass derives its broker socket from its
 actual parent PID; the broker checks the root peer, actual sudo PID and uid and
 allows one delivery. A sudo NOPASSWD command never calls askpass. The setuid helper
-rejects non-pipe stdout and non-setuid invocation. The root daemon rejects
+rejects non-pipe stdout and non-setuid invocation. The root daemon disables core dumps before loading keys; the sudo runner verifies
+that policy before fork and again in its child. The root daemon rejects
 unsigned/ad-hoc/debug binaries and verifies askpass's matching Developer Team,
 hardened runtime, identity, and root ownership.
 

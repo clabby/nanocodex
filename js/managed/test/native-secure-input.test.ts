@@ -5,7 +5,7 @@ import { NativeSecureInput } from '../src/native-secure-input';
 // expiry, substituted routes, missing signing authority, ambiguous dispatch, and
 // host output echo must fail closed without recording or returning private input.
 describe('native secure input authority', () => {
-  async function fixture(options:{missingPin?:boolean;missingSigner?:boolean;signedMismatch?:boolean;cancelRejected?:boolean;exitCode?:number;hostFailure?:boolean;responseMismatch?:boolean;responseFailure?:boolean}={}) {
+  async function fixture(options:{missingPin?:boolean;missingSigner?:boolean;signedMismatch?:boolean;cancelRejected?:boolean;exitCode?:number;hostFailure?:boolean;responseMismatch?:boolean;responseFailure?:boolean;uid?:number}={}) {
     const keys = await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign','verify']) as CryptoKeyPair;
     const key = JSON.stringify(await crypto.subtle.exportKey('jwk',keys.privateKey));
     const values = new Map<string, unknown>();
@@ -15,9 +15,9 @@ describe('native secure input authority', () => {
       calls.push(input);
       if (input.operation === 'prepare') {
         const command={executable:input.executable,arguments:input.arguments,cwd:input.cwd};
-        const canonical=JSON.stringify({arguments:input.arguments,cwd:input.cwd,executable:options.signedMismatch?'/usr/bin/false':input.executable,uid:501});
+        const canonical=JSON.stringify({arguments:input.arguments,cwd:input.cwd,executable:options.signedMismatch?'/usr/bin/false':input.executable,uid:options.uid??501});
         const command_digest=btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canonical)))));
-        const ticket={request_id:crypto.randomUUID(),command_digest,public_key:btoa('\x04'+'p'.repeat(64)),expires_at:Date.now()+300000,uid:501,command};
+        const ticket={request_id:crypto.randomUUID(),command_digest,public_key:btoa('\x04'+'p'.repeat(64)),expires_at:Date.now()+300000,uid:options.uid??501,command};
         const message=['nanocodex-secure-sudo-ticket-v1',ticket.request_id,ticket.command_digest,ticket.public_key,String(ticket.expires_at),String(ticket.uid)].join('\n');
         const helper_signature=btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},keys.privateKey,new TextEncoder().encode(message)))));
         return {...ticket,helper_signature, ...(substituted?{public_key:btoa('\x04'+'s'.repeat(64))}:{})};
@@ -36,6 +36,8 @@ describe('native secure input authority', () => {
     return {runtime,request,envelope,values,calls,keys,substitute:()=>{substituted=true},changeRoute:()=>{route='route-2'},fail:()=>{fail=true}};
   }
   it.each(['missingPin','missingSigner','signedMismatch','hostFailure'] as const)('rejects %s before durable admission',async mode=>{const f=await fixture({[mode]:true});await expect(f.request()).rejects.toThrow();expect(f.values.size).toBe(0)});
+  it.each([0,-1,1.5,4294967296])('rejects invalid sudo peer uid %s',async uid=>{const f=await fixture({uid});await expect(f.request()).rejects.toThrow('Native secure input unavailable');expect(f.values.size).toBe(0)});
+  it.each([998,1000,4294967295])('retains exact Linux peer uid %s in private review',async uid=>{const f=await fixture({uid}),request=await f.request();const review=await f.runtime.submit({request_id:request.request_id,action:'describe'});expect(review).toMatchObject({uid,machine_id:'hand',executable:'/usr/bin/id',arguments:[],cwd:'/tmp'});expect(request).not.toHaveProperty('uid');expect(request).not.toHaveProperty('public_key')});
   it('rejects a substituted recipient key before exposing a request',async()=>{const f=await fixture();f.substitute();await expect(f.request()).rejects.toThrow();expect(f.values.size).toBe(0)});
   it('does not confirm helper cancellation that was rejected',async()=>{
     const f=await fixture({cancelRejected:true}),ticket=await f.request();

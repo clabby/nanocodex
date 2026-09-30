@@ -13,7 +13,7 @@ export function workspacePushTools(options: {
   return (["gmail", "calendar"] as const).map(service => ({
     name: `${service}_watch`,
     description: service === "gmail"
-      ? "Enable continuous Gmail notifications for this agent, inspect status, or disable an exact connected Google account's watch. Enable requires its mailbox email. Optional crm=true explicitly imports relevant correspondence into the private CRM. Select the exact connection_id from connected accounts. Does not send email. Direct account authorization required; unavailable through Connect."
+      ? "Enable background Gmail processing for this agent, inspect status, or disable an exact connected Google account's watch. Incoming mail does not create chat turns; enabled TODO processing runs in the background. Enable requires its mailbox email. Optional crm=true explicitly imports relevant correspondence into the private CRM. Select the exact connection_id from connected accounts. Does not send email. Direct account authorization required; unavailable through Connect."
       : "Enable continuous Calendar meeting import into the private CRM, inspect status, or disable a watch for this agent and exact Google connection/calendar. Enable requires explicit crm=true; calendar_id defaults to primary. This does not supply meeting notes or send invitations. Direct account authorization required; unavailable through Connect.",
     parameters: { type: "object", additionalProperties: false, required: ["operation", "connection_id"], properties: {
       operation: {type: "string", enum: ["enable", "status", "disable"]},

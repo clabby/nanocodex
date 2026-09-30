@@ -19,7 +19,10 @@ runs:
     - name: Fingerprint WASM inputs
       id: inputs
       shell: bash
-      run: echo "key=wasm-outputs-v1-${{ runner.os }}-${{ runner.arch }}-$(node js/nanocodex-vite/scripts/wasm-output-cache.mjs key release)" >> "$GITHUB_OUTPUT"
+      # Assign first so a fingerprint failure fails the step (not an empty key).
+      run: |
+        key="$(node js/nanocodex-vite/scripts/wasm-output-cache.mjs key release)"
+        echo "key=wasm-outputs-v1-${{ runner.os }}-${{ runner.arch }}-$key" >> "$GITHUB_OUTPUT"
     - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       id: restore
       continue-on-error: true
@@ -80,11 +83,8 @@ runs:
       with:
         toolchain: '1.97'
         targets: wasm32-unknown-unknown
-    - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+    - uses: ./.github/actions/rust-compiler-cache
       if: steps.verify.outputs.hit != 'true'
-      with:
-        cache-on-failure: true
-        save-if: ${{ github.ref == 'refs/heads/master' }}
     - uses: taiki-e/install-action@3522286d40783523f9c7880e33f785905b4c20d0 # v2
       if: steps.verify.outputs.hit != 'true'
       with:

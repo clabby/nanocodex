@@ -125,10 +125,10 @@ adapter reuses the same execution, nested-call, notification, observer, and
 owned-context types as native Code Mode. The [`embedded`] module documentation
 includes a complete host implementation.
 
-## MCP is native and always available
+## MCP
 
-MCP is not a feature flag. Native consumers configure stdio or Streamable HTTP
-servers and install the provider into the same registry:
+MCP is the `mcp` feature, part of the default `native`. Native consumers
+configure stdio or Streamable HTTP servers and install the provider into the same registry:
 
 ```rust
 use nanocodex_tools::{
@@ -208,7 +208,8 @@ must never imply synchronization.
 ## Companion workspace runtimes
 
 The default `native` feature remains the complete tools crate: registry, Code
-Mode, MCP, web/image tools, macros, and standard workspace tools.
+Mode, MCP, web/image tools, macros, and standard workspace tools: `code-mode`
+(everything the agent loop needs) plus `mcp` (MCP, OAuth, deferred-tool search).
 
 The narrower `workspace-runtime` feature exists only for process companions
 such as `nanocodex-vm-guest`. With default features disabled, it exposes the

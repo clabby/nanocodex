@@ -244,6 +244,25 @@ pub(super) enum ScrollCommand {
 }
 
 impl Transcript {
+    pub(crate) fn secure_input_request(
+        &self,
+        command: &crate::tui::secure_input::Command,
+    ) -> Option<nanocodex_managed::NativeSecureInputRequest> {
+        self.model.entries().iter().rev().find_map(|entry| {
+            let EntryKind::Tool(tool) = &entry.kind else {
+                return None;
+            };
+            if !matches!(
+                tool.family(),
+                "request_native_secure_input" | "exec" | "wait"
+            ) {
+                return None;
+            }
+            let request =
+                nanocodex_managed::NativeSecureInputRequest::parse(tool.result.as_ref()?)?;
+            (command.matches(&request) && request.is_current()).then_some(request)
+        })
+    }
     pub(crate) fn latest_vault_command(&self) -> Option<crate::tui::vault::Command> {
         let mut receipts = Vec::new();
         for entry in self.model.entries().iter().rev() {

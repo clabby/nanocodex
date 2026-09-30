@@ -94,7 +94,7 @@ describe("Cloudflare frontier runtime", () => {
 describe("deployment-owned Cloudflare REST configuration", () => {
   const rest = { NANOCODEX_CLOUDFLARE_FRONTIER_ENABLED: "true", CLOUDFLARE_AI_API_TOKEN: "private-fixture-token",
     NANOCODEX_CLOUDFLARE_ACCOUNT_ID: "a".repeat(32) };
-  const pin = {backend:"cloudflare",model:"gpt-6-sol",provider_model:"openai/gpt-6-sol",thinking:"low"} as ThreadRoute;
+  const pin = {backend:"cloudflare",model:"gpt-6.1-sol",provider_model:"openai/gpt-6.1-sol",thinking:"low"} as ThreadRoute;
   it("keeps partial or invalid REST configuration unavailable even with a healthy binding", () => {
     const AI={run:vi.fn()};
     for(const extra of [{CLOUDFLARE_AI_API_TOKEN:undefined},{NANOCODEX_CLOUDFLARE_ACCOUNT_ID:undefined},

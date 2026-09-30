@@ -2,8 +2,14 @@
 
 This crate calls the official external Sky MCP provider. It contains no CUA
 implementation, JavaScript engine, browser extension, platform control backend,
-or bundled tool schema. The provider owns its tools, documentation, permissions,
-and execution behavior.
+or bundled tool schema. The provider owns its tools, documentation and execution behavior. The managed
+macOS path has a small Nanocodex MCP/lifecycle host for application consent and
+native policy compatibility; it does not bundle or run the official Codex CLI
+or app server. Its default surface is native `computer` only: browser windows
+remain accessible through native UI, but dedicated Tab/DOM APIs and the Chrome
+native-messaging bridge are not included. Windows/opt-in Linux are not yet
+converted and still require their existing Codex CLI. Native protected-target
+checks and OS permissions still apply.
 
 `ComputerConfig::discover_or_install()` uses the upstream provisioning path on
 supported hosts. `NANOCODEX_COMPUTER=/absolute/path/to/launcher` selects an explicit
@@ -63,20 +69,26 @@ remain ordered; other conversations execute independently. Cancellation or a
 protocol failure discards only the affected process. A subsequent upstream
 `js_reset` call is required before continuing that conversation.
 
-For `js` and `js_reset`, a positive integer `timeout_ms` also bounds the full
-host wait, including queueing, startup, and execution (default: 30 seconds, maximum: 2,147,483,647 ms).
-Arguments still reach the provider unchanged. An active call that expires
-discards its process and requires `js_reset`; a call that expires while queued
-never runs or discards the active process. Other conversations remain usable.
+Provider `timeout_ms` arguments are forwarded unchanged. Trusted host deadlines
+bound provider startup and native-helper readiness only; the transport adds no
+second model-derived execution timer. Cancellation discards the affected
+conversation and never replays input or establishes that earlier actions had no
+effect. The direct host's lease watchdogs reap owned native/provider process groups
+on EOF or hard cancellation, including TERM-ignoring descendants.
 
 MCP text, image, and audio content is translated to Nanocodex multimodal tool
 output. The full MCP result, including structured content and metadata, remains
 available as the structured result. Provider errors retain their failure status.
 
-Nanocodex does not advertise host elicitation, display consent forms, or retain
-permission decisions. Unhandled provider-to-client requests receive the standard
-MCP method-not-found error; provider failures remain errors.
-OpenAI's provider and operating-system permission requirements remain in effect.
+The outer Rust client advertises no elicitation and rejects unsupported server
+requests. The managed direct macOS host's internal client advertises form support
+and supplies empty native-app access confirmations from trusted host policy.
+The managed launcher defaults to `NANOCODEX_CUA_APP_CONSENT=allow`; a trusted host
+can set `deny` to disable blanket application access. Audio/data forms and unknown
+requests are never automatically accepted. Known enforced local/MDM sources fail
+closed until properly integrated. Ordinary owner-controlled Codex preferences are
+not read; the owner's explicit Nanocodex policy is independent of Codex sign-in.
+See [direct MCP host](../../../docs/computer/direct-mcp-host.md).
 
 Run the transport and provisioning tests without an installed provider:
 

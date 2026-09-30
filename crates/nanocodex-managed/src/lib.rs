@@ -10,6 +10,7 @@ mod builder;
 mod client;
 mod driver;
 mod error;
+mod native_secure_input;
 mod share;
 mod sse;
 mod types;
@@ -32,6 +33,10 @@ pub use client::{ManagedClient, ManagedClientBuilder};
 pub use driver::ManagedAgent;
 pub use error::ManagedError;
 pub use nanocodex_agent::{Model, ReasoningMode, Thinking};
+pub use native_secure_input::{
+    NativeSecureInputDescription, NativeSecureInputEnvelope, NativeSecureInputReceipt,
+    NativeSecureInputRequest, NativeSecureInputStatus,
+};
 pub use share::{CreatedShareLink, ShareLink, SharePermission};
 pub use sse::{
     EventCursor, ManagedEventFuture, ManagedEventSource, ManagedEventStream, ManagedEvents,

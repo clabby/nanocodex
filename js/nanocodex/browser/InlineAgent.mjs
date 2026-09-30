@@ -175,6 +175,7 @@ export async function create(options = {}) {
           subagentRouting: internalRuntime?.subagentRouting !== undefined,
           hostDefinitionId,
           beforeCompaction: beforeCompaction !== undefined,
+          promptCacheKey: internalRuntime?.promptCacheKey,
           ...config,
           durabilityHostId: durabilityOwner?.id,
         }));

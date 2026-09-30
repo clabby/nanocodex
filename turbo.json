@@ -8,6 +8,32 @@
     "nanocodex#build": {
       "dependsOn": ["^build"],
       "cache": false,
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/Cargo.toml",
+        "$TURBO_ROOT$/Cargo.lock",
+        "$TURBO_ROOT$/rust-toolchain",
+        "$TURBO_ROOT$/rust-toolchain.toml",
+        "$TURBO_ROOT$/.cargo/**",
+        "$TURBO_ROOT$/js/nanocodex-vite/scripts/**",
+        "$TURBO_ROOT$/crates/nanocodex/**",
+        "$TURBO_ROOT$/crates/nanocodex-agent/**",
+        "$TURBO_ROOT$/crates/nanocodex-durability/**",
+        "$TURBO_ROOT$/crates/nanocodex-oai-api/**",
+        "$TURBO_ROOT$/crates/nanocodex-subagents/**",
+        "$TURBO_ROOT$/crates/nanocodex-tools/**",
+        "$TURBO_ROOT$/crates/nanocodex-voice-protocol/**"
+      ],
+      "env": [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_INCREMENTAL",
+        "CARGO_PROFILE_*",
+        "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_*"
+      ],
       "outputs": []
     },
     "@nanocodex/connect-api#build": {

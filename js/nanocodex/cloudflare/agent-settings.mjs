@@ -1,5 +1,5 @@
 export const AGENT_MODELS = [
-    "gpt-6-sol",
+    "gpt-6.1-sol",
     "gpt-6-luna",
     "gpt-6-astra",
     "@cf/zai-org/glm-5.3",
@@ -108,8 +108,8 @@ export function validateAgentSettings(settings) {
         && (!(settings.model === "kimi-k3" ? ["low", "high"] : ["low", "medium", "high"]).includes(settings.thinking) || settings.reasoning_mode !== "standard" || settings.fast_mode)) {
         throw new TypeError("Gateway model requires a supported effort, standard mode, and no fast mode");
     }
-    if (settings.model === "gpt-6-astra" && settings.thinking === "none") {
-        throw new TypeError("GPT-6 Astra requires low, medium, high, xhigh, or max thinking");
+    if (["gpt-6-astra", "gpt-6.1-sol"].includes(settings.model) && settings.thinking === "none") {
+        throw new TypeError("GPT-6 Astra and GPT-6.1 Sol require low, medium, high, xhigh, or max thinking");
     }
     if (settings.model === "gpt-6-astra" && settings.reasoning_mode === "pro") {
         throw new TypeError("GPT-6 Astra does not support pro reasoning mode");

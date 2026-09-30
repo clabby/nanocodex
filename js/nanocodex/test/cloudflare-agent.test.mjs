@@ -331,7 +331,7 @@ test("Cloudflare ephemeral Agent owns transport without durable state", async ()
   const owner = durableOwner(storage, egressBinding(subjects));
   const agent = await createEphemeral(module, owner, {
     instructions: "Use the caller's search tool.",
-    model: "gpt-6-sol",
+    model: "gpt-6.1-sol",
     tools: [{
       name: "search",
       description: "Search account history",
@@ -1296,7 +1296,7 @@ test("live child continuation preserves schema, history, routing, and spawning a
     }] } }] };
   } };
   const gateway = {
-    provider: "openrouter", model: "gpt-6-sol", reasoningEffort: "low", apiKey: "synthetic-test-key",
+    provider: "openrouter", model: "gpt-6.1-sol", reasoningEffort: "low", apiKey: "synthetic-test-key",
     async fetch() { throw new Error("a child must never use the parent provider"); },
   };
   const options = {
@@ -1669,7 +1669,8 @@ test("manual GPT children preserve native defaults, max/xhigh/none, fast mode, a
       [{}, "gpt-6-astra", "max"],
       [{ model: "astra", thinking: "max" }, "gpt-6-astra", "max"],
       [{ model: "luna", thinking: "xhigh" }, "gpt-6-luna", "xhigh"],
-      [{ model: "sol", thinking: "none" }, "gpt-6-sol", "none"],
+      [{ model: "luna", thinking: "none" }, "gpt-6-luna", "none"],
+      [{ model: "sol", thinking: "low" }, "gpt-6.1-sol", "low"],
     ]) {
       const child = await Subagents.spawn(agent, { role: "native-child", task: "Submit ok true.", ...overrides,
         outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false } });
@@ -1778,7 +1779,7 @@ function nativePreparationOptions(prepare, signal) {
     durabilityId: "fixture-prepared-state",
     eventPersistence: "caller",
     [Symbol.for("nanocodex.cloudflare.internalConfiguration")]: {
-      model: "gpt-6-sol", thinking: "high", reasoning_mode: "standard", fast_mode: false,
+      model: "gpt-6.1-sol", thinking: "high", reasoning_mode: "standard", fast_mode: false,
     },
     [Symbol.for("nanocodex.cloudflare.internalRuntime")]: prepare === undefined
       ? { waitForPreconnect: false }

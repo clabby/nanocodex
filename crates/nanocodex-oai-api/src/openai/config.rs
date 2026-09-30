@@ -24,7 +24,7 @@ pub struct ModelConfig {
     /// Optional namespace prepended to the model identifier on the wire.
     ///
     /// This preserves Nanocodex's closed typed model policy while allowing an
-    /// OpenAI routing gateway to require IDs such as `openai/gpt-6-sol`.
+    /// OpenAI routing gateway to require IDs such as `openai/gpt-6.1-sol`.
     pub model_id_prefix: Option<Arc<str>>,
     /// Authentication source resolved for each transport connection.
     pub auth: OpenAiAuth,

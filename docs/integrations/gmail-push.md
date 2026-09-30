@@ -61,7 +61,7 @@ trigger an inbox backfill. CRM defaults off; disable before changing the opt-in.
 The server verifies
 that address against the exact connection's Gmail profile. One mailbox has one target agent; disable before changing it. Enable only
 after the Pub/Sub subscription exists, then send a test message and inspect status
-and the resulting agent turn before disabling the old five-minute polling cron.
+and the resulting TODO/CRM updates before disabling the old five-minute polling cron.
 The integration does not automatically remove existing account schedules.
 
 With CRM enabled, bounded metadata reads attach dated, sourced email interactions
@@ -83,37 +83,42 @@ configure the account API separately.
 
 ## Delivery and recovery
 
-Push acknowledgment means the history target is durable, not that an agent turn
+Push acknowledgment means the history target is durable, not that background processing
 finished. Duplicate and older history hints do not create duplicate work. Alarms
-page through Gmail history and persist an outbox before admitting a turn. A busy
-agent or an unavailable provider causes bounded retry; replay uses the same event
-ID so an uncertain admission response cannot start a second turn. Work per alarm
-and the message IDs included in each event are bounded. Renewal catches up from
-the existing cursor; it never replaces an unprocessed cursor with the watch result.
-An hourly backend-only history check recovers missed pushes; empty changes do not
-wake the agent. Each alarm admits at most one turn with up to five new message IDs;
-remaining chunks stay durable and retry after the agent becomes idle.
-An expired history cursor produces an explicit resynchronization event rather
-than silently claiming all intervening changes were delivered.
+page through Gmail history and persist an outbox before delivering an event.
+Unavailable dependencies cause bounded retry with the same event ID and frozen
+content. The managed receiver records completed deliveries independently of chat
+turns; concurrent delivery and replay do not repeat completed work. Active user
+conversations do not block background mail processing.
 
-Only newly added INBOX messages wake the agent. Draft, sent-only and label-only
-changes do not trigger turns. Self-addressed mail delivered to INBOX remains eligible.
-Before admitting a turn, the backend resolves the event's message IDs through the
-selected Gmail connection and includes message headers and decoded body text in
-the agent input. Ordinary messages therefore do not need a model-initiated Gmail
-read. The backend prefers the plain-text MIME alternative and converts HTML-only
+Work per alarm and the message IDs included in each event are bounded. Renewal
+catches up from the existing cursor; it never replaces an unprocessed cursor with
+the watch result. An hourly backend-only history check recovers missed pushes.
+Each alarm delivers at most one event with up to five new message IDs; remaining
+chunks stay durable for subsequent processing. An expired history cursor produces
+an explicit resynchronization event rather than silently claiming all intervening
+changes were delivered.
+
+Only newly added INBOX messages are processed. Draft, sent-only and label-only
+changes do not trigger processing. Self-addressed mail delivered to INBOX remains
+eligible. The backend resolves message IDs through the selected Gmail connection
+and includes message headers and decoded body text in the background event.
+Gmail events never submit a chat turn, append notification JSON to a conversation,
+or start a conversation to summarize mail. Enabled TODO classification and
+explicitly opted-in CRM imports run in the background.
+The backend prefers the plain-text MIME alternative and converts HTML-only
 mail to inert text. Selected text bodies stored separately by Gmail are resolved
 through the same connection. File contents are not downloaded. Resolution is
 bounded: an event fits within 32 KiB, a single message snapshot is at most 16,000
 serialized UTF-8 bytes, and multi-message events share the available budget.
 Missing messages, unavailable content, and truncation are explicit in the payload.
 
-The resolved envelope is persisted before its first admission attempt, so a busy
-agent or ambiguous admission response reuses identical content. Outboxes created
+The resolved envelope is persisted before its first delivery attempt, so an
+ambiguous response reuses identical content. Outboxes created
 before this feature retain their original identifier-only input for replay safety.
 Email content remains untrusted context. Receiving an event does not authorize sending email or other
 external actions; existing explicit user authorization is still required.
-Disabling stops local wakes immediately and attempts `users.stop`; inspect the
+Disabling stops local delivery immediately and attempts `users.stop`; inspect the
 returned `watchStopped` value. Delete the associated Pub/Sub subscription when
 retiring a mailbox. Gmail's watch is shared per mailbox/project, so another client
 using the same OAuth project can replace or stop it.
@@ -123,8 +128,8 @@ and [authenticated Pub/Sub push documentation](https://docs.cloud.google.com/pub
 
 ## Current scope
 
-This integration delivers durable mailbox events and admits agent turns. It does
-not run a Jev classifier, supply native approval cards, or guarantee a remote
-push notification to the user. Agent output and Gmail drafts remain separate
-from authorization to send. A successful watch configuration or accepted turn
-is not evidence that an email response was prepared or sent.
+This integration delivers durable mailbox events without creating chat turns.
+The configured TODO decision producer can classify messages and propose reply
+items; CRM imports require the watch's explicit opt-in. Neither processing path
+sends email. A successful watch configuration or accepted event is not evidence
+that an email response was sent, nor does it guarantee a remote push notification.

@@ -3,7 +3,7 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fork, spawn } from 'node:child_process';
+import { fork } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -22,8 +22,8 @@ export function frame(value) {
   result.writeUInt32LE(body.length); body.copy(result, 4); return result;
 }
 export function createSession(servicePath, { cleanupMs = 3000 } = {}) {
-  const child = fork(path.join(here, 'linux_sky_worker.mjs'), [servicePath], {
-    detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], execArgv: [],
+  const child = fork(path.join(here, 'linux_sky_lease.mjs'), [path.join(here, 'linux_sky_worker.mjs'), servicePath], {
+    detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], execArgv: [], env: desktopEnvironment(),
   });
   // Drain bounded native diagnostics without placing desktop data in host logs.
   child.stderr.resume();
@@ -67,7 +67,7 @@ export function createSession(servicePath, { cleanupMs = 3000 } = {}) {
         const kill = signal => { if (!child.pid) return; try { process.kill(-child.pid, signal); } catch (e) { if (e.code !== 'ESRCH') throw e; } };
         const exited = new Promise(resolve => { if (child.exitCode !== null || child.signalCode !== null) resolve(); else child.once('exit', resolve); });
         kill('SIGTERM');
-        const force = setTimeout(() => kill('SIGKILL'), 500);
+        const force = setTimeout(() => kill('SIGKILL'), 1500);
         await exited;
         clearTimeout(force);
         // Reap a helper that outlived its service parent.
@@ -141,33 +141,87 @@ export async function startSkyHost({ servicePath, directory, makeSession = () =>
     });
   } };
 }
-export async function runProvider(providerPath, providerArgs = []) {
-  if (process.platform !== 'linux') throw new Error('Linux Sky host requires Linux');
-  if (!process.env.CODEX_CLI_PATH) throw new Error('CODEX_CLI_PATH is required');
-  const modules = process.env.NODE_REPL_NODE_MODULE_DIRS;
+// Standalone upstream node_repl is not a Codex-managed execution sandbox.
+// Only desktop/runtime paths cross the boundary; never inherit Codex, tokens,
+// NODE_OPTIONS, browser services, or model-controlled bootstrap overrides.
+export function desktopEnvironment(env = process.env) {
+  const result = {};
+  for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL',
+    'DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'XAUTHORITY']) {
+    if (env[key]) result[key] = env[key];
+  }
+  return result;
+}
+export function providerEnvironment(env, socketPath) {
+  const surfaces = (env.CUA_REPL_ENABLED_SURFACES ?? 'computer').split(',').map(s => s.trim()).filter(Boolean);
+  if (surfaces.length !== 1 || surfaces[0] !== 'computer') throw new Error('Linux standalone CUA supports computer only; browser requires a separate no-Codex port');
+  const modules = env.NODE_REPL_NODE_MODULE_DIRS;
   if (!modules || !path.isAbsolute(modules)) throw new Error('An absolute verified OpenAI module directory is required');
-  const servicePath = path.join(modules, '@oai/sky/dist/project/cua/sky_js/src/service.js');
+  return { ...desktopEnvironment(env),
+    CUA_REPL_ENABLED_SURFACES: 'computer',
+    CUA_REPL_NODE_REPL_PATH: env.CUA_REPL_NODE_REPL_PATH,
+    NODE_REPL_NODE_PATH: env.NODE_REPL_NODE_PATH,
+    NODE_REPL_NODE_MODULE_DIRS: modules,
+    NODE_REPL_TRUSTED_SERVICES: JSON.stringify({ sky: path.join(here, 'linux_sky_proxy.mjs') }),
+    NODE_REPL_TRUSTED_CODE_PATHS: [modules, here].join(path.delimiter),
+    NANOCODEX_LINUX_SKY_SOCKET: socketPath,
+    NODE_REPL_UNTRUSTED_ENV_ALLOWLIST: 'NANOCODEX_LINUX_SKY_SOCKET',
+    NODE_REPL_DISABLE_ANALYTICS: '1',
+  };
+}
+// Metadata-only administrative policy detection. Do not read owner preferences
+// or auth. Known enforced policy and ambiguous filesystem failures fail closed.
+export async function checkManagedPolicy({ home = os.homedir(), codexHome = process.env.CODEX_HOME,
+  inspect = fs.promises.lstat, follow = fs.promises.stat, uid = process.getuid() } = {}) {
+  if (codexHome && !path.isAbsolute(codexHome)) throw new Error('CODEX_HOME policy path must be absolute; Linux CUA is disabled');
+  const homes = [...new Set([path.join(home, '.codex'), codexHome].filter(Boolean))];
+  const files = ['/etc/codex/requirements.toml', '/etc/codex/managed_config.toml'];
+  for (const directory of homes) {
+    files.push(path.join(directory, 'requirements.toml'), path.join(directory, 'managed_config.toml'));
+    const config = path.join(directory, 'config.toml');
+    try {
+      const metadata = await inspect(config);
+      if (metadata.uid !== uid || (metadata.isSymbolicLink?.() && (await follow(config)).uid !== uid)) throw new Error('Externally owned computer policy requires integration; Linux CUA is disabled');
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  for (const file of files) {
+    try { await inspect(file); throw new Error('Managed computer policy requires integration; Linux CUA is disabled'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+}
+export async function runProvider(providerPath, providerArgs = [], {
+  env = process.env, platform = process.platform, inputStream = process.stdin,
+  outputStream = process.stdout, managedCheck = checkManagedPolicy,
+} = {}) {
+  if (platform !== 'linux') throw new Error('Linux Sky host requires Linux');
+  // Validate before opening a desktop socket or launching any child.
+  const childEnv = providerEnvironment(env);
+  await managedCheck();
+  const servicePath = path.join(childEnv.NODE_REPL_NODE_MODULE_DIRS, '@oai/sky/dist/project/cua/sky_js/src/service.js');
   const host = await startSkyHost({ servicePath });
-  const surfaces = (process.env.CUA_REPL_ENABLED_SURFACES ?? '').split(',');
-  const services = process.env.NODE_REPL_TRUSTED_SERVICES ? JSON.parse(process.env.NODE_REPL_TRUSTED_SERVICES) :
-    (surfaces.includes('browser') ? { browser: '@oai/browser-desktop/service' } : {});
-  services.sky = path.join(here, 'linux_sky_proxy.mjs');
-  const child = spawn(process.execPath, [providerPath, ...providerArgs], { stdio: ['pipe', 'pipe', 'inherit'], env: {
-    ...process.env,
-    NODE_REPL_TRUSTED_SERVICES: JSON.stringify(services),
-    NODE_REPL_TRUSTED_CODE_PATHS: [...new Set((process.env.NODE_REPL_TRUSTED_CODE_PATHS ?? modules).split(path.delimiter).concat(here))].join(path.delimiter),
-    NANOCODEX_LINUX_SKY_SOCKET: host.socketPath,
-    NODE_REPL_UNTRUSTED_ENV_ALLOWLIST: [process.env.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST, 'NANOCODEX_LINUX_SKY_SOCKET'].filter(Boolean).join(','),
-  } });
-  child.stdout.pipe(process.stdout);
-  const input = createInterface({ input: process.stdin });
+  childEnv.NANOCODEX_LINUX_SKY_SOCKET = host.socketPath;
+  const child = fork(path.join(here, 'linux_sky_lease.mjs'), ['--cleanup-socket', host.socketPath, os.tmpdir(), providerPath, ...providerArgs], {
+    detached: true, stdio: ['pipe', 'pipe', 'inherit', 'ipc'], execArgv: [], env: childEnv,
+  });
+  child.stdout.pipe(outputStream, { end: false });
+  const input = createInterface({ input: inputStream });
   let stopping;
-  const stop = () => stopping ??= Promise.resolve().then(async () => { input.close(); process.stdin.pause(); child.kill(); await host.dispose(); });
+  const stop = () => stopping ??= Promise.resolve().then(async () => {
+    input.close(); inputStream.pause();
+    process.removeListener('SIGINT', onSignal); process.removeListener('SIGTERM', onSignal);
+    const kill = signal => { if (child.pid) try { process.kill(-child.pid, signal); } catch (e) { if (e.code !== 'ESRCH') throw e; } };
+    const exited = new Promise(resolve => { if (!child.pid || child.exitCode !== null || child.signalCode !== null) resolve(); else child.once('close', resolve); });
+    kill('SIGTERM');
+    const force = setTimeout(() => kill('SIGKILL'), 1500);
+    try { await Promise.all([exited, host.dispose()]); }
+    finally { clearTimeout(force); kill('SIGKILL'); }
+  });
+  const onSignal = () => { void stop(); };
   child.once('error', error => { console.error(error.message); process.exitCode = 1; void stop(); });
   child.once('exit', code => { if (!stopping) process.exitCode = code ?? 1; else process.exitCode ??= 0; void stop(); });
   child.stdin.on('error', () => { void stop(); });
-  process.once('SIGINT', () => { void stop(); });
-  process.once('SIGTERM', () => { void stop(); });
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
   input.on('close', () => { void stop(); });
   let forwarding = Promise.resolve();
   input.on('line', line => {

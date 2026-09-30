@@ -124,6 +124,7 @@ pub enum MessagePurpose {
     Coordinate,
     Finding,
     Question,
+    /// Answer a received message; requires a reference and reversed direction.
     Reply,
 }
 
@@ -155,6 +156,8 @@ pub struct AgentMessage {
     pub to: AgentId,
     pub priority: MessagePriority,
     pub purpose: MessagePurpose,
+    /// Correlates with an existing two-party thread, independently of intent.
+    /// Only explicit replies require reversing the referenced message direction.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<MessageId>,
     pub body: String,

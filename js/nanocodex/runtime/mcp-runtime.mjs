@@ -4,6 +4,7 @@ import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validatio
 import MiniSearch from "minisearch";
 
 import { toolResult } from "./code-runtime.mjs";
+import { mcpPaymentWrap } from "./mcp-payment.mjs";
 
 const DEFAULT_SEARCH_LIMIT = 8;
 const MAX_SEARCH_LIMIT = 32;
@@ -257,9 +258,8 @@ async function connectServer(server, options, signal) {
     jsonSchemaValidator: options.jsonSchemaValidator,
   });
   if (server.payment) {
-    const { McpClient } = await import("mppx/mcp/client");
-    const { context: _context, ...payment } = server.payment;
-    McpClient.wrap(client, payment);
+    const { context: _context, [mcpPaymentWrap]: wrap, ...payment } = server.payment;
+    await wrap(client, payment);
   }
   if (server.client) return { client, owned: false };
   const transport = new StreamableHTTPClientTransport(new URL(server.url), {
@@ -294,6 +294,11 @@ function normalizeServers(configuration) {
     }
     if (server.payment && (!Array.isArray(server.payment.methods) || !server.payment.methods.length)) {
       throw new TypeError(`MCP server ${name} payment requires at least one method`);
+    }
+    if (server.payment && typeof server.payment[mcpPaymentWrap] !== "function") {
+      throw new TypeError(
+        `MCP server ${name} payment must be created with mcpPayment() from "nanocodex/tempo"`,
+      );
     }
     if (server.enabledTools && !isStringArray(server.enabledTools)) {
       throw new TypeError(`MCP server ${name} enabledTools must be an array of strings`);

@@ -4,12 +4,10 @@ import {
   type AgentLifecycle,
   type AgentSessionContext,
   ChatGptSubscription,
-  type AccountsWallet,
   type CostStatus,
   type LifecycleTurn,
   type LifecycleTurnResult,
   type McpServer,
-  createTempoProviderFromAccounts,
   createMemoryChatGptSubscriptionStore,
   Subagents,
   type SessionSnapshot,
@@ -19,6 +17,11 @@ import {
   type TurnResult,
   Workspace,
 } from "../node/index.mjs";
+import {
+  type AccountsWallet,
+  createTempoProviderFromAccounts,
+  mcpPayment,
+} from "nanocodex/tempo";
 import {
   Agent as BrowserAgent,
   Subagents as BrowserSubagents,
@@ -303,7 +306,7 @@ async function check() {
     {
       instructions: "Search the caller's account history.",
       additionalInstructions: "Cite the matching thread.",
-      model: "gpt-6-sol",
+      model: "gpt-6.1-sol",
       tools: [{
         name: "search",
         description: "Search account history",
@@ -337,7 +340,7 @@ async function check() {
   });
   await CloudflareAgent.create(cloudflareOwner, {
     // @ts-expect-error Cloudflare policy is fixed by the adapter.
-    model: "gpt-6-sol",
+    model: "gpt-6.1-sol",
   });
   await CloudflareAgent.create(cloudflareOwner, {
     // @ts-expect-error Cloudflare filesystem policy is fixed by the adapter.
@@ -478,6 +481,14 @@ async function check() {
     session: { bootstrap: true },
   });
   await Agent.create({ transport: Transport.mpp({ session: tempoProvider }), mcp: false });
+  const paidServer: McpServer = {
+    url: "https://paid.example/mcp",
+    payment: mcpPayment({ methods: [{}] }),
+  };
+  // @ts-expect-error Paid MCP servers require mcpPayment() from nanocodex/tempo.
+  const unwrappedPaidServer: McpServer = { url: "https://paid.example/mcp", payment: { methods: [{}] } };
+  void paidServer;
+  void unwrappedPaidServer;
   const subscription = await ChatGptSubscription.open({
     id: "account-1",
     store: createMemoryChatGptSubscriptionStore("account-1"),
@@ -515,7 +526,7 @@ async function check() {
   // @ts-expect-error create and open-existing identities are mutually exclusive.
   Transport.managed({ agent: { create: true, id: "0198d3f0-8844-7000-8000-000000000001" } });
   // @ts-expect-error managed service owns model policy.
-  await Agent.create({ transport: managedTransport, model: "gpt-6-sol" });
+  await Agent.create({ transport: managedTransport, model: "gpt-6.1-sol" });
   // @ts-expect-error managed transport accepts only the unified Tools recipe.
   await Agent.create({ transport: managedTransport, tools: { echo: { handler() {} } } });
   // @ts-expect-error authentication belongs to the selected transport.
@@ -654,7 +665,7 @@ async function check() {
 
   const rolloutSnapshot: SessionSnapshot = {
     version: 1,
-    model: "gpt-6-sol",
+    model: "gpt-6.1-sol",
     lineage_id: "thread",
     prompt_cache_key: "thread",
     workspace: "/tmp",

@@ -11,7 +11,7 @@ pub(crate) use runtime::{PreparedToolCall, PreparedToolError, PreparedToolRuntim
 
 pub(crate) struct PreparedTools {
     entries: Vec<PreparedToolEntry>,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "mcp")]
     mcps: Vec<Arc<crate::mcp::Mcp>>,
     #[cfg(feature = "workspace-runtime")]
     workspaces: Vec<Arc<crate::workspace_runtime::WorkspaceToolRuntime>>,
@@ -98,7 +98,7 @@ impl PreparedTools {
 
         Ok(Self {
             entries,
-            #[cfg(feature = "native")]
+            #[cfg(feature = "mcp")]
             mcps: tools.attachment_mcps.clone(),
             #[cfg(feature = "workspace-runtime")]
             workspaces,

@@ -27,10 +27,11 @@ export const configurationSchema = z.object({
   model_routing_selection: z.literal("manual").optional(),
   chatgpt_account_id: z.string().regex(/^[\x21-\x7e]{1,256}$/).optional(),
   settings: z.object({
-    model: z.enum(["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"]),
+    model: z.enum(["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"]),
     thinking: z.enum(["none", "low", "medium", "high", "xhigh", "max"]),
     reasoning_mode: z.enum(["standard", "pro"]), fast_mode: z.boolean(),
-  }).strict().refine(s => s.model !== "gpt-6-astra" || s.thinking !== "none" && s.reasoning_mode !== "pro").optional(),
+  }).strict().refine(s => (s.model !== "gpt-6-astra" || s.reasoning_mode !== "pro")
+    && (!["gpt-6-astra", "gpt-6.1-sol"].includes(s.model) || s.thinking !== "none")).optional(),
   instructions: z.string().max(65_536).optional(),
   tools: z.array(name).max(128).optional(),
   multi_agent: z.discriminatedUnion("enabled", [
