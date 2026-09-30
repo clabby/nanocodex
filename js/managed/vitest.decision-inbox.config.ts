@@ -17,7 +17,7 @@ export default defineConfig(async () => ({
     },
   })],
   test: {
-    include: ["test/todo-inbox.test.ts", "test/todo-preparation.test.ts", "test/account-auth.test.ts", "test/todo-calendar-briefings.test.ts", "test/gmail-firehose-decisions.test.ts", "test/gmail-firehose-backtest.test.ts"],
+    include: ["test/todo-source-health.test.ts", "test/todo-inbox.test.ts", "test/todo-preparation.test.ts", "test/account-auth.test.ts", "test/todo-calendar-briefings.test.ts", "test/gmail-firehose-decisions.test.ts", "test/gmail-firehose-backtest.test.ts"],
     fileParallelism: false,
   },
 }));

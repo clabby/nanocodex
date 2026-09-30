@@ -1,3 +1,4 @@
+import { readTodoSourceHealth } from "./todo-source-health";
 import { readTodoCalendarBriefings } from "./todo-calendar-briefings";
 import { backfillTodoPreparation, nextTodoPreparationAlarm, runTodoPreparation, scheduleTodoPreparation } from "./todo-preparation";
 import { initializeTodoMail, handleTodoMail } from "./todo-mail";
@@ -1817,6 +1818,11 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/todo/source-health") {
+      const account = await this.ctx.storage.get<UserRecord>("account");
+      if (!account) return json({ error: "not_found" }, { status: 404 });
+      return readTodoSourceHealth(request, this.env.NANOCODEX, account.id);
+    }
     if (url.pathname.startsWith("/todo/mail/") || url.pathname === "/todo/schedule") {
       const account = await this.ctx.storage.get<UserRecord>("account");
       if (!account) return json({ error: "not_found" }, { status: 404 });

@@ -230,8 +230,10 @@ export async function routeTodoRequest(request: Request, env: Pick<AccountAuthEn
     if (principal.kind === "account_session" && request.headers.get("origin") !== url.origin)
       return reply({ error: "forbidden_origin" }, 403);
   }
+  const sourceHealth = url.pathname === "/v1/todo/source-health";
+  if (sourceHealth && request.method !== "GET") return reply({ error: "method_not_allowed" }, 405);
   const mailOrSchedule = /^\/v1\/todo\/(?:schedule|mail\/(?:accounts|threads(?:\/[A-Za-z0-9_-]+(?:\/modify)?)?|drafts(?:\/[0-9a-fA-F-]{36})?|send|suggest|messages\/[A-Za-z0-9_-]+\/attachments\/[A-Za-z0-9_-]+))$/.test(url.pathname);
-  if (!mailOrSchedule && (!/^\/v1\/todo(?:$|\/traces$|\/items\/[0-9a-f-]{36}(?:\/prepare)?$|\/decisions\/[0-9a-f-]{36}(?:\/(?:respond|prepare))?$)/i.test(url.pathname)
+  if (!sourceHealth && !mailOrSchedule && (!/^\/v1\/todo(?:$|\/traces$|\/items\/[0-9a-f-]{36}(?:\/prepare)?$|\/decisions\/[0-9a-f-]{36}(?:\/(?:respond|prepare))?$)/i.test(url.pathname)
     || url.search && url.pathname !== "/v1/todo/traces")) return reply({ error: "not_found" }, 404);
   const path = url.pathname.slice(3);
   return env.NANOCODEX_USERS.getByName(principal.userId, durablePlacementOptions(env.trustedClientIngressColo)).fetch(
