@@ -150,3 +150,23 @@ it("mixed external requests cannot become ready via transformation prefix", asyn
   const result=await prepareDecisionProposal(ai(async()=>response({body_text:"",source_references:["capture:mixed"]})),{kind:"capture",owner_request:"Summarize current health insurance plans and recommend cheapest eligible quote for me.",owner_changes:"",evidence:[{kind:"user",reference:"capture:mixed",detail:"request",content:"request only"}]});
   expect(result).toMatchObject({status:"blocked",missing_information:"complete_capture_proposal_unverified"});
 });
+
+ it("deterministic capture verifies full projection without model, connector or CRM access; Park/reopen stays version fenced", async () => withStorage(async storage => {
+   const {item} = await (await handleTodoInbox(request("",{body:"Format this as bullet points:\nalpha\nbeta",operation_id:crypto.randomUUID()}),storage)).json() as any;
+   const forbidden = {ownerID:"owner", ai:ai(async()=>{throw Error("unexpected model");}), binding:{fetch:async()=>{throw Error("unexpected provider");}} as unknown as Fetcher,
+     crm:{prepare:()=>{throw Error("unexpected CRM");}} as unknown as D1Database};
+   await runTodoPreparation(storage, forbidden);
+   expect(preparationView(storage,"capture",item.id)).toMatchObject({status:"ready",proposal:"- alpha\n- beta",error:null,draft_id:null,sources:[{kind:"user",reference:`capture:${item.id}`}]});
+   expect((await handleTodoInbox(request(`/items/${item.id}`,{version:1,status:"parked",operation_id:crypto.randomUUID()},"PATCH"),storage)).status).toBe(200);
+   await runTodoPreparation(storage,forbidden);expect(preparationView(storage,"capture",item.id)).toMatchObject({status:"blocked",error:"preparation_parked"});
+   expect((await handleTodoInbox(request(`/items/${item.id}`,{version:2,status:"captured",operation_id:crypto.randomUUID()},"PATCH"),storage)).status).toBe(200);
+   await runTodoPreparation(storage,forbidden);expect(preparationView(storage,"capture",item.id).status).toBe("ready");
+   expect(storage.sql.exec("SELECT * FROM todo_mail_drafts").toArray()).toHaveLength(0);
+ }));
+ it("changed deterministic owner request returns to unverified model gate, not old exact projection", async () => withStorage(async storage => {
+   const {item} = await (await handleTodoInbox(request("",{body:"Format this as bullet points:\nalpha\nbeta",operation_id:crypto.randomUUID()}),storage)).json() as any;
+   await runTodoPreparation(storage,{ownerID:"owner"});expect(preparationView(storage,"capture",item.id).status).toBe("ready");
+   await handleTodoInbox(request(`/items/${item.id}/prepare`,{version:1,text:"Also recommend current prices",operation_id:crypto.randomUUID()}),storage);
+   await runTodoPreparation(storage,{ownerID:"owner",ai:ai(async input=>response({body_text:"",source_references:[input.evidence[0].reference]}))});
+   expect(preparationView(storage,"capture",item.id)).toMatchObject({status:"blocked",error:"complete_capture_proposal_unverified"});
+ }));

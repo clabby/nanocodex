@@ -2,6 +2,7 @@
 import { bindPreparedTodoMailDraft, handleTodoMail, readTodoMailDraft, todoMailContextFingerprint, assertTodoMailSourceApplicable, type TodoMailDraft } from "./todo-mail";
 import { prepareDecisionProposal, type PreparationEvidence, type PreparationSource } from "./todo-preparation-model";
 import { researchTodoCapture, TODO_RESEARCH_SCOPE } from "./todo-readonly-research";
+import { prepareTodoTextProposal, TODO_TEXT_PROPOSAL_SCOPE } from "./todo-text-proposal";
 import { browserEgressSubject } from "./browser-egress";
 import { bindAgentCredential } from "./credentials";
 import type { TodoMailSuggestionAI } from "./todo-mail-suggest";
@@ -120,6 +121,15 @@ async function prepareJob(storage: DurableObjectStorage, deps: PreparationDepend
     if (!capture || capture.status !== "captured" || capture.version !== job.target_version) throw new Error("stale_preparation");
     ownerRequest = capture.body;
     evidence.push({ kind: "user", reference: `capture:${job.target_id}`, detail: "Owner's captured request", content: ownerRequest });
+    const textProposal = prepareTodoTextProposal(ownerRequest, job.instructions);
+    if (textProposal !== null) {
+      assertJobCurrent(storage, job);
+      return { ...unprepared(), kind: "capture", status: "ready",
+        context: "Owner-supplied lines, preserved verbatim and in order.",
+        recommendation: "Review the formatted text; its factual content has not been verified.",
+        proposal: textProposal, scope: TODO_TEXT_PROPOSAL_SCOPE,
+        updated_at: new Date().toISOString(), sources: evidence.map(({ content: _, ...source }) => source) };
+    }
     evidence.push(...await accountEvidence(deps, ownerRequest));
     // Pure transformations need no public lookup. Other captures use only the
     // fixed public search RPC; email/CRM evidence is never sent to the planner.
