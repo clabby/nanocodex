@@ -1,5 +1,5 @@
 // A disposable desktop-user process around the unmodified OpenAI Sky service.
-// The model and its trusted worker remain in their existing Codex sandbox.
+// Standalone upstream node_repl provides its own kernel, not a Codex sandbox.
 import { pathToFileURL } from 'node:url';
 const { handleRpc } = await import(pathToFileURL(process.argv[2]).href);
 const drags = new Set();

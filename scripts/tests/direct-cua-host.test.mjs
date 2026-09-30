@@ -60,9 +60,17 @@ test('blanket app consent excludes audio, data forms, unknown connectors and no 
   const audio = consent(); audio.params._meta.tool_name = 'start_audio_recording';
   const data = consent({ requestedSchema: { type: 'object', properties: { password: { type: 'string' } } } });
   const unknown = consent(); unknown.params._meta.connector_id = 'other';
-  for (const request of [audio, data, unknown]) assert.equal(appConsent(request, true, true).result.action, 'decline');
+  const newOperation = consent(); newOperation.params._meta.tool_name = 'unknown_sdk_operation';
+  for (const request of [audio, data, unknown, newOperation]) assert.equal(appConsent(request, true, true).result.action, 'decline');
   assert.equal(appConsent(consent(), false, true).result.action, 'decline');
   assert.equal(appConsent(consent(), true, false).result.action, 'decline');
+});
+test('observed native app-access methods retain blanket consent', () => {
+  for (const tool of ['click', 'drag', 'get_app_state', 'paste', 'perform_secondary_action',
+    'press_key', 'scroll', 'select_text', 'set_value', 'type_text']) {
+    const request = consent(); request.params._meta.tool_name = tool;
+    assert.equal(appConsent(request, true, true).result.action, 'accept', tool);
+  }
 });
 test('configuration requires macOS and normalized absolute paths', () => {
   assert.throws(() => configuration({}, 'linux'), /macOS/);
