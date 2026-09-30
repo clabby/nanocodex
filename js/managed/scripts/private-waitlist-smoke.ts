@@ -9,7 +9,7 @@ export async function waitlistJourney(request: Request, ctx: DurableObjectState,
     deny?: boolean; wrongOrigin?: boolean; closeAfterVault?: boolean; queryVariant?: string;
   };
   if (!/^[a-zA-Z0-9-]{1,64}$/.test(input.probe ?? '')
-    || !['pure', 'zero', 'paid', 'policy', 'lost', 'echo', 'native', 'hidden-confirmation', 'hidden-identity', 'family', 'myself', 'unrelated', 'split-form', 'redirect'].includes(input.path)) return Response.json({error:'Invalid fixture request'}, {status:400});
+    || !['pure', 'zero', 'paid', 'policy', 'lost', 'echo', 'native', 'hidden-confirmation', 'hidden-identity', 'family', 'myself', 'unrelated', 'split-form', 'header-confirmation', 'redirect'].includes(input.path)) return Response.json({error:'Invalid fixture request'}, {status:400});
   const fixtureUrl = new URL(input.path === 'redirect' ? '/redirect' : '/checkout/waitlist/' + input.path, env.FIXTURE_ORIGIN);
   fixtureUrl.searchParams.set('probe', input.probe);
   if (input.queryVariant) fixtureUrl.searchParams.set('variant',input.queryVariant);
