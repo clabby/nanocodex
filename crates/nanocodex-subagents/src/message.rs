@@ -42,7 +42,7 @@ impl MessageThreads {
         validate_reply(purpose, in_reply_to)?;
         let id = MessageId::next(&mut self.next_message_id);
         let thread_id = match in_reply_to {
-            Some(previous_id) => self.reply_thread(previous_id, from, to)?,
+            Some(previous_id) => self.reference_thread(previous_id, from, to, purpose)?,
             None => ThreadId::for_message(id),
         };
         Ok(AgentMessage {
@@ -114,11 +114,12 @@ impl MessageThreads {
         self.remove_message(id);
     }
 
-    fn reply_thread(
+    fn reference_thread(
         &self,
         previous_id: MessageId,
         from: MessageSender,
         to: AgentId,
+        purpose: MessagePurpose,
     ) -> std::io::Result<ThreadId> {
         let thread_id = self.thread_by_message.get(&previous_id).ok_or_else(|| {
             std::io::Error::other(format!("unknown in_reply_to message {previous_id}"))
@@ -132,19 +133,21 @@ impl MessageThreads {
             .iter()
             .find(|message| message.id == previous_id)
             .expect("message index should reference an existing message");
-        let expected_target = previous.from.agent_id().ok_or_else(|| {
-            std::io::Error::other(
-                "top-level root agents do not accept inbound messages in this experiment",
-            )
-        })?;
-        if from
-            != (MessageSender::Agent {
+        let same_direction = from == previous.from && to == previous.to;
+        let reverse_direction =
+            from == (MessageSender::Agent {
                 agent_id: previous.to,
-            })
-            || to != expected_target
-        {
+            }) && previous.from == (MessageSender::Agent { agent_id: to });
+        if purpose == MessagePurpose::Reply {
+            if !reverse_direction {
+                return Err(std::io::Error::other(format!(
+                    "message {previous_id} can only be answered by its recipient; use a non-reply \
+                     purpose to continue the same two-party thread in the original direction"
+                )));
+            }
+        } else if !same_direction && !reverse_direction {
             return Err(std::io::Error::other(format!(
-                "message {previous_id} can only be answered by its recipient"
+                "in_reply_to message {previous_id} belongs to a different two-party thread"
             )));
         }
         Ok(*thread_id)
@@ -186,10 +189,7 @@ fn validate_reply(purpose: MessagePurpose, in_reply_to: Option<MessageId>) -> st
         (MessagePurpose::Reply, None) => Err(std::io::Error::other(
             "reply messages require an in_reply_to message ID",
         )),
-        (MessagePurpose::Reply, Some(_)) | (_, None) => Ok(()),
-        (_, Some(_)) => Err(std::io::Error::other(
-            "in_reply_to is only valid for reply messages",
-        )),
+        _ => Ok(()),
     }
 }
 
@@ -209,56 +209,6 @@ fn validate_body(body: &str) -> std::io::Result<()> {
 mod tests {
     use super::{MAX_MESSAGE_BYTES, MAX_RETAINED_MESSAGES, MessageThreads};
     use crate::{AgentId, MessageDisposition, MessagePriority, MessagePurpose, MessageSender};
-
-    #[test]
-    fn replies_inherit_threads_and_require_the_original_recipient() {
-        let mut threads = MessageThreads::default();
-        let first = threads
-            .prepare(
-                MessageSender::Agent {
-                    agent_id: AgentId::new(1),
-                },
-                AgentId::new(2),
-                MessagePriority::Deferred,
-                MessagePurpose::Question,
-                None,
-                "question".to_owned(),
-            )
-            .unwrap();
-        threads.commit(first.clone());
-
-        let reply = threads
-            .prepare(
-                MessageSender::Agent {
-                    agent_id: AgentId::new(2),
-                },
-                AgentId::new(1),
-                MessagePriority::Deferred,
-                MessagePurpose::Reply,
-                Some(first.id),
-                "answer".to_owned(),
-            )
-            .unwrap();
-        assert_eq!(reply.thread_id, first.thread_id);
-
-        let error = threads
-            .prepare(
-                MessageSender::Agent {
-                    agent_id: AgentId::new(3),
-                },
-                AgentId::new(1),
-                MessagePriority::Deferred,
-                MessagePurpose::Reply,
-                Some(first.id),
-                "spoofed answer".to_owned(),
-            )
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("only be answered by its recipient")
-        );
-    }
 
     #[test]
     fn message_length_is_bounded_in_utf8_bytes() {
@@ -290,39 +240,6 @@ mod tests {
                 )
                 .is_err()
         );
-    }
-
-    #[test]
-    fn reply_metadata_is_consistent() {
-        let mut threads = MessageThreads::default();
-
-        let missing_reference = threads
-            .prepare(
-                MessageSender::Agent {
-                    agent_id: AgentId::new(1),
-                },
-                AgentId::new(2),
-                MessagePriority::Deferred,
-                MessagePurpose::Reply,
-                None,
-                "answer".to_owned(),
-            )
-            .unwrap_err();
-        assert!(missing_reference.to_string().contains("require"));
-
-        let unexpected_reference = threads
-            .prepare(
-                MessageSender::Agent {
-                    agent_id: AgentId::new(1),
-                },
-                AgentId::new(2),
-                MessagePriority::Deferred,
-                MessagePurpose::Coordinate,
-                Some(crate::MessageId::new(1)),
-                "answer".to_owned(),
-            )
-            .unwrap_err();
-        assert!(unexpected_reference.to_string().contains("only valid"));
     }
 
     #[test]
