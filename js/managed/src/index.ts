@@ -1,3 +1,4 @@
+import { gmailDecisionReceipts } from "./gmail-firehose-receipts";
 import { parsePrivateSecureInput } from "./browser-vault";
 import { NativeSecureInput, parseNativeSecureInput } from "./native-secure-input";
 import { parseRealtimeTranscript, realtimeTranscriptContext, type RealtimeTranscriptEntry } from "./realtime-transcript";
@@ -4086,19 +4087,9 @@ export class DurableAgentSession extends DurableComputerObject {
     try { emailEvent = JSON.parse(wake.input); } catch { /* legacy text */ }
     if (this.env.AI && enabledGmailDecisionOwner(this.env) === wake.userId) {
       // Leave general session startup unchanged while this producer is opt-in.
-      this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS gmail_firehose_decision_receipts (
-        source_key TEXT PRIMARY KEY, outcome TEXT NOT NULL CHECK (outcome IN ('reply', 'no_reply', 'filtered')),
-        created_at INTEGER NOT NULL
-      )`);
       await proposeGmailReplyDecisions(wake.input,
         jevGatewayBinding(this.env.AI, this.env.NANOCODEX_JEV_GATEWAY_ID ?? "default"),
-        this.env.NANOCODEX_USERS.getByName(wake.userId), () => { assertOwner(epoch); }, {
-          has: sourceKey => this.ctx.storage.sql.exec<{source_key:string}>(
-            "SELECT source_key FROM gmail_firehose_decision_receipts WHERE source_key = ?", sourceKey).toArray().length > 0,
-          mark: (sourceKey, outcome) => this.ctx.storage.sql.exec(
-            "INSERT INTO gmail_firehose_decision_receipts(source_key,outcome,created_at) VALUES(?,?,?) ON CONFLICT(source_key) DO NOTHING",
-            sourceKey, outcome, Date.now()),
-        }, trace => this.env.NANOCODEX_USERS.getByName(wake.userId).recordTodoDecisionTrace(trace));
+        this.env.NANOCODEX_USERS.getByName(wake.userId), () => { assertOwner(epoch); }, gmailDecisionReceipts(this.ctx.storage), trace => this.env.NANOCODEX_USERS.getByName(wake.userId).recordTodoDecisionTrace(trace));
       assertOwner(epoch);
     }
     if (isRecord(emailEvent) && emailEvent.crm === true) {

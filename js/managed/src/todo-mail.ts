@@ -42,10 +42,19 @@ export function initializeTodoMail(storage: DurableObjectStorage): void {
   ); CREATE TABLE IF NOT EXISTS todo_mail_sends (
     operation_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL UNIQUE, version INTEGER NOT NULL,
     status TEXT NOT NULL, message_id TEXT, thread_id TEXT, created_at TEXT NOT NULL
+  ); CREATE TABLE IF NOT EXISTS todo_mail_decision_drafts (
+    draft_id TEXT PRIMARY KEY, decision_id TEXT NOT NULL, generation INTEGER NOT NULL
   );`);
+  const columns = new Set(storage.sql.exec<{name:string}>("PRAGMA table_info(todo_mail_decision_drafts)").toArray().map(row => row.name));
+  for (const column of ["target_version", "context_fingerprint"]) if (!columns.has(column)) storage.sql.exec(`ALTER TABLE todo_mail_decision_drafts ADD COLUMN ${column} ${column === "target_version" ? "INTEGER" : "TEXT"}`);
 }
-type Draft = { id: string; version: number; connection_id: string; mode: string; to: string[]; cc: string[]; bcc: string[];
+export function bindPreparedTodoMailDraft(storage: DurableObjectStorage, draftID: string, decisionID: string, generation: number, targetVersion: number, fingerprint: string): void {
+  storage.sql.exec("INSERT INTO todo_mail_decision_drafts(draft_id,decision_id,generation,target_version,context_fingerprint) VALUES(?,?,?,?,?)", draftID, decisionID, generation, targetVersion, fingerprint);
+}
+export type TodoMailDraft = { id: string; version: number; connection_id: string; mode: string; to: string[]; cc: string[]; bcc: string[];
   subject: string; body_text: string; thread_id: string | null; reply_message_id: string | null; updated_at: string; status: string };
+type Draft = TodoMailDraft;
+export function readTodoMailDraft(storage: DurableObjectStorage, draftID: string): TodoMailDraft { return draft(storage, draftID); }
 type Receipt = { operation_id: string; draft_id: string; version: number; status: string; message_id: string | null; thread_id: string | null; created_at: string };
 function receipt(storage: DurableObjectStorage, draftID: string): Receipt | undefined {
   return storage.sql.exec<Receipt>("SELECT * FROM todo_mail_sends WHERE draft_id = ?", draftID).toArray()[0];
@@ -54,6 +63,20 @@ function draft(storage: DurableObjectStorage, draftID: string): Draft {
   const row = storage.sql.exec<{ data: string }>("SELECT data FROM todo_mail_drafts WHERE id = ?", draftID).toArray()[0];
   if (!row) return fail("not_found", 404);
   const result = JSON.parse(row.data) as Draft; result.status = receipt(storage, draftID)?.status ?? "draft"; return result;
+}
+/** Every generated draft stays tied to its exact current preparation generation. */
+function assertPreparedDraftCurrent(storage: DurableObjectStorage, draftID: string): {decision_id:string;generation:number;context_fingerprint:string} | undefined {
+  const link = storage.sql.exec<{decision_id:string;generation:number;target_version:number;context_fingerprint:string}>("SELECT * FROM todo_mail_decision_drafts WHERE draft_id=?", draftID).toArray()[0];
+  if (!link) return; // Existing manually composed/reply drafts retain their exact-version gate.
+  const current = storage.sql.exec<{ state:string; generation:number; target_version:number; result:string }>("SELECT * FROM todo_preparations WHERE kind='decision' AND target_id=?", link.decision_id).toArray()[0];
+  const decision = storage.sql.exec<{version:number;status:string;source_connection_id:string;source_thread_id:string;source_message_id:string}>("SELECT * FROM todo_decisions WHERE id=?", link.decision_id).toArray()[0];
+  const saved = draft(storage, draftID);
+  if (!link.context_fingerprint || link.target_version !== current?.target_version || !current || current.state !== "ready" || current.generation !== link.generation || JSON.parse(current.result).draft_id !== draftID
+    || decision?.version !== current.target_version || decision.status !== "needs_you" || saved.mode !== "reply"
+    || saved.connection_id !== decision.source_connection_id || saved.thread_id !== decision.source_thread_id || saved.reply_message_id !== decision.source_message_id) fail("stale_prepared_draft", 409);
+  if (storage.sql.exec(`SELECT s.operation_id FROM todo_mail_sends s JOIN todo_mail_decision_drafts d ON d.draft_id=s.draft_id
+    WHERE d.decision_id=? AND s.draft_id!=? LIMIT 1`, link.decision_id, draftID).toArray().length) fail("decision_send_locked", 409);
+  return link;
 }
 function addresses(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 100) return fail("invalid_recipients");
@@ -153,7 +176,20 @@ async function message(raw: any, connectionID: string, provider: Provider) {
   return { id: raw.id, thread_id: raw.threadId, from: h.from ?? "", to: h.to ?? "", cc: h.cc ?? "", bcc: h.bcc ?? "",
     reply_to: h["reply-to"] ?? "", subject: h.subject ?? "", date: Number(raw.internalDate) ? new Date(Number(raw.internalDate)).toISOString() : h.date ?? "",
     message_id: h["message-id"] ?? "", body_text: body, body_html: `<pre>${escape(body)}</pre>`, body_truncated: truncated,
-    unread: (raw.labelIds ?? []).includes("UNREAD"), attachments };
+    label_ids: (raw.labelIds ?? []).filter((label: unknown) => typeof label === "string"), unread: (raw.labelIds ?? []).includes("UNREAD"), attachments };
+}
+
+/** Labels/read state are not content; applicability is checked separately. */
+export async function todoMailContextFingerprint(thread: {id:string;connection_id:string;messages:any[]}): Promise<string> {
+  const content = JSON.stringify({id:thread.id, connection_id:thread.connection_id, messages:thread.messages.map(message =>
+    Object.fromEntries(["id", "thread_id", "from", "to", "cc", "bcc", "reply_to", "subject", "date", "message_id", "body_text", "body_truncated", "attachments"].map(key => [key, message[key]])))});
+  return Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content))).toString("hex");
+}
+export function assertTodoMailSourceApplicable(thread: any, sourceID: string): void {
+  const messages = thread?.messages;
+  const source = Array.isArray(messages) ? messages.find((message:any) => message.id === sourceID && message.thread_id === thread.id) : undefined;
+  if (!source || messages.at(-1)?.id !== sourceID || !source.label_ids?.includes("INBOX")
+    || source.label_ids.some((label:string) => ["SPAM", "TRASH", "DRAFT"].includes(label))) throw new Error("stale_source_context");
 }
 
 /** Called only behind the account route's principal/origin gate in UserAccount. */
@@ -308,6 +344,7 @@ export async function handleTodoMail(request: Request, storage: DurableObjectSto
       if (priorOperation) return priorOperation.draft_id === draftID && priorOperation.version === input.version ? json({ receipt: priorOperation }) : fail("operation_conflict", 409);
       const saved = draft(storage, draftID); if (saved.version !== input.version) fail("stale_draft", 409);
       const prior = receipt(storage, draftID); if (prior) return json({ receipt: prior });
+      assertPreparedDraftCurrent(storage, draftID);
       if (!saved.to.length && !saved.cc.length && !saved.bcc.length) fail("missing_recipients");
       await selected(saved.connection_id);
       const profile = await provider(`${gmail}profile`, saved.connection_id);
@@ -324,6 +361,23 @@ export async function handleTodoMail(request: Request, storage: DurableObjectSto
       const raw = Buffer.from(`${mimeHeaders.join("\r\n")}\r\n\r\n${Buffer.from(saved.body_text).toString("base64").match(/.{1,76}/g)?.join("\r\n") ?? ""}`).toString("base64url");
       // Recheck after provider reads: edits and sends may have interleaved while awaiting I/O.
       if (draft(storage, draftID).version !== saved.version) fail("stale_draft", 409);
+      const link = assertPreparedDraftCurrent(storage, draftID);
+      if (link) {
+        const latest = await provider(`${gmail}threads/${id(saved.thread_id)}?format=full`, saved.connection_id);
+        const messages = [];
+        for (const raw of latest.messages ?? []) messages.push(await message(raw, saved.connection_id, provider));
+        const thread = {id:latest.id, connection_id:saved.connection_id, messages};
+        const invalidate = (): never => {
+          storage.transactionSync(() => {
+            storage.sql.exec("UPDATE todo_preparations SET state='blocked',generation=generation+1,result=?,updated_at=? WHERE kind='decision' AND target_id=? AND generation=?", JSON.stringify({error:"stale_source_context"}), new Date().toISOString(), link.decision_id, link.generation);
+          });
+          return fail("stale_source_context", 409);
+        };
+        try { assertTodoMailSourceApplicable(thread, saved.reply_message_id!); } catch { invalidate(); }
+        if (await todoMailContextFingerprint(thread) !== link.context_fingerprint) invalidate();
+        if (draft(storage, draftID).version !== saved.version) fail("stale_draft", 409);
+        assertPreparedDraftCurrent(storage, draftID);
+      }
       const concurrent = receipt(storage, draftID); if (concurrent) return json({ receipt: concurrent });
       const operationConflict = storage.sql.exec<Receipt>("SELECT * FROM todo_mail_sends WHERE operation_id = ?", operationID).toArray()[0];
       if (operationConflict) fail("operation_conflict", 409);

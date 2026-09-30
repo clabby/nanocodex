@@ -15,7 +15,10 @@ export type TodoResearchResult = {
 export type TodoResearchDependencies = {
   binding?: Fetcher; subject?: string; ai?: TodoMailSuggestionAI;
 };
-export const TODO_RESEARCH_SCOPE = "Bounded public search excerpts only (at most 2 queries, 6 sources, 200 words/source); no authenticated pages, full-page verification or external actions. Retrieval dates are not publication dates. Results may be incomplete, stale or contradictory; a researched result is not a completed decision.";
+export const TODO_RESEARCH_SCOPE = "Conservative public insurance-topic vocabulary; unknown names/private context blocked. Bounded public search excerpts only (at most 2 queries, 6 sources, 200 words/source); no authenticated pages, full-page verification or external actions. Retrieval dates are not publication dates. Results may be incomplete, stale or contradictory; a researched result is not a completed decision.";
+// Planner is not the privacy boundary. Deliberately narrow public-topic
+// vocabulary until exact query review is available; names/unknown context fail closed.
+const publicQueryWords = new Set("a an and or the of for in on to with versus vs public official current compare comparison options coverage cost costs price prices premium premiums deductible deductibles copay copays network networks insurance health dental vision life auto home homeowners renters travel california usa united states federal state marketplace exchange plan plans enrollment open eligibility benefits exclusions limits provider providers individual family guide guides requirements consumer protection policy policies 2025 2026 2027".split(" "));
 const MAX_OUTPUT_BYTES = 48_000;
 const MAX_QUERIES = 2;
 const MAX_SOURCES = 6;
@@ -36,6 +39,7 @@ export function validateTodoResearchQueries(value: unknown): string[] {
       || !query.isWellFormed() || /[\u0000-\u001f\u007f<>`\\]/.test(query)
       || /[:/=;{}@]/.test(query) || /\b(?:localhost|metadata|\d{1,3}(?:\.\d{1,3}){3})\b/i.test(query)
       || injection.test(query) || sensitive.test(query)) fail("research_unsafe_query");
+    if (query.toLowerCase().split(/\s+/).some(word => !publicQueryWords.has(word))) fail("research_private_context_query");
     return query.trim();
   }))];
 }
@@ -123,7 +127,7 @@ function evidenceFromOutput(output: string, fetchedAt: string): PublicResearchEv
   if (!evidence.length) fail("research_no_public_sources");
   return evidence;
 }
-const safeErrors = new Set(["research_invalid_queries", "research_unsafe_query", "research_unsafe_source", "research_invalid_response", "research_response_too_large", "research_untrusted_response", "research_no_public_sources", "research_no_public_content", "research_unavailable", "research_timeout"]);
+const safeErrors = new Set(["research_private_context_query", "research_invalid_queries", "research_unsafe_query", "research_unsafe_source", "research_invalid_response", "research_response_too_large", "research_untrusted_response", "research_no_public_sources", "research_no_public_content", "research_unavailable", "research_timeout"]);
 /** Used by shipped capture preparation. Caller supplies only owner request and
  * changes, NEVER email/CRM evidence. Planner has no tools; planner output is an
  * exact-key query envelope, not executable code. "researched" means evidence was

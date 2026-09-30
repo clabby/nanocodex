@@ -140,3 +140,8 @@ describe("standalone safety validators", () => {
     expect(validateTodoResearchQueries({ queries: ["insurance coverage", "insurance coverage"] })).toEqual(["insurance coverage"]);
   });
 });
+
+it("fails closed on private names and confidential context rather than trusting planner instructions", async () => {
+  const f=fixture({plan:{queries:["Alice Morgan cancer diagnosis Northstar confidential acquisition plans"]}});
+  expect((await researchTodoCapture(f.deps,capture)).error).toBe("research_private_context_query");expect(f.requests).toHaveLength(0);
+});

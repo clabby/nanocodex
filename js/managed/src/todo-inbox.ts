@@ -1,3 +1,4 @@
+import { enqueueTodoPreparation, initializeTodoPreparation, preparationView, scheduleTodoPreparation } from "./todo-preparation";
 import { initializeGmailDecisionTraces, readGmailDecisionTraces, recentGmailTodoTraces } from "./gmail-firehose-traces";
 import { durablePlacementOptions } from "nanocodex/cloudflare/durable-placement";
 import type { AccountAuthEnv, Principal } from "./account-auth";
@@ -62,6 +63,7 @@ export function initializeTodoInbox(storage: DurableObjectStorage): void {
     if (!columns.has(column)) storage.sql.exec(`ALTER TABLE todo_decisions ADD COLUMN ${column} TEXT`);
   }
   initializeGmailDecisionTraces(storage);
+  initializeTodoPreparation(storage);
 }
 
 export async function handleTodoInbox(request: Request, storage: DurableObjectStorage): Promise<Response> {
@@ -70,12 +72,13 @@ export async function handleTodoInbox(request: Request, storage: DurableObjectSt
   if (path === "/todo/traces" && request.method === "GET") return readGmailDecisionTraces(storage, url.searchParams);
   if (url.search) return reply({ error: "invalid_request" }, 400);
   if (path === "/todo" && request.method === "GET") {
-    const items = storage.sql.exec<ItemRow>("SELECT * FROM todo_captures ORDER BY created_at DESC LIMIT 200").toArray();
+    const items = storage.sql.exec<ItemRow>("SELECT * FROM todo_captures ORDER BY created_at DESC LIMIT 200").toArray()
+      .map(item => ({ ...item, preparation: preparationView(storage, "capture", item.id) }));
     // Completed activity must never crowd an older unanswered choice out.
     const projection = "id, todo_id, title, context, source_label, source_url, source_connection_id, source_thread_id, source_message_id, choices, status, version, created_at";
-    const open = storage.sql.exec<DecisionView>(`SELECT ${projection} FROM todo_decisions WHERE status = 'needs_you' ORDER BY created_at DESC LIMIT 200`).toArray();
-    const activity = storage.sql.exec<DecisionView>(`SELECT ${projection} FROM todo_decisions WHERE status != 'needs_you' ORDER BY created_at DESC LIMIT 200`).toArray();
-    const decisions = [...open, ...activity].map(({ choices, ...rest }) => ({ ...rest, choices: JSON.parse(choices) as Choice[] }));
+    const open = storage.sql.exec<DecisionView>(`SELECT ${projection} FROM todo_decisions WHERE status IN ('needs_you','preparing') ORDER BY created_at DESC LIMIT 200`).toArray();
+    const activity = storage.sql.exec<DecisionView>(`SELECT ${projection} FROM todo_decisions WHERE status NOT IN ('needs_you','preparing') ORDER BY created_at DESC LIMIT 200`).toArray();
+    const decisions = [...open, ...activity].map(({ choices, ...rest }) => ({ ...rest, choices: JSON.parse(choices) as Choice[], preparation: preparationView(storage, "decision", rest.id) }));
     return reply({ items, decisions, traces: recentGmailTodoTraces(storage),
       feed_bounds: { traces: "recent", trace_limit: 100 } });
   }
@@ -88,11 +91,56 @@ export async function handleTodoInbox(request: Request, storage: DurableObjectSt
       || typeof operationInput !== "string" || !uuid.test(operationInput)) return reply({ error: "invalid_capture" }, 400);
     const operation = operationInput.toLowerCase();
     const previous = storage.sql.exec<ItemRow>("SELECT * FROM todo_captures WHERE operation_id = ?", operation).toArray()[0];
-    if (previous) return previous.body === body && previous.watch_hint === watchHint
-      ? reply({ item: previous }) : reply({ error: "operation_conflict" }, 409);
+    if (previous) {
+      if (previous.body !== body || previous.watch_hint !== watchHint) return reply({ error: "operation_conflict" }, 409);
+      await scheduleTodoPreparation(storage);
+      return reply({ item: { ...previous, preparation: preparationView(storage, "capture", previous.id) } });
+    }
     const id = crypto.randomUUID(), at = new Date().toISOString();
-    storage.sql.exec("INSERT INTO todo_captures(id, operation_id, body, watch_hint, created_at) VALUES (?, ?, ?, ?, ?)", id, operation, body, watchHint, at);
-    return reply({ item: storage.sql.exec<ItemRow>("SELECT * FROM todo_captures WHERE id = ?", id).toArray()[0] }, 201);
+    storage.transactionSync(() => {
+      storage.sql.exec("INSERT INTO todo_captures(id, operation_id, body, watch_hint, created_at) VALUES (?, ?, ?, ?, ?)", id, operation, body, watchHint, at);
+      enqueueTodoPreparation(storage, "capture", id, 1);
+    });
+    await scheduleTodoPreparation(storage);
+    return reply({ item: { ...storage.sql.exec<ItemRow>("SELECT * FROM todo_captures WHERE id = ?", id).toArray()[0], preparation: preparationView(storage, "capture", id) } }, 201);
+  }
+  // A detail read is a persisted snapshot only; it must not kick off inference.
+  const detail = path.match(/^\/todo\/(items|decisions)\/([0-9a-f-]{36})$/i);
+  if (detail && request.method === "GET" && uuid.test(detail[2]!)) {
+    const kind = detail[1] === "items" ? "capture" : "decision", id = detail[2]!.toLowerCase();
+    const row = storage.sql.exec<Record<string, any>>(`SELECT * FROM ${kind === "capture" ? "todo_captures" : "todo_decisions"} WHERE id=?`, id).toArray()[0];
+    if (!row) return reply({ error: "not_found" }, 404);
+    delete row.workflow_id; delete row.source_key;
+    if (kind === "decision") row.choices = JSON.parse(row.choices);
+    return reply({ [kind === "capture" ? "item" : "decision"]: { ...row, preparation: preparationView(storage, kind, id) } });
+  }
+  const prepare = path.match(/^\/todo\/(items|decisions)\/([0-9a-f-]{36})\/prepare$/i);
+  if (prepare && request.method === "POST" && uuid.test(prepare[2]!)) {
+    const input = await boundedBody(request);
+    if (!input) return reply({ error: "invalid_json" }, 400);
+    const { version, operation_id: op, text } = input;
+    if (Object.keys(input).some(key => !["version", "operation_id", "text"].includes(key))
+      || !Number.isSafeInteger(version) || (version as number) < 1
+      || typeof op !== "string" || !uuid.test(op) || typeof text !== "string" || !text.trim()
+      || new TextEncoder().encode(text).length > 4096) return reply({ error: "invalid_preparation_request" }, 400);
+    const kind = prepare[1] === "items" ? "capture" : "decision", id = prepare[2]!.toLowerCase(), operation = op.toLowerCase();
+    const result = storage.transactionSync(() => {
+      const previous = storage.sql.exec<{ kind: string; target_id: string; version: number; instructions: string; response: string }>("SELECT * FROM todo_preparation_requests WHERE operation_id=?", operation).toArray()[0];
+      if (previous) return previous.kind === kind && previous.target_id === id && previous.version === version && previous.instructions === text
+        ? reply(JSON.parse(previous.response)) : reply({ error: "operation_conflict" }, 409);
+      const row = storage.sql.exec<{ version: number; status: string }>(`SELECT version,status FROM ${kind === "capture" ? "todo_captures" : "todo_decisions"} WHERE id=?`, id).toArray()[0];
+      if (!row) return reply({ error: "not_found" }, 404);
+      if (row.version !== version || !(kind === "capture" ? ["captured"] : ["needs_you", "preparing"]).includes(row.status)) return reply({ error: "stale_preparation" }, 409);
+      if (kind === "decision" && storage.sql.exec(`SELECT s.operation_id FROM todo_mail_sends s
+        JOIN todo_mail_decision_drafts d ON d.draft_id=s.draft_id WHERE d.decision_id=? LIMIT 1`, id).toArray().length) return reply({ error: "decision_send_locked" }, 409);
+      if (kind === "decision") storage.sql.exec("UPDATE todo_decisions SET status='preparing',version=version+1 WHERE id=?", id);
+      const nextVersion = (version as number) + (kind === "decision" ? 1 : 0);
+      const response = { version: nextVersion, preparation: enqueueTodoPreparation(storage, kind, id, nextVersion, text) };
+      storage.sql.exec("INSERT INTO todo_preparation_requests(operation_id,kind,target_id,version,instructions,response) VALUES(?,?,?,?,?,?)", operation, kind, id, version as number, text, JSON.stringify(response));
+      return reply(response, 202);
+    });
+    await scheduleTodoPreparation(storage);
+    return result;
   }
   const itemMatch = path.match(/^\/todo\/items\/([0-9a-f-]{36})$/i);
   if (itemMatch && request.method === "PATCH" && uuid.test(itemMatch[1]!)) {
@@ -101,10 +149,10 @@ export async function handleTodoInbox(request: Request, storage: DurableObjectSt
     const { operation_id: operationInput, version, status } = input;
     if (typeof operationInput !== "string" || !uuid.test(operationInput)
       || !Number.isSafeInteger(version) || (version as number) < 1
-      || (status !== "done" && status !== "captured")) return reply({ error: "invalid_update" }, 400);
+      || (status !== "done" && status !== "captured" && status !== "parked")) return reply({ error: "invalid_update" }, 400);
     const id = itemMatch[1]!.toLowerCase(), operation = operationInput.toLowerCase();
     // Keep validation and the durable receipt in the same transaction as the mutation.
-    return storage.transactionSync(() => {
+    const result = storage.transactionSync(() => {
       const previous = storage.sql.exec<{ item_id: string; version: number; status: string; item_json: string }>(
         "SELECT * FROM todo_capture_updates WHERE operation_id = ?", operation).toArray()[0];
       if (previous) return previous.item_id === id && previous.version === version && previous.status === status
@@ -112,14 +160,18 @@ export async function handleTodoInbox(request: Request, storage: DurableObjectSt
       const item = storage.sql.exec<ItemRow>("SELECT * FROM todo_captures WHERE id = ?", id).toArray()[0];
       if (!item) return reply({ error: "not_found" }, 404);
       if (item.version !== version) return reply({ error: "stale_item" }, 409);
-      if (!["captured", "done"].includes(item.status) || item.status === status)
+      if (!["captured", "done", "parked"].includes(item.status) || item.status === status)
         return reply({ error: "invalid_transition" }, 409);
       storage.sql.exec("UPDATE todo_captures SET status = ?, version = version + 1 WHERE id = ? AND version = ?", status, id, version);
-      const updated = { ...item, status, version: item.version + 1 };
+      if (status === "captured") enqueueTodoPreparation(storage, "capture", id, item.version + 1);
+      else storage.sql.exec("UPDATE todo_preparations SET state='blocked',generation=generation+1,result=?,updated_at=? WHERE kind='capture' AND target_id=?", JSON.stringify({ error: status === "parked" ? "preparation_parked" : "capture_completed" }), new Date().toISOString(), id);
+      const updated = { ...item, status, version: item.version + 1, preparation: preparationView(storage, "capture", id) };
       storage.sql.exec("INSERT INTO todo_capture_updates(operation_id, item_id, version, status, item_json, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
         operation, id, version, status, JSON.stringify(updated), new Date().toISOString());
       return reply({ item: updated });
     });
+    await scheduleTodoPreparation(storage);
+    return result;
   }
   const response = path.match(/^\/todo\/decisions\/([0-9a-f-]{36})\/respond$/i);
   if (response && request.method === "POST" && uuid.test(response[1]!)) {
@@ -149,6 +201,7 @@ export async function handleTodoInbox(request: Request, storage: DurableObjectSt
       storage.sql.exec("INSERT INTO todo_decision_responses(operation_id, decision_id, version, choice_id, text, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
         operation, id, version, choice ?? null, text ?? null, new Date().toISOString());
       storage.sql.exec("UPDATE todo_decisions SET status = 'answered', version = version + 1 WHERE id = ? AND version = ? AND status = 'needs_you'", id, version);
+      storage.sql.exec("UPDATE todo_preparations SET state='blocked',generation=generation+1,result=?,updated_at=? WHERE kind='decision' AND target_id=?", JSON.stringify({error:"decision_answered"}), new Date().toISOString(), id);
     });
     // An answered decision remains pending workflow consumption, not completed.
     // A recorded answer is NOT an executed workflow step; the producer owns
@@ -171,7 +224,7 @@ export async function routeTodoRequest(request: Request, env: Pick<AccountAuthEn
       return reply({ error: "forbidden_origin" }, 403);
   }
   const mailOrSchedule = /^\/v1\/todo\/(?:schedule|mail\/(?:accounts|threads(?:\/[A-Za-z0-9_-]+(?:\/modify)?)?|drafts(?:\/[0-9a-fA-F-]{36})?|send|suggest|messages\/[A-Za-z0-9_-]+\/attachments\/[A-Za-z0-9_-]+))$/.test(url.pathname);
-  if (!mailOrSchedule && (!/^\/v1\/todo(?:$|\/traces$|\/items\/[0-9a-f-]{36}$|\/decisions\/[0-9a-f-]{36}\/respond$)/i.test(url.pathname)
+  if (!mailOrSchedule && (!/^\/v1\/todo(?:$|\/traces$|\/items\/[0-9a-f-]{36}(?:\/prepare)?$|\/decisions\/[0-9a-f-]{36}(?:\/(?:respond|prepare))?$)/i.test(url.pathname)
     || url.search && url.pathname !== "/v1/todo/traces")) return reply({ error: "not_found" }, 404);
   const path = url.pathname.slice(3);
   return env.NANOCODEX_USERS.getByName(principal.userId, durablePlacementOptions(env.trustedClientIngressColo)).fetch(
@@ -183,6 +236,7 @@ export type TodoDecisionProposal = Readonly<{
   source_key: string; todo_id?: string; workflow_id?: string;
   title: string; context: string; source_label: string;
   source_url: string; choices: readonly Choice[];
+  prepare?: boolean;
   source_connection_id?: string | null; source_thread_id?: string | null; source_message_id?: string | null;
 }>;
 
@@ -198,6 +252,7 @@ export function proposeTodoDecision(storage: DurableObjectStorage, input: TodoDe
     || input.source_connection_id != null && !safe(input.source_connection_id, 256)
     || input.source_thread_id != null && (typeof input.source_thread_id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(input.source_thread_id))
     || input.source_message_id != null && (typeof input.source_message_id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(input.source_message_id))
+    || input.prepare !== undefined && typeof input.prepare !== "boolean"
     || !safe(input.title, 200)
     || !safe(input.context, 4096) || !safe(input.source_label, 120)
     || typeof input.source_url !== "string" || input.source_url.length > 2048
@@ -208,12 +263,15 @@ export function proposeTodoDecision(storage: DurableObjectStorage, input: TodoDe
     throw new Error("invalid todo decision proposal");
   }
   const id = crypto.randomUUID();
+  storage.transactionSync(() => {
   storage.sql.exec(`INSERT INTO todo_decisions
-    (id, source_key, todo_id, workflow_id, title, context, source_label, source_url, choices, created_at, source_connection_id, source_thread_id, source_message_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_key) DO NOTHING`, id,
+    (id, source_key, todo_id, workflow_id, title, context, source_label, source_url, choices, created_at, source_connection_id, source_thread_id, source_message_id, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_key) DO NOTHING`, id,
   input.source_key, input.todo_id ?? null, input.workflow_id ?? null,
   input.title, input.context, input.source_label, input.source_url,
-  JSON.stringify(input.choices), new Date().toISOString(), input.source_connection_id ?? null, input.source_thread_id ?? null, input.source_message_id ?? null);
+  JSON.stringify(input.choices), new Date().toISOString(), input.source_connection_id ?? null, input.source_thread_id ?? null, input.source_message_id ?? null, input.prepare ? "preparing" : "needs_you");
+  if (input.prepare && storage.sql.exec("SELECT id FROM todo_decisions WHERE id=?", id).toArray().length) enqueueTodoPreparation(storage, "decision", id, 1);
+  });
   const existing = storage.sql.exec<DecisionRow>("SELECT * FROM todo_decisions WHERE source_key = ?", input.source_key).toArray()[0];
   if (!existing) throw new Error("todo proposal persistence failed");
   // A replay cannot silently redefine an already presented approval or its choices.
