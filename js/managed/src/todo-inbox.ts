@@ -5,6 +5,13 @@ import type { AccountAuthEnv, Principal } from "./account-auth";
 
 const noStore = { "cache-control": "no-store" };
 const reply = (data: unknown, status = 200) => Response.json(data, { status, headers: noStore });
+// Persisted decisions/traces demonstrate observed local work only. No account
+// watch/import heartbeat is verified here; empty queues NEVER prove caught-up.
+const unknownSourceCoverage = () => ({
+  status: "unknown", complete: false, background_ingest: "unknown",
+  reason: "watch_import_health_unverified",
+  scope: "Bounded persisted account records only; not the whole mailbox.",
+});
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type ItemRow = { id: string; body: string; watch_hint: string; status: string; version: number; created_at: string; operation_id: string };
@@ -79,7 +86,7 @@ export async function handleTodoInbox(request: Request, storage: DurableObjectSt
     const open = storage.sql.exec<DecisionView>(`SELECT ${projection} FROM todo_decisions WHERE status IN ('needs_you','preparing') ORDER BY created_at DESC LIMIT 200`).toArray();
     const activity = storage.sql.exec<DecisionView>(`SELECT ${projection} FROM todo_decisions WHERE status NOT IN ('needs_you','preparing') ORDER BY created_at DESC LIMIT 200`).toArray();
     const decisions = [...open, ...activity].map(({ choices, ...rest }) => ({ ...rest, choices: JSON.parse(choices) as Choice[], preparation: preparationView(storage, "decision", rest.id) }));
-    return reply({ items, decisions, traces: recentGmailTodoTraces(storage),
+    return reply({ source_coverage: unknownSourceCoverage(), items, decisions, traces: recentGmailTodoTraces(storage),
       feed_bounds: { traces: "recent", trace_limit: 100 } });
   }
   if (path === "/todo" && request.method === "POST") {
@@ -112,7 +119,7 @@ export async function handleTodoInbox(request: Request, storage: DurableObjectSt
     if (!row) return reply({ error: "not_found" }, 404);
     delete row.workflow_id; delete row.source_key;
     if (kind === "decision") row.choices = JSON.parse(row.choices);
-    return reply({ [kind === "capture" ? "item" : "decision"]: { ...row, preparation: preparationView(storage, kind, id) } });
+    return reply({ source_coverage: unknownSourceCoverage(), [kind === "capture" ? "item" : "decision"]: { ...row, preparation: preparationView(storage, kind, id) } });
   }
   const prepare = path.match(/^\/todo\/(items|decisions)\/([0-9a-f-]{36})\/prepare$/i);
   if (prepare && request.method === "POST" && uuid.test(prepare[2]!)) {

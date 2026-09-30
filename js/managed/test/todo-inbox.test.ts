@@ -239,3 +239,13 @@ describe("account-owned TODO inbox", () => {
       { origin: "https://unrelated.test" }))?.status).toBe(403);
   });
 });
+
+it("declares unknown mailbox/import coverage even for empty queues and recent classifier traces", async () => {
+  const f=await fixture(), me=owner(f.user);
+  const expected={status:"unknown",complete:false,background_ingest:"unknown",reason:"watch_import_health_unverified"};
+  const empty=await (await f.call(me,"GET",""))!.json() as any;expect(empty.source_coverage).toMatchObject(expected);expect(empty.decisions).toEqual([]);
+  await env.NANOCODEX_USERS.getByName(f.user).recordTodoDecisionTrace({source_key:"gmail:gmail-reply-triage-v1:"+"a".repeat(64),policy_version:"gmail-reply-triage-v1",outcome:"no_reply",reason:"no_reply",classifier_outcome:"success",confidence:0.99,reply_probability:0.01,duration_ms:10,decision_id:null});
+  const observed=await (await f.call(me,"GET",""))!.json() as any;expect(observed.traces).toHaveLength(1);expect(observed.source_coverage).toMatchObject(expected);
+  const created=await (await f.call(me,"POST","",{body:"Owner capture",operation_id:crypto.randomUUID()}))!.json() as any;
+  const detail=await (await f.call(me,"GET","/items/"+created.item.id))!.json() as any;expect(detail.source_coverage).toMatchObject(expected);
+});
