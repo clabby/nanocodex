@@ -137,6 +137,8 @@ test('host SIGKILL reaps detached provider even if provider ignores stdin EOF', 
   harness.kill('SIGKILL'); await once(harness, 'exit'); await pause(300);
   let alive = true; try { process.kill(providerPid, 0); } catch { alive = false; }
   assert.equal(alive, false, 'detached provider survives host SIGKILL');
+  await pause(1600);
+  assert.deepEqual(await readdir(path.join(directory, 's')), [], 'catalog-only killed host leaves its private session directory behind');
 });
 
 test('provider stdout EOF closes pending requests even if its process remains alive', async t => {
@@ -195,12 +197,20 @@ test('SIGKILL of native worker owner closes lease and reaps synthetic native hel
   assert.equal(alive, false, 'native worker failed to observe killed owner EOF');
 });
 
-test('stat-only local policy rejects external ownership/symlinks and allows owner preferences', async () => {
+test('stat-only policy rejects external ownership and permits explicitly superseded owner preferences', async () => {
   const configPath = '/synthetic/home/.codex/config.toml';
   const inspectFor = metadata => async file => file === configPath ? metadata : missing();
   await assert.rejects(checkManagedPolicy({ home: '/synthetic/home', codexHome: undefined, platform: 'linux', inspect: inspectFor({ uid: process.getuid() + 1, isSymbolicLink: () => false }) }), /Externally owned/);
-  await assert.rejects(checkManagedPolicy({ home: '/synthetic/home', codexHome: undefined, platform: 'linux', inspect: inspectFor({ uid: process.getuid(), isSymbolicLink: () => true }) }), /Externally owned/);
+  // An owner-controlled preferences link is not a managed-policy authority.
+  // No contents/credentials are read; the current explicit Nano grant wins.
+  await checkManagedPolicy({ home: '/synthetic/home', codexHome: undefined, platform: 'linux', inspect: inspectFor({ uid: process.getuid(), isSymbolicLink: () => true }), follow: async () => ({ uid: process.getuid() }) });
   await checkManagedPolicy({ home: '/synthetic/home', codexHome: undefined, platform: 'linux', inspect: inspectFor({ uid: process.getuid(), isSymbolicLink: () => false }) });
+});
+
+test('owner config link cannot hide externally owned or unreadable policy targets', async () => {
+  const settings = { home: '/synthetic/home', codexHome: undefined, platform: 'linux', inspect: async file => file.endsWith('/config.toml') ? {uid:process.getuid(), isSymbolicLink:()=>true} : missing() };
+  await assert.rejects(checkManagedPolicy({...settings, follow:async()=>({uid:process.getuid()+1})}), /Externally owned/);
+  await assert.rejects(checkManagedPolicy({...settings, follow:async()=>{throw Object.assign(new Error('unreadable target'),{code:'EACCES'});}}), /unreadable/);
 });
 
 test('home and absolute external CODEX_HOME enforced-source presence fails closed', async () => {
