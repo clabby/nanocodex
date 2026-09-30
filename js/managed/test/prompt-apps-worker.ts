@@ -1,12 +1,12 @@
 // Only account authentication is a fixture. All /v1/apps routing, validation,
-// authorization and D1 persistence below run in the production worker.
-export * from "./memory-scope-worker";
-import worker from "../src/index";
+// authorization and D1 persistence below run in production handlers. No native
+// Hand is connected here; the full native journey exercises successful saves.
+import { routeAppsRequest } from "../src/prompt-apps-http";
 import { routeManaged } from "../../account/worker/managedProxy";
 import type { Principal } from "../src/account-auth";
 const owner = "11111111-1111-4111-8111-111111111111";
 export default {
-  async fetch(request: Request, env: Parameters<typeof worker.fetch>[1], ctx: ExecutionContext) {
+  async fetch(request: Request, env: { NANOCODEX_CRM: D1Database }) {
     const fixture = request.headers.get("authorization")?.replace(/^Bearer /, "");
     const known = ["owner", "other", "read", "write", "no-tools", "connect", "cookie"].includes(fixture ?? "");
     const principal: Principal | undefined = known ? {
@@ -16,7 +16,7 @@ export default {
       capabilities: fixture === "read" ? ["agents:read", "tools:use"] : fixture === "write" ? ["agents:write", "tools:use"]
         : fixture === "no-tools" ? ["agents:read", "agents:write"] : ["agents:read", "agents:write", "tools:use"],
     } : undefined;
-    return await routeManaged(request, { NANOCODEX_BACKEND: { fetch: (forwarded: Request) => worker.fetch(forwarded, env, ctx, principal) } as Fetcher }, new URL(request.url))
+    return await routeManaged(request, { NANOCODEX_BACKEND: { fetch: (forwarded: Request) => routeAppsRequest(forwarded, env.NANOCODEX_CRM, principal) } as Fetcher }, new URL(request.url))
       ?? new Response("not_found", { status: 404 });
   },
 };

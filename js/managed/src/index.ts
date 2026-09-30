@@ -1,3 +1,4 @@
+import { nativeAppValidator } from "./prompt-apps-native";
 import { gmailDecisionReceipts } from "./gmail-firehose-receipts";
 import { parsePrivateSecureInput } from "./browser-vault";
 import { NativeSecureInput, parseNativeSecureInput } from "./native-secure-input";
@@ -1765,7 +1766,11 @@ async function managedFetchRoute(
     }
     if (url.pathname === "/v1/apps" || url.pathname.startsWith("/v1/apps/")) {
       const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
-      return (await import("./prompt-apps-http")).routeAppsRequest(request, env.NANOCODEX_CRM, principal);
+      const validator = principal ? nativeAppValidator(env.NANOCODEX_ACCOUNT_TOOLS, principal.userId,
+        { sessionId: "apps:" + crypto.randomUUID(), callId: crypto.randomUUID(), signal: request.signal },
+        () => principal.kind !== "connect_grant" && principal.connectGrant === undefined
+          && principal.capabilities.includes("tools:use") && principal.capabilities.includes("agents:write")) : undefined;
+      return (await import("./prompt-apps-http")).routeAppsRequest(request, env.NANOCODEX_CRM, principal, validator);
     }
     if (url.pathname === "/v1/crm" || url.pathname.startsWith("/v1/crm/")) {
       const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
@@ -9645,6 +9650,11 @@ export class DurableAgentSession extends DurableComputerObject {
       ...(multiplayer ? [] : appTools({
         db: this.env.NANOCODEX_CRM, ownerId: session.owner_id,
         authorization: context => this.#authorizationForToolContext(context),
+        validator: context => nativeAppValidator(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, context, () => {
+          const auth = this.#authorizationForToolContext(context);
+          return this.#hasFullAccountAuthority(auth) && auth!.capabilities.includes("tools:use")
+            && auth!.capabilities.includes("agents:write");
+        }),
       })),
       ...(multiplayer ? [] : crmTools({
         db: this.env.NANOCODEX_CRM, ownerId: session.owner_id,

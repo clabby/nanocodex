@@ -36,7 +36,7 @@ public enum AppValue: Codable, Hashable, Sendable {
     public var truth: Bool { switch self { case .bool(let b): return b; case .null: return false; default: return number != 0 || !text.isEmpty && self != .number(0) } }
 }
 
-public struct AppDiagnostic: Error, LocalizedError, Equatable, Sendable {
+public struct AppDiagnostic: Error, LocalizedError, Equatable, Codable, Sendable {
     public let message: String
     public let line: Int
     public init(_ message: String, line: Int = 0) { self.message = message; self.line = line }
@@ -64,7 +64,7 @@ struct AppProgram {
     var body: [Statement] = []
 }
 
-public struct AppNode: Identifiable, Equatable, Sendable {
+public struct AppNode: Identifiable, Equatable, Codable, Sendable {
     public var id: String
     public var kind: String
     public var text: String
@@ -81,11 +81,14 @@ public struct NativeAppHost {
     public var loadState: () async throws -> [String: AppValue]
     public var saveState: ([String: AppValue]) async throws -> Void
     public var runAgent: (String) async throws -> String
+    /// False only for isolated fixture hosts that never dispatch external agent work.
+    public var agentRequestsHaveExternalEffects: Bool
     /// The host can retain external-operation receipts until the enclosing action commits.
     public var beginAction: () -> Void
     public var commitAction: () -> Void
-    public init(loadState: @escaping () async throws -> [String: AppValue], saveState: @escaping ([String: AppValue]) async throws -> Void, runAgent: @escaping (String) async throws -> String, beginAction: @escaping () -> Void = {}, commitAction: @escaping () -> Void = {}) {
+    public init(loadState: @escaping () async throws -> [String: AppValue], saveState: @escaping ([String: AppValue]) async throws -> Void, runAgent: @escaping (String) async throws -> String, agentRequestsHaveExternalEffects: Bool = true, beginAction: @escaping () -> Void = {}, commitAction: @escaping () -> Void = {}) {
         self.loadState = loadState; self.saveState = saveState; self.runAgent = runAgent
+        self.agentRequestsHaveExternalEffects = agentRequestsHaveExternalEffects
         self.beginAction = beginAction; self.commitAction = commitAction
     }
 }

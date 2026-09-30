@@ -231,7 +231,7 @@ final class InboxUITests: XCTestCase {
             if typing { input.tap(); input.typeText("Keep the controls below this draft") }
             let dock = app.descendants(matching: .any)["main-selection-bar"].firstMatch
             XCTAssertTrue(dock.waitForExistence(timeout: 5))
-            let controls = [app.buttons["model-picker"], app.buttons["effort-dial"], app.buttons["auto-route"]]
+            let controls = [app.buttons["model-picker"]]
             for control in controls {
                 XCTAssertTrue(control.exists)
                 XCTAssertGreaterThanOrEqual(control.frame.minY, input.frame.maxY)
@@ -270,7 +270,7 @@ final class InboxUITests: XCTestCase {
                 XCTAssertEqual(XCTWaiter.wait(for: [rotated], timeout: 5), .completed)
                 let sizeName = orientation == .portrait ? "portrait" : (orientation == .landscapeLeft ? "landscape-left" : "landscape-right")
                 let dock = app.descendants(matching: .any)["main-selection-bar"].firstMatch
-                let controls = ["main-tab-todo", "main-tab-chat", "model-picker", "effort-dial", "auto-route"].map { app.buttons[$0] }
+                let controls = ["main-tab-todo", "main-tab-chat", "model-picker"].map { app.buttons[$0] }
                 XCTAssertTrue(dock.waitForExistence(timeout: 5))
                 for control in controls {
                     XCTAssertTrue(control.isHittable, control.identifier)
@@ -1584,51 +1584,66 @@ final class InboxUITests: XCTestCase {
             app.terminate()
         }
     }
-    func testBottomAppShortcutsOpenNativeAppsAndReturnToChat() {
+    func testAppStoreOpensNativeAppsAndReturnsToChat() {
         let app = launch(arguments: ["--generated-apps-ui-fixture"])
         let conversation = selectedConversationTab(app).identifier
-        let bar = app.scrollViews["saved-apps-bar"]
-        let water = app.buttons["main-app-water"]
-        XCTAssertTrue(water.waitForExistence(timeout: 25))
-        water.tap()
+        let store = app.buttons["main-tab-apps"]
+        XCTAssertTrue(store.waitForExistence(timeout: 25))
+        XCTAssertFalse(app.scrollViews["saved-apps-bar"].exists)
+        XCTAssertFalse(app.buttons["main-app-water"].exists)
+        capture(app, "app-store-compact-dock")
+
+        func openApp(_ id: String) {
+            store.tap()
+            let item = app.buttons["app-store-app-" + id]
+            XCTAssertTrue(item.waitForExistence(timeout: 5))
+            item.tap()
+        }
+        openApp("water")
         XCTAssertTrue(app.staticTexts["Glasses: 0"].waitForExistence(timeout: 10))
-        XCTAssertTrue(water.isSelected)
         XCTAssertFalse(app.webViews.firstMatch.exists)
         app.buttons["Add glass"].tap()
         XCTAssertTrue(app.staticTexts["Glasses: 1"].waitForExistence(timeout: 5))
-        capture(app, "bottom-app-water-native")
+        capture(app, "app-store-water-native")
 
-        let reading = app.buttons["main-app-reading"]
-        reading.tap()
+        openApp("reading")
         XCTAssertTrue(app.staticTexts["Pages: 0"].waitForExistence(timeout: 5))
-        XCTAssertTrue(reading.isSelected)
-        XCTAssertFalse(water.isSelected)
         XCTAssertFalse(app.staticTexts["Glasses: 1"].exists)
         app.buttons["Read page"].tap()
         XCTAssertTrue(app.staticTexts["Pages: 1"].waitForExistence(timeout: 5))
 
-        let travel = app.buttons["main-app-travel"]
-        XCTAssertFalse(travel.isHittable, "The fixture must exercise shortcuts beyond the visible bar.")
-        for _ in 0..<5 where !travel.isHittable { bar.swipeLeft() }
-        XCTAssertTrue(travel.isHittable)
-        travel.tap()
+        openApp("travel")
         XCTAssertTrue(app.staticTexts["Packed items: 0"].waitForExistence(timeout: 5))
-        XCTAssertTrue(travel.isSelected)
-        XCTAssertFalse(reading.isSelected)
-        capture(app, "bottom-app-overflow-travel")
+        capture(app, "app-store-travel")
 
         app.buttons["main-tab-chat"].tap()
         XCTAssertTrue(selectedConversationTab(app).waitForExistence(timeout: 5))
         XCTAssertEqual(selectedConversationTab(app).identifier, conversation)
-        XCTAssertFalse(travel.isSelected)
         XCTAssertFalse(app.staticTexts["Packed items: 0"].exists)
-        capture(app, "bottom-app-return-to-chat")
+        capture(app, "app-store-return-to-chat")
 
-        for _ in 0..<5 where !water.isHittable { bar.swipeRight() }
-        water.tap()
+        openApp("water")
         XCTAssertTrue(app.staticTexts["Glasses: 1"].waitForExistence(timeout: 5), "Switching apps must reopen their saved native state.")
-        XCTAssertTrue(water.isSelected)
-        capture(app, "bottom-app-water-reopened")
+        capture(app, "app-store-water-reopened")
+        store.tap()
+        app.buttons["Your apps"].tap()
+        XCTAssertTrue(app.buttons["create-generated-app"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Synthetic water tracker"].exists)
+    }
+
+    func testOneModelButtonOpensAllConversationSettings() {
+        let app = launch()
+        let picker = app.buttons["model-picker"]
+        XCTAssertTrue(picker.isHittable)
+        XCTAssertFalse(app.buttons["effort-dial"].exists)
+        XCTAssertFalse(app.buttons["auto-route"].exists)
+        picker.tap()
+        XCTAssertTrue(app.buttons["Astra"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Sol"].exists)
+        XCTAssertTrue(app.buttons["Automatic routing"].exists)
+        let thinking = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Thinking:")).firstMatch
+        XCTAssertTrue(thinking.exists)
+        capture(app, "single-model-menu")
     }
 
     private func launch(_ environment: [String: String] = [:], arguments: [String] = []) -> XCUIApplication {

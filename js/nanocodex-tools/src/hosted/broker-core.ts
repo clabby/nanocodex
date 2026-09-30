@@ -30,6 +30,7 @@ export const HOSTED_MACHINE_TOOL_NAMES = Object.freeze([
   "write_stdin",
   "preview",
   "native_secure_input",
+  "validate_app",
   "mcp__cua_repl__js",
   "mcp__cua_repl__js_reset",
 ] as const);

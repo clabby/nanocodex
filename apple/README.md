@@ -157,9 +157,12 @@ and repeated inner/outer tool outputs share a stable content identity.
 
 ## Personal apps
 
-The Apps menu beside TODO, Chat and CRM lists saved apps and **Create an app**.
+The App Store button beside TODO, Chat, CRM and Meetings opens a menu of saved
+apps, **Your apps**, and **Create an app**. Saved apps stay inside this menu.
+The single Chat model button opens model choices, thinking effort, and automatic
+routing for the selected conversation.
 Describe a tracker or another utility, follow generation in Chat, then open it
-from Apps. The pencil requests a change to the same app. The app menu can reload
+from App Store. The pencil requests a change to the same app. The app menu can reload
 or restore its previous source without reverting saved data. Deleting an app
 also deletes its data after confirmation.
 

@@ -98,7 +98,7 @@ struct CreateGeneratedAppSheet: View {
                     TextField("A tracker, a planner, a tiny tool…", text: $prompt, axis: .vertical)
                         .lineLimit(5...12).accessibilityIdentifier("generated-app-prompt")
                 }
-                Section { Text("Your agent will build a custom app. Follow its progress in Chat, then open the finished app from the selector.").font(.footnote) }
+                Section { Text("Your agent will build a custom app. Follow its progress in Chat, then open the finished app from App Store.").font(.footnote) }
                 if let error { Text(error).foregroundStyle(.red) }
             }
             .navigationTitle(app == nil ? "Create an app" : "Edit app")

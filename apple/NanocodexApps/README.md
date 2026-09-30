@@ -64,3 +64,57 @@ python3 apple/NanocodexApps/Journeys/run.py \
 ```
 
 The runner retains source inputs, real JSON state, CLI commands, and control-tree traces under the selected output directory.
+
+## Preflight generated source without saving
+
+`await NativeAppPreflight.validate(json:)` runs the same `NativeAppSession` parser,
+initializers, interpreter and render-tree builder with isolated in-memory state.
+The native Swift Hand publishes this as `validate_app` on both supported Apple
+platforms. No workspace or production app data is read or written. The validator
+never dispatches a live agent request; `agent_response` supplies an explicit
+fixture, and an attempted `Agent.run` without one fails.
+
+The JSON input requires `runtime: "swift-v1"` and `source`. Optional `state` is a
+persisted JSON object. Optional `steps` contains at most 32 ordered operations:
+
+```json
+[
+  {"action": "set", "binding": "title", "value": "The Odyssey"},
+  {"action": "tap", "title": "Add book"},
+  {"action": "expect", "text": "The Odyssey"},
+  {"action": "reopen"}
+]
+```
+
+Button titles must identify one enabled rendered button; bindings must belong to
+an enabled rendered control. `expect` matches exact rendered `Text`. Reopen
+creates a new session from the in-memory saved state and resets session-only
+values. A final reopen is always checked, even with no supplied steps.
+
+Results include `valid`, `runtime`, SHA-256 of the exact source UTF-8 bytes in
+`source_sha256`, `stage`, optional `diagnostic` (`message`, `line`; 0 when the
+runtime has no source location), `checks`, `rendered_tree`, `reopened_tree`, and
+`persisted_test_state`. Checks include the zero-based `step` for supplied actions.
+`tree_only: true` explicitly means this is an interpreter-tree inspection, not a
+pixel screenshot or a complete Swift compiler typecheck. Success covers the
+supplied path; it does not prove all future interactions succeed.
+
+Input is capped at 1 MiB; source, state and agent fixture strings at 256 KiB each;
+state nesting at 64 levels; collections at 2,000 entries. Normal session execution
+budgets and cooperative cancellation still apply. Output is capped at 512 KiB;
+when trees exceed their shared 160 KiB allowance they are pruned and
+`output_truncated` is true. Saved test state and diagnostics are retained.
+
+Use the shipped executable for JSON-only stdout, with the same validator:
+
+```sh
+swift build --package-path apple/NanocodexApps --product native-app-journey
+apple/NanocodexApps/.build/debug/native-app-journey --validate-json < request.json
+python3 apple/NanocodexApps/Journeys/validate.py \
+  --binary apple/NanocodexApps/.build/debug/native-app-journey \
+  --output output/native-app-validation
+```
+
+Validation failures return `valid: false` in JSON; this CLI mode exits normally
+when it produces a validation receipt. The runner retains requests, command
+lines, stdout receipts and stderr for successful and rejected journeys.

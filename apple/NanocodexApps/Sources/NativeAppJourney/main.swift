@@ -560,6 +560,22 @@ private func selfTest(screenshotPath: String?) async throws {
 private struct NativeAppJourney {
     @MainActor
     static func main() async {
+        if Array(CommandLine.arguments.dropFirst()) == ["--validate-json"] {
+            // Read one bounded request; stdout contains only the structured validation result.
+            var data = Data()
+            while data.count <= NativeAppPreflight.maximumInputBytes {
+                let chunk = (try? FileHandle.standardInput.read(upToCount: min(65_536, NativeAppPreflight.maximumInputBytes + 1 - data.count))) ?? Data()
+                if chunk.isEmpty { break }
+                data.append(chunk)
+            }
+            let result = await NativeAppPreflight.validate(json: data)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            if let output = try? encoder.encode(result) {
+                FileHandle.standardOutput.write(output)
+                FileHandle.standardOutput.write(Data("\n".utf8))
+            }
+            return
+        }
         do {
             let options = try Options(Array(CommandLine.arguments.dropFirst()))
             if options.help {
@@ -567,6 +583,7 @@ private struct NativeAppJourney {
                 native-app-journey — run Swift source through the public native app session
 
                 Usage:
+                  native-app-journey --validate-json < request.json
                   native-app-journey --self-test [--screenshot FILE]
                   native-app-journey --source FILE --state FILE [operations] [--screenshot FILE]
 

@@ -98,7 +98,7 @@ public final class NativeAppSession: ObservableObject {
             // A failed action cannot leave partially changed UI state.
             resetBudget()
             try? await render()
-            if hadAgentCall {
+            if hadAgentCall && host.agentRequestsHaveExternalEffects {
                 let detail = (error as? AppDiagnostic)?.message ?? error.localizedDescription
                 fail(AppDiagnostic(detail + " Local changes were rolled back, but an agent request was already sent and may have completed external work. Check agent activity before retrying."))
             } else { fail(error) }

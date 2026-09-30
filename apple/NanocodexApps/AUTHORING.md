@@ -2,7 +2,7 @@
 
 Apps are Swift source parsed by SwiftSyntax and interpreted by a bounded Swift runtime. Views are native SwiftUI controls. This is an explicit Swift subset, not a general Swift compiler; there is no HTML, JavaScript, WebKit, dynamic linking, or arbitrary operating-system access.
 
-An app has one `struct Name: View` with `var body: some View`. `import SwiftUI` is optional. Use explicit initial values. `@State` lives for the session; `@Persisted("stable-key")` loads and saves JSON through the signed-in host. Persisted keys survive source changes. Keep keys stable across revisions.
+An app has one `struct Name: View` with `var body: some View`. `import SwiftUI` is optional. Give stored fields in the View explicit initial values. Plain record structs use typed fields without initializers, such as `struct Entry { var id: String; var count: Int }`; supply every field during memberwise construction, such as `Entry(id: UUID().uuidString, count: 0)`. `@State` lives for the session; `@Persisted("stable-key")` loads and saves JSON through the signed-in host. Persisted keys survive source changes. Keep keys stable across revisions.
 
 ```swift
 import SwiftUI
@@ -61,7 +61,7 @@ Do not invent an app-specific brand palette, colored page backgrounds, gradients
 
 ## Boundaries and failures
 
-Unsupported syntax fails validation before initialization. Unsupported dynamic operations produce a visible diagnostic and roll back the action's local state changes. Function argument types and return annotations document intent; this interpreter is dynamically typed and does not run Swift's static type checker. No custom classes, protocols, extensions, generic declarations, macros, property observers, computed state, enum declarations, custom operators, arbitrary Foundation APIs, networking, filesystem, unstructured concurrency, arbitrary frameworks, or view lifecycle callbacks are supported. Avoid optional chaining/force unwrap, multi-trailing-closure buttons, and framework-specific style constructors.
+Unsupported syntax fails validation before initialization. Unsupported dynamic operations produce a visible diagnostic and roll back the action's local state changes. Function argument types and return annotations document intent; this interpreter is dynamically typed and does not run Swift's static type checker. No custom classes, protocols, extensions, generic declarations, macros, property observers, computed state, enum declarations, custom operators, arbitrary Foundation APIs, networking, filesystem, unstructured concurrency, arbitrary frameworks, or view lifecycle callbacks are supported. Conditions must be boolean expressions; optional binding (`if let`, `if var`, `guard let`) is unsupported. Use `??` with a suitable default where needed. Avoid optional chaining/force unwrap, multi-trailing-closure buttons, and framework-specific style constructors.
 
 Defaults bound each operation to 500,000 evaluation steps, 64 nested calls, 2,000 view nodes, 2,000 collection entries, three agent calls, and 256 KiB per text value. Source is bounded to 256 KiB before parsing. The interpreter yields to the main actor every 1,024 steps so bounded heavy work stays cancellable and native controls remain responsive. Read-only value functions are memoized within each render (up to 128 argument/result entries); the cache is discarded between renders, and `Date()`/`Clock.today()` share the render's timestamp. Functions that create UUIDs keep producing fresh identities. Show a bounded window such as `entries.suffix(30)` or `entries.dropFirst(page * 30).prefix(30)` when histories exceed the view-node bound; keep full histories for totals and persistence. Paging counts must be nonnegative integers.
 
@@ -70,3 +70,24 @@ Actions and persisted saves are serialized. `@State` edits do not write storage.
 ## Host API
 
 Link the `NanocodexApps` Swift package. Supply `NativeAppHost(loadState:saveState:runAgent:)`; state is `[String: AppValue]` with ordinary JSON encoding. Construct `try NativeAppSession(source:host:)`, call `try await session.start()`, and display `NativeAppView(session:)`. Optional synchronous `beginAction` and `commitAction` host callbacks bracket an explicit action. Commit is called only after action execution, rendering, and any persisted save all succeed; errors leave the receipt uncommitted, and bindings invoke neither callback. Hosts can use these callbacks to retain idempotent external-operation receipts across local failures. Keep these callbacks nonthrowing; if durable receipt cleanup fails, retain the receipt for recovery. Call `invalidate()` on teardown. `NativeAppSession.validate(source:)` checks source without executing it.
+
+## Validate before publishing
+
+The `apps` tool's `validate` operation runs the installed `swift-v1` parser and
+interpreter on an online native Hand. Provide `runtime`, `source`, and optional
+isolated `state` and `steps`. Steps support `tap` with a button `title`, `set` with
+`binding` and `value`, `expect` with exact rendered `text`, and `reopen`. The
+validator always initializes the app and reopens its persisted test state. Use
+representative inputs and expected totals before claiming an app is ready.
+
+Saves and restores also require native preflight. An edit is checked against a
+copy of the current saved data; concurrent data changes invalidate that check
+and require a retry. A validation failure includes its stage and native
+line diagnostic and does not replace the saved source. An unavailable validator
+blocks publication; open an updated native Nanocodex Hand and retry.
+
+Validation never changes the app's real data or calls a live agent. An optional
+`agent_response` supplies an explicit test fixture. Results describe only the
+supplied journey and return bounded interpreter trees, not screenshots or a
+full Swift compiler typecheck. Visual layout should also be inspected when
+relevant.

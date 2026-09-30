@@ -1,5 +1,5 @@
 import type { Principal } from "./account-auth";
-import { AppError, appRequest, type AppOperation } from "./prompt-apps";
+import { AppError, appRequest, type AppOperation, type AppValidator } from "./prompt-apps";
 
 // Includes JSON escaping overhead for a 256 KiB Swift source document.
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -26,7 +26,7 @@ async function body(request: Request): Promise<Record<string, unknown>> {
     throw new AppError("invalid_json");
   } finally { reader.releaseLock(); }
 }
-export async function routeAppsRequest(request: Request, db: D1Database | undefined, principal: Principal | null | undefined): Promise<Response> {
+export async function routeAppsRequest(request: Request, db: D1Database | undefined, principal: Principal | null | undefined, validator?: AppValidator): Promise<Response> {
   const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" } });
   if (!principal) return json({ error: "unauthorized" }, 401);
   const write = request.method !== "GET";
@@ -36,6 +36,10 @@ export async function routeAppsRequest(request: Request, db: D1Database | undefi
   if (write && principal.kind !== "api_key" && request.headers.get("origin") !== url.origin) return json({ error: "forbidden_origin" }, 403);
   if (!db) return json({ error: "apps_unavailable" }, 503);
   try {
+    if (url.pathname === "/v1/apps/validate") {
+      if (request.method !== "POST" || url.search) throw new AppError("method_not_allowed", 405);
+      return json(await appRequest(db, principal.userId, "validate", await body(request), undefined, validator));
+    }
     const match = /^\/v1\/apps(?:\/([a-zA-Z0-9_-]{1,128})(\/(?:data|restore))?)?$/.exec(url.pathname);
     if (!match) throw new AppError("not_found", 404);
     const [, id, section] = match;
@@ -63,9 +67,9 @@ export async function routeAppsRequest(request: Request, db: D1Database | undefi
       Object.assign(input, parsed);
     }
     if (id) input.id = id;
-    return json(await appRequest(db, principal.userId, operation, input), !id && write ? 201 : 200);
+    return json(await appRequest(db, principal.userId, operation, input, undefined, validator), !id && write ? 201 : 200);
   } catch (error) {
-    if (error instanceof AppError) return json({ error: error.code }, error.status);
+    if (error instanceof AppError) return json({ error: error.code, ...(error.validation ? { validation: error.validation } : {}) }, error.status);
     return json({ error: "apps_unavailable" }, 503);
   }
 }

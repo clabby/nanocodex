@@ -373,66 +373,37 @@ struct InboxView: View {
             mainNavigationButton(.chat, title: "Chat", symbol: "bubble.left", identifier: "main-tab-chat")
             mainNavigationButton(.crm, title: "CRM", symbol: "person.2", identifier: "main-tab-crm")
             mainNavigationButton(.meetings, title: "Meetings", symbol: "text.bubble", identifier: "main-tab-meetings")
-            if !model.isDemo {
+            if !model.isDemo || !model.generatedApps.isEmpty {
                 Menu {
                     ForEach(model.generatedApps) { app in
                         Button(app.title) {
                             composerFocused = false; todoInputFocused = false
                             selectedGeneratedApp = app.id; mainSurface = .apps
                         }
+                        .accessibilityIdentifier("app-store-app-\(app.id)")
                     }
                     if !model.generatedApps.isEmpty { Divider() }
-                    Button { selectedGeneratedApp = nil; mainSurface = .apps } label: { Label("Your apps", systemImage: "square.grid.2x2") }
-                    Button { showCreateApp = true } label: { Label("Create an app", systemImage: "plus") }
+                    Button {
+                        composerFocused = false; todoInputFocused = false
+                        selectedGeneratedApp = nil; mainSurface = .apps
+                    } label: { Label("Your apps", systemImage: "square.grid.2x2") }
+                    Button {
+                        composerFocused = false; todoInputFocused = false
+                        showCreateApp = true
+                    } label: { Label("Create an app", systemImage: "plus") }
                 } label: {
                     Image(systemName: "square.grid.2x2").font(.system(size: 19, weight: .medium))
                         .frame(width: InboxChrome.touchTarget, height: InboxChrome.touchTarget)
                         .background(mainSurface == .apps ? Color.primary.opacity(0.09) : .clear, in: Capsule())
-                }.accessibilityLabel("Apps").accessibilityIdentifier("main-tab-apps")
+                }.accessibilityLabel("App Store").accessibilityIdentifier("main-tab-apps")
             }
         }
     }
 
     private var mainNavigation: some View {
-        VStack(spacing: 2) {
-            InboxNavigationLayout {
-                navigationTabs
-                if model.focused != nil && (mainSurface == .chat || mainSurface == .todo) { MobileModelControls(model: model) }
-            }
-            if !model.generatedApps.isEmpty {
-                ScrollViewReader { proxy in
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 2) {
-                            ForEach(model.generatedApps) { app in
-                                Button {
-                                    composerFocused = false
-                                    todoInputFocused = false
-                                    selectedGeneratedApp = app.id
-                                    mainSurface = .apps
-                                } label: {
-                                    Text(app.title)
-                                        .font(.subheadline.weight(.medium))
-                                        .lineLimit(1)
-                                        .padding(.horizontal, 12)
-                                        .frame(minHeight: InboxChrome.touchTarget)
-                                        .background(mainSurface == .apps && selectedGeneratedApp == app.id ? Color.primary.opacity(0.09) : .clear, in: Capsule())
-                                        .contentShape(Capsule())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityAddTraits(mainSurface == .apps && selectedGeneratedApp == app.id ? [.isSelected] : [])
-                                .accessibilityIdentifier("main-app-\(app.id)")
-                                .id(app.id)
-                            }
-                        }
-                    }
-                    .frame(height: InboxChrome.touchTarget)
-                    .scrollIndicators(.hidden)
-                    .onChange(of: selectedGeneratedApp, initial: true) { _, id in
-                        if let id { proxy.scrollTo(id, anchor: .center) }
-                    }
-                }
-                .accessibilityIdentifier("saved-apps-bar")
-            }
+        InboxNavigationLayout {
+            navigationTabs
+            if model.focused != nil && (mainSurface == .chat || mainSurface == .todo) { MobileModelControls(model: model) }
         }
         .padding(.horizontal, 5).padding(.vertical, 3)
         .accessibilityElement(children: .contain)
@@ -4076,71 +4047,66 @@ private struct NativeAppUpdateSection: View {
 }
 
 
-/// The full-width dock keeps Chat routing one tap away without another composer row.
-/// These controls apply to the selected conversation, not to TODO processing.
+/// One menu owns the selected conversation's model, effort, and routing controls.
+/// These settings apply to Chat, not to TODO processing.
 private struct MobileModelControls: View {
     @ObservedObject var model: InboxModel
     var body: some View {
         if let card = model.focused {
             let selected = ModelChoice.find(card.model.isEmpty ? "gpt-6-astra" : card.model)
             let waiting = model.modelSettingsBusy.contains(card.id)
-            HStack(spacing: 2) {
-                Menu {
+            let effort = card.thinking.isEmpty ? "low" : card.thinking
+            Menu {
+                Section("Model") {
                     ForEach(ModelChoice.all) { choice in
                         Button { model.chooseModel(choice.id) } label: {
-                            if card.model == choice.id { Label(choice.name, systemImage: "checkmark") }
+                            if selected?.id == choice.id { Label(choice.name, systemImage: "checkmark") }
                             else { Text(choice.name) }
                         }
+                        .disabled(model.modelChoiceLocked || waiting)
                     }
-                    if !card.provider.isEmpty {
-                        Divider()
-                        Text(card.provider + " · " + (card.modelLocked ? "Pinned to this conversation" : "Ready"))
-                    }
-                    if let error = model.modelSettingsError { Text(error) }
-                } label: {
-                    HStack(spacing: 3) {
-                        if waiting { ProgressView().controlSize(.mini) }
-                        else {
-                            Text(selected?.name ?? card.model).fixedSize(horizontal: false, vertical: true)
-                            Image(systemName: model.modelChoiceLocked ? "lock.fill" : "chevron.down")
-                                .font(.system(size: 9))
-                        }
-                    }
-                    .frame(minWidth: InboxChrome.touchTarget, maxWidth: .infinity, minHeight: InboxChrome.touchTarget)
-                    .contentShape(Rectangle())
                 }
-                .disabled(model.modelChoiceLocked || waiting)
-                .accessibilityLabel("Chat model: \(selected?.name ?? card.model)")
-                .accessibilityHint("Changes the selected Chat conversation, not TODO decisions")
-                .accessibilityIdentifier("model-picker")
-
                 Menu {
-                    ForEach(selected?.efforts ?? [], id: \.self) { effort in
-                        Button { model.chooseEffort(effort) } label: {
-                            if effort == card.thinking { Label(ModelChoice.effortName(effort), systemImage: "checkmark") }
-                            else { Text(ModelChoice.effortName(effort)) }
+                    ForEach(selected?.efforts ?? [], id: \.self) { choice in
+                        Button { model.chooseEffort(choice) } label: {
+                            if choice == effort { Label(ModelChoice.effortName(choice), systemImage: "checkmark") }
+                            else { Text(ModelChoice.effortName(choice)) }
                         }
                     }
                 } label: {
-                    Text(ModelChoice.effortName(card.thinking.isEmpty ? "low" : card.thinking))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(minWidth: InboxChrome.touchTarget, maxWidth: .infinity, minHeight: InboxChrome.touchTarget)
-                        .contentShape(Rectangle())
+                    Text("Thinking: \(ModelChoice.effortName(effort))")
                 }
                 .disabled(waiting || card.effortLocked || card.routingAutomatic)
-                .accessibilityLabel("Chat thinking effort: \(card.thinking)")
                 .accessibilityIdentifier("effort-dial")
 
                 Button { model.toggleAutoRoute() } label: {
-                    Text("Auto").fixedSize(horizontal: false, vertical: true).frame(minWidth: InboxChrome.touchTarget, maxWidth: .infinity, minHeight: InboxChrome.touchTarget)
-                        .background(card.routingAutomatic ? Color.primary.opacity(0.09) : .clear, in: Capsule())
-                        .contentShape(Rectangle())
+                    if card.routingAutomatic { Label("Automatic routing", systemImage: "checkmark") }
+                    else { Text("Automatic routing") }
                 }
                 .disabled(model.modelChoiceLocked || waiting)
-                .accessibilityLabel(card.routingAutomatic ? "Disable Chat auto route" : "Enable Chat auto route")
                 .accessibilityValue(card.routingAutomatic ? "On" : "Off")
                 .accessibilityIdentifier("auto-route")
+
+                if !card.provider.isEmpty {
+                    Section {
+                        Text(card.provider + " · " + (card.modelLocked ? "Pinned to this conversation" : "Ready"))
+                    }
+                }
+                if let error = model.modelSettingsError { Text(error) }
+            } label: {
+                HStack(spacing: 3) {
+                    if waiting { ProgressView().controlSize(.mini) }
+                    Text(card.routingAutomatic ? "Auto" : (selected?.name ?? card.model))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Image(systemName: "chevron.down").font(.system(size: 9))
+                }
+                .frame(minWidth: InboxChrome.touchTarget, maxWidth: .infinity, minHeight: InboxChrome.touchTarget)
+                .contentShape(Rectangle())
             }
+            .accessibilityLabel("Chat model: \(selected?.name ?? card.model)")
+            .accessibilityValue(card.routingAutomatic ? "Automatic routing" : "Thinking: \(ModelChoice.effortName(effort))")
+            .accessibilityHint("Choose model, thinking effort, or automatic routing for the selected Chat conversation")
+            .accessibilityIdentifier("model-picker")
             .multilineTextAlignment(.center)
             .font(.caption.weight(.medium))
             .buttonStyle(.plain)
