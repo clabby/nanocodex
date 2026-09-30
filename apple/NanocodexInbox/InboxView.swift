@@ -17,6 +17,19 @@ import UIKit
 import AVFoundation
 import os.signpost
 
+// Native row swipes own their hit regions; horizontal navigation remains
+// available from the drawer header, blank space, and the exposed transcript.
+private struct ConversationDrawerRowFrames: PreferenceKey {
+    static var defaultValue: [CGRect] { [] }
+    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+private final class ConversationDrawerRows {
+    var frames: [CGRect] = []
+}
+
 private struct ConversationComposerHeightKey: EnvironmentKey {
     static let defaultValue: CGFloat = 0
 }
@@ -165,6 +178,7 @@ struct InboxView: View {
     @State private var showRunningAgents = false
     @State private var drawerTranslation: CGFloat = 0
     @State private var drawerDragIsHorizontal: Bool?
+    @State private var drawerRows = ConversationDrawerRows()
     @GestureState private var drawerGestureActive = false
     @State private var readingPositions = ConversationReadingPositions()
     @State private var showScheduledJobs = false
@@ -456,13 +470,18 @@ struct InboxView: View {
                 .frame(height: geometry.size.height + safeGeometry.safeAreaInsets.bottom, alignment: .top)
                 .clipped()
                 .contentShape(Rectangle())
-                .simultaneousGesture(DragGesture(minimumDistance: 16)
+                .onPreferenceChange(ConversationDrawerRowFrames.self) { drawerRows.frames = $0 }
+                .simultaneousGesture(DragGesture(minimumDistance: 16, coordinateSpace: .global)
                     .updating($drawerGestureActive) { _, active, _ in active = true }
                     .onChanged { value in
                         // Keep the direction through onEnded: GestureState can reset
                         // before that callback on iOS 18. Cancellation is handled below.
                         if drawerDragIsHorizontal == nil {
-                            drawerDragIsHorizontal = ((showConversations && value.startLocation.x >= width) || (!showConversations && value.startLocation.x <= safeGeometry.safeAreaInsets.leading + 28))
+                            let canSwipeDone = model.connected && !model.isDemo
+                            let startsOnRow = drawerRows.frames.contains { $0.contains(value.startLocation) }
+                            let startX = value.startLocation.x - geometry.frame(in: .global).minX
+                            let canClose = !canSwipeDone || (drawerRows.frames.isEmpty ? startX >= width : !startsOnRow)
+                            drawerDragIsHorizontal = ((showConversations && canClose) || (!showConversations && startX <= safeGeometry.safeAreaInsets.leading + 28))
                                 && abs(value.translation.width) > abs(value.translation.height) * 1.5
                                 && (showConversations || value.translation.width > 0)
                         }
@@ -967,6 +986,12 @@ private struct ConversationDrawerContent: View, Equatable {
             List {
                     ForEach(visibleCards) { card in
                         conversationRow(card)
+                            .background {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(key: ConversationDrawerRowFrames.self,
+                                        value: [geometry.frame(in: .global).insetBy(dx: -4, dy: -4)])
+                                }
+                            }
                             .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 2, trailing: 0))
                             .listRowSeparator(.hidden).listRowBackground(Color.clear)
                     }

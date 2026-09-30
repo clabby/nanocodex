@@ -762,6 +762,41 @@ final class InboxUITests: XCTestCase {
         capture(app, "session-done-reopened-history")
     }
 
+    func testSessionDoneRowsAndBlankDrawerSwipesStayIndependent() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["NANOCODEX_STARTUP_FIXTURE": "1", "NANOCODEX_STARTUP_PROFILE": UUID().uuidString,
+                                 "NANOCODEX_SESSION_DONE_FIXTURE": "1"]
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-chat"].waitForExistence(timeout: 20))
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(app.staticTexts["Loaded saved conversation."].waitForExistence(timeout: 20))
+        app.buttons["conversation-drawer-open"].tap()
+        let saved = app.buttons["conversation-row:saved"]
+        let other = app.buttons["conversation-row:other"]
+        XCTAssertTrue(saved.waitForExistence(timeout: 10))
+        XCTAssertTrue(other.waitForExistence(timeout: 10))
+        let list = app.descendants(matching: .any)["conversation-list"].firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        let y = list.frame.maxY - 20
+        XCTAssertGreaterThan(y, max(saved.frame.maxY, other.frame.maxY) + 8,
+                             "Use actual blank list space, not a native row's swipe region")
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let start = origin.withOffset(CGVector(dx: list.frame.minX + list.frame.width * 0.8, dy: y))
+        let end = origin.withOffset(CGVector(dx: list.frame.minX + 8, dy: y))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        let history = app.staticTexts["Loaded saved conversation."]
+        let visible = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"), object: history)
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 10), .completed,
+                       "Blank-space dismissal must restore the retained conversation")
+        app.buttons["conversation-drawer-open"].tap()
+        XCTAssertTrue(saved.waitForExistence(timeout: 10))
+        saved.swipeLeft()
+        XCTAssertTrue(app.buttons["Mark Done"].waitForExistence(timeout: 5),
+                      "A native row swipe must reveal Done instead of dismissing the drawer")
+        XCTAssertTrue(app.buttons["conversation-drawer-close"].isHittable)
+        capture(app, "session-done-row-and-blank-swipes")
+    }
+
     func testSessionDoneRejectedWriteLeavesSessionVisible() {
         let app = XCUIApplication()
         app.launchEnvironment = ["NANOCODEX_STARTUP_FIXTURE": "1", "NANOCODEX_STARTUP_PROFILE": UUID().uuidString,
