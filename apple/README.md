@@ -492,15 +492,20 @@ Disabling closes the connection and cancels pending device calls; enabling
 reconnects the same device identity and account-scoped workspace. Account changes
 close the old connection and select a separate workspace.
 
-On iOS 26 or later, sending or explicitly retrying a message requests a
-`BGContinuedProcessingTask` for that durable turn. While iOS grants runtime, the
-Hand stays connected after leaving the app or locking the screen. The system
-shows progress and cancellation. Progress counts actual activity from that turn's
-event stream; replayed events, other turns, and heartbeats do not advance it.
-The work is resumable at the service; losing a connection does not resubmit it.
+Ordinary chat Send and Retry submit durable cloud work without requesting system
+continued-processing UI, even when the Hand is enabled. Phone tools use foreground
+time and the existing short background grace period; cloud work continues after
+local observation stops. Generic turn failures stay inside the conversation.
+Completed responses use passive Notification Center receipts; only unconfirmed
+message delivery can raise a silent banner. See [notification behavior](LIVE-ACTIVITIES.md).
+
+The explicit **Run Agent Task** shortcut can request a
+`BGContinuedProcessingTask` on iOS 26 or later. While iOS grants runtime, the Hand
+stays connected after leaving the app or locking the screen. Its system progress
+counts actual turn activity, excluding replays, other turns, and heartbeats.
 Completion releases runtime. Expiry releases local observation and device tools;
 it never cancels the durable cloud turn. Only an explicit in-app Stop or a
-Shortcut user-cancellation request can persist cancellation for that exact turn.
+Shortcut user-cancellation request persists cancellation for that exact turn.
 If iOS refuses runtime, cloud work continues and device tools require foreground time.
 There is no permanent continued-processing task for an idle Hand.
 
