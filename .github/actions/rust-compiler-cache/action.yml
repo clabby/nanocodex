@@ -1,8 +1,23 @@
-name: Rust compiler cache
-description: Reuse content-addressed Rust compilation across fresh checkouts.
+name: Rust cache
+description: Cargo registry cache plus content-addressed compilation reuse for every Rust job.
+inputs:
+  workspace:
+    description: Cargo workspace whose lockfile keys the registry cache
+    default: "."
+  cache-targets:
+    description: Also archive target/ under a job-specific key (critical-path jobs only)
+    default: "false"
 runs:
   using: composite
   steps:
+    # Archives ~/.cargo only by default; see scripts/ci/README.md.
+    - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+      with:
+        cache-targets: ${{ inputs.cache-targets }}
+        shared-key: ${{ inputs.cache-targets == 'true' && format('target-{0}', github.job) || 'cargo-home' }}
+        workspaces: ${{ inputs.workspace }}
+        save-if: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' }}
+        cache-on-failure: "true"
     - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
       with:
         version: v0.16.0

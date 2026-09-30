@@ -294,6 +294,69 @@ fn capture(
     }
     Ok(())
 }
+
+/// Physical main-display dimensions, with no upscaling.
+pub fn main_display_dimensions() -> Result<(usize, usize)> {
+    let display = objc2_core_graphics::CGMainDisplayID();
+    let size = (
+        objc2_core_graphics::CGDisplayPixelsWide(display),
+        objc2_core_graphics::CGDisplayPixelsHigh(display),
+    );
+    if size.0 == 0 || size.1 == 0 {
+        return Err(error("main display unavailable"));
+    }
+    Ok(size)
+}
+/// Packed BGRA frames at 60 Hz. Repeats the latest frame for static desktops.
+/// Caller must close/unblock the writer when requesting cancellation.
+pub fn capture_video(
+    writer: impl Write,
+    stop: Arc<AtomicBool>,
+    width: usize,
+    height: usize,
+) -> Result<()> {
+    let native = main_display_dimensions()?;
+    if width == 0
+        || height == 0
+        || width > 3840
+        || height > 2160
+        || width > native.0
+        || height > native.1
+    {
+        return Err(error("invalid system video dimensions"));
+    }
+    capture(writer, stop, Some((width, height)))
+}
+unsafe fn video_packet(sample: &CMSampleBuffer, width: usize, height: usize) -> Option<Vec<u8>> {
+    let buffer = unsafe { sample.image_buffer() }?;
+    if CVPixelBufferGetWidth(&buffer) != width
+        || CVPixelBufferGetHeight(&buffer) != height
+        || CVPixelBufferGetPixelFormatType(&buffer) != kCVPixelFormatType_32BGRA
+    {
+        return None;
+    }
+    if unsafe { CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::ReadOnly) } != 0 {
+        return None;
+    }
+    let base = CVPixelBufferGetBaseAddress(&buffer).cast::<u8>();
+    let stride = CVPixelBufferGetBytesPerRow(&buffer);
+    let result = if base.is_null() || stride < width * 4 {
+        None
+    } else {
+        let mut bytes = Vec::with_capacity(width * height * 4);
+        for row in 0..height {
+            bytes.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(base.add(row * stride), width * 4)
+            });
+        }
+        Some(bytes)
+    };
+    unsafe {
+        CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::ReadOnly);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,66 +421,4 @@ mod tests {
         assert!(count > 0, "no system PCM received");
         eprintln!("captured {count} bytes of 48000 Hz stereo s16le");
     }
-}
-
-/// Physical main-display dimensions, with no upscaling.
-pub fn main_display_dimensions() -> Result<(usize, usize)> {
-    let display = objc2_core_graphics::CGMainDisplayID();
-    let size = (
-        objc2_core_graphics::CGDisplayPixelsWide(display),
-        objc2_core_graphics::CGDisplayPixelsHigh(display),
-    );
-    if size.0 == 0 || size.1 == 0 {
-        return Err(error("main display unavailable"));
-    }
-    Ok(size)
-}
-/// Packed BGRA frames at 60 Hz. Repeats the latest frame for static desktops.
-/// Caller must close/unblock the writer when requesting cancellation.
-pub fn capture_video(
-    writer: impl Write,
-    stop: Arc<AtomicBool>,
-    width: usize,
-    height: usize,
-) -> Result<()> {
-    let native = main_display_dimensions()?;
-    if width == 0
-        || height == 0
-        || width > 3840
-        || height > 2160
-        || width > native.0
-        || height > native.1
-    {
-        return Err(error("invalid system video dimensions"));
-    }
-    capture(writer, stop, Some((width, height)))
-}
-unsafe fn video_packet(sample: &CMSampleBuffer, width: usize, height: usize) -> Option<Vec<u8>> {
-    let buffer = unsafe { sample.image_buffer() }?;
-    if CVPixelBufferGetWidth(&buffer) != width
-        || CVPixelBufferGetHeight(&buffer) != height
-        || CVPixelBufferGetPixelFormatType(&buffer) != kCVPixelFormatType_32BGRA
-    {
-        return None;
-    }
-    if unsafe { CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::ReadOnly) } != 0 {
-        return None;
-    }
-    let base = CVPixelBufferGetBaseAddress(&buffer).cast::<u8>();
-    let stride = CVPixelBufferGetBytesPerRow(&buffer);
-    let result = if base.is_null() || stride < width * 4 {
-        None
-    } else {
-        let mut bytes = Vec::with_capacity(width * height * 4);
-        for row in 0..height {
-            bytes.extend_from_slice(unsafe {
-                std::slice::from_raw_parts(base.add(row * stride), width * 4)
-            });
-        }
-        Some(bytes)
-    };
-    unsafe {
-        CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::ReadOnly);
-    }
-    result
 }

@@ -80,7 +80,7 @@ for (const failHttps of [false, true]) {
       } } } };
       const options = { eventPersistence: "caller" as const };
       Object.defineProperty(options, Symbol.for("nanocodex.cloudflare.internalRuntime"), {
-        value: { responseControls: { promptCacheKey: "compaction-test-cache", outputSchema: { type: "object", properties: {} } } },
+        value: { promptCacheKey: "compaction-test-cache", responseControls: { outputSchema: { type: "object", properties: {} } } },
       });
       let agent = await Agent.create(owner, options);
       try {

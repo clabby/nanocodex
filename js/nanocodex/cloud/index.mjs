@@ -6,4 +6,4 @@ export * as Principal from "./Principal.mjs";
 export * as Transport from "./Transport.mjs";
 export { connectActions } from "./Decorator.mjs";
 export { iframe, popup } from "./Dialog.mjs";
-export { http, mock } from "./Transport.mjs";
+export { http } from "./Transport.mjs";

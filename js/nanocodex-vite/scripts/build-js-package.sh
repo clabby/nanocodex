@@ -66,10 +66,17 @@ cleanup() {
 trap cleanup EXIT
 
 cache_helper="js/nanocodex-vite/scripts/wasm-output-cache.mjs"
-if node "$cache_helper" check "$build_mode"; then
+# Downstream Turbo caches key on nanocodex#build inputs, which must cover every WASM source.
+node "$cache_helper" check-turbo
+# Exit 1 is a cache miss; any other failure means the input set is unresolvable.
+cache_status=0
+node "$cache_helper" check "$build_mode" || cache_status=$?
+if [[ "$cache_status" -eq 0 ]]; then
   node js/nanocodex/scripts/write-wasm-attestation.mjs .ci-wasm-cache/source.wasm
   echo "WASM outputs are current; skipped Cargo and binding generation"
   exit 0
+elif [[ "$cache_status" -ne 1 ]]; then
+  exit "$cache_status"
 fi
 
 if [[ "$(wasm-bindgen --version)" != "wasm-bindgen 0.2.126" ]]; then

@@ -10,20 +10,21 @@ import {
   type ConnectorStatus,
   type HostConnection,
 } from "nanocodex/connect";
+import { mock } from "nanocodex/connect/mock";
 import { HostPrincipal } from "nanocodex/connect/server";
 import { Voice } from "nanocodex/browser";
 
 const client = Client.create({
   appId: "type-probe",
   dialog: Dialog.memory(),
-  transport: Transport.mock(),
+  transport: mock(),
 });
 const principalClient = Client.create({
   appId: "type-probe",
   appOrigin: "https://app.example.com",
   principal: Principal.host(),
   dialog: Dialog.memory(),
-  transport: Transport.mock(),
+  transport: mock(),
 });
 const principalConnection = await principalClient.connection.connect({
   authorization: "hosted",
@@ -57,14 +58,14 @@ Client.create({
   appOrigin: "https://app.example.com",
   principal: widenedPrincipal,
   dialog: Dialog.memory(),
-  transport: Transport.mock(),
+  transport: mock(),
 });
 Dialog.popup({ target: "nanocodex-connect", features: "popup=yes" });
 
 const explicitClient: Client.Client = Client.create({
   appId: "explicit-client-type-probe",
   dialog: Dialog.memory(),
-  transport: Transport.mock(),
+  transport: mock(),
 });
 const explicitClientConnection = await explicitClient.connection.connect({});
 explicitClientConnection.accountAddress satisfies `0x${string}`;
@@ -72,7 +73,7 @@ explicitClientConnection.accountAddress satisfies `0x${string}`;
 const parameters: Client.Parameters = {
   appId: "parameters-type-probe",
   dialog: Dialog.memory(),
-  transport: Transport.mock(),
+  transport: mock(),
 };
 const parametersClient = Client.create(parameters);
 const parametersConnection = await parametersClient.connection.connect({});

@@ -6,7 +6,7 @@ import { Methods } from "mppx/tempo";
 
 import { createCodeRuntime } from "../runtime/code-runtime.mjs";
 import { createMcpRuntime } from "../runtime/mcp-runtime.mjs";
-import { createTempoProviderFromAccounts, DEFAULT_MERCATOR_MCP_URL, pinnedScopedAccountParameters, resolveMcpServers } from "../runtime/tempo-provider.mjs";
+import { createTempoProviderFromAccounts, DEFAULT_MERCATOR_MCP_URL, mcpPayment, pinnedScopedAccountParameters, resolveMcpServers } from "../tempo/index.mjs";
 
 test("any Accounts SDK provider can own both Tempo payment paths", async () => {
   const accessKey = "0x0000000000000000000000000000000000000001";
@@ -528,10 +528,15 @@ test("remote MCP tools retry payment challenges through McpClient.wrap", async (
       });
     },
   });
+  // Core never imports mppx: a plain payment object cannot be wrapped.
+  await assert.rejects(
+    createMcpRuntime({ mercator: { client, payment: { methods: [method] } } }),
+    /payment must be created with mcpPayment\(\) from "nanocodex\/tempo"/,
+  );
   const mcp = await createMcpRuntime({
     mercator: {
       client,
-      payment: { methods: [method] },
+      payment: mcpPayment({ methods: [method] }),
     },
   });
   await mcp.settled();

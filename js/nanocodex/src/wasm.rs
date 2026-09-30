@@ -1113,6 +1113,8 @@ struct WasmConfig {
     #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
+    prompt_cache_key: Option<String>,
+    #[serde(default)]
     workspace: Option<String>,
     #[serde(default)]
     execution_environment: Option<WasmExecutionEnvironment>,
@@ -1585,6 +1587,12 @@ impl WasmNanocodex {
             }
             .map_err(js_error)?;
             builder = builder.durability(durable_state).await.map_err(js_error)?;
+        }
+        // Restored and forked lineages keep their original key and prefix IDs.
+        if let Some(key) = config.prompt_cache_key
+            && builder.resume_snapshot().is_none()
+        {
+            builder = builder.prompt_cache_key(key);
         }
         let (inner, events) = builder.build().map_err(js_error)?;
         Ok(Self::from_parts(inner, events, subagents))

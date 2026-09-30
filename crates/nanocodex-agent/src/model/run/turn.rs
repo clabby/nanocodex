@@ -77,26 +77,15 @@ where
                 .await?;
         }
         let active_context_tokens = session.conversation.active_context_tokens();
-        let previous_response_id = session
-            .conversation
-            .previous_response_id()
-            .map(str::to_owned);
         let auto_compact_token_limit = compaction::auto_compact_token_limit(
             self.model.as_str(),
             self.config.context_window_tokens,
         )
         .unwrap_or(self.config.context_window_tokens);
-        let (history, prompt_repaired) = session.conversation.prompt_history_with_repair();
         let compacted = {
             let compaction = self.perform_compaction(
                 self.stats.model_calls,
-                history,
-                if prompt_repaired {
-                    0
-                } else {
-                    session.conversation.delta_start()
-                },
-                previous_response_id.as_deref().filter(|_| !prompt_repaired),
+                session.conversation.managed.compaction_request(),
                 active_context_tokens,
                 auto_compact_token_limit,
                 &session.factory,
@@ -118,9 +107,10 @@ where
         let (item, _usage, server_reasoning_included) = match compacted {
             Ok(compacted) => compacted,
             Err(error) => {
-                if error.requires_image_repair() {
-                    session.conversation.replace_rejected_images();
-                }
+                session
+                    .conversation
+                    .managed
+                    .repair_rejected_request(error.rejected_request_repair());
                 session.conversation.reset_for_full_request();
                 let checkpoint = Self::checkpoint_from_session(
                     &session,
@@ -339,15 +329,10 @@ where
                     // observed the failed request without returning a usable
                     // continuation.
                     if let Some(session) = &mut self.session {
-                        if error.requires_image_repair() {
-                            session.conversation.replace_rejected_images();
-                        }
-                        if let Some(definition) = error
-                            .responses_error()
-                            .and_then(ResponsesError::invalid_tool_schema)
-                        {
-                            session.conversation.remove_tool_definition(definition);
-                        }
+                        session
+                            .conversation
+                            .managed
+                            .repair_rejected_request(error.rejected_request_repair());
                         session.conversation.commit_interrupted();
                         session.preserve_inherited_delta = false;
                     }
@@ -830,32 +815,36 @@ where
             }
             first_batch = false;
             Self::publish_fork_snapshot(session, fork_snapshots, self.global_instructions.as_ref());
-            let model_call = self
-                .perform_model_call(call_index, &mut session.conversation, &session.factory)
-                .await?;
             let ModelCallOutcome {
+                request,
                 response,
                 transport_continuation_valid,
-            } = model_call;
+                server_reasoning_included,
+            } = self
+                .perform_model_call(call_index, &session.conversation, &session.factory)
+                .await?;
+            let TurnResult {
+                id,
+                end_turn,
+                final_message,
+                code_calls,
+                output_items,
+                usage,
+                ..
+            } = response;
             session
                 .conversation
-                .update_token_info(response.usage.as_ref());
-            if transport_continuation_valid {
-                session
-                    .conversation
-                    .set_previous_response_id(response.id.clone());
-                if session.conversation.previous_response_id().is_none() {
-                    return Err(NanocodexError::MalformedResponse {
-                        detail: "completed turn did not have a response ID",
-                    });
-                }
-            } else {
-                session.conversation.reset_for_full_request();
-            }
-            let end_turn = response.end_turn;
-            let final_message = response.final_message;
-            let code_calls = response.code_calls;
-            session.conversation.append(response.output_items);
+                .managed
+                .complete_generation(
+                    request,
+                    transport_continuation_valid.then_some(id),
+                    output_items,
+                    usage.as_ref(),
+                    server_reasoning_included,
+                )
+                .map_err(|_| NanocodexError::MalformedResponse {
+                    detail: "completed turn did not have a response ID",
+                })?;
             can_drain_steers = true;
 
             if code_calls.is_empty() {

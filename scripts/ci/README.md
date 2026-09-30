@@ -1,39 +1,44 @@
 # CI job selection
 
-The main workflow selects native Hand/Docker, voice, Python, Rust quality,
-WASM artifacts, JS bindings, JS apps, package preview, policy and Actions analysis
-independently. Managed TS changes retain JS binding checks without Rust quality,
-native matrices or account UI builds. Shared SDK JS changes validate consumers and
-packages without native/voice/Python builds. Apple Swift changes use the separate
-Apple workflow, whose Mac and iOS jobs are also selected independently.
-
-WASM artifact need is separate from changed Rust inputs: a JS consumer can restore
-verified WASM without Rust setup or Clippy in the bindings job. Automatic CI tests
-are temporarily paused with literal false conditions; builds, lint, typechecks and
-artifact integrity remain active when their inputs are selected.
-
 `select-jobs.mjs` compares the complete PR diff against its merge base, or the
 complete before/after range for a push. Deletions and both sides of renames count.
-Unknown paths, shared build manifests/locks, an unavailable diff, scheduled runs, and
-manual dispatches select all groups. Keep the allowlist conservative when adding
-new cross-language dependencies. The known CUA bridge scripts and their tests
-select the native matrix (the scripts are embedded in the Hand helper), but not
-the unrelated native voice or Python wheel jobs. The macOS Hand job retains disabled definitions for
-the bridge, host lifecycle, and GUI readiness unit tests. New CUA files and
-changes to shared Rust/build inputs still select all groups.
+Rust paths are mapped to workspace packages with `cargo metadata --no-deps`, then
+expanded to every workspace package that depends on them (normal, build or dev).
+Jobs are selected by the packages they build:
 
-The daily 05:23 UTC run selects the full build matrix even when no source changed;
-the temporary test pause also applies to scheduled and manual CI runs.
-Scheduled, manual, PR, and push concurrency groups are separate so a push cannot
-cancel the daily full-matrix run. The final `ci success` check requires every
-selected job to succeed and every unselected job to be explicitly skipped;
-the paused Rust test job must be skipped. Required package-preview publication is
-selected only in its supported upstream repository. Missing outputs or unexpected skips
-fail the gate.
+| Family | Jobs | Selected by |
+| --- | --- | --- |
+| `rust` | fmt + Clippy on affected crates (fast lane) | any affected package |
+| `rust_extra` | independent crate checks, docs | any affected package |
+| `hands` | Linux/macOS shared Hand | `nanocodex2-bin` closure, `js/desktop-runtime`, CUA bridges |
+| `windows` | Windows Hand and installer | `nanocodex-bin`/`nanocodex2-bin` closure, `windows/`, `install.ps1` |
+| `vm` | static guest and Docker Hand | `nanocodex-vm` closure, CUA bridges |
+| `voice` | native voice runtime | `nanocodex-voice-native` closure, `third_party/codex-voice` |
+| `python` | Python wheels | `nanocodex-python` closure, `py/`, `examples/python` |
+| `wasm_rust` | WASM Clippy; also selects JS consumers | `nanocodex-wasm` closure |
+| `wasm`, `bindings`, `apps`, `preview` | WASM artifact and JS consumers | JS package paths |
+| `policy` | cargo-deny, boundaries, typos, Cloudflare script policy | any non-binary path |
+| `codeql` | Actions analysis | `.github/` |
 
-Run `node --test scripts/ci/*.test.mjs` and `actionlint -shellcheck= -ignore 'constant expression.*false' .github/workflows/ci.yml`
-after changing selection. The tests include real Git histories and execute the
-workflow's actual final gate under Bash fail-fast semantics.
+Workspace-wide inputs (root Cargo/JS manifests and locks, toolchain, `.cargo/`,
+`ci.yml`, `js-preview.yml`, `.github/actions/`, `scripts/ci/`), unknown paths, an
+unavailable diff or Cargo graph, and non-PR/push events select everything
+(`packages=*`). Files a crate reads outside its directory belong in
+`crossPackageInputs`.
+
+Draft PRs get only the fast lane (fmt/Clippy on affected crates, WASM Clippy,
+policy, JS typecheck/build); marking ready reruns CI with the heavy lane. Only
+superseded PR runs are cancelled. `pnpm check:fast` runs the fast-lane
+fmt + Clippy command locally for crates changed since `origin/master`.
+
+Automatic tests are paused: they run only when `NANOCODEX_CI_TESTS` in `ci.yml`
+is `on`. Rust tests use `cargo nextest run --profile ci` (`.config/nextest.toml`).
+When re-enabling, add `hands` to `vm-guest`'s condition (its Docker tests run
+`nanocodex2`).
+
+`ci success` runs `select-jobs.mjs verify` on `toJSON(needs)`: selected jobs must
+succeed and all others must be skipped; add new jobs to its `gate` table. Run
+`node --test scripts/ci/select-jobs.test.mjs` and `actionlint` after changes.
 
 For measured run and step timings:
 
@@ -45,48 +50,17 @@ Pre-execution elapsed includes dependencies and workflow gates as well as runner
 queueing. Compare equivalent workflows; production deploy and the full native
 CI suite have different scopes.
 
-## Rust compilation critical path
+## Rust compilation
 
-The quality matrix runs workspace Clippy, CLI/benchmark Clippy, independent
-public crate checks, and documentation concurrently. The independent crate
-checks intentionally remain separate Cargo invocations: merging their package
-flags would unify features and weaken that check. CLI and benchmark targets
-belong to the same package and share one Clippy invocation. All four lanes read
-the workspace dependency cache; only successful workspace Clippy runs on master
-write it. This keeps one archive across the parallel feature/profile variants.
-Cargo still checks fingerprints and builds missing variants in each lane;
-independent crate checks keep their separate default-feature invocations.
-`ci success` requires the complete matrix to pass.
+Every Rust job uses `.github/actions/rust-compiler-cache`: a Cargo registry
+cache plus sccache shared by all jobs. Per-job target archives (0.8-1.4 GB each)
+overflowed the 10 GB cache budget; only the Windows critical path keeps one.
+The independent crate checks stay separate Cargo invocations so feature
+unification cannot weaken them. JavaScript jobs reuse Turborepo's cache through
+`.github/actions/turbo-cache`; only master writes it.
 
-This policy favors a smaller retained working set. A dedicated independent-crate
-archive reduced its warm check time, but was evicted between consecutive runs of
-the same revision and had to be rebuilt and uploaded. Compare both cache retention
-and per-lane compilation time when changing this sharing policy.
-
-Native Hand, Windows installer, VM guest, and Python wheel builds use pinned
-sccache with GitHub's cache backend, in addition to the dependency cache. This
-allows unchanged library compilation to be reused across fresh checkouts;
-linking and unsupported compiler invocations still run normally. Native Cargo
-caches include the job identity and compiler environment, so concurrent jobs
-cannot publish different target subsets under one immutable key.
-
-Baseline: CI run 35824188289 on 2026-09-23 spent 9m57s in quality: 6m08s in
-Clippy, 2m07s in isolated crate checks, and 1m03s in docs. Parallel lanes remove
-that serial dependency, but new cache namespaces need warming. Compare cold and
-warm runs before claiming a measured improvement; parallel jobs can increase
-aggregate runner minutes even as elapsed time falls. Existing paused tests are
-unchanged by this optimization.
-
-The Windows Hand lifecycle and installer now share one Windows 2025 runner and
-one CLI build. Linux and macOS retain their shared-Hand matrix lanes. The real
-installer build validates its definition, so CI no longer builds a placeholder
-installer before building the real one. Paused behavioral test definitions are
-retained, including the Windows media, capture, and JS lifecycle coverage.
-
-WASM Clippy runs directly after selection, in parallel with the optimized WASM
-artifact producer. JavaScript bindings download the artifact and immediately
-start their consumer checks. The final gate separately requires WASM Clippy
-when both Rust and binding checks are selected.
+The Windows Hand lifecycle and installer share one Windows 2025 runner and one
+CLI build. The real installer build validates its definition.
 
 Preview publishing uses the supplied artifact whenever its workflow input is
 present, including a manually dispatched parent CI. A standalone preview still
@@ -112,10 +86,6 @@ an image build. Successful cache availability checks emit a Docker registry cach
 notice. Compare a later run after seeding before attributing a speedup to reuse.
 Old Actions cache entries can expire normally; no cache deletion is required.
 
-The selection job always runs the small compiler and Docker cache policy tests,
-including the Wrangler Docker argument/exit-status boundary tests. The existing
-behavioral test pause is otherwise unchanged.
-
 ## Cloudflare preview latency
 
 Worker builds and uploads determine `Cloudflare preview success`. Ready dialog
@@ -140,16 +110,10 @@ Production builds applications in deployment order. Infrastructure and managed
 Workers upload before unrelated consumer and account UI builds, with successful
 health/receipt barriers and account deployed last. Completed shared build targets
 are reused between phases. Superseded pushes stop before starting another phase.
-The small orchestration tests run in the main CI selection job even while
+The small orchestration tests run in the main CI policy job even while
 behavioral test suites remain paused.
 
 Preview image validation uses BuildKit's `cacheonly` output. It still evaluates
 the complete Dockerfile, including its checks, but does not export and load an
 unused image into Docker Engine. Production publication retains `--load` for
 its runtime verification, registry push, and immutable digest receipt.
-
-The native Linux, macOS, and Windows jobs keep Node/pnpm setup paused alongside
-their existing JavaScript lifecycle suites. Their active Cargo builds and Windows
-installer do not consume the pnpm workspace. Re-enable the three dependency
-setup steps together with those lifecycle tests; JavaScript build/consumer jobs
-retain their active dependency installation.

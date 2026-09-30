@@ -1,9 +1,10 @@
-// Uses Node built-ins and Python 3.11+ tomllib; no Rust or pnpm setup needed.
+// Needs Node and Cargo (`cargo metadata`); no Rust target or pnpm setup.
 import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertCachedManagedWasmAttestation, hashManagedWasmArtifacts } from "../../nanocodex/scripts/check-managed-wasm.mjs";
 
@@ -25,130 +26,68 @@ async function walk(directory, skipStandaloneTests = false) {
   return result;
 }
 
-// Retain optional dependencies and unknown cfgs, excluding only target tables
-// proven inapplicable to wasm32. Host build/proc-macro dependencies stay broad.
-// Registry/git dependencies are pinned by Cargo.lock. No Cargo metadata call.
-function dependencyDirectories(repository) {
-  // Parse the entire closure in one Python process. tomllib handles all valid
-  // Cargo TOML key/table/string layouts instead of approximating that grammar.
-  return JSON.parse(execFileSync("python3", ["-c", String.raw`
-import json, pathlib, re, sys, tomllib
-root = pathlib.Path(sys.argv[1]).resolve()
-def manifest(directory):
-    with (directory / "Cargo.toml").open("rb") as file:
-        return tomllib.load(file)
-workspace = manifest(root).get("workspace", {}).get("dependencies", {})
-
-def wasm_cfg(platform):
-    # Three-valued evaluation: unsupported predicates/syntax remain included.
-    # Cargo target predicates do not depend on optional dependency activation.
-    expression = re.fullmatch(r"cfg\s*\((.*)\)", platform.strip(), re.S)
-    if expression is None:
-        return None if re.match(r"cfg\b", platform.strip()) else platform == "wasm32-unknown-unknown"
-    text = expression[1].strip()
-    tokens = []
-    while text:
-        match = re.match(r'\s*([A-Za-z_][A-Za-z_0-9]*|"(?:[^"\\]|\\.)*"|[(),=])', text)
-        if not match:
-            return None
-        tokens.append(match[1])
-        text = text[match.end():].strip()
-    position = 0
-    def take():
-        nonlocal position
-        token = tokens[position]
-        position += 1
-        return token
-    def peek():
-        return tokens[position] if position < len(tokens) else None
-    def parse():
-        name = take()
-        if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', name):
-            raise ValueError("unknown cfg syntax")
-        if peek() == "=":
-            take()
-            value = json.loads(take())
-            known = {"target_arch": "wasm32", "target_os": "unknown", "target_family": "wasm",
-                     "target_env": "", "target_vendor": "unknown", "target_pointer_width": "32",
-                     "target_endian": "little"}
-            return known[name] == value if name in known else None
-        if peek() == "(":
-            take()
-            values = []
-            while peek() != ")":
-                values.append(parse())
-                if peek() != ",":
-                    break
-                take()
-            if take() != ")":
-                raise ValueError("unterminated cfg")
-            if name == "all":
-                return False if False in values else (None if None in values else True)
-            if name == "any":
-                return True if True in values else (None if None in values else False)
-            if name == "not" and len(values) == 1:
-                return None if values[0] is None else not values[0]
-            return None
-        return False if name in ("unix", "windows") else None
-    try:
-        value = parse()
-        return value if position == len(tokens) else None
-    except (IndexError, ValueError, TypeError):
-        return None
-
-visited = set()
-inputs = {}
-def visit(directory, target=True):
-    directory = directory.resolve()
-    if not directory.is_relative_to(root):
-        raise ValueError("local Rust dependencies must remain inside repository")
-    data = manifest(directory)
-    # A proc macro and its dependency tree compile for the build host.
-    target = target and not data.get("lib", {}).get("proc-macro", False)
-    if (directory, target) in visited:
-        return
-    visited.add((directory, target))
-    build_script = (directory / "build.rs").exists() or bool(data.get("package", {}).get("build", False))
-    entry_points = [data.get("lib", {}), *data.get("bin", [])]
-    # Explicit production entry points can live in normally test-only folders.
-    keep_tests = build_script or any(pathlib.PurePosixPath(entry.get("path", "")).parts[:1] in [("tests",), ("benches",)] for entry in entry_points)
-    inputs[str(directory)] = {"directory": str(directory), "buildScript": build_script, "skipStandaloneTests": not keep_tests}
-    tables = [(None, data), *data.get("target", {}).items()]
-    for platform, table in tables:
-        for kind in ("dependencies", "build-dependencies"):
-            # Target-specific build dependencies are selected for the host.
-            dependency_target = target and kind != "build-dependencies"
-            if dependency_target and platform is not None and wasm_cfg(platform) is False:
-                continue
-            for name, dependency in table.get(kind, {}).items():
-                if not isinstance(dependency, dict):
-                    continue
-                base = directory
-                if dependency.get("workspace"):
-                    dependency = workspace[name]
-                    base = root
-                if isinstance(dependency, dict) and "path" in dependency:
-                    visit(base / dependency["path"], dependency_target)
-visit(root / "js/nanocodex")
-print(json.dumps([inputs[path] for path in sorted(inputs)]))
-`, repository], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-}
-
-export async function fingerprint(repository = root, mode = "release", environment = process.env) {
-  try { return await fingerprintInputs(repository, mode, environment); }
-  catch (error) {
-    // A new unsupported manifest/include cannot accidentally reuse stale output.
-    // A unique key still permits the ordinary build and its cache-save step.
-    console.error(`WASM cache reuse disabled: ${error.stderr?.toString().trim().split("\n").at(-1) || error.message.split("\n")[0]}`);
-    return sha(randomUUID());
+// Three-valued cfg evaluation for wasm32-unknown-unknown: true, false, or null
+// (unknown). Unknown predicates keep their dependencies in the input set.
+function wasmCfg(platform) {
+  const cfg = /^cfg\s*\(([\s\S]*)\)$/.exec(platform.trim());
+  if (!cfg) return /^cfg\b/.test(platform.trim()) ? null : platform === "wasm32-unknown-unknown";
+  const known = { target_arch: "wasm32", target_os: "unknown", target_family: "wasm", target_env: "", target_vendor: "unknown", target_pointer_width: "32", target_endian: "little" };
+  // Reduce leaves to 1/0/?, then fold all/any/not from the inside out.
+  let expression = cfg[1]
+    .replace(/([A-Za-z_]\w*)\s*=\s*"([^"\\]*)"/g, (_, name, value) => (Object.hasOwn(known, name) ? (known[name] === value ? "1" : "0") : "?"))
+    .replace(/\b([A-Za-z_]\w*)\b(?!\s*\()/g, (_, name) => (name === "unix" || name === "windows" ? "0" : "?"));
+  for (let previous; previous !== expression;) {
+    previous = expression;
+    expression = expression.replace(/\b([A-Za-z_]\w*)\s*\(\s*((?:[01?]\s*,?\s*)*)\)/g, (_, name, list) => {
+      const values = list.split(",").map((value) => value.trim()).filter(Boolean);
+      if (name === "all") return values.includes("0") ? "0" : values.includes("?") ? "?" : "1";
+      if (name === "any") return values.includes("1") ? "1" : values.includes("?") ? "?" : "0";
+      if (name === "not" && values.length === 1) return { 1: "0", 0: "1", "?": "?" }[values[0]];
+      return "?";
+    });
   }
+  return { 1: true, 0: false }[expression.trim()] ?? null;
 }
 
-// Release identity must be deterministic: callers receive resolution errors.
-// Only fingerprint(), the output-cache API, converts errors into non-reuse.
-export async function fingerprintInputs(repository = root, mode = "release", environment = process.env) {
-  repository = await realpath(repository);
-  assert.ok(["release", "development"].includes(mode));
+// Local packages the WASM crate can compile, from Cargo's own manifest view.
+// Only target tables proven inapplicable to wasm32 are skipped; optional,
+// build, and proc-macro dependencies stay included. Cargo.lock pins the rest.
+function dependencyDirectories(repository) {
+  const { packages } = JSON.parse(execFileSync("cargo", ["metadata", "--format-version", "1", "--no-deps", "--offline"],
+    { cwd: repository, encoding: "utf8", maxBuffer: 64 << 20, stdio: ["ignore", "pipe", "pipe"] }));
+  const byDirectory = new Map(packages.map((pkg) => [realpathSync(dirname(pkg.manifest_path)), pkg]));
+  const visited = new Set();
+  const inputs = new Map();
+  const visit = (directory, target) => {
+    directory = realpathSync(directory);
+    const location = relative(repository, directory);
+    if (location.startsWith("..") || isAbsolute(location)) throw new Error(`local Rust dependency ${directory} must remain inside repository`);
+    const pkg = byDirectory.get(directory);
+    if (!pkg) throw new Error(`local Rust dependency ${location} is not a workspace member`);
+    const kinds = pkg.targets.flatMap((entry) => entry.kind);
+    // A proc macro and its dependency tree compile for the build host.
+    target &&= !kinds.includes("proc-macro");
+    if (visited.has(`${target}:${directory}`)) return;
+    visited.add(`${target}:${directory}`);
+    const buildScript = kinds.includes("custom-build");
+    // Explicit production entry points can live in normally test-only folders.
+    const keepTests = buildScript || pkg.targets.some((entry) => !entry.kind.some((kind) => ["test", "bench", "example"].includes(kind))
+      && ["tests", "benches"].includes(relative(directory, entry.src_path).split(/[\\/]/)[0]));
+    inputs.set(directory, { directory, buildScript, skipStandaloneTests: !keepTests });
+    for (const dependency of pkg.dependencies) {
+      if (!dependency.path || dependency.kind === "dev") continue;
+      // Build dependencies, including target-specific ones, are built for the host.
+      const dependencyTarget = target && dependency.kind !== "build";
+      if (dependencyTarget && dependency.target && wasmCfg(dependency.target) === false) continue;
+      visit(dependency.path, dependencyTarget);
+    }
+  };
+  visit(resolve(repository, "js/nanocodex"), true);
+  return [...inputs.keys()].sort().map((directory) => inputs.get(directory));
+}
+
+// Every file whose content can change the WASM outputs, as sorted absolute paths.
+async function inputFiles(repository) {
   const files = new Set();
   const omittedTestDirectories = new Set();
   for (const { directory, buildScript, skipStandaloneTests } of dependencyDirectories(repository)) {
@@ -194,6 +133,14 @@ export async function fingerprintInputs(repository = root, mode = "release", env
       }
     }
   }
+  return [...files].sort();
+}
+
+// Resolution errors propagate: an unprovable input set fails the build loudly.
+export async function fingerprintInputs(repository = root, mode = "release", environment = process.env) {
+  repository = await realpath(repository);
+  assert.ok(["release", "development"].includes(mode));
+  const files = await inputFiles(repository);
   const pkg = JSON.parse(await readFile(resolve(repository, "js/nanocodex/package.json"), "utf8"));
   const buildEnvironment = Object.fromEntries(Object.entries(environment)
     .filter(([name]) => /^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_INCREMENTAL|CARGO_PROFILE_.*|CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_.*)$/.test(name))
@@ -205,7 +152,7 @@ export async function fingerprintInputs(repository = root, mode = "release", env
       : /^CARGO_PROFILE_DEV_/.test(name))).sort());
   const hash = createHash("sha256");
   hash.update(JSON.stringify({ schema: 1, mode, rustToolchain, bindgen: "0.2.126", binaryen: pkg.devDependencies.binaryen, buildEnvironment }));
-  for (const path of [...files].sort()) hash.update(JSON.stringify([relative(repository, path), sha(await readFile(path))]));
+  for (const path of files) hash.update(JSON.stringify([relative(repository, path), sha(await readFile(path))]));
   return hash.digest("hex");
 }
 
@@ -217,13 +164,40 @@ async function outputs(repository) {
   return { artifacts, node, sourceWasmSha256: sha(await readFile(resolve(repository, rawPath))) };
 }
 
+// Resolution errors propagate before the try, so they are never mistaken for a miss.
 export async function check(repository = root, mode = "release") {
-  const retained = JSON.parse(await readFile(resolve(repository, metadataPath), "utf8"));
-  assert.equal(retained.schema, 1);
-  assert.equal(retained.fingerprint, await fingerprint(repository, mode));
-  const current = await outputs(repository);
-  assert.deepEqual(retained.outputs, current);
-  assertCachedManagedWasmAttestation(JSON.parse(await readFile(resolve(repository, "js/nanocodex/pkg-web/nanocodex-build.json"), "utf8")), current);
+  const key = await fingerprintInputs(repository, mode);
+  try {
+    const retained = JSON.parse(await readFile(resolve(repository, metadataPath), "utf8"));
+    assert.equal(retained.schema, 1);
+    assert.equal(retained.fingerprint, key, "WASM inputs changed");
+    const current = await outputs(repository);
+    assert.deepEqual(retained.outputs, current, "outputs do not match retained metadata");
+    assertCachedManagedWasmAttestation(JSON.parse(await readFile(resolve(repository, "js/nanocodex/pkg-web/nanocodex-build.json"), "utf8")), current);
+  } catch (error) { throw new CacheMiss(error.message.split("\n")[0]); }
+}
+
+export class CacheMiss extends Error {}
+
+// turbo.json must hash every WASM input into nanocodex#build, or cached
+// downstream tasks (Worker bundles embedding the WASM) replay stale outputs
+// after a Rust edit. Supported input forms: $TURBO_DEFAULT$ (the package),
+// $TURBO_ROOT$/<file>, and $TURBO_ROOT$/<directory>/**.
+export async function assertTurboInputs(repository = root) {
+  repository = await realpath(repository);
+  const inputs = JSON.parse(await readFile(resolve(repository, "turbo.json"), "utf8")).tasks?.["nanocodex#build"]?.inputs ?? [];
+  const covered = inputs.map((input) => {
+    if (input === "$TURBO_DEFAULT$") return "js/nanocodex/**";
+    if (!input.startsWith("$TURBO_ROOT$/")) throw new Error(`unsupported nanocodex#build input ${input}`);
+    const path = input.slice("$TURBO_ROOT$/".length);
+    if (/[*?[{!]/.test(path.replace(/\/\*\*$/, ""))) throw new Error(`unsupported nanocodex#build input glob ${input}`);
+    return path;
+  });
+  const missing = (await inputFiles(repository)).map((path) => relative(repository, path))
+    .filter((path) => !covered.some((input) => input.endsWith("/**") ? path.startsWith(input.slice(0, -2)) : path === input));
+  if (missing.length) {
+    throw new Error(`turbo.json nanocodex#build inputs omit WASM inputs; add them (for example $TURBO_ROOT$/<crate>/**): ${missing.slice(0, 10).join(", ")}${missing.length > 10 ? ", ..." : ""}`);
+  }
 }
 
 async function atomicWrite(path, bytes) {
@@ -240,15 +214,22 @@ export async function save(repository = root, mode = "release", source) {
   await mkdir(resolve(repository, ".ci-wasm-cache"), { recursive: true });
   await writeFile(resolve(repository, ".ci-wasm-cache/.gitignore"), "*\n");
   await atomicWrite(resolve(repository, rawPath), await readFile(source));
-  await atomicWrite(resolve(repository, metadataPath), `${JSON.stringify({ schema: 1, fingerprint: await fingerprint(repository, mode), outputs: await outputs(repository) })}\n`);
+  await atomicWrite(resolve(repository, metadataPath), `${JSON.stringify({ schema: 1, fingerprint: await fingerprintInputs(repository, mode), outputs: await outputs(repository) })}\n`);
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   const [command, mode = "release", source] = process.argv.slice(2);
-  if (command === "key") console.log(await fingerprint(root, mode));
+  if (command === "key") console.log(await fingerprintInputs(root, mode));
   else if (command === "check") {
+    // Exit 1 is an ordinary miss (rebuild). Resolution failures exit 2 so the
+    // build stops instead of treating an unprovable input set as a miss.
     try { await check(root, mode); console.log("WASM output cache verified"); }
-    catch (error) { console.error(`WASM output cache miss: ${error.message}`); process.exitCode = 1; }
-  } else if (command === "save" && source) await save(root, mode, resolve(source));
-  else throw new Error("usage: wasm-output-cache.mjs key|check [release|development], or save <mode> <raw-wasm>");
+    catch (error) {
+      if (!(error instanceof CacheMiss)) { console.error("WASM input fingerprint failed:", error); process.exit(2); }
+      console.error(`WASM output cache miss: ${error.message}`);
+      process.exitCode = 1;
+    }
+  } else if (command === "check-turbo") await assertTurboInputs(root);
+  else if (command === "save" && source) await save(root, mode, resolve(source));
+  else throw new Error("usage: wasm-output-cache.mjs key|check|check-turbo [release|development], or save <mode> <raw-wasm>");
 }

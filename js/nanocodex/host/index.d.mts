@@ -1,15 +1,5 @@
 export * as Actions from "../actions/index.mjs";
 export { createQuickJsEvaluator } from "../runtime/quickjs-evaluator.mjs";
-export {
-  createTempoProvider,
-  createTempoProviderFromAccounts,
-  DEFAULT_MERCATOR_MCP_URL,
-} from "../runtime/tempo-provider.mjs";
-export type {
-  AccountsTempoProviderOptions,
-  AccountsWallet,
-  TempoProvider,
-} from "../runtime/tempo-provider.mjs";
 export type {
   AgentActions,
   AgentEvent,
@@ -32,6 +22,7 @@ export type {
   ForkOptions,
   McpClient,
   McpPayment,
+  PaidMcpPayment,
   McpServer,
   McpServers,
   McpTool,

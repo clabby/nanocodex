@@ -9781,12 +9781,10 @@ export class DurableAgentSession extends DurableComputerObject {
         responseControls: {
           outputSchema: configuration.output_schema,
           promptCache: configuration.prompt_cache,
-          // The hosted Codex endpoint rejects prompt_cache_options. Its existing
-          // automatic caching can reuse stable prefixes across an owner's agents
-          // when they share a key, rather than getting a fresh key per session.
-          promptCacheKey: this.#settings().model === "gpt-6-astra"
-            ? managedPromptCacheKey(session) : undefined,
         },
+        // Every route accepts prompt_cache_key. Rust derives the prefix item IDs
+        // from it, so an owner's new agents share one byte-identical prefix.
+        promptCacheKey: managedPromptCacheKey(session),
       } });
       const hasForkSeedTable = this.ctx.storage.sql.exec<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='managed_fork_seed'",
