@@ -4,12 +4,10 @@ import {
   type AgentLifecycle,
   type AgentSessionContext,
   ChatGptSubscription,
-  type AccountsWallet,
   type CostStatus,
   type LifecycleTurn,
   type LifecycleTurnResult,
   type McpServer,
-  createTempoProviderFromAccounts,
   createMemoryChatGptSubscriptionStore,
   Subagents,
   type SessionSnapshot,
@@ -19,6 +17,11 @@ import {
   type TurnResult,
   Workspace,
 } from "../node/index.mjs";
+import {
+  type AccountsWallet,
+  createTempoProviderFromAccounts,
+  mcpPayment,
+} from "nanocodex/tempo";
 import {
   Agent as BrowserAgent,
   Subagents as BrowserSubagents,
@@ -478,6 +481,14 @@ async function check() {
     session: { bootstrap: true },
   });
   await Agent.create({ transport: Transport.mpp({ session: tempoProvider }), mcp: false });
+  const paidServer: McpServer = {
+    url: "https://paid.example/mcp",
+    payment: mcpPayment({ methods: [{}] }),
+  };
+  // @ts-expect-error Paid MCP servers require mcpPayment() from nanocodex/tempo.
+  const unwrappedPaidServer: McpServer = { url: "https://paid.example/mcp", payment: { methods: [{}] } };
+  void paidServer;
+  void unwrappedPaidServer;
   const subscription = await ChatGptSubscription.open({
     id: "account-1",
     store: createMemoryChatGptSubscriptionStore("account-1"),

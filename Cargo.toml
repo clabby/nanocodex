@@ -115,7 +115,7 @@ nanocodex-vm = { version = "0.6.6", path = "crates/nanocodex-vm" }
 nanocodex-oai-api = { version = "0.6.6", path = "crates/nanocodex-oai-api" }
 nanocodex-observability = { version = "0.6.6", path = "crates/nanocodex-observability" }
 nanocodex-subagents = { version = "0.6.6", path = "crates/nanocodex-subagents" }
-nanocodex-tools = { version = "0.6.6", path = "crates/nanocodex-tools" }
+nanocodex-tools = { version = "0.6.6", path = "crates/nanocodex-tools", default-features = false }
 nanocodex-tools-macros = { version = "0.6.6", path = "crates/nanocodex-tools/macros" }
 nanousd = { version = "0.6.6", path = "bin/nanousd" }
 oci-client = { version = "0.17.0", git = "https://github.com/gakonst/rust-oci-client", rev = "17c22ce8842e9275ef6bc11fa4eb58101a4abd7f", default-features = false, features = ["rustls-tls-no-provider"] }

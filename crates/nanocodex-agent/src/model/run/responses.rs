@@ -10,8 +10,10 @@ struct RecordedModelResult {
 }
 
 pub(super) struct ModelCallOutcome {
+    pub(super) request: RequestHistory,
     pub(super) response: TurnResult,
     pub(super) transport_continuation_valid: bool,
+    pub(super) server_reasoning_included: bool,
 }
 
 impl<S> ModelRun<S>
@@ -23,7 +25,7 @@ where
     pub(super) async fn perform_model_call(
         &mut self,
         call_index: u32,
-        conversation: &mut ConversationState,
+        conversation: &ConversationState,
         factory: &ResponsesAttemptFactory,
     ) -> Result<ModelCallOutcome> {
         let step_id = format!("model-{call_index}");
@@ -31,12 +33,8 @@ where
         let thinking = self.thinking;
         let reasoning_mode = self.config.reasoning_mode;
         let fast_mode = self.fast_mode;
-        let (prompt_history, prompt_repaired) = conversation.prompt_history_with_repair();
-        let previous_response_id = if prompt_repaired {
-            None
-        } else {
-            conversation.previous_response_id().map(str::to_owned)
-        };
+        let request_history = conversation.managed.generation_request();
+        let previous_response_id = request_history.previous_response_id();
         let started_at = Instant::now();
         self.stats.model_calls += 1;
         self.events.emit(
@@ -46,19 +44,10 @@ where
                 model: model.as_str(),
                 reasoning_mode: reasoning_mode.as_str(),
                 effort: thinking.as_str(),
-                previous_response_id: previous_response_id.as_deref(),
+                previous_response_id,
             },
         )?;
-        let request = factory.generation(
-            call_index,
-            prompt_history.clone(),
-            conversation.shared_history(),
-            conversation.delta_start(),
-            previous_response_id.as_deref(),
-            model,
-            thinking,
-            fast_mode,
-        );
+        let request = factory.generation(call_index, &request_history, model, thinking, fast_mode);
         let (input_item_count, input_bytes, input_content) = trace_model_input(&request);
         let span = model_call_span(
             call_index,
@@ -131,10 +120,6 @@ where
             duration_ns,
         } = recorded_result;
         validate_provider_response_id(&response.id)?;
-        conversation.observe_server_reasoning(server_reasoning_included);
-        if prompt_repaired {
-            conversation.adopt_prompt_history(prompt_history);
-        }
         record_model_response(&span, &response);
         span.record("status", "completed");
         span.record("otel.status_code", "OK");
@@ -164,8 +149,10 @@ where
             },
         )?;
         Ok(ModelCallOutcome {
+            request: request_history,
             response,
             transport_continuation_valid,
+            server_reasoning_included,
         })
     }
 

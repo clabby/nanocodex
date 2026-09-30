@@ -79,3 +79,6 @@ __pycache__/
 /js/managed/src/just-bash-lazy.d.mts
 
 /js/managed2/src/just-bash-lazy.mjs
+
+# Materialized by third_party/codex-voice/patches/webrtc-sys/prepare.py
+third_party/codex-voice/vendor/

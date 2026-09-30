@@ -4,49 +4,54 @@ import { Agent } from "nanocodex/cloudflare";
 import { Subagents } from "nanocodex/host";
 import { createTools } from "nanocodex/tools";
 
-it("shares a cache key through the Worker transport without explicit cache options", async () => {
+it("shares one owner's cached prefix and key across independent Worker sessions", async () => {
   const namespace = (env as unknown as { NANOCODEX_MEMORY: DurableObjectNamespace }).NANOCODEX_MEMORY;
-  await runInDurableObject(namespace.getByName(crypto.randomUUID()), async (_instance, ctx) => {
-    const requests: { input: { type: string; role?: string; content?: {
-      type: string; text?: string; prompt_cache_breakpoint?: unknown;
-    }[] }[]; prompt_cache_options?: unknown; prompt_cache_key: string }[] = [];
-    class ModelSocket extends EventTarget {
-      readyState = 1;
-      accept() {}
-      close() { this.readyState = 3; }
-      send(data: string) {
-        requests.push(JSON.parse(data));
-        queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
-          type: "response.completed", response: {
-            id: `cache-fixture-${requests.length}`, status: "completed", end_turn: true,
-            output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Hello" }] }],
-            usage: { input_tokens: 100, output_tokens: 1, total_tokens: 101 },
-          },
-        }) })));
+  type Request = { input: { id?: string; role?: string; content?: {
+    type: string; text?: string; prompt_cache_breakpoint?: unknown;
+  }[] }[]; prompt_cache_options?: unknown; prompt_cache_key: string };
+  const session = async (context: string) => {
+    let request!: Request;
+    await runInDurableObject(namespace.getByName(crypto.randomUUID()), async (_instance, ctx) => {
+      class ModelSocket extends EventTarget {
+        readyState = 1;
+        accept() {}
+        close() { this.readyState = 3; }
+        send(data: string) {
+          request = JSON.parse(data);
+          queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+            type: "response.completed", response: {
+              id: "cache-fixture", status: "completed", end_turn: true,
+              output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Hello" }] }],
+              usage: { input_tokens: 100, output_tokens: 1, total_tokens: 101 },
+            },
+          }) })));
+        }
       }
-    }
-    const owner = { ctx, env: { NANOCODEX: { async fetch() {
-      return { status: 101, headers: new Headers(), webSocket: new ModelSocket() };
-    } } } };
-    const options = { instructions: "Stable host instructions", eventPersistence: "caller" as const };
-    Object.defineProperty(options, Symbol.for("nanocodex.cloudflare.internalRuntime"), {
-      value: { responseControls: { promptCacheKey: "owner-team-key" } },
+      const owner = { ctx, env: { NANOCODEX: { async fetch() {
+        return { status: 101, headers: new Headers(), webSocket: new ModelSocket() };
+      } } } };
+      const options = { instructions: "Stable host instructions", eventPersistence: "caller" as const };
+      Object.defineProperty(options, Symbol.for("nanocodex.cloudflare.internalRuntime"), {
+        value: { promptCacheKey: "owner-team-key" },
+      });
+      const agent = await Agent.create(owner, options);
+      try {
+        await agent.session.appendDeveloperMessage(context);
+        expect((await agent.turn.prompt({ input: "hi hi" }).result()).finalMessage).toBe("Hello");
+      } finally { await agent.session.shutdown(); }
     });
-    const agent = await Agent.create(owner, options);
-    try {
-      await agent.session.appendDeveloperMessage("Dynamic retrieved startup context");
-      expect((await agent.turn.prompt({ input: "hi hi" }).result()).finalMessage).toBe("Hello");
-      const request = requests.at(-1)!;
-      expect(request.prompt_cache_options).toBeUndefined();
-      expect(request.prompt_cache_key).toBe("owner-team-key");
-      const messages = request.input.filter(item => item.role === "developer" && item.content);
-      expect(messages.length).toBeGreaterThanOrEqual(2);
-      expect(messages[0]!.content!.at(-1)!.prompt_cache_breakpoint).toBeUndefined();
-      const retrieved = messages.find(item => item.content!.some(part => part.text === "Dynamic retrieved startup context"));
-      expect(retrieved).toBeDefined();
-      expect(retrieved!.content!.every(part => part.prompt_cache_breakpoint === undefined)).toBe(true);
-    } finally { await agent.session.shutdown(); }
-  });
+    return request;
+  };
+  const [first, second] = [await session("Retrieved context A"), await session("Retrieved context B")];
+  for (const request of [first, second]) {
+    expect(request.prompt_cache_key).toBe("owner-team-key");
+    expect(request.prompt_cache_options).toBeUndefined();
+    expect(request.input.slice(0, 2).every(item => item.id)).toBe(true);
+    expect(JSON.stringify(request.input).includes("prompt_cache_breakpoint")).toBe(false);
+  }
+  // Byte-identical tools and instructions, including their derived item IDs.
+  expect(JSON.stringify(second.input.slice(0, 2))).toBe(JSON.stringify(first.input.slice(0, 2)));
+  expect(JSON.stringify(second.input)).not.toBe(JSON.stringify(first.input));
 }, 20_000);
 
 it("persists voice start and end in Worker SQLite while Responses preconnect stays pending", async () => {

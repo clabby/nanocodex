@@ -108,6 +108,10 @@ serves the same names with `:1355` appended. Portless's proxy is user-global,
 while app routes, processes, and Wrangler state remain isolated per checkout
 and worktree.
 
+Before pushing Rust changes, `pnpm check:fast` runs `cargo fmt` and the CI
+Clippy command on the crates changed since `origin/master` and their workspace
+dependents.
+
 Or install the native CLI/TUI on Apple Silicon macOS or x86-64 glibc Linux:
 
 ```sh
@@ -156,6 +160,11 @@ The CLI is a production consumer and a useful way to try the agent, not a
 process protocol that applications must adopt. See
 [`bin/nanocodex`](bin/nanocodex), the [examples index](examples/README.md), and
 the [release switcher documentation](bin/nanocodex/src/update.rs).
+
+To install a branch or an open pull request from source, run
+`nanocodex update --branch master` or `nanocodex update --pr 123`. Both commands fetch the selected
+revision and compile the CLI and Hand locally with Cargo. PR selection also
+requires `gh`. These source builds do not package the native voice runtime.
 
 For managed agents, `nanocodex2 login` signs in with an SMS code and saves an
 account key; `nanocodex2 status` verifies it, and `nanocodex2 logout` removes the

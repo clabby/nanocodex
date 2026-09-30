@@ -494,7 +494,7 @@ fn normalize_environment(environment: &mut Vec<(OsString, OsString)>) {
 /// markers from real secrets. Passing its result to a tool runtime grants every
 /// tool subprocess access to every returned value. Only use it when the embedding
 /// boundary deliberately permits that access.
-#[cfg(feature = "native")]
+#[cfg(feature = "code-mode")]
 #[must_use]
 pub fn ambient_sensitive_environment() -> Vec<(OsString, OsString)> {
     env::vars_os()
@@ -513,10 +513,10 @@ fn is_sensitive_name(name: &OsStr) -> bool {
 mod tests {
     use std::ffi::OsString;
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "code-mode")]
     use std::collections::BTreeSet;
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "code-mode")]
     use super::ambient_sensitive_environment;
     use super::{NORMALIZED_ENVIRONMENT, normalize_environment, sanitized_environment};
 
@@ -597,7 +597,7 @@ mod tests {
         assert_eq!(child.wait().await.unwrap(), 23);
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "code-mode")]
     #[test]
     fn ambient_sensitive_environment_partitions_the_ambient_environment() {
         let forwarded: BTreeSet<_> = ambient_sensitive_environment()

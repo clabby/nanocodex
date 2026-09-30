@@ -629,6 +629,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
         subagentSessions,
         subagentRouting: internalRuntime?.subagentRouting,
         onSocketTiming: internalRuntime?.onSocketTiming,
+        promptCacheKey: internalRuntime?.promptCacheKey,
         [CLOUDFLARE_SESSION_RESERVATION]: sessionReservation,
       },
       transport,

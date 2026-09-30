@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { Actions, Client, Dialog, Errors, Transport } from "../cloud/index.mjs";
+import { mock } from "../cloud/mock.mjs";
 import { Voice } from "../browser/index.mjs";
 import { isManagedReadPath, projectAgentObservations } from "../cloud/actions/agent.mjs";
 import { connectionFromWire } from "../cloud/internal.mjs";
@@ -1321,7 +1322,7 @@ test("Connect rejects an empty spending policy before opening the wallet", async
         assert.fail("the wallet must not receive an ambiguous empty spending policy");
       },
     },
-    transport: Transport.mock(),
+    transport: mock(),
   });
 
   await assert.rejects(
@@ -1365,7 +1366,7 @@ test("Connect preserves explicit zero spending and empty call scopes for signing
         };
       },
     },
-    transport: Transport.mock(),
+    transport: mock(),
   });
 
   await client.connection.connect();
@@ -1633,7 +1634,7 @@ test("Connect account logout clears the local session when wallet logout fails",
       },
     },
     session: storage,
-    transport: Transport.mock(),
+    transport: mock(),
   });
   client._setSession({
     grantId: `0x${"34".repeat(32)}`,
@@ -1662,7 +1663,7 @@ test("Connect account logout clears the local session before remote wallet clean
       },
     },
     session: storage,
-    transport: Transport.mock(),
+    transport: mock(),
   });
   client._setSession({
     grantId: `0x${"56".repeat(32)}`,
@@ -1712,7 +1713,7 @@ test("Nanocodex Connect signs one witness-bound access key and enforces its MPP 
         };
       },
     },
-    transport: Transport.mock({ appName: "Test Workspace" }),
+    transport: mock({ appName: "Test Workspace" }),
   });
 
   let connection = await Actions.connection.connect(client, {

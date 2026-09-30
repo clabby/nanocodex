@@ -22,7 +22,7 @@ use std::{
 use futures_util::{FutureExt, StreamExt, stream::FuturesOrdered};
 use nanocodex_oai_api::{
     __private::{
-        EventSink, ManagedSessionState, ModelConfig, ResponsesAttemptFactory,
+        EventSink, ManagedSessionState, ModelConfig, RequestHistory, ResponsesAttemptFactory,
         assign_missing_response_item_id, compaction, responses_lite_request_prefix,
         with_code_mode_tool_names,
     },
@@ -632,10 +632,13 @@ mod context_accounting_snapshot_tests {
             None,
         )
         .unwrap();
-        checkpoint.conversation.update_token_info(Some(&Usage {
-            total_tokens: 265639,
-            ..Usage::default()
-        }));
+        checkpoint
+            .conversation
+            .managed
+            .update_token_info(Some(&Usage {
+                total_tokens: 265639,
+                ..Usage::default()
+            }));
         checkpoint.conversation.observe_server_reasoning(true);
         let snapshot =
             CommittedSession::new(Arc::from("synthetic-lineage"), Model::Astra, checkpoint)
@@ -645,7 +648,13 @@ mod context_accounting_snapshot_tests {
         let restored = restored.into_resume().unwrap().checkpoint.unwrap();
         assert_eq!(restored.conversation.active_context_tokens(), 265639);
         assert!(restored.conversation.managed.context_usage().1);
-        assert!(restored.conversation.previous_response_id().is_none());
+        assert!(
+            restored
+                .conversation
+                .managed
+                .previous_response_id()
+                .is_none()
+        );
         assert!(restored.conversation.active_context_tokens() >= 244800);
 
         // History replacement stores an all-history estimate, not a provider baseline.

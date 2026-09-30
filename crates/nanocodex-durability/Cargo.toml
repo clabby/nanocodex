@@ -48,7 +48,7 @@ reqwest.workspace = true
 rustls.workspace = true
 eyre.workspace = true
 nanocodex-oai-api.workspace = true
-nanocodex-tools.workspace = true
+nanocodex-tools = { workspace = true, features = ["code-mode"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 tower.workspace = true

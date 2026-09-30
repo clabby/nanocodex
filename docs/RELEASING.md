@@ -19,10 +19,13 @@ also contains the static VM guest. `nanocodex update --nightly` verifies and
 installs that complete platform bundle atomically and exposes both CLI launchers
 under `$NANOCODEX_DIR/bin`. Stable releases publish the same two native CLI
 binaries. The Apple Silicon `nanocodex2` artifact is ad-hoc signed with the
-hypervisor entitlement required by its VM hand VMM child. Switching to a PR or
-local build removes the owned `nanocodex2`
-launcher because those preview channels do not publish the companion. Updaters
-published before this bundle contract need one
+hypervisor entitlement required by its VM hand VMM child.
+`nanocodex update --branch NAME` and `nanocodex update --pr NUMBER` fetch source into a temporary
+checkout, compile both native binaries locally, and install them together.
+The PR must be open; the updater checks that the fetched head still matches the
+PR metadata. The source build requires Git and a working Rust toolchain, plus
+`gh` for PR selection. Locally compiled source bundles do not include the native
+voice runtime archive. Updaters published before this bundle contract need one
 nightly update to promote the bundle-aware manager and a second invocation to
 fetch `nanocodex2`; subsequent nightly updates install the complete bundle in
 one invocation.

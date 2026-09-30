@@ -10,11 +10,12 @@ use super::PreparedTools;
 use crate::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput};
 
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 9_007_199_254_740_991;
+#[cfg(feature = "mcp")]
 const MCP_DISCOVERY_TIMEOUT_MS: u64 = 120_000;
 
 enum PreparedToolHandler {
     Fixed(Arc<dyn Tool>),
-    #[cfg(feature = "native")]
+    #[cfg(feature = "mcp")]
     Mcp(crate::mcp::PreparedMcpTool),
     #[cfg(feature = "workspace-runtime")]
     Workspace(Arc<crate::workspace_runtime::WorkspaceToolRuntime>),
@@ -22,7 +23,7 @@ enum PreparedToolHandler {
 
 enum PreparedToolInput {
     Contract(ToolInput),
-    #[cfg(feature = "native")]
+    #[cfg(feature = "mcp")]
     Mcp(Value),
 }
 
@@ -73,7 +74,7 @@ impl PreparedToolEntry {
         }
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "mcp")]
     pub(crate) fn mcp(tool: crate::mcp::PreparedMcpTool) -> Self {
         Self {
             provider: tool.provider().into(),
@@ -193,12 +194,12 @@ impl PreparedToolRuntime {
     pub async fn initialize(tools: PreparedTools) -> Result<Self, PreparedToolError> {
         let PreparedTools {
             mut entries,
-            #[cfg(feature = "native")]
+            #[cfg(feature = "mcp")]
             mcps,
             #[cfg(feature = "workspace-runtime")]
             workspaces,
         } = tools;
-        #[cfg(feature = "native")]
+        #[cfg(feature = "mcp")]
         for mcp in mcps {
             let tools = mcp
                 .prepared_snapshot(std::time::Duration::from_millis(MCP_DISCOVERY_TIMEOUT_MS))
@@ -267,7 +268,7 @@ impl PreparedToolRuntime {
         .transpose()
         .map_err(PreparedToolError::InvalidOutput)?;
         let input = match &entry.handler {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "mcp")]
             PreparedToolHandler::Mcp(_) => {
                 if !call.input.is_object() {
                     return Err(PreparedToolError::InvalidInput {
@@ -313,7 +314,7 @@ impl PreparedToolRuntime {
                     .execute(input, context)
                     .await
                     .unwrap_or_else(|error| ToolOutput::error(error.to_string())),
-                #[cfg(feature = "native")]
+                #[cfg(feature = "mcp")]
                 (PreparedToolHandler::Mcp(tool), PreparedToolInput::Mcp(input)) => {
                     tool.execute(input, context).await
                 }
@@ -321,7 +322,7 @@ impl PreparedToolRuntime {
                 (PreparedToolHandler::Workspace(workspace), PreparedToolInput::Contract(input)) => {
                     workspace.execute_tool(&call.name, input, context).await
                 }
-                #[cfg(feature = "native")]
+                #[cfg(feature = "mcp")]
                 _ => ToolOutput::error("invalid attached tool input routing"),
             }
         }
@@ -472,7 +473,7 @@ pub(crate) enum PreparedToolError {
     #[error("attached tool name `{0}` is present more than once after discovery")]
     DuplicateTool(Box<str>),
     /// A configured native MCP provider failed initial connection or discovery.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "mcp")]
     #[error("failed to initialize attached MCP: {0}")]
     McpInitialization(String),
     /// The immutable catalog does not contain this tool.

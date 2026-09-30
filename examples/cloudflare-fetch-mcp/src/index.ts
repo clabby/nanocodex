@@ -1,7 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import asyncVariant from "@jitl/quickjs-wasmfile-release-asyncify";
 import { createJsonChannelStore, tempo } from "mppx/client";
-import { Agent, createQuickJsEvaluator, createTempoProvider, Transport } from "nanocodex/host";
+import { Agent, createQuickJsEvaluator, Transport } from "nanocodex/host";
+import { createTempoProvider } from "nanocodex/tempo";
 import {
   newQuickJSAsyncWASMModuleFromVariant,
   newVariant,

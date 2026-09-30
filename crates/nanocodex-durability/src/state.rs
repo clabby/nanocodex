@@ -41,9 +41,9 @@ impl EncodedPayload {
         })
     }
 
-    pub(crate) fn reference(&self) -> Self {
+    pub(crate) const fn reference_key(key: Arc<str>) -> Self {
         Self {
-            key: self.key.clone(),
+            key,
             content: None,
             pending: Vec::new(),
         }

@@ -36,6 +36,10 @@ const requiredFiles = [
   "cloud/actions/index.d.mts",
   "cloud/actions/connector.mjs",
   "cloud/actions/connector.d.mts",
+  "cloud/mock.mjs",
+  "cloud/mock.d.mts",
+  "tempo/index.mjs",
+  "tempo/index.d.mts",
   "browser/index.mjs",
   "browser/index.d.mts",
   "browser/InlineAgent.mjs",
@@ -139,6 +143,14 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./connect/actions"]?.import, "./cloud/actions/index.mjs");
   assert.equal(packageJson.exports?.["./connect/server"]?.import, "./cloud/server/index.mjs");
   assert.equal(packageJson.exports?.["./connect/server"]?.types, "./cloud/server/index.d.mts");
+  assert.equal(packageJson.exports?.["./connect/mock"]?.import, "./cloud/mock.mjs");
+  assert.equal(packageJson.exports?.["./tempo"]?.import, "./tempo/index.mjs");
+  assert.equal(packageJson.exports?.["./tempo"]?.types, "./tempo/index.d.mts");
+  // Payment and wallet libraries are opt-in peers used only by ./tempo and ./connect/mock.
+  for (const name of ["mppx", "ox", "viem"]) {
+    assert.equal(packageJson.dependencies?.[name], undefined, `${name} must not be a runtime dependency`);
+    assert.equal(packageJson.peerDependenciesMeta?.[name]?.optional, true, `${name} must be an optional peer`);
+  }
   assert.equal(packageJson.exports?.["./durability"]?.import, "./runtime/durability-store.mjs");
   assert.equal(
     packageJson.exports?.["./durability/cloudflare"]?.import,

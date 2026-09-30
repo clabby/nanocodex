@@ -18,10 +18,11 @@ all-features = true
 rustdoc-args = ["-D", "warnings"]
 
 [features]
-default = ["durability", "openai", "tools"]
+default = ["durability", "mcp", "openai", "tools"]
 claude = ["dep:nanocodex-claude", "nanocodex-durability?/claude"]
 durability = ["dep:nanocodex-durability", "openai"]
 managed = ["dep:nanocodex-managed"]
+mcp = ["tools", "nanocodex-tools/mcp"]
 observability = ["dep:nanocodex-observability"]
 openai = ["nanocodex-agent/openai", "nanocodex-oai-api/client"]
 realtime = ["openai", "nanocodex-oai-api/realtime"]

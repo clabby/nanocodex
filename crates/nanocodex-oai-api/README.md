@@ -232,6 +232,9 @@ response-item, and tool wire contracts may disable default features. This
 keeps one canonical contract without linking an unused network client; it does
 not create an alternate provider or transport implementation.
 
+With `client`, [`audio::estimate_audio_token_count`] charges audio inputs by
+decoded duration exactly like codex-rs, for compaction and tool output budgets.
+
 ## Tools and managed sessions
 
 The [`tools`] module defines the model-visible tool contract shared with

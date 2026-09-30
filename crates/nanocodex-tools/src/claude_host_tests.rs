@@ -255,7 +255,7 @@ async fn invalid_or_unavailable_requests_never_reach_host_and_denials_are_not_su
     assert!(unavailable.host.0.lock().unwrap().is_empty());
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "mcp")]
 mod mcp_tests {
     use super::*;
     use crate::runtime::DynamicToolProvider;

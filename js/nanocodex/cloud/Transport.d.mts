@@ -1,6 +1,4 @@
 export const DEFAULT_API_URL: "https://api.nanocodex.xyz";
-export const MOCK_ACCOUNT_ADDRESS: `0x${string}`;
-export const MOCK_MACHINE_USD_ADDRESS: `0x${string}`;
 
 export type Request = Readonly<{
   path: string;
@@ -36,12 +34,3 @@ export function http(url?: string | undefined, options?: Readonly<{
   key?: string | undefined;
   name?: string | undefined;
 }>): Transport<"http">;
-
-export function mock(options?: Readonly<{
-  accountAddress?: `0x${string}` | undefined;
-  appName?: string | undefined;
-  appOrigin?: string | undefined;
-  key?: string | undefined;
-  machineUsdAddress?: `0x${string}` | undefined;
-  name?: string | undefined;
-}>): Transport<"mock">;

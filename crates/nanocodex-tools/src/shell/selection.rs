@@ -29,7 +29,7 @@ impl Shell {
         &self.path
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "code-mode")]
     pub(super) const fn name(&self) -> &'static str {
         match self.shell_type {
             ShellType::Zsh => "zsh",

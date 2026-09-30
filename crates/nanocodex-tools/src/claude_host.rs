@@ -468,11 +468,11 @@ pub enum WorktreeAction {
 /// Query definitions at each model request boundary; do not freeze a startup
 /// snapshot. This bridge never exposes the provider's Responses tool_search.
 /// MCP resource listing/reading and WaitForMcpServers are not implemented here.
-#[cfg(feature = "native")]
+#[cfg(feature = "mcp")]
 pub struct ClaudeMcp<P: crate::runtime::DynamicToolProvider + ?Sized> {
     provider: std::sync::Arc<P>,
 }
-#[cfg(feature = "native")]
+#[cfg(feature = "mcp")]
 impl<P: crate::runtime::DynamicToolProvider + ?Sized> ClaudeMcp<P> {
     /// Wrap an explicitly authorized existing provider without connecting yet.
     #[must_use]

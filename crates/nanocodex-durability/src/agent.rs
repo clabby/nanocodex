@@ -1,7 +1,4 @@
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use nanocodex_agent::{
     ExecutionPolicyDisposition, NanocodexBuilder, NanocodexError, Result as AgentResult,
@@ -13,7 +10,10 @@ use nanocodex_agent::{
 };
 use serde_json::value::RawValue;
 
-use crate::{Admission, BeginStep, DurableSession, Error, OperationStatus, session::DurableOwner};
+use crate::{
+    Admission, BeginStep, DurableSession, Error, OperationStatus, context::ContextCache,
+    session::DurableOwner,
+};
 
 /// Fluent builder extension that attaches portable durability to an agent.
 pub trait DurableAgentExt: Sized {
@@ -27,7 +27,7 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
         let state_id = state.state_id().to_owned();
         let mut builder = self;
         let (owner, checkpoint) = state.acquire_agent().await.map_err(agent_error)?;
-        let mut known_records = HashSet::new();
+        let mut known_records = ContextCache::default();
         if let Some(checkpoint) = checkpoint {
             let (restored, keys) = crate::context::load_snapshot_with_keys(
                 (&owner).into(),
@@ -46,7 +46,7 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
                     "configured resume snapshot does not match the durability state".to_owned(),
                 ));
             }
-            known_records = keys;
+            known_records.known = keys;
             builder = builder.resume(restored);
         } else if builder.resume_snapshot().is_none() {
             // A fork's explicitly supplied completed snapshot owns its cache
@@ -80,29 +80,30 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
 
 struct DurableExecution {
     owner: DurableOwner,
-    context_records: Mutex<HashSet<String>>,
+    context_records: Mutex<ContextCache>,
 }
 
 impl DurableExecution {
     fn ready(owner: DurableOwner) -> Self {
         Self {
             owner,
-            context_records: Mutex::new(HashSet::new()),
+            context_records: Mutex::new(ContextCache::default()),
         }
     }
 
     fn prepare_snapshot(&self, snapshot: SessionSnapshot) -> AgentResult<crate::context::Prepared> {
-        let known = self
+        let cache = self
             .context_records
             .lock()
             .map_err(|_| NanocodexError::InvalidExecutionPolicy("context cache poisoned".into()))?;
-        crate::context::prepare_snapshot(snapshot, &known).map_err(agent_error)
+        crate::context::prepare_snapshot(snapshot, &cache).map_err(agent_error)
     }
 
-    fn remember(&self, keys: HashSet<String>) -> AgentResult<()> {
-        *self.context_records.lock().map_err(|_| {
-            NanocodexError::InvalidExecutionPolicy("context cache poisoned".into())
-        })? = keys;
+    fn remember(&self, delta: ContextCache) -> AgentResult<()> {
+        self.context_records
+            .lock()
+            .map_err(|_| NanocodexError::InvalidExecutionPolicy("context cache poisoned".into()))?
+            .extend(delta);
         Ok(())
     }
 }
@@ -162,7 +163,7 @@ impl ExecutionPolicy for DurableExecution {
                 .commit_checkpoint(prepared.payload)
                 .await
                 .map_err(agent_error)?;
-            self.remember(prepared.keys)
+            self.remember(prepared.delta)
         })
     }
 
@@ -217,16 +218,16 @@ impl ExecutionPolicy for DurableExecution {
             let prepared = snapshot
                 .map(|snapshot| self.prepare_snapshot(snapshot))
                 .transpose()?;
-            let (checkpoint, keys) = match prepared {
-                Some(value) => (Some(value.payload), Some(value.keys)),
+            let (checkpoint, delta) = match prepared {
+                Some(value) => (Some(value.payload), Some(value.delta)),
                 None => (None, None),
             };
             self.owner
                 .cancel(operation_id, checkpoint)
                 .await
                 .map_err(agent_error)?;
-            if let Some(keys) = keys {
-                self.remember(keys)?;
+            if let Some(delta) = delta {
+                self.remember(delta)?;
             }
             Ok(())
         })
@@ -371,11 +372,11 @@ impl ExecutionPolicy for DurableExecution {
                 .map_err(agent_error)?
             {
                 Some(value) => {
-                    let (continuation, keys) =
+                    let (continuation, delta) =
                         crate::context::load_continuation(owner.into(), value)
                             .await
                             .map_err(agent_error)?;
-                    self.remember(keys)?;
+                    self.remember(delta)?;
                     Ok(Some(continuation))
                 }
                 None => Ok(None),
@@ -390,16 +391,16 @@ impl ExecutionPolicy for DurableExecution {
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
             let prepared = {
-                let known = self.context_records.lock().map_err(|_| {
+                let cache = self.context_records.lock().map_err(|_| {
                     NanocodexError::InvalidExecutionPolicy("context cache poisoned".into())
                 })?;
-                crate::context::prepare_continuation(continuation, &known).map_err(agent_error)?
+                crate::context::prepare_continuation(continuation, &cache).map_err(agent_error)?
             };
             self.owner
                 .advance(operation_id, prepared.payload)
                 .await
                 .map_err(agent_error)?;
-            self.remember(prepared.keys)
+            self.remember(prepared.delta)
         })
     }
 
@@ -453,7 +454,7 @@ impl ExecutionPolicy for DurableExecution {
                 .complete(operation_id, prepared.payload, &output)
                 .await
                 .map_err(agent_error)?;
-            self.remember(prepared.keys)
+            self.remember(prepared.delta)
         })
     }
 
@@ -482,7 +483,7 @@ impl ExecutionPolicy for DurableExecution {
                 .fail(operation_id, prepared.payload, error)
                 .await
                 .map_err(agent_error)?;
-            self.remember(prepared.keys)
+            self.remember(prepared.delta)
         })
     }
 }
@@ -663,6 +664,48 @@ mod tests {
         };
         assert!(
             matches!(source.downcast_ref::<Error>(), Some(Error::OperationBlocked { pending_id, .. }) if pending_id == "older")
+        );
+        policy.shutdown().await.unwrap();
+    }
+
+    /// The agent reloads its continuation after a failed write, so this is not
+    /// observable end to end: a rejected commit must not advance the context
+    /// cache, or retrying the same boundary would skip the records it needs.
+    #[tokio::test]
+    async fn rejected_boundary_does_not_advance_the_context_cache() {
+        use nanocodex_agent::execution::{ResponseHistory, ResponseItem};
+        use nanocodex_oai_api::responses::{ContentItem, MessageRole};
+
+        let state = DurableSession::open(crate::MemoryStore::new().unwrap(), "cache")
+            .await
+            .unwrap();
+        let (owner, _) = state.acquire_agent().await.unwrap();
+        owner
+            .admit_typed::<_, u32, String>("turn".into(), &"input")
+            .await
+            .unwrap();
+        let policy = DurableExecution::ready(owner);
+        let item = |index| {
+            ResponseItem::message(
+                MessageRole::User,
+                [ContentItem::input_text(format!("{index}"))],
+            )
+        };
+        let history = ResponseHistory::new((0..70).map(item).collect());
+        let continuation = || ExecutionContinuation {
+            state_json: "{}".into(),
+            history: history.clone(),
+            prefix: Arc::from([item(-1)]),
+        };
+        // No attempt is running yet, so the owner rejects the first commit.
+        assert!(policy.advance("turn".into(), continuation()).await.is_err());
+        policy.begin_attempt("turn".into()).await.unwrap();
+        policy.advance("turn".into(), continuation()).await.unwrap();
+        let stored = state.agent_continuation("turn").await.unwrap().unwrap();
+        let json = |items: Vec<&ResponseItem>| serde_json::to_value(items).unwrap();
+        assert_eq!(
+            json(stored.history.iter().collect()),
+            json(history.iter().collect())
         );
         policy.shutdown().await.unwrap();
     }

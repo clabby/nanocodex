@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fmt};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ResponseItem, Usage, responses::ResponseHistory};
+use crate::{ResponseItem, ResponsesError, Usage, responses::ResponseHistory};
 
 use super::{
     compaction,
@@ -184,31 +184,6 @@ impl ManagedSessionState {
         self.context.shared_items()
     }
 
-    /// Returns request-ready history, repairing incomplete tool-call pairs in
-    /// an isolated copy only when required.
-    #[must_use]
-    pub fn prompt_history(&self) -> ResponseHistory {
-        self.context.prompt_items()
-    }
-
-    /// Returns request-ready history and whether it differs from retained
-    /// authoritative history because incomplete tool calls were repaired.
-    ///
-    /// Higher orchestration layers use the flag to force a full replay and
-    /// adopt the repaired baseline only after provider completion.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn prompt_history_with_repair(&self) -> (ResponseHistory, bool) {
-        self.context.prompt_items_with_repair()
-    }
-
-    /// Replaces authoritative history with a successfully replayed repaired
-    /// prompt baseline.
-    #[doc(hidden)]
-    pub fn adopt_prompt_history(&mut self, history: ResponseHistory) {
-        self.context.adopt_prompt_items(history);
-    }
-
     /// Appends client- or provider-authored typed items to the active tail.
     ///
     /// Unsupported non-API items are ignored and bounded tool-output policy is
@@ -373,30 +348,92 @@ impl ManagedSessionState {
         self.context.commit_tail();
     }
 
-    /// Replaces image inputs after the provider rejects their encoded data.
+    /// Derives the next `response.create` request from retained history.
     ///
-    /// The returned count is the number of image parts replaced with a stable
-    /// text diagnostic so a later full replay cannot resend poisoned bytes.
-    #[doc(hidden)]
-    pub fn replace_rejected_images(&mut self) -> usize {
-        let replaced = self.context.replace_rejected_images();
-        if replaced > 0 {
-            self.reset_for_full_request();
-            self.history_revision = self.history_revision.saturating_add(1);
+    /// A repaired prompt (incomplete tool calls closed in an isolated copy)
+    /// cannot continue the provider checkpoint and is sent as a full replay.
+    #[must_use]
+    pub fn generation_request(&self) -> RequestHistory {
+        let (full, repaired) = self.context.prompt_items_with_repair();
+        RequestHistory {
+            full,
+            incremental: self.context.shared_items(),
+            incremental_start: self.delta_start,
+            previous_response_id: self.previous_response_id.clone().filter(|_| !repaired),
+            repaired,
         }
-        replaced
     }
 
-    /// Removes exact matches from discovery metadata while retaining transcript items.
-    /// A changed history must be replayed without its old provider continuation.
-    #[doc(hidden)]
-    pub fn remove_tool_definition(&mut self, definition: &serde_json::Value) -> usize {
-        let removed = self.context.remove_tool_definition(definition);
-        if removed > 0 {
+    /// Records one completed generation derived from [`Self::generation_request`].
+    ///
+    /// `response_id` is `None` when the provider checkpoint cannot be reused
+    /// (for example, a journal-replayed result from a replaced transport); the
+    /// next request then replays complete history. The active tail is not
+    /// committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagedSessionStateError::MissingResponseId`] without
+    /// changing state when a reusable continuation has an empty ID.
+    pub fn complete_generation(
+        &mut self,
+        request: RequestHistory,
+        response_id: Option<String>,
+        output: impl IntoIterator<Item = ResponseItem>,
+        usage: Option<&Usage>,
+        server_reasoning_included: bool,
+    ) -> Result<(), ManagedSessionStateError> {
+        if response_id.as_deref().is_some_and(str::is_empty) {
+            return Err(ManagedSessionStateError::MissingResponseId);
+        }
+        self.observe_server_reasoning(server_reasoning_included);
+        if request.repaired {
+            self.context.adopt_prompt_items(request.full);
+        }
+        self.update_token_info(usage);
+        match response_id {
+            Some(response_id) => self.previous_response_id = Some(response_id),
+            None => self.reset_for_full_request(),
+        }
+        self.append(output);
+        Ok(())
+    }
+
+    /// Derives the next `response.compact` request from retained history.
+    ///
+    /// Callers may inspect [`RequestHistory::full`] (for example, to preserve
+    /// the transcript) before [`RequestHistory::fit_context_window`] trims it.
+    #[must_use]
+    pub fn compaction_request(&self) -> RequestHistory {
+        let (full, repaired) = self.context.prompt_items_with_repair();
+        RequestHistory {
+            incremental: full.clone(),
+            full,
+            incremental_start: if repaired { 0 } else { self.delta_start },
+            previous_response_id: self.previous_response_id.clone().filter(|_| !repaired),
+            repaired,
+        }
+    }
+
+    /// Applies the client-owned history repair a provider rejection requires.
+    ///
+    /// Rejected image payloads are replaced with a stable text diagnostic and
+    /// a rejected tool definition is removed from discovery metadata, so a
+    /// later full replay cannot resend them. Any change discards the provider
+    /// checkpoint. Returns whether retained history changed.
+    pub fn repair_rejected_request(&mut self, repair: RejectedRequestRepair<'_>) -> bool {
+        let mut changed = 0;
+        if repair.replace_images {
+            changed += self.context.replace_rejected_images();
+        }
+        if let Some(definition) = repair.tool_definition {
+            changed += self.context.remove_tool_definition(definition);
+        }
+        if changed > 0 {
             self.reset_for_full_request();
             self.history_revision = self.history_revision.saturating_add(1);
         }
-        removed
+        changed > 0
     }
 
     /// Commits the active tail without changing continuation state.
@@ -444,6 +481,75 @@ impl ManagedSessionState {
     #[must_use]
     pub const fn history_revision(&self) -> u64 {
         self.history_revision
+    }
+}
+
+/// Continuation-aware history for one replayable provider request.
+///
+/// Produced by [`ManagedSessionState`] so every driver derives the full replay,
+/// the incremental delta, and the provider checkpoint from one policy.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RequestHistory {
+    pub(crate) full: ResponseHistory,
+    pub(crate) incremental: ResponseHistory,
+    pub(crate) incremental_start: usize,
+    pub(crate) previous_response_id: Option<String>,
+    pub(crate) repaired: bool,
+}
+
+impl RequestHistory {
+    /// Returns the complete request-ready history.
+    #[must_use]
+    pub const fn full(&self) -> &ResponseHistory {
+        &self.full
+    }
+
+    /// Returns the provider checkpoint this request continues, if any.
+    #[must_use]
+    pub fn previous_response_id(&self) -> Option<&str> {
+        self.previous_response_id.as_deref()
+    }
+
+    /// Trims oversized tool outputs so a compaction request fits the context
+    /// window. Rewritten history no longer matches the provider checkpoint, so
+    /// any rewrite turns the request into a full replay.
+    pub fn fit_context_window(
+        &mut self,
+        request_prefix: &[ResponseItem],
+        context_window_tokens: u64,
+    ) {
+        let rewritten = compaction::trim_tool_outputs_to_fit_context_window(
+            &mut self.full,
+            request_prefix,
+            context_window_tokens,
+        );
+        if rewritten > 0 {
+            self.incremental = self.full.clone();
+            self.incremental_start = 0;
+            self.previous_response_id = None;
+        }
+    }
+}
+
+/// Client-owned history repair required after a provider rejected a request.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RejectedRequestRepair<'a> {
+    /// Replace every retained image payload with a text diagnostic.
+    pub replace_images: bool,
+    /// Remove this rejected definition from retained discovery metadata.
+    pub tool_definition: Option<&'a serde_json::Value>,
+}
+
+impl<'a> RejectedRequestRepair<'a> {
+    /// Derives the repair required by one provider error.
+    #[must_use]
+    pub fn for_error(error: &'a ResponsesError) -> Self {
+        Self {
+            replace_images: matches!(error, ResponsesError::InvalidImageRequest { .. }),
+            tool_definition: error.invalid_tool_schema(),
+        }
     }
 }
 
@@ -547,7 +653,11 @@ mod tests {
         ]);
 
         expected[6]["tools"] = json!([]);
-        assert_eq!(state.remove_tool_definition(&rejected), 4);
+        let repair = super::RejectedRequestRepair {
+            tool_definition: Some(&rejected),
+            ..Default::default()
+        };
+        assert!(state.repair_rejected_request(repair));
         assert_eq!(
             serde_json::to_value(state.flattened_history()).unwrap(),
             expected
@@ -555,11 +665,11 @@ mod tests {
         assert_eq!(state.previous_response_id(), None);
         assert_eq!(state.delta_start(), 0);
         assert_eq!(state.history_revision(), 1);
-        assert!(!state.prompt_history_with_repair().1);
+        assert!(!state.generation_request().repaired);
 
         state.set_previous_response_id("resp-after");
         state.commit().unwrap();
-        assert_eq!(state.remove_tool_definition(&rejected), 0);
+        assert!(!state.repair_rejected_request(repair));
         assert_eq!(state.previous_response_id(), Some("resp-after"));
         assert_eq!(state.delta_start(), state.history_len());
         assert_eq!(state.history_revision(), 1);

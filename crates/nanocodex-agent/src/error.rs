@@ -353,6 +353,23 @@ impl NanocodexError {
         }
     }
 
+    /// Client-owned history repair required before retrying after this failure.
+    #[cfg(feature = "openai")]
+    pub(crate) fn rejected_request_repair(
+        &self,
+    ) -> nanocodex_oai_api::__private::RejectedRequestRepair<'_> {
+        use nanocodex_oai_api::__private::RejectedRequestRepair;
+        // Durable compaction receipts carry image recovery without a live
+        // provider error, so image repair follows this error's own policy.
+        RejectedRequestRepair {
+            replace_images: self.requires_image_repair(),
+            ..self
+                .responses_error()
+                .map(RejectedRequestRepair::for_error)
+                .unwrap_or_default()
+        }
+    }
+
     /// Returns the underlying Responses transport/API error, including when a
     /// caller-provided Tower middleware boxed the standard service error.
     #[cfg(feature = "openai")]
