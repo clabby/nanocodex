@@ -29,7 +29,7 @@ import { gatewayAvailability, gatewayRuntime } from "./gateway-runtime";
 import { createSubagentRouteController, subagentRoutingPolicy, type RetainedChildRoute } from "./subagent-model-routing";
 import { SqliteProviderTelemetryStore, normalizeProviderColo, type ProviderObservation } from "./provider-telemetry";
 import { resolveThreadRoute, ROUTING_CANDIDATES, routingPolicySchema, ThreadRoutePin, type ThreadRoute, type RoutingAi } from "./thread-model-routing";
-import { AgentPresentationWriter, generatePresentationText, presentationPending } from "./agent-presentation";
+import { AgentPresentationWriter, generatePresentationText, presentationPending, presentationRetryAt } from "./agent-presentation";
 import { retireSessionProjects, isRetiredProjectCompletion } from "./retired-projects";
 import { downloadPath, downloadBrainFile, downloadHandFile, fileDownloadFailure, FileDownloadError } from "./file-download";
 import { callerContext, type CallerContext } from "./request-origin";
@@ -1847,7 +1847,7 @@ async function managedFetchRoute(
           updated_at: summary.updatedAt,
           turn_count: summary.turnCount,
           last_user_message_at: summary.presentation?.lastUserMessageAt ?? (summary.turnCount > 0 ? summary.updatedAt : 0),
-          ...(summary.presentation ? { presentation: summary.presentation } : {}),
+          presentation: summary.presentation ?? { revision: 0, status: "idle", activeTurnIds: [], updatedAt: 0, done: false, doneAt: null },
           ...(principal.connectGrant ? {} : { may_have_scheduled_jobs: summary.mayHaveScheduledJobs }),
         }])),
       });
@@ -2547,6 +2547,16 @@ async function managedFetchRoute(
     sessionHeaders.delete("x-nanocodex-vm-renewal");
     forwardPrincipalAssertions(sessionHeaders, principal);
     const publicOrigin = `public_origin=${encodeURIComponent(url.origin)}`;
+    if (resource === "done") {
+      if (request.method !== "PUT") return json({ error: "method_not_allowed" }, { status: 405 });
+      if (url.search) return json({ error: "invalid_request" }, { status: 400 });
+      if (!principal.capabilities.includes("agents:write")) return json({ error: "forbidden" }, { status: 403 });
+      const originFailure = requireSameOriginMutation(request, url, principal);
+      if (originFailure) return originFailure;
+      return stub.fetch("https://session.internal/done", {
+        method: "PUT", headers: sessionHeaders, body: request.body, signal: request.signal,
+      });
+    }
     if (resource.startsWith("calendar-push/")) {
       if (!/^calendar-push\/[A-Za-z0-9_-]{43}$/.test(resource) || [...url.searchParams.keys()].some(k => k !== "calendar_id") || url.searchParams.getAll("calendar_id").length > 1) return json({error:"invalid_request"},{status:400});
       if (!["GET", "PUT", "DELETE"].includes(request.method)) return json({error:"method_not_allowed"},{status:405});
@@ -4237,6 +4247,33 @@ export class DurableAgentSession extends DurableComputerObject {
         return json({ error: "not_found" }, { status: 404 });
       }
       turnAuthorization = asserted.authorization;
+    }
+    if (url.pathname === "/done") {
+      if (request.method !== "PUT") return json({ error: "method_not_allowed" }, { status: 405 });
+      if (!ownerAssertion || !turnAuthorization.capabilities.includes("agents:write"))
+        return json({ error: "forbidden" }, { status: 403 });
+      if (url.search) return json({ error: "invalid_request" }, { status: 400 });
+      let value: unknown;
+      try { value = await request.json(); } catch { return json({ error: "invalid_request" }, { status: 400 }); }
+      if (!value || typeof value !== "object" || Array.isArray(value)
+        || typeof (value as { done?: unknown }).done !== "boolean")
+        return json({ error: "invalid_request" }, { status: 400 });
+      const session = this.#session();
+      if (!session || session.runtime_profile !== "managed" || this.#deleting || this.#deleted)
+        return json({ error: "not_found" }, { status: 404 });
+      const presentation = this.#sidebarPresentation();
+      const result = presentation.setDone((value as { done: boolean }).done);
+      // Arm the persisted outbox before the network hop, including idle sessions.
+      await this.#scheduleNextAlarm();
+      try { await presentation.flush(true); }
+      catch {
+        await this.#scheduleNextAlarm();
+        return json({ error: "presentation_delivery_pending", saved: true }, {
+          status: 503, headers: { "cache-control": "no-store", "retry-after": "20" },
+        });
+      }
+      await this.#scheduleNextAlarm();
+      return json(result, { headers: { "cache-control": "no-store" } });
     }
     if (url.pathname === "/share" || url.pathname === "/share/events/history" || url.pathname === "/share/events" || url.pathname === "/share/turns") {
       const headers = { "cache-control": "no-store" };
@@ -11332,7 +11369,7 @@ export class DurableAgentSession extends DurableComputerObject {
   #sidebarPresentation(): AgentPresentationWriter {
     const session = this.#session()!;
     return this.#presentation ??= new AgentPresentationWriter(this.ctx.storage, async value => {
-      if (this.#deleting) return;
+      if (this.#deleting || this.#deleted) throw new Error("presentation session unavailable");
       const response = await this.env.NANOCODEX_USERS.getByName(session.owner_id).fetch(
         `https://user.internal/agents/${session.session_id}/presentation`, {
           method: "POST", signal: AbortSignal.timeout(5_000),
@@ -12166,7 +12203,8 @@ export class DurableAgentSession extends DurableComputerObject {
     if (this.#deleting || !this.#sessionId()) return;
     const now = Date.now();
     const targets: number[] = [];
-    if (presentationPending(this.ctx.storage)) targets.push(now + 20_000);
+    const presentationAlarm = presentationRetryAt(this.ctx.storage);
+    if (presentationAlarm !== undefined) targets.push(Math.max(now + 1, presentationAlarm));
     const webhookAlarm = this.#operations.nextAlarm();
     if (webhookAlarm !== undefined) targets.push(webhookAlarm);
     if (!this.#durabilityExported && this.#durabilityImportState !== "pending") {

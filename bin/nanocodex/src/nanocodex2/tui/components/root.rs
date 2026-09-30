@@ -303,6 +303,7 @@ pub(crate) enum SessionListKind {
 pub(crate) enum RootEffect {
     AutoRoute,
     Reload,
+    SetDone(bool),
     Bug(String),
     Screen,
     Zoom,
@@ -1332,7 +1333,15 @@ impl RootNode {
                     && !self.composer.component().has_images()
                     && matches!(
                         self.composer.component().draft().split_whitespace().next(),
-                        Some("/share" | "/voice" | "/screen" | "/zoom" | "/reload")
+                        Some(
+                            "/share"
+                                | "/voice"
+                                | "/screen"
+                                | "/zoom"
+                                | "/reload"
+                                | "/done"
+                                | "/undone"
+                        )
                     )
                 {
                     let mut update = self
@@ -3251,6 +3260,10 @@ impl RootNode {
                 )));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
+            SettingsCommand::SetDone(done) => ComponentUpdate {
+                effects: vec![RootEffect::SetDone(done)],
+                render: RenderRequest::Immediate,
+            },
             SettingsCommand::Reload => ComponentUpdate {
                 effects: vec![RootEffect::Reload],
                 render: RenderRequest::Immediate,
