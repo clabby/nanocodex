@@ -131,10 +131,10 @@ jobs:
       - name: Check CUA bridge and native host lifecycle
         # Temporarily disabled: CI tests are paused.
         if: needs.changes.outputs.tests == 'true' && runner.os == 'macOS'
-        run: >-
-          node --test scripts/tests/openai-cua-app-server.test.mjs
-          scripts/tests/openai-cua-native-host.test.mjs
-          scripts/tests/openai-cua-gui-readiness.test.mjs
+        run: |
+          node --test scripts/tests/direct-cua-host.test.mjs crates/experimental/nanocodex-computer/tests/linux-sky/host.test.mjs crates/experimental/nanocodex-computer/tests/windows-sky/host.test.mjs crates/experimental/nanocodex-computer/tests/windows-sky/unsupported.test.mjs
+          python3 scripts/test_install_linux_sky_host.py
+          python3 scripts/test_install_upstream_cua.py
       - name: Check shared native capture policy and platform adapters
         # Temporarily disabled: CI tests are paused.
         if: needs.changes.outputs.tests == 'true'

@@ -1,8 +1,18 @@
 import XCTest
 import CryptoKit
+import CSecureSudo
+import Darwin
 @testable import SecureInputCore
 
 final class BoundaryTests: XCTestCase {
+    func testCoreDumpsAreIrreversiblyDisabledBeforePrivateWork() {
+        XCTAssertEqual(nc_secure_disable_core_dumps(), 0)
+        var limit = rlimit()
+        XCTAssertEqual(getrlimit(RLIMIT_CORE, &limit), 0)
+        XCTAssertEqual(limit.rlim_cur, 0)
+        XCTAssertEqual(limit.rlim_max, 0)
+    }
+
     func testLocalAdmissionIsBoundedPerUIDAndResetsAfterWindow() {
         var limiter = AdmissionLimiter()
         for _ in 0..<24 { XCTAssertTrue(limiter.admit(uid: 501, now: 100)) }

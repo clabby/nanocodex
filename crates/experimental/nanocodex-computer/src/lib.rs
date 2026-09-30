@@ -49,6 +49,11 @@ const PROVIDER_ENVIRONMENT: &[&str] = &[
     "DBUS_SESSION_BUS_ADDRESS",
     "LANG",
     "SKY_ENABLE_AUDIO",
+    // Trusted embedding-host app-access policy; never supplied by tool args.
+    "NANOCODEX_CUA_APP_CONSENT",
+    // Metadata-only enforced-policy lookup by the direct host. It does not
+    // forward this account directory into upstream JavaScript/native workers.
+    "CODEX_HOME",
 ];
 
 /// Trusted launch configuration, supplied by the embedding application.
@@ -82,13 +87,18 @@ impl ComputerConfig {
     /// Provision the platform's upstream runtime on first use, then discover it.
     /// Explicit provider settings (including off) never trigger installation.
     pub async fn discover_or_install() -> Result<Option<Self>, String> {
-        if std::env::var_os("NANOCODEX_COMPUTER").is_none_or(|value| value.is_empty())
-            && cfg!(any(target_os = "macos", target_os = "windows"))
-        {
-            return provision::provision_upstream(false)
-                .await
-                .and_then(|receipt| provision::config_from_receipt(&receipt))
-                .map(Some);
+        if std::env::var_os("NANOCODEX_COMPUTER").is_none_or(|value| value.is_empty()) {
+            // Automatic Windows managed upstream setup is unverified. This does
+            // not disable explicitly selected, host-owned custom MCP providers.
+            if cfg!(target_os = "windows") {
+                return Ok(None);
+            }
+            if cfg!(target_os = "macos") {
+                return provision::provision_upstream(false)
+                    .await
+                    .and_then(|receipt| provision::config_from_receipt(&receipt))
+                    .map(Some);
+            }
         }
         Ok(Self::discover())
     }
@@ -96,12 +106,24 @@ impl ComputerConfig {
     /// Discover only an explicitly configured or managed upstream MCP launcher.
     /// There is no custom runtime, sibling executable, or PATH fallback.
     pub fn discover() -> Option<Self> {
-        if let Some(path) = std::env::var_os("NANOCODEX_COMPUTER").filter(|value| !value.is_empty())
-        {
+        Self::discover_for_platform(
+            std::env::consts::OS,
+            std::env::var_os("NANOCODEX_COMPUTER").filter(|value| !value.is_empty()),
+        )
+    }
+
+    fn discover_for_platform(platform: &str, explicit: Option<OsString>) -> Option<Self> {
+        if let Some(path) = explicit {
             if path == "off" || path == "none" || path == "0" {
                 return None;
             }
             return Some(Self::mcp(path));
+        }
+        // Never read an old managed Windows receipt or select its immutable
+        // host. Explicit custom providers remain the trusted embedding host's
+        // responsibility, consistent with the JavaScript transport.
+        if platform == "windows" {
+            return None;
         }
         provision::managed_provider_path().map(Self::mcp)
     }
@@ -746,6 +768,27 @@ mod provider_contract_tests {
                 .unwrap();
             assert_eq!(result.structured_result()["structuredContent"], args);
             assert_eq!(result.structured_result()["content"][0]["text"], name);
+        }
+    }
+}
+
+#[cfg(test)]
+mod windows_custom_provider_tests {
+    use super::*;
+
+    #[test]
+    fn windows_explicit_custom_provider_is_preserved_without_managed_fallback() {
+        let custom = OsString::from(r"C:\trusted\custom-no-cli-mcp.exe");
+        let config =
+            ComputerConfig::discover_for_platform("windows", Some(custom.clone())).unwrap();
+        assert_eq!(config.executable.as_os_str(), custom);
+        assert!(config.args.is_empty());
+        assert!(config.environment.is_empty());
+        assert!(ComputerConfig::discover_for_platform("windows", None).is_none());
+        for disabled in ["off", "none", "0"] {
+            assert!(
+                ComputerConfig::discover_for_platform("windows", Some(disabled.into())).is_none()
+            );
         }
     }
 }

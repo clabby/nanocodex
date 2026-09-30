@@ -13,6 +13,11 @@ keywords.workspace = true
 categories.workspace = true
 description = "Native account-managed lifecycle backend for Nanocodex"
 
+[package.metadata.cargo-machete]
+# Feature-unification dependencies: wipe expanded AES/GHASH/POLYVAL state,
+# not merely aes-gcm's temporary hash-key buffer.
+ignored = ["aes", "ghash", "polyval"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["-D", "warnings"]
@@ -23,6 +28,13 @@ tools = ["dep:nanocodex-tools"]
 voice = ["dep:nanocodex-voice-protocol"]
 
 [dependencies]
+aes = { version = "0.8.4", features = ["zeroize"] }
+ghash = { version = "0.5.1", features = ["zeroize"] }
+polyval = { version = "0.6.2", features = ["zeroize"] }
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc", "zeroize"] }
+base64.workspace = true
+hkdf = "0.12.4"
+p256 = { version = "0.13.2", features = ["ecdh"] }
 futures-util.workspace = true
 nanocodex-voice-protocol = { workspace = true, optional = true }
 nanocodex-agent = { path = "../nanocodex-agent", version = "0.6.6", default-features = false }
@@ -33,6 +45,7 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sha2-hkdf = { package = "sha2", version = "0.10.9" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
