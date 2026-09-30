@@ -1,0 +1,11 @@
+{
+ "name":"nanocodex-private-browser-smoke-local",
+ "main":"private-browser-smoke.ts",
+ "workers_dev":false,
+ "compatibility_date":"2026-07-29",
+ "compatibility_flags":["nodejs_compat"],
+ "browser":{"binding":"BROWSER","remote":true},
+ "worker_loaders":[{"binding":"LOADER"}],
+ "durable_objects":{"bindings":[{"name":"PROBE","class_name":"PrivateBrowserSmoke"}]},
+ "migrations":[{"tag":"v1","new_sqlite_classes":["PrivateBrowserSmoke"]}]
+}
