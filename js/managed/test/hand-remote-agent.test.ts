@@ -3,10 +3,11 @@ import { describe, expect, it } from "vitest";
 import { AccountHostedTools, AccountHostedToolsProvider } from "../src/account-hosted-tools";
 import { screenAction, screenResult } from "../src/hand-remote-agent";
 import { createNamespaceExecutionRuntime } from "../src/namespace-tools";
+import { CUA_JS_NAME, CUA_RESET_NAME } from "nanocodex-computer/contract";
 
 const owner = "11111111-1111-4111-8111-111111111193";
 const other = "22222222-2222-4222-8222-222222222293";
-const surface = { id: "desktop", name: "Desktop", kind: "vm", width: 1600, height: 900, controllable: true, agent_tools: true };
+const surface = { id: "desktop", name: "Desktop", kind: "vm", width: 1600, height: 900, controllable: true, agent_tools: true, transport: "frames-v1" };
 const observation = { schemaVersion: 1 as const, capturedAt: 1000, providers: [
   { id: "accessibility", status: "ok" as const, capturedAt: 999, ageMs: 1, freshness: "fresh" as const, scope: "requested_context" as const, foreground_verified: false, data: { role: "window", text: "Visible app state" } },
   { id: "external:0", status: "timeout" as const, capturedAt: 1000, freshness: "unknown" as const, error: "Provider timed out" },
@@ -31,7 +32,7 @@ async function host(machine: string) {
   return { stub, socket, state, tool };
 }
 describe("agent screen protocol", () => {
-  it("retains internal screen adapters with grants and reconnect fencing", async () => {
+  it("discovers native CUA and joins the viewer on a live Hand, preserving grants and reconnect fences", async () => {
     const connected = await host("wayland-computer");
     let allowed = true;
     const provider = new AccountHostedToolsProvider(namespace(), owner, () => allowed);
@@ -43,31 +44,69 @@ describe("agent screen protocol", () => {
       (id, context) => provider.screenTool(id, context));
     const context = { sessionId: "screen-session", callId: "screen-call", parentCallId: "cell", model: "fixture", signal: new AbortController().signal };
     expect(runtime.tools).not.toHaveProperty("computer");
-    const internalScreen = provider.screenTool(machine.id, context)!;
+    const cua = runtime.tools[CUA_JS_NAME]!;
+    const reset = runtime.tools[CUA_RESET_NAME]!;
+    // Workdir-only discovery is the agent's first operation, not a direct
+    // invocation of the internal screen adapter that bypasses its contract.
+    expect(await cua.handler({ workdir: "/wayland-computer" }, context)).toMatchObject({
+      definitions: [
+        { name: CUA_JS_NAME, description: expect.stringContaining("Native screen control fallback"),
+          parameters: { required: ["action"], properties: { action: { enum: expect.arrayContaining(["observe", "click"]) } } } },
+        { name: CUA_RESET_NAME, parameters: { type: "object", additionalProperties: false } },
+      ],
+    });
+    // The human viewer joins the very same publication, without another setup
+    // or provider attachment. This is a real DO/WebSocket frame transport.
+    const viewerJoined = next(connected.socket);
+    const viewerResponse = await connected.stub.fetch(
+      `https://account-tools.internal/hands/view?machine_id=${machine.id}&surface_id=desktop&generation=${connected.state.generation}`,
+      { headers: { "x-nanocodex-owner-id": owner, upgrade: "websocket" } },
+    );
+    expect(viewerResponse.status).toBe(101);
+    const viewer = viewerResponse.webSocket!, viewerReady = next(viewer);
+    viewer.accept();
+    const viewerState = await viewerReady;
+    expect(await viewerJoined).toMatchObject({ type: "viewer", viewer_id: viewerState.connection_id, surface_id: "desktop" });
+    const frameRequest = next(connected.socket);
+    viewer.send(JSON.stringify({ type: "frame_request" }));
+    expect(await frameRequest).toEqual({ type: "frame_request", viewer_id: viewerState.connection_id });
+    const viewerFrame = next(viewer);
+    connected.socket.send(JSON.stringify({ type: "frame", viewer_id: viewerState.connection_id, jpeg: "/9j/2Q==", width: 1, height: 1 }));
+    expect(await viewerFrame).toEqual({ type: "frame", jpeg: "/9j/2Q==", width: 1, height: 1 });
     const requested = next(connected.socket);
     const selector = { app: "Example", window: "Window" };
-    const pending = internalScreen.handler({ action: "observe", context: selector }, context);
+    const pending = cua.handler({ workdir: "/wayland-computer", action: "observe", context: selector }, context);
     const request = await requested;
     expect(request).toMatchObject({ type: "agent_call", surface_id: "desktop", input: { action: "observe", context: selector } });
     connected.socket.send(JSON.stringify({ type: "agent_result", request_id: request.request_id, status: "ok", jpeg: "/9j/2Q==", width: 1, height: 1, observation }));
     expect(await pending).toMatchObject({ success: true,
       structuredResult: { status: "ok", image_url: "data:image/jpeg;base64,/9j/2Q==", detail: "original", observation } });
+    const clicked = next(connected.socket);
+    const click = cua.handler({ workdir: "/wayland-computer", action: "click", x: 0.5, y: 0.5 },
+      { ...context, callId: "screen-click" });
+    const clickRequest = await clicked;
+    expect(clickRequest).toMatchObject({ type: "agent_call", surface_id: "desktop",
+      generation: connected.state.generation, input: { action: "click", x: 0.5, y: 0.5 } });
+    connected.socket.send(JSON.stringify({ type: "agent_result", request_id: clickRequest.request_id,
+      status: "ok", jpeg: "/9j/2Q==", width: 1, height: 1 }));
+    expect(await click).toMatchObject({ success: true, structuredResult: { status: "ok" } });
     allowed = false;
     expect(provider.screenTool(machine.id)).toBeUndefined();
-    expect(await internalScreen.handler({ action: "click", x: 0.5, y: 0.5 }, context))
+    expect(await cua.handler({ workdir: "/wayland-computer", action: "click", x: 0.5, y: 0.5 }, context))
       .toMatchObject({ success: false, structuredResult: { status: "unavailable" } });
     allowed = true;
     const replacement = await host(machine.id);
     await provider.refresh();
-    expect(await internalScreen.handler({ action: "click", x: 0.5, y: 0.5 }, { ...context, parentCallId: "next" }))
+    expect(await cua.handler({ workdir: "/wayland-computer", action: "click", x: 0.5, y: 0.5 }, context))
       .toMatchObject({ success: false, structuredResult: { status: "unavailable" } });
-    const replacementScreen = provider.screenTool(machine.id, context)!;
+    const freshContext = { ...context, parentCallId: "replacement-cell", callId: "replacement-discover" };
+    expect(await cua.handler({ workdir: "/wayland-computer" }, freshContext)).toHaveProperty("definitions");
     const released = next(replacement.socket);
-    const release = replacementScreen.handler({ action: "release" }, context);
+    const release = reset.handler({ workdir: "/wayland-computer" }, { ...freshContext, callId: "replacement-release" });
     const releaseRequest = await released;
     replacement.socket.send(JSON.stringify({ type: "agent_result", request_id: releaseRequest.request_id, status: "ok" }));
     expect(await release).toMatchObject({ success: true });
-    replacement.socket.close();
+    viewer.close(); connected.socket.close(); replacement.socket.close();
   });
   it("rejects mixed, unbounded, and malformed input before sending anything", () => {
     for (const value of [ { action: "click", x: 0.2, y: 0.4, text: "mixed" }, { action: "drag", x: 0, y: 0, endX: 1, endY: 1, durationMs: 5000 },

@@ -574,6 +574,9 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
       const definition = entry.definition;
       const tool: RoutedHostedTool = {
         name: definition.name,
+        // Keep the admitted contract with the route: native-screen CUA
+        // discovery must expose the exact screen schema, not only a callable.
+        definition,
         parallelSafe: entry.parallel_safe,
         provider: entry.provider,
         remoteName: entry.remote_name,
