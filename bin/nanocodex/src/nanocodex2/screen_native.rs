@@ -35,13 +35,50 @@ pub(crate) async fn serve_desktop(command: DesktopCommand) -> Result<(), Managed
 pub(crate) struct NativeScreen {
     publisher: Option<ScreenPublisher>,
     #[cfg(target_os = "linux")]
-    desktop: Option<tokio::process::Child>,
+    desktop: Option<DesktopChild>,
     #[cfg(target_os = "linux")]
     wayland: Option<super::screen_wayland::Platform>,
     #[cfg(target_os = "linux")]
     runtime: PathBuf,
     #[cfg(target_os = "linux")]
+    _desktop_directory: Option<tempfile::TempDir>,
+    #[cfg(target_os = "linux")]
     workspace: PathBuf,
+}
+// A cancelled startup future cannot await NativeScreen::shutdown. Keep the
+// helper's graceful cleanup in its ownership guard, including runtime teardown.
+#[cfg(target_os = "linux")]
+struct DesktopChild(tokio::process::Child);
+#[cfg(target_os = "linux")]
+impl DesktopChild {
+    fn terminate(&self) {
+        if let Some(id) = self.0.id() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(id as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for DesktopChild {
+    fn drop(&mut self) {
+        self.terminate();
+        // The helper installs SIGTERM before starting infrastructure. Let its
+        // cancellation guard reap Xvfb, the window manager and terminal tree.
+        // Synchronous bounded cleanup cannot be abandoned by Tokio teardown.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if !matches!(self.0.try_wait(), Ok(None)) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = self.0.start_kill();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 }
 impl NativeScreen {
     pub(crate) async fn start(
@@ -116,16 +153,30 @@ impl NativeScreen {
                     desktop: None,
                     wayland: Some(wayland),
                     runtime: directory.join("desktop"),
+                    _desktop_directory: None,
                     workspace: machine.workspace().into(),
                 });
             }
-            let runtime = directory.join("desktop");
+            use std::os::unix::fs::DirBuilderExt as _;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(directory)
+                .map_err(configuration)?;
+            // A retired or failed publisher must never send shutdown to another
+            // session's helper, even when both were given the same state-dir.
+            let desktop_directory = tempfile::Builder::new()
+                .prefix("desktop-")
+                .tempdir_in(directory)
+                .map_err(configuration)?;
+            let runtime = desktop_directory.path().to_owned();
             let desktop = Self::spawn_desktop(Path::new(machine.workspace()), &runtime)?;
             let mut screen = Self {
                 publisher: None,
                 desktop: Some(desktop),
                 wayland: None,
                 runtime: runtime.clone(),
+                _desktop_directory: Some(desktop_directory),
                 workspace: machine.workspace().into(),
             };
             let ready = async {
@@ -165,10 +216,7 @@ impl NativeScreen {
         }
     }
     #[cfg(target_os = "linux")]
-    fn spawn_desktop(
-        workspace: &Path,
-        runtime: &Path,
-    ) -> Result<tokio::process::Child, ManagedError> {
+    fn spawn_desktop(workspace: &Path, runtime: &Path) -> Result<DesktopChild, ManagedError> {
         let mut command =
             tokio::process::Command::new(std::env::current_exe().map_err(configuration)?);
         command
@@ -188,7 +236,7 @@ impl NativeScreen {
                 command.env(key, value);
             }
         }
-        command.spawn().map_err(configuration)
+        command.spawn().map(DesktopChild).map_err(configuration)
     }
     #[cfg(target_os = "linux")]
     async fn wait_desktop(&mut self) -> Result<(), ManagedError> {
@@ -199,6 +247,7 @@ impl NativeScreen {
                 .desktop
                 .as_mut()
                 .expect("desktop child")
+                .0
                 .try_wait()
                 .map_err(configuration)?
                 .is_some()
@@ -234,14 +283,12 @@ impl NativeScreen {
                     return Ok(true);
                 }
             } else if match self.desktop.as_mut() {
-                Some(desktop) => desktop.try_wait().map_err(configuration)?.is_some(),
+                Some(desktop) => desktop.0.try_wait().map_err(configuration)?.is_some(),
                 None => true,
             } {
                 self.desktop = Some(Self::spawn_desktop(&self.workspace, &self.runtime)?);
                 if let Err(error) = self.wait_desktop().await {
-                    if let Some(mut desktop) = self.desktop.take() {
-                        let _ = desktop.kill().await;
-                    }
+                    drop(self.desktop.take());
                     return Err(error);
                 }
                 return Ok(true);
@@ -278,11 +325,12 @@ impl NativeScreen {
                     serde_json::json!({"action":"shutdown"}),
                 )
                 .await;
-                if tokio::time::timeout(std::time::Duration::from_secs(5), desktop.wait())
+                desktop.terminate();
+                if tokio::time::timeout(std::time::Duration::from_secs(10), desktop.0.wait())
                     .await
                     .is_err()
                 {
-                    let _ = desktop.kill().await;
+                    let _ = desktop.0.kill().await;
                 }
             }
         }
@@ -317,16 +365,31 @@ pub(crate) async fn serve(
         ["screen"],
     )
     .map_err(configuration)?;
-    let screen = NativeScreen::start(
-        &client.account_attachment_target()?,
-        &machine,
-        &command.state_dir,
+    let target = client.account_attachment_target()?;
+    let mut signal_result = Ok(());
+    let mut shutdown_requested = false;
+    let stopped = super::screen_supervisor::supervise_observed(
+        || NativeScreen::start(&target, &machine, &command.state_dir),
+        async {
+            signal_result = super::service::shutdown_signal().await;
+            shutdown_requested = true;
+        },
+        |error| match error {
+            None => eprintln!("Hand screen is ready"),
+            // Keep the process-owner status channel bounded and credential-free;
+            // the configured tracing sink retains the underlying diagnostic.
+            Some(_) => {
+                eprintln!("Hand screen unavailable: capture startup or recovery failed; retrying")
+            }
+        },
     )
-    .await?;
-    eprintln!("Hand screen is ready");
-    let result = super::service::shutdown_signal().await;
-    let stopped = screen.shutdown().await;
-    result.and(stopped)
+    .await;
+    if !shutdown_requested && stopped.is_ok() {
+        eprintln!("Hand screen publisher stopped");
+    }
+    // A terminal publisher exits without reclaiming its replacement. A shutdown
+    // signal failure still takes precedence over capture cleanup, as before.
+    signal_result.and(stopped)
 }
 fn configuration(error: impl std::fmt::Display) -> ManagedError {
     ManagedError::Configuration(error.to_string())

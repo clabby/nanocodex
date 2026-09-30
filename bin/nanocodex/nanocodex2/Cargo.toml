@@ -42,7 +42,7 @@ nanocodex-voice-native.workspace = true
 nanocodex-voice-protocol.workspace = true
 nanocodex-cli-auth.workspace = true
 nanocodex-observability = { workspace = true, features = ["cli"] }
-nanocodex-tools = { path = "../../../crates/nanocodex-tools", version = "0.6.6", default-features = false, features = ["attachment", "workspace-runtime"] }
+nanocodex-tools = { path = "../../../crates/nanocodex-tools", version = "0.6.6", default-features = false, features = ["attachment", "workspace-runtime", "mcp"] }
 png = "0.18.1"
 percent-encoding.workspace = true
 pulldown-cmark = { version = "0.13.4", default-features = false }
