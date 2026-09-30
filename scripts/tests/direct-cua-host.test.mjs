@@ -32,7 +32,7 @@ async function fixture(t, options = {}) {
   const directory = await root(t), state = path.join(directory, 's');
   await mkdir(state, { mode: 0o700 });
   const input = new PassThrough(), output = new PassThrough(), children = [], invocations = [];
-  const config = { app: '/synthetic/App.app', provider: '/synthetic/provider', policyHost: '/synthetic/policy', state, allowApps: true, env: { HOME: directory, PATH: '/usr/bin:/bin', CODEX_TOKEN: 'synthetic-not-a-secret', NODE_OPTIONS: '--inspect' } };
+  const config = { app: '/synthetic/App.app', provider: '/synthetic/provider', policyHost: '/synthetic/policy', state, allowApps: true, env: { HOME: directory, PATH: '/usr/bin:/bin', CODEX_HOME: '/synthetic/account/home', CODEX_TOKEN: 'synthetic-not-a-secret', NODE_OPTIONS: '--inspect' } };
   const completed = runHost(config, { input, output, managedCheck: async () => {}, spawnChild(command, args, settings) {
     const child = new Child(); children.push(child); invocations.push({ command, args, settings }); options.onSpawn?.(child, settings, children.length); return child;
   }});
@@ -95,6 +95,7 @@ test('upstream initialization/results/errors/notifications preserved and provide
   assert.equal(f.invocations[0].settings.env.CODEX_TOKEN, undefined);
   assert.equal(f.invocations[0].settings.env.NODE_OPTIONS, undefined);
   assert.equal(f.invocations[0].settings.env.CODEX_CLI_PATH, undefined);
+  assert.equal(f.invocations[0].settings.env.CODEX_HOME, undefined);
 });
 test('EOF reports uncertainty and removes private session state without replay', async t => {
   const f = await fixture(t), replies = [];

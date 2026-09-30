@@ -54,8 +54,10 @@ Known local/MDM policy sources are detected conservatively. If `/etc/codex`
 requirements/managed configuration, user-home enforced requirement files, or
 macOS managed preferences are present,
 the direct host fails closed rather than declaring the machine unrestricted.
-Full managed-policy import and cloud/enterprise-policy integration are not
-implemented. Ordinary owner-controlled Codex preferences are not read; the
+The outer adapters preserve a trusted caller's `CODEX_HOME` only for this
+metadata-only policy check; upstream JS gets none of it, and the helper receives
+only its own private session directory. Full managed-policy import and
+cloud/enterprise-policy integration are not implemented. Ordinary owner-controlled Codex preferences are not read; the
 owner's explicit Nanocodex app-access policy supersedes their prior local consent
 choices, not administrator restrictions. Externally owned config fails closed.
 This host does not authenticate or impersonate an enterprise Codex

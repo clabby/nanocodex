@@ -196,7 +196,7 @@ function interruptible(result, signal, cancellationReason) {
 
 class ComputerProcess {
   constructor(executable, args, environment) {
-    const env = Object.fromEntries(["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TEMP", "SystemRoot", "LOCALAPPDATA", "LANG", "NANOCODEX_CUA_APP_CONSENT", "SKY_ENABLE_AUDIO"]
+    const env = Object.fromEntries(["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TEMP", "SystemRoot", "LOCALAPPDATA", "LANG", "CODEX_HOME", "NANOCODEX_CUA_APP_CONSENT", "SKY_ENABLE_AUDIO"]
       .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
     this.child = spawn(executable, args, { env: { ...env, ...environment }, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
     this.pending = new Map(); this.sequence = 0; this.lines = new LineBuffer();
