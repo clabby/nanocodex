@@ -92,6 +92,9 @@ final class InboxModel: ObservableObject {
     private var overviewProjectors: [String: TranscriptStreamProjection] = [:]
     private var streamProjector = TranscriptStreamProjection()
     private var overviewProjections: [String: Task<Void, Never>] = [:]
+    @Published private(set) var doneUpdating = Set<String>()
+    @Published private(set) var doneError: String?
+    private var doneRevisions: [String: UUID] = [:]
     @Published var busy = Set<String>()
     @Published var connection = "Disconnected" { didSet { scheduleAgentNotifications() } }
     @Published var error: String?
@@ -425,13 +428,14 @@ final class InboxModel: ObservableObject {
     var tabCards: [AgentCard] {
         let byID = Dictionary(uniqueKeysWithValues: cards.map { ($0.id, $0) })
         return tabOrder.filter { !closedConversationIDs.contains($0) }.compactMap { byID[$0] }
+            .filter { !$0.done || $0.id == deck.focusedID }
     }
     private var recentConversationIDs: Set<String> {
-        Set(cards.filter { !closedConversationIDs.contains($0.id) && ConversationWindow.includes($0, focusedID: deck.focusedID,
+        Set(cards.filter { !$0.done && !closedConversationIDs.contains($0.id) && ConversationWindow.includes($0, focusedID: deck.focusedID,
             openedIDs: openedConversations) }.map(\.id))
     }
     var overviewCards: [AgentCard] {
-        ConversationWindow.overview(cards.filter { !closedConversationIDs.contains($0.id) }, focusedID: deck.focusedID,
+        ConversationWindow.overview(cards.filter { !$0.done && !closedConversationIDs.contains($0.id) }, focusedID: deck.focusedID,
             openedIDs: openedConversations, olderLimit: olderConversationLimit)
     }
     var closedConversationCards: [AgentCard] {
@@ -1782,6 +1786,7 @@ final class InboxModel: ObservableObject {
         generatedAgentJournal = nil; generatedApps = []; generatedAppsLoading = false; generatedAppsError = nil
         todoWorkspace.reset()
         todoRetainedChecks = [:]; todoRetainedMail = []; todoSnoozed = [:]; todoSplit = "For you"; todoSearch = ""; todoMailQuery = "in:inbox"; todoSelectedAccount = ""
+        doneUpdating = []; doneError = nil; doneRevisions = [:]
         isDemo = false; todoItems = []; todoDecisions = []; todoTraces = []; todoFilter = .all; todoDraft = ""; todoWatchHint = ""; todoCaptureOperation = nil; todoResponseOperations.removeAll(); todoError = nil; todoLoading = false; todoLoaded = false; todoRevision = 0; todoRefreshRequested = false; todoFixtureLoaded = false; todoSaving = false; todoResponding = false; cards = []; deck = InboxDeck(); mediaProjection = InboxMediaProjection(); rows = []; events = []; drafts = [:]; seen = [:]
         for task in attachmentProviderTasks.values { task.cancel() }
         attachmentProviderTasks = [:]
@@ -1956,9 +1961,47 @@ final class InboxModel: ObservableObject {
         if focused != nil { observeFocused(restart: true) }
         else { Task { await refresh() } }
     }
+    func setSessionDone(_ id: String, done: Bool) {
+        guard connected, !isDemo, let client, !doneUpdating.contains(id),
+              cards.contains(where: { $0.id == id }) else { return }
+        let epoch = generation
+        doneUpdating.insert(id); doneError = nil
+        doneRevisions[id] = UUID()
+        Task {
+            defer { if generation == epoch { doneUpdating.remove(id) } }
+            do {
+                let receipt = try await client.setDone(id, done: done)
+                guard generation == epoch, !Task.isCancelled else { return }
+                doneRevisions[id] = UUID()
+                if let index = cards.firstIndex(where: { $0.id == id }) {
+                    cards[index].applyDoneReceipt(done: receipt.done, doneAt: receipt.doneAt, presentationRevision: receipt.presentationRevision)
+                    reconcile()
+                }
+            } catch {
+                guard generation == epoch, !Task.isCancelled else { return }
+                doneError = "Couldn’t confirm the change. Refreshing saved state. " + error.localizedDescription
+                // Never replay an uncertain write. A read may prove that it was saved.
+                do {
+                    let listing = try await client.list()
+                    guard generation == epoch, !Task.isCancelled else { return }
+                    doneRevisions[id] = UUID()
+                    if let saved = listing.first(where: { $0.id == id }),
+                       let index = cards.firstIndex(where: { $0.id == id }) {
+                        cards[index].mergeDone(from: saved)
+                        reconcile()
+                        doneError = "Couldn’t confirm the request. Showing the saved state; no automatic retry was made."
+                    }
+                } catch {
+                    guard generation == epoch, !Task.isCancelled else { return }
+                    doneError = "Couldn’t confirm or refresh the change. Reconnect and refresh before trying again."
+                }
+            }
+        }
+    }
     func refresh(initialListing: [AgentCard]? = nil) async {
         guard let client, !refreshing else { return }
         let epoch = generation
+        let completionRevisions = doneRevisions
         refreshing = true
         defer { if generation == epoch { refreshing = false } }
         do {
@@ -1979,6 +2022,9 @@ final class InboxModel: ObservableObject {
                 card.title = summary.title; card.updatedAt = max(card.updatedAt, summary.updatedAt); card.turnCount = summary.turnCount
                 card.lastUserMessageAt = max(card.lastUserMessageAt, summary.lastUserMessageAt)
                 card.mayHaveScheduledJobs = summary.mayHaveScheduledJobs
+                if completionRevisions[summary.id] == doneRevisions[summary.id] {
+                    card.mergeDone(from: summary)
+                }
                 if summary.presentationUpdatedAt >= card.presentationUpdatedAt {
                     card.presentationStatus = summary.presentationStatus
                     card.presentationActivity = summary.presentationActivity

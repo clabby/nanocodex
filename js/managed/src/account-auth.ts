@@ -2012,6 +2012,8 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
         || !["running", "stopping", "completed", "cancelled", "failed", "idle"].includes(value.status)
         || !Array.isArray(value.activeTurnIds) || !value.activeTurnIds.every(id => typeof id === "string")
         || !Number.isFinite(value.updatedAt)
+        || (value.done !== undefined && typeof value.done !== "boolean")
+        || (value.doneAt !== undefined && value.doneAt !== null && (!Number.isFinite(value.doneAt) || value.doneAt < 0))
         || (value.lastUserMessageAt !== undefined && (!Number.isFinite(value.lastUserMessageAt) || value.lastUserMessageAt < 0))
         || (value.lastUserPrompt !== undefined && (typeof value.lastUserPrompt !== "string" || value.lastUserPrompt.length > LAST_USER_PROMPT_LIMIT))
         || (value.title !== undefined && (typeof value.title !== "string" || value.title.length > 56))
@@ -2020,11 +2022,17 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
       }
       this.ctx.storage.sql.exec(`UPDATE agent_registry SET presentation = json_set(?, '$.lastUserMessageAt',
         COALESCE(?, json_extract(presentation, '$.lastUserMessageAt'), CASE WHEN turn_count > 0 THEN updated_at ELSE 0 END),
-        '$.lastUserPrompt', COALESCE(?, json_extract(presentation, '$.lastUserPrompt'), '')),
+        '$.lastUserPrompt', COALESCE(?, json_extract(presentation, '$.lastUserPrompt'), ''),
+        '$.done', json(COALESCE(?, CASE WHEN json_extract(presentation, '$.done') THEN 'true' ELSE 'false' END)),
+        '$.doneAt', CASE WHEN ? IS NULL THEN json_extract(presentation, '$.doneAt') ELSE ? END),
         title = COALESCE(?, title)
         WHERE id = ? AND deleted_at IS NULL
           AND COALESCE(json_extract(presentation, '$.revision'), 0) < ?`,
-        JSON.stringify(value), value.lastUserMessageAt ?? null, value.lastUserPrompt ?? null, value.title ?? null, presentationMatch[1]!, value.revision);
+        JSON.stringify(value), value.lastUserMessageAt ?? null, value.lastUserPrompt ?? null,
+        value.done === undefined ? null : JSON.stringify(value.done), value.doneAt === undefined ? null : 1, value.doneAt ?? null,
+        value.title ?? null, presentationMatch[1]!, value.revision);
+      if (!this.ctx.storage.sql.exec("SELECT id FROM agent_registry WHERE id = ? AND deleted_at IS NULL", presentationMatch[1]!).toArray().length)
+        return json({ error: "not_found" }, { status: 404 });
       return new Response(null, { status: 204 });
     }
     const activityMatch = url.pathname.match(/^\/agents\/([0-9a-f-]{36})\/activity$/);
@@ -2079,7 +2087,7 @@ function agentSummary(row: AgentRegistryRow): AgentSummary {
     updatedAt: row.updated_at,
     turnCount: row.turn_count,
     mayHaveScheduledJobs: row.cron_candidate !== 0,
-    ...(row.presentation ? { presentation: JSON.parse(row.presentation) as AgentPresentation } : {}),
+    ...(row.presentation ? { presentation: { done: false, doneAt: null, ...JSON.parse(row.presentation) } as AgentPresentation } : {}),
 
   };
 }

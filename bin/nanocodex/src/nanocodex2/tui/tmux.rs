@@ -43,6 +43,13 @@ impl Publisher {
                 &self.pane,
                 "@nanocodex-overview",
                 &metadata,
+                ";",
+                "set-option",
+                "-p",
+                "-t",
+                &self.pane,
+                "@nanocodex-continue-agent",
+                agent,
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

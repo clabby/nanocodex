@@ -413,7 +413,7 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     private func record(_ phase: String, bytes: Int? = nil) {
         var event: [String: Any] = ["phase": phase, "request": requestID, "path": request.url!.path,
-                                    "query": request.url!.query ?? "",
+                                    "query": request.url!.query ?? "", "method": request.httpMethod ?? "GET",
                                     "time": ProcessInfo.processInfo.systemUptime, "process": ProcessInfo.processInfo.processIdentifier]
         if let bytes { event["bytes"] = bytes }
         let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("startup-requests.jsonl")
@@ -497,6 +497,49 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
                     Self.historyStreams[requestID] = self
                 } else if !path.hasSuffix("/triggers") {
                     body = "{\"agent_id\":\"saved\",\"latest_event_cursor\":\"\(Self.historyLatest)\",\"active_turns\":[]}"
+                }
+            }
+            if ProcessInfo.processInfo.environment["NANOCODEX_SESSION_DONE_FIXTURE"] == "1" {
+                delay = 0.1
+                let key = "session-done-fixture." + (ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_PROFILE"] ?? "default")
+                var doneDates = UserDefaults.standard.dictionary(forKey: key) ?? [:]
+                var revision = UserDefaults.standard.integer(forKey: key + ".revision")
+                if path.hasSuffix("/done"), request.httpMethod == "PUT" {
+                    let data: Data
+                    if let supplied = request.httpBody { data = supplied }
+                    else if let stream = request.httpBodyStream {
+                        stream.open(); defer { stream.close() }
+                        var bytes = Data(), buffer = [UInt8](repeating: 0, count: 1024)
+                        while stream.hasBytesAvailable {
+                            let count = stream.read(&buffer, maxLength: buffer.count)
+                            if count <= 0 { break }; bytes.append(contentsOf: buffer.prefix(count))
+                        }
+                        data = bytes
+                    } else { data = Data() }
+                    let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                    let done = payload?["done"] as? Bool ?? false
+                    record(done ? "mark-done" : "reopen")
+                    if ProcessInfo.processInfo.environment["NANOCODEX_SESSION_DONE_FAILURE"] != "before" {
+                        if done != (doneDates[id] != nil) { revision += 1 }
+                        if done { doneDates[id] = Date().timeIntervalSince1970 * 1000 }
+                        else { doneDates[id] = nil }
+                        UserDefaults.standard.set(doneDates, forKey: key)
+                        UserDefaults.standard.set(revision, forKey: key + ".revision")
+                    }
+                    body = String(data: try! JSONSerialization.data(withJSONObject: ["done": done,
+                        "done_at": doneDates[id] ?? NSNull(), "presentation_revision": revision]), encoding: .utf8)!
+                    if ProcessInfo.processInfo.environment["NANOCODEX_SESSION_DONE_FAILURE"] != nil {
+                        status = 503; body = #"{"error":"synthetic_uncertain_write"}"#
+                    }
+                } else if path == "/v1/agents", let data = body.data(using: .utf8),
+                          var roster = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                          var summaries = roster["summaries"] as? [String: [String: Any]] {
+                    for agent in summaries.keys {
+                        summaries[agent]?["presentation"] = ["status": "completed", "updatedAt": Date().timeIntervalSince1970 * 1000, "revision": revision,
+                            "done": doneDates[agent] != nil, "doneAt": doneDates[agent] ?? NSNull()]
+                    }
+                    roster["summaries"] = summaries
+                    body = String(data: try! JSONSerialization.data(withJSONObject: roster), encoding: .utf8)!
                 }
             }
             let responseBody = body, responseStatus = status

@@ -74,7 +74,7 @@ export async function routeManaged(
       // direct dispatch throws to the 503 boundary; never create a second agent.
       response = await directLiveAgent(request, env) ?? await env.NANOCODEX_BACKEND.fetch(request);
     }
-    if (url.pathname === "/v1/agent-runs" || /^\/v1\/agents(?:\/(?:live|[0-9a-f-]{36}(?:\/(?:routing|settings|prepare|ws|events(?:\/history)?|turns(?:\/[A-Za-z0-9_.:-]{1,128}\/cancel)?))?))?$/.test(url.pathname)) {
+    if (url.pathname === "/v1/agent-runs" || /^\/v1\/agents(?:\/(?:live|[0-9a-f-]{36}(?:\/(?:routing|settings|done|prepare|ws|events(?:\/history)?|turns(?:\/[A-Za-z0-9_.:-]{1,128}\/cancel)?))?))?$/.test(url.pathname)) {
       // Match the managed receipt without reading a body or changing upgraded
       // sockets. This separates account forwarding from managed execution and
       // the caller's network/scheduling residual in end-to-end traces.

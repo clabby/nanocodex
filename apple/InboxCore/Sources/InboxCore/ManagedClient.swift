@@ -237,6 +237,8 @@ public final class ManagedClient: @unchecked Sendable {
             let store = snapshots
             await Task.detached(priority: .utility) {
                 if let snapshotTicket,
+                   store.applySessionDoneMutation(path: path, method: method, response: decoded, ticket: snapshotTicket, expectedDone: body?["done"].bool) { return }
+                if let snapshotTicket,
                    store.applyTodoMutation(path: path, method: method, response: decoded, ticket: snapshotTicket) { return }
                 // A retired client must not recreate a Todo projection.
                 if snapshotTicket == nil, path == "/v1/todo" || path.hasPrefix("/v1/todo/") { return }
@@ -292,6 +294,26 @@ public final class ManagedClient: @unchecked Sendable {
     public static func agentPath(_ id: String) throws -> String {
         guard !id.isEmpty, id.count <= 128, id.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || [45, 95].contains($0) }) else { throw APIError.invalidResponse }
         return "/v1/agents/" + id
+    }
+    /// One explicit write, with no automatic retry on an uncertain result.
+    public func setDone(_ id: String, done: Bool) async throws -> (done: Bool, doneAt: Double?, presentationRevision: Double?) {
+        let result = try await json(path: Self.agentPath(id) + "/done", method: "PUT",
+                                    body: .object(["done": .bool(done)]))
+        guard case .bool(let confirmed) = result["done"], confirmed == done else { throw APIError.invalidResponse }
+        let timestamp: Double?
+        switch result["done_at"] {
+        case .null: timestamp = nil
+        case .number(let value) where value.isFinite && value >= 0: timestamp = value
+        default: throw APIError.invalidResponse
+        }
+        guard confirmed ? timestamp != nil : timestamp == nil else { throw APIError.invalidResponse }
+        let revision: Double?
+        switch result["presentation_revision"] {
+        case .null: revision = nil // Older services did not return ordering metadata.
+        case .number(let value) where value.isFinite && value >= 0 && value.rounded(.down) == value: revision = value
+        default: throw APIError.invalidResponse
+        }
+        return (confirmed, timestamp, revision)
     }
     public func state(_ id: String) async throws -> JSON { try await json(path: Self.agentPath(id)) }
     /// Starts server-owned preparation without waiting for model readiness.

@@ -35,6 +35,30 @@ final class AccountSnapshotTests: XCTestCase {
         XCTAssertNotNil(store.read(path: "/v1/agents"))
     }
 
+    func testManualDonePersistsWithoutRemovingHistoryAndFencesStaleRoster() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = PersistentReadCache(directory: directory)
+        let roster = Data(#"{"data":["synthetic"],"summaries":{"synthetic":{"title":"Working","presentation":{"status":"running"}}}}"#.utf8)
+        let ticket = store.ticket()
+        store.save(roster, path: "/v1/agents", ticket: ticket)
+        let historyPath = "/v1/agents/synthetic/events/history?limit=128"
+        store.save(Data("history".utf8), path: historyPath, ticket: ticket)
+        XCTAssertTrue(store.applySessionDoneMutation(path: "/v1/agents/synthetic/done", method: "PUT",
+            response: .object(["done": .bool(true), "done_at": .number(123)]), ticket: ticket))
+        store.save(roster, path: "/v1/agents", ticket: ticket)
+        let reopened = PersistentReadCache(directory: directory)
+        let recovered = try JSONDecoder().decode(JSON.self, from: XCTUnwrap(reopened.read(path: "/v1/agents")))
+        XCTAssertEqual(recovered["summaries"]["synthetic"]["presentation"]["done"], .bool(true))
+        XCTAssertEqual(recovered["summaries"]["synthetic"]["presentation"]["doneAt"], .number(123))
+        XCTAssertEqual(recovered["summaries"]["synthetic"]["presentation"]["status"], .string("running"))
+        XCTAssertEqual(reopened.read(path: historyPath), Data("history".utf8))
+        XCTAssertTrue(store.applySessionDoneMutation(path: "/v1/agents/synthetic/done", method: "PUT",
+            response: .object(["done": .bool(false), "done_at": .null]), ticket: store.ticket()))
+        let restored = try JSONDecoder().decode(JSON.self, from: XCTUnwrap(reopened.read(path: "/v1/agents")))
+        XCTAssertEqual(restored["summaries"]["synthetic"]["presentation"]["done"], .bool(false))
+    }
+
     func testAgentMutationsPreserveUnrelatedOfflineHistory() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
