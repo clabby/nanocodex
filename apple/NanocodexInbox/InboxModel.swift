@@ -907,6 +907,26 @@ final class InboxModel: ObservableObject {
         guard connected, !isDemo, scope == expected else { throw APIError.invalidCredential }
     }
 
+    // Meetings share one protected journal with foreground and locked recorders.
+    // Its rows are isolated by the same pinned account scope as voice recovery.
+    lazy var meetingRecordingStore: MeetingRecordingStore? = try? MeetingRecordingStore.applicationStore()
+    lazy var meetingLibrary: MeetingLibrary? = meetingRecordingStore.map { MeetingLibrary(store: $0) }
+
+    func prepareMeetingLibrary() {
+        let active = MeetingRecorder.shared
+        meetingLibrary?.activate(scope: connected && !isDemo ? scope : nil,
+                                 client: connected && !isDemo ? client : nil,
+                                 activeCaptureID: active.accountScope == scope ? active.captureID : nil)
+    }
+
+    func syncMeetingRecording(accountScope expected: String) async {
+        guard (try? lockedVoiceAccountScope()) == expected else { return }
+        do { try await restoreLockedVoiceAccount(scope: expected) } catch { return }
+        if meetingLibrary?.scope != expected { prepareMeetingLibrary() }
+        meetingLibrary?.reloadLocal()
+        await meetingLibrary?.retry()
+    }
+
     /// The preview carries only finalized Speech text and does not create an agent
     /// turn. The account scope is pinned before recording and checked again after
     /// restoring or awaiting the network to fence an account switch.
@@ -1422,6 +1442,12 @@ final class InboxModel: ObservableObject {
             }
         }
         connected = true; connection = "Connecting"; reconcile(); resume(initialListing: initial)
+        prepareMeetingLibrary()
+        Task { [weak self] in
+            guard let self, self.connected, self.scope == accountScope else { return }
+            await self.meetingLibrary?.refresh()
+            await self.meetingLibrary?.retry()
+        }
         updateDeviceHand(); scheduleHandRefresh()
     }
     private func crmPath(id: String?, section: String?, query: [String: String]) -> String {
@@ -1753,6 +1779,8 @@ final class InboxModel: ObservableObject {
         restoringTodoDraft = true
         defer { restoringTodoDraft = false }
         agentNotificationUpdate?.cancel(); agentNotificationUpdate = nil
+        MeetingRecorder.shared.interrupt("Account disconnected. Partial meeting retained for its original account.")
+        if !MeetingRecorder.shared.working { _ = MeetingRecorder.shared.discard() }
         stopOverview()
         overviewTranscripts = [:]; tabHistories = [:]; recentTabs = []; tabOrder = []
         openedConversations = []; closedConversationIDs = []; olderConversationLimit = 0
@@ -1773,6 +1801,7 @@ final class InboxModel: ObservableObject {
         #endif
         do { try ContextStore.shared().activate(nil) } catch { contextError = error.localizedDescription }
         contextItems = []; contextRoutes = [:]; contextEnabled = false; selectedContext = [:]; excludedContext = [:]; showContext = false; automaticContext = [:]
+        meetingLibrary?.activate(scope: nil, client: nil)
         voice.stop(); voice.clearHistory(); accountCredential = nil; unlistedAgents = []; unavailableAgents = []; historyCursors = [:]
         remoteService?.close(); remoteService = nil
         connectionAttempt = UUID(); generation = UUID(); observation = UUID(); polling?.cancel(); streaming?.cancel(); client?.close(); client = nil
@@ -2053,6 +2082,10 @@ final class InboxModel: ObservableObject {
             })
             guard generation == epoch, !Task.isCancelled else { return }
             prioritizeNext()
+            // A pending journal retries after connectivity returns even when the
+            // user never opens the Meetings tab again.
+            if meetingLibrary?.scope != scope { prepareMeetingLibrary() }
+            await meetingLibrary?.retry()
         } catch {
             guard generation == epoch, !Task.isCancelled else { return }
             self.error = error.localizedDescription

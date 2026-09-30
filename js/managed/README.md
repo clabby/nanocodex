@@ -961,3 +961,7 @@ retain digest ETags and content lengths. Revoked/expired grants cannot access
 these routes. Generic `/files`, attachments and configuration stay unavailable
 to Connect. These HTTP boundaries do not change the agent's shared `/brain`
 execution model described above.
+
+## Native meeting library
+
+See [Account meeting library](MEETING_LIBRARY_API.md) for recording persistence, revision-safe synchronization, summary generation, limits and the reusable local HTTP fixture.

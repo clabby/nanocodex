@@ -21,6 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // account services or device sharing during UI tests.
         if ProcessInfo.processInfo.environment["NANOCODEX_NATIVE_UI_FIXTURE"] == "1" {
             model.runtime.requestOverride = { _, _ in .null }
+            if ProcessInfo.processInfo.environment["NANOCODEX_NATIVE_MEETINGS_HTTP_FIXTURE"] == "1" {
+                model.meetingClientOverride = { NativeMeetingsHTTPFixture.makeClient() }
+            }
             model.state.connected = true
             model.state.defaultHandEnabled = false
             model.isStarting = false
@@ -121,6 +124,7 @@ struct NanocodexApp: App {
                 Button("Actual Size") { model.resetZoom() }.keyboardShortcut("0", modifiers: .command)
             }
             CommandMenu("Workspace") {
+                Button("Meetings") { model.screen = .meetings }.keyboardShortcut("m", modifiers: [.command, .shift])
                 Button("Keyboard Shortcuts…") { model.showingKeyboardHelp = true }
                 Divider()
                 Button("New Agent to the Right") { model.splitAgent(axis: "horizontal") }.keyboardShortcut("\\")
@@ -177,7 +181,9 @@ private struct WorkspaceSplitContent: View {
     var body: some View {
         HSplitView {
             Group {
-                if model.screen == .hands { HandsView() } else { TiledWorkspaceView() }
+                if model.screen == .hands { HandsView() }
+                else if model.screen == .meetings { MeetingsView(library: model.meetingLibrary) }
+                else { TiledWorkspaceView() }
             }.frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
             if model.showingScreens, let service = model.remoteService {
                 RemoteDashboard(service: service, host: model.remoteMacHost, phoneHost: model.remotePhoneHost,
@@ -216,7 +222,7 @@ struct ContentView: View {
                 workspace
             }
         }
-        .navigationTitle(model.screen == .hands ? "Hands" : "Nanocodex")
+        .navigationTitle(model.screen == .hands ? "Hands" : model.screen == .meetings ? "Meetings" : "Nanocodex")
         .toolbar {
             if !model.isStarting && !model.showsOnboarding {
                 WorkspaceToolbar(model: model, verticalTabs: model.tabPosition == "left" && tabColumnVisibility != .detailOnly) { vertical in
