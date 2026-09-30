@@ -20,3 +20,17 @@ checks, OS permissions, and authenticated Hand boundaries remain in place.
 Known local/MDM managed policy causes the direct host to fail closed until that
 policy has a proper integration. It does not claim to be a signed-in Codex account
 or invent authentication, requirements discovery, or enterprise-policy results.
+
+There is no per-app Nanocodex approval dialog. The old dedicated official
+app-server's process-local `approval_policy="never"` and
+`sandbox_mode="danger-full-access"` overrides are superseded on the managed
+macOS path by this direct host; do not restore the retired bridge or edit a
+user's ordinary Codex configuration to obtain app access. Known provider or
+organization restrictions are not overridden.
+
+Confidential sudo input remains a separate exact-command flow through
+`request_native_secure_input` and an independently enrolled protected helper.
+The authentication user is enrollment-bound, not caller-selected. Installation
+and first enrollment require trusted local administrator approval; passwords
+never belong in chat, tool arguments, or an agent-visible terminal. This is not
+a general native browser/login-password input mechanism.
