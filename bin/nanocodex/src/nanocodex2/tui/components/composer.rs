@@ -54,6 +54,7 @@ pub(crate) enum ComposerEffect {
     ShowAgentId,
     Share(Result<crate::tui::share::Command, String>),
     Vault(crate::tui::vault::Command),
+    SecureInput(crate::tui::secure_input::Command),
     Submit(Submission),
     Queue(Submission),
     RunShell(String),
@@ -1095,6 +1096,14 @@ impl Composer {
 
     fn take_local_command(&mut self) -> Option<ComposerUpdate> {
         if !self.images.is_empty() {
+            if self.draft.split_whitespace().next() == Some("/secure-input") {
+                return Some(ComposerUpdate::effect(
+                    ComposerEffect::Settings(SettingsCommand::Invalid(
+                        "Remove image attachments before opening private secure input.".into(),
+                    )),
+                    false,
+                ));
+            }
             if self.draft.split_whitespace().next() == Some("/autoroute") {
                 return Some(ComposerUpdate::effect(
                     ComposerEffect::Settings(SettingsCommand::Invalid(
@@ -1127,16 +1136,22 @@ impl Composer {
             }
             return None;
         }
-        let effect = if let Some(command) = crate::tui::share::Command::parse(self.draft.trim()) {
-            ComposerEffect::Share(command)
-        } else if let Some(command) = crate::tui::vault::Command::parse(self.draft.trim()) {
-            ComposerEffect::Vault(command)
-        } else if self.draft.trim() == "/id" {
-            ComposerEffect::ShowAgentId
-        } else {
-            ComposerEffect::Settings(SettingsCommand::parse(self.draft.trim())?)
-        };
-        self.history.record(self.draft.trim().to_owned());
+        let effect =
+            if let Some(command) = crate::tui::secure_input::Command::parse(self.draft.trim()) {
+                ComposerEffect::SecureInput(command)
+            } else if let Some(command) = crate::tui::share::Command::parse(self.draft.trim()) {
+                ComposerEffect::Share(command)
+            } else if let Some(command) = crate::tui::vault::Command::parse(self.draft.trim()) {
+                ComposerEffect::Vault(command)
+            } else if self.draft.trim() == "/id" {
+                ComposerEffect::ShowAgentId
+            } else {
+                ComposerEffect::Settings(SettingsCommand::parse(self.draft.trim())?)
+            };
+        // Never persist even malformed private-control arguments in composer history.
+        if !matches!(&effect, ComposerEffect::SecureInput(_)) {
+            self.history.record(self.draft.trim().to_owned());
+        }
         self.replace_draft(String::new());
         Some(ComposerUpdate::effect(effect, true))
     }
@@ -3109,6 +3124,38 @@ mod tests {
             Some(ComposerEffect::Settings(SettingsCommand::Invalid(_)))
         ));
         assert!(!composer.images.is_empty());
+    }
+
+    #[test]
+    fn secure_input_controls_never_record_arguments_in_history() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("/secure-input synthetic-mistaken-argument".to_owned());
+        let update = composer.take_local_command().unwrap();
+        assert!(matches!(
+            update.effect,
+            Some(ComposerEffect::SecureInput(
+                crate::tui::secure_input::Command::Help
+            ))
+        ));
+        assert!(composer.draft.is_empty());
+        assert!(!composer.move_up());
+    }
+
+    #[test]
+    fn secure_input_with_images_fails_locally_without_chat_fallback() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("/secure-input".to_owned());
+        composer.images.push(super::PastedImage {
+            range: 0..0,
+            data_url: "data:image/png;base64,".into(),
+        });
+        let update = composer.take_local_command().unwrap();
+        assert!(matches!(
+            update.effect,
+            Some(ComposerEffect::Settings(SettingsCommand::Invalid(_)))
+        ));
+        assert_eq!(composer.images.len(), 1);
+        assert_eq!(composer.draft, "/secure-input");
     }
 
     #[test]

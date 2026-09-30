@@ -43,6 +43,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -57,6 +58,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -4060,6 +4062,7 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -6059,16 +6062,24 @@ dependencies = [
 name = "nanocodex-managed"
 version = "0.6.6"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "axum",
+ "base64 0.22.1",
  "futures-util",
+ "ghash",
+ "hkdf",
  "nanocodex-agent",
  "nanocodex-oai-api",
  "nanocodex-tools",
  "nanocodex-voice-protocol",
+ "p256",
+ "polyval",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
@@ -6374,6 +6385,7 @@ dependencies = [
 name = "nanocodex2-bin"
 version = "0.6.6"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "arboard",
  "async-trait",
@@ -6388,6 +6400,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "hex",
+ "hkdf",
  "image",
  "kvm-ioctls",
  "nanocodex",
@@ -6406,6 +6419,7 @@ dependencies = [
  "nanocodex-voice-protocol",
  "nix 0.31.3",
  "opusic-c",
+ "p256",
  "percent-encoding",
  "png 0.18.1",
  "portable-pty",
@@ -6418,6 +6432,7 @@ dependencies = [
  "semver 1.0.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sha2 0.11.0",
  "shlex 2.0.1",
  "syntect",
@@ -6436,6 +6451,7 @@ dependencies = [
  "vt100",
  "webrtc",
  "whoami 1.6.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -7748,6 +7764,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]

@@ -55,7 +55,7 @@ export class NativeSecureInput {
     if(typeof r.request_id!=='string'||!uuid.test(r.request_id)||typeof r.expires_at!=='number'||!Number.isSafeInteger(r.expires_at)||r.expires_at<=Date.now()||r.expires_at>Date.now()+301000)throw fail();
     const ticket:Ticket={request_id:r.request_id,machine_id:v.machine_id,executable:v.executable,arguments:v.arguments as string[],cwd:v.cwd,uid:r.uid as number,command_digest:bytes(r.command_digest,32),public_key:bytes(r.public_key,65),expires_at:r.expires_at};
     if(atob(ticket.public_key).charCodeAt(0)!==4)throw fail();
-    if(typeof r.uid!=='number'||!Number.isSafeInteger(r.uid)||r.uid<0)throw fail();
+    if(typeof r.uid!=='number'||!Number.isSafeInteger(r.uid)||r.uid<=0||r.uid>0xffffffff)throw fail();
     const canonical=JSON.stringify({arguments:v.arguments,cwd:v.cwd,executable:v.executable,uid:r.uid});
     const digest=btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canonical)))));
     if(digest!==ticket.command_digest)throw fail();

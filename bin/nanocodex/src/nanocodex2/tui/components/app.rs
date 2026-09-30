@@ -213,6 +213,11 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         projection: Box<RestoredSessionProjection>,
     },
+    SecureInputReceipt {
+        pane: PaneId,
+        request_id: String,
+        status: crate::tui::secure_input::Status,
+    },
     VaultReceipt {
         pane: PaneId,
         receipt: String,
@@ -606,6 +611,11 @@ impl AppNode {
             AppEvent::HistoryReplayed { pane, projection } => {
                 self.update_root(pane, RootEvent::HistoryReplayed { projection })
             }
+            AppEvent::SecureInputReceipt {
+                pane,
+                request_id,
+                status,
+            } => self.update_root(pane, RootEvent::SecureInputReceipt { request_id, status }),
             AppEvent::VaultReceipt { pane, receipt } => {
                 self.update_root(pane, RootEvent::VaultReceipt(receipt))
             }
@@ -1145,6 +1155,10 @@ impl AppNode {
                 main.component_mut().set_fork_available(true);
             }
         }
+    }
+
+    pub(crate) fn focused_pane(&self) -> Option<PaneId> {
+        (!self.screen_focused).then_some(self.focus)
     }
 
     pub(crate) fn main_pane(&self) -> Option<PaneId> {
