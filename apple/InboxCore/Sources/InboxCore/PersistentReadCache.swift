@@ -83,10 +83,15 @@ final class PersistentReadCache: @unchecked Sendable {
     }
     /// Preserve transcript/history while updating only acknowledged manual organization.
     @discardableResult
-    func applySessionDoneMutation(path: String, method: String, response: JSON, ticket: UInt64) -> Bool {
+    func applySessionDoneMutation(path: String, method: String, response: JSON, ticket: UInt64, expectedDone: Bool? = nil) -> Bool {
         let parts = path.split(separator: "/")
         guard method == "PUT", parts.count == 4, parts[0] == "v1", parts[1] == "agents", parts[3] == "done" else { return false }
-        guard case .bool(let done) = response["done"] else { return true }
+        guard case .bool(let done) = response["done"], expectedDone == nil || done == expectedDone else { return true }
+        switch response["presentation_revision"] {
+        case .null: break // Compatibility with services without revision metadata.
+        case .number(let revision) where revision.isFinite && revision >= 0 && revision.rounded(.down) == revision: break
+        default: return true
+        }
         if done {
             guard case .number(let at) = response["done_at"], at.isFinite, at >= 0 else { return true }
         } else { guard response["done_at"] == .null else { return true } }

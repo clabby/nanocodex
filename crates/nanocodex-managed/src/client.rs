@@ -548,13 +548,28 @@ impl ManagedClient {
         validate_id("agent", agent_id)?;
         let body = serde_json::to_vec(&serde_json::json!({ "done": done }))
             .map_err(|_| ManagedError::InvalidResponse("failed to encode session disposition"))?;
-        self.json(
-            Method::PUT,
-            &format!("{}/done", agent_path(agent_id)),
-            Some(&body),
-            None,
-        )
-        .await
+        let receipt: crate::SessionDoneState = self
+            .json(
+                Method::PUT,
+                &format!("{}/done", agent_path(agent_id)),
+                Some(&body),
+                None,
+            )
+            .await?;
+        if receipt.done != done
+            || (if done {
+                !receipt
+                    .done_at
+                    .is_some_and(|at| at.is_finite() && at >= 0.0)
+            } else {
+                receipt.done_at.is_some()
+            })
+        {
+            return Err(ManagedError::InvalidResponse(
+                "session disposition could not be confirmed",
+            ));
+        }
+        Ok(receipt)
     }
 
     /// Deletes one account-owned managed agent.

@@ -31,6 +31,18 @@ async fn done_client_uses_authenticated_put_and_decodes_undo_and_failures() {
         if id == "malformed-session" {
             return Ok(Json(json!({"done_at":null})));
         }
+        if id == "mismatched-session" {
+            return Ok(Json(json!({"done":false,"done_at":null})));
+        }
+        if id == "missing-timestamp-session" {
+            return Ok(Json(json!({"done":true,"done_at":null})));
+        }
+        if id == "negative-timestamp-session" {
+            return Ok(Json(json!({"done":true,"done_at":-1})));
+        }
+        if id == "unexpected-timestamp-session" {
+            return Ok(Json(json!({"done":false,"done_at":1234})));
+        }
         assert_eq!(id, "synthetic-session");
         assert!(body["done"].is_boolean());
         Ok(Json(
@@ -71,6 +83,25 @@ async fn done_client_uses_authenticated_put_and_decodes_undo_and_failures() {
         Err(ManagedError::Http { .. })
     ));
     assert!(client.set_done("malformed-session", false).await.is_err());
+    assert!(client.set_done("mismatched-session", true).await.is_err());
+    assert!(
+        client
+            .set_done("missing-timestamp-session", true)
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .set_done("negative-timestamp-session", true)
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .set_done("unexpected-timestamp-session", false)
+            .await
+            .is_err()
+    );
     assert!(client.set_done("invalid/id", true).await.is_err());
     assert_eq!(
         *calls.lock().unwrap(),
@@ -79,6 +110,16 @@ async fn done_client_uses_authenticated_put_and_decodes_undo_and_failures() {
             ("synthetic-session".to_owned(), json!({"done":false})),
             ("forbidden-session".to_owned(), json!({"done":true})),
             ("malformed-session".to_owned(), json!({"done":false})),
+            ("mismatched-session".to_owned(), json!({"done":true})),
+            ("missing-timestamp-session".to_owned(), json!({"done":true})),
+            (
+                "negative-timestamp-session".to_owned(),
+                json!({"done":true})
+            ),
+            (
+                "unexpected-timestamp-session".to_owned(),
+                json!({"done":false})
+            ),
         ]
     );
     eprintln!(

@@ -40,6 +40,29 @@ final class SessionDoneTransportTests: XCTestCase {
         }
     }
 
+    func testRejectedDoneReceiptsCannotMutateTheOfflineRoster() async throws {
+        let roster = "{\"data\":[\"synthetic\"],\"summaries\":{\"synthetic\":{\"presentation\":{\"done\":true,\"doneAt\":123,\"revision\":2}}}}"
+        for receipt in ["{\"done\":false,\"done_at\":null,\"presentation_revision\":3}",
+                        "{\"done\":true,\"done_at\":456,\"presentation_revision\":3.5}",
+                        "{\"done\":true,\"done_at\":456,\"presentation_revision\":-1}"] {
+            var writes = 0
+            let fixture = try HTTPFixture { request in
+                if request.method == "GET" { return FixtureReply(body: roster) }
+                writes += 1
+                return FixtureReply(body: receipt)
+            }
+            defer { fixture.close() }
+            let client = ManagedClient(credential: try .init(origin: fixture.origin, apiKey: fixtureKey), configuration: fixture.configuration)
+            defer { client.clearCachedResponses(); client.close() }
+            let before = try await client.json(path: "/v1/agents")
+            do { _ = try await client.setDone("synthetic", done: true); XCTFail("Malformed receipt must fail") }
+            catch { }
+            let cached = await client.cachedJSON(path: "/v1/agents")
+            XCTAssertEqual(cached, before, "Rejected receipt corrupted the saved roster")
+            XCTAssertEqual(writes, 1)
+        }
+    }
+
     func testRosterReadsManualDoneSeparatelyFromExecutionStatus() async throws {
         let fixture = try HTTPFixture { request in
             XCTAssertEqual(request.method, "GET")

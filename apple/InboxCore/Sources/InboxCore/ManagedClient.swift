@@ -237,7 +237,7 @@ public final class ManagedClient: @unchecked Sendable {
             let store = snapshots
             await Task.detached(priority: .utility) {
                 if let snapshotTicket,
-                   store.applySessionDoneMutation(path: path, method: method, response: decoded, ticket: snapshotTicket) { return }
+                   store.applySessionDoneMutation(path: path, method: method, response: decoded, ticket: snapshotTicket, expectedDone: body?["done"].bool) { return }
                 if let snapshotTicket,
                    store.applyTodoMutation(path: path, method: method, response: decoded, ticket: snapshotTicket) { return }
                 // A retired client must not recreate a Todo projection.
