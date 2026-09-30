@@ -66,9 +66,8 @@ pub async fn provision_upstream(force_refresh: bool) -> Result<serde_json::Value
     }
 }
 
-/// Install the official native-messaging bridge shipped with the selected
-/// browser component. Browser stores still require the user to confirm the
-/// extension installation.
+/// Dedicated browser APIs are unsupported by the native-computer-only runtime.
+/// Browsers remain controllable through the native computer UI.
 pub async fn configure_browser_bridge() -> Result<serde_json::Value, String> {
     #[cfg(target_os = "macos")]
     {
@@ -523,24 +522,6 @@ mod mac {
         ))
     }
 
-    fn browser_assets(version: &Path) -> Vec<(PathBuf, PathBuf)> {
-        let plugin = version.join(APP).join(RESOURCES).join(BROWSER_PLUGIN);
-        let extension_host = browser_extension_host();
-        [
-            PathBuf::from("scripts/installManifest.mjs"),
-            PathBuf::from("scripts/browser-client.mjs"),
-            extension_host,
-        ]
-        .into_iter()
-        .map(|relative| {
-            (
-                plugin.join(&relative),
-                PathBuf::from("browser").join(relative),
-            )
-        })
-        .collect()
-    }
-
     fn legacy_browser_config_relative() -> PathBuf {
         PathBuf::from("Resources")
             .join(BROWSER_PLUGIN)
@@ -548,41 +529,15 @@ mod mac {
             .join("extension-host-config.json")
     }
 
-    #[cfg(test)]
-    fn remove_unsealed_legacy_browser_config(
-        app: &Path,
-        seals: &HashMap<String, Seal>,
-    ) -> Result<(), String> {
-        let relative = legacy_browser_config_relative();
-        let name = relative
-            .to_str()
-            .ok_or("OpenAI browser config path is not UTF-8")?
-            .replace('\\', "/");
-        let path = app.join("Contents").join(&relative);
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.to_string()),
-        };
-        // Newer upstream builds may eventually ship a sealed default. Preserve
-        // it. Only remove the small unsealed file written by our old bridge
-        // setup, never a directory, symlink, or unexpectedly large payload.
-        if seals.contains_key(&name) {
-            return Ok(());
-        }
-        if !metadata.is_file() || metadata.len() > 64 * 1024 {
-            return Err("Legacy OpenAI browser config is not a bounded regular file".into());
-        }
-        io(fs::remove_file(path))
-    }
-
     // Old selections may still be used by running hosts. Migrate by publishing
     // a fresh generation, never by deleting resources in the selected bundle.
     fn requires_fresh_generation(app: &Path) -> Result<bool, String> {
-        match fs::symlink_metadata(app.join(RESOURCES).join("codex")) {
-            Ok(_) => return Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
+        for relative in ["codex", BROWSER_PLUGIN] {
+            match fs::symlink_metadata(app.join(RESOURCES).join(relative)) {
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
         }
         let relative = legacy_browser_config_relative();
         match fs::symlink_metadata(app.join("Contents").join(&relative)) {
@@ -597,7 +552,7 @@ mod mac {
 
     fn verify_lean_layout(app: &Path) -> Result<(), String> {
         if requires_fresh_generation(app)? {
-            return Err("OpenAI CUA runtime requires a fresh no-Codex generation".into());
+            return Err("OpenAI CUA runtime requires a fresh native-computer-only generation (no Codex CLI or Chrome plugin)".into());
         }
         Ok(())
     }
@@ -718,10 +673,7 @@ mod mac {
             "cua_node/bin/node_repl".into(),
             format!("{MODULES}/{ENTRY}"),
             format!("{MODULES}/@oai/sky/package.json"),
-            format!("{MODULES}/@oai/browser-desktop/package.json"),
             format!("{MODULES}/{SKY}/Contents/MacOS/SkyComputerUseService"),
-            "plugins/openai-bundled/plugins/chrome/scripts/installManifest.mjs".into(),
-            "plugins/openai-bundled/plugins/chrome/scripts/check-extension-installed.js".into(),
         ] {
             let path = resources.join(relative);
             if !path.is_file() {
@@ -731,24 +683,15 @@ mod mac {
                 ));
             }
         }
-        let extension_host = format!(
-            "{BROWSER_PLUGIN}/extension-host/macos/{}/ChatGPT for Chrome",
-            browser_architecture()
-        );
-        if !resources.join(&extension_host).is_file() {
-            return Err("OpenAI browser bridge is missing its native host".into());
-        }
         let seals = signed_seals(app)?;
-        for relative in [
+        verify_tree(
+            &app.join("Contents"),
             Path::new("Resources/cua_node"),
-            Path::new("Resources/plugins/openai-bundled/plugins/chrome"),
-        ] {
-            verify_tree(&app.join("Contents"), relative, &seals)?;
-        }
+            &seals,
+        )?;
         for relative in [
             "Contents/Resources/cua_node/bin/node",
             "Contents/Resources/cua_node/bin/node_repl",
-            &format!("{RESOURCES}/{extension_host}"),
             &format!("{RESOURCES}/{MODULES}/{SKY}"),
         ] {
             verify_code(app, relative, commands)?;
@@ -828,10 +771,10 @@ mod mac {
         let modules = resources.join(MODULES);
         // These are the actual shipped node_repl and cua-repl environment
         // contracts. CODEX_BINARY_PATH is not supported by this upstream.
-        // The official host enables Tab.ax with BROWSER_USE_TINYSKY_ENABLED;
-        // high-level browser tab creation and lookup require this capability.
+        // Enable only the native computer surface. Browser Tab/DOM APIs need
+        // the official app-server proxy and are intentionally unsupported.
         Ok(format!(
-            "#!/bin/sh\nset -eu\nunset CODEX_CLI_PATH\nexport CUA_REPL_NODE_REPL_PATH={}\nexport CUA_REPL_ENABLED_SURFACES=browser,computer\nexport BROWSER_USE_TINYSKY_ENABLED=1\nexport NODE_REPL_NODE_PATH={}\nexport NODE_REPL_NODE_MODULE_DIRS={}\nexport NODE_REPL_TRUSTED_CODE_PATHS={}\nexport SKY_CUA_SERVICE_PATH={}\nexport NODE_REPL_UNTRUSTED_ENV_ALLOWLIST=\"${{NODE_REPL_UNTRUSTED_ENV_ALLOWLIST:+$NODE_REPL_UNTRUSTED_ENV_ALLOWLIST,}}SKY_CUA_SERVICE_PATH,SKY_CUA_SERVICE_NATIVE_PIPE_PATH\"\nexport PATH={}:\"$PATH\"\nexec {} {} \"$@\"\n",
+            "#!/bin/sh\nset -eu\nunset CODEX_CLI_PATH BROWSER_USE_TINYSKY_ENABLED\nexport CUA_REPL_NODE_REPL_PATH={}\nexport CUA_REPL_ENABLED_SURFACES=computer\nexport NODE_REPL_NODE_PATH={}\nexport NODE_REPL_NODE_MODULE_DIRS={}\nexport NODE_REPL_TRUSTED_CODE_PATHS={}\nexport SKY_CUA_SERVICE_PATH={}\nexport NODE_REPL_UNTRUSTED_ENV_ALLOWLIST=\"${{NODE_REPL_UNTRUSTED_ENV_ALLOWLIST:+$NODE_REPL_UNTRUSTED_ENV_ALLOWLIST,}}SKY_CUA_SERVICE_PATH,SKY_CUA_SERVICE_NATIVE_PIPE_PATH\"\nexport PATH={}:\"$PATH\"\nexec {} {} \"$@\"\n",
             quote(&runtime.join("bin/node_repl"))?,
             quote(&runtime.join("bin/node"))?,
             quote(&modules)?,
@@ -935,7 +878,6 @@ mod mac {
         modules: &[(&str, &str)],
     ) -> Result<PathBuf, String> {
         let direct = launcher(version)?;
-        let browser_assets = browser_assets(version);
         let mut digest = Sha256::new();
         for content in modules
             .iter()
@@ -947,13 +889,6 @@ mod mac {
         {
             digest.update((content.len() as u64).to_le_bytes());
             digest.update(content.as_bytes());
-        }
-        for (source, relative) in &browser_assets {
-            let bytes = io(fs::read(source))?;
-            digest.update((relative.as_os_str().len() as u64).to_le_bytes());
-            digest.update(relative.as_os_str().as_encoded_bytes());
-            digest.update((bytes.len() as u64).to_le_bytes());
-            digest.update(bytes);
         }
         // Include the wrapper template too; placeholders avoid a circular hash.
         digest.update(host_launcher(
@@ -1003,25 +938,6 @@ mod mac {
                     }
                 }
             }
-            for (source, relative) in &browser_assets {
-                let path = host.join(relative);
-                let metadata = io(fs::symlink_metadata(&path))?;
-                if !metadata.is_file() || io(fs::read(&path))? != io(fs::read(source))? {
-                    return Err(format!(
-                        "managed browser host asset is modified: {}",
-                        path.display()
-                    ));
-                }
-                if relative == &PathBuf::from("browser").join(browser_extension_host()) {
-                    use std::os::unix::fs::PermissionsExt;
-                    if metadata.permissions().mode() & 0o111 == 0 {
-                        return Err(format!(
-                            "managed browser host is not executable: {}",
-                            path.display()
-                        ));
-                    }
-                }
-            }
             Ok(())
         };
         match fs::symlink_metadata(&host) {
@@ -1048,13 +964,6 @@ mod mac {
                     fs::Permissions::from_mode(0o755),
                 ))?;
             }
-        }
-        for (source, relative) in &browser_assets {
-            let path = stage.path.join(relative);
-            io(fs::create_dir_all(
-                path.parent().ok_or("Invalid browser host asset path")?,
-            ))?;
-            io(fs::copy(source, path))?;
         }
         if let Err(error) = fs::rename(&stage.path, &host) {
             // Another setup may have published this hash first. Never replace
@@ -1404,9 +1313,6 @@ mod mac {
             || name.starts_with(&format!("{prefix}Contents/MacOS/"))
             || name == format!("{prefix}Contents/_CodeSignature/CodeResources")
             || name.starts_with(&format!("{prefix}{RESOURCES}/cua_node/"))
-            || name.starts_with(&format!(
-                "{prefix}{RESOURCES}/plugins/openai-bundled/plugins/chrome/"
-            ))
     }
 
     fn component_zip(
@@ -1639,62 +1545,8 @@ mod mac {
         publish_receipt(root, &host, &build, fingerprint.as_deref(), commands)
     }
 
-    #[cfg(target_os = "macos")]
-    pub(super) fn configure_browser(root: &Path) -> Result<serde_json::Value, String> {
-        let target = io(fs::read_link(root.join("current")))?;
-        let parts: Vec<_> = target.components().collect();
-        if parts.len() != 2
-            || parts[0].as_os_str() != "versions"
-            || !matches!(parts[1], std::path::Component::Normal(_))
-        {
-            return Err("No managed OpenAI CUA runtime is selected".into());
-        }
-        let version = root.join(target);
-        let resources = version.join(APP).join(RESOURCES);
-        let runtime = resources.join("cua_node");
-        // The official installer writes extension-host-config.json beside its
-        // native host. Run it against our verified copy so setup never mutates
-        // the signed sparse OpenAI bundle.
-        let host = ensure_host(root, &version, HOST_MODULES)?;
-        let plugin = host.join("browser");
-        let policy_host = host.join("cua-policy-host");
-        let installer = plugin.join("scripts/installManifest.mjs");
-        for path in [
-            &installer,
-            &runtime.join("bin/node"),
-            &runtime.join("bin/node_repl"),
-            &policy_host,
-        ] {
-            if !path.is_file() {
-                return Err(format!(
-                    "OpenAI browser bridge component is incomplete: {}",
-                    path.display()
-                ));
-            }
-        }
-        let source = r#"import { pathToFileURL } from 'node:url';
-const { install } = await import(pathToFileURL(process.env.NANOCODEX_BROWSER_INSTALLER));
-await install({ appServerRuntimePaths: {
-  codexCliPath: process.env.NANOCODEX_BROWSER_CODEX,
-  nodePath: process.env.NANOCODEX_BROWSER_NODE,
-  nodeReplPath: process.env.NANOCODEX_BROWSER_NODE_REPL,
-}});"#;
-        let output = std::process::Command::new(runtime.join("bin/node"))
-            .args(["--input-type=module", "--eval", source])
-            .env("NANOCODEX_BROWSER_INSTALLER", &installer)
-            .env("NANOCODEX_BROWSER_CODEX", &policy_host)
-            .env("NANOCODEX_BROWSER_NODE", runtime.join("bin/node"))
-            .env("NANOCODEX_BROWSER_NODE_REPL", runtime.join("bin/node_repl"))
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|e| format!("Could not start the official browser bridge installer: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Official browser bridge installer failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        Ok(serde_json::json!({"status":"installed","component":"official-browser-bridge"}))
+    pub(super) fn configure_browser(_root: &Path) -> Result<serde_json::Value, String> {
+        Err("Dedicated browser Tab/DOM APIs and the Chrome native-messaging bridge are unsupported by the native-computer-only CUA runtime; control browsers through the native computer UI instead".into())
     }
 
     #[cfg(test)]

@@ -25,7 +25,7 @@ fn archive_urls_are_restricted_to_the_official_versioned_feed() {
 }
 
 #[test]
-fn component_selection_excludes_the_desktop_shell() {
+fn component_selection_excludes_the_desktop_shell_and_chrome_proxy() {
     let prefix = "ChatGPT.app/";
     assert!(!selected_name(
         "Codex.app/Contents/Resources/codex",
@@ -40,11 +40,13 @@ fn component_selection_excludes_the_desktop_shell() {
         "ChatGPT.app/Contents/MacOS/ChatGPT",
         "ChatGPT.app/Contents/_CodeSignature/CodeResources",
         "ChatGPT.app/Contents/Resources/cua_node/bin/node",
-        "ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/chrome/scripts/installManifest.mjs",
     ] {
         assert!(selected_name(name, prefix), "{name}");
     }
     for name in [
+        "ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/chrome/scripts/installManifest.mjs",
+        "ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/chrome/extension-host/macos/arm64/ChatGPT for Chrome",
+        "ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/chrome/extension-host/macos/x64/ChatGPT for Chrome",
         "ChatGPT.app/Contents/Resources/codex",
         "ChatGPT.app/Contents/Resources/app.asar",
         "ChatGPT.app/Contents/Frameworks/Electron Framework.framework/Electron Framework",
@@ -86,7 +88,7 @@ fn parses_bounded_classic_zip_directory() {
 fn launcher_uses_only_headless_upstream_components() {
     let script = launcher(Path::new("/tmp/runtime")).unwrap();
     assert!(!script.contains("Contents/Resources/codex"));
-    assert!(script.contains("unset CODEX_CLI_PATH"));
+    assert!(script.contains("unset CODEX_CLI_PATH BROWSER_USE_TINYSKY_ENABLED"));
     assert!(!script.contains("export CODEX_CLI_PATH"));
     assert!(
         script
@@ -94,7 +96,9 @@ fn launcher_uses_only_headless_upstream_components() {
     );
     assert!(script.contains("SKY_CUA_SERVICE_PATH,SKY_CUA_SERVICE_NATIVE_PIPE_PATH"));
     assert!(script.contains("cua_node/bin/node"));
-    assert!(script.contains("BROWSER_USE_TINYSKY_ENABLED=1"));
+    assert!(script.contains("export CUA_REPL_ENABLED_SURFACES=computer\n"));
+    assert!(!script.contains("export BROWSER_USE_TINYSKY_ENABLED"));
+    assert!(!script.contains("SURFACES=browser"));
     assert!(!script.contains("Contents/MacOS"));
     assert_eq!(HOST_MODULES.len(), 1);
     assert_eq!(HOST_MODULES[0].0, "direct-cua-host.mjs");
@@ -112,63 +116,40 @@ fn node_path_delimiters_are_rejected() {
 }
 
 #[test]
-fn removes_only_the_unsealed_legacy_browser_config() {
-    let directory = Staging {
-        path: std::env::temp_dir().join(format!("nanocodex-browser-config-test-{}", nonce())),
-        cleanup: true,
-    };
-    let app = directory.path.join("Codex.app");
-    let relative = legacy_browser_config_relative();
-    let config = app.join("Contents").join(&relative);
-    fs::create_dir_all(config.parent().unwrap()).unwrap();
-    fs::write(&config, b"{\"generated\":true}").unwrap();
-
-    remove_unsealed_legacy_browser_config(&app, &HashMap::new()).unwrap();
-    assert!(!config.exists());
-
-    fs::write(&config, b"{\"upstream\":true}").unwrap();
-    let mut seals = HashMap::new();
-    seals.insert(
-        relative.to_string_lossy().replace('\\', "/"),
-        Seal::Hash([0; 32]),
+fn dedicated_browser_setup_is_explicitly_unsupported_without_mutation() {
+    let directory = test_directory("unsupported-browser");
+    let root = directory.path.join("runtime");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("provider.json"), b"live receipt").unwrap();
+    let error = configure_browser(&root).unwrap_err();
+    assert!(error.contains("Tab/DOM APIs"), "{error}");
+    assert!(error.contains("native-computer-only"), "{error}");
+    assert!(error.contains("native computer UI"), "{error}");
+    assert_eq!(
+        fs::read(root.join("provider.json")).unwrap(),
+        b"live receipt"
     );
-    remove_unsealed_legacy_browser_config(&app, &seals).unwrap();
-    assert!(config.is_file());
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    assert!(configure_browser(&root.join("missing")).is_err());
+    assert!(!root.join("missing").exists());
 }
 
 #[test]
-fn browser_bridge_uses_an_immutable_host_copy() {
+fn native_host_is_immutable_and_has_no_chrome_assets() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let directory = Staging {
-        path: std::env::temp_dir().join(format!("nanocodex-browser-host-test-{}", nonce())),
-        cleanup: true,
-    };
+    let directory = test_directory("native-host");
     let root = directory.path.join("runtime");
     let version = directory.path.join("version");
-    for (source, relative) in browser_assets(&version) {
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
-        fs::write(&source, relative.to_string_lossy().as_bytes()).unwrap();
-        if relative == PathBuf::from("browser").join(browser_extension_host()) {
-            fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-    }
-
+    // Host construction does not require or read any Chrome plugin assets.
     let host = ensure_host(&root, &version, &[("host.mjs", "export default true;")]).unwrap();
-    for (source, relative) in browser_assets(&version) {
-        assert_eq!(
-            fs::read(source).unwrap(),
-            fs::read(host.join(relative)).unwrap()
-        );
-    }
-    assert!(
-        !version
-            .join(APP)
-            .join("Contents")
-            .join(legacy_browser_config_relative())
-            .exists()
-    );
-
+    assert!(!host.join("browser").exists());
+    assert_eq!(fs::read_dir(&host).unwrap().count(), 4);
+    let upstream = fs::read_to_string(host.join("upstream-cua-provider")).unwrap();
+    assert!(upstream.contains("CUA_REPL_ENABLED_SURFACES=computer\n"));
+    assert!(!upstream.contains("installManifest"));
+    assert!(!upstream.contains("ChatGPT for Chrome"));
+    assert!(!version.exists());
     assert!(
         fs::symlink_metadata(host.join("cua-policy-host"))
             .unwrap()
@@ -176,6 +157,14 @@ fn browser_bridge_uses_an_immutable_host_copy() {
             .mode()
             & 0o111
             != 0
+    );
+    // Adding unrelated Chrome files does not affect the generated host hash.
+    let plugin = version.join(APP).join(RESOURCES).join(BROWSER_PLUGIN);
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(plugin.join("unselected"), b"browser proxy").unwrap();
+    assert_eq!(
+        host,
+        ensure_host(&root, &version, &[("host.mjs", "export default true;")]).unwrap()
     );
     let updated = ensure_host(&root, &version, &[("host.mjs", "export default false;")]).unwrap();
     assert_ne!(host, updated);
@@ -187,14 +176,11 @@ fn browser_bridge_uses_an_immutable_host_copy() {
         fs::read(updated.join("host.mjs")).unwrap(),
         b"export default false;"
     );
+    assert!(!updated.join("browser").exists());
 
-    let copied_installer = host.join("browser/scripts/installManifest.mjs");
-    fs::write(&copied_installer, b"modified").unwrap();
+    fs::write(host.join("cua-policy-host"), b"modified").unwrap();
     let error = ensure_host(&root, &version, &[("host.mjs", "export default true;")]).unwrap_err();
-    assert!(
-        error.contains("managed browser host asset is modified"),
-        "{error}"
-    );
+    assert!(error.contains("managed host asset is modified"), "{error}");
 }
 
 #[derive(Default)]
@@ -240,15 +226,7 @@ fn lean_fixture(app: &Path) {
         "Resources/cua_node/bin/node_repl".into(),
         format!("Resources/{MODULES}/{ENTRY}"),
         format!("Resources/{MODULES}/@oai/sky/package.json"),
-        format!("Resources/{MODULES}/@oai/browser-desktop/package.json"),
         format!("Resources/{MODULES}/{SKY}/Contents/MacOS/SkyComputerUseService"),
-        format!("Resources/{BROWSER_PLUGIN}/scripts/installManifest.mjs"),
-        format!("Resources/{BROWSER_PLUGIN}/scripts/check-extension-installed.js"),
-        format!("Resources/{BROWSER_PLUGIN}/scripts/browser-client.mjs"),
-        format!(
-            "Resources/{BROWSER_PLUGIN}/{}",
-            browser_extension_host().display()
-        ),
     ];
     let mut manifest = String::from("<plist><dict><key>files2</key><dict>");
     for relative in files {
@@ -370,7 +348,7 @@ fn warm_verification_cache_cannot_authorize_a_codex_bearing_layout() {
     assert!(
         verified_cached(&directory.path, &app, &mut commands, false)
             .unwrap_err()
-            .contains("fresh no-Codex")
+            .contains("fresh native-computer-only")
     );
     assert!(commands.calls.is_empty());
     fs::remove_file(&codex).unwrap();
@@ -379,6 +357,49 @@ fn warm_verification_cache_cannot_authorize_a_codex_bearing_layout() {
     fs::remove_dir(&codex).unwrap();
     std::os::unix::fs::symlink("missing", &codex).unwrap();
     assert!(verify_lean_layout(&app).is_err());
+}
+
+#[test]
+fn browser_containing_cached_generation_is_rejected_without_mutation() {
+    let directory = test_directory("browser-generation");
+    let root = directory.path.join("runtime");
+    let app = root.join("versions/old").join(APP);
+    lean_fixture(&app);
+    let plugin = app.join(RESOURCES).join(BROWSER_PLUGIN);
+    fs::create_dir_all(&plugin).unwrap();
+    let proxy = plugin.join("signed-proxy");
+    fs::write(&proxy, b"old running app-server proxy").unwrap();
+    std::os::unix::fs::symlink("versions/old", root.join("current")).unwrap();
+    fs::write(root.join("provider.json"), b"old receipt").unwrap();
+    let fingerprint = crate::startup_cache::fingerprint(&app).unwrap();
+    crate::startup_cache::write(
+        &root.join(".startup-cache/verification-v2.json"),
+        &VerificationRecord {
+            format: 2,
+            verified_at: crate::startup_cache::now(),
+            fingerprint,
+            build: "9922".into(),
+        },
+    )
+    .unwrap();
+    for refresh in [false, true] {
+        let mut commands = RecordingCommands::default();
+        assert!(cached(&root, &mut commands, refresh).unwrap().is_none());
+        assert!(commands.calls.is_empty());
+        assert_eq!(fs::read(&proxy).unwrap(), b"old running app-server proxy");
+        assert_eq!(
+            fs::read(root.join("provider.json")).unwrap(),
+            b"old receipt"
+        );
+        assert_eq!(
+            fs::read_link(root.join("current")).unwrap(),
+            Path::new("versions/old")
+        );
+        assert!(verified_cached(&root, &app, &mut commands, refresh).is_err());
+    }
+    fs::remove_dir_all(&plugin).unwrap();
+    std::os::unix::fs::symlink("missing", &plugin).unwrap();
+    assert!(requires_fresh_generation(&app).unwrap());
 }
 
 #[test]
