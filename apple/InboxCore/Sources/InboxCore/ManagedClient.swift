@@ -172,6 +172,10 @@ public final class ManagedClient: @unchecked Sendable {
         // Spotify's shared registration may ask the broker to wait for quota
         // before its identity read. Tokens remain inside that broker exchange.
         if path == "/v1/connectors/spotify/loopback/callback" || path == "/v1/connectors/soundcloud/loopback/callback" { request.timeoutInterval = 90 }
+        // Full-source meeting summaries may make bounded rolling inference
+        // requests for up to 90 seconds. Do not time out midway and misreport
+        // a safely persisted document as lost.
+        if path.hasPrefix("/v1/meetings/"), path.hasSuffix("/summarize"), method == "POST" { request.timeoutInterval = 120 }
         request.httpMethod = method
         request.setValue("Bearer " + credential.apiKey, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -202,7 +206,7 @@ public final class ManagedClient: @unchecked Sendable {
               let data = snapshots.read(path: path) else { return nil }
         return try? JSONDecoder().decode(JSON.self, from: data)
     }
-    public func json(path: String, method: String = "GET", body: JSON? = nil, idempotencyKey: String? = nil) async throws -> JSON {
+    public func json(path: String, method: String = "GET", body: JSON? = nil, idempotencyKey: String? = nil, ifMatch: Int? = nil) async throws -> JSON {
         let snapshotTicket = snapshotTicket()
         let isAdmission = method == "POST" && (path == "/v1/agents" || (path.hasPrefix("/v1/agents/") && path.hasSuffix("/turns")))
         let location = isAdmission ? await locationContext?() : nil
@@ -214,7 +218,12 @@ public final class ManagedClient: @unchecked Sendable {
         do {
             if isHistory { os_signpost(.begin, log: historyPerformanceLog, name: "HistoryTransport", signpostID: signpostID) }
             defer { if isHistory { os_signpost(.end, log: historyPerformanceLog, name: "HistoryTransport", signpostID: signpostID) } }
-            (data, response) = try await ManagedAccess.data(for: request(path: path, method: method, body: body, idempotencyKey: idempotencyKey, location: location), using: session)
+            var outgoing = try request(path: path, method: method, body: body, idempotencyKey: idempotencyKey, location: location)
+            if let ifMatch {
+                guard ifMatch >= 0 else { throw APIError.invalidResponse }
+                outgoing.setValue("\"\(ifMatch)\"", forHTTPHeaderField: "If-Match")
+            }
+            (data, response) = try await ManagedAccess.data(for: outgoing, using: session)
         }
         guard let response = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard (200..<300).contains(response.statusCode) else {

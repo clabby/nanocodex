@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import Combine
 import InboxCore
 import OSLog
 import Speech
@@ -74,6 +75,9 @@ struct MeetingSummarySnapshot: Equatable {
 final class MeetingRecorder: ObservableObject {
     static let shared = MeetingRecorder()
     @Published private(set) var transcript = ""
+    @Published var meetingTitle = "Meeting" { didSet { persistMetadataChange() } }
+    @Published var meetingNotes = "" { didSet { persistMetadataChange() } }
+    private var updatingMetadata = false
     @Published private(set) var summarySnapshot: MeetingSummarySnapshot?
     /// Final Speech results, indexed in capture order. They may arrive out of
     /// order; callers must not treat the joined transcript as an append-only delta.
@@ -85,6 +89,24 @@ final class MeetingRecorder: ObservableObject {
     @Published private(set) var reviewing = false
     @Published private(set) var seconds = 0
     @Published private(set) var waveform: [UInt8] = []
+    @Published private(set) var accountScope: String?
+    @Published private(set) var persistenceError: String?
+    private var lifecycleObservers: [AnyCancellable] = []
+    private var lastCheckpoint = Date.distantPast
+
+    init() {
+        lifecycleObservers.append(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification).sink { [weak self] notification in
+            guard let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  type == AVAudioSession.InterruptionType.began.rawValue else { return }
+            Task { @MainActor in self?.interrupt() }
+        })
+        lifecycleObservers.append(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification).sink { [weak self] notification in
+            guard let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue else { return }
+            Task { @MainActor in self?.interrupt() }
+        })
+    }
+
 
     private final class Segment {
         let index: Int
@@ -120,8 +142,23 @@ final class MeetingRecorder: ObservableObject {
     // 25 seconds provides preview segments while leaving ample headroom.
     static let segmentSeconds = MeetingSegmentPolicy.segmentSeconds
 
-    func start(locale: String, permissionsGranted: Bool = false) async {
-        discard()
+    func start(locale: String, permissionsGranted: Bool = false, accountScope expected: String? = nil, captureID requestedID: UUID? = nil) async {
+        guard !working else { return }
+        let model = InboxModel.shared
+        guard let pinnedScope = expected ?? (try? model.lockedVoiceAccountScope()),
+              (try? model.lockedVoiceAccountScope()) == pinnedScope else {
+            status = "Sign in before recording a meeting."; return
+        }
+        // A notes-only draft may become a recording without losing its title,
+        // notes or UUID. Completed captures are already durable before reset.
+        if accountScope != pinnedScope || !transcript.isEmpty || requestedID != nil {
+            guard discard() else { return }
+        }
+        accountScope = pinnedScope
+        if let requestedID { captureID = requestedID }
+        if startedAt == nil { startedAt = Date() }
+        reviewing = false
+        guard checkpointDurably(final: false) else { return }
         router.resetLevels()
         guard QuickVoiceRecorder.audioOwner == nil else {
             status = "Another voice recording is in progress. Finish it first."
@@ -137,10 +174,14 @@ final class MeetingRecorder: ObservableObject {
             let speech = await withCheckedContinuation { continuation in
                 SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
             }
-            guard permissionRun == run else { return }
+            guard permissionRun == run, working, !reviewing else { return }
             let microphone = await AVAudioApplication.requestRecordPermission()
-            guard permissionRun == run else { return }
+            guard permissionRun == run, working, !reviewing else { return }
             allowed = speech == .authorized && microphone
+        }
+        guard permissionRun == run, working, !reviewing else { return }
+        guard (try? model.lockedVoiceAccountScope()) == pinnedScope else {
+            stopWithWarning("Account changed. Recording retained for the original account."); return
         }
         guard allowed else {
             stopWithWarning("Allow Microphone and Speech Recognition in Settings, then try again.")
@@ -176,14 +217,20 @@ final class MeetingRecorder: ObservableObject {
             VoiceDiagnostic.note("meeting.recorder.engineStarted")
             recording = true
             startedAt = Date()
-            status = "Recording. Tap Stop Recording to start an agent."
+            status = "Recording. Tap Stop Recording to save the meeting."
+            _ = checkpointDurably(final: false)
             scheduleRotation(run: run)
             clock = Task { [weak self] in
                 while !Task.isCancelled {
                     do { try await Task.sleep(for: .seconds(1)) } catch { return }
                     guard let self, self.permissionRun == run, self.recording else { return }
                     self.seconds = Int(Date().timeIntervalSince(self.startedAt ?? Date()))
-                self.waveform = self.router.levels()
+                    self.waveform = self.router.levels()
+                    if Date().timeIntervalSince(self.lastCheckpoint) >= 5 { _ = self.checkpointDurably(final: false) }
+                    if (try? model.lockedVoiceAccountScope()) != pinnedScope {
+                        self.interrupt("Account changed. Partial meeting retained for the original account.")
+                        return
+                    }
                 }
             }
         } catch {
@@ -257,14 +304,18 @@ final class MeetingRecorder: ObservableObject {
     }
 
     func finish() {
-        guard recording else { return }
+        guard recording else {
+            if !working { saveDraft() }
+            else { stopWithWarning("Recording stopped before microphone capture. Meeting retained.") }
+            return
+        }
         stopCapture()
         stopReason = nil
         status = "Finishing transcription…"
         awaitCompletion()
     }
 
-    func interrupt(_ reason: String = "Recording interrupted. Review the partial transcript before sending.") {
+    func interrupt(_ reason: String = "Recording interrupted. Partial meeting saved for review.") {
         guard working else { return }
         stopWithWarning(reason)
     }
@@ -312,10 +363,15 @@ final class MeetingRecorder: ObservableObject {
     private func checkCompletion() {
         guard !recording, ledger.unfinished == 0 else { return }
         completion?.cancel(); completion = nil
+        // Assemble the final ledger while working is still true. Turning it off
+        // first made updateTranscript skip the last recognition result.
+        updateTranscript()
         working = false
         reviewing = true
-        updateTranscript()
-        status = stopReason ?? (transcript.isEmpty ? "No words recognized. Edit the transcript or record again." : "Review and edit the transcript, then send it in a new conversation.")
+        status = stopReason ?? (transcript.isEmpty ? "No words recognized. Meeting saved; edit the transcript or record again." : "Meeting saved. Review transcript and notes in your library.")
+        if checkpointDurably(final: true), let accountScope {
+            Task { await InboxModel.shared.syncMeetingRecording(accountScope: accountScope) }
+        }
         publishPreviewSnapshot()
     }
 
@@ -344,6 +400,7 @@ final class MeetingRecorder: ObservableObject {
         // Once in review, edits belong to the user, not late Speech callbacks.
         guard working else { return }
         transcript = ledger.transcript
+        _ = checkpointDurably(final: false, force: false)
         publishPreviewSnapshot()
     }
 
@@ -363,10 +420,92 @@ final class MeetingRecorder: ObservableObject {
     }
 
     func edit(_ text: String) {
-        if reviewing && !working { transcript = text; publishPreviewSnapshot() }
+        if reviewing && !working {
+            transcript = text; publishPreviewSnapshot()
+            if checkpointDurably(final: true), let accountScope {
+                Task { await InboxModel.shared.syncMeetingRecording(accountScope: accountScope) }
+            }
+        }
     }
 
-    func discard() {
+    @discardableResult
+    private func checkpointDurably(final: Bool, force: Bool = true) -> Bool {
+        guard let accountScope, let startedAt else { return false }
+        // Speech revises partial text frequently. UI/preview stay current, while
+        // FULL synchronous journal writes remain bounded to one per five seconds.
+        // Initial setup, user notes/metadata, lifecycle and final saves force it.
+        if !final, !force, Date().timeIntervalSince(lastCheckpoint) < 5 { return true }
+        do {
+            guard let store = InboxModel.shared.meetingRecordingStore else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            let previous = try store.entries(scope: accountScope).first { $0.id == captureID }?.record
+            var record = previous ?? MeetingRecord(id: captureID, startedAt: startedAt)
+            record.title = meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Meeting" : meetingTitle
+            record.notes = meetingNotes
+            record.transcript = transcript; record.durationSeconds = seconds
+            record.partial = !final || completedWithWarning
+            try store.put(record, scope: accountScope, state: final ? .pending : .capturing)
+            lastCheckpoint = Date(); persistenceError = nil
+            if InboxModel.shared.meetingLibrary?.scope == accountScope { InboxModel.shared.meetingLibrary?.reloadLocal() }
+            return true
+        } catch {
+            persistenceError = "Meeting could not be saved on this device: " + error.localizedDescription
+            status = persistenceError ?? "Meeting save failed."
+            return false
+        }
+    }
+
+    /// Legitimate typed-notes meeting; microphone permission is not required.
+    @discardableResult
+    func prepareDraft(accountScope expected: String) -> Bool {
+        guard (try? InboxModel.shared.lockedVoiceAccountScope()) == expected else { return false }
+        // Reopening the sheet must never reset an unsaved/active capture.
+        if accountScope == expected, startedAt != nil { return true }
+        guard !working else { return false }
+        guard discard() else { return false }
+        accountScope = expected; startedAt = Date(); reviewing = false
+        status = "Add notes or start recording."
+        return checkpointDurably(final: true)
+    }
+
+    func updateMetadata(title: String, notes: String) {
+        updatingMetadata = true
+        meetingTitle = title; meetingNotes = notes
+        updatingMetadata = false
+        persistMetadataChange()
+    }
+
+    private func persistMetadataChange() {
+        guard !updatingMetadata, accountScope != nil, startedAt != nil else { return }
+        _ = checkpointDurably(final: !working)
+    }
+
+    @discardableResult
+    func saveDraft() -> Bool {
+        if working { finish(); return persistenceError == nil }
+        guard accountScope != nil, startedAt != nil else { return false }
+        reviewing = true
+        let saved = checkpointDurably(final: true)
+        if saved, let accountScope {
+            status = "Meeting saved on this device."
+            Task { await InboxModel.shared.syncMeetingRecording(accountScope: accountScope) }
+        }
+        publishPreviewSnapshot()
+        return saved
+    }
+
+    /// Explicit lifecycle checkpoint. The view can disappear without ending mic
+    /// ownership or resetting the recorder; it is process-pinned, not sheet state.
+    @discardableResult
+    func checkpoint(force: Bool = true) -> Bool { checkpointDurably(final: !working, force: force) }
+
+    @discardableResult
+    func discard() -> Bool {
+        // Resetting never deletes a journal row, and a disk failure must not
+        // clear the last in-memory copy while preparing the next capture.
+        if working { stopReason = "Recording stopped before transcription completed. Partial meeting retained." }
+        if startedAt != nil, !checkpointDurably(final: true) { return false }
         permissionRun = UUID() // Invalidate permission continuations and callbacks.
         captureID = permissionRun
         completion?.cancel(); completion = nil
@@ -380,13 +519,18 @@ final class MeetingRecorder: ObservableObject {
         previewRevision = 0
         summarySnapshot = nil
         recognizer = nil
+        accountScope = nil; startedAt = nil
         transcript = ""
+        updatingMetadata = true; meetingTitle = "Meeting"; meetingNotes = ""; updatingMetadata = false
         status = "Ready to listen"
         seconds = 0
         waveform = []
         startedAt = nil
+        accountScope = nil
+        persistenceError = nil
         stopReason = nil
         reviewing = false
         working = false
+        return true
     }
 }

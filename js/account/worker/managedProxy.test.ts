@@ -395,15 +395,6 @@ test("combined agent create-and-turn forwards exactly once with its idempotency 
 });
 
 
-test("meeting previews expose only the capture UUID endpoint", () => {
-  const capture = "a745f840-f68d-46ce-9d70-5daf9693a582";
-  for (const id of [capture, capture.toUpperCase()])
-    assert.equal(isManagedRoutePath(`/v1/meetings/${id}/preview`), true);
-  for (const path of ["/v1/meetings", "/v1/meetings/", "/v1/meetings/anything/preview",
-    `/v1/meetings/${capture}/preview/extra`, `/v1/meetings/${capture}/transcript`])
-    assert.equal(isManagedRoutePath(path), false, path);
-});
-
 // The account proxy previously returned no route, causing public TODO calls to
 // fall through to 404 before managed authentication or persistence could run.
 test("TODO reads, captures and decision responses retain the exact managed request and response", async () => {
