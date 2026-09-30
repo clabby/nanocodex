@@ -1,9 +1,25 @@
 /** Bounded, text-only Gmail snapshots. Email content is always untrusted data. */
 type GmailAttachmentReference = { filename?: string; mimeType?: string; size?: number; attachmentId?: string };
 export type GmailMessageSnapshot = {
-  id: string; threadId?: string; status: "ok" | "missing" | "error" | "body_unavailable";
+  id: string; threadId?: string; status: "ok" | "missing" | "error" | "body_unavailable" | "excluded";
+  /** Current provider metadata, not email headers or inferred trust. */
+  label_ids?: string[]; exclusion_reason?: GmailInboxExclusion;
   headers?: Record<string, string>; body?: string; truncated?: boolean; attachments?: GmailAttachmentReference[];
 };
+export type GmailInboxExclusion = "spam" | "trash" | "draft" | "outside_inbox";
+/** Fail closed rather than truncate away a security-relevant provider label. */
+export function gmailProviderLabelIds(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 64
+    || value.some(label => typeof label !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(label))) return null;
+  return [...new Set(value)];
+}
+export function gmailInboxExclusion(labels: readonly string[]): GmailInboxExclusion | null {
+  if (labels.includes("SPAM")) return "spam";
+  if (labels.includes("TRASH")) return "trash";
+  if (labels.includes("DRAFT")) return "draft";
+  // SENT+INBOX self-deliveries remain eligible; own-sender policy is separate.
+  return labels.includes("INBOX") ? null : "outside_inbox";
+}
 const encoder = new TextEncoder();
 export const jsonBytes = (value: unknown) => encoder.encode(JSON.stringify(value)).length;
 const record = (v: any): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -85,6 +101,7 @@ async function extract(payload: unknown, external: (id: string) => Promise<strin
 }
 export async function hydrateGmailMessage(id:string, fetchMessage:(signal:AbortSignal, attachmentId?:string)=>Promise<Response>, budget:number, finalAttempt=false):Promise<GmailMessageSnapshot> {
   let retryable=false;
+  let currentLabels: string[] | undefined;
   const controller=new AbortController(); let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;
   let timer:ReturnType<typeof setTimeout>;
   const timeout=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{retryable=true;controller.abort(); void reader?.cancel().catch(()=>{});reject(new Error("timeout"));},2000);});
@@ -104,7 +121,18 @@ export async function hydrateGmailMessage(id:string, fetchMessage:(signal:AbortS
         return JSON.parse(new TextDecoder("utf-8",{fatal:true,ignoreBOM:true}).decode(bytes));
       };
       const raw=await read(response);
-      if(!record(raw)||raw.id!==id||!record(raw.payload))throw new Error("invalid_message");
+      if(!record(raw)||raw.id!==id)throw new Error("invalid_message");
+      const labelIds=gmailProviderLabelIds(raw.labelIds);
+      if(!labelIds)throw new Error("invalid_labels");
+      currentLabels=labelIds;
+      const exclusionReason=gmailInboxExclusion(labelIds);
+      if(exclusionReason) {
+        const excluded:GmailMessageSnapshot={id,status:"excluded",label_ids:labelIds,exclusion_reason:exclusionReason};
+        if(jsonBytes(excluded)>budget)throw new Error("label_budget");
+        // Do not extract excluded content, hydrate MIME parts, or fetch attachments.
+        return excluded;
+      }
+      if(!record(raw.payload))throw new Error("invalid_message");
       let externalCount=0;
       const text=await extract(raw.payload, async attachmentId => {
         if (++externalCount>4 || !/^[A-Za-z0-9_-]{1,512}$/.test(attachmentId)) throw new Error("external_body_limit");
@@ -118,14 +146,22 @@ export async function hydrateGmailMessage(id:string, fetchMessage:(signal:AbortS
         const name=h.name.toLowerCase();if(!["from","to","cc","subject","date","message-id","reply-to","in-reply-to","references"].includes(name)||name in headers)continue;
         headers[name]=h.value.slice(0,512);if(h.value.length>512)truncated=true;
       }
-      const result:GmailMessageSnapshot={id,...(typeof raw.threadId==="string" && /^[A-Za-z0-9_-]{1,128}$/.test(raw.threadId)?{threadId:raw.threadId}:{}),status:text.available?"ok":"body_unavailable",headers,body:text.body,truncated,...(text.attachments.length?{attachments:text.attachments}:{})};
+      const result:GmailMessageSnapshot={id,...(typeof raw.threadId==="string" && /^[A-Za-z0-9_-]{1,128}$/.test(raw.threadId)?{threadId:raw.threadId}:{}),status:text.available?"ok":"body_unavailable",label_ids:labelIds,headers,body:text.body,truncated,...(text.attachments.length?{attachments:text.attachments}:{})};
       while(result.attachments?.length && jsonBytes(result.attachments)>Math.floor(budget/4)) {result.attachments.pop();result.truncated=true;}
       // Measure serialized UTF-8 including escapes, leaving space for the flag.
       while(jsonBytes(result)>budget && result.body) {result.truncated=true;result.body=result.body.slice(0,Math.max(0,Math.floor(result.body.length*.75)));}
       for(const key of Object.keys(headers).reverse()) {if(jsonBytes(result)<=budget)break;delete headers[key];result.truncated=true;}
       if (jsonBytes(result)>budget) {delete result.headers;delete result.body;delete result.attachments;result.truncated=true;
         if(jsonBytes(result)>budget) delete result.threadId;}
+      if(jsonBytes(result)>budget)throw new Error("label_budget");
       return result;
     })()]);
-  } catch {if(retryable && !finalAttempt) throw new Error("gmail_body_retry");return {id,status:"error"};} finally {clearTimeout(timer!);}
+  } catch {
+    if(retryable && !finalAttempt) throw new Error("gmail_body_retry");
+    const error:GmailMessageSnapshot={id,status:"error",...(currentLabels?{label_ids:currentLabels}:{})};
+    // Even unavailable bodies retain validated provider metadata when it fits.
+    // Never truncate the label set to fit, which could hide an exclusion label.
+    if(jsonBytes(error)>budget) delete error.label_ids;
+    return error;
+  } finally {clearTimeout(timer!);}
 }

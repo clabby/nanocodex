@@ -202,7 +202,7 @@ struct InboxView: View {
         NavigationStack {
             Group {
                 if model.connected && mainSurface == .todo {
-                    TodoBoardView(model: model)
+                    TodoBoardView(model: model, onChat: { mainSurface = .chat })
                         .id(model.todoAccountIdentity)
                         .contentMargins(.bottom, bottomDockHeight, for: .scrollContent)
                 } else if model.connected && mainSurface == .meetings {

@@ -179,7 +179,7 @@ final class InboxModel: ObservableObject {
     @Published private(set) var todoResponding = false
     private var todoCaptureOperation: (body: String, hint: String, id: UUID)?
     private var todoResponseOperations: [String: UUID] = [:]
-    var pendingTodoDecisionCount: Int { todoDecisions.filter { $0.status == "needs_you" }.count }
+    var pendingTodoDecisionCount: Int { todoDecisions.filter { $0.isPreparedForReview }.count }
     @Published var connected = false
     @Published private(set) var restoringAccount = true
     @Published private(set) var restorationError: String?
@@ -1086,9 +1086,25 @@ final class InboxModel: ObservableObject {
         }
     }
 
+    #if DEBUG
+    private static func fixturePreparation(id: String, messageID: String, body: String) -> JSON {
+        .object([
+            "status": .string("ready"), "context": .string("Synthetic source context for mobile review."),
+            "recommendation": .string("Confirm the proposed time and commit to reviewing the plan."),
+            "scope": .string("Synthetic fixture only · no live email is sent."),
+            "prepared_draft": .object([
+                "id": .string(id), "connection_id": .string("fixture-mail"), "thread_id": .string("fixture-thread"),
+                "reply_message_id": .string(messageID), "mode": .string("reply"), "version": .number(1),
+                "to": .array([.string("maya@example.com")]), "cc": .array([]), "bcc": .array([]),
+                "subject": .string("Re: A quick look at the launch plan"), "body_text": .string(body), "status": .string("draft")
+            ])
+        ])
+    }
+    #endif
+
     func refreshTodo() async {
         guard connected else { return }
-        if todoLoading { todoRefreshRequested = true; return }
+        if todoLoading { return }
         if isDemo {
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--todo-ui-fixture"), !todoFixtureLoaded {
@@ -1097,10 +1113,11 @@ final class InboxModel: ObservableObject {
                     "id": .string("fixture-email"), "title": .string("How should we reply to Maya?"),
                     "context": .string("Maya accepted Tuesday, but the offered slot is no longer free. Review an alternative before anything is sent."),
                     "source_label": .string("Email thread"), "source_url": .string(""),
-                    "source_connection_id": .string(ProcessInfo.processInfo.arguments.contains("--todo-linked-mail-fixture") ? "fixture-mail" : ""),
-                    "source_thread_id": .string(ProcessInfo.processInfo.arguments.contains("--todo-linked-mail-fixture") ? "fixture-thread" : ""),
-                    "source_message_id": .string(ProcessInfo.processInfo.arguments.contains("--todo-linked-mail-fixture") ? "fixture-message-2" : ""),
+                    "source_connection_id": .string("fixture-mail"),
+                    "source_thread_id": .string("fixture-thread"),
+                    "source_message_id": .string("fixture-message-2"),
                     "status": .string("needs_you"), "version": .number(1),
+                    "preparation": Self.fixturePreparation(id: "f341290a-8130-4a5f-aeb2-fcfd90e8dd01", messageID: "fixture-message-2", body: "Thursday at 10 works. I will review the launch plan before then."),
                     "choices": .array([
                         .object(["id": .string("draft"), "title": .string("Draft another time")]),
                         .object(["id": .string("defer"), "title": .string("Not now")]),
@@ -1111,6 +1128,7 @@ final class InboxModel: ObservableObject {
                     "context": .string("The first message asks for feedback on the plan."), "source_label": .string("Email thread"),
                     "status": .string("needs_you"), "version": .number(1), "source_connection_id": .string("fixture-mail"),
                     "source_thread_id": .string("fixture-thread"), "source_message_id": .string("fixture-message-1"),
+                    "preparation": Self.fixturePreparation(id: "f341290a-8130-4a5f-aeb2-fcfd90e8dd02", messageID: "fixture-message-1", body: "I will review the launch plan before Thursday."),
                     "choices": .array([.object(["id": .string("follow_up"), "title": .string("Follow up")]), .object(["id": .string("dismiss"), "title": .string("Dismiss")])]),
                 ])) { todoDecisions.append(earlier) }
                 if ProcessInfo.processInfo.arguments.contains("--todo-filter-fixture") {
@@ -1124,6 +1142,15 @@ final class InboxModel: ObservableObject {
                     todoItems = (try? [TodoCapture(.object(["id": .string("fixture-capture"),
                         "body": .string("Remember the agenda"), "status": .string("captured"), "version": .number(1)]))]) ?? []
                 }
+            }
+            #endif
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--decision-preparation-fixture"), todoItems.isEmpty {
+                todoItems = (try? [
+                    TodoCapture(.object(["id": .string("fixture-working"), "body": .string("Research the launch risks"), "status": .string("captured"), "version": .number(1), "preparation": .object(["status": .string("preparing")])])),
+                    TodoCapture(.object(["id": .string("fixture-blocked"), "body": .string("Book a trip"), "status": .string("captured"), "version": .number(1), "preparation": .object(["status": .string("blocked"), "error": .string("Destination and budget are needed")])])),
+                    TodoCapture(.object(["id": .string("fixture-ready-capture"), "body": .string("Plan the launch review"), "status": .string("captured"), "version": .number(1), "preparation": .object(["status": .string("ready"), "recommendation": .string("Hold a focused review"), "proposal": .string("Review milestones, assign owners, and record open risks.")])]))
+                ]) ?? []
             }
             #endif
             todoLoaded = true
@@ -1164,6 +1191,7 @@ final class InboxModel: ObservableObject {
                 "id": .string(UUID().uuidString), "body": .string(text),
                 "watch_hint": .string(todoWatchHint), "status": .string("captured"),
                 "version": .number(1), "created_at": .string(Date.now.ISO8601Format()),
+                "preparation": .object(["status": .string("pending"), "kind": .string("capture")]),
             ]))
             if let result { todoItems.insert(result, at: 0); todoDraft = ""; todoWatchHint = "" }
             return
@@ -1195,6 +1223,29 @@ final class InboxModel: ObservableObject {
             if generation == epoch { todoError = "Couldn't save. Your text is still here. " + error.localizedDescription }
         }
         if generation == epoch { todoSaving = false }
+    }
+
+    func prepareTodoChanges(kind: String, id: String, version: Int, text: String) async -> Bool {
+        guard !todoResponding else { return false }
+        if isDemo { return true }
+        guard connected, let client else { return false }
+        let epoch = generation
+        let key = "prepare:\(kind):\(id):\(version):\(text)"
+        let operationID = todoResponseOperations[key] ?? UUID()
+        todoResponseOperations[key] = operationID
+        todoResponding = true; todoError = nil
+        defer { if generation == epoch { todoResponding = false } }
+        do {
+            try await client.prepareTodo(kind: kind, id: id, version: version, instructions: text, operationID: operationID)
+            guard generation == epoch, connected else { return false }
+            todoResponseOperations.removeValue(forKey: key)
+            todoRevision &+= 1
+            await refreshTodo()
+            return true
+        } catch {
+            if generation == epoch { todoError = "Preparation could not be confirmed. Your instructions are retained. " + error.localizedDescription }
+            return false
+        }
     }
 
     func respondTodo(to decision: TodoDecision, choiceID: String?, text: String?) async -> Bool {
