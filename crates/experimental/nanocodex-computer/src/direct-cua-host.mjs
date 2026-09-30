@@ -93,6 +93,10 @@ export function policyReply(request, allowApps) {
   return { jsonrpc: '2.0', id: request.id, result };
 }
 
+// Only observed native application-access operations are covered by blanket
+// app consent. New/unknown SDK operations must not silently expand that grant.
+const APP_ACCESS_TOOLS = new Set(['click', 'drag', 'get_app_state', 'paste',
+  'perform_secondary_action', 'press_key', 'scroll', 'select_text', 'set_value', 'type_text']);
 export function appConsent(request, allowApps, executing) {
   const p = request.params, meta = p?._meta, schema = p?.requestedSchema;
   const permitted = allowApps && executing && request.method === 'elicitation/create'
@@ -100,7 +104,7 @@ export function appConsent(request, allowApps, executing) {
     && record(schema.properties) && Object.keys(schema.properties).length === 0
     && (!schema.required || (Array.isArray(schema.required) && schema.required.length === 0))
     && meta?.connector_id === 'computer-use' && meta?.codex_approval_kind === 'mcp_tool_call'
-    && typeof meta?.tool_name === 'string' && meta.tool_name !== 'start_audio_recording'
+    && APP_ACCESS_TOOLS.has(meta?.tool_name)
     && typeof meta?.tool_params?.app === 'string' && /^[A-Za-z0-9._-]{1,256}$/.test(meta.tool_params.app);
   return { jsonrpc: '2.0', id: request.id, result: permitted ? { action: 'accept', content: {} } : { action: 'decline' } };
 }

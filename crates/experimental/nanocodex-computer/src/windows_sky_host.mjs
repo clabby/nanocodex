@@ -1,11 +1,8 @@
-// Nanocodex host for the unmodified OpenAI WindowsHelperTransport.
-// Verified against OpenAI Sky 26.915.4065.0 and Codex Desktop build 9922.
-// This runs beside the sandboxed provider, never inside its trusted worker.
+// Windows native-pipe transport fixtures for upstream WindowsHelperTransport.
+// Production launch is disabled: the Windows native helper policy contract has
+// not been verified without an official Codex executable/app-server.
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { createInterface } from 'node:readline';
-import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const LIMIT = 8 * 1024 * 1024;
@@ -130,49 +127,13 @@ export async function startSkyHost({ makeTransport, pipePath = `\\\\.\\pipe\\nan
   };
 }
 
-// Provider stdin/stdout remain the official MCP protocol, including elicitation.
-// No approval is generated here: the SDK sends it through node_repl to the host.
-export async function runProvider(providerPath, providerArgs = []) {
-  if (process.platform !== 'win32') throw new Error('The Sky native pipe host is Windows-only');
-  if (!process.env.CODEX_CLI_PATH) throw new Error('CODEX_CLI_PATH is required');
-  const modules = process.env.NODE_REPL_NODE_MODULE_DIRS;
-  if (!modules || !path.isAbsolute(modules)) throw new Error('A verified OpenAI module directory is required');
-  const sky = path.join(modules, '@oai', 'sky');
-  const modulePath = path.join(sky, 'dist/project/cua/sky_js/src/targets/windows/internal/helper_transport.js');
-  const helperCommand = path.join(sky, 'bin/windows', process.arch === 'arm64' ? 'codex-computer-use-arm64.exe' : 'codex-computer-use.exe');
-  const { WindowsHelperTransport } = await import(pathToFileURL(modulePath).href);
-  const host = await startSkyHost({ makeTransport: () => new WindowsHelperTransport({
-    helperCommand, helperArgs: ['--parent-pid', String(process.pid)],
-    helperEnv: { CODEX_CLI_PATH: process.env.CODEX_CLI_PATH },
-  }) });
-  const child = spawn(process.execPath, [providerPath, ...providerArgs], { windowsHide: true, stdio: ['pipe', 'pipe', 'inherit'], env: {
-    ...process.env, SKY_CUA_NATIVE_PIPE: '1', SKY_CUA_NATIVE_PIPE_DIRECTORY: host.pipePath,
-    NODE_REPL_UNTRUSTED_ENV_ALLOWLIST: [...new Set((process.env.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST ?? '').split(',').filter(Boolean).concat(['SKY_CUA_NATIVE_PIPE', 'SKY_CUA_NATIVE_PIPE_DIRECTORY']))].join(','),
-  } });
-  child.stdout.pipe(process.stdout);
-  let ended = false;
-  const stop = async () => { if (ended) return; ended = true; input.close(); process.stdin.pause(); child.kill(); await host.dispose(); };
-  child.once('error', error => { console.error(error.message); void stop(); process.exitCode = 1; });
-  child.once('exit', code => { void stop(); process.exitCode = code ?? 1; });
-  child.stdin.on('error', () => { void stop(); });
-  process.once('SIGTERM', () => { void stop(); });
-  process.once('SIGINT', () => { void stop(); });
-  const input = createInterface({ input: process.stdin });
-  input.on('close', () => { void stop(); });
-  // Serialize lifecycle cleanup with subsequent input. Elicitation replies must
-  // still reach the provider while the pending tools/call is awaiting a human.
-  let forwarding = Promise.resolve();
-  input.on('line', line => {
-    forwarding = forwarding.then(async () => {
-      const message = JSON.parse(line);
-      if (message.method === 'notifications/cancelled' ||
-          (message.method === 'tools/call' && ['turn_ended', 'js_reset'].includes(message.params?.name))) await host.endTurn();
-      if (!ended) child.stdin.write(line + '\n');
-    }).catch(error => { console.error(error.message); void stop(); });
-  });
-  return { child, host, stop };
+// Keep the injectable framing/approval bridge testable, but never launch an
+// unverified helper or reuse a legacy receipt that depends on Codex. The JS
+// transport alone does not prove the native helper's policy dependencies.
+export const WINDOWS_NATIVE_CONTRACT_BLOCKER = 'Windows upstream CUA is unsupported: the native helper policy contract without Codex has not been verified. No provider or helper was started.';
+export async function runProvider() {
+  throw new Error(WINDOWS_NATIVE_CONTRACT_BLOCKER);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  if (!process.argv[2]) throw new Error('Expected the verified OpenAI CUA provider entry point');
-  await runProvider(process.argv[2], process.argv.slice(3));
+  await runProvider();
 }

@@ -33,8 +33,32 @@ pub fn managed_provider_path() -> Option<PathBuf> {
     if std::fs::metadata(&path).ok()?.len() > 65536 {
         return None;
     }
-    let receipt = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if !no_codex_managed_receipt(&receipt) {
+        return None;
+    }
     Some(config_from_receipt(&receipt).ok()?.executable)
+}
+
+const NO_CODEX_DEPENDENCY_CONTRACT: &str = "nanocodex-native-no-codex-v1";
+
+fn no_codex_managed_receipt(receipt: &serde_json::Value) -> bool {
+    receipt["dependency_contract"].as_str() == Some(NO_CODEX_DEPENDENCY_CONTRACT)
+        && receipt["environment"].get("CODEX_CLI_PATH").is_none()
+}
+
+#[cfg(test)]
+mod managed_dependency_tests {
+    #[test]
+    fn legacy_and_cli_bearing_managed_receipts_are_not_selected() {
+        let mut receipt = serde_json::json!({"status":"installed","transport":"mcp",
+            "executable":"/legacy/cua-provider","environment":{}});
+        assert!(!super::no_codex_managed_receipt(&receipt));
+        receipt["dependency_contract"] = super::NO_CODEX_DEPENDENCY_CONTRACT.into();
+        assert!(super::no_codex_managed_receipt(&receipt));
+        receipt["environment"]["CODEX_CLI_PATH"] = "/legacy/codex".into();
+        assert!(!super::no_codex_managed_receipt(&receipt));
+    }
 }
 
 /// Reuse the cached runtime by default; refresh explicitly fetches the official
@@ -117,76 +141,37 @@ pub fn config_from_receipt(receipt: &serde_json::Value) -> Result<crate::Compute
 }
 
 #[cfg(any(target_os = "windows", test))]
-async fn windows_provision(refresh: bool) -> Result<serde_json::Value, String> {
-    use base64::Engine as _;
-    let script: Vec<u8> = include_str!("provision_windows.ps1")
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect();
-    let encoded = base64::engine::general_purpose::STANDARD.encode(script);
-    let child = tokio::process::Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-EncodedCommand",
-            &encoded,
-        ])
-        .env(
-            "NANOCODEX_UPSTREAM_REFRESH",
-            if refresh { "1" } else { "0" },
-        )
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(600),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| "OpenAI Store installation timed out")?
-    .map_err(|e| e.to_string())?;
-    if !result.status.success() {
-        return Err(format!(
-            "OpenAI CUA setup failed: {}",
-            String::from_utf8_lossy(&result.stderr)
-        ));
+async fn windows_provision(_refresh: bool) -> Result<serde_json::Value, String> {
+    // The JS WindowsHelperTransport does not establish the native helper's
+    // policy contract. Never install a desktop package, launch PowerShell,
+    // copy a Codex executable, or select a legacy receipt to fill that gap.
+    Ok(serde_json::json!({
+        "status": "unsupported",
+        "platform": "windows",
+        "reason": "The Windows native helper policy contract without Codex has not been verified. No installation or configuration was changed."
+    }))
+}
+
+#[cfg(test)]
+mod windows_provision_tests {
+    #[tokio::test]
+    async fn windows_setup_and_refresh_are_unsupported_without_launching_an_installer() {
+        for refresh in [false, true] {
+            let receipt = super::windows_provision(refresh).await.unwrap();
+            assert_eq!(receipt["status"], "unsupported");
+            assert_eq!(receipt["platform"], "windows");
+            assert!(
+                receipt["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("without Codex")
+            );
+            assert!(receipt.get("executable").is_none());
+            assert!(receipt.get("args").is_none());
+            assert!(receipt.get("environment").is_none());
+            assert!(super::config_from_receipt(&receipt).is_err());
+        }
     }
-    let mut receipt: serde_json::Value = serde_json::from_slice(&result.stdout)
-        .map_err(|e| format!("Invalid OpenAI Store receipt: {e}"))?;
-    config_from_receipt(&receipt)?;
-    let root = runtime_root()?;
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_nanos();
-    // Keep the Nanocodex host outside the byte-verified upstream resources tree.
-    // Each receipt owns an immutable host file so updates preserve running hosts.
-    let host = root.join(format!(
-        "windows-sky-host-{}-{stamp}.mjs",
-        std::process::id()
-    ));
-    std::fs::write(&host, include_bytes!("windows_sky_host.mjs")).map_err(|e| e.to_string())?;
-    let args = receipt["args"]
-        .as_array_mut()
-        .ok_or("OpenAI CUA Windows receipt has no provider arguments")?;
-    args.insert(
-        0,
-        serde_json::Value::String(host.to_string_lossy().into_owned()),
-    );
-    config_from_receipt(&receipt)?;
-    let stage = root.join(format!("provider-{}-{stamp}.json", std::process::id()));
-    std::fs::write(
-        &stage,
-        serde_json::to_vec(&receipt).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::rename(&stage, root.join("provider.json")).map_err(|e| e.to_string())?;
-    Ok(receipt)
 }
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
@@ -985,6 +970,7 @@ mod mac {
     ) -> Result<serde_json::Value, String> {
         commands.check_cancelled()?;
         let mut receipt = serde_json::json!({"status": "installed", "build": build,
+            "dependency_contract": super::NO_CODEX_DEPENDENCY_CONTRACT,
             "executable": host.join("cua-provider"), "transport": "mcp", "args": [], "environment": {}});
         if let Some(fingerprint) = fingerprint {
             receipt["catalog_cache"] = serde_json::to_value(

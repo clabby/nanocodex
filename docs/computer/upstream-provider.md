@@ -1,15 +1,18 @@
 # Installed upstream CUA runtime
 
 Native Nanocodex, Nanocodex2, local Hands, and the JavaScript desktop runtime
-provision OpenAI's CUA provider automatically on macOS and Windows. They expose
+provision OpenAI's CUA provider automatically on macOS. Windows upstream native
+CUA is currently unsupported without a verified no-Codex helper contract; its
+automatic installation/launch path is disabled before side effects. They expose
 its actual MCP catalog, including descriptions, schemas, metadata, and visibility.
 Production Code Mode remains QuickJS; the provider uses its own bundled Node.
 
 The lean managed **macOS** launcher enables only the upstream `computer`
 surface. Browser windows remain controllable through native UI, but dedicated
 browser inventory/Tab/DOM APIs and the official Chrome native-messaging bridge
-are not enabled. That bridge contains an app-server proxy and needs a separate
-port before it can meet the no-Codex dependency requirement. Hosted browser CDP
+are not enabled. The shipped bridge contains an app-server proxy. The extension browser data-plane
+is separable, but a replacement relay needs verified peer authentication and
+browser policy/session integration before it can be supported without Codex. Hosted browser CDP
 and other Hands' screen providers are separate paths and are not changed here.
 Mac setup regenerates Nanocodex host assets independently of the cached signed
 bundle; a launcher update does not require `--refresh`.
@@ -109,34 +112,23 @@ minimal bundle is verified against Apple's signature chain, OpenAI team
 SHA-256 seal. Compatibility is based on required signed components, not a hardcoded
 desktop build. The user's installed desktop app is never read or replaced.
 
-On Windows, setup obtains Store product `9PLM9XGG6VKS` through winget, as identified
-by [upstream's Windows installer](https://github.com/openai/codex/blob/36430b36881cf5c289cb48e671cfc9e8b542ae7b/codex-rs/cli/src/desktop_app/windows.rs).
-This installs the official ChatGPT/Codex desktop package for the current Windows
-user and accepts the standard Store/package installation agreements. Setup checks
-its Store signature, package family, and health. Store-owned executables cannot
-be launched directly by an unpackaged Hand, so setup copies the complete CUA tree,
-native host executables, and notices into a private cache. Every copied file is
-compared with its Store source using SHA-256. The matching bundled Node handles
-long Windows paths; no extra Node or Python installation is needed. Windows
-requires Microsoft App Installer/winget and Store access for initial download.
-
-Windows setup also writes a Nanocodex-owned host script outside the verified
-OpenAI resources tree. It starts the packaged `WindowsHelperTransport` and signed
-helper through the upstream native-pipe integration, then starts the official
-MCP provider with that pipe. `CODEX_CLI_PATH` and the provider sandbox remain in
-place. The host forwards authentic turn metadata and the SDK's
-`requestComputerUseApproval` messages between the native helper and official
-provider. This bridge carries upstream protocol messages; it supplies no consent
-UI, permission cache, or approval decision. The Nanocodex MCP client does not
-support host elicitation, so an upstream request that requires it fails explicitly.
-Timeout, cancellation, disconnect, reset, and turn completion close pending
-requests and the native helper. Each receipt retains its own host script so
-replacing the selected runtime does not overwrite a running host.
+On Windows, setup and refresh return `unsupported` without launching PowerShell,
+installing the Store app, copying companion executables, or selecting an old
+managed receipt. The standalone installer and upstream native-host live probe
+also refuse execution. The local Windows JavaScript transport can launch a
+native helper directly, but the signed Windows helper binary/source is absent
+from the available local package and the registered Windows Hand is offline.
+Absence of a CLI call in JavaScript is not proof of the native policy contract.
+See [Windows evidence and blocker](windows-upstream-helper-contract.md).
+Generic explicitly configured external MCP providers remain separate trusted
+host configuration; this restriction is not a ban on all Windows MCP servers.
+The native screen fallback is unchanged.
 
 
 Linux and Linux VM/container guests require an explicitly configured upstream
 MCP provider. No custom CUA runtime, background-input plugin, or legacy fallback
-is bundled. Automatic `computer setup` currently supports macOS and Windows;
+is bundled. Automatic `computer setup` currently supports macOS; Windows upstream setup is
+unsupported until the native no-Codex contract is verified;
 without a provider, guests use their native controllable screen action contract
 through the workdir-routed CUA entry point. This fallback does not emulate or
 claim to install OpenAI's JavaScript provider.
@@ -147,7 +139,13 @@ The cache lives under `${NANOCODEX_DIR:-$HOME/.nanocodex}/runtimes/openai-cua`
 (`USERPROFILE` is the Windows fallback). Version directories are immutable after
 installation. Only a complete verified runtime is selected; a failed download or
 copy preserves the previous selection. Old versions remain available to running
-processes. Cached corruption produces an actionable error rather than silently
+processes. New managed receipts carry `dependency_contract` equal to
+`nanocodex-native-no-codex-v1`. Automatic discovery rejects unmarked legacy
+receipts or receipts exporting `CODEX_CLI_PATH`; installation regenerates the
+Mac selection rather than running the old host. Windows automatic discovery
+never reads its old receipt. Explicit external-provider commands remain trusted
+owner configuration, not an assertion that they satisfy this dependency contract.
+Cached corruption produces an actionable error rather than silently
 selecting a different backend. Run setup with `--refresh` to repair it.
 
 The native and JS desktop hosts select the managed MCP provider automatically.
@@ -156,8 +154,11 @@ its automatic download. Custom external MCP commands continue to use
 `NANOCODEX_COMPUTER_TRANSPORT=mcp`. No versions are spoofed and no provider binaries
 are committed to this repository or redistributed in Nanocodex release assets.
 
-The older `scripts/install-upstream-cua.py` remains an explicit development-only
-copy helper. Normal installations use the shared native provisioning command.
+The older `scripts/install-upstream-cua.py` copy-only launcher is retired and
+fails before touching files. It did not provide the no-Codex lifecycle/policy
+host or attestation context. Use the shared native provisioning command on
+macOS, or the separate Linux Sky installer; Windows upstream support is currently
+unavailable.
 
 ## Provider permissions and validation
 
@@ -174,31 +175,30 @@ sources fail closed pending a real policy integration; no enterprise Codex
 identity is fabricated. See [native Hand computer access](native-hand-consent.md).
 
 Validation covers transport fidelity, cancellation and cleanup, installer
-migration, attestation, and the isolated no-Codex macOS MCP/native-observation
-smoke. Arithmetic/catalog success alone is not proof of native CUA. Windows and
-the opt-in Linux Sky host retain their existing Codex CLI dependencies; this
-macOS change does not convert those paths or establish input acceptance on them.
+migration, attestation, and isolated no-Codex macOS MCP lifecycle checks.
+Arithmetic/catalog success alone is not proof of native observation/input.
+Mac native UI acceptance remains pending an unlocked console. The modified
+no-Codex Linux wrapper delivered a key to its uniquely observed synthetic X11
+fixture; this does not establish native Wayland coverage or a production rollout.
+Windows native acceptance remains unavailable, not inferred from transport tests.
 
-The Windows native-pipe contract was verified against Store build 26.915.4065.0
-and Codex Desktop 9922. A separate protocol probe returned app inventory,
-forwarded a Calculator approval form, preserved a deliberate denial, and completed
-`turn_ended`. That probe supplies its own decline-only response handler; it does
-not represent the Nanocodex adapter, which rejects unsupported host requests.
-It establishes transport and denial handling, not human approval UI, screen
-capture, or input acceptance. The diagnostic fixture is
-`crates/experimental/nanocodex-computer/tests/windows-sky/live-probe.mjs` (place it
-beside the host script and run with the verified bundled Node on Windows). Its
-responses to every elicitation are declines. Transport fixtures run with
-`node --test crates/experimental/nanocodex-computer/tests/windows-sky/host.test.mjs`.
+Windows transport fixtures preserve framing, metadata, deliberate denial,
+turn completion, disconnect cleanup and cross-client isolation. Those fixtures
+use injectable transports, not real native screenshot/input. The previous
+Codex-dependent Windows live probe is retired and fails before launch.
 
 ## Linux native host
 
 A configured Linux provider must launch the native Sky service outside the model
-sandbox so it can reach the desktop X server. `linux_sky_host.mjs` hosts the
-unchanged `@oai/sky/service` in a disposable desktop-user process. Its trusted
-proxy uses the upstream NodeREPL `nativePipe` bridge; ordinary model JavaScript
-keeps the Codex sandbox and has no nativePipe capability. MCP tool definitions,
-descriptions and results still come from the official provider.
+JavaScript provider so it can reach the desktop X server. `linux_sky_host.mjs`
+hosts the unchanged `@oai/sky/service` in a disposable desktop-user process.
+Its trusted proxy uses upstream NodeREPL `nativePipe`; ordinary model JavaScript
+has no nativePipe capability. Standalone upstream node_repl is **not** a
+Codex-managed execution sandbox. The host passes only selected desktop/runtime
+environment variables, scrubs inherited CLI/tokens/bootstrap overrides, disables
+analytics, and fails closed on known enforced administrative policy. MCP tool
+definitions, descriptions, metadata and results still come from the real provider.
+Only `computer` is enabled; browser opt-ins fail before any child starts.
 
 For an already installed, compatible upstream Linux runtime, create a separate
 host installation from this checkout:
@@ -206,7 +206,6 @@ host installation from this checkout:
 ```sh
 python3 scripts/install-linux-sky-host.py \
   --runtime /path/to/cua_node \
-  --codex-cli /path/to/codex \
   --destination "$HOME/.local/share/nanocodex/sky-host-version"
 ```
 
@@ -216,7 +215,7 @@ its real DISPLAY and session bus. Keep the host modules outside model-writable
 workspaces. A system administrator can install the same modules in a protected
 system directory and wrap the launcher with the desktop-session environment.
 The script does not obtain or authenticate an upstream Linux distribution;
-automatic `computer setup` remains limited to macOS and Windows.
+automatic `computer setup` remains limited to macOS.
 
 For a Linux VM, add `--register-managed` to publish the launcher selection under
 `$NANOCODEX_DIR/runtimes/openai-cua/provider.json` (or
@@ -229,8 +228,8 @@ fail when forwarding a call to a newer guest.
 OpenAI's Linux distribution includes both `x86_64` and `aarch64` packages. The
 26.915.31945 ARM64 package is published at
 `https://persistent.oaistatic.com/codex-app-prod/linux/arch/26.915.31945/aarch64/chatgpt-bin-26.915.31945-1-aarch64.pkg.tar.zst`.
-Use the package's matching `resources/codex` and complete `resources/cua_node`
-together, and verify the package signature against the fingerprint published in
+Use the complete matching `resources/cua_node`; do not copy or require
+`resources/codex`. Verify the package signature against the fingerprint published in
 the upstream installer. This version contains `sky_linux_arm64`; the x86 package
 contains `sky_linux_x64`. A macOS ARM64 bundle is not a Linux ARM64 bundle.
 Bundled Node and the native Linux Sky executable require glibc, so a bare Alpine
@@ -246,9 +245,12 @@ can have partial effects before cancellation; cancellation is never a rollback.
 The installed Linux Sky target controls X11/Xwayland windows. This transport does
 not make native Wayland windows visible to that target. Application-level input
 filters still apply (for example, xterm rejects synthetic SendEvent input by
-default). Browser control remains the separate official browser surface.
+default). Dedicated browser Tab/DOM control remains unsupported until the separate
+no-Codex browser integration is verified; native browser-window input is separate.
 
 Transport tests: `node --test crates/experimental/nanocodex-computer/tests/linux-sky/host.test.mjs`.
-Live verification used the unmodified Linux service: inventory, a GTK X11 test
-window screenshot, exact text plus Enter received by that app, and reconnect after
-turn completion. The model process retained NoNewPrivs/Seccomp and had no nativePipe.
+The new no-Codex wrapper was verified with real upstream MCP catalog/metadata,
+inventory, persistence/reset/turn-end, and a key delivered to a uniquely observed
+owned X11 test window. Historical Codex-sandboxed GTK tests are not evidence of
+this standalone kernel's sandbox or full native coverage. No global provider
+selection or production Hand restart was performed for that Linux probe.

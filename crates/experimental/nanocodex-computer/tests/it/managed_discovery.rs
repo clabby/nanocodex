@@ -53,7 +53,8 @@ fn linux_managed_launcher_discovery_respects_explicit_selection() {
     fs::write(
         &receipt,
         serde_json::to_vec(&serde_json::json!({
-            "status": "installed", "transport": "mcp", "executable": launcher
+            "status": "installed", "transport": "mcp", "executable": launcher,
+            "dependency_contract": "nanocodex-native-no-codex-v1"
         }))
         .unwrap(),
     )
@@ -66,6 +67,9 @@ fn linux_managed_launcher_discovery_respects_explicit_selection() {
         check(Some(disabled), "absent".as_ref());
     }
     for invalid in [
+        serde_json::json!({"status":"installed", "transport":"mcp", "executable":launcher}).to_string(),
+        serde_json::json!({"status":"installed", "transport":"mcp", "executable":launcher,
+            "dependency_contract":"nanocodex-native-no-codex-v1", "environment":{"CODEX_CLI_PATH":"/legacy/codex"}}).to_string(),
         "invalid json".to_owned(),
         serde_json::json!({"status":"installed", "transport":"mcp", "executable":"relative"})
             .to_string(),

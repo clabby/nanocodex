@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { access, stat } from "node:fs/promises";
 import { constants, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { namedTool } from "nanocodex-tools/named-tool";
@@ -10,7 +10,8 @@ import { toolResult } from "nanocodex-tools/runtime/code-runtime";
 const runSetup = promisify(execFile);
 const preparations = new Map();
 const interruptedGuidance = "Upstream/native input may still be running and effects are uncertain; do not replay uncertain input. Call cua_repl.js_reset, then inspect the surface before continuing. Reset does not prove earlier input stopped.";
-const supportsManagedComputer = () => ["darwin", "win32"].includes(process.platform);
+// Windows is fail-closed until its native no-Codex contract is verified.
+const supportsManagedComputer = () => process.platform === "darwin";
 const managedRoot = () => join(process.env.NANOCODEX_DIR || join(process.env.HOME || process.env.USERPROFILE || homedir(), ".nanocodex"), "runtimes", "openai-cua");
 function managedProvider() {
   if (!supportsManagedComputer()) return undefined;
@@ -19,6 +20,9 @@ function managedProvider() {
   catch (error) { if (error.code === "ENOENT") return undefined; throw error; }
   if (source.length > 65536) throw new Error("Invalid managed CUA receipt; run nanocodex2 computer setup");
   const value = JSON.parse(source);
+  if (value?.dependency_contract !== "nanocodex-native-no-codex-v1" || value?.environment?.CODEX_CLI_PATH !== undefined) {
+    throw new Error("Invalid managed CUA receipt: legacy Codex-dependent generation is not supported; run nanocodex2 computer setup");
+  }
   if (value?.status !== "installed" || value.transport !== "mcp" || typeof value.executable !== "string" || !isAbsolute(value.executable)
     || !Array.isArray(value.args) || !value.args.every(arg => typeof arg === "string")
     || !value.environment || typeof value.environment !== "object" || Array.isArray(value.environment) || !Object.values(value.environment).every(v => typeof v === "string")) {
@@ -28,7 +32,10 @@ function managedProvider() {
 }
 const managedComputer = () => managedProvider()?.executable;
 function managedOptions(options) {
-  if (process.env.NANOCODEX_COMPUTER) return options;
+  // Explicit external commands must not inspect or inherit unrelated managed
+  // state. Only automatic managed-root candidates use receipt metadata.
+  if (process.env.NANOCODEX_COMPUTER || !supportsManagedComputer()
+    || !resolve(options.executable).startsWith(resolve(managedRoot()) + sep)) return options;
   const managed = managedProvider();
   if (!managed || resolve(options.executable) !== resolve(managed.executable)) return options;
   return { ...options, args: options.args ?? managed.args, environment: { ...managed.environment, ...options.environment } };
