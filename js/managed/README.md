@@ -9,6 +9,46 @@ followers, and following. `environment().apis` advertises the tool independently
 of connector authentication. It calls the private [X Worker](../x-api/README.md)
 through `NANOCODEX_X`; deploy it with `pnpm deploy:x` before `pnpm deploy:managed`.
 
+## Thread sharing tool
+
+`thread_sharing` exposes `list`, `create`, `revoke`, and `revoke_all`. Omit
+`session_id` to target the current thread; explicit targets must have the same
+owner, organization, team, and authorization epoch. Calls require a direct
+account root with `agents:read` and `tools:use`; mutations also require
+`agents:write`. Connect grants, shared guests, and subagents cannot use it.
+
+To disable all current sharing, call:
+
+```js
+await tools.thread_sharing({ operation: "revoke_all" });
+```
+
+`list` returns active link IDs, permissions, and creation times, never bearer
+URLs. `revoke` takes a listed `link_id`. `create` returns a one-time bearer URL
+and defaults to `permission: "read"`; `write` permits guest turn submission and
+must be explicitly requested. Creating or distributing links requires user
+authorization. Never automatically retry uncertain creation; inspect active
+links and resolve the outcome first. Listing cannot recover a lost bearer URL.
+
+The tool reuses the public owner-authenticated `/v1/agents/:id/share-links`
+router. `DELETE` on that collection atomically revokes all active links and
+returns `revoked_ids`, `revoked_count`, and `active_links: 0`. Live streams for
+those links close immediately. Repeating it returns an empty result. Individual
+`DELETE /share-links/:link_id` retains its existing 204/404 behavior. Revocation
+does not cancel guest turns already admitted to the owner thread.
+
+Guest metadata, history, and SSE redact share bearer tokens, including nested
+Code Mode output and object keys, so creating another link cannot implicitly
+redistribute write or cross-thread authority. Guest text updates use completed
+assistant messages; assistant/reasoning delta fragments are owner-only because
+tokens split across fragments could otherwise be reconstructed. Owner events
+and ordinary shared tool results remain unchanged.
+
+Run the Workerd route/tool journeys with
+`pnpm --filter nanocodex-managed-service exec vitest run test/thread-share-links.test.ts`.
+They emit sanitized journey traces for authorization, revocation, live-feed
+closure, and bearer redaction.
+
 ## Ownership and security
 
 `DurableAgentSession` exclusively owns an agent's mutable runtime: retained

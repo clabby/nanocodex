@@ -54,6 +54,13 @@ export class ThreadShareLinks {
     ).toArray().length > 0;
   }
 
+  /** One SQLite statement fences every currently active link without an await gap. */
+  revokeAll(): string[] {
+    return this.storage.sql.exec<{ id: string }>(
+      "UPDATE managed_share_links SET revoked_at=? WHERE revoked_at IS NULL RETURNING id", Date.now(),
+    ).toArray().map(link => link.id);
+  }
+
   validate(header: string | null): LinkWithAuthorization | undefined {
     const token = bearerToken(header);
     if (!token) return undefined;
