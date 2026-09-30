@@ -122,8 +122,6 @@ State format 4 uses the `nanocodex_durable_state` head envelope and SHA-256
 addressed payload records. Bodies over 256,000 UTF-8 bytes are split into records.
 Persistent 64-message context pages share prior records. Each boundary publishes
 only new messages and changed pages, with its head in one atomic transaction.
-The policy retains the last acknowledged boundary and encodes only items after
-the prefix both share by allocation identity, so boundary CPU tracks new items.
 The old inline/compressed storage formats are rejected.
 
 Cold acquisition reads the head only. Execution resolves current model context

@@ -141,9 +141,7 @@ match state.admit_typed::<_, String, String>("request-7", &"hello").await? {
 # }
 ```
 
-Enable `sqlite` and open `SqliteStore` for a directly owned native connection
-(`open` enables WAL, `synchronous=FULL`, and a 5 s busy timeout; calls run on
-Tokio's blocking pool).
+Enable `sqlite` and open `SqliteStore` for a directly owned native connection.
 Enable `postgres` and pass a driven `tokio_postgres::Client` to
 `PostgresStore::new`. Both implement the exact same `StateStore` contract.
 

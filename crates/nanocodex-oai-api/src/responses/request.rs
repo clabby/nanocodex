@@ -273,37 +273,6 @@ impl ResponseHistory {
         Arc::make_mut(&mut self.tail).extend(replacement);
     }
 
-    /// Returns how many leading items `self` provably shares with `previous`
-    /// by allocation identity: sealed segments are immutable and a shared tail
-    /// is copied before mutation, so while both are alive equal pointers prove
-    /// equal content. Rebuilt but equal content reports no sharing.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn shared_prefix_len(&self, previous: &Self) -> usize {
-        let head = |history: &Self| history.head.as_ref().map(Arc::as_ptr);
-        if head(self) == head(previous) && Arc::ptr_eq(&self.tail, &previous.tail) {
-            return self.len();
-        }
-        let mut retained = previous.head.as_ref();
-        let mut current = self.head.as_ref();
-        while let Some(segment) = current {
-            // `previous`'s exact tail sealed on top of its exact head.
-            if Arc::ptr_eq(&segment.items, &previous.tail)
-                && segment.previous.as_ref().map(Arc::as_ptr) == head(previous)
-            {
-                return segment.len;
-            }
-            while let Some(older) = retained.filter(|older| older.len > segment.len) {
-                retained = older.previous.as_ref();
-            }
-            if retained.is_some_and(|older| Arc::ptr_eq(older, segment)) {
-                return segment.len;
-            }
-            current = segment.previous.as_ref();
-        }
-        0
-    }
-
     /// Iterates over all items from oldest to newest.
     #[must_use]
     pub fn iter(&self) -> ResponseHistoryIter<'_> {
@@ -1463,53 +1432,5 @@ mod tests {
             serde_json::to_value(history.iter().cloned().collect::<Vec<_>>()).unwrap(),
             serde_json::to_value(vec![item("zero"), item("one"), item("replacement")]).unwrap(),
         );
-    }
-
-    /// Durable checkpoints reuse records for the claimed prefix.
-    #[test]
-    fn pointer_shared_prefix_never_claims_rewritten_items() {
-        let item = |text: &str| {
-            ResponseItem::message(
-                MessageRole::User,
-                [ContentItem::InputText { text: text.into() }],
-            )
-        };
-        let shared = |live: &ResponseHistory, previous: &ResponseHistory| {
-            let len = live.shared_prefix_len(previous);
-            let prefix = |history: &ResponseHistory| {
-                serde_json::to_value(history.iter().take(len).collect::<Vec<_>>()).unwrap()
-            };
-            assert!(len <= live.len().min(previous.len()));
-            assert_eq!(prefix(live), prefix(previous), "claimed {len} shared items");
-            len
-        };
-        let mut live = ResponseHistory::new(vec![item("a"), item("b")]);
-        live.commit_tail();
-        live.push(item("c"));
-        let previous = live.clone();
-        assert_eq!(shared(&live, &previous), 3);
-
-        // A model boundary seals the checkpointed tail and appends new items.
-        let mut boundary = live.clone();
-        boundary.commit_tail();
-        boundary.push(item("d"));
-        assert_eq!(shared(&boundary, &previous), 3);
-
-        // In-place tail edits copy while the checkpoint shares the tail.
-        let mut edited = live.clone();
-        edited.tail_mut()[0] = item("rewritten");
-        assert_eq!(shared(&edited, &previous), 2);
-
-        let mut suffix = boundary.clone();
-        suffix.replace_suffix(1, vec![item("z")]);
-        assert_eq!(shared(&suffix, &previous), 0);
-        let mut suffix = boundary.clone();
-        suffix.replace_suffix(3, vec![item("z")]);
-        assert_eq!(shared(&suffix, &previous), 3);
-
-        let mut replaced = boundary.clone();
-        replaced.replace(previous.iter().cloned().collect());
-        assert_eq!(shared(&replaced, &previous), 0);
-        assert_eq!(shared(&ResponseHistory::default(), &previous), 0);
     }
 }
