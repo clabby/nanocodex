@@ -8,11 +8,13 @@ use nanocodex_managed::{ManagedApiKey, ManagedClient, ManagedError, SessionDoneS
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+type DoneRequests = Arc<Mutex<Vec<(String, Value)>>>;
+
 #[tokio::test]
 async fn done_client_uses_authenticated_put_and_decodes_undo_and_failures() {
     let calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
     async fn endpoint(
-        State(calls): State<Arc<Mutex<Vec<(String, Value)>>>>,
+        State(calls): State<DoneRequests>,
         Path(id): Path<String>,
         headers: HeaderMap,
         Json(body): Json<Value>,
