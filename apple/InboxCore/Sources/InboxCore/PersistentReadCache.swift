@@ -27,7 +27,7 @@ final class PersistentReadCache: @unchecked Sendable {
     }
     static func allows(_ path: String) -> Bool {
         let endpoint = String(path.split(separator: "?", maxSplits: 1).first ?? "")
-        if ["/v1/agents", "/v1/todo", "/v1/crm", "/v1/connectors", "/v1/connectors/catalog", "/v1/connectors/mcp-connections"].contains(endpoint) { return true }
+        if ["/v1/agents", "/v1/todo", "/v1/todo/schedule", "/v1/crm", "/v1/connectors", "/v1/connectors/catalog", "/v1/connectors/mcp-connections"].contains(endpoint) { return true }
         if endpoint.hasPrefix("/v1/crm/") { return true }
         let parts = endpoint.split(separator: "/")
         return parts.count >= 4 && parts[0] == "v1" && parts[1] == "agents"

@@ -8,15 +8,31 @@ public struct TodoCapture: Identifiable, Equatable, Sendable {
     public let watchHint: String
     public let status: String
     public let version: Int
+    public let recommendation: String
+    public let proposal: String
     public let createdAt: String
+    public let preparationKind: String
+    public let preparationState: TodoPreparationState
+    public let preparationError: String
+    public let preparationContext: String
+    public let preparationScope: String
+    public let preparationSources: [TodoPreparationSource]
 
     public init(_ json: JSON) throws {
         guard !json["id"].string.isEmpty, !json["body"].string.isEmpty,
               let version = Int(exactly: json["version"].number), version > 0,
-              ["captured", "watching", "done", "paused"].contains(json["status"].string) else { throw APIError.invalidResponse }
+              ["captured", "watching", "done", "paused", "parked"].contains(json["status"].string) else { throw APIError.invalidResponse }
         id = json["id"].string; body = json["body"].string
         watchHint = json["watch_hint"].string; status = json["status"].string
         self.version = version; createdAt = json["created_at"].string
+        recommendation = json["preparation"]["recommendation"].string
+        proposal = json["preparation"]["proposal"].string
+        preparationKind = json["preparation"]["kind"].string
+        preparationState = TodoPreparationState(serverValue: json["preparation"]["status"].string)
+        preparationError = json["preparation"]["error"].string
+        preparationContext = json["preparation"]["context"].string
+        preparationScope = json["preparation"]["scope"].string
+        preparationSources = json["preparation"]["sources"].array.map(TodoPreparationSource.init)
     }
 }
 
@@ -42,11 +58,20 @@ public struct TodoDecision: Identifiable, Equatable, Sendable {
     public let status: String
     public let version: Int
     public let choices: [TodoDecisionChoice]
+    public let preparationKind: String
+    public let preparationState: TodoPreparationState
+    public let preparationError: String
+    public let preparationContext: String
+    public let preparationScope: String
+    public let preparationSources: [TodoPreparationSource]
+    public let recommendation: String
+    public let proposal: String
+    public let preparedDraft: TodoMailDraft?
 
     public init(_ json: JSON) throws {
         guard !json["id"].string.isEmpty, !json["title"].string.isEmpty,
               let version = Int(exactly: json["version"].number), version > 0,
-              ["needs_you", "answered", "resolved", "stale"].contains(json["status"].string),
+              ["needs_you", "preparing", "answered", "resolved", "stale"].contains(json["status"].string),
               case .array(let options) = json["choices"] else { throw APIError.invalidResponse }
         id = json["id"].string; title = json["title"].string
         context = json["context"].string
@@ -56,9 +81,19 @@ public struct TodoDecision: Identifiable, Equatable, Sendable {
         sourceMessageID = json["source_message_id"].string.isEmpty ? nil : json["source_message_id"].string
         sourceLabel = json["source_label"].string
         let url = URL(string: json["source_url"].string)
-        sourceURL = url?.scheme == "https" ? url : nil
+        sourceURL = url?.scheme == "https" && url?.host != nil && url?.user == nil && url?.password == nil ? url : nil
         status = json["status"].string; self.version = version
         choices = try options.map(TodoDecisionChoice.init)
+        preparationKind = json["preparation"]["kind"].string
+        preparationState = TodoPreparationState(serverValue: json["preparation"]["status"].string)
+        preparationError = json["preparation"]["error"].string
+        preparationContext = json["preparation"]["context"].string
+        preparationScope = json["preparation"]["scope"].string
+        preparationSources = json["preparation"]["sources"].array.map(TodoPreparationSource.init)
+        recommendation = json["preparation"]["recommendation"].string
+        proposal = json["preparation"]["proposal"].string
+        if case .object = json["preparation"]["prepared_draft"] { preparedDraft = try TodoMailDraft(json["preparation"]["prepared_draft"]) }
+        else { preparedDraft = nil }
     }
 }
 

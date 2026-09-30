@@ -172,6 +172,11 @@ public final class ManagedClient: @unchecked Sendable {
         // Spotify's shared registration may ask the broker to wait for quota
         // before its identity read. Tokens remain inside that broker exchange.
         if path == "/v1/connectors/spotify/loopback/callback" || path == "/v1/connectors/soundcloud/loopback/callback" { request.timeoutInterval = 90 }
+        // Presentation snapshots are separate. Approval/status reads must reach
+        // the server even when URLCache has a previously ready draft or decision.
+        if method == "GET", path.hasPrefix("/v1/todo/decisions/") || path.hasPrefix("/v1/todo/mail/drafts/") {
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+        }
         request.httpMethod = method
         request.setValue("Bearer " + credential.apiKey, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")

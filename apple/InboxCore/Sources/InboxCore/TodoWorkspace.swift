@@ -35,8 +35,28 @@ public struct TodoMailPage: Sendable {
     public let nextPageToken: String?
 }
 
+public struct TodoMeetingEvidence: Equatable, Sendable {
+    public let text: String
+    public let kind: String
+    public let reference: String
+    public init(_ json: JSON) {
+        text = json["text"].string; kind = json["source"]["kind"].string; reference = json["source"]["reference"].string
+    }
+}
+public struct TodoMeetingAttendee: Equatable, Sendable {
+    public let name: String
+    public let email: String
+    public let responseStatus: String
+    public let context: [TodoMeetingEvidence]
+    public init(_ json: JSON) {
+        name = json["name"].string; email = json["email"].string; responseStatus = json["response_status"].string
+        context = json["context"].array.map(TodoMeetingEvidence.init)
+    }
+}
 public struct TodoScheduleEvent: Identifiable, Equatable, Sendable {
-    public let id: String
+    /// A provider event ID is unique only within an account and calendar.
+    public var id: String { [connectionID, calendarID, eventID].map { "\($0.utf8.count):\($0)" }.joined() }
+    public let eventID: String
     public let connectionID: String
     public let calendarID: String
     public let title: String
@@ -46,11 +66,21 @@ public struct TodoScheduleEvent: Identifiable, Equatable, Sendable {
     public let location: String
     public let details: String
     public let url: URL?
+    public let briefing: String
+    public let briefingScope: String
+    public let attendees: [TodoMeetingAttendee]
+    public let coverageReasons: [String]
+    public let briefingState: TodoPreparationState
     public init(_ json: JSON) throws {
-        id = json["id"].string; connectionID = json["connection_id"].string; calendarID = json["calendar_id"].string
-        guard !id.isEmpty, let start = todoDate(json["start"].string), let end = todoDate(json["end"].string) else { throw APIError.invalidResponse }
+        eventID = json["id"].string; connectionID = json["connection_id"].string; calendarID = json["calendar_id"].string
+        guard !eventID.isEmpty, !connectionID.isEmpty, !calendarID.isEmpty, let start = todoDate(json["start"].string), let end = todoDate(json["end"].string) else { throw APIError.invalidResponse }
         title = json["title"].string; startAt = start; endAt = end; isAllDay = json["all_day"].bool
         location = json["location"].string; details = json["description"].string
+        briefing = json["briefing"].string
+        briefingScope = json["briefing_scope"].string
+        attendees = json["prepared_briefing"]["attendees"].array.map(TodoMeetingAttendee.init)
+        coverageReasons = json["prepared_briefing"]["coverage"]["reasons"].array.map(\.string)
+        briefingState = TodoPreparationState(serverValue: json["briefing_status"].string)
         let link = URL(string: json["html_url"].string)
         url = link?.scheme == "https" && link?.host != nil && link?.user == nil && link?.password == nil ? link : nil
     }
@@ -58,6 +88,20 @@ public struct TodoScheduleEvent: Identifiable, Equatable, Sendable {
 public struct TodoSchedule: Sendable {
     public let events: [TodoScheduleEvent]
     public let partial: Bool
+    public init(_ json: JSON) throws {
+        guard case .array(let events) = json["events"] else { throw APIError.invalidResponse }
+        let briefings = json["briefings"].array
+        self.events = try events.map { event in
+            guard case .object(var fields) = event else { throw APIError.invalidResponse }
+            if let briefing = briefings.first(where: {
+                $0["source"]["connection_id"].string == event["connection_id"].string &&
+                $0["source"]["calendar_id"].string == event["calendar_id"].string &&
+                $0["source"]["event_id"].string == event["id"].string
+            }) { fields["prepared_briefing"] = briefing }
+            return try TodoScheduleEvent(.object(fields))
+        }
+        partial = json["partial"].bool
+    }
 }
 private func todoDate(_ text: String) -> Date? {
     let formatter = ISO8601DateFormatter()
@@ -93,10 +137,9 @@ public extension ManagedClient {
         let response = try await json(path: "/v1/todo/mail/threads/" + id + todoQuery(["connection_id": connectionID, "format": "metadata"]))
         return try TodoMailThreadSummary(response["summary"])
     }
-    func todoSchedule() async throws -> TodoSchedule {
-        let response = try await json(path: "/v1/todo/schedule")
-        guard case .array(let events) = response["events"] else { throw APIError.invalidResponse }
-        return TodoSchedule(events: try events.map(TodoScheduleEvent.init), partial: response["partial"].bool)
+    func todoSchedule(briefingsOnly: Bool = false) async throws -> TodoSchedule {
+        let response = try await json(path: "/v1/todo/schedule" + (briefingsOnly ? "?briefings_only=true" : ""))
+        return try TodoSchedule(response)
     }
     func modifyTodoMailThread(connectionID: String, threadID: String, archive: Bool? = nil, unread: Bool? = nil) async throws {
         guard let id = threadID.addingPercentEncoding(withAllowedCharacters: .alphanumerics), !id.isEmpty else { throw APIError.invalidResponse }

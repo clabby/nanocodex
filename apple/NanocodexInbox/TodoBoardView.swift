@@ -1,6 +1,7 @@
 import SwiftUI
 import InboxCore
 import NanocodexUI
+import os
 
 private enum TodoDestination: Identifiable {
     case decision(TodoDecision), mail(String, String, String? = nil), draft(TodoMailDraft), compose, event(TodoScheduleEvent), capture(TodoCapture)
@@ -22,7 +23,7 @@ private enum TodoQueueRow: Identifiable {
         switch self {
         case .decision(let item): return "decision:" + item.id
         case .mail(let item): return "mail:" + item.connectionID + ":" + item.id
-        case .event(let item): return "event:" + item.connectionID + ":" + item.calendarID + ":" + item.id
+        case .event(let item): return "event:" + item.id
         case .capture(let item): return "capture:" + item.id
         case .draft(let item): return "draft:" + item.id
         }
@@ -74,20 +75,20 @@ struct TodoBoardView: View {
     @State private var pendingActions = Set<String>()
     @State private var captureOperations: [String: UUID] = [:]
 
-    init(model: InboxModel) { self.model = model; workspace = model.todoWorkspace }
+    let onChat: () -> Void
+    init(model: InboxModel, onChat: @escaping () -> Void = {}) { self.model = model; workspace = model.todoWorkspace; self.onChat = onChat }
     private var query: String {
         let typed = model.todoSearch.trimmingCharacters(in: .whitespacesAndNewlines)
         return typed.isEmpty ? model.todoMailQuery : typed
     }
-    private var requestKey: String { model.todoSelectedAccount + "\n" + query }
+    private var requestKey: String { model.todoSplit + "\n" + model.todoSelectedAccount + "\n" + query }
     private var queue: [TodoQueueRow] {
         var rows: [TodoQueueRow] = []
         let search = model.todoSearch.trimmingCharacters(in: .whitespacesAndNewlines)
         let mailOnly = model.todoSplit == "Mail"
         if !mailOnly {
-            rows += workspace.events.filter { $0.endAt > .now && (model.todoSelectedAccount.isEmpty || $0.connectionID == model.todoSelectedAccount) }.map(TodoQueueRow.event)
-            rows += model.todoDecisions.filter { $0.status == "needs_you" && (model.todoSelectedAccount.isEmpty || $0.sourceConnectionID == nil || $0.sourceConnectionID == model.todoSelectedAccount) }.map(TodoQueueRow.decision)
-            rows += model.todoItems.filter { $0.status != "done" && $0.status != "paused" }.map(TodoQueueRow.capture)
+            rows += model.todoItems.filter { $0.status == "captured" && $0.preparationState == .ready && !$0.proposal.isEmpty && !$0.recommendation.isEmpty }.map(TodoQueueRow.capture)
+            rows += model.todoDecisions.filter { $0.isPreparedForReview && (model.todoSelectedAccount.isEmpty || $0.sourceConnectionID == nil || $0.sourceConnectionID == model.todoSelectedAccount) }.map(TodoQueueRow.decision)
         }
         let linked = Set(rows.compactMap { row -> String? in
             let sleeping = model.todoRowIsSnoozed(row.snoozeID)
@@ -96,9 +97,9 @@ struct TodoBoardView: View {
                   case .decision(let item) = row, let connection = item.sourceConnectionID, let thread = item.sourceThreadID else { return nil }
             return connection + ":" + thread
         })
-        if model.todoMailQuery == "in:drafts" {
+        if mailOnly && model.todoMailQuery == "in:drafts" {
             rows += workspace.drafts.filter { model.todoSelectedAccount.isEmpty || $0.connectionID == model.todoSelectedAccount }.map(TodoQueueRow.draft)
-        } else {
+        } else if mailOnly || model.todoSplit == "Later" {
             var mail = workspace.threads.filter { model.todoSelectedAccount.isEmpty || $0.connectionID == model.todoSelectedAccount }
             if model.todoSearch.isEmpty && (model.todoMailQuery == "in:inbox" || model.todoSplit == "Later") {
                 let present = Set(mail.map { $0.connectionID + ":" + $0.id })
@@ -132,7 +133,7 @@ struct TodoBoardView: View {
             if showSearch {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search mail and your day", text: $model.todoSearch)
+                    TextField(model.todoSplit == "Mail" ? "Search mail" : "Search decisions", text: $model.todoSearch)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .submitLabel(.search).accessibilityIdentifier("todo-search")
                     if !model.todoSearch.isEmpty {
@@ -162,17 +163,22 @@ struct TodoBoardView: View {
             }
             .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
             .listRowSeparator(.hidden)
-            if let error = workspace.error { problem(error) }
+            if let error = workspace.error, model.todoSplit == "Mail" { problem(error) }
+            if let error = model.todoError { problem(error) }
             if let error = workspace.scheduleError, model.todoSplit != "Mail" { problem(error) }
             if !workspace.accounts.isEmpty && model.todoSplit == "Mail" {
                 mailFilters.listRowSeparator(.hidden)
             }
+            if model.todoSplit == "For you" {
+                upcomingMeetings
+                preparationActivity
+            }
             if queue.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Image(systemName: workspace.loading ? "tray" : "checkmark").font(.title2.weight(.light)).padding(.bottom, 6)
-                    Text(workspace.loading || !model.todoLoaded ? "Loading your day" : model.todoSplit == "Later" ? "Nothing snoozed" : "You're all caught up")
+                    Text(!model.todoLoaded ? "Loading prepared decisions" : model.todoError != nil ? "Decision inbox unavailable" : model.todoSplit == "Later" ? "Nothing snoozed" : "No prepared decisions")
                         .font(.title3.weight(.semibold))
-                    Text(model.todoSearch.isEmpty ? "Nothing needs your decision right now" : "No results for this search")
+                    Text(model.todoSearch.isEmpty ? "Only complete proposals appear here. Working and blocked preparation stays visible separately. This is not your entire mailbox." : "No results for this search")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 30).listRowSeparator(.hidden).accessibilityIdentifier("todo-no-decisions")
@@ -186,11 +192,7 @@ struct TodoBoardView: View {
                             Button { archive(thread) } label: { Label("Archive", systemImage: "archivebox") }.tint(.gray)
                                 .accessibilityIdentifier("todo-archive:" + thread.id)
                         }
-                        if case .decision(let item) = row, item.choices.count > 1 {
-                            Button { Task { _ = await model.respondTodo(to: item, choiceID: item.choices[1].id, text: nil) } }
-                            label: { Label(item.choices[1].title, systemImage: "checkmark") }.tint(.gray)
-                                .accessibilityIdentifier("decision-swipe-secondary:" + item.id)
-                        }
+
                     }
                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
                         if model.todoSplit == "Later" {
@@ -209,13 +211,13 @@ struct TodoBoardView: View {
                     }
                     .disabled(pendingActions.contains(row.id))
             }
-            if workspace.hasMore && model.todoSplit != "Later" {
+            if workspace.hasMore && model.todoSplit == "Mail" {
                 Button("Load more mail") { Task { await refreshMail(more: true) } }
                     .frame(maxWidth: .infinity, minHeight: 44).disabled(!workspace.canLoadMore(account: model.todoSelectedAccount, query: query))
                     .accessibilityIdentifier("todo-load-more")
             }
-            if !model.todoTraces.isEmpty {
-                DisclosureGroup("Recent firehose activity", isExpanded: $showDiagnostics) {
+            if !model.todoTraces.isEmpty && model.todoSplit == "Mail" {
+                DisclosureGroup("Classification diagnostics", isExpanded: $showDiagnostics) {
                     ForEach(model.todoTraces) { trace in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(trace.title).font(.subheadline.weight(.medium))
@@ -244,7 +246,8 @@ struct TodoBoardView: View {
                 .accessibilityIdentifier("todo-notice")
             }
         }
-        .refreshable { await refreshAll() }
+        .onAppear { os_signpost(.event, log: DecisionUXMetrics.log, name: "DecisionInboxRendered") }
+        .refreshable { await refreshAll(liveCalendar: true) }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             while !Task.isCancelled {
@@ -253,10 +256,11 @@ struct TodoBoardView: View {
             }
         }
         .task(id: requestKey) {
+            guard model.todoSplit == "Mail" else { return }
             do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
             await refreshMail()
         }
-        .sheet(item: $destination, onDismiss: { Task { await refreshAll() } }) { selection in
+        .sheet(item: $destination) { selection in
             destinationView(selection).presentationDragIndicator(.visible)
         }
         .confirmationDialog("Remind me", isPresented: $showSnooze, titleVisibility: .visible, presenting: snoozing) { row in
@@ -265,6 +269,48 @@ struct TodoBoardView: View {
                 Button("Next week") { snooze(row, until: .now.addingTimeInterval(7 * 86400)) }
                 Button("Cancel", role: .cancel) { snoozing = nil }
         } message: { _ in Text("Snoozed items return to this device's queue when they're due.") }
+    }
+
+    @ViewBuilder private var upcomingMeetings: some View {
+        let upcoming = workspace.events.filter { $0.endAt > .now }.sorted { $0.startAt < $1.startAt }.prefix(3)
+        if !upcoming.isEmpty {
+            Section("Upcoming meetings") {
+                ForEach(Array(upcoming)) { event in
+                    Button { destination = .event(event) } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(event.title).font(.subheadline.weight(.semibold))
+                            Text(event.startAt.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                            Text(event.briefingState == .ready && !event.briefing.isEmpty ? event.briefing : "Briefing · " + event.briefingState.title)
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }.buttonStyle(.plain).accessibilityIdentifier("meeting-briefing:" + event.id)
+                }
+            }
+        }
+    }
+    @ViewBuilder private var preparationActivity: some View {
+        let captures = model.todoItems.filter { $0.status != "done" && ($0.preparationState != .ready || $0.proposal.isEmpty || $0.recommendation.isEmpty) }
+        let preparing = model.todoDecisions.filter { $0.status == "preparing" || ($0.status == "needs_you" && !$0.isPreparedForReview) }
+        if !captures.isEmpty || !preparing.isEmpty {
+            Section("Preparation") {
+                ForEach(captures) { item in
+                    Button { destination = .capture(item) } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.body).font(.subheadline).lineLimit(2)
+                            Text(item.preparationState.title).font(.caption.weight(.semibold)).foregroundStyle(item.preparationState == .blocked ? Color.orange : Color.secondary)
+                            if !item.preparationError.isEmpty { Text(item.preparationError).font(.caption).foregroundStyle(.orange) }
+                        }
+                    }.buttonStyle(.plain).accessibilityIdentifier("capture-preparation:" + item.id)
+                }
+                ForEach(preparing) { item in
+                    Button { destination = .decision(item) } label: { VStack(alignment: .leading, spacing: 4) {
+                        Text(item.title).font(.subheadline)
+                        Text(item.preparationState == .ready ? "Blocked · incomplete proposal" : item.preparationState.title).font(.caption).foregroundStyle(.secondary)
+                        if !item.preparationError.isEmpty { Text(item.preparationError).font(.caption).foregroundStyle(.orange) }
+                    } }.buttonStyle(.plain).accessibilityIdentifier("decision-preparation:" + item.id)
+                }
+            }
+        }
     }
 
     private var header: some View {
@@ -364,8 +410,8 @@ struct TodoBoardView: View {
     private func open(_ row: TodoQueueRow) {
         switch row {
         case .decision(let item):
-            if let account = item.sourceConnectionID, let thread = item.sourceThreadID { destination = .mail(account, thread, item.sourceMessageID) }
-            else { destination = .decision(item) }
+            DecisionUXMetrics.beginNavigation(item.id)
+            destination = .decision(item)
         case .mail(let item): destination = .mail(item.connectionID, item.id)
         case .event(let item): destination = .event(item)
         case .capture(let item): destination = .capture(item)
@@ -374,7 +420,7 @@ struct TodoBoardView: View {
     }
     @ViewBuilder private func destinationView(_ selection: TodoDestination) -> some View {
         switch selection {
-        case .decision(let item): DecisionDetailView(decision: item, model: model)
+        case .decision(let item): DecisionDetailView(decision: item, model: model, onChat: onChat)
         case .mail(let account, let thread, let message):
             NavigationStack {
                 TodoMailThreadView(client: model.todoMailClient, connectionID: account, threadID: thread, replyMessageID: message, fixture: fixtureThread)
@@ -398,15 +444,29 @@ struct TodoBoardView: View {
             TodoContextSheet(title: item.title, symbol: "calendar") {
                 Text(item.startAt.formatted(date: .complete, time: item.isAllDay ? .omitted : .shortened)).font(.headline)
                 if !item.location.isEmpty { Label(item.location, systemImage: "mappin.and.ellipse") }
-                if !item.details.isEmpty { Text(item.details).textSelection(.enabled) }
+                Text(item.briefingState == .ready && !item.briefing.isEmpty ? "Prepared briefing" : item.briefingState.title).font(.headline)
+                if !item.briefing.isEmpty { Text(item.briefing).textSelection(.enabled) }
+                else { Text("A prepared briefing is not available yet.").foregroundStyle(.secondary) }
+                ForEach(Array(item.attendees.enumerated()), id: \.offset) { _, attendee in
+                    DisclosureGroup(attendee.name.isEmpty ? attendee.email : attendee.name) {
+                        Text("Invitee · " + (attendee.responseStatus.isEmpty ? "RSVP unknown" : attendee.responseStatus)).font(.caption)
+                        ForEach(Array(attendee.context.enumerated()), id: \.offset) { _, evidence in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(evidence.text).textSelection(.enabled)
+                                Text(evidence.kind + " · " + evidence.reference).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                ForEach(item.coverageReasons, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
+                if !item.briefingScope.isEmpty { Text(item.briefingScope).font(.caption).foregroundStyle(.secondary) }
+                Text("Calendar invitations are not evidence of attendance.").font(.caption).foregroundStyle(.secondary)
+                if !item.details.isEmpty { DisclosureGroup("Invitation context") { Text(item.details).textSelection(.enabled) } }
                 if let url = item.url { Link("Open in Calendar", destination: url).frame(minHeight: 44) }
             }
         case .capture(let item):
-            TodoContextSheet(title: "On your mind", symbol: "circle") {
-                Text(item.body).font(.title3).textSelection(.enabled)
-                if !item.watchHint.isEmpty { Text("Watch for: " + item.watchHint).foregroundStyle(.secondary) }
-                Button("Mark done") { complete(item); destination = nil }.buttonStyle(.borderedProminent)
-            }
+            PreparedCaptureDetailView(capture: item, model: model, onChat: onChat)
+
         }
     }
     private func adjacentThread(account: String, thread: String, offset: Int) -> TodoMailThreadSummary? {
@@ -458,11 +518,14 @@ struct TodoBoardView: View {
     private func refreshMail(more: Bool = false) async {
         await workspace.refresh(client: model.todoMailClient, account: model.todoSelectedAccount, query: query, demo: model.isDemo, more: more)
     }
-    private func refreshAll() async {
+    private func refreshAll(liveCalendar: Bool = false) async {
+        let id = OSSignpostID(log: DecisionUXMetrics.log)
+        os_signpost(.begin, log: DecisionUXMetrics.log, name: "DecisionInboxRefresh", signpostID: id)
+        defer { os_signpost(.end, log: DecisionUXMetrics.log, name: "DecisionInboxRefresh", signpostID: id) }
         await model.refreshTodo()
-        await refreshMail()
-        await workspace.refreshSchedule(client: model.todoMailClient, demo: model.isDemo)
-        await model.reconcileRetainedTodoMail()
+        if model.todoSplit == "Mail" { await refreshMail() }
+        await workspace.refreshSchedule(client: model.todoMailClient, demo: model.isDemo, liveRefresh: liveCalendar)
+        if model.todoSplit == "Mail" { await model.reconcileRetainedTodoMail() }
     }
 }
 
@@ -550,7 +613,7 @@ struct TodoCaptureComposer: View {
                     .frame(width: 44, height: 44).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).disabled(!canSave)
-                .accessibilityLabel("Save thought").accessibilityIdentifier("todo-capture-save")
+                .accessibilityLabel("Delegate thought for preparation").accessibilityIdentifier("todo-capture-save")
             }
             .padding(.horizontal, 4).padding(.bottom, 4).padding(.top, 4)
         }
@@ -567,78 +630,133 @@ private struct DecisionDetailView: View {
     @ObservedObject var model: InboxModel
     @Environment(\.dismiss) private var dismiss
     @State private var instructions = ""
+    @State private var changing = false
+    @State private var mailBusy = false
+    let onChat: () -> Void
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label(decision.sourceLabel.isEmpty ? "Decision" : decision.sourceLabel, systemImage: "sparkle")
+                VStack(alignment: .leading, spacing: 18) {
+                    Label(decision.sourceLabel.isEmpty ? "Prepared decision" : decision.sourceLabel, systemImage: "sparkle")
                         .font(.subheadline).foregroundStyle(.secondary)
-                    Text(decision.title).font(.system(size: 24, weight: .semibold)).tracking(-0.4)
-                    Text(decision.context).font(.body).foregroundStyle(.secondary)
-                    if let todoID = decision.todoID,
-                       let thought = model.todoItems.first(where: { $0.id == todoID }) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("From your capture").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                            Text(thought.body).font(.subheadline)
-                        }
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 12))
+                    Text(decision.title).font(.title2.weight(.semibold))
+                    Text("Context").font(.headline)
+                    Text(decision.preparationContext.isEmpty ? decision.context : decision.preparationContext).textSelection(.enabled)
+                    if !decision.preparationScope.isEmpty { Text(decision.preparationScope).font(.caption).foregroundStyle(.secondary) }
+                    ForEach(Array(decision.preparationSources.enumerated()), id: \.offset) { _, source in
+                        Text(source.detail + " · " + source.reference).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     }
-                    if let url = decision.sourceURL {
-                        Link(destination: url) {
-                            Label("Open source", systemImage: "arrow.up.right.square")
-                        }.frame(minHeight: 44).accessibilityIdentifier("decision-source")
-                    }
-                    if decision.status == "needs_you" {
-                        ForEach(decision.choices) { choice in
-                            Button {
-                                Task {
-                                    if await model.respondTodo(to: decision, choiceID: choice.id, text: nil) { dismiss() }
-                                }
-                            } label: {
-                                HStack {
-                                    Text(choice.title)
-                                    Spacer()
-                                    Image(systemName: "arrow.right")
-                                }
-                                .padding(.horizontal, 12).padding(.vertical, 8)
-                                .frame(minHeight: 44)
-                                .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 12))
-                            }
-                            .buttonStyle(.plain).disabled(model.todoResponding)
-                            .accessibilityIdentifier("decision-choice:\(decision.id):\(choice.id)")
+                    if let url = decision.sourceURL { Link("Open source", destination: url).accessibilityIdentifier("decision-source") }
+                    Text("Recommendation").font(.headline)
+                    Text(decision.recommendation).textSelection(.enabled)
+                    Label(decision.preparationState.title, systemImage: "sparkles")
+                    if !decision.preparationError.isEmpty { Text(decision.preparationError).font(.caption).foregroundStyle(.orange) }
+                    if decision.isPreparedForReview, let draft = decision.preparedDraft {
+                        PreparedDecisionMailView(client: model.todoMailClient, decision: decision, draft: draft, fixture: model.isDemo, approvalBlocked: changing, busy: $mailBusy)
+                            .id(draft.id + ":" + String(draft.version))
+                        ForEach(decision.choices.filter { $0.id == "dismiss" || $0.id == "defer" }) { choice in
+                            Button(choice.title) {
+                                Task { if await model.respondTodo(to: decision, choiceID: choice.id, text: nil) { dismiss() } }
+                            }.disabled(mailBusy || changing || model.todoResponding)
                         }
-                        Text("Edit or give instructions").font(.subheadline.weight(.semibold)).padding(.top, 4)
-                        TextEditor(text: $instructions)
-                            .scrollContentBackground(.hidden)
-                            .frame(minHeight: 80).padding(6)
-                            .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 12))
-                            .accessibilityIdentifier("decision-instructions")
-                        Button("Submit instructions") {
+                    } else if decision.isPreparedForReview {
+                        Text("Prepared proposal").font(.headline)
+                        Text(decision.proposal).textSelection(.enabled)
+                        Text("This proposal does not send email or execute external actions.").font(.caption).foregroundStyle(.secondary)
+                        ForEach(decision.choices.filter { $0.id != "send" && $0.id != "approve" }) { choice in
+                            Button(choice.title) { Task { if await model.respondTodo(to: decision, choiceID: choice.id, text: nil) { dismiss() } } }
+                                .disabled(model.todoResponding || changing)
+                        }
+                    }
+                    if [.failed, .blocked, .unprepared].contains(decision.preparationState) {
+                        Button("Retry preparation") {
+                            changing = true
                             Task {
-                                if await model.respondTodo(to: decision, choiceID: nil,
-                                                           text: instructions.trimmingCharacters(in: .whitespacesAndNewlines)) { dismiss() }
+                                if await model.prepareTodoChanges(kind: "decisions", id: decision.id, version: decision.version, text: "Retry preparation using the available source context.") { dismiss() }
+                                else { changing = false }
                             }
-                        }
-                        .frame(minHeight: 44)
-                        .buttonStyle(.borderedProminent).tint(.primary)
-                        .disabled(instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.todoResponding)
-                        if let error = model.todoError { Text(error).font(.caption).foregroundStyle(.orange) }
-                    } else {
-                        Label(decision.status == "answered" ? "Answer recorded; waiting for the workflow" : "This decision is no longer open",
-                              systemImage: "checkmark.circle")
-                            .font(.subheadline).foregroundStyle(.secondary)
+                        }.disabled(changing || mailBusy || model.todoResponding).accessibilityIdentifier("decision-retry")
                     }
-                }
-                .padding(16).frame(maxWidth: 620, alignment: .leading).frame(maxWidth: .infinity)
+                    Text("Change this…").font(.headline)
+                    TextField("Make it warmer, add context, change the plan…", text: $instructions, axis: .vertical)
+                        .lineLimit(3...6).padding(12)
+                        .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 12))
+                        .accessibilityIdentifier("decision-instructions")
+                    Button(changing ? "Working on your changes" : "Prepare changes") {
+                        changing = true
+                        Task {
+                            let success = await model.prepareTodoChanges(kind: "decisions", id: decision.id, version: decision.version, text: instructions.trimmingCharacters(in: .whitespacesAndNewlines))
+                            if success { dismiss() } else { changing = false }
+                        }
+                    }.disabled(changing || mailBusy || model.todoResponding || instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityIdentifier("decision-change")
+                    if let error = model.todoError { Text(error).font(.caption).foregroundStyle(.orange) }
+                    Button("Continue in Chat") { dismiss(); onChat() }
+                        .accessibilityIdentifier("decision-chat")
+                }.padding(18).frame(maxWidth: 620, alignment: .leading).frame(maxWidth: .infinity)
+            }.background(ChatPalette.background)
+                .navigationTitle("Decision").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() }.accessibilityIdentifier("decision-detail-close") } }
+                .onAppear { DecisionUXMetrics.endNavigation(decision.id) }
+        }
+    }
+}
+
+/// Actual UI path signposts, separate from backend preparation/model latency.
+private enum DecisionUXMetrics {
+    static let log = OSLog(subsystem: "com.nanocodex.mobile", category: .pointsOfInterest)
+    static var navigation: [String: OSSignpostID] = [:]
+    static func beginNavigation(_ key: String) {
+        let id = OSSignpostID(log: log); navigation[key] = id
+        os_signpost(.begin, log: log, name: "DecisionNavigation", signpostID: id)
+    }
+    static func endNavigation(_ key: String) {
+        guard let id = navigation.removeValue(forKey: key) else { return }
+        os_signpost(.end, log: log, name: "DecisionNavigation", signpostID: id)
+    }
+}
+
+private struct PreparedCaptureDetailView: View {
+    let capture: TodoCapture
+    @ObservedObject var model: InboxModel
+    let onChat: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var instructions = ""
+    @State private var changing = false
+    var body: some View {
+        TodoContextSheet(title: "On your mind", symbol: "sparkles") {
+            Text(capture.body).font(.title3).textSelection(.enabled)
+            Label(capture.preparationState.title, systemImage: "sparkles")
+            if !capture.preparationError.isEmpty { Text(capture.preparationError).foregroundStyle(.orange) }
+            if !capture.preparationContext.isEmpty { Text(capture.preparationContext).textSelection(.enabled) }
+            if !capture.recommendation.isEmpty { Text("Recommendation").font(.headline); Text(capture.recommendation).textSelection(.enabled) }
+            if !capture.proposal.isEmpty { Text("Prepared proposal").font(.headline); Text(capture.proposal).textSelection(.enabled).accessibilityIdentifier("capture-proposal") }
+            Text(capture.preparationScope.isEmpty ? "Captured for preparation. This is not completed work." : capture.preparationScope).font(.caption).foregroundStyle(.secondary)
+            ForEach(Array(capture.preparationSources.enumerated()), id: \.offset) { _, source in
+                Text(source.detail + " · " + source.reference).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
-            .background(ChatPalette.background)
-            .navigationTitle("Decision").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) {
-                Button("Done") { dismiss() }.accessibilityIdentifier("decision-detail-close")
-            } }
+            if [.failed, .blocked, .unprepared].contains(capture.preparationState) {
+                Button("Retry preparation") {
+                    changing = true
+                    Task {
+                        if await model.prepareTodoChanges(kind: "items", id: capture.id, version: capture.version, text: "Retry preparation using my captured request and available context.") { dismiss() }
+                        else { changing = false }
+                    }
+                }.disabled(changing || model.todoResponding).accessibilityIdentifier("capture-retry")
+            }
+            TextField("Change this… or supply missing context", text: $instructions, axis: .vertical)
+                .lineLimit(3...6).accessibilityIdentifier("capture-change-input")
+            Button(changing ? "Working" : "Prepare changes") {
+                changing = true
+                Task {
+                    if await model.prepareTodoChanges(kind: "items", id: capture.id, version: capture.version, text: instructions.trimmingCharacters(in: .whitespacesAndNewlines)) { dismiss() }
+                    else { changing = false }
+                }
+            }.disabled(changing || model.todoResponding || instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Text("This proposal does not send email or execute external actions.").font(.caption).foregroundStyle(.secondary)
+            Button("Continue in Chat") { dismiss(); onChat() }
+            if let error = model.todoError { Text(error).foregroundStyle(.orange) }
         }
     }
 }
