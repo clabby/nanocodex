@@ -115,6 +115,7 @@ impl BuilderBackend for Claude {
 /// Provider-specific session builder. Custom functions are opt-in, not automatically discovered.
 pub struct ClaudeBuilder {
     claude: Claude,
+    session_id: Option<String>,
     max_tokens: u32,
     effort: Option<crate::Effort>,
     automatic_cache: bool,
@@ -144,6 +145,7 @@ impl ClaudeBuilder {
         };
         Self {
             claude,
+            session_id: None,
             max_tokens: 4096,
             effort: None,
             automatic_cache: false,
@@ -176,6 +178,12 @@ impl ClaudeBuilder {
         self.restored = checkpoint.map(Snapshot::decode).transpose()?;
         self.policy = Some(policy);
         Ok(self)
+    }
+    /// Sets an embedding-owned stable session identity. For durable sessions it
+    /// must equal the policy state ID; reopened tool identities cannot drift.
+    pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
     /// Sets the Messages output-token limit.
     pub const fn max_tokens(mut self, max_tokens: u32) -> Self {
@@ -659,7 +667,23 @@ impl ClaudeBuilder {
                 ));
             }
         }
-        let session_id = format!("claude-{}", uuid::Uuid::new_v4());
+        if self
+            .session_id
+            .as_ref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err(unsupported("Claude session ID must not be empty"));
+        }
+        if let (Some(session_id), Some(policy)) = (&self.session_id, &self.policy)
+            && session_id != policy.state_id()
+        {
+            return Err(unsupported(
+                "durable Claude session ID must equal the policy state ID",
+            ));
+        }
+        let session_id = self
+            .session_id
+            .unwrap_or_else(|| format!("claude-{}", uuid::Uuid::new_v4()));
         let session_id = self
             .policy
             .as_ref()
@@ -1527,7 +1551,22 @@ impl State {
     }
     async fn run(&self, request: BackendPrompt, cancel: Arc<Cancellation>) -> Result<TurnResult> {
         let started = Instant::now();
-        let mut conversation = self.conversation.lock().await;
+        if request.cancel_on_admission {
+            cancel.cancel();
+        }
+        let mut conversation = if self.policy.is_none() {
+            // An ephemeral queued turn can retire without waiting for the active
+            // turn's blocked model/tool, and must never mutate that transcript.
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(NanocodexError::TurnCancelled),
+                conversation = self.conversation.lock() => conversation,
+            }
+        } else {
+            // Durable retirement still needs the serialized snapshot/receipt
+            // settlement below; do not bypass it with an ephemeral early exit.
+            self.conversation.lock().await
+        };
         let events = &request.events;
         let reasoning_mode =
             if matches!(self.model.as_str(), "claude-opus-5-5" | "claude-fable-5-1") {
@@ -2010,8 +2049,26 @@ impl State {
                                     "Claude reused an admitted tool_use id",
                                 ));
                             }
-                            if cursor.tool_search
-                                && cursor.template.tools.iter().any(|tool| matches!(tool, ClaudeToolSpec::Client(tool) if tool.name == *name && tool.defer_loading && !discovered.contains(name) && !server_discovered.contains(name.as_str())))
+                            // A recovered host can attach additional handlers, but that
+                            // must not enlarge this operation's admitted catalog.
+                            let definition = cursor
+                                .template
+                                .tools
+                                .iter()
+                                .find_map(|tool| match tool {
+                                    ClaudeToolSpec::Client(tool) if tool.name == *name => {
+                                        Some(tool)
+                                    }
+                                    _ => None,
+                                })
+                                .ok_or_else(|| {
+                                    provider_error(format!(
+                                        "Claude tool {name} is outside the admitted catalog"
+                                    ))
+                                })?;
+                            if definition.defer_loading
+                                && !discovered.contains(name)
+                                && !server_discovered.contains(name.as_str())
                             {
                                 return Err(provider_error(
                                     "Claude used deferred tool before discovery",
@@ -2730,5 +2787,27 @@ impl LifecycleBackend for Driver {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod session_identity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn explicit_session_identity_and_empty_rejection() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let backend = Claude::new(
+            ClaudeClient::official(reqwest::Client::new(), "synthetic-test-key"),
+            "synthetic-test-model",
+        );
+        let (agent, _events) = Nanocodex::builder(backend.clone())
+            .session_id("host-session")
+            .build()
+            .expect("explicit identity");
+        assert_eq!(agent.session_id(), "host-session");
+        assert_eq!(agent.agent_id(), "host-session");
+        agent.shutdown().await.expect("shutdown");
+        assert!(Nanocodex::builder(backend).session_id(" ").build().is_err());
     }
 }

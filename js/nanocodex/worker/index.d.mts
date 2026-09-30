@@ -16,3 +16,5 @@ export type {
   SubscriptionStoredValue,
 } from "../types.mjs";
 export * as ChatGptSubscription from "./ChatGptSubscription.mjs";
+
+export * as Claude from "./Claude.mjs";

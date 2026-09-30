@@ -127,8 +127,10 @@ shared durability crate's at-least-once semantics.
 `status()` returns public lifecycle state and authenticated account/organization
 identity, never token values. The credential lifecycle is Rust/WASM portable;
 the host remains responsible for storage placement, callback UI and networking.
-This library does not install the product's sign-in screen or JavaScript provider
-selection.
+This library does not install the product's sign-in screen. The additive
+[JavaScript runtime](CLAUDE_JAVASCRIPT.md) accepts a host-owned auth callback; it
+does not expose the native PKCE manager as a JS login UI or switch managed
+provider selection.
 
 ## API keys and other token sources
 

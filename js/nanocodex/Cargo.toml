@@ -17,7 +17,9 @@ crate-type = ["cdylib", "rlib"]
 async-trait.workspace = true
 futures-util.workspace = true
 js-sys.workspace = true
-nanocodex.workspace = true
+nanocodex = { workspace = true, features = ["claude"] }
+nanocodex-claude.workspace = true
+reqwest.workspace = true
 nanocodex-subagents.workspace = true
 nanocodex-voice-protocol.workspace = true
 serde.workspace = true

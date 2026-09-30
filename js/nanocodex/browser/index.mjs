@@ -16,3 +16,5 @@ export {
   defaultHostManagedWebSocketUrl,
   openHostManagedWebSocket,
 } from "./hostManagedWebSocket.mjs";
+
+export * as Claude from "./Claude.mjs";

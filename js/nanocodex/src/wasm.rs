@@ -55,7 +55,10 @@ use nanocodex_voice_protocol::{
     realtime_message_requires_agent_admission, realtime_tail_delegation, valid_realtime_call_id,
 };
 
+mod claude;
 mod transport;
+
+pub use claude::WasmNanoclaude;
 
 use transport::JavaScriptResponsesHost;
 
@@ -63,6 +66,7 @@ use transport::JavaScriptResponsesHost;
 /// Capability marker checked against the actual bundled module before deployment.
 /// Older kernels reject the native child route emitted by the current host.
 #[wasm_bindgen(js_name = nativeSpawnContractVersion)]
+#[allow(clippy::missing_const_for_fn)] // wasm-bindgen requires a non-const function.
 pub fn native_spawn_contract_version() -> u32 {
     1
 }
@@ -2840,6 +2844,7 @@ fn encode_voice_effects(effects: &BrowserVoiceEffects) -> Result<String, JsValue
 }
 
 struct TurnState {
+    host_turn_id: Option<String>,
     accepted: Option<Result<Option<String>, TurnFailure>>,
     control: Option<TurnControl>,
     completed: Option<Result<TurnResult, TurnFailure>>,
@@ -2879,6 +2884,17 @@ impl WasmTurn {
     /// Rejects with a stable `code` describing an admission failure.
     pub async fn accepted(&self) -> Result<Option<String>, JsValue> {
         self.acceptance().await.map_err(js_turn_error)
+    }
+
+    /// Host-only lifecycle identity, including turns without a durable request ID.
+    #[wasm_bindgen(js_name = hostTurnId)]
+    pub async fn host_turn_id(&self) -> Result<String, JsValue> {
+        self.acceptance().await.map_err(js_turn_error)?;
+        self.state
+            .borrow()
+            .host_turn_id
+            .clone()
+            .ok_or_else(|| js_error("turn lifecycle identity unavailable"))
     }
 
     /// Injects text input at the active turn's next safe model boundary.
@@ -2982,6 +2998,7 @@ impl WasmTurn {
         cancel_on_admission: bool,
     ) -> Self {
         let state = Rc::new(RefCell::new(TurnState {
+            host_turn_id: None,
             accepted: None,
             control: None,
             completed: None,
@@ -3013,6 +3030,7 @@ impl WasmTurn {
 
     fn started(turn: Turn) -> Self {
         let state = Rc::new(RefCell::new(TurnState {
+            host_turn_id: None,
             accepted: None,
             control: None,
             completed: None,
@@ -3028,6 +3046,7 @@ impl WasmTurn {
     async fn complete_started(state: Rc<RefCell<TurnState>>, turn: Turn) {
         {
             let mut state = state.borrow_mut();
+            state.host_turn_id = Some(turn.id().to_owned());
             state.accepted = Some(Ok(turn.request_id().map(str::to_owned)));
             state.control = Some(turn.control());
             state.notify();

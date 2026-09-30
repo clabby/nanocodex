@@ -849,7 +849,7 @@ impl ClaudeClient {
         &self,
         request: &MessagesRequest,
         streaming: bool,
-    ) -> Result<reqwest::Response, ClaudeError> {
+    ) -> Result<(reqwest::Response, Vec<String>), ClaudeError> {
         // Reject invalid cache policy before resolving credentials or sending HTTP.
         request.validate_cache_control()?;
         #[derive(Serialize)]
@@ -991,18 +991,19 @@ impl ClaudeClient {
                 }
                 return Err(ClaudeError::Http { status, body });
             }
-            return Ok(response);
+            credentials.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+            return Ok((response, credentials));
         }
     }
 
     pub async fn create(&self, request: &MessagesRequest) -> Result<MessageResponse, ClaudeError> {
-        Ok(self.post(request, false).await?.json().await?)
+        Ok(self.post(request, false).await?.0.json().await?)
     }
 
     pub async fn stream(&self, request: &MessagesRequest) -> Result<ClaudeStream, ClaudeError> {
-        let response = self.post(request, true).await?;
+        let (response, credentials) = self.post(request, true).await?;
         Ok(Box::pin(stream::unfold(
-            SseState::new(response),
+            SseState::new(response, credentials),
             |mut state| async move {
                 if state.done {
                     return None;
@@ -1012,7 +1013,7 @@ impl ClaudeClient {
                         Ok(line) => line,
                         Err(error) => {
                             state.done = true;
-                            return Some((Err(error), state));
+                            return Some((Err(redact_error(error, &state.credentials)), state));
                         }
                     };
                     if let Some(line) = line {
@@ -1058,7 +1059,10 @@ impl ClaudeClient {
                                     }
                                     Err(error) => {
                                         state.done = true;
-                                        return Some((Err(error), state));
+                                        return Some((
+                                            Err(redact_error(error, &state.credentials)),
+                                            state,
+                                        ));
                                     }
                                     Ok(event) => return Some((Ok(event), state)),
                                 }
@@ -1123,7 +1127,35 @@ type ResponseBytes = Pin<Box<dyn Stream<Item = Result<Vec<u8>, reqwest::Error>> 
 #[cfg(target_family = "wasm")]
 type ResponseBytes = Pin<Box<dyn Stream<Item = Result<Vec<u8>, reqwest::Error>>>>;
 
+// Scrub diagnostics only, never valid signed or opaque provider content.
+fn redact_error(error: ClaudeError, credentials: &[String]) -> ClaudeError {
+    let scrub = |mut text: String| {
+        for credential in credentials {
+            text = text.replace(credential, "[redacted]");
+        }
+        text
+    };
+    match error {
+        ClaudeError::StreamError { kind, message } => ClaudeError::StreamError {
+            kind: scrub(kind),
+            message: scrub(message),
+        },
+        ClaudeError::Protocol(message) => ClaudeError::Protocol(scrub(message)),
+        ClaudeError::Json(error) => {
+            let original = error.to_string();
+            let redacted = scrub(original.clone());
+            if redacted == original {
+                ClaudeError::Json(error)
+            } else {
+                ClaudeError::Protocol(format!("invalid Messages JSON: {redacted}"))
+            }
+        }
+        other => other,
+    }
+}
+
 struct SseState {
+    credentials: Vec<String>,
     response: ResponseBytes,
     bytes: Vec<u8>,
     data: Vec<String>,
@@ -1133,8 +1165,9 @@ struct SseState {
 }
 
 impl SseState {
-    fn new(response: reqwest::Response) -> Self {
+    fn new(response: reqwest::Response, credentials: Vec<String>) -> Self {
         Self {
+            credentials,
             response: Box::pin(
                 response
                     .bytes_stream()

@@ -1074,3 +1074,113 @@ async fn cancellation_at_completed_handler_boundary_stops_next_effect() {
 async fn parallel_cancellation_at_completed_handler_boundary_stops_unstarted_effect() {
     cancellation_at_completed_handler_boundary(true).await;
 }
+
+#[tokio::test]
+async fn queued_ephemeral_cancellation_retires_without_aborting_active_model_or_tool() {
+    use nanocodex_agent::{NanocodexError, PromptRequest};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    for held_tool in [false, true] {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route("/v1/messages", post({
+            let started = started.clone();
+            let release = release.clone();
+            let requests = requests.clone();
+            move |Json(_body): Json<Value>| {
+                let started = started.clone();
+                let release = release.clone();
+                let requests = requests.clone();
+                async move {
+                    let index = requests.fetch_add(1, Ordering::SeqCst);
+                    if index == 0 && !held_tool {
+                        started.notify_one();
+                        release.notified().await;
+                    }
+                    let (blocks, stop) = if index == 0 && held_tool {
+                        (vec![json!({"type":"tool_use","id":"held-effect","name":"effect","input":{}})], "tool_use")
+                    } else {
+                        (vec![json!({"type":"text","text":"ACTIVE_FINISHED"})], "end_turn")
+                    };
+                    ([("content-type", "text/event-stream")], stream(blocks, stop))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ClaudeClient::new(
+            reqwest::Client::new(),
+            format!("http://{address}/v1/messages"),
+            "synthetic",
+        );
+        let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+            .tool(
+                ToolDefinition {
+                    name: "effect".into(),
+                    description: "Held synthetic effect".into(),
+                    input_schema: json!({"type":"object"}),
+                    strict: None,
+                    defer_loading: false,
+                },
+                {
+                    let started = started.clone();
+                    let release = release.clone();
+                    move |_input| {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            Ok("effect completed".into())
+                        }
+                    }
+                },
+            )
+            .build()
+            .unwrap();
+        let active = agent.prompt("hold active A").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        let queued = agent.prompt("cancel queued B only").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), queued.cancel())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), queued.result())
+                .await
+                .unwrap(),
+            Err(NanocodexError::TurnCancelled)
+        ));
+        let cancelled_on_admission = agent
+            .prompt(PromptRequest::new("never dispatch C").cancel_on_admission())
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), cancelled_on_admission.result())
+                .await
+                .unwrap(),
+            Err(NanocodexError::TurnCancelled)
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), active.result())
+                .await
+                .unwrap()
+                .unwrap()
+                .final_message(),
+            "ACTIVE_FINISHED"
+        );
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            if held_tool { 2 } else { 1 }
+        );
+        agent.shutdown().await.unwrap();
+        server.abort();
+    }
+}

@@ -80,6 +80,14 @@ Worker, Durable Object, or application proxy that owns rotating credentials.
 Authentication modes are constructors rather than a union of mutually
 exclusive fields on `Agent.create`.
 
+### Explicit Claude runtime
+
+`Claude.create` is an additive Messages backend with explicit host-owned auth
+and a Claude-only tool array, using the existing durability store contract.
+It does not silently switch managed providers, install Codex tools, or supply
+a subscription sign-in screen. See the [Claude JavaScript guide](../../docs/CLAUDE_JAVASCRIPT.md)
+for durable reopen, replay, and placement boundaries.
+
 ### Personal memories and caller context
 
 Managed agents can keep user preferences separate from team knowledge:
