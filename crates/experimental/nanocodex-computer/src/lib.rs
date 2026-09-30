@@ -49,6 +49,11 @@ const PROVIDER_ENVIRONMENT: &[&str] = &[
     "DBUS_SESSION_BUS_ADDRESS",
     "LANG",
     "SKY_ENABLE_AUDIO",
+    // Trusted embedding-host app-access policy; never supplied by tool args.
+    "NANOCODEX_CUA_APP_CONSENT",
+    // Metadata-only enforced-policy lookup by the direct host. It does not
+    // forward this account directory into upstream JavaScript/native workers.
+    "CODEX_HOME",
 ];
 
 /// Trusted launch configuration, supplied by the embedding application.

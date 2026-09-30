@@ -1,4 +1,4 @@
-//! Install the unmodified, signed OpenAI desktop bundle as a private CUA runtime.
+//! Install signed OpenAI CUA components with a separate Nanocodex MCP host.
 use std::path::PathBuf;
 
 fn runtime_root() -> Result<PathBuf, String> {
@@ -66,9 +66,8 @@ pub async fn provision_upstream(force_refresh: bool) -> Result<serde_json::Value
     }
 }
 
-/// Install the official native-messaging bridge shipped with the selected
-/// browser component. Browser stores still require the user to confirm the
-/// extension installation.
+/// Dedicated browser APIs are unsupported by the native-computer-only runtime.
+/// Browsers remain controllable through the native computer UI.
 pub async fn configure_browser_bridge() -> Result<serde_json::Value, String> {
     #[cfg(target_os = "macos")]
     {
@@ -523,24 +522,6 @@ mod mac {
         ))
     }
 
-    fn browser_assets(version: &Path) -> Vec<(PathBuf, PathBuf)> {
-        let plugin = version.join(APP).join(RESOURCES).join(BROWSER_PLUGIN);
-        let extension_host = browser_extension_host();
-        [
-            PathBuf::from("scripts/installManifest.mjs"),
-            PathBuf::from("scripts/browser-client.mjs"),
-            extension_host,
-        ]
-        .into_iter()
-        .map(|relative| {
-            (
-                plugin.join(&relative),
-                PathBuf::from("browser").join(relative),
-            )
-        })
-        .collect()
-    }
-
     fn legacy_browser_config_relative() -> PathBuf {
         PathBuf::from("Resources")
             .join(BROWSER_PLUGIN)
@@ -548,36 +529,32 @@ mod mac {
             .join("extension-host-config.json")
     }
 
-    fn remove_unsealed_legacy_browser_config(
-        app: &Path,
-        seals: &HashMap<String, Seal>,
-    ) -> Result<(), String> {
+    // Old selections may still be used by running hosts. Migrate by publishing
+    // a fresh generation, never by deleting resources in the selected bundle.
+    fn requires_fresh_generation(app: &Path) -> Result<bool, String> {
+        for relative in ["codex", BROWSER_PLUGIN] {
+            match fs::symlink_metadata(app.join(RESOURCES).join(relative)) {
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
         let relative = legacy_browser_config_relative();
-        let name = relative
-            .to_str()
-            .ok_or("OpenAI browser config path is not UTF-8")?
-            .replace('\\', "/");
-        let path = app.join("Contents").join(&relative);
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.to_string()),
-        };
-        // Newer upstream builds may eventually ship a sealed default. Preserve
-        // it. Only remove the small unsealed file written by our old bridge
-        // setup, never a directory, symlink, or unexpectedly large payload.
-        if seals.contains_key(&name) {
-            return Ok(());
+        match fs::symlink_metadata(app.join("Contents").join(&relative)) {
+            Ok(_) => {
+                let name = relative.to_string_lossy().replace('\\', "/");
+                Ok(!signed_seals(app)?.contains_key(&name))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.to_string()),
         }
-        if !metadata.is_file() || metadata.len() > 64 * 1024 {
-            return Err("Legacy OpenAI browser config is not a bounded regular file".into());
-        }
-        io(fs::remove_file(path))
     }
 
-    fn remove_legacy_browser_config(app: &Path) -> Result<(), String> {
-        let seals = signed_seals(app)?;
-        remove_unsealed_legacy_browser_config(app, &seals)
+    fn verify_lean_layout(app: &Path) -> Result<(), String> {
+        if requires_fresh_generation(app)? {
+            return Err("OpenAI CUA runtime requires a fresh native-computer-only generation (no Codex CLI or Chrome plugin)".into());
+        }
+        Ok(())
     }
 
     fn verify_tree(
@@ -645,6 +622,7 @@ mod mac {
     }
 
     fn verify(app: &Path, commands: &mut impl Commands) -> Result<String, String> {
+        verify_lean_layout(app)?;
         commands.run(
             "/usr/bin/codesign",
             &args(
@@ -691,15 +669,11 @@ mod mac {
         }
         let resources = app.join(RESOURCES);
         for relative in [
-            "codex".to_owned(),
             "cua_node/bin/node".into(),
             "cua_node/bin/node_repl".into(),
             format!("{MODULES}/{ENTRY}"),
             format!("{MODULES}/@oai/sky/package.json"),
-            format!("{MODULES}/@oai/browser-desktop/package.json"),
             format!("{MODULES}/{SKY}/Contents/MacOS/SkyComputerUseService"),
-            "plugins/openai-bundled/plugins/chrome/scripts/installManifest.mjs".into(),
-            "plugins/openai-bundled/plugins/chrome/scripts/check-extension-installed.js".into(),
         ] {
             let path = resources.join(relative);
             if !path.is_file() {
@@ -709,26 +683,15 @@ mod mac {
                 ));
             }
         }
-        let extension_host = format!(
-            "{BROWSER_PLUGIN}/extension-host/macos/{}/ChatGPT for Chrome",
-            browser_architecture()
-        );
-        if !resources.join(&extension_host).is_file() {
-            return Err("OpenAI browser bridge is missing its native host".into());
-        }
         let seals = signed_seals(app)?;
-        for relative in [
-            Path::new("Resources/codex"),
+        verify_tree(
+            &app.join("Contents"),
             Path::new("Resources/cua_node"),
-            Path::new("Resources/plugins/openai-bundled/plugins/chrome"),
-        ] {
-            verify_tree(&app.join("Contents"), relative, &seals)?;
-        }
+            &seals,
+        )?;
         for relative in [
-            "Contents/Resources/codex",
             "Contents/Resources/cua_node/bin/node",
             "Contents/Resources/cua_node/bin/node_repl",
-            &format!("{RESOURCES}/{extension_host}"),
             &format!("{RESOURCES}/{MODULES}/{SKY}"),
         ] {
             verify_code(app, relative, commands)?;
@@ -755,14 +718,15 @@ mod mac {
     ) -> Result<(String, Option<String>), String> {
         use crate::startup_cache as cache;
 
-        let path = root.join(".startup-cache/verification-v1.json");
+        let path = root.join(".startup-cache/verification-v2.json");
         commands.check_cancelled()?;
+        verify_lean_layout(app)?;
         let before = cache::fingerprint(app);
         commands.check_cancelled()?;
         if !refresh
             && let Some(fingerprint) = &before
             && let Some(record) = cache::read::<VerificationRecord>(&path)
-            && record.format == 1
+            && record.format == 2
             && valid_build(&record.build)
             && cache::fresh(record.verified_at, cache::now())
             && record.fingerprint == *fingerprint
@@ -780,7 +744,7 @@ mod mac {
             let _ = cache::write(
                 &path,
                 &VerificationRecord {
-                    format: 1,
+                    format: 2,
                     verified_at: cache::now(),
                     fingerprint: fingerprint.clone(),
                     build: build.clone(),
@@ -807,15 +771,14 @@ mod mac {
         let modules = resources.join(MODULES);
         // These are the actual shipped node_repl and cua-repl environment
         // contracts. CODEX_BINARY_PATH is not supported by this upstream.
-        // The official host enables Tab.ax with BROWSER_USE_TINYSKY_ENABLED;
-        // high-level browser tab creation and lookup require this capability.
+        // Enable only the native computer surface. Browser Tab/DOM APIs need
+        // the official app-server proxy and are intentionally unsupported.
         Ok(format!(
-            "#!/bin/sh\nset -eu\nexport CUA_REPL_NODE_REPL_PATH={}\nexport CUA_REPL_ENABLED_SURFACES=browser,computer\nexport BROWSER_USE_TINYSKY_ENABLED=1\nexport NODE_REPL_NODE_PATH={}\nexport NODE_REPL_NODE_MODULE_DIRS={}\nexport NODE_REPL_TRUSTED_CODE_PATHS={}\nexport CODEX_CLI_PATH={}\nexport SKY_CUA_SERVICE_PATH={}\nexport NODE_REPL_UNTRUSTED_ENV_ALLOWLIST=SKY_CUA_SERVICE_PATH\nexport PATH={}:\"$PATH\"\nexec {} {} \"$@\"\n",
+            "#!/bin/sh\nset -eu\nunset CODEX_CLI_PATH BROWSER_USE_TINYSKY_ENABLED\nexport CUA_REPL_NODE_REPL_PATH={}\nexport CUA_REPL_ENABLED_SURFACES=computer\nexport NODE_REPL_NODE_PATH={}\nexport NODE_REPL_NODE_MODULE_DIRS={}\nexport NODE_REPL_TRUSTED_CODE_PATHS={}\nexport SKY_CUA_SERVICE_PATH={}\nexport NODE_REPL_UNTRUSTED_ENV_ALLOWLIST=\"${{NODE_REPL_UNTRUSTED_ENV_ALLOWLIST:+$NODE_REPL_UNTRUSTED_ENV_ALLOWLIST,}}SKY_CUA_SERVICE_PATH,SKY_CUA_SERVICE_NATIVE_PIPE_PATH\"\nexport PATH={}:\"$PATH\"\nexec {} {} \"$@\"\n",
             quote(&runtime.join("bin/node_repl"))?,
             quote(&runtime.join("bin/node"))?,
             quote(&modules)?,
             quote(&modules)?,
-            quote(&resources.join("codex"))?,
             quote(&modules.join(SKY))?,
             quote(&runtime.join("bin"))?,
             quote(&runtime.join("bin/node"))?,
@@ -854,14 +817,16 @@ mod mac {
         };
         let result = validate().and_then(|version| {
             let app = version.join(APP);
-            remove_legacy_browser_config(&app)?;
+            if requires_fresh_generation(&app)? {
+                return Ok(None);
+            }
             let (build, fingerprint) = verified_cached(root, &app, commands, refresh)?;
             commands.check_cancelled()?;
             let host = ensure_host(root, &version, HOST_MODULES)?;
             commands.check_cancelled()?;
-            publish_receipt(root, &host, &build, fingerprint.as_deref(), commands)
+            publish_receipt(root, &host, &build, fingerprint.as_deref(), commands).map(Some)
         });
-        result.map(Some).map_err(|error| {
+        result.map_err(|error| {
             if error == CANCELLED {
                 error
             } else {
@@ -870,31 +835,39 @@ mod mac {
         })
     }
 
-    const HOST_MODULES: &[(&str, &str)] = &[
-        (
-            "openai-cua-app-server.mjs",
-            include_str!("openai-cua-app-server.mjs"),
-        ),
-        (
-            "openai-cua-native-host.mjs",
-            include_str!("openai-cua-native-host.mjs"),
-        ),
-    ];
+    const HOST_MODULES: &[(&str, &str)] =
+        &[("direct-cua-host.mjs", include_str!("direct-cua-host.mjs"))];
 
     fn host_launcher(
         root: &Path,
         version: &Path,
         host: &Path,
-        hash: &str,
+        _hash: &str,
     ) -> Result<String, String> {
+        // A short state root avoids Unix-domain socket path limits. The host
+        // derives per-generation state beneath it; no installed app is changed.
+        let base = root.parent().and_then(Path::parent).unwrap_or(root);
         Ok(format!(
-            "#!/bin/sh\nset -eu\nexport NANOCODEX_CUA_NATIVE_APP={}\nexport NANOCODEX_CUA_NATIVE_PROVIDER={}\nexport NANOCODEX_CUA_NATIVE_STATE={}\nexec {} {} \"$@\"\n",
+            "#!/bin/sh\nset -eu\nexport NANOCODEX_CUA_NATIVE_APP={}\nexport NANOCODEX_CUA_NATIVE_PROVIDER={}\nexport NANOCODEX_CUA_POLICY_HOST={}\nexport NANOCODEX_CUA_NATIVE_STATE={}\nexport NANOCODEX_CUA_APP_CONSENT=\"${{NANOCODEX_CUA_APP_CONSENT:-allow}}\"\nexec {} {} \"$@\"\n",
             quote(&version.join(APP))?,
             quote(&host.join("upstream-cua-provider"))?,
-            quote(&root.join("host-state").join(hash))?,
+            quote(&host.join("cua-policy-host"))?,
+            quote(&base.join("s"))?,
             quote(&version.join(APP).join(RESOURCES).join("cua_node/bin/node"))?,
-            quote(&host.join("openai-cua-native-host.mjs"))?,
+            quote(&host.join("direct-cua-host.mjs"))?,
         ))
+    }
+
+    fn policy_launcher(version: &Path, host: &Path) -> Result<String, String> {
+        Ok(format!(
+            "#!/bin/sh\nset -eu\nexec {} {} --policy \"$@\"\n",
+            quote(&version.join(APP).join(RESOURCES).join("cua_node/bin/node"))?,
+            quote(&host.join("direct-cua-host.mjs"))?,
+        ))
+    }
+
+    fn executable_host_asset(name: &str) -> bool {
+        name.ends_with("cua-provider") || name == "cua-policy-host"
     }
 
     // The signed bundle and generated host have independent lifetimes. Source
@@ -905,7 +878,6 @@ mod mac {
         modules: &[(&str, &str)],
     ) -> Result<PathBuf, String> {
         let direct = launcher(version)?;
-        let browser_assets = browser_assets(version);
         let mut digest = Sha256::new();
         for content in modules
             .iter()
@@ -918,13 +890,6 @@ mod mac {
             digest.update((content.len() as u64).to_le_bytes());
             digest.update(content.as_bytes());
         }
-        for (source, relative) in &browser_assets {
-            let bytes = io(fs::read(source))?;
-            digest.update((relative.as_os_str().len() as u64).to_le_bytes());
-            digest.update(relative.as_os_str().as_encoded_bytes());
-            digest.update((bytes.len() as u64).to_le_bytes());
-            digest.update(bytes);
-        }
         // Include the wrapper template too; placeholders avoid a circular hash.
         digest.update(host_launcher(
             root,
@@ -932,6 +897,7 @@ mod mac {
             &root.join("hosts/HASH"),
             "HASH",
         )?);
+        digest.update(policy_launcher(version, &root.join("hosts/HASH"))?);
         let hash: String = digest
             .finalize()
             .iter()
@@ -939,12 +905,14 @@ mod mac {
             .collect();
         let host = root.join("hosts").join(&hash);
         let wrapper = host_launcher(root, version, &host, &hash)?;
+        let policy = policy_launcher(version, &host)?;
         let assets: Vec<_> = modules
             .iter()
             .copied()
             .chain([
                 ("upstream-cua-provider", direct.as_str()),
                 ("cua-provider", wrapper.as_str()),
+                ("cua-policy-host", policy.as_str()),
             ])
             .collect();
         let validate = || -> Result<(), String> {
@@ -960,30 +928,11 @@ mod mac {
                         path.display()
                     ));
                 }
-                if name.ends_with("cua-provider") {
+                if executable_host_asset(name) {
                     use std::os::unix::fs::PermissionsExt;
                     if metadata.permissions().mode() & 0o111 == 0 {
                         return Err(format!(
                             "managed host launcher is not executable: {}",
-                            path.display()
-                        ));
-                    }
-                }
-            }
-            for (source, relative) in &browser_assets {
-                let path = host.join(relative);
-                let metadata = io(fs::symlink_metadata(&path))?;
-                if !metadata.is_file() || io(fs::read(&path))? != io(fs::read(source))? {
-                    return Err(format!(
-                        "managed browser host asset is modified: {}",
-                        path.display()
-                    ));
-                }
-                if relative == &PathBuf::from("browser").join(browser_extension_host()) {
-                    use std::os::unix::fs::PermissionsExt;
-                    if metadata.permissions().mode() & 0o111 == 0 {
-                        return Err(format!(
-                            "managed browser host is not executable: {}",
                             path.display()
                         ));
                     }
@@ -1008,20 +957,13 @@ mod mac {
         for (name, content) in &assets {
             let path = stage.path.join(name);
             io(fs::write(&path, content))?;
-            if name.ends_with("cua-provider") {
+            if executable_host_asset(name) {
                 use std::os::unix::fs::PermissionsExt;
                 io(fs::set_permissions(
                     &path,
                     fs::Permissions::from_mode(0o755),
                 ))?;
             }
-        }
-        for (source, relative) in &browser_assets {
-            let path = stage.path.join(relative);
-            io(fs::create_dir_all(
-                path.parent().ok_or("Invalid browser host asset path")?,
-            ))?;
-            io(fs::copy(source, path))?;
         }
         if let Err(error) = fs::rename(&stage.path, &host) {
             // Another setup may have published this hash first. Never replace
@@ -1370,11 +1312,7 @@ mod mac {
         name == format!("{prefix}Contents/Info.plist")
             || name.starts_with(&format!("{prefix}Contents/MacOS/"))
             || name == format!("{prefix}Contents/_CodeSignature/CodeResources")
-            || name == format!("{prefix}{RESOURCES}/codex")
             || name.starts_with(&format!("{prefix}{RESOURCES}/cua_node/"))
-            || name.starts_with(&format!(
-                "{prefix}{RESOURCES}/plugins/openai-bundled/plugins/chrome/"
-            ))
     }
 
     fn component_zip(
@@ -1607,60 +1545,8 @@ mod mac {
         publish_receipt(root, &host, &build, fingerprint.as_deref(), commands)
     }
 
-    #[cfg(target_os = "macos")]
-    pub(super) fn configure_browser(root: &Path) -> Result<serde_json::Value, String> {
-        let target = io(fs::read_link(root.join("current")))?;
-        let parts: Vec<_> = target.components().collect();
-        if parts.len() != 2
-            || parts[0].as_os_str() != "versions"
-            || !matches!(parts[1], std::path::Component::Normal(_))
-        {
-            return Err("No managed OpenAI CUA runtime is selected".into());
-        }
-        let version = root.join(target);
-        let resources = version.join(APP).join(RESOURCES);
-        let runtime = resources.join("cua_node");
-        // The official installer writes extension-host-config.json beside its
-        // native host. Run it against our verified copy so setup never mutates
-        // the signed sparse OpenAI bundle.
-        let plugin = ensure_host(root, &version, HOST_MODULES)?.join("browser");
-        let installer = plugin.join("scripts/installManifest.mjs");
-        for path in [
-            &installer,
-            &runtime.join("bin/node"),
-            &runtime.join("bin/node_repl"),
-            &resources.join("codex"),
-        ] {
-            if !path.is_file() {
-                return Err(format!(
-                    "OpenAI browser bridge component is incomplete: {}",
-                    path.display()
-                ));
-            }
-        }
-        let source = r#"import { pathToFileURL } from 'node:url';
-const { install } = await import(pathToFileURL(process.env.NANOCODEX_BROWSER_INSTALLER));
-await install({ appServerRuntimePaths: {
-  codexCliPath: process.env.NANOCODEX_BROWSER_CODEX,
-  nodePath: process.env.NANOCODEX_BROWSER_NODE,
-  nodeReplPath: process.env.NANOCODEX_BROWSER_NODE_REPL,
-}});"#;
-        let output = std::process::Command::new(runtime.join("bin/node"))
-            .args(["--input-type=module", "--eval", source])
-            .env("NANOCODEX_BROWSER_INSTALLER", &installer)
-            .env("NANOCODEX_BROWSER_CODEX", resources.join("codex"))
-            .env("NANOCODEX_BROWSER_NODE", runtime.join("bin/node"))
-            .env("NANOCODEX_BROWSER_NODE_REPL", runtime.join("bin/node_repl"))
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|e| format!("Could not start the official browser bridge installer: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Official browser bridge installer failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        Ok(serde_json::json!({"status":"installed","component":"official-browser-bridge"}))
+    pub(super) fn configure_browser(_root: &Path) -> Result<serde_json::Value, String> {
+        Err("Dedicated browser Tab/DOM APIs and the Chrome native-messaging bridge are unsupported by the native-computer-only CUA runtime; control browsers through the native computer UI instead".into())
     }
 
     #[cfg(test)]

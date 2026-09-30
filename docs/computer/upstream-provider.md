@@ -5,9 +5,13 @@ provision OpenAI's CUA provider automatically on macOS and Windows. They expose
 its actual MCP catalog, including descriptions, schemas, metadata, and visibility.
 Production Code Mode remains QuickJS; the provider uses its own bundled Node.
 
-Browser-enabled launchers set upstream `BROWSER_USE_TINYSKY_ENABLED=1`, matching
-the official desktop host. This exposes `Tab.ax`, which upstream `cua.getTab()`
-and `cua.createBrowserTab()` use to return accessibility state. Mac setup regenerates Nanocodex host assets independently of the cached signed
+The lean managed **macOS** launcher enables only the upstream `computer`
+surface. Browser windows remain controllable through native UI, but dedicated
+browser inventory/Tab/DOM APIs and the official Chrome native-messaging bridge
+are not enabled. That bridge contains an app-server proxy and needs a separate
+port before it can meet the no-Codex dependency requirement. Hosted browser CDP
+and other Hands' screen providers are separate paths and are not changed here.
+Mac setup regenerates Nanocodex host assets independently of the cached signed
 bundle; a launcher update does not require `--refresh`.
 
 ```sh
@@ -17,44 +21,33 @@ nanocodex2 computer setup --refresh # check OpenAI's feed and update changed com
 ```
 
 `nanocodex setup` is the guided, resumable path: it signs in to the shared account,
-installs CUA and its official browser bridge, ensures Hand is connected, and offers
-the official browser-extension page. On macOS, CUA starts an isolated official app server
-without the desktop GUI and delegates application access and confirmation
-handling to the existing upstream permission policy. Nanocodex adds no prompts. Official sign-in and OS permissions
-still apply. See [managed macOS host](official-app-server-bridge.md).
+installs CUA, and ensures Hand is connected. On macOS it does not install or offer
+the official browser extension, whose native bridge still depends on app-server.
+CUA uses the direct MCP host without the official Codex binary or desktop GUI.
+The trusted host owns app-access consent; protected-target and OS permission
+checks remain native. See [direct MCP host](direct-mcp-host.md).
 
-The macOS updater reads OpenAI's live appcast and HTTP range-fetches only the
-signed `codex`, `cua_node`, and Chrome bridge resources plus their signature
-metadata. It does not install Electron, `app.asar`, frameworks, or the desktop
-application. Every selected resource is checked against the SHA-256 seals bound
-to OpenAI's Developer ID signature before atomic publication. The hourly
-Nanocodex updater performs the same cheap feed check and downloads payload bytes
-only when the upstream build changes.
+The macOS updater range-fetches only signed CUA/Node components plus signature
+metadata and the tiny signed main executable used only for attestation. The
+official `codex` executable, Chrome plugin, Electron, `app.asar`, and frameworks
+are excluded. A small Nanocodex MCP/lifecycle host handles explicit native-app
+consent and the helper's narrow policy reads. No model, Codex thread, sign-in
+state, or general app server is involved. Node, node_repl, and Sky are still
+upstream binary dependencies; this is not a Sky-only distribution.
 
-A running Hand retains its provider launch configuration. Updating the installed
-launcher or reloading a TUI does not replace that configuration in the shared
-Hand daemon. Restart the Hand after upgrading from the older direct provider
-launcher to the managed macOS bridge, then rediscover its CUA contract. Existing
-CUA JavaScript bindings and browser debugger attachments do not survive this
-restart. Calls already admitted to the old connection are never retargeted.
-
-If native app access reports `nodeRepl.createElicitation is unavailable because
-the MCP client does not support form elicitation`, check the **active process
-chain**, not just `provider.json`. The managed path is Hand → native host →
-official Codex app server → CUA provider. The server handles confirmations under
-its effective permission policy without starting the desktop GUI. A provider launched directly by an older Hand bypasses that path. The
-outer Nanocodex adapter intentionally advertises no elicitation capability;
-adding it there does not establish a working permission UI.
+A running Hand retains its provider generation. Installing the new direct host
+or reloading a TUI does not replace that configuration in the shared daemon.
+Restart the Hand to activate it; existing JavaScript scopes and debugger
+attachments do not survive. Old cached bundles containing Codex are not reused
+as new direct-host generations or modified beneath running processes.
 
 ## Timeout ownership and cancellation
 
 `timeout_ms` belongs to the upstream provider. Nanocodex forwards it unchanged and
 awaits the provider result; it does not subtract queueing or startup time, supply
 a default execution timeout, or abandon a call based on that argument. The macOS
-app-server bridge likewise delegates tool execution timeouts to the official app
-server ([configured MCP tool timeout](official-app-server-bridge.md#transport),
-upstream default 300 seconds) while keeping
-trusted connection and startup deadlines. This applies to standalone and managed
+direct MCP host likewise delegates tool execution timeouts to the upstream
+provider while keeping trusted startup and native readiness deadlines. This applies to standalone and managed
 bridges. An unresponsive tool remains governed by upstream timeout handling or
 caller cancellation.
 
@@ -76,19 +69,12 @@ never automatically replay that input.
 
 ## Browser selection
 
-OpenAI's browser selector accepts exact discovered browser IDs and lowercase
-family aliases such as `brave`. The display name `Brave Browser` is not an
-accepted alias in the pinned provider, despite its browser instructions saying
-to pass a browser name. Codex-rs forwards JavaScript unchanged and does not
-normalize this string. Nanocodex includes a separate selection note alongside
-workdir-only discovery; the provider's tool definitions and call arguments
-remain unchanged.
-
-Use a known browser ID from current provider state. For an unambiguous request
-for Brave, `cua.createBrowserTab('brave', url, options)` works directly. If
-multiple browser instances or profiles could match, use the provider's browser
-inventory to select the requested instance before creating a tab. Never guess a
-numeric ID or retry a failed creation against another browser automatically.
+The lean managed macOS runtime does not expose the dedicated browser surface.
+Use `cua.getApp` and the upstream native UI APIs for browser windows. Do not use
+`cua.getTab`, `cua.createBrowserTab`, or DOM APIs on that launcher. A custom,
+explicit browser-enabled provider may have different dependencies and semantics;
+read its actual discovered contract. Enabling it does not establish that it is
+free of Codex/app-server.
 
 ## Native app recovery
 
@@ -116,7 +102,7 @@ discovery separately from the unchanged provider tool definitions.
 
 On macOS, setup uses the official versioned, architecture-specific archives from
 the desktop appcast. Setup probes the immutable archive with bounded HTTP ranges,
-rebuilds a ZIP containing only the CLI, CUA Node runtime, Chrome bridge, and
+rebuilds a ZIP containing only the CUA Node runtime, signature anchor, and
 signature metadata, and rejects archives that do not honor exact ranges. The
 minimal bundle is verified against Apple's signature chain, OpenAI team
 `2DC432GLL2`, bundle identity `com.openai.codex`, and every selected `files2`
@@ -175,27 +161,23 @@ copy helper. Normal installations use the shared native provisioning command.
 
 ## Provider permissions and validation
 
-Application policy, OS permissions, and provider-supplied approval flows belong
-to the official OpenAI runtime. Nanocodex does not display consent forms, remember
-application permissions, or expose an embedding callback that makes approval
-decisions. Installing a provider does not grant consent.
+The outer Rust/JavaScript adapters advertise no MCP elicitation and reject
+unsupported incoming requests with method-not-found (`-32601`). On managed
+macOS, the direct host is the upstream provider's internal MCP client. It
+advertises form support and supplies empty native application-access consent
+from trusted `NANOCODEX_CUA_APP_CONSENT=allow` policy (the managed launcher's
+default). A trusted host can set `deny`; tool arguments cannot override it.
+Audio, data-bearing forms, unknown connectors, and requests outside active JS
+are not automatically approved. Native protected-target checks, OS permissions,
+and caller authorization continue to apply. Known enforced local/MDM policy
+sources fail closed pending a real policy integration; no enterprise Codex
+identity is fabricated. See [native Hand computer access](native-hand-consent.md).
 
-The adapters advertise no MCP elicitation capability. On macOS, the official app server handles provider confirmations using its
-existing permission policy. The managed bridge declines unresolved interactive
-requests for its own thread without showing a prompt or launching the GUI. Direct provider-to-adapter requests use the following MCP behavior. Unsupported provider
-requests, including `elicitation/create` and `openai/elicitation/create`, receive
-a JSON-RPC method-not-found error (`-32601`), never an approval response. Operations
-that require this host capability can therefore fail; discovery or a successful
-operation does not establish support for every upstream permission flow. See
-[native Hand computer access](native-hand-consent.md).
-
-Validation covers installer invocation/opt-outs, exact command and environment
-forwarding, failed refresh recovery, corrupt cache detection, and desktop first
-start. A real macOS download and the Windows Store installation were exercised,
-and both installed providers returned `js`, `js_add_node_module_dir`, `js_reset`,
-and hidden `turn_ended` through MCP. Catalog discovery is not a claim of completed
-approval UI or a full screen/input acceptance test.
-
+Validation covers transport fidelity, cancellation and cleanup, installer
+migration, attestation, and the isolated no-Codex macOS MCP/native-observation
+smoke. Arithmetic/catalog success alone is not proof of native CUA. Windows and
+the opt-in Linux Sky host retain their existing Codex CLI dependencies; this
+macOS change does not convert those paths or establish input acceptance on them.
 
 The Windows native-pipe contract was verified against Store build 26.915.4065.0
 and Codex Desktop 9922. A separate protocol probe returned app inventory,
