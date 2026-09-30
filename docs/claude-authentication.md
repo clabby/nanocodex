@@ -73,11 +73,29 @@ let (agent, events) = Nanocodex::builder(Claude::latest(client))
 Enable `claude` on the `nanocodex` facade; its existing default durability feature
 includes the Claude adapter. Direct crate users enable `claude` on
 `nanocodex-durability`. `ClaudeClient::subscription` selects the observed Messages
-route and consumes the manager's headers. It does not inject Claude Code's private
-system prompt, billing attribution or product identity. Authentication beta
-headers are combined with request feature betas, so context management remains
-enabled alongside OAuth. Tools, nested model requests and compaction share that
-same authenticated client.
+route and consumes the manager's headers. It enables the explicit subscription
+compatibility profile measured below. Authentication beta headers combine with
+request feature betas, so context management remains enabled alongside OAuth.
+Tools, nested model requests and compaction share the same authenticated client.
+
+The measured profile includes the fixed public first system block `You are
+Claude Code, Anthropic's official CLI for Claude.`, followed by the caller's
+instructions. This is a wire compatibility convention of the independent
+Nanocodex implementation; the process remains Nanocodex and identifies its HTTP
+implementation as `nanocodex/<version>`. No private CLI prompt, billing marker,
+account identifier or CLI session identifier is imported. The public
+OAuth/Claude feature, interleaved-thinking, effort and extended-cache betas, CLI
+workload headers and direct-browser flag match the accepted probe. Context
+management requests also add their feature beta. These are observed
+accepted settings, not a proven minimal or permanent provider contract.
+
+The agent prepares this system prefix before freezing an admitted request and
+before creating its durable effect identity. Restoring an unfinished request
+keeps that original body even when the newly attached client has different
+defaults. Direct Messages callers use `client.prepare_request(&mut request)` before
+`create` or `stream`; agent builders prepare requests automatically. Custom
+endpoints opt in with `client.subscription_compatibility()`. The HTTP transport
+never silently rewrites a frozen request body.
 
 ## Credential persistence and failures
 
@@ -129,9 +147,23 @@ The composed journey performs login, a signed tool round, compaction, real SQLit
 reopen, 401 recovery and refresh rotation, terminal replay without another model
 request, and logout. Provider traffic in these tests is synthetic loopback HTTP.
 
-The CLI probe establishes emitted protocol behavior; it does not establish a
-live login, subscription eligibility, billing, or acceptance of the native
-backend's request by Anthropic. A fresh end-to-end provider authorization remains
-the live integration check. Anthropic documents third-party subscription use under
-its applicable approval terms in the [Agent SDK guidance](https://code.claude.com/docs/en/agent-sdk/overview),
-and explains the user login paths in [Claude Code authentication](https://code.claude.com/docs/en/authentication).
+Live independent-native subscription admission was verified with the measured
+compatibility profile. An actual interactive tmux reference exercised the CLI's
+tool, compaction and recall behavior. The independent Rust client then performed
+provider-backed tool execution, summary compaction and recall after a real SQLite
+reopen, with provider-reported cache hits. Authentication for that measurement
+came from an in-memory broker of the user's authenticated CLI; native request
+bodies and successful response bytes were unchanged.
+
+Two alternative first system blocks returned generic HTTP 429 before the fixed
+public compatibility block succeeded with the same native comparison settings.
+This establishes the observed difference in that environment, not a universal
+provider rule or the meaning of the earlier rate-limit error. Applications should
+validate their selected model and approved subscription integration against the
+live provider; a synthetic transport test cannot establish admission or billing.
+
+A fresh real provider PKCE exchange and native refresh remain unverified; their
+lifecycle coverage is the synthetic integration above. Product sign-in and
+billing are separate integration work. Anthropic documents third-party
+subscription use in its [Agent SDK guidance](https://code.claude.com/docs/en/agent-sdk/overview)
+and user login paths in [Claude Code authentication](https://code.claude.com/docs/en/authentication).

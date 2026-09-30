@@ -189,7 +189,8 @@ async fn build_agent(
         reqwest::Client::new(),
         format!("{origin}/v1/messages?beta=true"),
         subscription,
-    );
+    )
+    .subscription_compatibility();
     Nanocodex::builder(Claude::new(client, "synthetic"))
         .system("Use the synthetic effect; keep its result.")
         .cache_one_hour()
@@ -269,9 +270,19 @@ async fn subscription_rotation_tool_compaction_and_terminal_replay_survive_sqlit
             async move {
                 provider.attempts.fetch_add(1, Ordering::SeqCst);
                 assert!(!headers.contains_key("x-api-key"));
+                assert_eq!(headers["user-agent"], concat!("nanocodex/", env!("CARGO_PKG_VERSION")));
+                assert_eq!(headers["x-app"], "cli");
+                assert_eq!(headers["x-claude-code-request-class"], "main");
+                assert_eq!(headers["anthropic-dangerous-direct-browser-access"], "true");
+                assert_eq!(body["system"][0]["text"], "You are Claude Code, Anthropic's official CLI for Claude.");
+                assert_eq!(body["system"][1]["text"], "Use the synthetic effect; keep its result.");
+                assert_eq!(body["system"][1]["cache_control"]["ttl"], "1h");
                 let betas = headers["anthropic-beta"].to_str().unwrap();
                 assert!(betas.split(',').any(|b| b == "oauth-2025-04-20"));
                 assert!(betas.split(',').any(|b| b == "context-management-2025-06-27"));
+                for beta in ["claude-code-20250219", "interleaved-thinking-2025-05-14", "effort-2025-11-24", "extended-cache-ttl-2025-04-11"] {
+                    assert_eq!(betas.split(',').filter(|b| *b == beta).count(), 1);
+                }
                 assert_eq!(body["cache_control"]["ttl"], "1h");
                 let authorization = headers["authorization"].to_str().unwrap();
                 if !provider.accept_original.load(Ordering::SeqCst) && authorization == "Bearer synthetic-access-1" {
@@ -388,4 +399,213 @@ async fn subscription_rotation_tool_compaction_and_terminal_replay_survive_sqlit
     eprintln!(
         "subscription+SQLite: login/reopen -> signed tool roundtrip -> compact -> reopen/401/rotation -> terminal replay -> logout; 2 token exchanges, 5 Messages attempts, 1 effect; credentials absent from agent store"
     );
+}
+
+// One synthetic storage outage after the real HTTP response leaves the native
+// request frozen. All successful persistence still uses actual SQLite.
+struct InterruptedStore {
+    inner: SqliteStore,
+    armed: Arc<AtomicBool>,
+}
+impl nanocodex_durability::StateStore for InterruptedStore {
+    fn read_record<'a>(
+        &'a mut self,
+        id: &'a str,
+        key: &'a str,
+    ) -> nanocodex_durability::StoreFuture<
+        'a,
+        Result<Option<String>, nanocodex_durability::StoreError>,
+    > {
+        self.inner.read_record(id, key)
+    }
+    fn acquire<'a>(
+        &'a mut self,
+        id: &'a str,
+        owner: nanocodex_durability::OwnerId,
+    ) -> nanocodex_durability::StoreFuture<
+        'a,
+        Result<nanocodex_durability::OwnedState, nanocodex_durability::StoreError>,
+    > {
+        self.inner.acquire(id, owner)
+    }
+    fn replace<'a>(
+        &'a mut self,
+        id: &'a str,
+        owner: &'a nanocodex_durability::OwnerToken,
+        revision: u64,
+        payload: &'a str,
+        records: &'a [nanocodex_durability::StoreRecord],
+    ) -> nanocodex_durability::StoreFuture<'a, Result<u64, nanocodex_durability::StoreError>> {
+        Box::pin(async move {
+            if self.armed.swap(false, Ordering::SeqCst) {
+                return Err(nanocodex_durability::StoreError::NotCommitted(
+                    "synthetic response receipt storage outage".into(),
+                ));
+            }
+            self.inner
+                .replace(id, owner, revision, payload, records)
+                .await
+        })
+    }
+}
+
+#[tokio::test]
+async fn frozen_subscription_request_survives_sqlite_reopen_with_changed_client_profile() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    for originally_enabled in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.sqlite");
+        let armed = Arc::new(AtomicBool::new(false));
+        let arm = armed.clone();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let (captured, arm) = (captured.clone(), arm.clone());
+                async move {
+                    assert_eq!(headers["authorization"], "Bearer synthetic-frozen-secret");
+                    let index = {
+                        let mut log = captured.lock().unwrap();
+                        log.push(body);
+                        log.len()
+                    };
+                    if index == 1 {
+                        arm.store(true, Ordering::SeqCst);
+                    }
+                    (
+                        [("content-type", "text/event-stream")],
+                        sse(
+                            vec![json!({"type":"text","text":"frozen answer"})],
+                            "end_turn",
+                        ),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = |enabled: bool| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "authorization",
+                "Bearer synthetic-frozen-secret".parse().unwrap(),
+            );
+            let client =
+                ClaudeClient::with_auth_headers(reqwest::Client::new(), &endpoint, headers);
+            if enabled {
+                client.subscription_compatibility()
+            } else {
+                client
+            }
+        };
+        let state = DurableSession::open(
+            InterruptedStore {
+                inner: SqliteStore::open(&path).unwrap(),
+                armed,
+            },
+            "profile-session",
+        )
+        .await
+        .unwrap();
+        let caller = json!({"type":"text", "text":"Original caller policy", "cache_control":{"type":"ephemeral","ttl":"1h"}});
+        let (agent, events) =
+            Nanocodex::builder(Claude::new(client(originally_enabled), "original-model"))
+                .system_blocks(vec![caller.clone()])
+                .durability(state)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+        let request =
+            || PromptRequest::new("retain the original request").request_id("frozen-profile");
+        let error = agent
+            .prompt(request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap_err();
+        assert!(error.execution_policy_disposition().is_some(), "{error}");
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let _ = agent.shutdown().await;
+        drop((agent, events));
+        let state = DurableSession::open(SqliteStore::open(&path).unwrap(), "profile-session")
+            .await
+            .unwrap();
+        let (agent, events) =
+            Nanocodex::builder(Claude::new(client(!originally_enabled), "changed-model"))
+                .system("Changed caller policy")
+                .durability(state)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+        assert_eq!(
+            agent
+                .prompt(request())
+                .await
+                .unwrap()
+                .result()
+                .await
+                .unwrap()
+                .final_message(),
+            "frozen answer"
+        );
+        assert_eq!(
+            agent
+                .prompt(request())
+                .await
+                .unwrap()
+                .result()
+                .await
+                .unwrap()
+                .final_message(),
+            "frozen answer"
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "terminal replay sends no HTTP"
+        );
+        agent
+            .prompt("new request uses the current profile")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        agent.shutdown().await.unwrap();
+        drop((agent, events));
+        let log = requests.lock().unwrap();
+        assert_eq!(log.len(), 3);
+        assert_eq!(
+            log[0], log[1],
+            "resumed HTTP body must match the frozen body despite profile and builder changes"
+        );
+        let expected = if originally_enabled {
+            json!([{"type":"text", "text":"You are Claude Code, Anthropic's official CLI for Claude."}, caller])
+        } else {
+            json!([caller])
+        };
+        assert_eq!(log[0]["system"], expected);
+        assert_eq!(log[0]["model"], "original-model");
+        assert_eq!(log[2]["model"], "changed-model");
+        if originally_enabled {
+            assert_eq!(log[2]["system"], "Changed caller policy");
+        } else {
+            assert_eq!(
+                log[2]["system"][0]["text"],
+                "You are Claude Code, Anthropic's official CLI for Claude."
+            );
+            assert_eq!(log[2]["system"][1]["text"], "Changed caller policy");
+        }
+        assert_no_secrets(&path, &["synthetic-frozen-secret".into()]);
+        server.abort();
+        eprintln!(
+            "profile SQLite recovery: initial profile={originally_enabled}, changed profile={}, frozen HTTP body identical, cache marker preserved, 2 recovery attempts + 1 new request, terminal replay has zero dispatch; auth absent from DB",
+            !originally_enabled
+        );
+    }
 }

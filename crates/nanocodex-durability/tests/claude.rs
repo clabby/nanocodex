@@ -33,6 +33,27 @@ fn sse(blocks: Vec<Value>, stop: &str, input: u64) -> String {
 fn text(value: &str) -> Vec<Value> {
     vec![json!({"type":"text","text":value})]
 }
+fn invalid_server_boundary(body: &Value) -> bool {
+    let mut unresolved = std::collections::HashSet::new();
+    for message in body["messages"].as_array().unwrap() {
+        for block in message["content"].as_array().unwrap() {
+            if message["role"] == "user" && block["type"] != "tool_result" && !unresolved.is_empty()
+            {
+                return true;
+            }
+            if block["type"] == "server_tool_use" || block["type"] == "mcp_tool_use" {
+                unresolved.insert(block["id"].as_str().unwrap());
+            } else if block["type"] != "tool_result"
+                && let Some(id) = block["tool_use_id"].as_str()
+                && !unresolved.remove(id)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 async fn server(
     respond: impl Fn(usize, &Value) -> String + Send + Sync + 'static,
 ) -> (
@@ -57,6 +78,13 @@ async fn server(
                 };
                 if std::env::var_os("NANOCLAUDE_DURABILITY_TRACE").is_some() {
                     eprintln!("{}", json!({"request_index":index,"request":body}));
+                }
+                if invalid_server_boundary(&body) {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "invalid server tool boundary",
+                    )
+                        .into_response();
                 }
                 (
                     [("content-type", "text/event-stream")],
@@ -1584,5 +1612,437 @@ async fn manual_compaction_cancels_active_tool_then_preserves_safe_context_on_re
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     agent.shutdown().await.unwrap();
     drop((agent, events));
+    server.abort();
+}
+
+// Terminal failures and cancellations turn unresolved native calls into bounded
+// evidence. Real SQLite reopen, cancelled new input, lossy summary and exact
+// terminal receipt replay must neither resurrect that input nor repeat effects.
+#[tokio::test]
+async fn uncertain_paused_server_turn_survives_compaction_cancellation_and_sqlite_reopen() {
+    use axum::{body::Body, http::StatusCode};
+    use futures_util::{StreamExt, stream};
+    use nanocodex_agent::events::AgentEventKind;
+    use std::{
+        convert::Infallible,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+    for cancel_active in [false, true] {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("paused-state.sqlite");
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let log = requests.clone();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let counter = effects.clone();
+        let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+            let log = log.clone();
+            let counter = counter.clone();
+            async move {
+                let index = { let mut rows = log.lock().unwrap(); rows.push(body.clone()); rows.len() };
+                if std::env::var_os("NANOCLAUDE_DURABILITY_TRACE").is_some() {
+                    eprintln!("{}", json!({"cancel_active":cancel_active,"request_index":index,"request":body}));
+                }
+                if invalid_server_boundary(&body) {
+                    return (StatusCode::BAD_REQUEST, "invalid server tool boundary").into_response();
+                }
+                // Increment only after admission, and on EVERY native replay.
+                // This detects accidental repeats as well as unexpected HTTP.
+                if body["tool_choice"]["type"] != "none" && body["messages"].as_array().unwrap().iter()
+                    .flat_map(|m| m["content"].as_array().unwrap())
+                    .any(|b| b["type"] == "server_tool_use" && b["id"] == "paused-mutation") {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+                if index == 3 {
+                    let partial = [
+                        json!({"type":"message_start","message":{"id":"uncertain-resume","role":"assistant","model":"test","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}),
+                        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"continuation admitted"}}),
+                    ].into_iter().map(|frame| format!("data: {frame}\n\n")).collect::<String>();
+                    if cancel_active {
+                        return ([("content-type","text/event-stream")], Body::from_stream(
+                            stream::once(async { Ok::<_, Infallible>(partial) }).chain(stream::pending())
+                        )).into_response();
+                    }
+                    return ([("content-type","text/event-stream")], partial).into_response();
+                }
+                let output = match index {
+                    1 => sse(vec![
+                        json!({"type":"thinking","thinking":"perform the authorized mutation","signature":"opaque-paused-signature"}),
+                        json!({"type":"server_tool_use","id":"paused-mutation","name":"bash_code_execution","input":{"command":"synthetic mutation"},"opaque":"retain-evidence"}),
+                        json!({"type":"text","text":"多字節 provider evidence ".repeat(8_000)}),
+                    ], "pause_turn", 70_000),
+                    2 => sse(text("Perform the authorized synthetic operation."), "end_turn", 10),
+                    4 => sse(text("A deliberately lossy summary."), "end_turn", 10),
+                    _ => sse(text("reconciled current request"), "end_turn", 10),
+                };
+                ([("content-type","text/event-stream")], output).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ClaudeClient::new(
+            reqwest::Client::new(),
+            format!("http://{address}/v1/messages"),
+            "synthetic",
+        );
+        let first_request = || PromptRequest::new("perform operation").request_id("paused-first");
+        let cancelled_request = || {
+            PromptRequest::new("CANCELLED_USER_REQUEST never execute this")
+                .request_id("cancelled-new")
+        };
+        let final_request = || {
+            PromptRequest::new("CURRENT_USER_REQUEST reconcile before acting")
+                .request_id("after-uncertain-reopen")
+        };
+        let (agent, mut events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+            .auto_compact_window_tokens(100_000)
+            .server_tool(nanocodex_claude::ServerToolDefinition::code_execution_current())
+            .durability(reopen(&path).await)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        let turn = agent.prompt(first_request()).await.unwrap();
+        if cancel_active {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let event = events.next().await.unwrap();
+                    if event.kind == AgentEventKind::AssistantDelta {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            turn.cancel().await.unwrap();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), turn.result())
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        agent.shutdown().await.unwrap();
+        drop((agent, events));
+
+        // Reopen before any new input. Replaying the terminal ID cannot resume
+        // the failed/cancelled continuation or issue another native effect.
+        let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+            .server_tool(nanocodex_claude::ServerToolDefinition::code_execution_current())
+            .durability(reopen(&path).await)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            agent
+                .prompt(first_request())
+                .await
+                .unwrap()
+                .result()
+                .await
+                .is_err()
+        );
+        assert!(
+            agent
+                .prompt(cancelled_request().cancel_on_admission())
+                .await
+                .unwrap()
+                .result()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            3,
+            "terminal replay and cancelled new input must not reach HTTP"
+        );
+        agent.compact().await.unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 4);
+        agent.shutdown().await.unwrap();
+        drop((agent, events));
+
+        let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+            .server_tool(nanocodex_claude::ServerToolDefinition::code_execution_current())
+            .durability(reopen(&path).await)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        let result = agent
+            .prompt(final_request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        assert_eq!(result.final_message(), "reconciled current request");
+        let usage = result.usage().unwrap().total_tokens();
+        agent.shutdown().await.unwrap();
+        drop((agent, events));
+
+        let (agent, events) = Nanocodex::builder(Claude::new(client, "test"))
+            .server_tool(nanocodex_claude::ServerToolDefinition::code_execution_current())
+            .durability(reopen(&path).await)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        let replay = agent
+            .prompt(final_request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        assert_eq!(replay.final_message(), "reconciled current request");
+        assert_eq!(replay.usage().unwrap().total_tokens(), usage);
+        assert!(
+            agent
+                .prompt(cancelled_request())
+                .await
+                .unwrap()
+                .result()
+                .await
+                .is_err()
+        );
+        agent.shutdown().await.unwrap();
+        drop((agent, events));
+
+        let log = requests.lock().unwrap();
+        assert_eq!(log.len(), 5, "terminal receipt replay must not call HTTP");
+        assert_eq!(
+            effects.load(Ordering::SeqCst),
+            1,
+            "uncertain effects must not repeat"
+        );
+        assert_eq!(log[2]["messages"][1]["content"][1]["id"], "paused-mutation");
+        assert!(!log[1]["messages"].to_string().contains("paused-mutation"));
+        for request in &log[3..] {
+            assert!(
+                request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|m| m["role"] == "user"),
+                "uncertain transcript must be data, without native calls or fabricated results"
+            );
+            let evidence = request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["content"].as_array().unwrap())
+                .filter_map(|b| b["text"].as_str())
+                .find(|text| text.contains("paused-mutation"))
+                .expect("prior server evidence");
+            assert!(evidence.contains("outcome unknown"));
+            assert!(evidence.contains("opaque-paused-signature"));
+            assert!(evidence.contains("retain-evidence"));
+            assert!(evidence.contains("provider transcript truncated"));
+            assert!(evidence.len() <= 66_000, "bounded UTF-8 evidence");
+            assert!(
+                !request["messages"]
+                    .to_string()
+                    .contains("CANCELLED_USER_REQUEST")
+            );
+        }
+        assert_eq!(
+            log[4]["messages"]
+                .to_string()
+                .matches("CURRENT_USER_REQUEST")
+                .count(),
+            1
+        );
+        server.abort();
+    }
+}
+
+// A store failure leaves the operation unfinished, unlike a provider failure.
+// Reopen must use the prepared native cursor: settled model receipts replay,
+// while an admitted effect with no committed receipt remains at least once.
+#[tokio::test]
+async fn paused_server_cursor_replays_across_store_failure_without_terminalizing() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    for after_commit in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pending-server.sqlite");
+        let armed = Arc::new(AtomicBool::new(false));
+        let arm = armed.clone();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let counter = effects.clone();
+        let (client, requests, server) = server(move |_, body| {
+            let has_pending_call = body["messages"].as_array().unwrap().iter()
+                .flat_map(|m| m["content"].as_array().unwrap())
+                .any(|b| b["type"] == "server_tool_use" && b["id"] == "durable-pause");
+            if has_pending_call {
+                counter.fetch_add(1, Ordering::SeqCst);
+                arm.store(true, Ordering::SeqCst);
+                sse(vec![
+                    json!({"type":"bash_code_execution_tool_result","tool_use_id":"durable-pause","content":{"type":"bash_code_execution_result","stdout":"committed","stderr":"","return_code":0,"content":[]}}),
+                    json!({"type":"text","text":"recovered prepared server turn"}),
+                ], "end_turn", 10)
+            } else {
+                sse(vec![
+                    json!({"type":"thinking","thinking":"run once","signature":"durable-signature"}),
+                    json!({"type":"server_tool_use","id":"durable-pause","name":"bash_code_execution","input":{"command":"synthetic effect"}}),
+                ], "pause_turn", 10)
+            }
+        }).await;
+        let state = DurableSession::open(
+            FaultStore {
+                inner: SqliteStore::open(&path).unwrap(),
+                writes: Arc::new(AtomicUsize::new(0)),
+                fail_at: None,
+                after_commit,
+                fail_when_armed: Some(armed),
+            },
+            "claude-synthetic",
+        )
+        .await
+        .unwrap();
+        let request =
+            || PromptRequest::new("perform durable server operation").request_id("pending-server");
+        let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "original-model"))
+            .server_tool(nanocodex_claude::ServerToolDefinition::code_execution_current())
+            .durability(state)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        let error = agent
+            .prompt(request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap_err();
+        assert!(error.execution_policy_disposition().is_some(), "{error}");
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        let _ = agent.shutdown().await;
+        drop((agent, events));
+
+        let (agent, events) = Nanocodex::builder(Claude::new(client, "different-model"))
+            .durability(reopen(&path).await)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            agent
+                .prompt(request())
+                .await
+                .unwrap()
+                .result()
+                .await
+                .unwrap()
+                .final_message(),
+            "recovered prepared server turn"
+        );
+        let expected = if after_commit { 1 } else { 2 };
+        assert_eq!(effects.load(Ordering::SeqCst), expected);
+        assert_eq!(requests.lock().unwrap().len(), 1 + expected);
+        agent
+            .prompt(request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1 + expected,
+            "terminal replay must not execute again"
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), expected);
+        agent.shutdown().await.unwrap();
+        drop((agent, events));
+        let log = requests.lock().unwrap();
+        if !after_commit {
+            assert_eq!(
+                log[1], log[2],
+                "unfinished operation must replay its original frozen native request"
+            );
+        }
+        assert!(
+            log.iter()
+                .all(|request| request["model"] == "original-model")
+        );
+        server.abort();
+    }
+}
+
+// Compatibility fixture for a version-1 terminal failed checkpoint emitted
+// before failure finalization converted unresolved server calls. Seed it through
+// the public store API, then exercise the real provider boundary after reopen.
+#[tokio::test]
+async fn legacy_failed_server_snapshot_accepts_new_input_without_native_replay() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("legacy-failure.sqlite");
+    let session = reopen(&path).await;
+    session
+        .admit("legacy-failed", &json!({"legacy":"fetch once"}))
+        .await
+        .unwrap();
+    session.begin_attempt("legacy-failed").await.unwrap();
+    session.fail("legacy-failed", &json!({
+        "provider":"claude", "version":1, "discovered":[], "tasks":null,
+        "conversation":{
+            "admitted_tool_ids":[], "recovery_notices":[],
+            "messages":[
+                {"role":"user","content":[{"type":"text","text":"original authorized fetch"}]},
+                {"role":"assistant","content":[
+                    {"type":"thinking","thinking":"fetch once","signature":"legacy-signed-evidence"},
+                    {"type":"server_tool_use","id":"legacy-pending-fetch","name":"web_fetch","input":{"url":"https://example.org"}}
+                ]}
+            ],
+            "summary":"", "active_context_tokens":70_000, "pending_continuation":true,
+            "auto_compaction_suppressed":true, "rapid_compactions":1, "rounds_since_compaction":0,
+            "previous_message_id":"legacy-pause", "container":"legacy-container"
+        }
+    }), "synthetic rejected continuation").await.unwrap();
+    drop(session);
+    let (client, requests, server) =
+        server(|_, _| sse(text("legacy state reconciled"), "end_turn", 10)).await;
+    let (agent, events) = Nanocodex::builder(Claude::new(client, "test"))
+        .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
+        .durability(reopen(&path).await)
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("NEW_USER_REQUEST reconcile old fetch")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "legacy state reconciled"
+    );
+    agent.shutdown().await.unwrap();
+    drop((agent, events));
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    let messages = &log[0]["messages"];
+    assert!(
+        messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["role"] == "user")
+    );
+    assert!(messages.to_string().contains("legacy-pending-fetch"));
+    assert!(messages.to_string().contains("legacy-signed-evidence"));
+    assert!(messages.to_string().contains("outcome unknown"));
+    assert_eq!(messages.to_string().matches("NEW_USER_REQUEST").count(), 1);
+    assert_eq!(log[0]["container"], "legacy-container");
     server.abort();
 }

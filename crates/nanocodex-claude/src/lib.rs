@@ -734,6 +734,7 @@ pub struct ClaudeClient {
     http: reqwest::Client,
     endpoint: String,
     auth: ClientAuth,
+    subscription_compatibility: bool,
 }
 
 impl ClaudeClient {
@@ -748,6 +749,7 @@ impl ClaudeClient {
             http,
             endpoint: endpoint.into(),
             auth: ClientAuth::ApiKey(api_key.into()),
+            subscription_compatibility: false,
         }
     }
 
@@ -764,6 +766,7 @@ impl ClaudeClient {
             http,
             endpoint: endpoint.into(),
             auth: ClientAuth::Headers(headers),
+            subscription_compatibility: false,
         }
     }
 
@@ -779,6 +782,7 @@ impl ClaudeClient {
             http,
             endpoint: endpoint.into(),
             auth: ClientAuth::Provider(provider),
+            subscription_compatibility: false,
         }
     }
 
@@ -791,6 +795,54 @@ impl ClaudeClient {
     /// agent checkpoints. No local Claude Code login or API key is discovered.
     pub fn subscription(http: reqwest::Client, provider: Arc<dyn ClaudeAuthProvider>) -> Self {
         Self::with_auth_provider(http, ANTHROPIC_SUBSCRIPTION_MESSAGES_URL, provider)
+            .subscription_compatibility()
+    }
+
+    /// Enable the observed subscription compatibility profile for an explicitly
+    /// selected endpoint. Nanocodex keeps its own HTTP User-Agent; this protocol
+    /// profile does not make it Anthropic's CLI or supply authorization.
+    ///
+    /// Agent requests are prepared before durable request freezing. Raw transport
+    /// callers must call [`Self::prepare_request`] before `create` or `stream`.
+    pub const fn subscription_compatibility(mut self) -> Self {
+        self.subscription_compatibility = true;
+        self
+    }
+
+    /// Prepare the explicit public subscription protocol block before persisting
+    /// or hashing a request. Existing blocks and their cache markers are retained;
+    /// repeated preparation leaves an existing first protocol block unchanged.
+    /// `create` and `stream` never silently rewrite the supplied request body.
+    pub fn prepare_request(&self, request: &mut MessagesRequest) {
+        if !self.subscription_compatibility {
+            return;
+        }
+        const PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+        match request.system.as_ref() {
+            Some(Value::String(text)) if text == PREFIX => {
+                request.system = Some(serde_json::json!([{"type":"text","text":PREFIX}]));
+                return;
+            }
+            Some(Value::Array(blocks))
+                if blocks.first().is_some_and(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("text")
+                        && block.get("text").and_then(Value::as_str) == Some(PREFIX)
+                }) =>
+            {
+                return;
+            }
+            _ => {}
+        }
+        let mut blocks = vec![serde_json::json!({"type":"text","text":PREFIX})];
+        match request.system.take() {
+            Some(Value::String(text)) => {
+                blocks.push(serde_json::json!({"type":"text","text":text}));
+            }
+            Some(Value::Array(existing)) => blocks.extend(existing),
+            Some(other) => blocks.push(other),
+            None => {}
+        }
+        request.system = Some(Value::Array(blocks));
     }
 
     async fn post(
@@ -849,6 +901,19 @@ impl ClaudeClient {
                     }
                 }
             }
+            if self.subscription_compatibility {
+                for beta in [
+                    "oauth-2025-04-20",
+                    "claude-code-20250219",
+                    "interleaved-thinking-2025-05-14",
+                    "effort-2025-11-24",
+                    "extended-cache-ttl-2025-04-11",
+                ] {
+                    if !betas.contains(&beta) {
+                        betas.push(beta);
+                    }
+                }
+            }
             if request.context_management.is_some()
                 && !betas.contains(&"context-management-2025-06-27")
             {
@@ -858,6 +923,19 @@ impl ClaudeClient {
                 let value = reqwest::header::HeaderValue::from_str(&betas.join(","))
                     .map_err(|_| ClaudeError::AuthUnavailable)?;
                 headers.insert("anthropic-beta", value);
+            }
+            if self.subscription_compatibility {
+                for (name, value) in [
+                    (
+                        "user-agent",
+                        concat!("nanocodex/", env!("CARGO_PKG_VERSION")),
+                    ),
+                    ("x-app", "cli"),
+                    ("x-claude-code-request-class", "main"),
+                    ("anthropic-dangerous-direct-browser-access", "true"),
+                ] {
+                    headers.insert(name, reqwest::header::HeaderValue::from_static(value));
+                }
             }
             for (name, value) in &headers {
                 if name == reqwest::header::AUTHORIZATION

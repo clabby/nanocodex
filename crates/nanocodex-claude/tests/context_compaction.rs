@@ -23,6 +23,29 @@ fn sse(blocks: Vec<Value>, stop: &str, input: u64) -> String {
     output
 }
 
+// The loopback provider enforces the Messages turn boundary: ordinary user
+// text cannot terminate a directly called server tool before its result exists.
+fn invalid_server_boundary(body: &Value) -> bool {
+    let mut unresolved = std::collections::HashSet::new();
+    for message in body["messages"].as_array().unwrap() {
+        for block in message["content"].as_array().unwrap() {
+            if message["role"] == "user" && block["type"] != "tool_result" && !unresolved.is_empty()
+            {
+                return true;
+            }
+            if block["type"] == "server_tool_use" || block["type"] == "mcp_tool_use" {
+                unresolved.insert(block["id"].as_str().unwrap());
+            } else if block["type"] != "tool_result"
+                && let Some(id) = block["tool_use_id"].as_str()
+                && !unresolved.remove(id)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 async fn server(
     respond: impl Fn(usize, &Value) -> (Vec<Value>, &'static str, u64) + Send + Sync + 'static,
     fail_at: Option<usize>,
@@ -56,6 +79,13 @@ async fn server(
                             "request": body,
                         })
                     );
+                }
+                if invalid_server_boundary(&body) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "unresolved server tool before user text",
+                    )
+                        .into_response();
                 }
                 if Some(index) == fail_at {
                     return (StatusCode::BAD_REQUEST, "synthetic failure").into_response();
@@ -291,7 +321,7 @@ async fn server_pause_suffix_survives_summary_and_failed_continuation() {
                 "end_turn",
                 10,
             ),
-            _ => (text("resumed"), "end_turn", 10),
+            _ => (text("reconciled uncertain fetch"), "end_turn", 10),
         },
         Some(3),
     )
@@ -310,20 +340,34 @@ async fn server_pause_suffix_survives_summary_and_failed_continuation() {
             .await
             .is_err()
     );
-    agent
+    let result = agent
         .prompt("continue fetch")
         .await
         .unwrap()
         .result()
         .await
         .unwrap();
+    assert_eq!(result.final_message(), "reconciled uncertain fetch");
     let log = requests.lock().unwrap();
     assert_eq!(log.len(), 4);
     assert!(!log[1]["messages"].to_string().contains("srv-pending"));
     assert_eq!(log[2]["messages"].as_array().unwrap().len(), 2);
     assert_eq!(log[2]["messages"][1]["content"], json!([paused]));
-    assert_eq!(log[3]["messages"][1], log[2]["messages"][1]);
-    assert!(!log[3]["messages"].to_string().contains("\"tool_result\""));
+    let messages = log[3]["messages"].as_array().unwrap();
+    assert!(messages.iter().all(|message| message["role"] == "user"));
+    assert!(log[3]["messages"].to_string().contains("outcome unknown"));
+    assert!(log[3]["messages"].to_string().contains("srv-pending"));
+    assert_eq!(
+        messages.last().unwrap()["content"][0]["text"],
+        "continue fetch"
+    );
+    assert_eq!(
+        log[3]["messages"]
+            .to_string()
+            .matches("continue fetch")
+            .count(),
+        1
+    );
     assert_eq!(log[0]["tools"], log[2]["tools"]);
     assert_eq!(
         log[1]["tools"], log[0]["tools"],
@@ -578,5 +622,242 @@ async fn arbitrary_retained_tool_result_cannot_activate_deferred_tool() {
         .unwrap_err();
     assert!(error.to_string().contains("before discovery"));
     assert_eq!(effects.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+
+// Incremental pause responses can put a result in a later assistant message.
+// A summary must retain the whole open assistant turn even once every server
+// call currently has a result, because pause_turn still needs continuation.
+#[tokio::test]
+async fn incremental_server_pauses_retain_the_whole_turn_during_compaction() {
+    let first = vec![
+        json!({"type":"thinking","thinking":"fetch the page","signature":"signed-first-pause"}),
+        json!({"type":"server_tool_use","id":"incremental-fetch","name":"web_fetch","input":{"url":"https://example.org"}}),
+    ];
+    let second = vec![
+        json!({"type":"web_fetch_tool_result","tool_use_id":"incremental-fetch","content":{"type":"web_fetch_result","url":"https://example.org","content":"page"}}),
+        json!({"type":"thinking","thinking":"read the fetched page","signature":"signed-second-pause"}),
+    ];
+    let first_response = first.clone();
+    let second_response = second.clone();
+    let (client, requests, server) = server(
+        move |index, _| match index {
+            1 => (first_response.clone(), "pause_turn", 10),
+            2 => (second_response.clone(), "pause_turn", 70_000),
+            3 => (text("Preserve the requested fetch."), "end_turn", 10),
+            _ => (text("fetched through both pauses"), "end_turn", 10),
+        },
+        None,
+    )
+    .await;
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .auto_compact_window_tokens(100_000)
+        .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("fetch the page")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "fetched through both pauses"
+    );
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 4);
+    assert!(!log[2]["messages"].to_string().contains("incremental-fetch"));
+    assert_eq!(log[3]["messages"][1]["content"], json!(first));
+    assert_eq!(log[3]["messages"][2]["content"], json!(second));
+    assert_eq!(log[3]["messages"].as_array().unwrap().len(), 3);
+    server.abort();
+}
+
+// A rejected summary is itself a failed turn. Its unresolved suffix must be
+// settled before manual compaction or an unrelated user request can proceed.
+#[tokio::test]
+async fn failed_server_pause_summary_is_data_before_manual_compaction() {
+    let (client, requests, task) = server(
+        |index, _| match index {
+            1 => (vec![json!({"type":"server_tool_use","id":"summary-failure-fetch","name":"web_fetch","input":{"url":"https://example.org"}})], "pause_turn", 70_000),
+            3 => (text("A deliberately lossy summary"), "end_turn", 10),
+            _ => (text("reconciled after summary failure"), "end_turn", 10),
+        }, Some(2),
+    ).await;
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .auto_compact_window_tokens(100_000)
+        .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
+        .build()
+        .unwrap();
+    assert!(
+        agent
+            .prompt("fetch once")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .is_err()
+    );
+    agent.compact().await.unwrap();
+    assert_eq!(
+        agent
+            .prompt("reconcile the fetch")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "reconciled after summary failure"
+    );
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 4);
+    for request in &log[2..] {
+        assert!(
+            request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["role"] == "user")
+        );
+        assert!(
+            request["messages"]
+                .to_string()
+                .contains("summary-failure-fetch")
+        );
+        assert!(request["messages"].to_string().contains("outcome unknown"));
+    }
+    task.abort();
+}
+
+// Even without new server blocks, a malformed continuation is evidence of an
+// uncertain prior server turn. No client callback may run and no call may replay.
+#[tokio::test]
+async fn invalid_client_continuation_preserves_prior_server_uncertainty() {
+    let (client, requests, task) = server(
+        |index, _| match index {
+            1 => (vec![json!({"type":"server_tool_use","id":"invalid-prior-fetch","name":"web_fetch","input":{"url":"https://example.org"}})], "pause_turn", 10),
+            2 => (vec![json!({"type":"tool_use","id":"invalid-client-response","name":"effect","input":{}})], "end_turn", 10),
+            _ => (text("reconciled invalid continuation"), "end_turn", 10),
+        }, None,
+    ).await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counter = effects.clone();
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
+        .tool(tool(), move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Ok("must not dispatch".into()) }
+        })
+        .build()
+        .unwrap();
+    assert!(
+        agent
+            .prompt("fetch once")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        agent
+            .prompt("reconcile invalid continuation")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "reconciled invalid continuation"
+    );
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 3);
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    let messages = &log[2]["messages"];
+    assert!(
+        messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["role"] == "user")
+    );
+    assert!(messages.to_string().contains("outcome unknown"));
+    assert!(messages.to_string().contains("invalid-prior-fetch"));
+    assert!(messages.to_string().contains("invalid-client-response"));
+    task.abort();
+}
+
+#[tokio::test]
+async fn end_turn_without_prior_server_result_fails_and_recovers_as_data() {
+    let (client, requests, task) = server(
+        |index, _| match index {
+            1 => (vec![json!({"type":"mcp_tool_use","id":"missing-mcp-result","name":"fetch","server_name":"synthetic","input":{}})], "pause_turn", 10),
+            2 => (text(&"no server result received ".repeat(900)), "end_turn", 10),
+            3 => (text("A lossy summary of the failed turn"), "end_turn", 10),
+            _ => (text("reconciled missing result"), "end_turn", 10),
+        }, None,
+    ).await;
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .auto_compact_window_tokens(4_000)
+        .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
+        .build()
+        .unwrap();
+    let failure = agent
+        .prompt("fetch once")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap_err();
+    assert!(
+        failure
+            .to_string()
+            .contains("without a complete server-tool result")
+    );
+    agent
+        .prompt("reconcile missing result")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let log = requests.lock().unwrap();
+    assert_eq!(
+        log.len(),
+        4,
+        "converted evidence must count toward the next compaction threshold"
+    );
+    assert_eq!(log[2]["tool_choice"]["type"], "none");
+    assert!(log[3].get("tool_choice").is_none());
+    assert!(
+        log[3]["messages"]
+            .to_string()
+            .contains("missing-mcp-result")
+    );
+    assert!(
+        log[3]["messages"]
+            .to_string()
+            .contains("reconcile missing result")
+    );
+    assert!(
+        log[2]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["role"] == "user")
+    );
+    assert!(
+        log[2]["messages"]
+            .to_string()
+            .contains("missing-mcp-result")
+    );
+    assert!(
+        log[2]["messages"]
+            .to_string()
+            .contains("no server result received")
+    );
     task.abort();
 }

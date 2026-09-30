@@ -106,7 +106,10 @@ async fn pause_turn_resends_server_tools_and_assistant_blocks_without_user_resul
             let index = { let mut reqs = received.lock().unwrap(); reqs.push(body); reqs.len() };
             let (blocks,stop) = if index == 1 {
                 (vec![json!({"type":"server_tool_use","id":"srvtoolu_1","name":"web_fetch","input":{"url":"https://example.org"}})],"pause_turn")
-            } else { (vec![json!({"type":"text","text":"fetched"})],"end_turn") };
+            } else { (vec![
+                json!({"type":"web_fetch_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"web_fetch_result","url":"https://example.org","content":"page"}}),
+                json!({"type":"text","text":"fetched"}),
+            ],"end_turn") };
             ([ ("content-type","text/event-stream") ], stream(blocks,stop)).into_response()
         }
     }));
@@ -324,7 +327,7 @@ async fn provider_code_container_id_is_reused_on_next_turn_without_local_bash() 
 }
 
 #[tokio::test]
-async fn failed_pause_turn_continuation_keeps_opaque_server_tool_boundary() {
+async fn uncertain_pause_turn_continuation_preserves_opaque_boundary_as_recovery_data() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let received = requests.clone();
@@ -384,14 +387,17 @@ async fn failed_pause_turn_continuation_keeps_opaque_server_tool_boundary() {
     );
     let log = requests.lock().unwrap();
     assert_eq!(log.len(), 3);
-    assert_eq!(log[2]["messages"][1]["content"][0]["id"], "srvtoolu_paused");
-    assert_eq!(log[2]["messages"][1], log[1]["messages"][1]);
-    assert!(
-        log[2]["messages"][2]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("outcome unknown")
-    );
-    assert_eq!(log[2]["messages"][3]["content"][0]["text"], "continue");
+    assert_eq!(log[1]["messages"][1]["content"][0]["id"], "srvtoolu_paused");
+    let messages = log[2]["messages"].as_array().unwrap();
+    assert!(messages.iter().all(|message| message["role"] == "user"));
+    let evidence = messages
+        .iter()
+        .flat_map(|message| message["content"].as_array().unwrap())
+        .filter_map(|block| block["text"].as_str())
+        .find(|text| text.contains("srvtoolu_paused"))
+        .expect("the original unresolved server call must survive as data");
+    assert!(evidence.contains("outcome unknown"));
+    assert!(evidence.contains("Do not automatically repeat"));
+    assert_eq!(messages.last().unwrap()["content"][0]["text"], "continue");
     server.abort();
 }

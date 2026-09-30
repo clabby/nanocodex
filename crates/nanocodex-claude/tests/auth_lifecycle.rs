@@ -334,3 +334,117 @@ async fn reflected_credentials_are_removed_from_errors_for_every_auth_path() {
     assert!(!error.to_string().contains("synthetic-old"));
     assert!(!error.to_string().contains("synthetic-new"));
 }
+
+// Inspect the public transport, including explicit preparation for raw clients.
+// The identity block is protocol data; original caller/cache blocks must survive.
+#[tokio::test]
+async fn subscription_profile_prepares_public_http_without_hidden_body_rewrites() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let captured = seen.clone();
+    let endpoint = serve(Router::new().route("/v1/messages", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+        let captured = captured.clone();
+        async move {
+            captured.lock().unwrap().push((headers, body));
+            Json(json!({"id":"profile", "role":"assistant", "model":"synthetic", "content":[], "stop_reason":"end_turn", "usage":{}}))
+        }
+    }))).await;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        "Bearer synthetic-profile-token".parse().unwrap(),
+    );
+    headers.insert("user-agent", "caller-transport".parse().unwrap());
+    headers.append(
+        "anthropic-beta",
+        "oauth-2025-04-20, caller-feature".parse().unwrap(),
+    );
+    headers.append(
+        "anthropic-beta",
+        "effort-2025-11-24, oauth-2025-04-20".parse().unwrap(),
+    );
+    let plain = ClaudeClient::with_auth_headers(http(), &endpoint, headers);
+    let profile = plain.clone().subscription_compatibility();
+    let default_profile = ClaudeClient::subscription(
+        http(),
+        Arc::new(RefreshingClaudeAuth::new(
+            source(vec![token("unused-default-token")]),
+            Duration::from_secs(30),
+        )),
+    );
+    let prefix =
+        json!({"type":"text", "text":"You are Claude Code, Anthropic's official CLI for Claude."});
+    let cached = json!({"type":"text", "text":"Original caller rules", "cache_control":{"type":"ephemeral","ttl":"1h"}});
+    for original in [
+        None,
+        Some(json!("Caller string")),
+        Some(json!(
+            "You are Claude Code, Anthropic's official CLI for Claude."
+        )),
+        Some(json!([cached.clone()])),
+        Some(json!([prefix.clone(), cached.clone()])),
+    ] {
+        let mut request = request();
+        request.system = original.clone();
+        request.context_management =
+            Some(json!({"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}));
+        // Both the default constructor and the custom-endpoint opt-in prepare
+        // the same request; repeated preparation must retain caller markers.
+        default_profile.prepare_request(&mut request);
+        profile.prepare_request(&mut request);
+        profile.create(&request).await.unwrap();
+        let expected = match original {
+            None => json!([prefix.clone()]),
+            Some(Value::String(text)) if text == prefix["text"] => json!([prefix.clone()]),
+            Some(Value::String(text)) => json!([prefix.clone(), {"type":"text","text":text}]),
+            Some(Value::Array(blocks)) if blocks[0] == prefix => json!(blocks),
+            Some(Value::Array(blocks)) => json!([prefix.clone(), blocks[0]]),
+            _ => unreachable!(),
+        };
+        let log = seen.lock().unwrap();
+        let (headers, body) = log.last().unwrap();
+        assert_eq!(body["system"], expected);
+        assert_eq!(
+            headers["user-agent"],
+            concat!("nanocodex/", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(headers["x-app"], "cli");
+        assert_eq!(headers["x-claude-code-request-class"], "main");
+        assert_eq!(headers["anthropic-dangerous-direct-browser-access"], "true");
+        assert_eq!(headers["authorization"], "Bearer synthetic-profile-token");
+        assert!(!headers.contains_key("x-api-key"));
+        let betas: Vec<_> = headers["anthropic-beta"]
+            .to_str()
+            .unwrap()
+            .split(',')
+            .collect();
+        for beta in [
+            "oauth-2025-04-20",
+            "caller-feature",
+            "claude-code-20250219",
+            "interleaved-thinking-2025-05-14",
+            "effort-2025-11-24",
+            "context-management-2025-06-27",
+            "extended-cache-ttl-2025-04-11",
+        ] {
+            assert_eq!(betas.iter().filter(|value| **value == beta).count(), 1);
+        }
+        assert!(body.get("metadata").is_none());
+        assert!(!body.to_string().contains("synthetic-profile-token"));
+    }
+    let mut raw = request();
+    raw.system = Some(json!("Caller controls the exact raw body"));
+    profile.create(&raw).await.unwrap();
+    plain.create(&raw).await.unwrap();
+    let log = seen.lock().unwrap();
+    assert_eq!(
+        log[5].1["system"],
+        raw.system.clone().unwrap(),
+        "transport must not rewrite an unprepared frozen request"
+    );
+    assert_eq!(log[5].1, log[6].1);
+    assert_eq!(log[6].0["user-agent"], "caller-transport");
+    assert!(!log[6].0.contains_key("x-app"));
+    eprintln!(
+        "subscription profile HTTP: 5 prepared system layouts preserve blocks/cache markers; merged betas/own UA; raw frozen body unchanged across profile changes"
+    );
+}
