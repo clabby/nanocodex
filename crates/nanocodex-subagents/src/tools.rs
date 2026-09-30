@@ -756,12 +756,12 @@ impl Tool for SendAgentMessage {
                         "type": "string",
                         "enum": ["delegate", "coordinate", "finding", "question", "reply"],
                         "default": "coordinate",
-                        "description": "A typed coordination intent. Delegate is restricted to agents the sender can manage."
+                        "description": "A typed coordination intent, independent of thread correlation. Reply requires in_reply_to and reverses the referenced message direction. Delegate is restricted to agents the sender can manage."
                     },
                     "in_reply_to": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "A message ID from the same two-party thread. Replies must reverse the original direction."
+                        "description": "Continue the referenced two-party thread without changing purpose. Non-reply messages may continue in either direction, including follow-ups to your own messages. With purpose=reply, answer a received message and reverse its direction."
                     }
                 },
                 "required": ["agent_id", "message"],

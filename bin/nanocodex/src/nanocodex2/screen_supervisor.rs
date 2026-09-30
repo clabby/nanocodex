@@ -32,8 +32,18 @@ pub(super) async fn while_attached<S: Session, F: Future<Output = Result<S, S::E
 }
 
 pub(super) async fn supervise<S: Session, F: Future<Output = Result<S, S::Error>>>(
+    start: impl FnMut() -> F,
+    shutdown: impl Future<Output = ()>,
+) -> Result<(), S::Error> {
+    supervise_observed(start, shutdown, |_| {}).await
+}
+
+/// None marks a usable publication/capture; Some reports retryable capture
+/// failure. A terminal replacement never becomes ready or starts again.
+pub(super) async fn supervise_observed<S: Session, F: Future<Output = Result<S, S::Error>>>(
     mut start: impl FnMut() -> F,
     shutdown: impl Future<Output = ()>,
+    mut observe: impl FnMut(Option<&S::Error>),
 ) -> Result<(), S::Error> {
     tokio::pin!(shutdown);
     let mut retry = POLL;
@@ -46,6 +56,7 @@ pub(super) async fn supervise<S: Session, F: Future<Output = Result<S, S::Error>
         match result {
             Ok(screen) => break screen,
             Err(error) => {
+                observe(Some(&error));
                 tracing::warn!(target: "nanocodex2", stage = "native.screen.unavailable", %error,
                 retry_ms = retry.as_millis() as u64,
                 "Native screen unavailable; shell and filesystem remain connected")
@@ -58,6 +69,11 @@ pub(super) async fn supervise<S: Session, F: Future<Output = Result<S, S::Error>
         }
         retry = (retry * 2).min(MAX_RETRY);
     };
+    if screen.is_finished() {
+        return screen.shutdown().await;
+    }
+    observe(None);
+    let mut unavailable = false;
     tracing::info!(target: "nanocodex2", stage = "native.screen.ready", "Native screen is ready");
     retry = POLL;
     let mut delay = POLL;
@@ -80,6 +96,10 @@ pub(super) async fn supervise<S: Session, F: Future<Output = Result<S, S::Error>
         };
         delay = match result {
             Ok(recovered) => {
+                if recovered || unavailable {
+                    observe(None);
+                }
+                unavailable = false;
                 if recovered {
                     tracing::info!(target: "nanocodex2", stage = "native.screen.recovered", "Native screen capture recovered");
                 } else {
@@ -88,6 +108,8 @@ pub(super) async fn supervise<S: Session, F: Future<Output = Result<S, S::Error>
                 POLL
             }
             Err(error) => {
+                unavailable = true;
+                observe(Some(&error));
                 tracing::warn!(target: "nanocodex2", stage = "native.screen.recovery_failed", %error,
                     retry_ms = retry.as_millis() as u64, "Native screen capture recovery failed");
                 let delay = retry;

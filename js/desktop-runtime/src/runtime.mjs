@@ -265,7 +265,7 @@ export class DesktopRuntime extends EventEmitter {
     this.#accountTransition = operation;
     return operation;
   }
-  async #save() { await this.#persist({ defaultHandEnabled: this.#state.defaultHandEnabled, accountHands: restoredAccountHands(this.#state.accountHands), layout: this.#state.layout, hands: this.#state.hands.map(({ status, calls, activeCalls, error, logs, factory, ...config }) => config) }); }
+  async #save() { await this.#persist({ defaultHandEnabled: this.#state.defaultHandEnabled, accountHands: restoredAccountHands(this.#state.accountHands), layout: this.#state.layout, hands: this.#state.hands.map(({ status, calls, activeCalls, error, logs, factory, screen, ...config }) => config) }); }
 
   async saveLayout(value) {
     // A UI may deliver a debounced message after the account has changed. The
@@ -736,7 +736,7 @@ export class DesktopRuntime extends EventEmitter {
     const existing = this.#resources.get(id);
     if (existing) { await existing.ready?.catch(() => {}); return this.state(); }
     hand.status = "connecting"; delete hand.error;
-    const resource = { abort: new AbortController(), cleanups: [], ready: undefined };
+    const resource = { abort: new AbortController(), cleanups: [], ready: undefined, generation: this.#generation };
     resource.add = close => {
       let closing;
       const once = () => closing ??= Promise.resolve().then(close);
@@ -807,11 +807,6 @@ export class DesktopRuntime extends EventEmitter {
     resource.abort.signal.throwIfAborted();
     hand.status = "connected";
     this.#log(hand, hand.agentId ? "Connected to the selected thread." : "Connected to your account. Available to all your agents.");
-    if (!hand.agentId && this.#state.defaults.binary && ["darwin", "linux"].includes(process.platform)) {
-      // The Hand binary owns platform capture/input. A recording-permission
-      // failure must not disconnect the already usable shell/filesystem Hand.
-      await this.#startNativeScreen(hand, resource).catch(error => this.#log(hand, this.#safeError(error)));
-    }
     const monitor = setInterval(() => {
       if (resource.abort.signal.aborted) return;
       const status = connection.connected ? "connected" : "connecting";
@@ -840,6 +835,15 @@ export class DesktopRuntime extends EventEmitter {
       hand.status = "error"; hand.error = this.#safeError(error); this.#emit();
       void resource.close().finally(() => { if (this.#resources.get(hand.id) === resource) this.#resources.delete(hand.id); });
     });
+    // Observe shell retirement before waiting on optional capture. A fenced
+    // attachment must cancel its old screen retry before it can publish later.
+    if (!hand.agentId && this.#state.defaults.binary && ["darwin", "linux", "win32"].includes(process.platform)) {
+      // The Hand binary owns platform capture/input. A recording-permission
+      // failure must not disconnect the already usable shell/filesystem Hand.
+      await this.#startNativeScreen(hand, resource).catch(error => {
+        if (hand.screen?.status !== "ready") this.#setScreenStatus(hand, resource, "unavailable", error);
+      });
+    }
     // Shell/filesystem readiness does not depend on the optional VM factory.
     void this.#startFactory(hand, resource);
   }
@@ -870,11 +874,22 @@ export class DesktopRuntime extends EventEmitter {
       this.#log(host, host.error);
     }
   }
+  #setScreenStatus(hand, resource, status, error) {
+    // A retired child must never change a replacement Hand or another account.
+    if (this.#closed || resource.abort.signal.aborted || resource.generation !== this.#generation
+      || this.#resources.get(hand.id) !== resource || !this.#state.hands.includes(hand)) return;
+    const next = { status, ...(error ? { error: this.#safeError(error) } : {}) };
+    if (hand.screen?.status === next.status && hand.screen?.error === next.error) return;
+    hand.screen = next;
+    this.#log(hand, error ? `Screen unavailable: ${hand.screen.error}`
+      : status === "ready" ? "Rust Hand screen is available." : "Starting Hand screen…");
+  }
   #nativeScreenDirectory(hand) {
     const scope = createHash("sha256").update(`${this.#options.baseUrl}\0${this.#options.apiKey}`).digest("hex");
     return join(this.#dataDirectory, "screens", scope, hand.id);
   }
   async #startNativeScreen(hand, resource) {
+    this.#setScreenStatus(hand, resource, "starting");
     const binary = await this.#prepareVmHelper(this.#state.defaults.binary);
     const stateDirectory = this.#nativeScreenDirectory(hand);
     await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
@@ -888,18 +903,36 @@ export class DesktopRuntime extends EventEmitter {
     const closed = new Promise(resolve => { resolveClosed = resolve; });
     let resolveReady, rejectReady;
     const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
-    let buffer = "";
+    let buffer = "", diagnostic;
     child.stderr.on("data", chunk => {
       buffer = (buffer + chunk.toString()).slice(-8192);
       const lines = buffer.split("\n"); buffer = lines.pop();
       for (const line of lines) {
-        if (line === "Hand screen is ready") { this.#log(hand, "Rust Hand screen is available."); resolveReady(); }
-        else if (line.startsWith("Error: ")) rejectReady(new Error(line.slice(7)));
+        if (line === "Hand screen is ready") {
+          diagnostic = undefined;
+          // Keep listening after a startup timeout: late publication is recovery.
+          this.#setScreenStatus(hand, resource, "ready"); resolveReady();
+        } else if (line.startsWith("Error: ") || line.startsWith("Hand screen unavailable: ")) {
+          diagnostic = new Error(line.slice(line.indexOf(": ") + 2));
+          this.#setScreenStatus(hand, resource, "unavailable", diagnostic); rejectReady(diagnostic);
+        } else if (line === "Hand screen publisher stopped") {
+          diagnostic = new Error("The native Hand screen publisher stopped. It may have been replaced by another host.");
+          this.#setScreenStatus(hand, resource, "unavailable", diagnostic);
+        }
       }
     });
-    child.on("error", error => { resolveClosed(); rejectReady(error); });
-    child.on("close", () => { resolveClosed(); rejectReady(new Error("The native Hand screen publisher stopped.")); });
+    child.on("error", error => {
+      diagnostic = error; resolveClosed(); this.#setScreenStatus(hand, resource, "unavailable", error); rejectReady(error);
+    });
+    child.on("close", (code, signal) => {
+      resolveClosed();
+      const error = diagnostic ?? new Error(`The native Hand screen publisher stopped (${signal ?? code}).`);
+      this.#setScreenStatus(hand, resource, "unavailable", error); rejectReady(error);
+    });
     resource.add(async () => {
+      if (this.#resources.get(hand.id) === resource && this.#state.hands.includes(hand)) {
+        hand.screen = { status: "stopped" }; this.#emit();
+      }
       if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
       try { process.kill(process.platform === "win32" ? child.pid : -child.pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
       await Promise.race([closed, delay(7_000, undefined, { ref: false })]);
@@ -1096,7 +1129,7 @@ export class DesktopRuntime extends EventEmitter {
       if (this.#resources.get(id) === resource) this.#resources.delete(id);
     }
     const hand = this.#state.hands.find(hand => hand.id === id);
-    if (hand) { hand.status = "stopped"; if (hand.factory) hand.factory = { ...hand.factory, status: "stopped" }; hand.activeCalls = 0; this.#log(hand, "Stopped. Compute is no longer available to agents."); }
+    if (hand) { hand.status = "stopped"; if (hand.screen) hand.screen = { status: "stopped" }; if (hand.factory) hand.factory = { ...hand.factory, status: "stopped" }; hand.activeCalls = 0; this.#log(hand, "Stopped. Compute is no longer available to agents."); }
     return this.state();
   }
   async removeHand(id) {

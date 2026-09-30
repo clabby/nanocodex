@@ -3937,7 +3937,7 @@ async fn model_recovery_uses_current_conversation_across_runtime_changes() -> Re
                 .unwrap()
                 .clone();
             expected.extend(
-                serde_json::to_value(input.history.iter().collect::<Vec<_>>())?
+                serde_json::to_value(&input.history)?
                     .as_array()
                     .unwrap()
                     .iter()
@@ -4088,8 +4088,7 @@ async fn durable_parent_keeps_children_and_grandchildren_ephemeral() -> Result<(
 }
 
 struct LongTurnService {
-    calls: Arc<std::sync::Mutex<Vec<(u32, std::time::Instant)>>>,
-    turns: u32,
+    calls: Arc<std::sync::Mutex<Vec<u32>>>,
 }
 
 impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for LongTurnService {
@@ -4113,11 +4112,8 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for LongTurnServ
             },
         };
         let index = request.model_call_index().expect("generation only");
-        self.calls
-            .lock()
-            .unwrap()
-            .push((index, std::time::Instant::now()));
-        let done = index == self.turns;
+        self.calls.lock().unwrap().push(index);
+        let done = index == 65;
         let call_id = format!("long-tool-{index}");
         let mut output_items = vec![ResponseItem::message(
             MessageRole::Assistant,
@@ -4186,7 +4182,6 @@ async fn long_turn_retires_batches_and_recovers_only_current_work() -> Result<()
                         let calls = Arc::clone(&calls);
                         move || LongTurnService {
                             calls: Arc::clone(&calls),
-                            turns: 65,
                         }
                     })
                     .build()
@@ -4249,7 +4244,7 @@ async fn long_turn_retires_batches_and_recovers_only_current_work() -> Result<()
             assert!(
                 calls.lock().unwrap()[before..]
                     .iter()
-                    .all(|(index, _)| *index >= 32)
+                    .all(|index| *index >= 32)
             );
             assert_eq!(result.usage().unwrap().total_tokens(), 65 * 110);
             let terminal = state.state().await?;
@@ -4261,100 +4256,6 @@ async fn long_turn_retires_batches_and_recovers_only_current_work() -> Result<()
             std::fs::remove_dir_all(workspace)?;
         }
     }
-    Ok(())
-}
-
-/// Checkpoint cost over a 1000-boundary tool loop with 4 KiB outputs: the gap
-/// between model calls (agent and durability CPU on an in-memory store) must
-/// stay flat as history grows, and a turn resumed cold after a late lost
-/// acknowledgement must end with the live history. Writes
-/// `output/durable-checkpoint-bench.json`; run with
-/// `cargo test --release -p nanocodex-durability --test it -- --ignored checkpoint_cost`.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "benchmark; run in release mode"]
-async fn checkpoint_cost_per_boundary_stays_flat() -> Result<()> {
-    let workspace = temporary_workspace("checkpoint-bench")?;
-    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let run = async |store: &CrashAtReplace| -> Result<(u64, serde_json::Value)> {
-        let (mut result, mut revision) = (Err(NanocodexError::TurnStopped), 0);
-        for _attempt in 0..2 {
-            if result.is_ok() {
-                break;
-            }
-            let openai = OpenAi::builder("test-key")
-                .websocket_warmup(false)
-                .service({
-                    let calls = Arc::clone(&calls);
-                    move || LongTurnService {
-                        calls: Arc::clone(&calls),
-                        turns: 1000,
-                    }
-                })
-                .build()?;
-            let tools = Tools::builder()
-                .without_defaults()
-                .tool(CountingDurableTool {
-                    calls: Arc::default(),
-                })
-                .build()?;
-            let state = DurableSession::open(store.clone(), "checkpoint").await?;
-            let (agent, events) = Nanocodex::builder(openai)
-                .workspace(&workspace)
-                .tools(tools)
-                .durability(state.clone())
-                .await?
-                .build()?;
-            let request = PromptRequest::new("run the checkpoint loop").request_id("loop");
-            result = agent.prompt(request).await?.result().await;
-            if result.is_ok() {
-                revision = state.state().await?.revision();
-            }
-            let _ = agent.shutdown().await;
-            drop((agent, events));
-        }
-        let mut history = serde_json::to_value(result?.snapshot())?["history"].take();
-        for item in history.as_array_mut().unwrap() {
-            item.as_object_mut().unwrap().remove("id"); // Fresh per session.
-        }
-        Ok((revision, history))
-    };
-    let store = |revision| CrashAtReplace {
-        inner: MemoryStore::new().unwrap(),
-        revision,
-        after_commit: true,
-        fired: Arc::default(),
-    };
-    let (revisions, live) = run(&store(u64::MAX)).await?;
-    let calls = calls.lock().unwrap().clone();
-    let crashed = store(revisions - 40);
-    let (_, resumed) = run(&crashed).await?;
-    assert!(crashed.fired.load(Ordering::SeqCst) && resumed == live);
-    std::fs::remove_dir_all(workspace)?;
-
-    let gaps: Vec<u128> = calls
-        .windows(2)
-        .map(|pair| pair[1].1.duration_since(pair[0].1).as_micros())
-        .collect();
-    let mean = |start: usize| gaps[start..start + 100].iter().sum::<u128>() / 100;
-    let (early, late) = (mean(10), mean(gaps.len() - 100));
-    let summary = json!({
-        "command": "cargo test --release -p nanocodex-durability --test it -- --ignored checkpoint_cost",
-        "inputs": { "boundaries": 1000, "output_bytes": 4096 },
-        "expected": "flat mean gap between model calls; resumed history equals live history",
-        "mean_gap_micros": { "calls_10_110": early, "last_100": late },
-        "gaps_micros": gaps,
-    });
-    let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../output");
-    std::fs::create_dir_all(&output)?;
-    std::fs::write(
-        output.join("durable-checkpoint-bench.json"),
-        summary.to_string(),
-    )?;
-    println!("{}", summary["mean_gap_micros"]);
-    assert!(
-        late < early * 3,
-        "per-boundary cost grew from {early} to {late} us"
-    );
     Ok(())
 }
 

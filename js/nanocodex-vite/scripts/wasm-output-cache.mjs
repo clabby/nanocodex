@@ -144,6 +144,10 @@ export async function fingerprintInputs(repository = root, mode = "release", env
   const pkg = JSON.parse(await readFile(resolve(repository, "js/nanocodex/package.json"), "utf8"));
   const buildEnvironment = Object.fromEntries(Object.entries(environment)
     .filter(([name]) => /^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_INCREMENTAL|CARGO_PROFILE_.*|CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_.*)$/.test(name))
+    // CI installs this transparent compiler cache only after a cache miss.
+    // Its presence cannot change either the planned release or the output key;
+    // custom wrappers remain inputs because they may transform compilation.
+    .filter(([name, value]) => name !== "RUSTC_WRAPPER" || value !== "sccache")
     // cargo +1.97 overrides RUSTUP_TOOLCHAIN. Dev/test overrides do not affect
     // --profile wasm, and rust-toolchain setup commonly introduces them.
     .filter(([name, value]) => name !== "CARGO_INCREMENTAL" || value !== (mode === "release" ? "0" : "1"))

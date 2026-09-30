@@ -66,29 +66,6 @@ impl StateStore for PostgresStore {
         })
     }
 
-    fn read_records<'a>(
-        &'a mut self,
-        state_id: &'a str,
-        keys: &'a [String],
-    ) -> StoreFuture<'a, Result<Vec<Option<String>>, StoreError>> {
-        Box::pin(async move {
-            let rows = self
-                .client
-                .query(
-                    "SELECT key, value FROM nanocodex_durable_records
-                     WHERE state_id = $1 AND key = ANY($2)",
-                    &[&state_id, &keys],
-                )
-                .await
-                .map_err(backend)?;
-            let values = rows
-                .into_iter()
-                .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
-                .collect::<std::collections::HashMap<_, _>>();
-            Ok(keys.iter().map(|key| values.get(key).cloned()).collect())
-        })
-    }
-
     fn acquire<'a>(
         &'a mut self,
         state_id: &'a str,
@@ -194,7 +171,7 @@ impl StateStore for PostgresStore {
             transaction
                 .execute(
                     "INSERT INTO nanocodex_durable_states (state_id, revision, payload)
-                     VALUES ($1, $2::text::numeric, $3)
+                     VALUES ($1, $2::numeric, $3)
                      ON CONFLICT (state_id) DO UPDATE
                      SET revision = excluded.revision, payload = excluded.payload",
                     &[&state_id, &revision_text, &payload],

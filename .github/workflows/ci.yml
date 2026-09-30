@@ -517,6 +517,7 @@ jobs:
           scripts/cloudflare/preview-workflow.test.mjs scripts/cloudflare/worker-build.test.mjs
           scripts/cloudflare/release-plan.test.mjs scripts/cloudflare/release-workers.test.mjs
           scripts/cloudflare/current-production-release.test.mjs
+          js/nanocodex-vite/scripts/wasm-output-cache.test.mjs
 
   wasm-build:
     needs: changes

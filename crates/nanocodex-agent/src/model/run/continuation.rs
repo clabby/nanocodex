@@ -88,7 +88,7 @@ where
             .factory
             .with_request_content(
                 saved.prompt_cache_key,
-                prefix,
+                prefix.into(),
                 saved.model_id_prefix,
                 saved
                     .reasoning_mode
@@ -100,7 +100,7 @@ where
         session.conversation = if history.is_empty() && saved.phase == ExecutionPhase::Compact {
             ConversationState::empty(saved.canonical_context)
         } else {
-            ConversationState::resume(saved.canonical_context, history.iter().cloned().collect())?
+            ConversationState::resume(saved.canonical_context, history)?
         };
         session
             .conversation
@@ -208,8 +208,8 @@ where
         steps
             .advance(
                 &saved,
-                session.conversation.shared_history(),
-                session.factory.profile().shared_prefix(),
+                session.conversation.flattened_history(),
+                session.factory.profile().prefix().to_vec(),
             )
             .await?;
         Ok(())

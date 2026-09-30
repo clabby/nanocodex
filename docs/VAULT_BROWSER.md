@@ -32,8 +32,28 @@ hosted browser tools. Every browser call requires current full account tool
 authority; Connect grants cannot access the account's retained browser.
 
 Production, development, and an unset `MANAGED_BROWSER_PROVIDER` select `chromium`;
-development uses a remote `BROWSER` binding. The one-shot `chromium` and `kitesurf`
-providers do not expose private Vault or secure-input browser tools.
+development uses a remote `BROWSER` binding. Kitesurf has no private Vault or
+secure-input browser tools. Chromium exposes `browser_private_checkout_inspect`
+for an explicitly authorized named Vault login and a public checkout URL. It opens
+its own host-owned Chromium connection, validates the login's approved HTTPS
+origin and document, signs in once, and returns only fixed checkout capability
+flags. It disconnects and awaits browser deletion before returning, reporting
+uncertain cleanup explicitly; it cannot continue a `browser_execute` session.
+Credentials, page text, connection IDs and payment tokens never enter tool
+results. It activates only the sign-in control, not booking, payment,
+registration, password-reset or consent controls. Merchant sign-in can have side
+effects. It does not solve verification challenges. An uncertain login result
+must not be retried automatically.
+
+The private inspection uses upstream CDP directly and leaves public
+`browser_execute` commands unchanged. JavaScript-backed login forms are supported
+with browser-enforced CSP blocking all native form navigation, including direct
+`form.submit()`. Sign-in through JavaScript fetch/XHR works; native POST/GET form
+navigation is unsupported. Runtime closure aborts and drains private operations;
+provider connection and deletion requests have independent eight-second limits.
+Inspection is not proof of successful sign-in or Link compatibility: a challenge or missing opt-in marker needs further
+authorized work. Generic secure-input and private continuation remain unavailable
+with one-shot providers.
 Deploy the managed Worker to apply the binding and tool changes.
 Deployments without a browser binding can still serve ordinary agent turns.
 

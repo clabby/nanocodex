@@ -266,6 +266,10 @@ struct HandFactory: Codable, Equatable, Sendable {
     var status: String
     var error: String?
 }
+struct HandScreen: Codable, Equatable, Sendable {
+    var status: String
+    var error: String?
+}
 struct Hand: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var name: String
@@ -285,6 +289,7 @@ struct Hand: Codable, Identifiable, Equatable, Sendable {
     var activeCalls: Int?
     var logs: [String]?
     var factory: HandFactory?
+    var screen: HandScreen?
     var isRunning: Bool { status == "connected" || status == "connecting" }
 }
 struct DesktopState: Decodable, Equatable, Sendable {

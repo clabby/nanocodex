@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { test } from "node:test";
@@ -110,4 +110,24 @@ test("input set follows Cargo's local dependency graph for wasm32", async (t) =>
   assert.ok(await affects("crates/core/tests/prompt.txt"), "literal includes are tracked");
   await put("crates/core/build.rs", "fn main() {}");
   assert.ok(await affects("crates/core/tests/standalone.rs"), "build scripts may read test assets");
+});
+
+// Exercise the shipped key command across the same process boundary as Actions:
+// planning/cache lookup runs before the cache-miss path installs compiler tools.
+test("WASM key survives compiler-cache setup but retains compiler and source inputs", async (t) => {
+  const { root, put } = await fixture(t);
+  const beforeSetup = { ...process.env };
+  for (const name of ["RUSTC_WRAPPER", "CARGO_INCREMENTAL", "RUSTFLAGS"]) delete beforeSetup[name];
+  const afterSetup = { ...beforeSetup, RUSTC_WRAPPER: "sccache", CARGO_INCREMENTAL: "0" };
+  const command = await realpath(resolve(root, "js/nanocodex-vite/scripts/wasm-output-cache.mjs"));
+  const key = (env) => execFileSync(process.execPath,
+    [command, "key", "release"],
+    { cwd: root, env, encoding: "utf8" }).trim();
+  const planned = key(beforeSetup);
+  assert.match(planned, /^[a-f0-9]{64}$/);
+  assert.equal(key(afterSetup), planned, "compiler-cache setup must not invalidate a planned release or cache key");
+  assert.notEqual(key({ ...afterSetup, RUSTC_WRAPPER: "custom-rustc-wrapper" }), planned);
+  assert.notEqual(key({ ...afterSetup, RUSTFLAGS: "-C opt-level=1" }), planned);
+  await put("crates/core/src/lib.rs", "// changed production source");
+  assert.notEqual(key(afterSetup), planned);
 });
