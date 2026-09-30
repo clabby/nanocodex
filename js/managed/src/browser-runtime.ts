@@ -11,6 +11,7 @@ import {
   type CreateBrowserToolsOptions,
 } from "agents/browser/ai";
 import type { NamedTool, ToolContext } from "nanocodex";
+import { inspectPrivateCheckout } from "./browser-private-checkout";
 import { privateVaultTakeover, releasePrivateVaultTakeover, validateBrowserVaultTakeoverAction, type BrowserVaultTakeoverAction, type BrowserVaultTouchState } from "./browser-vault-takeover";
 
 import {
@@ -407,7 +408,28 @@ export async function createManagedBrowserRuntime(
         : { mode: "one-shot" },
       quickActions: false, timeout, name: `managed-browser-${provider}`,
     });
-    const tools = await adaptAiSdkTools(runtime.tools, { native: true });
+    const tools: NamedTool[] = [...await adaptAiSdkTools(runtime.tools, { native: true })];
+    const privateCalls = new Map<AbortController, Promise<unknown>>();
+    let closing: Promise<void> | undefined;
+    if (provider === "chromium" && options.resolveVaultLogin && options.authorizeVaultAccess) tools.push({
+      name: "browser_private_checkout_inspect",
+      description: "Privately sign in once with an explicitly user-authorized named Vault login and inspect checkout capabilities in a separate hosted Chromium browser. Supply the public checkout URL and saved Vault ID; its exact HTTPS origin must be approved for that login. Credentials remain inside trusted host code. This returns fixed checkout capabilities only, closes its private browser, and activates only the sign-in control. It does not activate booking, payment, registration, password-reset, or consent controls; merchant sign-in behavior may have side effects. Only JavaScript-backed login is supported; native form navigation is blocked. It cannot continue a browser_execute session. If login_attempted=true and status=outcome_unknown, do not automatically retry: sign-in may have occurred. Use only after the user authorizes the named login and destination.",
+      supportsParallelToolCalls: false,
+      parameters: { type: "object", additionalProperties: false,
+        properties: { vault_id: { type: "string" }, url: { type: "string" },
+          username_selector: { type: "string" }, password_selector: { type: "string" } },
+        required: ["vault_id", "url"] },
+      handler: async (input, context) => {
+        if (closing) throw new Error("Browser runtime is closing");
+        const controller = new AbortController();
+        const operation = inspectPrivateCheckout({ browser: options.env.BROWSER!, input,
+          context: {...context, signal:AbortSignal.any([context.signal, controller.signal])},
+          resolveVaultLogin: options.resolveVaultLogin!, authorizeVaultAccess: options.authorizeVaultAccess! });
+        privateCalls.set(controller, operation);
+        try { return await operation; }
+        finally { privateCalls.delete(controller); }
+      },
+    });
     const unsupported = async () => { throw new Error(`${providerName} does not support private browser continuation`); };
     return {
       provider,
@@ -417,7 +439,14 @@ export async function createManagedBrowserRuntime(
       } })),
       submitSecureInput: unsupported, submitVaultTakeover: unsupported, submitVaultChallenge: unsupported,
       expireAndSweep: async () => { await runtime.runtime.expirePaused(); },
-      close: async () => { await runtime.connector.closeSession(); },
+      close: () => {
+        if (!closing) closing = Promise.resolve().then(async () => {
+          for (const controller of privateCalls.keys()) controller.abort();
+          await Promise.allSettled([...privateCalls.values()]);
+          await runtime.connector.closeSession();
+        });
+        return closing;
+      },
     };
   }
   let browser: BrowserBinding;
