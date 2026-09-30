@@ -123,6 +123,47 @@ device-local resource identities show an unavailable message, and tool details h
 embedded binary data. Result parsing and image decoding stay outside view bodies,
 and repeated inner/outer tool outputs share a stable content identity.
 
+## Personal apps
+
+The Apps menu beside TODO, Chat and CRM lists saved apps and **Create an app**.
+Describe a tracker or another utility, follow generation in Chat, then open it
+from Apps. The pencil requests a change to the same app. The app menu can reload
+or restore its previous source without reverting saved data. Deleting an app
+also deletes its data after confirmation.
+
+Apps are actual Swift source interpreted by the shared
+[NanocodexApps](NanocodexApps/README.md) package and rendered as native SwiftUI
+controls. SwiftSyntax validates a documented, bounded Swift subset; unsupported
+syntax produces a source diagnostic. This is not a full Swift compiler. There is
+no HTML, JavaScript or WebKit app runtime. See the
+[authoring contract](NanocodexApps/AUTHORING.md) for views, language features and
+execution limits.
+
+Use `@State` for transient input and `@Persisted("stable-key")` for durable values.
+The host loads account-owned JSON, serializes actions, and saves changed durable
+values with revision checks. App source and data survive the creating
+conversation. Failed actions restore the previous local state; conflicts ask the
+user to reload. A source update keeps existing data, and a failed replacement
+leaves the last working native session visible. Each account supports 100 apps;
+each app has up to 256 KiB of Swift source and 256 KiB of JSON state. Storage
+requires a network connection; offline synchronization and photo/file input are
+not implemented.
+
+Within a button action, `Task { answer = try await Agent.run("prompt") }` calls
+the logged-in agent and returns its text result. Credentials remain in the native
+client, and normal agent permissions apply. Generated code has no general URL,
+filesystem or authenticated HTTP bridge. After five minutes, a running turn
+reports that work continues in Chat. Closing an app stops its foreground wait;
+an admitted agent turn can continue in Chat. Request IDs and completed receipts
+are stored per account before returning to generated code. Retrying the same
+prompt after a failed action or process restart reconciles that request. A
+successful app action releases its used receipts so a later intentional action
+can start new work. External agent effects cannot be undone by a later app
+action failure; the runtime reports that distinction.
+
+See the [persistent app HTTP contract](../js/managed/README.md#persistent-prompt-apps)
+for source publication, state conflicts and deployment migration requirements.
+
 ## App identity
 
 The App Store Connect listing is [Centaur by Paradigm](https://appstoreconnect.apple.com/apps/6809176380),

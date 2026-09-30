@@ -399,6 +399,67 @@ protocol. `/health` is the service health endpoint.
 | `NANOCODEX_WORKSPACES`, `NANOCODEX_WORKSPACES_*`, `NANOCODEX_BRAIN` | Retained per-hand workspaces, read-only peer aliases, and the durable agent's shared writable `/brain` scratch. |
 | `BROWSER`, `LOADER` | Browser Run and the sandboxed Worker loader used by the official Agents browser runtime. |
 
+### Persistent prompt apps
+
+The `apps` agent tool generates account-private Swift source for the native
+`swift-v1` runtime. `NANOCODEX_CRM` stores source and JSON state in `prompt_apps`
+(migration `0011_prompt_apps.sql`). Source is untrusted data; the native host
+validates it against the supported Swift language subset before execution.
+There is no HTML, JavaScript, WebKit, or web runtime fallback.
+
+All routes require direct account authorization: `agents:read` for reads or
+`agents:write` for mutations, plus `tools:use`. Connect grants are rejected.
+Cookie mutations require an Origin matching the request origin. Responses are JSON
+with `Cache-Control: no-store`; Swift source is returned as JSON data and is never
+rendered as a web page.
+
+| Method and path | Input | Result |
+| --- | --- | --- |
+| `GET /v1/apps` | `limit` (1–100, default 30), `cursor` | `{apps, next_cursor}`; summaries include runtime and omit source |
+| `POST /v1/apps` | `{title, description?, runtime:"swift-v1", source}` | Full manifest, HTTP 201 |
+| `GET /v1/apps/:id` | None | Full manifest |
+| `PUT /v1/apps/:id` | `{title, description?, runtime:"swift-v1", source, revision}` | Replaced manifest |
+| `DELETE /v1/apps/:id` | `{revision}` JSON, or `?revision=N` | `{deleted:true,id}` |
+| `POST /v1/apps/:id/restore` | `{revision}` | Previous source restored, new manifest revision |
+| `GET /v1/apps/:id/data` | None | `{value,revision,updated_at}` |
+| `PUT /v1/apps/:id/data` | `{value,revision}` | Saved state receipt |
+
+Manifests contain `id,title,description,runtime,source,revision,created_at,updated_at`.
+App revision starts at 1; empty state is `{value:null,revision:0,updated_at:null}`.
+Source and data revisions are independent. Stale writes/deletes/restores return
+HTTP 409 `revision_conflict`; read the current revision before retrying. A source
+edit retains one previous title/description/source version. Restore swaps the two
+versions, increments the app revision and preserves state; a new app returns
+409 `no_previous_revision`. Deletion atomically removes source, previous source
+and state. Missing or other-account IDs return 404.
+
+Limits: 100 apps per account, 256 KiB UTF-8 Swift source, 256-byte title, 2048-byte
+description, and 256 KiB JSON state with at most 64 nesting levels. The JSON
+request envelope is limited to 2 MiB to allow escaped text. Unknown fields,
+invalid revisions, duplicate/unknown query parameters and non-JSON inputs fail.
+
+Every save requires `runtime: "swift-v1"` and `source`. Missing or unsupported
+runtimes return HTTP 400 `unsupported_runtime`; the former `html` field and
+unknown fields return HTTP 400 `invalid_input`. Runtime and source validation
+failures never change the existing document, retained source, or account data.
+The service stores source without compiling it; unsupported Swift syntax is
+reported by the native runtime when the app opens.
+
+Apps declare one Swift `struct Name: View` with a `body`, native controls and
+bounded Swift expressions and actions. `@State` is session-only;
+`@Persisted("stable-key")` loads and saves account JSON through the native host.
+Use stable keys across source revisions. In a button action,
+`Task { answer = try await Agent.run("prompt") }` calls the existing signed-in agent
+and returns text. The host owns credentials, progress, cancellation and error
+reporting. See [the Swift authoring contract](../../apple/NanocodexApps/AUTHORING.md)
+for supported syntax, controls, modifiers and runtime limits.
+
+Run `pnpm --filter nanocodex-managed-service run test:apps` for the real worker
+HTTP/D1 journey, including website proxy forwarding, ownership, origin checks,
+optimistic write races, Swift source recovery, legacy-contract rejection, and
+deletion. Synthetic authentication is the only fixture at this boundary;
+production proxy/router/storage run intact.
+
 ### Private-account CRM database
 
 `NANOCODEX_CRM` is a `D1Database` owned by this Worker. CRM records belong to
