@@ -50,3 +50,9 @@ Drafts are persisted in the authenticated Nanocodex account and sent through the
 Current source routing is Inbox-scoped. Filter-archived mail and Spam are outside that opted-in ingestion boundary. A healthy configured watcher must be verified independently of repository configuration; an unavailable status/read must be shown as unknown coverage, not a completed background sync.
 
 General “on my mind” work is read-only preparation. Supported evidence scope, source limitations and missing information remain visible. A blocked request is not completed research; a proposed external action is not an executed action. Non-email judgments must not be labeled “sent”.
+
+## Current acceptance status: full rollout held
+
+The email-decision path and focused native approval UI are implemented and locally tested. **Complete-ready “on my mind” captures are not implemented:** every capture result remains blocked with `complete_capture_proposal_unverified`, including supplied-text transformations. Cited analysis can be shown, but it is not counted as finished work. Broad arbitrary public research also remains unsupported; the current fail-closed query vocabulary is deliberately narrow.
+
+This safety gate is not product completion. A practical whole-request completion contract/verifier and its actual closed-loop acceptance are required before a full Decision Inbox release. Exact-email live-send approval and verified background source health also remain distinct gates. No branch deployment or new physical-phone installation is implied by local tests or by opening the draft PR.
