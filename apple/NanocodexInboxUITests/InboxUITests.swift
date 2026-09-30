@@ -404,6 +404,27 @@ final class InboxUITests: XCTestCase {
         capture(app, "todo-capture-prepares-and-archive-undo")
     }
 
+    func testEmptyDecisionQueueDoesNotClaimCaughtUpOrHealthyWatch() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-mail-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        let tab = app.buttons["main-tab-todo"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 15)); tab.tap()
+        XCTAssertTrue(app.buttons["todo-compose"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["todo-compose"].isEnabled, "Connected fixture mail accounts do not establish watch coverage")
+        let coverage = app.staticTexts["todo-source-coverage"]
+        XCTAssertTrue(coverage.waitForExistence(timeout: 5))
+        XCTAssertTrue(coverage.label.contains("Inbox-scoped"))
+        XCTAssertTrue(coverage.label.contains("archived mail is excluded"))
+        XCTAssertTrue(coverage.label.contains("Watch coverage is unknown"))
+        let empty = app.staticTexts["Nothing ready to review"]
+        for _ in 0..<4 where !empty.isHittable { app.swipeUp() }
+        XCTAssertTrue(empty.exists)
+        XCTAssertFalse(app.staticTexts["Caught up"].exists)
+        capture(app, "decision-empty-watch-coverage-unknown")
+    }
+
     func testDecisionCachedPreviewIsReadOnlyWithoutCurrentAuthority() {
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-cached-readonly-fixture"]

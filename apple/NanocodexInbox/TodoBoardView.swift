@@ -130,6 +130,12 @@ struct TodoBoardView: View {
             header
                 .listRowSeparator(.hidden)
                 .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 12))
+            if model.todoSplit == "For you" {
+                Text("Decision collection is Inbox-scoped; archived mail is excluded. Watch coverage is unknown.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("todo-source-coverage")
+                    .listRowSeparator(.hidden)
+            }
             if showSearch {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -175,8 +181,8 @@ struct TodoBoardView: View {
             }
             if queue.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Image(systemName: workspace.loading ? "tray" : "checkmark").font(.title2.weight(.light)).padding(.bottom, 6)
-                    Text(!model.todoLoaded ? "Loading prepared decisions" : model.todoError != nil ? "Decision inbox unavailable" : model.todoSplit == "Later" ? "Nothing snoozed" : "No prepared decisions")
+                    Image(systemName: "tray").font(.title2.weight(.light)).padding(.bottom, 6)
+                    Text(!model.todoLoaded ? "Loading prepared decisions" : model.todoError != nil ? "Decision inbox unavailable" : model.todoSplit == "Later" ? "Nothing snoozed" : "Nothing ready to review")
                         .font(.title3.weight(.semibold))
                     Text(model.todoSearch.isEmpty ? "Only complete proposals appear here. Working and blocked preparation stays visible separately. This is not your entire mailbox." : "No results for this search")
                         .font(.subheadline).foregroundStyle(.secondary)
