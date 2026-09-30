@@ -91,6 +91,14 @@ action schema. This gives Linux VMs and Cloudflare desktop sandboxes real CUA
 without pretending they implement OpenAI's JavaScript provider contract; the
 initial workdir-only call returns the exact contract selected for that Hand.
 
+Desktop-owned native screen helpers use the same capture supervisor as CLI
+Hands: startup failures retry automatically, and recoverable capture failures
+are repaired in place. The desktop runtime reports screen `starting`, `ready`,
+`unavailable`, or `stopped` separately from shell connectivity. `ready` confirms
+initial capture and publication, not decoded viewer video or OS input permission.
+A terminal or replaced publisher exits without reclaiming its successor; an old
+helper cannot change the state of a restarted Hand or another account.
+
 Each surface also advertises its account-owned `screen_*` tool through
 `tool_search`, including individual windows when no unique desktop exists. Code Mode callers
 use `image(result)` to display returned screenshots. Coordinates are normalized

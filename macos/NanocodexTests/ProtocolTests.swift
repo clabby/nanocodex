@@ -5,6 +5,21 @@ import NanocodexRemote
 
 final class ProtocolTests: XCTestCase {
 
+    func testHandScreenReadinessCodableCompatibility() throws {
+        let legacy = Data(#"{"id":"local","name":"This Mac","kind":"local","workspace":"/workspace","status":"connected"}"#.utf8)
+        let hand = try JSONDecoder().decode(Hand.self, from: legacy)
+        XCTAssertNil(hand.screen, "Older runtimes omit optional screen presence")
+        XCTAssertTrue(hand.isRunning)
+        for status in ["starting", "ready", "unavailable", "stopped"] {
+            var current = hand
+            current.screen = HandScreen(status: status, error: status == "unavailable" ? "Capture unavailable" : nil)
+            let decoded = try JSONDecoder().decode(Hand.self, from: JSONEncoder().encode(current))
+            XCTAssertEqual(decoded, current)
+            XCTAssertEqual(decoded.status, "connected", "Screen presence does not change shell connectivity")
+            XCTAssertTrue(decoded.isRunning)
+        }
+    }
+
 
     @MainActor
     func testTabOrientationRetainsEditorSelectionAndLayout() async throws {

@@ -647,8 +647,21 @@ runtime and use one-shot sessions: complete navigation and extraction in one
 `browser_execute` call. Page state does not persist between calls. These providers
 use the upstream tools, descriptions, CDP commands, and result handling without
 Nanocodex's CDP filter or result proxy. Their default execution timeout is 90 seconds;
-`MANAGED_BROWSER_TOOL_TIMEOUT_MS` can override it. Private Vault and one-time secure
-input tools are unavailable with either one-shot provider.
+`MANAGED_BROWSER_TOOL_TIMEOUT_MS` can override it. Chromium also exposes a
+separate retained private session through `browser_vault_open`, existing Vault
+login tools, and generic snapshot/actions. Authenticated browsing can navigate,
+fill ordinary forms, select choices, and activate user-authorized booking or
+checkout controls. Login and action UUID receipts prevent replay after lost
+responses; requested actions require subsequent outcome verification. Private
+phone takeover handles unsupported controls and payment iframes. Credentials
+never enter public CDP or model text arguments, and no VM is required. This is
+not a universal automatic-payment or Stripe Link integration.
+
+The older one-shot `browser_private_checkout_inspect` and
+`browser_private_waitlist` remain available with their narrower contracts.
+Kitesurf has no private Vault tools. See [Vault browser operations](../../docs/VAULT_BROWSER.md)
+for the general session contract and [the private checkout journey](scripts/private-checkout-smoke.md)
+for legacy opt-in browser validation.
 
 `cloudflare` and `browserbase` retain bounded sessions per durable agent, with
 separate storage for each provider. Their existing CDP restrictions and private

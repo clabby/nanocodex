@@ -2239,3 +2239,7 @@ async fn docker_preflight_errors_are_actionable_before_account_login() {
         assert!(stderr.contains(expected), "{stderr}");
     }
 }
+
+#[cfg(unix)]
+#[path = "native_screen_lifecycle.rs"]
+mod native_screen_lifecycle;

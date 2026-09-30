@@ -26,7 +26,7 @@ async function fixture(t, platform = "darwin") {
   async function receipt(command = executable, args = [], environment = {}) {
     const path = join(process.env.NANOCODEX_DIR || join(root, ".nanocodex"), "runtimes/openai-cua/provider.json");
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, JSON.stringify({ status: "installed", transport: "mcp", executable: command, args, environment }));
+    await writeFile(path, JSON.stringify({ status: "installed", dependency_contract: "nanocodex-native-no-codex-v1", transport: "mcp", executable: command, args, environment }));
   }
   async function helper(mode = "ok") {
     await script(binary, `
@@ -37,7 +37,7 @@ async function fixture(t, platform = "darwin") {
       if (${JSON.stringify(mode)} === 'unsupported') { console.log(JSON.stringify({ status: 'unsupported' })); process.exit(0); }
       const executable = ${JSON.stringify(executable)};
       if (${JSON.stringify(mode)} !== 'missing') { fs.mkdirSync(require('node:path').dirname(executable), { recursive: true }); fs.writeFileSync(executable, '', { mode: 0o755 }); }
-      const receipt = { status: 'installed', executable, transport: 'mcp', args: [], environment: {} };
+      const receipt = { status: 'installed', dependency_contract: 'nanocodex-native-no-codex-v1', executable, transport: 'mcp', args: [], environment: {} };
       const path = require('node:path').join(process.env.NANOCODEX_DIR, 'runtimes/openai-cua/provider.json');
       fs.mkdirSync(require('node:path').dirname(path), { recursive: true });
       fs.writeFileSync(path, JSON.stringify(receipt));
@@ -161,17 +161,17 @@ test("the default install root follows HOME and unusable managed entries do not 
   assert.equal(await ensureComputer(), managed);
 });
 
-for (const platform of ["darwin", "win32"]) test(`${platform} consumes the managed receipt's exact command and environment through MCP`, async t => {
+for (const platform of ["darwin"]) test(`${platform} consumes the managed receipt's exact command and environment through MCP`, async t => {
   const f = await fixture(t, platform);
   await f.script(f.executable, `
-    if (process.argv[2] !== 'provider-entry' || process.env.CODEX_CLI_PATH !== 'signed-host-fixture') process.exit(8);
+    if (process.argv[2] !== 'provider-entry' || process.env.PROVIDER_HOST_MARKER !== 'signed-host-fixture') process.exit(8);
     require('node:readline').createInterface({input:process.stdin}).on('line', line => {
       const r=JSON.parse(line); if (!r.id) return;
       const result = r.method === 'tools/list' ? {tools:[{name:'js',inputSchema:{type:'object'}}]} : {};
       process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result})+'\\n');
     });
   `);
-  const receipt = {status:'installed',transport:'mcp',executable:f.executable,args:['provider-entry'],environment:{CODEX_CLI_PATH:'signed-host-fixture'}};
+  const receipt = {status:'installed',dependency_contract:'nanocodex-native-no-codex-v1',transport:'mcp',executable:f.executable,args:['provider-entry'],environment:{PROVIDER_HOST_MARKER:'signed-host-fixture'}};
   await writeFile(join(process.env.NANOCODEX_DIR,'runtimes/openai-cua/provider.json'), JSON.stringify(receipt));
   assert.equal(await discoverComputer({binary:f.binary}),f.executable);
   assert.equal(await ensureComputer(),f.executable);
@@ -225,11 +225,14 @@ for (const platform of ["darwin", "win32"]) test(`${platform} explicit provider 
     });
   `);
   await f.receipt();
-  process.env.NANOCODEX_COMPUTER = custom;
   for (const malformed of ['invalid JSON', 'null']) {
+    process.env.NANOCODEX_COMPUTER = custom;
     await writeFile(join(process.env.NANOCODEX_DIR, "runtimes/openai-cua/provider.json"), malformed);
     assert.equal(await discoverComputer(), custom);
     assert.equal(await ensureComputer({ binary: f.binary }), custom);
+    // An explicitly supplied external command is equally independent when
+    // there is no process-wide override; do not read unrelated managed state.
+    delete process.env.NANOCODEX_COMPUTER;
     const options = { executable: custom, args: ['explicit-entry'], environment: { EXPLICIT_PROVIDER: 'fixture' } };
     const connected = await connectComputerTools(options);
     t.after(connected.close);
@@ -241,4 +244,32 @@ for (const platform of ["darwin", "win32"]) test(`${platform} explicit provider 
     }
   }
   await assert.rejects(readFile(f.calls), { code: "ENOENT" });
+});
+
+
+test("Windows never selects a legacy managed receipt or starts setup", async t => {
+  const f = await fixture(t, "win32");
+  await f.helper();
+  await f.script(f.executable, "process.exit(99)");
+  await f.receipt(f.executable, [], { CODEX_CLI_PATH: "/legacy/codex.exe" });
+  assert.equal(await discoverComputer(), undefined);
+  assert.equal(await ensureComputer({ binary: f.binary }), undefined);
+  assert.equal(await ensureComputer(), undefined);
+  await writeFile(join(process.env.NANOCODEX_DIR, "runtimes/openai-cua/provider.json"), "invalid JSON");
+  assert.equal(await discoverComputer(), undefined, "unsupported platform does not even read old receipts");
+  await assert.rejects(readFile(f.calls), { code: "ENOENT" });
+});
+
+test("automatic Mac discovery refuses unmarked and CLI-bearing legacy receipts", async t => {
+  const f = await fixture(t);
+  await f.script(f.executable, "process.exit(99)");
+  await f.receipt();
+  const receiptPath = join(process.env.NANOCODEX_DIR, "runtimes/openai-cua/provider.json");
+  const valid = JSON.parse(await readFile(receiptPath, "utf8"));
+  const unmarked = { ...valid }; delete unmarked.dependency_contract;
+  for (const value of [unmarked, { ...valid, environment: { CODEX_CLI_PATH: "/legacy/codex" } }]) {
+    await writeFile(receiptPath, JSON.stringify(value));
+    await assert.rejects(discoverComputer(), /legacy Codex-dependent generation/);
+    await assert.rejects(ensureComputer(), /legacy Codex-dependent generation/);
+  }
 });

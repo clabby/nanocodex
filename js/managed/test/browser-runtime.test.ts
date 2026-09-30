@@ -246,10 +246,11 @@ describe("Vault browser isolation", () => {
     });
     const connect = vi.spyOn(PrivateBrowserCdp, "connect").mockResolvedValue({ send, close() {} } as unknown as PrivateBrowserCdp);
     const close = vi.fn(async () => {});
+    const providerDelete = vi.fn(async () => new Response(null, {status:204}));
     const resolve = vi.fn(async () => ({ username: "fake-user", password: "fake-password" }));
     const create = () => createManagedBrowserRuntime({
       ctx: { storage: { get: async (key: string) => stored.get(key), put: async (key: string, value: unknown) => { stored.set(key, value); }, delete: async (key: string) => stored.delete(key) } } as unknown as DurableObjectState,
-      env: { MANAGED_BROWSER_PROVIDER: "cloudflare", BROWSER: { fetch: vi.fn() }, LOADER: {} as WorkerLoader }, sessionId: "agent-vault",
+      env: { MANAGED_BROWSER_PROVIDER: "cloudflare", BROWSER: { fetch: providerDelete }, LOADER: {} as WorkerLoader }, sessionId: "agent-vault",
       resolveVaultLogin: resolve, authorizeVaultAccess: () => {},
       createRuntime: () => ({ connector: { sessionInfo: async () => ({ sessionId: "browser-1" }), closeSession: close },
         tools: { browser_execute: tool({ inputSchema: jsonSchema({ type: "object" }), execute: ordinary }) }, runtime: {} }) as unknown as BrowserRuntime,
@@ -272,7 +273,8 @@ describe("Vault browser isolation", () => {
       expect(await call("browser_vault_status", reference)).toEqual({ status: "password_form", password_selector: 'input[type="password"]' });
       expect(ordinary).not.toHaveBeenCalled();
       expect(await call("browser_vault_close", {})).toEqual({ status: "closed" });
-      expect(close).toHaveBeenCalledOnce();
+      expect(providerDelete).toHaveBeenCalledOnce();
+      expect(close).not.toHaveBeenCalled();
       expect(await call("browser_execute", { code: "1" })).toEqual({ page: "fixture" });
     } finally { connect.mockRestore(); }
   });
@@ -398,13 +400,13 @@ describe("private browser verification lifecycle", () => {
     const f = await fixture();
     try {
       f.resolve.mockRejectedValue(new Error("not authorized"));
-      await expect(f.call(name, name === "browser_vault_action" ? { ...identity, action: "navigate", url: identity.expected_origin + "/account" } : identity)).rejects.toThrow();
+      await expect(f.call(name, name === "browser_vault_action" ? { ...identity, operation_id: crypto.randomUUID(), action: "navigate", url: identity.expected_origin + "/account" } : identity)).rejects.toThrow();
       expect(f.resolve).toHaveBeenCalledOnce();
       expect(f.connect).not.toHaveBeenCalled();
       expect(f.stored.size).toBe(0);
     } finally { f.connect.mockRestore(); }
   });
-  it("persists exclusive human control across recreation and resumes only private reads on finish", async () => {
+  it("preserves private-input isolation after recreation and human finish", async () => {
     const f = await fixture();
     const takeoverKey = "browser-vault-takeover:cloudflare:agent-vault";
     try {
@@ -430,8 +432,8 @@ describe("private browser verification lifecycle", () => {
       await expect(recreated.submitVaultTakeover({ challenge_id: lease.challenge_id, action: "finish" }, context.signal)).resolves.toEqual({ status: "finished" });
       expect(f.stored.has(takeoverKey)).toBe(false);
       expect(f.stored.has(quarantineKey)).toBe(true);
-      await expect(f.call("browser_vault_snapshot", identity, recreated)).resolves.toMatchObject({ title: "Account" });
-      await expect(f.call("browser_execute", { code: "1" }, recreated)).rejects.toThrow("isolated");
+      await expect(f.call("browser_vault_snapshot", identity, recreated)).rejects.toThrow("redaction state was lost");
+      await expect(f.call("browser_execute", { code: "1" }, recreated)).rejects.toThrow("redaction state was lost");
     } finally { f.connect.mockRestore(); }
   });
   it("redacts accumulated native keyboard text without redacting every typed letter", async () => {

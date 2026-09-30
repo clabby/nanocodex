@@ -3,7 +3,8 @@
 
 Run the launcher as the desktop user with its DISPLAY and session bus available.
 This installs Nanocodex transport files separately; it never downloads or patches
-OpenAI binaries, supplies approvals, or disables the Codex model sandbox.
+OpenAI binaries or supplies approvals. Standalone node_repl is not a Codex
+managed execution sandbox. Browser is unsupported and fails closed.
 """
 import argparse
 import json
@@ -14,15 +15,16 @@ import shutil
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--runtime', type=Path, required=True, help='Installed cua_node directory')
-parser.add_argument('--codex-cli', type=Path, required=True, help='Matching upstream Codex executable')
 parser.add_argument('--destination', type=Path, required=True, help='New, private host installation directory')
 parser.add_argument('--register-managed', action='store_true', help='Select this launcher for automatic Linux guest discovery')
-parser.add_argument('--surfaces', choices=['computer', 'browser,computer'], default='browser,computer')
+parser.add_argument('--surfaces', choices=['computer', 'browser,computer'], default='computer')
 args = parser.parse_args()
-runtime, codex, destination = args.runtime.resolve(), args.codex_cli.resolve(), args.destination.resolve()
+if args.surfaces != 'computer':
+    parser.error('Linux standalone CUA supports computer only; browser requires a separate no-Codex port')
+runtime, destination = args.runtime.resolve(), args.destination.resolve()
 modules = runtime / 'lib/node_modules'
 provider = modules / '@oai/cua-repl/bin/cua-repl.mjs'
-for executable in (runtime / 'bin/node', runtime / 'bin/node_repl', codex):
+for executable in (runtime / 'bin/node', runtime / 'bin/node_repl'):
     if not executable.is_file() or not os.access(executable, os.X_OK):
         parser.error(f'Required upstream executable unavailable: {executable}')
 for source in (provider, modules / '@oai/sky/dist/project/cua/sky_js/src/service.js'):
@@ -34,12 +36,11 @@ if destination.exists():
     parser.error('Use a new destination; running host installations are immutable')
 source_dir = Path(__file__).resolve().parents[1] / 'crates/experimental/nanocodex-computer/src'
 destination.mkdir(mode=0o700, parents=True)
-for name in ('linux_sky_host.mjs', 'linux_sky_proxy.mjs', 'linux_sky_worker.mjs'):
+for name in ('linux_sky_host.mjs', 'linux_sky_proxy.mjs', 'linux_sky_worker.mjs', 'linux_sky_lease.mjs'):
     target = destination / name
     shutil.copyfile(source_dir / name, target)
     target.chmod(0o600)
 variables = {
-    'CODEX_CLI_PATH': str(codex),
     'CUA_REPL_NODE_REPL_PATH': str(runtime / 'bin/node_repl'),
     'CUA_REPL_ENABLED_SURFACES': args.surfaces,
     'NODE_REPL_NODE_PATH': str(runtime / 'bin/node'),
@@ -48,14 +49,15 @@ variables = {
 }
 command = [str(runtime / 'bin/node'), str(destination / 'linux_sky_host.mjs'), str(provider)]
 launcher = destination / 'cua-provider'
-launcher.write_text('#!/bin/sh\nset -eu\n' + ''.join(f'export {key}={shlex.quote(value)}\n' for key,value in variables.items()) + 'exec ' + ' '.join(map(shlex.quote, command)) + ' "$@"\n')
+launcher.write_text('#!/bin/sh\nset -eu\nunset CODEX_CLI_PATH\n' + ''.join(f'export {key}={shlex.quote(value)}\n' for key,value in variables.items()) + 'exec ' + ' '.join(map(shlex.quote, command)) + ' "$@"\n')
 launcher.chmod(0o700)
 if args.register_managed:
     base = Path(os.environ.get('NANOCODEX_DIR') or Path.home() / '.nanocodex').resolve()
     managed = base / 'runtimes/openai-cua'
     managed.mkdir(mode=0o700, parents=True, exist_ok=True)
     receipt = {'status': 'installed', 'transport': 'mcp', 'executable': str(launcher),
-               'args': [], 'environment': {}}
+               'args': [], 'environment': {},
+               'dependency_contract': 'nanocodex-native-no-codex-v1'}
     # Readers see either the previous complete selection or this complete receipt.
     import tempfile
     with tempfile.NamedTemporaryFile(mode='w', dir=managed, prefix='.provider-', delete=False) as stage:

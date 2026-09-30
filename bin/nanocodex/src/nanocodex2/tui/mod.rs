@@ -21,6 +21,7 @@ mod pane;
 mod prompt;
 mod scheduler;
 mod screen;
+mod secure_input;
 mod session;
 mod share;
 mod shell;
@@ -573,6 +574,9 @@ struct DriverRuntime {
     )>,
     unresolved_steers: HashMap<(PaneId, components::QueueId), CancellationToken>,
     vault_tasks: JoinSet<vault::Completion>,
+    secure_input: Option<secure_input::Flow>,
+    secure_input_tasks: JoinSet<secure_input::Completion>,
+    secure_input_attempted: HashSet<String>,
     share_tasks: JoinSet<(PaneId, String, u64, Result<share::Outcome, ManagedError>)>,
     vault_attempted: HashSet<(String, String)>,
     steer_receipts: HashMap<(PaneId, components::QueueId), (u64, SteerTarget, String)>,
@@ -1602,6 +1606,8 @@ impl DriverRuntime {
             && self.settings_updates.is_empty()
             && self.settings_queue.is_empty()
             && self.vault_tasks.is_empty()
+            && self.secure_input.is_none()
+            && self.secure_input_tasks.is_empty()
             && self.share_tasks.is_empty()
             && self.voice_tasks.is_empty()
             // Keep local recordings and samples until explicitly submitted or discarded.
@@ -1944,6 +1950,9 @@ async fn run_inner(
         receipt_reconciliations: JoinSet::new(),
         unresolved_steers: HashMap::new(),
         vault_tasks: JoinSet::new(),
+        secure_input: None,
+        secure_input_tasks: JoinSet::new(),
+        secure_input_attempted: HashSet::new(),
         share_tasks: JoinSet::new(),
         vault_attempted: HashSet::new(),
         steer_receipts: HashMap::new(),
@@ -1978,7 +1987,12 @@ async fn run_inner(
     };
     // Put the complete interface on screen before any managed request starts.
     terminal
-        .draw(|frame| app.render(frame))
+        .draw(|frame| {
+            app.render(frame);
+            if let Some(flow) = &mut runtime.secure_input {
+                flow.render(frame);
+            }
+        })
         .map_err(terminal_error)?;
     scheduler.presented(Instant::now());
     drop(first_frame);
@@ -2043,6 +2057,27 @@ async fn run_inner(
     routing_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     while !stopping {
+        // Crossterm's reader can prequeue terminal bytes while HTTP is pending.
+        // Drain at EVERY private phase boundary before drawing/enabling input.
+        if runtime
+            .secure_input
+            .as_mut()
+            .is_some_and(|flow| flow.take_drain())
+        {
+            drain_private_input(&mut input, &mut runtime).await;
+        }
+        // Scope changes can come from mouse/control/API/session activity, not
+        // just keyboard shortcuts. Wipe before publishing ANY UI snapshot.
+        if runtime.secure_input.as_ref().is_some_and(|flow| {
+            !flow.scope_matches(
+                &runtime.agent_id,
+                runtime.connection_generation,
+                app.focused_pane(),
+            )
+        }) {
+            runtime.cancel_secure_input();
+            scheduler.request_immediate(Instant::now());
+        }
         if let Some(bridge) = &runtime.control_bridge {
             control::snapshot(bridge, &app, &runtime, false);
         }
@@ -2183,7 +2218,12 @@ async fn run_inner(
         }
         if scheduler.is_due(Instant::now()) {
             terminal
-                .draw(|frame| app.render(frame))
+                .draw(|frame| {
+                    app.render(frame);
+                    if let Some(flow) = &mut runtime.secure_input {
+                        flow.render(frame);
+                    }
+                })
                 .map_err(terminal_error)?;
             runtime.screen.size.send_if_modified(|size| {
                 let current = app.screen_size();
@@ -2341,6 +2381,23 @@ async fn run_inner(
                     message: "Reloading after pending local operations finish…".into(),
                 }), &mut scheduler);
             }
+            Some(completion) = runtime.secure_input_tasks.join_next(), if !runtime.secure_input_tasks.is_empty() => {
+                if let Ok((agent_id, generation, request_id, outcome)) = completion {
+                    if !vault::scope_matches(&agent_id, generation, &runtime.agent_id, runtime.connection_generation) { continue; }
+                    if let secure_input::Outcome::Status(status) = &outcome {
+                        let update = app.update(AppEvent::SecureInputReceipt { pane: PaneId::Main, request_id: request_id.clone(), status: *status });
+                        stopping |= apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
+                    }
+                    if let Some(flow) = &mut runtime.secure_input
+                        && flow.request.request_id == request_id && flow.generation == generation {
+                        flow.finish(outcome);
+                        scheduler.request_immediate(Instant::now());
+                    }
+                } else if let Some(flow) = &mut runtime.secure_input {
+                    flow.finish(secure_input::Outcome::Status(secure_input::Status::Unknown));
+                    scheduler.request_immediate(Instant::now());
+                }
+            }
             Some(completion) = runtime.vault_tasks.join_next(), if !runtime.vault_tasks.is_empty() => {
                 if let Ok((pane, agent_id, generation, result)) = completion {
                     if !vault::scope_matches(&agent_id, generation, &runtime.agent_id, runtime.connection_generation) {
@@ -2398,6 +2455,16 @@ async fn run_inner(
                     .transpose()
                     .map_err(terminal_error)?
                     .ok_or_else(|| terminal_error(io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input closed")))?;
+                // SECURITY: intercept BEFORE ordinary AppEvent, clipboard,
+                // screen, composer, shell, debug/control, export or history.
+                if let Some(flow) = &mut runtime.secure_input {
+                    let action = flow.intercept(event);
+                    let drain = flow.take_drain();
+                    if drain { drain_private_input(&mut input, &mut runtime).await; }
+                    runtime.secure_input_action(action);
+                    scheduler.request_immediate(Instant::now());
+                    continue;
+                }
                 // Mute remains global while another pane or a modal has focus.
                 if (runtime.voice.is_some() || runtime.pending_voice.is_some())
                     && matches!(&event, Event::Key(key) if key.code == KeyCode::Char('x') && key.modifiers == KeyModifiers::CONTROL)
@@ -3436,6 +3503,7 @@ async fn run_inner(
         }
     }
 
+    runtime.cancel_secure_input(); // wipe before terminal restoration/shutdown
     drop(terminal);
     if let Some(voice) = runtime.voice.take() {
         voice.finish().await;
@@ -3486,7 +3554,10 @@ async fn apply_update(
     while let Some(effect) = effects.pop_front() {
         match effect {
             AppEffect::Screen(command) => runtime.screen.command(&runtime.client, command),
-            AppEffect::Shutdown => stopping = true,
+            AppEffect::Shutdown => {
+                runtime.cancel_secure_input();
+                stopping = true;
+            }
             AppEffect::SetTheme(_) => scheduler.request_immediate(Instant::now()),
             AppEffect::OpenFork { pane, .. } => {
                 if runtime.agent_id.is_empty() {
@@ -3684,6 +3755,30 @@ async fn apply_update(
                             };
                             (pane, agent_id, generation, result)
                         });
+                    }
+                    RootEffect::SecureInput(request) => {
+                        runtime.cancel_secure_input();
+                        let Some(request) = request.filter(|request| request.agent_id == runtime.agent_id && request.is_current() && !runtime.secure_input_attempted.contains(&request.request_id)) else {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: secure_input::HELP.into() }), &mut effects, scheduler);
+                            continue;
+                        };
+                        if pane != PaneId::Main || runtime.agent.is_none() || runtime.recovery.is_some() || !runtime.secure_input_tasks.is_empty() {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "Private secure input is unavailable while disconnected or another approval is pending. No password requested.".into() }), &mut effects, scheduler);
+                            continue;
+                        }
+                        if secure_input::protect_process().is_err() {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "Private input protection unavailable. No password requested or submitted.".into() }), &mut effects, scheduler);
+                            continue;
+                        }
+                        let client = runtime.client.clone();
+                        let agent = runtime.agent_id.clone();
+                        let generation = runtime.connection_generation;
+                        runtime.secure_input = Some(secure_input::Flow::loading(request.clone(), generation, pane));
+                        runtime.secure_input_tasks.spawn(async move {
+                            let outcome = client.describe_native_secure_input(&request).await.map(secure_input::Outcome::Description).unwrap_or(secure_input::Outcome::Status(secure_input::Status::Unavailable));
+                            (agent, generation, request.request_id, outcome)
+                        });
+                        scheduler.request_immediate(Instant::now());
                     }
                     RootEffect::Vault(command) => {
                         match command {
@@ -4605,6 +4700,122 @@ fn terminal_error(error: io::Error) -> ManagedError {
     ManagedError::Configuration(format!("terminal error: {error}"))
 }
 
+// Private approval driver: tasks contain only safe metadata/ciphertext.
+impl DriverRuntime {
+    fn cancel_secure_input(&mut self) {
+        let Some(flow) = &mut self.secure_input else {
+            return;
+        };
+        let request = flow.request.clone();
+        let generation = flow.generation;
+        flow.cancel_local(); // zeroize first; retain a private quarantine panel
+        if !self
+            .secure_input_attempted
+            .insert(request.request_id.clone())
+        {
+            return;
+        }
+        let client = self.client.clone();
+        self.secure_input_tasks.spawn(async move {
+            let outcome = client
+                .cancel_native_secure_input(&request)
+                .await
+                .map(|_| secure_input::Status::Cancelled)
+                .unwrap_or(secure_input::Status::Unknown);
+            (
+                request.agent_id,
+                generation,
+                request.request_id,
+                secure_input::Outcome::Status(outcome),
+            )
+        });
+    }
+    fn secure_input_action(&mut self, action: secure_input::Action) {
+        match action {
+            secure_input::Action::None => {}
+            secure_input::Action::Cancel => self.cancel_secure_input(),
+            secure_input::Action::Dismiss => {
+                if self
+                    .secure_input
+                    .as_ref()
+                    .is_some_and(|flow| flow.can_dismiss())
+                {
+                    self.secure_input.take();
+                }
+            }
+            secure_input::Action::Submit(envelope) => {
+                let Some(flow) = &self.secure_input else {
+                    return;
+                };
+                let request = flow.request.clone();
+                if !flow.is_sending()
+                    || request.agent_id != self.agent_id
+                    || flow.generation != self.connection_generation
+                    || !request.is_current()
+                    || !self
+                        .secure_input_attempted
+                        .insert(request.request_id.clone())
+                {
+                    self.cancel_secure_input();
+                    return;
+                }
+                let client = self.client.clone();
+                let generation = flow.generation;
+                self.secure_input_tasks.spawn(async move {
+                    let outcome = match client.submit_native_secure_input(&request, envelope).await
+                    {
+                        Ok(receipt) => match receipt.status.as_str() {
+                            "completed" => secure_input::Status::Completed,
+                            "failed" => secure_input::Status::Failed,
+                            _ => secure_input::Status::Unknown,
+                        },
+                        Err(_) => secure_input::Status::Unknown,
+                    };
+                    (
+                        request.agent_id,
+                        generation,
+                        request.request_id,
+                        secure_input::Outcome::Status(outcome),
+                    )
+                });
+            }
+        }
+    }
+}
+
+/// Discard prequeued keys/paste before private UI transitions. FocusLost remains
+/// meaningful even in the discarded tail; it must wipe the newly opened field.
+async fn drain_private_input(input: &mut EventStream, runtime: &mut DriverRuntime) {
+    // A mere now_or_never poll is insufficient: Crossterm's background reader
+    // may not yet have parsed bytes already in the PTY kernel queue. Require a
+    // quiet interval, while the field remains unrendered and disabled.
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        if Instant::now() >= deadline {
+            runtime.cancel_secure_input();
+            return;
+        }
+        let result = match tokio::time::timeout(Duration::from_millis(30), input.next()).await {
+            Err(_) => return,
+            Ok(Some(Ok(event))) => event,
+            _ => {
+                runtime.cancel_secure_input();
+                return;
+            }
+        };
+        let mut event = result;
+        if matches!(event, Event::FocusLost | Event::FocusGained) {
+            if let Some(flow) = &mut runtime.secure_input {
+                let action = flow.intercept(event);
+                runtime.secure_input_action(action);
+            }
+        } else if let Event::Paste(text) = &mut event {
+            use zeroize::Zeroize;
+            text.zeroize();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -5018,6 +5229,9 @@ mod tests {
             receipt_reconciliations: JoinSet::new(),
             unresolved_steers: HashMap::new(),
             vault_tasks: JoinSet::new(),
+            secure_input: None,
+            secure_input_tasks: JoinSet::new(),
+            secure_input_attempted: HashSet::new(),
             share_tasks: JoinSet::new(),
             vault_attempted: HashSet::new(),
             steer_receipts: HashMap::new(),

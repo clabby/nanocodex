@@ -270,16 +270,10 @@ impl Update {
         }
         // The same hourly job keeps upstream Computer Use components current.
         // It checks the small signed appcast first and range-downloads only
-        // changed CUA/browser payloads; CLI updates remain independent.
+        // changed CUA payloads; Nanocodex CLI updates remain independent.
         if self.background && cfg!(any(target_os = "macos", target_os = "windows")) {
             match nanocodex_computer::provision::provision_upstream(true).await {
-                Ok(receipt) if receipt["status"] == "installed" => {
-                    if let Err(error) =
-                        nanocodex_computer::provision::configure_browser_bridge().await
-                    {
-                        eprintln!("warning: could not refresh the browser bridge: {error}");
-                    }
-                }
+                Ok(receipt) if receipt["status"] == "installed" => {}
                 Ok(_) => {}
                 Err(error) => {
                     eprintln!("warning: could not refresh Computer Use components: {error}")
