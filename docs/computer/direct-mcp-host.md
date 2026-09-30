@@ -23,7 +23,9 @@ are disabled so they cannot attempt to fetch Codex authentication.
 to disable it. The module itself denies application access without `allow`. Tool arguments cannot change it. This setting does not authorize arbitrary
 external actions, financial transactions, messages, account changes, microphone
 recording, or forms that collect data. The authenticated caller's authorization
-and agent-level action boundaries continue to apply.
+and agent-level action boundaries continue to apply. The upstream kernel runs
+standalone; this host does not import Codex sandbox profiles or claim to provide
+a Codex-managed execution sandbox.
 
 The adapter accepts only an empty native application-access form from the
 `computer-use` connector during an active JavaScript invocation. Audio requests,
@@ -45,8 +47,10 @@ an official Codex binary or general app-server implementation. The helper's
 itself as `nanocodex-cua-policy-host` and describes this host's own access policy.
 
 All other methods, including account/authentication, models, threads, execution,
-and configuration writes, return method-not-found. No Codex credentials or user
-configuration are read, copied, or fabricated. The helper has its own temporary
+and configuration writes, return method-not-found. Codex authentication material
+and ordinary user configuration file contents are not read, copied, or fabricated.
+Enforced-preference existence probes discard returned values without decoding
+or logging them. The helper has its own temporary
 Codex-named home within the private session directory; this is isolated state,
 not the user's signed-in Codex home.
 
