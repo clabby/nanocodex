@@ -22,7 +22,7 @@ struct MeetingLockedActivityWidget: Widget {
         ActivityConfiguration(for: MeetingLockedActivityAttributes.self) { context in
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 12) {
-                    Image(systemName: context.state.phase == "sent" ? "checkmark.circle.fill" : "waveform")
+                    Image(systemName: ["sent", "saved"].contains(context.state.phase) ? "checkmark.circle.fill" : "waveform")
                     VStack(alignment: .leading, spacing: 3) {
                         Text(label(context)).font(.headline)
                         if context.state.phase == "listening" {
@@ -62,9 +62,9 @@ struct MeetingLockedActivityWidget: Widget {
                 }.frame(width: 52, height: 52)
             }.buttonStyle(.plain)
                 .accessibilityLabel("Stop Recording")
-                .accessibilityHint("Stops the meeting recording and starts an agent with its transcript")
+                .accessibilityHint("Stops recording and saves the meeting transcript and notes")
         } else if !context.isStale && context.state.phase == "ready" {
-            Button("Retry starting agent", intent: SendMeetingLockedIntent(captureID: context.attributes.captureID))
+            Button("Retry saving meeting", intent: SendMeetingLockedIntent(captureID: context.attributes.captureID))
                 .buttonStyle(.bordered)
         }
     }
@@ -74,10 +74,10 @@ struct MeetingLockedActivityWidget: Widget {
         case "preparing": return "Preparing microphone…"
         case "listening": return "Meeting recording"
         case "transcribing": return "Finishing transcript…"
-        case "ready": return context.state.warning ? "Not sent · transcript saved" : "Transcript ready to send"
-        case "sending": return "Sending transcript…"
-        case "sent": return "Meeting sent"
-        case "saved": return "Transcript saved"
+        case "ready": return context.state.warning ? "Partial meeting saved" : "Meeting saved on device"
+        case "sending": return "Syncing meeting…"
+        case "sent": return "Meeting synced"
+        case "saved": return "Meeting saved"
         case "failed": return "Meeting stopped"
         default: return "Meeting ended"
         }

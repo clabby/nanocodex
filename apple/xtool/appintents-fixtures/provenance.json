@@ -1,0 +1,39 @@
+{
+  "kind": "public-OTA-schema-reference-not-paired-compiler-reference",
+  "metadataFiles": {
+    "Payload/Nanocodex.app/Metadata.appintents/extract.actionsdata": {
+      "sha256": "5b583e91c66d5b32e8b21c1f4dc5390163e8e965aa2e3e1762450ab6b9ffbba8",
+      "size": 30278
+    },
+    "Payload/Nanocodex.app/Metadata.appintents/nlu/dad9043d7f1c9be7cde243d85b6b41c9.version": {
+      "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "size": 1
+    },
+    "Payload/Nanocodex.app/Metadata.appintents/nlu/nlu.lzfse": {
+      "sha256": "b5f8de71f82be252086be820e3160931ea1a85c54680b02cf04ba87d6853bef9",
+      "size": 2516
+    },
+    "Payload/Nanocodex.app/Metadata.appintents/version.json": {
+      "sha256": "6c610c2d346f595bd7c5a8513a62e02f76557fa5d8b046a63ef82ac801f34f93",
+      "size": 52
+    },
+    "Payload/Nanocodex.app/PlugIns/NanocodexWidgets.appex/Metadata.appintents/extract.actionsdata": {
+      "sha256": "4e6979de68e28d698c40a91a3d835293312e5b59cdd16807571922a06fc98a53",
+      "size": 8579
+    },
+    "Payload/Nanocodex.app/PlugIns/NanocodexWidgets.appex/Metadata.appintents/version.json": {
+      "sha256": "3fbb1d7e80265e2010710177b0fc9598db06fa016bcf112736407ca76ceddb21",
+      "size": 52
+    }
+  },
+  "otaBuild": "1790623764",
+  "otaSHA256": "a852b91c70381a86cf68fd7d33f3f69af43cd47af07a01450544e9a354d08450",
+  "otaSize": 10614002,
+  "pairedCompilerInputAvailable": false,
+  "phoneDiscoveryVerified": false,
+  "referenceGenerator": {
+    "name": "xcode-tools",
+    "version": "17F113"
+  },
+  "schemaNumericSemanticsVerified": false
+}

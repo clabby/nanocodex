@@ -1,0 +1,113 @@
+name: Linux iPhone build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Marketing version
+        required: true
+        default: '0.1.0'
+        type: string
+      build:
+        description: Numeric build number (empty uses UTC epoch seconds)
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - apple/**
+      - crates/nanocodex-voice-ffi/**
+      - crates/nanocodex-voice-protocol/**
+      - .github/workflows/ios-linux.yml
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Validate Linux packaging journeys
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - run: sudo apt-get update && sudo apt-get install -y python3-pil
+      - run: /usr/bin/python3 apple/scripts/test-ios-linux.py
+      - name: Retain packaging evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ios-linux-packaging
+          path: output/ios-linux/
+          if-no-files-found: warn
+
+  signing:
+    name: Validate Linux signing with synthetic profiles
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Install compiler and signer prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang build-essential libssl-dev pkg-config python3
+      - name: Build pinned zsign
+        run: |
+          mkdir -p output/ios-signing
+          ZSIGN_PREFIX="$RUNNER_TEMP/zsign" bash apple/scripts/install-zsign-linux.sh > output/ios-signing/install.log 2>&1
+      - name: Install xtool's iOS-enabled Linux linker
+        run: |
+          curl --fail --location https://github.com/xtool-org/darwin-tools-linux-llvm/releases/download/v1.1.0/toolset-x86_64.tar.gz -o "$RUNNER_TEMP/darwin-tools.tar.gz"
+          printf '%s  %s\n' a5166f2d56ac45707e5ef2f3c20a41a94af8ef0c0456354224dd08656e874188 "$RUNNER_TEMP/darwin-tools.tar.gz" | sha256sum --check --status
+          mkdir "$RUNNER_TEMP/darwin-tools"
+          tar -xzf "$RUNNER_TEMP/darwin-tools.tar.gz" -C "$RUNNER_TEMP/darwin-tools"
+      - name: Sign three synthetic ARM64 bundles and verify CMS signatures
+        run: /usr/bin/python3 apple/scripts/test-ios-signing.py --zsign "$RUNNER_TEMP/zsign/zsign" --linker "$RUNNER_TEMP/darwin-tools/bin/ld64.lld"
+      - name: Retain synthetic signing evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ios-linux-signing
+          path: output/ios-signing/
+          if-no-files-found: warn
+
+  build:
+    name: Compile unsigned iPhone IPA on Linux
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container: swift:6.4.0-jammy
+    env:
+      NANOCODEX_IOS_VERSION: ${{ inputs.version }}
+      NANOCODEX_IOS_BUILD_VERSION: ${{ inputs.build }}
+      NANOCODEX_XTOOL_PREFIX: /opt/nanocodex-xtool
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Check SDK input
+        env:
+          SDK_URL: ${{ secrets.IOS_LINUX_SDK_URL }}
+          SDK_SHA256: ${{ vars.IOS_LINUX_SDK_SHA256 }}
+        run: |
+          test -n "$SDK_URL" || { echo 'Configure IOS_LINUX_SDK_URL to your private Xcode.xip archive.' >&2; exit 1; }
+          test -n "$SDK_SHA256" || { echo 'Configure IOS_LINUX_SDK_SHA256.' >&2; exit 1; }
+      - name: Install Linux dependencies and Rust
+        run: |
+          apt-get update
+          apt-get install -y curl ca-certificates python3 python3-pil libimobiledevice6 libusbmuxd6 libssl-dev pkg-config xz-utils unzip util-linux
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain 1.97.0
+          "$HOME/.cargo/bin/rustup" target add aarch64-apple-ios
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install xtool and Apple SDK
+        env:
+          SDK_URL: ${{ secrets.IOS_LINUX_SDK_URL }}
+          SDK_SHA256: ${{ vars.IOS_LINUX_SDK_SHA256 }}
+        run: |
+          curl --fail --location --silent --show-error "$SDK_URL" -o "$RUNNER_TEMP/AppleSDK.xip"
+          printf '%s  %s\n' "$SDK_SHA256" "$RUNNER_TEMP/AppleSDK.xip" | sha256sum --check --status
+          bash apple/scripts/install-xtool-linux.sh "$RUNNER_TEMP/AppleSDK.xip"
+          rm "$RUNNER_TEMP/AppleSDK.xip"
+          echo "NANOCODEX_XTOOL=$NANOCODEX_XTOOL_PREFIX/squashfs-root/AppRun" >> "$GITHUB_ENV"
+      - name: Build app, share extension, widgets, and voice core
+        run: bash apple/scripts/build-ios-linux.sh
+      - name: Retain build evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ios-linux-unsigned
+          path: output/ios-linux/
+          if-no-files-found: warn

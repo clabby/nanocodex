@@ -19,6 +19,15 @@ keyboard input for capability probes. Recognized Kitty, Ghostty, iTerm2, and
 WezTerm environments use native images where supported; other terminals use
 half-block images.
 
+## Continue from mobile
+
+`nanocodex2 continue` brings unfinished sessions used in the last six hours,
+plus older sessions still running, into named tmux windows. Existing windows
+are reused by session ID. `/done` (or swipe left → Done on mobile) hides a
+session from future restores without deleting history or cancelling work;
+`/undone` restores it. See [session continuation](../../../docs/session-continue.md)
+for preview, lookback, detached operation, and headless commands.
+
 ## Managed2 preview (explicit opt-in)
 
 `nanocodex2 --managed2` opens the familiar terminal UI against the separate

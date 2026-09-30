@@ -141,7 +141,10 @@ test('host SIGKILL reaps detached provider even if provider ignores stdin EOF', 
   const harness = spawn(process.execPath, ['--input-type=module', '-e', `import { runHost } from ${JSON.stringify(hostUrl.href)}; await runHost(${JSON.stringify({ state: path.join(directory, 's'), provider: providerMjs, env: { HOME: directory } })}, { managedCheck: async () => {} });`], { stdio: ['pipe', 'ignore', 'pipe'] });
   let providerPid;
   t.after(() => { harness.kill('SIGKILL'); if (providerPid) { try { process.kill(-providerPid, 'SIGKILL'); } catch {} } });
-  for (let n = 0; n < 100; n++) { try { providerPid = Number(await readFile(pidFile, 'utf8')); break; } catch {} await pause(10); }
+  // Parallel native builds can delay synthetic Node startup beyond one second.
+  // Bound the fixture wait independently of the owned-process cleanup assertion.
+  const startupDeadline = Date.now() + 5000;
+  while (Date.now() < startupDeadline) { try { providerPid = Number(await readFile(pidFile, 'utf8')); break; } catch {} await pause(10); }
   assert.ok(providerPid, 'synthetic provider did not start');
   harness.kill('SIGKILL'); await once(harness, 'exit'); await pause(300);
   let alive = true; try { process.kill(providerPid, 0); } catch { alive = false; }
@@ -168,7 +171,7 @@ test('native owner watchdog reaps TERM-ignoring helper descendants after leader 
   const worker = spawn(process.execPath, [fileURLToPath(hostUrl), '--native-worker'], { env: { HOME: directory, NANOCODEX_CUA_NATIVE_APP: app, NANOCODEX_CUA_POLICY_HOST: '/synthetic/policy' }, stdio: ['pipe', 'ignore', 'pipe'] });
   let leader, grandchild;
   t.after(() => { worker.kill('SIGKILL'); if (leader) { try { process.kill(-leader, 'SIGKILL'); } catch {} } if (grandchild) { try { process.kill(grandchild, 'SIGKILL'); } catch {} } });
-  for (let n = 0; n < 100; n++) {
+  for (let n = 0; n < 500; n++) {
     try { leader = Number(await readFile(path.join(directory, 'leader'), 'utf8')); grandchild = Number(await readFile(path.join(directory, 'grandchild'), 'utf8')); break; } catch {} await pause(10);
   }
   assert.ok(leader && grandchild, 'synthetic helper descendants did not start');
@@ -199,7 +202,7 @@ test('SIGKILL of native worker owner closes lease and reaps synthetic native hel
   const owner = spawn(process.execPath, ['-e', ownerCode], { stdio: ['ignore', 'ignore', 'ignore'] });
   let helperPid;
   t.after(() => { owner.kill('SIGKILL'); if (helperPid) { try { process.kill(-helperPid, 'SIGKILL'); } catch {} } });
-  for (let n = 0; n < 100; n++) { try { helperPid = Number(await readFile(path.join(directory, 'helper'), 'utf8')); break; } catch {} await pause(10); }
+  for (let n = 0; n < 500; n++) { try { helperPid = Number(await readFile(path.join(directory, 'helper'), 'utf8')); break; } catch {} await pause(10); }
   assert.ok(helperPid, 'synthetic native helper did not start');
   owner.kill('SIGKILL'); await once(owner, 'exit'); await pause(1800);
   let alive = true; try { process.kill(helperPid, 0); } catch { alive = false; }

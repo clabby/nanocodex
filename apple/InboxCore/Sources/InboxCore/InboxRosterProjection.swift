@@ -25,7 +25,7 @@ public struct InboxRosterProjection: Sendable {
     }
     public func resolve() -> Result {
         let opened = opened.intersection(Set(cards.map(\.id)))
-        let available = Set(cards.filter { !closed.contains($0.id) && ConversationWindow.includes($0,
+        let available = Set(cards.filter { (!$0.done || $0.id == focusedID) && !closed.contains($0.id) && ConversationWindow.includes($0,
             focusedID: focusedID, openedIDs: opened) }.map(\.id))
         var known = Set<String>()
         var tabs = tabOrder.filter { available.contains($0) && known.insert($0).inserted }

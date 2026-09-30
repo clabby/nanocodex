@@ -16,7 +16,32 @@ The recording intent adopts `AudioRecordingIntent` and `LiveActivityIntent`, wit
 
 ## Meeting listening from the Lock Screen
 
-Add the circular/rectangular **Listen to a meeting** widget to the Lock Screen, or its Control Widget to the Lock Screen or Control Center after granting Microphone and Speech Recognition access in the app. Starting it uses a separate background `AudioRecordingIntent` and Live Activity; it does not open the app or require an unlock after the device's first unlock since reboot, subject to iOS microphone policy. A single **Stop Recording** action stops the microphone, waits for bounded transcription segments, and starts a new cloud thread with the transcript. The Live Activity shows recording duration/status and an optional short rolling recap, marked privacy-sensitive for WidgetKit redaction; it never includes raw dictated transcript or account identity. The recap may be hidden by Lock Screen privacy settings and may lag speech. Speech partials update the foreground live transcript immediately. Finalized recognition segments (typically every 25 seconds during uninterrupted speech, sooner when Speech finalizes after a pause) stream under monotonic revisions to the account-owned meeting-preview service, which updates a compact AI recap no more than once per 45 seconds. The foreground meeting sheet shows the generated rolling summary or a clearly labeled extractive fallback. This preview creates no agent turn; Stop still sends the complete transcript exactly once. If preview networking or inference fails, recording and final submission continue independently. No raw microphone audio is sent to this preview service. Speech recognition uses short requests rather than a single meeting-length request; if recognition fails or is interrupted, only the available partial transcript can be recovered. It does not capture other apps' protected audio. Long locked sessions and cold starts require physical-device testing; a simulator build does not prove them.
+Add the circular/rectangular **Listen to a meeting** widget or its Control Widget
+after granting Microphone and Speech Recognition access in the app. Starting uses
+a background `AudioRecordingIntent` and Live Activity without presenting the
+scene, subject to iOS microphone policy. **Stop Recording** stops the microphone,
+waits for bounded recognition segments, and saves a meeting document — it does
+not start an agent. Foreground and locked capture share one app-process recorder
+and capture UUID, including live recap revisions and the durable library row.
+
+Open **Meetings** on iPhone/iPad or Mac to review the transcript, edit your notes,
+and generate enhanced notes. An explicit **Ask Nanocodex** action can start a chat.
+The account-pinned protected SQLite journal checkpoints active capture and keeps
+final records in an outbox until cloud acknowledgement. A process termination
+recovers the last checkpoint as a visibly partial meeting. Network failures retain
+local content; retries do not create a new capture ID. A signed-out or different
+account cannot see or redirect the original meeting.
+
+The Live Activity contains duration/status and an optional privacy-sensitive
+rolling recap, never raw transcript or account identity. Finalized Speech segments
+stream monotonically to the optional account-owned preview service, generating a
+compact recap no more than once per 45 seconds. It creates no agent turn, is not
+the permanent meeting store, and can fail independently of capture and saving.
+Neither that preview transport nor the meeting library uploads raw microphone
+audio. Recognition uses bounded requests and only captures the microphone, not
+other apps' protected audio. Long locked sessions and cold starts require
+physical-device testing; Simulator UI evidence covers document storage and
+navigation, not real microphone capture.
 
 ## Verification
 

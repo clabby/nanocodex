@@ -27,11 +27,43 @@ the app's quick voice sheet. The inline accessory is not offered because it
 cannot run an interactive recording intent; actual locked-device microphone
 behavior requires physical-device testing.
 
-For meetings, add the **Listen to a meeting** widget or Control Widget. It records from
-the Lock Screen until **Finish & send**, then transcribes bounded segments and
-starts a new conversation without opening the app. **Discard** deletes the
-capture; recognition interruptions can leave only a partial transcript. Grant
-permissions in the app once and test cold locked starts on a physical iPhone.
+## Meetings
+
+Open **Meetings** in the native iPhone/iPad navigation to record or take notes.
+The same account-owned library is available in the Mac app's **Meetings** section.
+A meeting stores its title, duration, transcript, your notes, and enhanced notes;
+it is independent of chat threads. Enhanced notes use the transcript and your
+notes to identify key points, decisions, and actions. Review generated notes
+against the transcript. **Ask Nanocodex** explicitly starts a conversation; saving
+or stopping a meeting does not start an agent task.
+
+Recording belongs to the app process, not its sheet. Leaving the screen keeps an
+explicitly started recording running. A protected, account-scoped SQLite journal
+checkpoints capture and queues final documents. Interrupted/terminated captures
+recover as partial meetings, never as automatically submitted agent tasks.
+Network failure leaves the document on the device with a visible pending state;
+retry keeps the capture UUID and revision. Account changes cannot redirect it.
+Only transcripts and notes are retained; microphone audio is not stored for
+playback, and protected audio from other apps is not captured.
+
+For locked capture, add the **Listen to a meeting** widget or Control Widget.
+**Stop Recording** finalizes recognition and saves the meeting to the same library.
+Grant Microphone and Speech Recognition access in the app first. Cold locked
+starts, interruptions, and long recordings still require physical-iPhone testing;
+a successful Simulator build does not establish those microphone behaviors.
+
+The durable library's `/v1/meetings` API requires the managed D1 migration
+`0011_meeting_library.sql` and `0012_meeting_summary_recovery.sql`. The live recap
+service remains optional and ephemeral;
+a recap outage does not prevent saving a meeting. See
+[Lock Screen capture](LOCK_SCREEN_VOICE.md) for operating constraints.
+
+Run `apple/scripts/test-meetings.sh` on macOS (after `pnpm install`) for the native
+notes → transcript → enhancement → relaunch → deletion journey against a real
+local Worker and persistent D1. The fixture uses synthetic authentication and
+inference only; it does not replace meeting storage or HTTP responses. XCTest
+screenshots, the Worker log, and the result bundle are written to
+`output/native-meetings/ios`. This journey does not simulate microphone audio.
 
 On iPhones with an Action Button, select **Settings → Action Button → Shortcut
 → Choose a Shortcut → Nanocodex → Record Voice Task**. The shortcut uses the
@@ -122,6 +154,47 @@ retain a complete downloadable file. HTML and SVG remain files. Unsupported
 device-local resource identities show an unavailable message, and tool details hide
 embedded binary data. Result parsing and image decoding stay outside view bodies,
 and repeated inner/outer tool outputs share a stable content identity.
+
+## Personal apps
+
+The Apps menu beside TODO, Chat and CRM lists saved apps and **Create an app**.
+Describe a tracker or another utility, follow generation in Chat, then open it
+from Apps. The pencil requests a change to the same app. The app menu can reload
+or restore its previous source without reverting saved data. Deleting an app
+also deletes its data after confirmation.
+
+Apps are actual Swift source interpreted by the shared
+[NanocodexApps](NanocodexApps/README.md) package and rendered as native SwiftUI
+controls. SwiftSyntax validates a documented, bounded Swift subset; unsupported
+syntax produces a source diagnostic. This is not a full Swift compiler. There is
+no HTML, JavaScript or WebKit app runtime. See the
+[authoring contract](NanocodexApps/AUTHORING.md) for views, language features and
+execution limits.
+
+Use `@State` for transient input and `@Persisted("stable-key")` for durable values.
+The host loads account-owned JSON, serializes actions, and saves changed durable
+values with revision checks. App source and data survive the creating
+conversation. Failed actions restore the previous local state; conflicts ask the
+user to reload. A source update keeps existing data, and a failed replacement
+leaves the last working native session visible. Each account supports 100 apps;
+each app has up to 256 KiB of Swift source and 256 KiB of JSON state. Storage
+requires a network connection; offline synchronization and photo/file input are
+not implemented.
+
+Within a button action, `Task { answer = try await Agent.run("prompt") }` calls
+the logged-in agent and returns its text result. Credentials remain in the native
+client, and normal agent permissions apply. Generated code has no general URL,
+filesystem or authenticated HTTP bridge. After five minutes, a running turn
+reports that work continues in Chat. Closing an app stops its foreground wait;
+an admitted agent turn can continue in Chat. Request IDs and completed receipts
+are stored per account before returning to generated code. Retrying the same
+prompt after a failed action or process restart reconciles that request. A
+successful app action releases its used receipts so a later intentional action
+can start new work. External agent effects cannot be undone by a later app
+action failure; the runtime reports that distinction.
+
+See the [persistent app HTTP contract](../js/managed/README.md#persistent-prompt-apps)
+for source publication, state conflicts and deployment migration requirements.
 
 ## App identity
 

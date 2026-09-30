@@ -64,13 +64,17 @@ struct SidebarTabsView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Tabs").font(.headline)
+                Text("Workspace").font(.headline)
                 Text("\(model.browserTabs.count)").font(.caption).foregroundStyle(.secondary).monospacedDigit()
                 Spacer()
                 Button("New tab", systemImage: "plus") { model.newTab() }
                     .labelStyle(.iconOnly).buttonStyle(.borderless)
                     .help("New conversation (⌘T)").accessibilityIdentifier("new-tab-in-sidebar")
             }.padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 8)
+            Button { model.screen = .meetings } label: {
+                Label("Meetings", systemImage: "waveform").frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                    .background(Color.primary.opacity(model.screen == .meetings ? 0.08 : 0), in: RoundedRectangle(cornerRadius: 10))
+            }.buttonStyle(.plain).padding(.horizontal, 12).accessibilityIdentifier("sidebar-meetings")
             List(selection: selection) {
                 ForEach(model.browserTabs) { node in
                     BrowserTab(node: node, vertical: true)
@@ -127,6 +131,8 @@ struct WorkspaceToolbar: ToolbarContent {
                 .disabled(!canGoForward).help("Forward (⌘])").accessibilityIdentifier("conversation-forward")
         }
         ToolbarItemGroup(placement: .primaryAction) {
+            Button("Meetings", systemImage: "waveform") { model.screen = .meetings }
+                .help("Meetings (⌘⇧M)").accessibilityIdentifier("workspace-meetings")
             Button("Search conversations", systemImage: "magnifyingglass") { model.showingSearch = true }
                 .help("Search conversations (⌘K)").accessibilityIdentifier("search-threads")
             Button("New conversation", systemImage: "square.and.pencil") { model.newTab() }
