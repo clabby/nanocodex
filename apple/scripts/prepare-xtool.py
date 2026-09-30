@@ -106,7 +106,7 @@ def expand(value, settings):
 
 
 def icons(catalog, destination):
-    """Linux has no actool. Preserve actual artwork with legacy icon PNGs."""
+    """Linux has no actool. Preserve actual artwork with legacy icon PNG images."""
     from PIL import Image
     contents = {p.relative_to(catalog).as_posix() for p in catalog.rglob("*") if p.is_file()}
     allowed = {"Contents.json", "AppIcon.appiconset/Contents.json", "AppIcon.appiconset/AppIcon.png"}

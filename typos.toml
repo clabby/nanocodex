@@ -27,7 +27,8 @@ extend-ignore-re = ['\bpackets(?:Received|Sent)WithEct1\b', '\bOT[0-9]+A[0-9]+\b
 
 # Match both 'truncated' and 'truncation' in retained measurement helpers.
 [type.py]
-extend-ignore-re = ["'truncat'"]
+# OpenSSL uses the exact -passin option; changing it breaks key loading.
+extend-ignore-re = ["'truncat'", '-passin\b']
 
 # FFmpeg's audio passthrough filter has this exact identifier.
 [type.sh.extend-words]

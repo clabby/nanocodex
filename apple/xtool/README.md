@@ -175,7 +175,7 @@ independent; this route does not change or depend on them.
 ## Compatibility boundaries
 
 The current app asset catalog contains only its app icon. Preparation creates
-legacy iPhone/iPad icon PNGs from the canonical image and rejects additional
+legacy iPhone/iPad icon PNG images from the canonical image and rejects additional
 asset types until they have explicit Linux handling. This preserves artwork;
 icon rendering on the target phone remains a device validation step.
 

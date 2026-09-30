@@ -262,7 +262,7 @@ comparison); this IPA is still **unsigned, unprovisioned and not device-tested**
 The signer also requests zsign's compression level 9; compression changes neither
 signature member bytes nor executable semantics. The repacker passed16 bounded,
 no-overwrite/path/race tests, plus two real-IPA byte/metadata audits. An
-uncompressible 51 MiB fixture remains oversized, so chunk transport stays necessary.
+incompressible 51 MiB fixture remains oversized, so chunk transport stays necessary.
 
 The independent signature verifier passed 117 synthetic corruption/parser/resource
 journeys and both SHA256-only and dual SHA1/SHA256 zsign modes on the complete

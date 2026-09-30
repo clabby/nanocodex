@@ -238,7 +238,7 @@ class RepackTests(unittest.TestCase):
         with self.assertRaises(ValueError): mod.member_digest(io.BytesIO(b'xx'), 1)
         with self.assertRaises(ValueError): mod.member_digest(io.BytesIO(b''), 1)
     def test_output_size_bound_cleanup(self):
-        # Input fits max but an uncompressible small file grows when deflated.
+        # Input fits max but an incompressible small file grows when deflated.
         archive(self.source, [('a', os.urandom(20), stat.S_IFREG)])
         with patch.object(mod, 'MAX_ARCHIVE', self.source.stat().st_size): self.refused()
     def test_51_mib_streaming_memory_and_large_output_fallback(self):
