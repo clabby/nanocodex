@@ -107,11 +107,20 @@ const WAITLIST = String.raw`function(url, expected, mode) {
     || /(?:reserve for|booking for)\s*\n\s*(?:someone else|family|guests)/i.test(text)
     || controls.some(el=>/^(remove guest|remove family member)$/.test(label(el)))
     || [...document.querySelectorAll('input')].filter(visible).some(el=> !['radio','checkbox','button','submit'].includes(el.type) && /guest/i.test(el.name+' '+el.id+' '+el.placeholder) && el.value);
-  const successText = 'You have been added to the waitlist! If a spot opens up, you will receive an email.';
-  const confirmations = [...document.querySelectorAll('p,div,span,[role="status"],[role="alert"]')].filter(visible)
-    .filter(el=>norm(visibleText(el).join(' ')) === norm(successText))
-    .filter(el=>![...el.children].some(child=>visible(child) && norm(visibleText(child).join(' ')) === norm(successText)));
-  const anchor = joins.length === 1 ? joins[0] : payments.length === 1 ? payments[0] : confirmations.length === 1 ? confirmations[0] : null;
+  // Arketa uses a notice in checkout and a heading on its reservation card.
+  // Preserve adjacent text-node punctuation (React splits You / ' / re).
+  const successTexts = [
+    'You have been added to the waitlist! If a spot opens up, you will receive an email.',
+    "You're on the waitlist",
+    "You've Been Added To The Waitlist!",
+  ].map(norm);
+  const success = el => successTexts.includes(norm(visibleText(el).join('')));
+  const confirmations = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,div,span,[role="status"],[role="alert"]')].filter(visible)
+    .filter(success)
+    .filter(el=>![...el.children].some(child=>visible(child) && success(child)));
+  // A completed reservation can retain an unrelated purchase form below it.
+  // Associate the receipt with its own class region before inspecting controls.
+  const anchor = confirmations.length === 1 ? confirmations[0] : joins.length === 1 ? joins[0] : payments.length === 1 ? payments[0] : null;
   let classScope = null;
   // Require a local semantic checkout region containing both identity and
   // action/receipt. The entire page/app root is not a class association.

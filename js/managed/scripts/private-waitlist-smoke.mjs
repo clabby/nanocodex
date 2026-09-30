@@ -85,6 +85,9 @@ if(process.argv.includes('--replay')){
   });
   await journey('join-after-inspect-new-operation',{...inspect,tool:{...inspect.tool,operation:'join',operation_id:randomUUID(),authorize_join:true}},check('joined',1));
   await journey('class-header-outside-action-form',make('split-form'),check('joined',1));
+  const header=make('header-confirmation');
+  await journey('split-text-header-confirmation-with-purchase-form',header,check('joined',1));
+  await journey('inspect-header-confirmation',{...header,tool:{...header.tool,operation:'inspect',operation_id:randomUUID(),authorize_join:false}},check('already_waitlisted',1));
   await journey('explicit-zero-total',make('zero'),check('joined',1));
   await journey('wrong-class',{...make(),tool:{...make().tool,expected:{...expected,title:'Different Reformer'}}},check('class_mismatch',0));
   await journey('wrong-time',{...make(),tool:{...make().tool,expected:{...expected,time:'7:00 PM UTC'}}},check('class_mismatch',0));

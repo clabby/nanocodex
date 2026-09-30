@@ -47,7 +47,7 @@ export class PrivateCheckoutFixture extends DurableObject<Env> {
     }
     if (url.pathname.startsWith('/checkout/waitlist/')) {
       const mode = url.pathname.slice('/checkout/waitlist/'.length);
-      if (!['pure', 'zero', 'paid', 'policy', 'lost', 'echo', 'native', 'hidden-confirmation', 'hidden-identity', 'family', 'myself', 'unrelated', 'split-form'].includes(mode)) return new Response('Unknown waitlist fixture', { status: 404 });
+      if (!['pure', 'zero', 'paid', 'policy', 'lost', 'echo', 'native', 'hidden-confirmation', 'hidden-identity', 'family', 'myself', 'unrelated', 'split-form', 'header-confirmation'].includes(mode)) return new Response('Unknown waitlist fixture', { status: 404 });
       await this.ctx.storage.transaction(async storage => {
         await storage.put('pageRequests', ((await storage.get<number>('pageRequests')) ?? 0) + 1);
       });
@@ -102,6 +102,7 @@ function waitlistPage(mode: string): string {
     const probe=new URL(location.href).searchParams.get('probe');
     const endpoint=path=>path+'?probe='+encodeURIComponent(probe);
     const identity='<h1>Synthetic Reformer</h1><p>September 30, 2026</p><p>6:00 PM UTC</p><p>Instructor: Taylor Fixture</p>'+(mode==='zero'||mode==='paid'?'':'<p>Free waitlist</p>');
+    const confirmation=()=>mode==='header-confirmation'?'<h5>You<span>&#39;</span>re on the waitlist</h5><p>If a spot opens up, you will receive an email.</p><form><label><input type="checkbox" required> I agree to the cancellation policy</label><button>Purchase</button></form>':'<p>You have been added to the waitlist! If a spot opens up, you will receive an email.</p>';
     const show=html=>{document.body.innerHTML='<main>'+html+'</main>';};
     if(mode==='native' && sessionStorage.getItem('signed-in-'+probe)==='true'){
       show('<form method="post" action="'+endpoint('/native-join')+'">'+identity+'<button type="submit">Join the Waitlist</button></form>');
@@ -114,7 +115,7 @@ function waitlistPage(mode: string): string {
       const response=await fetch(endpoint('/verify'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username,password,trusted:event.isTrusted})});
       const verified=await response.json();
       if(!verified.ok){document.body.append('Sign-in failed');return;}
-      if(verified.waitlisted){show(identity+'<p>You have been added to the waitlist! If a spot opens up, you will receive an email.</p>');return;}
+      if(verified.waitlisted){show(identity+confirmation());return;}
       if(mode==='native'){sessionStorage.setItem('signed-in-'+probe,'true');location.reload();return;}
       show((mode==='hidden-identity'?'<div style="opacity:0">'+identity+'</div><h1>Other Class</h1>':mode==='unrelated'?'<section>'+identity+'</section><section><h1>Other Class</h1>':identity)
         +(mode==='zero'?'<p>Total $0.00 USD</p>':'')
@@ -129,7 +130,7 @@ function waitlistPage(mode: string): string {
         event.preventDefault();
         const response=await fetch(endpoint('/join'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({classId:'synthetic-reformer'})});
         if(!(await response.json()).ok)return;
-        show(identity+(mode==='lost'?'<p>Request sent. Waiting for an update.</p>':'<p>You have been added to the waitlist! If a spot opens up, you will receive an email.</p>'));
+        show(identity+(mode==='lost'?'<p>Request sent. Waiting for an update.</p>':confirmation()));
         if(mode==='hidden-confirmation')document.querySelector('main').lastElementChild.style.opacity='0';
         if(mode==='echo')echo();
       });
