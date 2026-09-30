@@ -1,242 +1,208 @@
 import AVFoundation
 import DSWaveformImageViews
 import InboxCore
+import NanocodexUI
 import SwiftUI
 
+/// Presentation observes the app-process recorder; leaving this sheet does not
+/// own (or tear down) an in-progress microphone or its durable document.
 struct MeetingView: View {
     @ObservedObject var model: InboxModel
-    @StateObject private var recorder = MeetingRecorder()
+    @ObservedObject private var recorder = MeetingRecorder.shared
     @StateObject private var summary = MeetingSummaryPreview()
     @AppStorage("quickVoice.locale") private var locale = "en-US"
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var account: UUID?
     @State private var accountScope: String?
-    @State private var targetID: String?
-    @State private var submitted = false
+    @State private var tab = "Notes"
+    @State private var saving = false
     @State private var stopRequested = false
-    @State private var sendError: String?
-    @State private var visible = true
+    @State private var saveError: String?
+    @FocusState private var focusedField: String?
+    private var ownsCapture: Bool { accountScope != nil && recorder.accountScope == accountScope && account == model.quickVoiceGeneration }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Picker("Speech language", selection: $locale) {
-                        Text("English").tag("en-US")
-                        Text("Ελληνικά").tag("el-GR")
-                    }
-                    .pickerStyle(.segmented)
-                    .disabled(recorder.working)
-                    Text(recorder.status)
-                        .font(.subheadline)
-                        .accessibilityIdentifier("meeting-status")
-                    if recorder.recording {
-                        Label("Recording · \(Duration.seconds(recorder.seconds).formatted())", systemImage: "mic.fill")
-                            .foregroundStyle(.red)
-                            .accessibilityIdentifier("meeting-recording-indicator")
-                        if scenePhase == .active {
-                            recordingWaveform
-                        }
-                    }
-                    if let sendError { Text(sendError).font(.caption).foregroundStyle(.red) }
-                    HStack {
-                        Text("Live transcript").font(.headline)
-                        Spacer()
-                        if recorder.recording { Text("May revise").font(.caption).foregroundStyle(.secondary) }
-                    }
-                    if scenePhase == .active {
-                        if recorder.reviewing {
-                            TextEditor(text: Binding(get: { recorder.transcript }, set: { recorder.edit($0) }))
-                                .frame(minHeight: 180, maxHeight: 240)
-                                .accessibilityIdentifier("meeting-transcript")
-                                .privacySensitive()
+                VStack(alignment: .leading, spacing: 20) {
+                    if ownsCapture && scenePhase == .active {
+                        TextField("Meeting title", text: Binding(get: { recorder.meetingTitle }, set: { recorder.updateMetadata(title: $0, notes: recorder.meetingNotes) }), axis: .vertical)
+                            .font(.system(.title, design: .rounded, weight: .bold)).accessibilityIdentifier("meeting-title").focused($focusedField, equals: "title")
+                        captureControls
+                        Picker("Meeting content", selection: $tab) { Text("Notes").tag("Notes"); Text("Transcript").tag("Transcript") }
+                            .pickerStyle(.segmented).accessibilityIdentifier("meeting-capture-tabs")
+                        if tab == "Notes" {
+                            Text("My notes").font(.headline)
+                            Text("Jot down what matters. Nanocodex will fill in the details from the transcript.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                            TextEditor(text: Binding(get: { recorder.meetingNotes }, set: { recorder.updateMetadata(title: recorder.meetingTitle, notes: $0) }))
+                                .frame(minHeight: 220).scrollContentBackground(.hidden).padding(10)
+                                .background(ChatPalette.composer, in: RoundedRectangle(cornerRadius: 18))
+                                .accessibilityIdentifier("meeting-notes").focused($focusedField, equals: "notes")
+                            if recorder.working || !summary.text.isEmpty { summaryPanel }
                         } else {
-                            ScrollView {
-                                Text(recorder.transcript.isEmpty ? "Words appear here as they are recognized…" : recorder.transcript)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .accessibilityIdentifier("meeting-transcript")
-                                    .privacySensitive()
+                            HStack {
+                                Text(recorder.recording ? "Live transcript" : "Transcript").font(.headline)
+                                Spacer()
+                                if recorder.recording { Text("May revise").font(.caption).foregroundStyle(.secondary) }
                             }
-                            .frame(minHeight: 180, maxHeight: 240)
+                            if recorder.reviewing && !recorder.working {
+                                TextEditor(text: Binding(get: { recorder.transcript }, set: { recorder.edit($0) }))
+                                    .frame(minHeight: 280).scrollContentBackground(.hidden).padding(10)
+                                    .background(ChatPalette.composer, in: RoundedRectangle(cornerRadius: 18))
+                                    .accessibilityIdentifier("meeting-transcript").focused($focusedField, equals: "transcript")
+                            } else {
+                                Text(recorder.transcript.isEmpty ? "Words appear here as they are recognized…" : recorder.transcript)
+                                    .frame(maxWidth: .infinity, minHeight: 240, alignment: .topLeading).padding(16)
+                                    .background(ChatPalette.composer, in: RoundedRectangle(cornerRadius: 18))
+                                    .accessibilityIdentifier("meeting-transcript").textSelection(.enabled)
+                            }
                         }
+                        if let error = recorder.persistenceError ?? saveError { Text(error).font(.subheadline).foregroundStyle(.red) }
+                        if !recorder.working {
+                            Button(saving ? "Saving…" : "Save meeting") { Task { await saveAndClose() } }
+                                .buttonStyle(.borderedProminent).foregroundStyle(Color(uiColor: .systemBackground)).disabled(saving)
+                                .accessibilityIdentifier("meeting-save")
+                        }
+                        Text("Tell participants before transcribing. Only your microphone is captured; other apps’ protected call audio is not. Transcripts and notes sync to your account — microphone audio is not stored.")
+                            .font(.footnote).foregroundStyle(.secondary)
                     } else {
-                        Text("Meeting content hidden while inactive")
-                            .frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading)
+                        ContentUnavailableView("Meeting content hidden", systemImage: "lock", description: Text("Return to the original signed-in account to view this recording."))
                     }
-                    summaryPanel
-
-                    if recorder.recording {
-                        Button("Stop Recording") { stopRequested = true; recorder.finish() }
-                            .buttonStyle(.borderedProminent)
-                            .accessibilityIdentifier("meeting-finish")
-                    } else if !recorder.working {
-                        if recorder.reviewing, QuickVoiceInput.finalText(recorder.transcript) != nil {
-                            Button(sendError == nil ? "Start agent with transcript" : "Retry starting agent") { submit() }
-                                .disabled(!model.connected || model.isDemo || account != model.quickVoiceGeneration || scenePhase != .active)
-                                .accessibilityIdentifier("meeting-send")
-                        } else {
-                            Button("Start listening") { Task { await start() } }
-                                .buttonStyle(.borderedProminent)
-                                .accessibilityIdentifier("meeting-start")
-                        }
-                    } else if !recorder.recording {
-                        ProgressView("Finishing segments…")
-                    }
-                    Text("Recording continues through pauses. Stop Recording transcribes and starts one agent thread. An interrupted transcript stays available for review; nothing partial sends automatically.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                .padding()
+                }.padding(20).frame(maxWidth: 620).frame(maxWidth: .infinity).privacySensitive()
             }
-            .navigationTitle("Meeting listening")
+            .background(ChatPalette.background).navigationTitle("Meeting").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done typing") { focusedField = nil }.accessibilityIdentifier("meeting-keyboard-done")
+                }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(recorder.working ? "Keep recording" : "Close") { summary.pause(); dismiss() }
+                        .accessibilityIdentifier("meeting-close")
+                }
+            }
         }
-        .interactiveDismissDisabled(recorder.working)
+        .onAppear { prepare() }
         .onChange(of: recorder.summarySnapshot) { _, snapshot in
-            guard scenePhase == .active, model.connected,
-                  let account, account == model.quickVoiceGeneration, let snapshot else { return }
+            guard ownsCapture, scenePhase == .active, let account, let snapshot else { return }
             summary.receive(snapshot, account: account)
         }
         .onChange(of: recorder.finalizedSegments) { _, _ in enqueuePreview() }
         .onChange(of: recorder.settledSegmentIndices) { _, _ in enqueuePreview() }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active, model.connected, let account,
-               account == model.quickVoiceGeneration, (recorder.working || recorder.reviewing) {
-                summary.begin(account: account, captureID: recorder.captureID,
-                              snapshot: recorder.summarySnapshot, model: model, accountScope: accountScope)
-                enqueuePreview()
-            } else if phase != .active { summary.pause() }
-        }
         .onChange(of: recorder.reviewing) { _, ready in
-            if ready && stopRequested {
-                stopRequested = false
-                if !recorder.completedWithWarning { submit() }
-            }
+            guard ready && stopRequested else { return }
+            stopRequested = false
+            Task { await enhanceSavedMeeting() }
         }
-        .onChange(of: model.connected) { _, connected in
-            if !connected { summary.pause(); stopRequested = false; recorder.interrupt("Account disconnected. Review your partial transcript; sign in before sending.") }
-            else if let account, account == model.quickVoiceGeneration, scenePhase == .active {
-                summary.begin(account: account, captureID: recorder.captureID,
-                              snapshot: recorder.summarySnapshot, model: model, accountScope: accountScope)
-                enqueuePreview()
-            }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { beginPreview() } else { summary.pause() }
         }
         .onChange(of: model.quickVoiceGeneration) { _, generation in
-            if let account, generation != account {
-                summary.clear()
-                accountScope = nil
-                stopRequested = false
-                recorder.interrupt("Account changed. This transcript cannot be sent from a different account.")
-            }
+            guard let account, generation != account else { return }
+            summary.clear(); stopRequested = false
+            recorder.interrupt("Account changed. Partial meeting kept for the original account.")
         }
-        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { notification in
-            guard let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                  type == AVAudioSession.InterruptionType.began.rawValue else { return }
-            stopRequested = false; recorder.interrupt()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { notification in
-            if let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-               reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue {
-                stopRequested = false; recorder.interrupt()
-            }
-        }
-        .onDisappear {
-            visible = false
-            summary.close()
-            summary.clear()
-            if !submitted, let text = QuickVoiceInput.finalText(recorder.transcript),
-               let scope = try? model.lockedVoiceAccountScope() {
-                model.retainLockedVoiceRecovery(text, captureID: UUID().uuidString, accountScope: scope)
-            }
-            recorder.discard()
-        }
+        .onDisappear { summary.pause(); retainDraftIfNeeded() }
     }
-
+    private var captureControls: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if recorder.recording {
+                HStack {
+                    Label("Recording", systemImage: "record.circle.fill").foregroundStyle(.red).font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(Duration.seconds(recorder.seconds).formatted()).monospacedDigit().font(.headline)
+                }.accessibilityIdentifier("meeting-recording-indicator")
+                recordingWaveform
+                Button { stopRequested = true; recorder.finish() } label: { Label("Stop Recording", systemImage: "stop.fill") }
+                    .buttonStyle(.borderedProminent).foregroundStyle(Color(uiColor: .systemBackground)).accessibilityIdentifier("meeting-finish")
+                Text("You can leave this screen. Recording continues until you stop it.").font(.caption).foregroundStyle(.secondary)
+            } else if recorder.working {
+                ProgressView("Finishing transcription…")
+            } else {
+                Text(recorder.status).font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("meeting-status")
+                if !recorder.reviewing || (recorder.seconds == 0 && recorder.transcript.isEmpty) {
+                    Picker("Speech language", selection: $locale) { Text("English").tag("en-US"); Text("Ελληνικά").tag("el-GR") }.pickerStyle(.segmented)
+                    Button { Task { await start() } } label: { Label("Start recording", systemImage: "mic.fill") }
+                        .buttonStyle(.bordered).disabled(!model.connected || saving)
+                        .accessibilityIdentifier("meeting-start")
+                } else if recorder.completedWithWarning {
+                    Label("Partial transcript — review for missing words.", systemImage: "exclamationmark.circle").font(.subheadline).foregroundStyle(.secondary)
+                }
+            }
+        }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(ChatPalette.composer, in: RoundedRectangle(cornerRadius: 20))
+    }
     private var recordingWaveform: some View {
         GeometryReader { geometry in
-            WaveformLiveCanvas(
-                samples: waveformSamples(count: max(1, Int(geometry.size.width))),
-                configuration: .init(style: .filled(.systemRed), scale: 1, verticalScalingFactor: 0.45)
-            )
-        }
-        .frame(height: 44)
-        .clipped()
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+            WaveformLiveCanvas(samples: waveformSamples(count: max(1, Int(geometry.size.width))),
+                configuration: .init(style: .filled(.systemRed), scale: 1, verticalScalingFactor: 0.45))
+        }.frame(height: 44).clipped().allowsHitTesting(false).accessibilityHidden(true)
     }
-
     private func waveformSamples(count: Int) -> [Float] {
-        // Recorder levels are quantized peaks (1...15), not dB. The renderer
-        // expects inverted amplitude: 1 is silence and 0 is full height.
         let levels = Array(recorder.waveform.suffix(28))
         let history = Array(repeating: UInt8(0), count: 28 - levels.count) + levels
-        // Expand the bounded history across the canvas; missing history is silent.
-        return (0..<count).map { index in
-            1 - Float(min(history[index * history.count / count], 15)) / 15
-        }
+        return (0..<count).map { 1 - Float(min(history[$0 * history.count / count], 15)) / 15 }
     }
-
+    private var summaryPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Live recap", systemImage: "sparkles").font(.headline)
+            Text(summary.text.isEmpty ? "A recap appears as speech segments are confirmed." : summary.text).font(.subheadline)
+            Text(summary.caption).font(.caption).foregroundStyle(.secondary)
+        }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(ChatPalette.composer, in: RoundedRectangle(cornerRadius: 18)).accessibilityIdentifier("meeting-rolling-summary")
+    }
+    private func prepare() {
+        guard model.connected, !model.isDemo, let scope = try? model.lockedVoiceAccountScope() else { return }
+        account = model.quickVoiceGeneration; accountScope = scope
+        if !recorder.working && (!recorder.reviewing || recorder.accountScope != scope) { recorder.prepareDraft(accountScope: scope) }
+        beginPreview()
+    }
     private func start() async {
-        guard visible, scenePhase == .active, !submitted, !recorder.working else { return }
-        guard model.connected, !model.isDemo, !model.restoringAccount else { return }
-        summary.clear()
+        guard ownsCapture, scenePhase == .active, !recorder.working, let accountScope else { return }
         guard QuickVoiceRecorder.audioOwner == nil else {
-            // Recorder reports the competing capture as well; do not stop its mic.
-            await recorder.start(locale: locale)
-            return
+            saveError = "Another voice recording is active. Finish it first."; return
         }
-        LockedVoiceCoordinator.shared.yieldToForegroundRecording()
-        model.voice.stop()
-        account = model.quickVoiceGeneration
-        accountScope = try? model.lockedVoiceAccountScope()
-        targetID = nil
-        sendError = nil
-        stopRequested = false
-        await recorder.start(locale: locale == "el-GR" ? "el-GR" : "en-US")
-        if visible, scenePhase == .active, model.connected,
-           account == model.quickVoiceGeneration, recorder.working, let account {
-            summary.begin(account: account, captureID: recorder.captureID,
-                          snapshot: recorder.summarySnapshot, model: model, accountScope: accountScope)
-            enqueuePreview()
-        }
+        LockedVoiceCoordinator.shared.yieldToForegroundRecording(); model.voice.stop(); summary.clear()
+        await recorder.start(locale: locale == "el-GR" ? "el-GR" : "en-US", accountScope: accountScope)
+        beginPreview()
     }
-
+    private func beginPreview() {
+        guard ownsCapture, scenePhase == .active, model.connected, let account else { return }
+        summary.begin(account: account, captureID: recorder.captureID, snapshot: recorder.summarySnapshot, model: model, accountScope: accountScope)
+        enqueuePreview()
+    }
     private func enqueuePreview() {
-        guard scenePhase == .active, model.connected, let account,
-              account == model.quickVoiceGeneration else { return }
+        guard ownsCapture, scenePhase == .active else { return }
         summary.enqueue(finalized: recorder.finalizedSegments, settled: recorder.settledSegmentIndices)
     }
-
-    @ViewBuilder private var summaryPanel: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Rolling summary").font(.headline)
-            if scenePhase == .active {
-                Text(summary.text.isEmpty ? "A live recap will appear as speech segments are confirmed." : summary.text)
-                    .font(.subheadline)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .privacySensitive()
-                Text(summary.caption).font(.caption).foregroundStyle(.secondary)
-            } else {
-                Text("Meeting content hidden while inactive").font(.caption)
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityIdentifier("meeting-rolling-summary")
+    @MainActor private func enhanceSavedMeeting() async {
+        guard ownsCapture, let accountScope, let library = model.meetingLibrary else { return }
+        let id = recorder.captureID
+        await model.syncMeetingRecording(accountScope: accountScope)
+        guard library.scope == accountScope else { return }
+        do { try await library.summarize(id: id) } catch { /* Saved meeting remains editable; enhancement has a separate retry. */ }
     }
-
-    private func submit() {
-        guard !submitted, visible, scenePhase == .active, recorder.reviewing, !recorder.working,
-              let text = QuickVoiceInput.finalText(recorder.transcript), let account else { return }
-        guard model.connected, !model.isDemo, account == model.quickVoiceGeneration else { return }
-        guard model.sendQuickVoice(text, generation: account, targetID: &targetID) else {
-            sendError = model.error ?? "Could not start the conversation. Your transcript is still here; try sending again."
-            return
+    private func retainDraftIfNeeded() {
+        guard ownsCapture, !recorder.working, !saving, let accountScope else { return }
+        if recorder.saveDraft() {
+            recorder.discard()
+            Task { await model.syncMeetingRecording(accountScope: accountScope) }
         }
-        submitted = true
+    }
+    @MainActor private func saveAndClose() async {
+        guard ownsCapture, !recorder.working, !saving else { return }
+        saving = true; defer { saving = false }
+        guard recorder.saveDraft() else { saveError = recorder.persistenceError ?? "Add notes or record a meeting before saving."; return }
+        let captureID = recorder.captureID, scope = accountScope
         summary.close()
+        recorder.discard()
         dismiss()
+        if let scope {
+            await model.syncMeetingRecording(accountScope: scope)
+            if model.meetingLibrary?.scope == scope { try? await model.meetingLibrary?.summarize(id: captureID) }
+        }
     }
 }
 

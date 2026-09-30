@@ -6,7 +6,7 @@ import NanocodexRemote
 
 @MainActor
 final class AppModel: ObservableObject {
-    enum Screen { case chat, hands }
+    enum Screen { case chat, hands, meetings }
     enum WorkspaceFocus { case navigation, writing, sidebar }
     @Published var state = DesktopState() {
         didSet { updateBackgroundActivity() }
@@ -131,6 +131,7 @@ final class AppModel: ObservableObject {
     private var currentCredential: AccountKeychain.Credential? {
         didSet {
             showingScheduledJobs = false
+            meetingLibrary.reset()
             resetRemoteSharing()
             if let credential = currentCredential, let origin = URL(string: credential.baseUrl) {
                 remoteService = try? RemoteService(origin: origin) { request in
@@ -140,6 +141,20 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    let meetingLibrary = MacMeetingLibrary()
+#if DEBUG
+    var meetingClientOverride: (() throws -> ManagedClient)?
+#endif
+    func meetingsClient() throws -> ManagedClient {
+#if DEBUG
+        if let meetingClientOverride { return try meetingClientOverride() }
+#endif
+        // Runtime state can arrive while connect/phone sign-in still owns the
+        // previous credential. Never use that credential for a restored journal.
+        guard state.connected, !accountTransition else { throw APIError.invalidCredential }
+        return try schedulesClient()
+    }
+
     @Published var showingScheduledJobs = false
 
     func schedulesClient() throws -> ManagedClient {
@@ -523,6 +538,9 @@ final class AppModel: ObservableObject {
         }
     }
     private func apply(_ next: DesktopState) {
+        // Also runs for an unchanged state after reconnect reset the library.
+        // Only runtime-accepted state activates account-owned pending receipts.
+        defer { meetingLibrary.activate(scope: state.connected ? state.accountScope : nil) }
         if restoredLayout, next.accountScope == state.accountScope {
             // A save acknowledgement contains the entire persisted layout. It
             // cannot change this live layout or invalidate every pane on typing.
@@ -955,8 +973,9 @@ final class AppModel: ObservableObject {
         persistence?.cancel(); accountTransition = true
         defer { accountTransition = false }
         let next: DesktopState = try await runtime.call("connect", [.object(["baseUrl": .string(baseUrl), "apiKey": .string(key), "remember": .bool(false)])])
-        resetAccount(); apply(next)
+        resetAccount()
         currentCredential = .init(baseUrl: next.baseUrl, apiKey: key)
+        apply(next)
         if !isolatedSession {
             if remember { try AccountKeychain.save(.init(baseUrl: next.baseUrl, apiKey: key)) } else { AccountKeychain.remove() }
         }
@@ -998,8 +1017,9 @@ final class AppModel: ObservableObject {
                 throw error
             }
             signInChangedAccount = true
-            resetAccount(); apply(next)
+            resetAccount()
             currentCredential = credential
+            apply(next)
             signInCommitted = true
         }
         try await runtime.request("completeSignIn")
@@ -1020,12 +1040,15 @@ final class AppModel: ObservableObject {
         clearPhoneSignIn()
     }
     private func restoreSignInPreviousAccount() async throws {
+        let wasTransitioning = accountTransition
+        accountTransition = true
+        defer { accountTransition = wasTransitioning }
         if let previous = signInPreviousCredential {
             let next: DesktopState = try await runtime.call("connect", [.object(["baseUrl": .string(previous.baseUrl), "apiKey": .string(previous.apiKey), "remember": .bool(false)])])
-            resetAccount(); apply(next); currentCredential = previous
+            resetAccount(); currentCredential = previous; apply(next)
         } else {
             let next: DesktopState = try await runtime.call("disconnect")
-            resetAccount(); apply(next); currentCredential = nil
+            resetAccount(); currentCredential = nil; apply(next)
         }
         signInChangedAccount = false
     }
@@ -1040,6 +1063,7 @@ final class AppModel: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
     private func resetAccount() {
+        meetingLibrary.reset()
         voice.stop(); voice.clearHistory(); preparingVoiceTabID = nil
         accountHandDiscovery?.cancel(); accountHandDiscovery = nil
         defaultHandConnection?.cancel(); defaultHandConnection = nil
@@ -1120,6 +1144,7 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
     func prepareToQuit() async {
+        meetingLibrary.suspend()
         accountHandDiscovery?.cancel(); accountHandDiscovery = nil
         backgroundActivityStopped = true; backgroundActivity.stop()
         voice.stop(); await voice.finishStopping()
@@ -1130,7 +1155,7 @@ final class AppModel: ObservableObject {
         _ = try? await runtime.request("saveLayout", [try await Self.layoutPayload(TabLayout(tabs: tabs, activeTabId: activeTabID, tabPosition: tabPosition, theme: theme, workspaceMode: workspaceMode, paneWidth: paneWidth, tiledTabIDs: tiledTabIDs, pendingMessages: pending, paneLayouts: paneLayouts), scope: state.accountScope)])
         runtime.stop()
     }
-    func shutdown() { resetRemoteSharing(); backgroundActivityStopped = true; backgroundActivity.stop(); voice.stop(); defaultHandConnection?.cancel(); accountHandDiscovery?.cancel(); persistence?.cancel(); runtime.stop() }
+    func shutdown() { meetingLibrary.suspend(); resetRemoteSharing(); backgroundActivityStopped = true; backgroundActivity.stop(); voice.stop(); defaultHandConnection?.cancel(); accountHandDiscovery?.cancel(); persistence?.cancel(); runtime.stop() }
 
     private func connectDefaultHand() {
         defaultHandConnection?.cancel()

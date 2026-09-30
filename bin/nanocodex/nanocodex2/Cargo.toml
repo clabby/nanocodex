@@ -137,3 +137,7 @@ use-self = "warn"
 redundant-clone = "warn"
 large-enum-variant = "allow"
 result-large-err = "allow"
+
+[[test]]
+name = "nanocodex2_continue"
+path = "../tests/nanocodex2_continue.rs"

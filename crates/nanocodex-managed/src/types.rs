@@ -158,6 +158,19 @@ pub struct AgentList {
     pub summaries: BTreeMap<String, AgentSummary>,
 }
 
+/// Durable manual session disposition, independent of runtime lifecycle.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SessionDoneState {
+    /// Whether the user has marked this session done.
+    pub done: bool,
+    /// Unix timestamp in milliseconds of the current done transition, or none after undo.
+    #[serde(default)]
+    pub done_at: Option<f64>,
+    /// Confirmed presentation revision, used to reject older list snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_revision: Option<u64>,
+}
+
 /// Compact account-owned agent summary.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AgentSummary {

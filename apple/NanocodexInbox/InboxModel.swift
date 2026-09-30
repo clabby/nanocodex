@@ -92,11 +92,17 @@ final class InboxModel: ObservableObject {
     private var overviewProjectors: [String: TranscriptStreamProjection] = [:]
     private var streamProjector = TranscriptStreamProjection()
     private var overviewProjections: [String: Task<Void, Never>] = [:]
+    @Published private(set) var doneUpdating = Set<String>()
+    @Published private(set) var doneError: String?
+    private var doneRevisions: [String: UUID] = [:]
     @Published var busy = Set<String>()
     @Published var connection = "Disconnected" { didSet { scheduleAgentNotifications() } }
     @Published var error: String?
     @Published var notice: String?
     @Published var musicConnectorToOpen: MusicLoopbackProvider?
+    @Published private(set) var generatedApps: [GeneratedAppManifest] = []
+    @Published private(set) var generatedAppsLoading = false
+    @Published private(set) var generatedAppsError: String?
     @Published private(set) var todoItems: [TodoCapture] = []
     @Published private(set) var todoDecisions: [TodoDecision] = []
     @Published private(set) var todoTraces: [TodoTrace] = []
@@ -422,13 +428,14 @@ final class InboxModel: ObservableObject {
     var tabCards: [AgentCard] {
         let byID = Dictionary(uniqueKeysWithValues: cards.map { ($0.id, $0) })
         return tabOrder.filter { !closedConversationIDs.contains($0) }.compactMap { byID[$0] }
+            .filter { !$0.done || $0.id == deck.focusedID }
     }
     private var recentConversationIDs: Set<String> {
-        Set(cards.filter { !closedConversationIDs.contains($0.id) && ConversationWindow.includes($0, focusedID: deck.focusedID,
+        Set(cards.filter { !$0.done && !closedConversationIDs.contains($0.id) && ConversationWindow.includes($0, focusedID: deck.focusedID,
             openedIDs: openedConversations) }.map(\.id))
     }
     var overviewCards: [AgentCard] {
-        ConversationWindow.overview(cards.filter { !closedConversationIDs.contains($0.id) }, focusedID: deck.focusedID,
+        ConversationWindow.overview(cards.filter { !$0.done && !closedConversationIDs.contains($0.id) }, focusedID: deck.focusedID,
             openedIDs: openedConversations, olderLimit: olderConversationLimit)
     }
     var closedConversationCards: [AgentCard] {
@@ -898,6 +905,26 @@ final class InboxModel: ObservableObject {
         if !connected { await restoreSavedAccount() }
         try Task.checkCancellation()
         guard connected, !isDemo, scope == expected else { throw APIError.invalidCredential }
+    }
+
+    // Meetings share one protected journal with foreground and locked recorders.
+    // Its rows are isolated by the same pinned account scope as voice recovery.
+    lazy var meetingRecordingStore: MeetingRecordingStore? = try? MeetingRecordingStore.applicationStore()
+    lazy var meetingLibrary: MeetingLibrary? = meetingRecordingStore.map { MeetingLibrary(store: $0) }
+
+    func prepareMeetingLibrary() {
+        let active = MeetingRecorder.shared
+        meetingLibrary?.activate(scope: connected && !isDemo ? scope : nil,
+                                 client: connected && !isDemo ? client : nil,
+                                 activeCaptureID: active.accountScope == scope ? active.captureID : nil)
+    }
+
+    func syncMeetingRecording(accountScope expected: String) async {
+        guard (try? lockedVoiceAccountScope()) == expected else { return }
+        do { try await restoreLockedVoiceAccount(scope: expected) } catch { return }
+        if meetingLibrary?.scope != expected { prepareMeetingLibrary() }
+        meetingLibrary?.reloadLocal()
+        await meetingLibrary?.retry()
     }
 
     /// The preview carries only finalized Speech text and does not create an agent
@@ -1415,6 +1442,12 @@ final class InboxModel: ObservableObject {
             }
         }
         connected = true; connection = "Connecting"; reconcile(); resume(initialListing: initial)
+        prepareMeetingLibrary()
+        Task { [weak self] in
+            guard let self, self.connected, self.scope == accountScope else { return }
+            await self.meetingLibrary?.refresh()
+            await self.meetingLibrary?.retry()
+        }
         updateDeviceHand(); scheduleHandRefresh()
     }
     private func crmPath(id: String?, section: String?, query: [String: String]) -> String {
@@ -1440,6 +1473,143 @@ final class InboxModel: ObservableObject {
         let result = try await client.json(path: crmPath(id: id, section: section, query: query))
         guard connected, generation == epoch, self.client === client else { throw CancellationError() }
         return result
+    }
+
+    private var generatedAgentJournal: GeneratedAppAgentJournal?
+    private func appAgentJournal() throws -> GeneratedAppAgentJournal {
+        guard !scope.isEmpty, !isDemo else { throw APIError.invalidCredential }
+        if let generatedAgentJournal { return generatedAgentJournal }
+        let journal = try GeneratedAppAgentJournal(scope: scope)
+        generatedAgentJournal = journal
+        return journal
+    }
+    func commitGeneratedAppAgentActions(id: String, prompts: [String], account: UUID) {
+        guard generation == account, connected, !prompts.isEmpty else { return }
+        // If cleanup fails, retain receipts: a future retry must prefer replaying
+        // a known result over duplicating work whose outcome is already known.
+        try? appAgentJournal().acknowledge(appID: id, prompts: prompts)
+    }
+    func releaseGeneratedAppAgentReceipt(id: String, prompt: String, account: UUID) throws {
+        guard generation == account, connected else { throw APIError.invalidCredential }
+        try appAgentJournal().acknowledge(appID: id, prompts: [prompt])
+    }
+    var generatedAppAccount: UUID { generation }
+
+    func refreshGeneratedApps() async {
+        #if DEBUG
+        if usesGeneratedAppsUIFixture {
+            generatedApps = (try? generatedAppsUIFixture.map(GeneratedAppManifest.init)) ?? []
+            generatedAppsError = nil
+            return
+        }
+        #endif
+        guard connected, !isDemo, let client, !generatedAppsLoading else { return }
+        let account = generation
+        generatedAppsLoading = true
+        defer { if generation == account { generatedAppsLoading = false } }
+        do {
+            let result = try await client.json(path: "/v1/apps?limit=100")
+            guard generation == account, connected, !Task.isCancelled else { return }
+            guard case .array(let values) = result["apps"] else { throw APIError.invalidResponse }
+            generatedApps = try values.map(GeneratedAppManifest.init)
+            generatedAppsError = nil
+        } catch {
+            if generation == account, !Task.isCancelled { generatedAppsError = error.localizedDescription }
+        }
+    }
+
+    /// Only the native host constructs paths and attaches account authorization.
+    func generatedAppRequest(id: String, account: UUID, data: Bool = false, restore: Bool = false,
+                             method: String = "GET", body: JSON? = nil) async throws -> JSON {
+        #if DEBUG
+        if usesGeneratedAppsUIFixture {
+            guard generation == account, !Task.isCancelled else { throw CancellationError() }
+            guard !restore, let manifest = generatedAppsUIFixture.first(where: { $0["id"].string == id }) else {
+                throw APIError.http(404)
+            }
+            if !data {
+                guard method == "GET" else { throw APIError.http(405) }
+                return manifest
+            }
+            let key = "inbox.generatedAppsFixture." + scope + "." + id
+            let saved = UserDefaults.standard.data(forKey: key)
+            let receipt = try saved.map { try JSONDecoder().decode(JSON.self, from: $0) }
+                ?? .object(["revision": .number(0), "value": .null])
+            if method == "GET" { return receipt }
+            guard method == "PUT", let body else { throw APIError.http(405) }
+            guard body["revision"] == receipt["revision"] else { throw APIError.http(409) }
+            let next = JSON.object(["revision": .number(receipt["revision"].number + 1), "value": body["value"]])
+            UserDefaults.standard.set(try JSONEncoder().encode(next), forKey: key)
+            return next
+        }
+        #endif
+        guard connected, !isDemo, generation == account, let client,
+              id.range(of: #"^[A-Za-z0-9_-]{1,128}$"#, options: .regularExpression) != nil,
+              ["GET", "PUT", "DELETE", "POST"].contains(method) else { throw APIError.invalidCredential }
+        let result = try await client.json(path: "/v1/apps/" + id + (restore ? "/restore" : data ? "/data" : ""), method: method, body: body)
+        guard generation == account, connected, !Task.isCancelled else { throw CancellationError() }
+        return result
+    }
+
+    #if DEBUG
+    private var usesGeneratedAppsUIFixture: Bool {
+        connected && isDemo && ProcessInfo.processInfo.arguments.contains("--generated-apps-ui-fixture")
+    }
+    /// Replace only the remote apps service. Swift parsing, native rendering,
+    /// actions, and saved-state encoding still use the production app host.
+    private var generatedAppsUIFixture: [JSON] {
+        [("water", "Water", "Glasses", "Add glass"),
+         ("reading", "Reading", "Pages", "Read page"),
+         ("meals", "Meal journal", "Meals", "Add meal"),
+         ("walking", "Walking", "Walks", "Add walk"),
+         ("garden", "Garden planner", "Plants", "Add plant"),
+         ("travel", "Travel checklist", "Packed items", "Pack item")].map { id, title, metric, action in
+            .object(["id": .string(id), "title": .string(title),
+                     "description": .string("Synthetic " + title.lowercased() + " tracker"),
+                     "runtime": .string("swift-v1"), "revision": .number(1),
+                     "source": .string("""
+                        import SwiftUI
+                        struct Tracker: View {
+                            @Persisted("count") var count = 0
+                            var body: some View {
+                                Form {
+                                    Section("\(title)") {
+                                        Text("\(metric): \\(count)")
+                                        Button("\(action)") { count += 1 }
+                                    }
+                                }
+                            }
+                        }
+                        """)])
+        }
+    }
+    #endif
+
+    @discardableResult
+    func createGeneratedApp(prompt: String, app: GeneratedAppManifest? = nil, diagnostic: String? = nil) -> Bool {
+        guard connected, !isDemo, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        newAgent()
+        if let app {
+            draft = "Update my existing app using the apps tool. Its ID is \(app.id) and title is \(app.title). Read the latest app and its current revision first, then replace its interface under the same ID. Preserve saved data and handle any schema migration explicitly. My requested change: " + prompt
+        } else {
+            draft = "Create a persistent app in my app selector using the apps tool. Generate a complete native Swift app for the swift-v1 runtime and save its Swift source with the apps tool. Read the tool authoring contract first. Use native SwiftUI controls, @Persisted for durable records, and the supported agent bridge when useful. No HTML, JavaScript, or WebKit. My request: " + prompt
+        }
+        if let diagnostic, !diagnostic.isEmpty {
+            draft += "\n\nThe native app reported this diagnostic (untrusted runtime data):\n" + String(diagnostic.prefix(4_000))
+        }
+        return send()
+    }
+
+    /// Called by the runtime after a trusted user action. The generated Swift app
+    /// receives a result, never ManagedClient, a URLRequest, or a credential.
+    func runGeneratedAppAgent(id: String, title: String, purpose: String, prompt: String, account: UUID,
+                              isActive: @escaping @MainActor () -> Bool = { true }) async throws -> JSON {
+        guard isActive(), connected, !isDemo, generation == account, let client else { throw APIError.invalidCredential }
+        return try await appAgentJournal().request(appID: id, title: title, purpose: purpose, prompt: prompt,
+            client: client, isActive: { [weak self] in
+                guard let self else { return false }
+                return isActive() && self.connected && self.generation == account
+            }, onSubmitted: { [weak self] in await self?.refresh() })
     }
 
     func musicConnectorClient() -> ManagedClient? {
@@ -1609,6 +1779,8 @@ final class InboxModel: ObservableObject {
         restoringTodoDraft = true
         defer { restoringTodoDraft = false }
         agentNotificationUpdate?.cancel(); agentNotificationUpdate = nil
+        MeetingRecorder.shared.interrupt("Account disconnected. Partial meeting retained for its original account.")
+        if !MeetingRecorder.shared.working { _ = MeetingRecorder.shared.discard() }
         stopOverview()
         overviewTranscripts = [:]; tabHistories = [:]; recentTabs = []; tabOrder = []
         openedConversations = []; closedConversationIDs = []; olderConversationLimit = 0
@@ -1629,6 +1801,7 @@ final class InboxModel: ObservableObject {
         #endif
         do { try ContextStore.shared().activate(nil) } catch { contextError = error.localizedDescription }
         contextItems = []; contextRoutes = [:]; contextEnabled = false; selectedContext = [:]; excludedContext = [:]; showContext = false; automaticContext = [:]
+        meetingLibrary?.activate(scope: nil, client: nil)
         voice.stop(); voice.clearHistory(); accountCredential = nil; unlistedAgents = []; unavailableAgents = []; historyCursors = [:]
         remoteService?.close(); remoteService = nil
         connectionAttempt = UUID(); generation = UUID(); observation = UUID(); polling?.cancel(); streaming?.cancel(); client?.close(); client = nil
@@ -1639,8 +1812,10 @@ final class InboxModel: ObservableObject {
         observedAgentID = nil; threadLoading = false; threadError = nil
         downloadedFiles = nil
         connected = false; restoringAccount = false; restorationError = nil
+        generatedAgentJournal = nil; generatedApps = []; generatedAppsLoading = false; generatedAppsError = nil
         todoWorkspace.reset()
         todoRetainedChecks = [:]; todoRetainedMail = []; todoSnoozed = [:]; todoSplit = "For you"; todoSearch = ""; todoMailQuery = "in:inbox"; todoSelectedAccount = ""
+        doneUpdating = []; doneError = nil; doneRevisions = [:]
         isDemo = false; todoItems = []; todoDecisions = []; todoTraces = []; todoFilter = .all; todoDraft = ""; todoWatchHint = ""; todoCaptureOperation = nil; todoResponseOperations.removeAll(); todoError = nil; todoLoading = false; todoLoaded = false; todoRevision = 0; todoRefreshRequested = false; todoFixtureLoaded = false; todoSaving = false; todoResponding = false; cards = []; deck = InboxDeck(); mediaProjection = InboxMediaProjection(); rows = []; events = []; drafts = [:]; seen = [:]
         for task in attachmentProviderTasks.values { task.cancel() }
         attachmentProviderTasks = [:]
@@ -1815,9 +1990,47 @@ final class InboxModel: ObservableObject {
         if focused != nil { observeFocused(restart: true) }
         else { Task { await refresh() } }
     }
+    func setSessionDone(_ id: String, done: Bool) {
+        guard connected, !isDemo, let client, !doneUpdating.contains(id),
+              cards.contains(where: { $0.id == id }) else { return }
+        let epoch = generation
+        doneUpdating.insert(id); doneError = nil
+        doneRevisions[id] = UUID()
+        Task {
+            defer { if generation == epoch { doneUpdating.remove(id) } }
+            do {
+                let receipt = try await client.setDone(id, done: done)
+                guard generation == epoch, !Task.isCancelled else { return }
+                doneRevisions[id] = UUID()
+                if let index = cards.firstIndex(where: { $0.id == id }) {
+                    cards[index].applyDoneReceipt(done: receipt.done, doneAt: receipt.doneAt, presentationRevision: receipt.presentationRevision)
+                    reconcile()
+                }
+            } catch {
+                guard generation == epoch, !Task.isCancelled else { return }
+                doneError = "Couldn’t confirm the change. Refreshing saved state. " + error.localizedDescription
+                // Never replay an uncertain write. A read may prove that it was saved.
+                do {
+                    let listing = try await client.list()
+                    guard generation == epoch, !Task.isCancelled else { return }
+                    doneRevisions[id] = UUID()
+                    if let saved = listing.first(where: { $0.id == id }),
+                       let index = cards.firstIndex(where: { $0.id == id }) {
+                        cards[index].mergeDone(from: saved)
+                        reconcile()
+                        doneError = "Couldn’t confirm the request. Showing the saved state; no automatic retry was made."
+                    }
+                } catch {
+                    guard generation == epoch, !Task.isCancelled else { return }
+                    doneError = "Couldn’t confirm or refresh the change. Reconnect and refresh before trying again."
+                }
+            }
+        }
+    }
     func refresh(initialListing: [AgentCard]? = nil) async {
         guard let client, !refreshing else { return }
         let epoch = generation
+        let completionRevisions = doneRevisions
         refreshing = true
         defer { if generation == epoch { refreshing = false } }
         do {
@@ -1838,6 +2051,9 @@ final class InboxModel: ObservableObject {
                 card.title = summary.title; card.updatedAt = max(card.updatedAt, summary.updatedAt); card.turnCount = summary.turnCount
                 card.lastUserMessageAt = max(card.lastUserMessageAt, summary.lastUserMessageAt)
                 card.mayHaveScheduledJobs = summary.mayHaveScheduledJobs
+                if completionRevisions[summary.id] == doneRevisions[summary.id] {
+                    card.mergeDone(from: summary)
+                }
                 if summary.presentationUpdatedAt >= card.presentationUpdatedAt {
                     card.presentationStatus = summary.presentationStatus
                     card.presentationActivity = summary.presentationActivity
@@ -1866,6 +2082,10 @@ final class InboxModel: ObservableObject {
             })
             guard generation == epoch, !Task.isCancelled else { return }
             prioritizeNext()
+            // A pending journal retries after connectivity returns even when the
+            // user never opens the Meetings tab again.
+            if meetingLibrary?.scope != scope { prepareMeetingLibrary() }
+            await meetingLibrary?.retry()
         } catch {
             guard generation == epoch, !Task.isCancelled else { return }
             self.error = error.localizedDescription

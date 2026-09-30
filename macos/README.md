@@ -23,6 +23,43 @@ Select a job to edit its prompt, timing, active status, or conversation mode, or
 cancel future scheduling. Dispatched and running work is not stopped by
 cancellation. New schedules are created by asking an agent in chat.
 
+## Meetings
+
+Open **Meetings** in the workspace toolbar/sidebar or press **⌘⇧M** to review
+account-synced iPhone recordings. Notes and generated summaries are separate;
+the Transcript tab preserves the complete saved text and marks partial captures.
+No audio is stored and playback is unavailable. Save notes to sync them across
+devices. Unsaved notes remain in memory when switching recordings, workspace
+pages, or hiding the window; switching accounts clears private account data.
+The visible, active library refreshes on return without background polling.
+
+Summary failures leave the recording intact and expose **Retry summary**.
+Long recordings use bounded full-source summary chunks rather than silently
+truncating the transcript; service limits are reported explicitly. Ready summaries
+are immutable per saved revision; **Refresh enhanced notes**
+reads the current receipt without another generation.
+Delete removes the transcript, notes, and summary after confirmation.
+
+The native user journey uses actual ManagedClient HTTP requests through a
+Debug-only, loopback-pinned adapter to the production account router/D1 fixture.
+With normal build prerequisites prepared, run these in two shells from the root:
+
+```sh
+node js/managed/scripts/meeting-library-fixture.mjs --port 8797 --persist output/meeting-library-fixture-state
+scripts/xcodebuild-guard.sh -project macos/Nanocodex.xcodeproj -scheme Nanocodex \
+  -destination 'platform=macOS' -derivedDataPath output/meetings-macos \
+  -resultBundlePath output/meetings-macos-ui.xcresult \
+  -only-testing:NanocodexUITests/NanocodexUITests/testSyncedMeetingsNotesSummaryDraftAndDeletion test
+```
+
+The journey creates synthetic UUID-scoped recordings, verifies server-side note
+revision updates and exact lost-response retry, exercises unavailable-summary
+recovery and full-source long/notes-only summaries, preserves drafts across
+navigation and cloud conflicts, renders partial transcripts, and deletes via
+native controls. Screenshots live in the result bundle. It requires the local fixture;
+no live account is used. The fixture control temporarily toggles provider failure,
+so do not run another summary journey concurrently on the same fixture port.
+
 ## Build and open
 
 Install workspace dependencies with `pnpm install` and prepare the pinned Node
@@ -49,7 +86,7 @@ For development with the repository's `.env`:
 
 ```sh
 pnpm --filter @nanocodex/desktop-runtime build
-xcodebuild -project macos/Nanocodex.xcodeproj -scheme Nanocodex -configuration Debug -derivedDataPath macos/build build
+scripts/xcodebuild-guard.sh -project macos/Nanocodex.xcodeproj -scheme Nanocodex -configuration Debug -derivedDataPath macos/build build
 open macos/build/Build/Products/Debug/Nanocodex.app
 ```
 
