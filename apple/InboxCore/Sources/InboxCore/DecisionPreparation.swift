@@ -15,6 +15,19 @@ public enum TodoDecisionApproval {
     public static func matches(reviewed: TodoDecision, current: TodoDecision) -> Bool {
         reviewed.isPreparedForReview && current.isPreparedForReview && reviewed == current
     }
+
+    /// A locally acknowledged edit may advance only the same bound draft. Every
+    /// decision/preparation field (including target version and preparation
+    /// timestamp) remains unchanged; the current draft must be the exact edit
+    /// shown and acknowledged by this session, not an arbitrary remote update.
+    public static func matches(reviewed: TodoDecision, current: TodoDecision, acknowledgedDraft: TodoMailDraft) -> Bool {
+        guard reviewed.isPreparedForReview, current.isPreparedForReview,
+              reviewed.preparedDraft?.id == acknowledgedDraft.id,
+              TodoDraftApproval.matches(reviewed: acknowledgedDraft, current: current.preparedDraft) else { return false }
+        var boundContext = current
+        boundContext.preparedDraft = reviewed.preparedDraft
+        return reviewed == boundContext
+    }
 }
 
 public enum TodoDraftApproval {

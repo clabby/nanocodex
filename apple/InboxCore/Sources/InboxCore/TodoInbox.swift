@@ -66,7 +66,8 @@ public struct TodoDecision: Identifiable, Equatable, Sendable {
     public let preparationSources: [TodoPreparationSource]
     public let recommendation: String
     public let proposal: String
-    public let preparedDraft: TodoMailDraft?
+    public let preparationUpdatedAt: String
+    public internal(set) var preparedDraft: TodoMailDraft?
 
     public init(_ json: JSON) throws {
         guard !json["id"].string.isEmpty, !json["title"].string.isEmpty,
@@ -92,6 +93,7 @@ public struct TodoDecision: Identifiable, Equatable, Sendable {
         preparationSources = json["preparation"]["sources"].array.map(TodoPreparationSource.init)
         recommendation = json["preparation"]["recommendation"].string
         proposal = json["preparation"]["proposal"].string
+        preparationUpdatedAt = json["preparation"]["updated_at"].string
         if case .object = json["preparation"]["prepared_draft"] { preparedDraft = try TodoMailDraft(json["preparation"]["prepared_draft"]) }
         else { preparedDraft = nil }
     }

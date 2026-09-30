@@ -129,6 +129,75 @@ final class DecisionPreparationTests: XCTestCase {
         XCTAssertEqual(session.draft?.status, "draft")
         XCTAssertEqual(reads, 2)
     }
+    @MainActor func testAcknowledgedPreparedLocalEditCanApproveButRemoteDraftContextAndGenerationChangesCannot() async throws {
+        for change in ["none", "remote-draft", "target-version", "source", "preparation-time"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let initial = try TodoDecision(decisionJSON())
+            var serverDraft = try XCTUnwrap(initial.preparedDraft)
+            var saved = false, sends = 0
+            func jsonDraft(_ draft: TodoMailDraft) -> JSON {
+                guard case .object(var fields) = draft.saveJSON else { return .null }
+                fields["status"] = .string(draft.status)
+                return .object(fields)
+            }
+            let fixture = try HTTPFixture { request in
+                if request.path.hasSuffix("/accounts") {
+                    XCTAssertEqual(request.method, "GET")
+                    return FixtureReply(body: #"{"accounts":[{"connection_id":"account","email":"owner@example.test"}]}"#)
+                }
+                if request.path.hasSuffix("/drafts"), request.method == "POST" {
+                    XCTAssertEqual(request.json["body_text"] as? String, "My locally reviewed edit")
+                    XCTAssertEqual(request.json["version"] as? Int, 1)
+                    serverDraft.bodyText = "My locally reviewed edit"; serverDraft.version = 2; saved = true
+                    return FixtureReply(body: self.encoded(.object(["draft": jsonDraft(serverDraft)])))
+                }
+                if request.path.contains("/decisions/") {
+                    XCTAssertEqual(request.method, "GET")
+                    guard case .object(var fields) = self.decisionJSON(), case .object(var prep) = fields["preparation"] else { return FixtureReply(status: 500) }
+                    var currentDraft = serverDraft
+                    if saved {
+                        if change == "remote-draft" { currentDraft.bodyText = "An unreviewed remote edit"; currentDraft.version = 3 }
+                        if change == "target-version" { fields["version"] = .number(2) }
+                        if change == "source" { fields["source_message_id"] = .string("new-source") }
+                        if change == "preparation-time" { prep["updated_at"] = .string("2026-09-30T05:00:00Z") }
+                    }
+                    prep["prepared_draft"] = jsonDraft(currentDraft); fields["preparation"] = .object(prep)
+                    return FixtureReply(body: self.encoded(.object(["decision": .object(fields)])))
+                }
+                if request.path.contains("/drafts/") {
+                    XCTAssertEqual(request.method, "GET")
+                    return FixtureReply(body: self.encoded(.object(["draft": jsonDraft(serverDraft)])))
+                }
+                if request.path.hasSuffix("/send") {
+                    XCTAssertEqual(change, "none", "Changed authority must never POST send")
+                    XCTAssertEqual(request.method, "POST"); sends += 1
+                    XCTAssertEqual(request.json["version"] as? Int, 2)
+                    return FixtureReply(body: self.encoded(.object(["receipt": .object([
+                        "draft_id": .string(self.draftID), "operation_id": .string(request.json["operation_id"] as? String ?? ""), "status": .string("sent")])])) )
+                }
+                XCTFail("Unexpected \(request.method) \(request.path)"); return FixtureReply(status: 404)
+            }
+            defer { fixture.close() }
+            let client = ManagedClient(credential: try AccountCredential(origin: fixture.origin, apiKey: fixtureKey), configuration: fixture.configuration)
+            defer { client.clearCachedResponses(); client.close() }
+            let session = TodoMailSession(client: client, connectionID: "account", draftID: draftID,
+                preparedDraft: initial.preparedDraft, preparedDecision: initial, recoveryRoot: root)
+            await session.load(); XCTAssertTrue(session.canSend)
+            session.edit { $0.bodyText = "My locally reviewed edit" }
+            await session.flush()
+            XCTAssertFalse(session.dirty); XCTAssertEqual(session.draft?.version, 2)
+            let reviewed = try XCTUnwrap(session.draft)
+            await session.send(reviewed: reviewed)
+            XCTAssertEqual(sends, change == "none" ? 1 : 0)
+            XCTAssertEqual(session.draft?.bodyText, "My locally reviewed edit")
+            XCTAssertEqual(session.draft?.status, change == "none" ? "sent" : "draft")
+            XCTAssertFalse(session.canSend)
+            if change != "none" { XCTAssertTrue(session.conflicted) }
+            await session.waitForRecovery()
+        }
+    }
+
     @MainActor func testUnavailableFreshDetailKeepsCachedPreviewButBlocksApproval() async throws {
         let fixture = try HTTPFixture { request in
             XCTAssertEqual(request.method, "GET")

@@ -29,6 +29,7 @@ public final class TodoMailSession: ObservableObject {
     private var recovered = false
     private let preparedReview: TodoMailDraft?
     private let preparedDecision: TodoDecision?
+    private var acknowledgedPreparedDraft: TodoMailDraft?
     private let performanceLog = OSLog(subsystem: "com.nanocodex.mobile", category: .pointsOfInterest)
     private var persistence: Task<Bool, Never>?
     private var debounce: Task<Void, Never>?
@@ -49,7 +50,7 @@ public final class TodoMailSession: ObservableObject {
         let isFixture = fixture != nil || fixtureMode
         initialDraftID = draftID; self.fixtureMode = isFixture
         thread = fixture
-        draft = preparedDraft; preparedReview = preparedDraft; self.preparedDecision = preparedDecision
+        draft = preparedDraft; acknowledgedPreparedDraft = preparedDraft; preparedReview = preparedDraft; self.preparedDecision = preparedDecision
         let fixtureProfile = Data((ProcessInfo.processInfo.environment["NANOCODEX_DEMO_PROFILE"] ?? "default").utf8).base64EncodedString()
             .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "+", with: "-")
         let scope = isFixture ? "fixture-" + fixtureProfile : (client?.todoMailStorageScope ?? "offline")
@@ -83,7 +84,7 @@ public final class TodoMailSession: ObservableObject {
     public var canSend: Bool {
         guard let draft else { return false }
         return loaded && !accountEmail.isEmpty && !loading && !sending && !saving && !suggesting && !conflicted && !draft.isLocked && !hasLockedReceipt && !localPersistenceFailed
-            && (preparedReview == nil || preparedAuthorityVerified)
+            && (preparedReview == nil || (preparedAuthorityVerified && !dirty))
             && !draft.to.filter({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }).isEmpty
     }
     public var canSuggest: Bool {
@@ -142,7 +143,8 @@ public final class TodoMailSession: ObservableObject {
         do {
             if let preparedDecision {
                 let current = try await client.todoDecision(id: preparedDecision.id)
-                guard TodoDecisionApproval.matches(reviewed: preparedDecision, current: current) else {
+                guard let acknowledgedPreparedDraft,
+                      TodoDecisionApproval.matches(reviewed: preparedDecision, current: current, acknowledgedDraft: acknowledgedPreparedDraft) else {
                     conflicted = true
                     error = "This prepared decision changed. Reopen the current decision before approving."
                     return
@@ -278,7 +280,10 @@ public final class TodoMailSession: ObservableObject {
                 error = "The server returned a locked receipt. Local unsent edits are retained."
             } else if editRevision == revision { draft = saved; dirty = false }
             else { draft?.id = saved.id; draft?.version = saved.version }
-            if !saved.isLocked { error = nil }; persist()
+            if !saved.isLocked {
+                if preparedReview != nil { acknowledgedPreparedDraft = saved }
+                error = nil
+            }; persist()
         } catch {
             if (error as? APIError) == .http(409) {
                 conflicted = true
@@ -309,7 +314,8 @@ public final class TodoMailSession: ObservableObject {
                 guard let client else { throw APIError.invalidCredential }
                 if let preparedDecision {
                     let current = try await client.todoDecision(id: preparedDecision.id)
-                    guard TodoDecisionApproval.matches(reviewed: preparedDecision, current: current) else {
+                    guard acknowledgedPreparedDraft == reviewed,
+                          TodoDecisionApproval.matches(reviewed: preparedDecision, current: current, acknowledgedDraft: reviewed) else {
                         preparedAuthorityVerified = false; conflicted = true
                         error = "Decision context changed. No send was attempted. Reopen and review it."
                         sending = false; return
