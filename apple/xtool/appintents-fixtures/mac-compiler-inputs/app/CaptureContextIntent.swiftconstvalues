@@ -1,0 +1,2957 @@
+[
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox21CaptureIMessageIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox21CaptureIMessageIntentV16parameterSummaryQrvpZQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox21CaptureIMessageIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_text",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Message",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_sender",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Sender",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Capture iMessage",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "description",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentDescription",
+        "value": "Save the message text supplied by a Shortcuts Message automation to Nanocodex. Works with iMessage and SMS.",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "text",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Message",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Message",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$text",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "sender",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Sender",
+                "valueKind": "RawLiteral"
+              },
+              {
+                "label": "default",
+                "type": "Swift.Optional<Swift.String>",
+                "value": "",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Sender",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$sender",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "parameterSummary",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "some AppIntents.ParameterSummary",
+        "value": {
+          "arguments": [
+            {
+              "label": "",
+              "type": "AppIntents.ParameterSummaryString<NanocodexInbox.CaptureIMessageIntent>",
+              "value": {
+                "segments": [
+                  {
+                    "value": "Capture iMessage ",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "value": {
+                      "components": [
+                        {
+                          "label": "$text",
+                          "type": "AppIntents.IntentParameter<Swift.String>"
+                        }
+                      ],
+                      "path": "$text",
+                      "rootType": "NanocodexInbox.CaptureIMessageIntent"
+                    },
+                    "valueKind": "KeyPath"
+                  },
+                  {
+                    "value": "",
+                    "valueKind": "RawLiteral"
+                  }
+                ]
+              },
+              "valueKind": "InterpolatedStringLiteral"
+            },
+            {
+              "label": "table",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "",
+              "type": "() -> Swift.Array<Swift.PartialKeyPath<NanocodexInbox.CaptureIMessageIntent>>",
+              "value": {
+                "members": [
+                  {
+                    "element": {
+                      "value": {
+                        "components": [
+                          {
+                            "label": "$sender",
+                            "type": "AppIntents.IntentParameter<Swift.String>"
+                          }
+                        ],
+                        "path": "$sender",
+                        "rootType": "NanocodexInbox.CaptureIMessageIntent"
+                      },
+                      "valueKind": "KeyPath"
+                    },
+                    "kind": "buildExpression"
+                  }
+                ],
+                "type": ""
+              },
+              "valueKind": "Builder"
+            }
+          ],
+          "type": "AppIntents.IntentParameterSummary<NanocodexInbox.CaptureIMessageIntent>"
+        },
+        "valueKind": "InitCall"
+      }
+    ],
+    "typeName": "NanocodexInbox.CaptureIMessageIntent"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox21CaptureWhatsAppIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox21CaptureWhatsAppIntentV16parameterSummaryQrvpZQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox21CaptureWhatsAppIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_text",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Message",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Capture WhatsApp",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "description",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentDescription",
+        "value": "Save WhatsApp text supplied by a shortcut, such as notification text or text extracted from a screenshot, to Nanocodex.",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "text",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Message",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Message",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$text",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "parameterSummary",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "some AppIntents.ParameterSummary",
+        "value": {
+          "arguments": [
+            {
+              "label": "",
+              "type": "AppIntents.ParameterSummaryString<NanocodexInbox.CaptureWhatsAppIntent>",
+              "value": {
+                "segments": [
+                  {
+                    "value": "Capture WhatsApp ",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "value": {
+                      "components": [
+                        {
+                          "label": "$text",
+                          "type": "AppIntents.IntentParameter<Swift.String>"
+                        }
+                      ],
+                      "path": "$text",
+                      "rootType": "NanocodexInbox.CaptureWhatsAppIntent"
+                    },
+                    "valueKind": "KeyPath"
+                  },
+                  {
+                    "value": "",
+                    "valueKind": "RawLiteral"
+                  }
+                ]
+              },
+              "valueKind": "InterpolatedStringLiteral"
+            },
+            {
+              "label": "table",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            }
+          ],
+          "type": "AppIntents.IntentParameterSummary<NanocodexInbox.CaptureWhatsAppIntent>"
+        },
+        "valueKind": "InitCall"
+      }
+    ],
+    "typeName": "NanocodexInbox.CaptureWhatsAppIntent"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox22CaptureInstagramIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox22CaptureInstagramIntentV16parameterSummaryQrvpZQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox22CaptureInstagramIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_text",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Message",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Capture Instagram",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "description",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentDescription",
+        "value": "Save Instagram text supplied by a shortcut, such as notification text or text extracted from a screenshot, to Nanocodex.",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "text",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Message",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Message",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$text",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "parameterSummary",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "some AppIntents.ParameterSummary",
+        "value": {
+          "arguments": [
+            {
+              "label": "",
+              "type": "AppIntents.ParameterSummaryString<NanocodexInbox.CaptureInstagramIntent>",
+              "value": {
+                "segments": [
+                  {
+                    "value": "Capture Instagram ",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "value": {
+                      "components": [
+                        {
+                          "label": "$text",
+                          "type": "AppIntents.IntentParameter<Swift.String>"
+                        }
+                      ],
+                      "path": "$text",
+                      "rootType": "NanocodexInbox.CaptureInstagramIntent"
+                    },
+                    "valueKind": "KeyPath"
+                  },
+                  {
+                    "value": "",
+                    "valueKind": "RawLiteral"
+                  }
+                ]
+              },
+              "valueKind": "InterpolatedStringLiteral"
+            },
+            {
+              "label": "table",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            }
+          ],
+          "type": "AppIntents.IntentParameterSummary<NanocodexInbox.CaptureInstagramIntent>"
+        },
+        "valueKind": "InitCall"
+      }
+    ],
+    "typeName": "NanocodexInbox.CaptureInstagramIntent"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox19CaptureSignalIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox19CaptureSignalIntentV16parameterSummaryQrvpZQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox19CaptureSignalIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_text",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Message",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Capture Signal",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "description",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentDescription",
+        "value": "Save Signal text supplied by a shortcut, such as notification text or text extracted from a screenshot, for queries through this phone's Hand.",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "text",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Message",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Message",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$text",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "parameterSummary",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "some AppIntents.ParameterSummary",
+        "value": {
+          "arguments": [
+            {
+              "label": "",
+              "type": "AppIntents.ParameterSummaryString<NanocodexInbox.CaptureSignalIntent>",
+              "value": {
+                "segments": [
+                  {
+                    "value": "Capture Signal ",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "value": {
+                      "components": [
+                        {
+                          "label": "$text",
+                          "type": "AppIntents.IntentParameter<Swift.String>"
+                        }
+                      ],
+                      "path": "$text",
+                      "rootType": "NanocodexInbox.CaptureSignalIntent"
+                    },
+                    "valueKind": "KeyPath"
+                  },
+                  {
+                    "value": "",
+                    "valueKind": "RawLiteral"
+                  }
+                ]
+              },
+              "valueKind": "InterpolatedStringLiteral"
+            },
+            {
+              "label": "table",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            }
+          ],
+          "type": "AppIntents.IntentParameterSummary<NanocodexInbox.CaptureSignalIntent>"
+        },
+        "valueKind": "InitCall"
+      }
+    ],
+    "typeName": "NanocodexInbox.CaptureSignalIntent"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox20CaptureContextIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox20CaptureContextIntentV16parameterSummaryQrvpZQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox20CaptureContextIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_text",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Text",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_source",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Source",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "Shared",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_sender",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Sender",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_thread",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Conversation",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_link",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.URL>>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Link",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Foundation.URL>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.URL>>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_date",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.Date>>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Message Date",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "kind",
+              "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.Date>>.DateKind",
+              "valueKind": "Runtime"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.Date>>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_externalID",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Source Item ID",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Capture Context",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "description",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentDescription",
+        "value": "Save text or a link to your Nanocodex Context inbox for agents to query through this device's Hand. Enable capture in Nanocodex first.",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "text",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Text",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Text",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$text",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "source",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Source",
+                "valueKind": "RawLiteral"
+              },
+              {
+                "label": "default",
+                "type": "Swift.Optional<Swift.String>",
+                "value": "Shared",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Source",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "Shared",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$source",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "sender",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Sender",
+                "valueKind": "RawLiteral"
+              },
+              {
+                "label": "default",
+                "type": "Swift.Optional<Swift.String>",
+                "value": "",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Sender",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$sender",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "thread",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Conversation",
+                "valueKind": "RawLiteral"
+              },
+              {
+                "label": "default",
+                "type": "Swift.Optional<Swift.String>",
+                "value": "",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Conversation",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$thread",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "link",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Link",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.Optional<Foundation.URL>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Link",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Foundation.URL>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.URL>>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$link",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.URL>>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "date",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Message Date",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.Optional<Foundation.Date>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Message Date",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "kind",
+              "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.Date>>.DateKind",
+              "valueKind": "Runtime"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.Date>>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$date",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.Date>>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "externalID",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Source Item ID",
+                "valueKind": "RawLiteral"
+              },
+              {
+                "label": "default",
+                "type": "Swift.Optional<Swift.String>",
+                "value": "",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Source Item ID",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$externalID",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "parameterSummary",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "some AppIntents.ParameterSummary",
+        "value": {
+          "arguments": [
+            {
+              "label": "",
+              "type": "AppIntents.ParameterSummaryString<NanocodexInbox.CaptureContextIntent>",
+              "value": {
+                "segments": [
+                  {
+                    "value": "Capture ",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "value": {
+                      "components": [
+                        {
+                          "label": "$text",
+                          "type": "AppIntents.IntentParameter<Swift.String>"
+                        }
+                      ],
+                      "path": "$text",
+                      "rootType": "NanocodexInbox.CaptureContextIntent"
+                    },
+                    "valueKind": "KeyPath"
+                  },
+                  {
+                    "value": " from ",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "value": {
+                      "components": [
+                        {
+                          "label": "$source",
+                          "type": "AppIntents.IntentParameter<Swift.String>"
+                        }
+                      ],
+                      "path": "$source",
+                      "rootType": "NanocodexInbox.CaptureContextIntent"
+                    },
+                    "valueKind": "KeyPath"
+                  },
+                  {
+                    "value": "",
+                    "valueKind": "RawLiteral"
+                  }
+                ]
+              },
+              "valueKind": "InterpolatedStringLiteral"
+            },
+            {
+              "label": "table",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "",
+              "type": "() -> Swift.Array<Swift.PartialKeyPath<NanocodexInbox.CaptureContextIntent>>",
+              "value": {
+                "members": [
+                  {
+                    "element": {
+                      "value": {
+                        "components": [
+                          {
+                            "label": "$sender",
+                            "type": "AppIntents.IntentParameter<Swift.String>"
+                          }
+                        ],
+                        "path": "$sender",
+                        "rootType": "NanocodexInbox.CaptureContextIntent"
+                      },
+                      "valueKind": "KeyPath"
+                    },
+                    "kind": "buildExpression"
+                  },
+                  {
+                    "element": {
+                      "value": {
+                        "components": [
+                          {
+                            "label": "$thread",
+                            "type": "AppIntents.IntentParameter<Swift.String>"
+                          }
+                        ],
+                        "path": "$thread",
+                        "rootType": "NanocodexInbox.CaptureContextIntent"
+                      },
+                      "valueKind": "KeyPath"
+                    },
+                    "kind": "buildExpression"
+                  },
+                  {
+                    "element": {
+                      "value": {
+                        "components": [
+                          {
+                            "label": "$link",
+                            "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.URL>>"
+                          }
+                        ],
+                        "path": "$link",
+                        "rootType": "NanocodexInbox.CaptureContextIntent"
+                      },
+                      "valueKind": "KeyPath"
+                    },
+                    "kind": "buildExpression"
+                  },
+                  {
+                    "element": {
+                      "value": {
+                        "components": [
+                          {
+                            "label": "$date",
+                            "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.Date>>"
+                          }
+                        ],
+                        "path": "$date",
+                        "rootType": "NanocodexInbox.CaptureContextIntent"
+                      },
+                      "valueKind": "KeyPath"
+                    },
+                    "kind": "buildExpression"
+                  },
+                  {
+                    "element": {
+                      "value": {
+                        "components": [
+                          {
+                            "label": "$externalID",
+                            "type": "AppIntents.IntentParameter<Swift.String>"
+                          }
+                        ],
+                        "path": "$externalID",
+                        "rootType": "NanocodexInbox.CaptureContextIntent"
+                      },
+                      "valueKind": "KeyPath"
+                    },
+                    "kind": "buildExpression"
+                  }
+                ],
+                "type": ""
+              },
+              "valueKind": "Builder"
+            }
+          ],
+          "type": "AppIntents.IntentParameterSummary<NanocodexInbox.CaptureContextIntent>"
+        },
+        "valueKind": "InitCall"
+      }
+    ],
+    "typeName": "NanocodexInbox.CaptureContextIntent"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox24CaptureFileContextIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox24CaptureFileContextIntentV16parameterSummaryQrvpZQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox24CaptureFileContextIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_file",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<AppIntents.IntentFile>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "File",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<AppIntents.IntentFile>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "supportedContentTypes",
+              "type": "Swift.Array<UniformTypeIdentifiers.UTType>",
+              "valueKind": "Runtime"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<AppIntents.IntentFile>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_source",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Source",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "Shared",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Capture Text from File",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "description",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentDescription",
+        "value": "Extract text on this device from an image, screenshot, PDF, or text file and save it in Nanocodex. The original file is not saved or uploaded. Images without readable text and scanned PDFs aren't supported.",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "file",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "File",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "AppIntents.IntentFile",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "File",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<AppIntents.IntentFile>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "supportedContentTypes",
+              "type": "Swift.Array<UniformTypeIdentifiers.UTType>",
+              "valueKind": "Runtime"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<AppIntents.IntentFile>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$file",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<AppIntents.IntentFile>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "source",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Source",
+                "valueKind": "RawLiteral"
+              },
+              {
+                "label": "default",
+                "type": "Swift.Optional<Swift.String>",
+                "value": "Shared",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Source",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "value": "Shared",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$source",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "parameterSummary",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "some AppIntents.ParameterSummary",
+        "value": {
+          "arguments": [
+            {
+              "label": "",
+              "type": "AppIntents.ParameterSummaryString<NanocodexInbox.CaptureFileContextIntent>",
+              "value": {
+                "segments": [
+                  {
+                    "value": "Capture text from ",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "value": {
+                      "components": [
+                        {
+                          "label": "$file",
+                          "type": "AppIntents.IntentParameter<AppIntents.IntentFile>"
+                        }
+                      ],
+                      "path": "$file",
+                      "rootType": "NanocodexInbox.CaptureFileContextIntent"
+                    },
+                    "valueKind": "KeyPath"
+                  },
+                  {
+                    "value": " for ",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "value": {
+                      "components": [
+                        {
+                          "label": "$source",
+                          "type": "AppIntents.IntentParameter<Swift.String>"
+                        }
+                      ],
+                      "path": "$source",
+                      "rootType": "NanocodexInbox.CaptureFileContextIntent"
+                    },
+                    "valueKind": "KeyPath"
+                  },
+                  {
+                    "value": "",
+                    "valueKind": "RawLiteral"
+                  }
+                ]
+              },
+              "valueKind": "InterpolatedStringLiteral"
+            },
+            {
+              "label": "table",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            }
+          ],
+          "type": "AppIntents.IntentParameterSummary<NanocodexInbox.CaptureFileContextIntent>"
+        },
+        "valueKind": "InitCall"
+      }
+    ],
+    "typeName": "NanocodexInbox.CaptureFileContextIntent"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppShortcutsProvider"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.BitwiseCopyable"
+      }
+    ],
+    "associatedTypeAliases": [],
+    "conformances": [
+      "AppIntents.AppShortcutsProvider",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox16ContextShortcutsV",
+    "properties": [
+      {
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "appShortcuts",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Array<AppIntents.AppShortcut>",
+        "value": {
+          "members": [
+            {
+              "element": {
+                "value": {
+                  "arguments": [
+                    {
+                      "label": "intent",
+                      "type": "NanocodexInbox.StartLockedVoiceIntent",
+                      "value": {
+                        "arguments": [],
+                        "type": "NanocodexInbox.StartLockedVoiceIntent"
+                      },
+                      "valueKind": "InitCall"
+                    },
+                    {
+                      "label": "phrases",
+                      "type": "Swift.Array<AppIntents.AppShortcutPhrase<NanocodexInbox.StartLockedVoiceIntent>>",
+                      "value": [
+                        {
+                          "value": {
+                            "segments": [
+                              {
+                                "value": "Record a voice task with ",
+                                "valueKind": "RawLiteral"
+                              },
+                              {
+                                "value": {
+                                  "name": "applicationName"
+                                },
+                                "valueKind": "Enum"
+                              },
+                              {
+                                "value": "",
+                                "valueKind": "RawLiteral"
+                              }
+                            ]
+                          },
+                          "valueKind": "InterpolatedStringLiteral"
+                        }
+                      ],
+                      "valueKind": "Array"
+                    },
+                    {
+                      "label": "shortTitle",
+                      "type": "Foundation.LocalizedStringResource",
+                      "value": "Record Voice Task",
+                      "valueKind": "RawLiteral"
+                    },
+                    {
+                      "label": "systemImageName",
+                      "type": "Swift.String",
+                      "value": "mic.fill",
+                      "valueKind": "RawLiteral"
+                    }
+                  ],
+                  "type": "AppIntents.AppShortcut"
+                },
+                "valueKind": "InitCall"
+              },
+              "kind": "buildExpression"
+            },
+            {
+              "element": {
+                "value": {
+                  "arguments": [
+                    {
+                      "label": "intent",
+                      "type": "NanocodexInbox.RunAgentTaskIntent",
+                      "value": {
+                        "arguments": [],
+                        "type": "NanocodexInbox.RunAgentTaskIntent"
+                      },
+                      "valueKind": "InitCall"
+                    },
+                    {
+                      "label": "phrases",
+                      "type": "Swift.Array<AppIntents.AppShortcutPhrase<NanocodexInbox.RunAgentTaskIntent>>",
+                      "value": [
+                        {
+                          "value": {
+                            "segments": [
+                              {
+                                "value": "Run a task with ",
+                                "valueKind": "RawLiteral"
+                              },
+                              {
+                                "value": {
+                                  "name": "applicationName"
+                                },
+                                "valueKind": "Enum"
+                              },
+                              {
+                                "value": "",
+                                "valueKind": "RawLiteral"
+                              }
+                            ]
+                          },
+                          "valueKind": "InterpolatedStringLiteral"
+                        }
+                      ],
+                      "valueKind": "Array"
+                    },
+                    {
+                      "label": "shortTitle",
+                      "type": "Foundation.LocalizedStringResource",
+                      "value": "Run Agent Task",
+                      "valueKind": "RawLiteral"
+                    },
+                    {
+                      "label": "systemImageName",
+                      "type": "Swift.String",
+                      "value": "hand.raised",
+                      "valueKind": "RawLiteral"
+                    }
+                  ],
+                  "type": "AppIntents.AppShortcut"
+                },
+                "valueKind": "InitCall"
+              },
+              "kind": "buildExpression"
+            },
+            {
+              "element": {
+                "value": {
+                  "arguments": [
+                    {
+                      "label": "intent",
+                      "type": "NanocodexInbox.CaptureIMessageIntent",
+                      "value": {
+                        "arguments": [],
+                        "type": "NanocodexInbox.CaptureIMessageIntent"
+                      },
+                      "valueKind": "InitCall"
+                    },
+                    {
+                      "label": "phrases",
+                      "type": "Swift.Array<AppIntents.AppShortcutPhrase<NanocodexInbox.CaptureIMessageIntent>>",
+                      "value": [
+                        {
+                          "value": {
+                            "segments": [
+                              {
+                                "value": "Capture an iMessage in ",
+                                "valueKind": "RawLiteral"
+                              },
+                              {
+                                "value": {
+                                  "name": "applicationName"
+                                },
+                                "valueKind": "Enum"
+                              },
+                              {
+                                "value": "",
+                                "valueKind": "RawLiteral"
+                              }
+                            ]
+                          },
+                          "valueKind": "InterpolatedStringLiteral"
+                        }
+                      ],
+                      "valueKind": "Array"
+                    },
+                    {
+                      "label": "shortTitle",
+                      "type": "Foundation.LocalizedStringResource",
+                      "value": "Capture iMessage",
+                      "valueKind": "RawLiteral"
+                    },
+                    {
+                      "label": "systemImageName",
+                      "type": "Swift.String",
+                      "value": "message",
+                      "valueKind": "RawLiteral"
+                    }
+                  ],
+                  "type": "AppIntents.AppShortcut"
+                },
+                "valueKind": "InitCall"
+              },
+              "kind": "buildExpression"
+            },
+            {
+              "element": {
+                "value": {
+                  "arguments": [
+                    {
+                      "label": "intent",
+                      "type": "NanocodexInbox.CaptureWhatsAppIntent",
+                      "value": {
+                        "arguments": [],
+                        "type": "NanocodexInbox.CaptureWhatsAppIntent"
+                      },
+                      "valueKind": "InitCall"
+                    },
+                    {
+                      "label": "phrases",
+                      "type": "Swift.Array<AppIntents.AppShortcutPhrase<NanocodexInbox.CaptureWhatsAppIntent>>",
+                      "value": [
+                        {
+                          "value": {
+                            "segments": [
+                              {
+                                "value": "Capture WhatsApp in ",
+                                "valueKind": "RawLiteral"
+                              },
+                              {
+                                "value": {
+                                  "name": "applicationName"
+                                },
+                                "valueKind": "Enum"
+                              },
+                              {
+                                "value": "",
+                                "valueKind": "RawLiteral"
+                              }
+                            ]
+                          },
+                          "valueKind": "InterpolatedStringLiteral"
+                        }
+                      ],
+                      "valueKind": "Array"
+                    },
+                    {
+                      "label": "shortTitle",
+                      "type": "Foundation.LocalizedStringResource",
+                      "value": "Capture WhatsApp",
+                      "valueKind": "RawLiteral"
+                    },
+                    {
+                      "label": "systemImageName",
+                      "type": "Swift.String",
+                      "value": "message",
+                      "valueKind": "RawLiteral"
+                    }
+                  ],
+                  "type": "AppIntents.AppShortcut"
+                },
+                "valueKind": "InitCall"
+              },
+              "kind": "buildExpression"
+            },
+            {
+              "element": {
+                "value": {
+                  "arguments": [
+                    {
+                      "label": "intent",
+                      "type": "NanocodexInbox.CaptureInstagramIntent",
+                      "value": {
+                        "arguments": [],
+                        "type": "NanocodexInbox.CaptureInstagramIntent"
+                      },
+                      "valueKind": "InitCall"
+                    },
+                    {
+                      "label": "phrases",
+                      "type": "Swift.Array<AppIntents.AppShortcutPhrase<NanocodexInbox.CaptureInstagramIntent>>",
+                      "value": [
+                        {
+                          "value": {
+                            "segments": [
+                              {
+                                "value": "Capture Instagram in ",
+                                "valueKind": "RawLiteral"
+                              },
+                              {
+                                "value": {
+                                  "name": "applicationName"
+                                },
+                                "valueKind": "Enum"
+                              },
+                              {
+                                "value": "",
+                                "valueKind": "RawLiteral"
+                              }
+                            ]
+                          },
+                          "valueKind": "InterpolatedStringLiteral"
+                        }
+                      ],
+                      "valueKind": "Array"
+                    },
+                    {
+                      "label": "shortTitle",
+                      "type": "Foundation.LocalizedStringResource",
+                      "value": "Capture Instagram",
+                      "valueKind": "RawLiteral"
+                    },
+                    {
+                      "label": "systemImageName",
+                      "type": "Swift.String",
+                      "value": "message",
+                      "valueKind": "RawLiteral"
+                    }
+                  ],
+                  "type": "AppIntents.AppShortcut"
+                },
+                "valueKind": "InitCall"
+              },
+              "kind": "buildExpression"
+            },
+            {
+              "element": {
+                "value": {
+                  "arguments": [
+                    {
+                      "label": "intent",
+                      "type": "NanocodexInbox.CaptureSignalIntent",
+                      "value": {
+                        "arguments": [],
+                        "type": "NanocodexInbox.CaptureSignalIntent"
+                      },
+                      "valueKind": "InitCall"
+                    },
+                    {
+                      "label": "phrases",
+                      "type": "Swift.Array<AppIntents.AppShortcutPhrase<NanocodexInbox.CaptureSignalIntent>>",
+                      "value": [
+                        {
+                          "value": {
+                            "segments": [
+                              {
+                                "value": "Capture Signal in ",
+                                "valueKind": "RawLiteral"
+                              },
+                              {
+                                "value": {
+                                  "name": "applicationName"
+                                },
+                                "valueKind": "Enum"
+                              },
+                              {
+                                "value": "",
+                                "valueKind": "RawLiteral"
+                              }
+                            ]
+                          },
+                          "valueKind": "InterpolatedStringLiteral"
+                        }
+                      ],
+                      "valueKind": "Array"
+                    },
+                    {
+                      "label": "shortTitle",
+                      "type": "Foundation.LocalizedStringResource",
+                      "value": "Capture Signal",
+                      "valueKind": "RawLiteral"
+                    },
+                    {
+                      "label": "systemImageName",
+                      "type": "Swift.String",
+                      "value": "message",
+                      "valueKind": "RawLiteral"
+                    }
+                  ],
+                  "type": "AppIntents.AppShortcut"
+                },
+                "valueKind": "InitCall"
+              },
+              "kind": "buildExpression"
+            },
+            {
+              "element": {
+                "value": {
+                  "arguments": [
+                    {
+                      "label": "intent",
+                      "type": "NanocodexInbox.CaptureContextIntent",
+                      "value": {
+                        "arguments": [],
+                        "type": "NanocodexInbox.CaptureContextIntent"
+                      },
+                      "valueKind": "InitCall"
+                    },
+                    {
+                      "label": "phrases",
+                      "type": "Swift.Array<AppIntents.AppShortcutPhrase<NanocodexInbox.CaptureContextIntent>>",
+                      "value": [
+                        {
+                          "value": {
+                            "segments": [
+                              {
+                                "value": "Capture context in ",
+                                "valueKind": "RawLiteral"
+                              },
+                              {
+                                "value": {
+                                  "name": "applicationName"
+                                },
+                                "valueKind": "Enum"
+                              },
+                              {
+                                "value": "",
+                                "valueKind": "RawLiteral"
+                              }
+                            ]
+                          },
+                          "valueKind": "InterpolatedStringLiteral"
+                        }
+                      ],
+                      "valueKind": "Array"
+                    },
+                    {
+                      "label": "shortTitle",
+                      "type": "Foundation.LocalizedStringResource",
+                      "value": "Capture Context",
+                      "valueKind": "RawLiteral"
+                    },
+                    {
+                      "label": "systemImageName",
+                      "type": "Swift.String",
+                      "value": "tray.and.arrow.down",
+                      "valueKind": "RawLiteral"
+                    }
+                  ],
+                  "type": "AppIntents.AppShortcut"
+                },
+                "valueKind": "InitCall"
+              },
+              "kind": "buildExpression"
+            }
+          ],
+          "type": "AppIntents.AppShortcutsBuilder"
+        },
+        "valueKind": "Builder"
+      }
+    ],
+    "typeName": "NanocodexInbox.ContextShortcuts"
+  }
+]

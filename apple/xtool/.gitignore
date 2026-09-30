@@ -1,0 +1,5 @@
+/generated/
+/.prepare-*/
+/.xtool-tmp/
+/*.app/
+/*.ipa
