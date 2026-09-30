@@ -1054,6 +1054,35 @@ async fn real_tmux_default_interactive_launch_enters_and_can_detach_from_restore
 }
 
 #[tokio::test]
+async fn real_tmux_fresh_server_never_inherits_caller_credentials() {
+    let now = now();
+    let fixture = Fixture::new(json!({"data":[A],"summaries":{A:summary("private handoff",now,presentation("running",now))}})).await;
+    let tmux = Tmux::new().await;
+    let output = bounded_output(
+        fixture
+            .command()
+            .args(["continue", "--detach", "--tmux-socket", &tmux.socket])
+            .env("NC_API_KEY", "synthetic-unused-alias"),
+    )
+    .await;
+    success(&output);
+    wait_for_attach(&fixture, A, 1).await;
+    let panes = tmux.panes("nanocodex").await;
+    assert_eq!(panes.len(), 1);
+    assert!(!panes[0].dead);
+    for key in ["NANOCODEX_API_KEY", "NC_API_KEY"] {
+        let receipt = tmux.output(&["show-environment", "-g", key]).await;
+        assert!(
+            !receipt.status.success(),
+            "fresh tmux server retained {key}"
+        );
+    }
+    assert!(!panes[0].command.contains(KEY));
+    assert!(!panes[0].command.contains("synthetic-unused-alias"));
+    fixture.assert_read_only();
+}
+
+#[tokio::test]
 async fn real_tmux_existing_server_keeps_stale_credentials_and_custom_configuration_private() {
     let now = now();
     let fixture = Fixture::new(json!({"data":[A],"summaries":{A:summary("fresh account",now,presentation("running",now))}})).await;

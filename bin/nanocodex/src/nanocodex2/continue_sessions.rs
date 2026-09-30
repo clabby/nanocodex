@@ -151,6 +151,11 @@ struct Tmux {
 impl Tmux {
     fn command(&self) -> Command {
         let mut command = Command::new("tmux");
+        // A newly created tmux server retains its launch environment. Keep the
+        // selected account credentials only in the private per-pane IPC handoff.
+        command
+            .env_remove("NANOCODEX_API_KEY")
+            .env_remove("NC_API_KEY");
         if let Some(socket) = &self.socket {
             command.args(["-L", socket]);
         }
