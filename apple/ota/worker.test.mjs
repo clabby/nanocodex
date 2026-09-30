@@ -2,12 +2,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import worker from './worker.mjs';
 const root = path.resolve(process.argv[2] || '../ota-http-test/upload');
 const file = '/builds/1790730578/Nanocodex.ipa';
-const canonical = JSON.parse(fs.readFileSync(root + file + '.chunks.json'));
-const size = canonical.size, CHUNK=24*1024*1024, BLOCK=1024*1024;
+let canonical = JSON.parse(fs.readFileSync(root + file + '.chunks.json'));
+let size = canonical.size, activeRoot = root;
+const CHUNK=24*1024*1024, BLOCK=1024*1024;
 let mode={}, calls=[], cancelled=0;
 function byteStream(disk, selected) {
   let fd=fs.openSync(disk,'r'),pos=0,limit=fs.statSync(disk).size;
@@ -47,7 +49,7 @@ const assets={async fetch(req){
     const body=req.method==='HEAD'?null:new ReadableStream({start(c){for(let i=0;i<bytes.length;i+=65536)c.enqueue(bytes.subarray(i,i+65536));c.close();}});
     return new Response(body,{headers});
   }
-  const disk=root+p;
+  const disk=activeRoot+p;
   if(!fs.existsSync(disk))return new Response(null,{status:404});
   const selected=p===canonical.chunks[0].path;
   if(selected && mode.missing)return new Response(null,{status:404});
@@ -83,8 +85,60 @@ for(const name of ['badJSON','metaOversize','metaWrongLength','missing','wrongLe
 for(const [name,change] of [['wrong path',m=>(m.path='/builds/9/Nanocodex.ipa',m)],['unsafe size',m=>(m.size=Number.MAX_SAFE_INTEGER,m)],['unexpected key',m=>(m.extra=true,m)],['escaping chunk',m=>(m.chunks[0].path='/elsewhere',m)],['block hash missing',m=>(m.chunks[0].blocks.pop(),m)],['invalid sha',m=>(m.sha256='x',m)]])await test('invalid metadata '+name,async()=>{mode.change=change;assert.equal((await response()).status,503);});
 for(const name of ['corrupt','truncated','overlong','huge'])await test('stream refuses '+name,async()=>{mode[name]=true;const r=await response();assert.equal(r.status,200);await assert.rejects(()=>consume(r));});
 await test('stream cancellation cancels chunk read',async()=>{const before=cancelled;const r=await response();const reader=r.body.getReader();assert.equal((await reader.read()).done,false);await reader.cancel();assert(cancelled>before);});
-await test('legacy direct small IPA',async()=>{mode.metaMissing=true;const r=await response();assert.equal(r.status,200);assert.equal((await consume(r)).bytes,10);});
-await test('legacy direct no length remains bounded',async()=>{mode.metaMissing=true;mode.omitLength=true;const r=await response();assert.equal(r.status,200);assert.equal((await consume(r)).bytes,10);});
+await test('legacy direct small IPA (limited native-asset compatibility only)',async()=>{mode.metaMissing=true;const r=await response();assert.equal(r.status,200);assert.equal((await consume(r)).bytes,10);});
+await test('legacy direct no length remains bounded (not new-transport HEAD/Range evidence)',async()=>{mode.metaMissing=true;mode.omitLength=true;const r=await response();assert.equal(r.status,200);assert.equal((await consume(r)).bytes,10);});
 await test('legacy oversized direct refused',async()=>{mode.metaMissing=true;mode.directSize=CHUNK+1;assert.equal((await response()).status,503);mode.omitLength=true;assert.equal((await response()).status,503);});
 await test('missing direct remains404',async()=>{mode.metaMissing=true;mode.directAbsent=true;assert.equal((await response()).status,404);});
+// A native on-disk single-chunk fixture exercises the same metadata route even
+// when ASSETS HEAD omits length and its GET ignores client Range (returns full 200).
+// No source archive or external service is modified; all generated files are removed.
+const prior = {canonical, size, activeRoot};
+const singleRoot = fs.mkdtempSync(path.join(path.dirname(root), 'ota-worker-singlechunk-'));
+try {
+  activeRoot = singleRoot;
+  const realIPA = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../output/ios-linux/1790736193/Nanocodex-1790736193-unsigned.ipa');
+  const bytes = fs.existsSync(realIPA) ? fs.readFileSync(realIPA) : Buffer.alloc(BLOCK + 37);
+  if (!fs.existsSync(realIPA)) for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
+  assert(bytes.length > BLOCK && bytes.length <= CHUNK, 'Single-chunk fixture must cross a verification block');
+  console.log(`Single-chunk native fixture: ${fs.existsSync(realIPA) ? 'actual 1790736193 unsigned IPA' : 'synthetic fallback'}, ${bytes.length} bytes`);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const chunkPath = `/__ota_chunks/1790730578/${sha256}/0000.bin`;
+  fs.mkdirSync(path.dirname(singleRoot + chunkPath), {recursive:true});
+  fs.writeFileSync(singleRoot + chunkPath, bytes);
+  canonical = {version:1, path:file, size:bytes.length, sha256, chunkSize:CHUNK, blockSize:BLOCK,
+    chunks:[{path:chunkPath, size:bytes.length, sha256,
+      blocks:Array.from({length:Math.ceil(bytes.length/BLOCK)},(_,i)=>createHash('sha256').update(bytes.subarray(i*BLOCK,(i+1)*BLOCK)).digest('hex'))}]};
+  size = canonical.size;
+  await test('native single chunk HEAD without ASSETS length', async()=>{
+    mode.omitLength=true;
+    const r=await response({'Range':'bytes=1-5'},'HEAD');
+    assert.equal(r.status,200);assert.equal(r.headers.get('Content-Length'),String(size));
+    assert.equal(r.headers.get('ETag'),`"sha256-${sha256}"`);assert.equal(r.headers.get('Accept-Ranges'),'bytes');
+    assert.equal(r.body,null);assert(!calls.some(c=>c.path===chunkPath&&c.method==='GET'));
+  });
+  await test('native single chunk full authenticated SHA without ASSETS length', async()=>{
+    mode.omitLength=true;await full();assert(!calls.some(c=>c.path===file));
+  });
+  await test('native single chunk Range slices full 200 asset across verification blocks', async()=>{
+    mode.omitLength=true;const lo=BLOCK-9,hi=BLOCK+18;
+    const r=await response({'Range':`bytes=${lo}-${hi}`});
+    assert.equal(r.status,206);assert.equal(r.headers.get('Content-Length'),String(hi-lo+1));
+    assert.equal(r.headers.get('Content-Range'),`bytes ${lo}-${hi}/${size}`);
+    assert.deepEqual(Buffer.from(await r.arrayBuffer()),bytes.subarray(lo,hi+1));
+    assert.equal(calls.filter(c=>c.path===chunkPath&&c.method==='GET').length,1);
+  });
+  await test('native single chunk corrupt block releases no bytes', async()=>{
+    mode.omitLength=true;mode.corrupt=true;const r=await response();
+    assert.equal(r.status,200);const reader=r.body.getReader();await assert.rejects(()=>reader.read());
+  });
+  await test('zero size metadata rejected before any chunk request', async()=>{
+    mode.change=m=>(m.size=0,m.chunks=[],m);
+    const r=await response();assert.equal(r.status,503);
+    assert.equal(r.headers.get('Cache-Control'),'no-store');
+    assert(!calls.some(c=>c.path.startsWith('/__ota_chunks/')));
+  });
+} finally {
+  fs.rmSync(singleRoot,{recursive:true,force:true});
+  ({canonical,size,activeRoot}=prior);
+}
 console.log(JSON.stringify({status:'pass',tests:results.length,fixture:'unsigned local IPA transport only',size,sha256:canonical.sha256}));

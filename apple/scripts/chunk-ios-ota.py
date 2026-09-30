@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Create an atomic NEW offline OTA deployment tree. Never sign, deploy or alter archives.
 
+All canonical nonempty IPAs use chunks, including single-chunk small IPAs.
 Cloudflare assets are limited to 25 MiB; IPA chunks are 24 MiB. SHA-256
 verification blocks are 1 MiB, allowing the Worker to authenticate bounded buffers.
 """
@@ -110,7 +111,7 @@ def stage(source, destination):
                 with regular_file(checksum) as stream:
                     require(stream.read(81) == (sha + '  Nanocodex.ipa\n').encode(), 'IPA checksum mismatch.')
                 require(size > 0, 'Empty IPA.')
-            if size <= CHUNK:
+            if match is None and size <= CHUNK:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 copied = hashlib.sha256()
                 with regular_file(path) as stream, target.open('wb') as dest:

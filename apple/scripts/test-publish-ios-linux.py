@@ -180,12 +180,40 @@ try:
             reconstructed.update(data)
         assert reconstructed.hexdigest()==meta['sha256']
         assert all(p.stat().st_size<=24*1024*1024 for p in upload.rglob('*') if p.is_file())
-        assert (upload/'builds/10/Nanocodex.ipa').read_bytes()==old.read_bytes()
-        assert (upload/'builds/11/Nanocodex.ipa').read_bytes()==b'synthetic unsigned fixture'
+        for historical in ('10','11'):
+            full=assets/'builds'/historical/'Nanocodex.ipa'
+            assert not (upload/'builds'/historical/'Nanocodex.ipa').exists()
+            sidecar=json.loads((upload/'builds'/historical/'Nanocodex.ipa.chunks.json').read_text())
+            assert len(sidecar['chunks'])==1
+            data=(upload/sidecar['chunks'][0]['path'].lstrip('/')).read_bytes()
+            assert data==full.read_bytes()
+            assert hashlib.sha256(data).hexdigest()==sidecar['sha256']
+        trace.append('PASS: historical tiny IPAs also use authenticated single-chunk upload metadata; archive bytes remain unchanged.')
         assert (upload/'builds/12/manifest.plist').read_bytes()==(assets/'builds/12/manifest.plist').read_bytes()
         snapshot()
         cli('existing chunked output never overwritten', ['--upload-dir',str(upload)], expected='new non-symlink path')
         trace.append('PASS: actual helper generated 3 <=24MiB chunks, full SHA reconstructed; archived large IPA/history retained, upload large IPA absent, prior small builds/manifests retained.')
+        # Real CMS chain refusal: default trust paths must not bypass the pinned
+        # Apple root. Disposable self-issued material only, never Apple keys.
+        untrusted = temp/'untrusted-root';untrusted.mkdir(mode=0o700)
+        def openssl(*arguments):
+            result=subprocess.run(['openssl',*map(str,arguments)],capture_output=True)
+            assert result.returncode==0, 'Synthetic CMS setup failed.'
+        openssl('req','-x509','-newkey','rsa:2048','-nodes','-keyout',untrusted/'key.pem',
+            '-out',untrusted/'root.pem','-days','1','-subj','/CN=Synthetic untrusted profile signer')
+        (untrusted/'content').write_bytes(b'Synthetic profile trust-boundary payload')
+        openssl('cms','-sign','-binary','-nodetach','-in',untrusted/'content',
+            '-signer',untrusted/'root.pem','-inkey',untrusted/'key.pem',
+            '-outform','DER','-out',untrusted/'profile.cms')
+        trust=untrusted/'trust';trust.mkdir();(trust/'root.pem').write_bytes((untrusted/'root.pem').read_bytes())
+        openssl('rehash',trust)
+        import os
+        with patch.dict(os.environ,{'SSL_CERT_DIR':str(trust),'SSL_CERT_FILE':str(untrusted/'root.pem')}):
+            try: mod.verified_profile_content(untrusted/'profile.cms')
+            except ValueError as error:
+                assert 'pinned Apple Root CA' in str(error)
+            else: raise AssertionError('Default trust store bypassed the pinned Apple profile anchor.')
+        trace.append('PASS: real synthetic CMS rooted in overridden default trust directory is rejected by exclusive pinned Apple profile anchor.')
         # Production profile guards exercised with synthetic decoded CMS only.
         # Never open private Apple inputs or equate these unit checks with trust.
         now=dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
@@ -247,7 +275,11 @@ try:
             if '-dates' in command:return ('\n'.join(cert_dates)+'\n').encode()
             raise AssertionError(command)
         def entitlements(binary):return profiles[binary.decode()]['Entitlements']
-        with patch.object(mod.sign,'run',side_effect=decoded),patch.object(mod.sign,'signed_entitlements',side_effect=entitlements),patch.object(mod.verify,'verify'):
+        from types import SimpleNamespace
+        original_load=mod.load
+        def mocked_signature_loader(name,path):
+            return SimpleNamespace(verify_ipa=lambda *args: {'synthetic_policy_only':True}) if name=='linux_signature_integrity' else original_load(name,path)
+        with patch.object(mod.sign,'run',side_effect=decoded),patch.object(mod.sign,'signed_entitlements',side_effect=entitlements),patch.object(mod.verify,'verify'),patch.object(mod,'load',side_effect=mocked_signature_loader):
             assert mod.validate(policy_ipa,policy_receipt,None)==('1.0.0','42')
             guard('unprovisioned device in every bundle',lambda:mod.validate(policy_ipa,policy_receipt,
                 {'build':'42','version':'1.0.0','device_udid':'NOT-PROVISIONED'}),'not provisioned in every bundle')

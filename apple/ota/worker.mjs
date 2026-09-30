@@ -17,7 +17,7 @@ function exactKeys(obj, keys) {
 function validate(meta, path, build) {
   if (!exactKeys(meta, ['version', 'path', 'size', 'sha256', 'chunkSize', 'blockSize', 'chunks']) ||
       meta.version !== 1 || meta.path !== path || typeof meta.sha256 !== 'string' || !HASH.test(meta.sha256) ||
-      !Number.isSafeInteger(meta.size) || meta.size <= CHUNK || meta.size > CHUNK * 20 ||
+      !Number.isSafeInteger(meta.size) || meta.size <= 0 || meta.size > CHUNK * 20 ||
       meta.chunkSize !== CHUNK || meta.blockSize !== BLOCK || !Array.isArray(meta.chunks) ||
       meta.chunks.length !== Math.ceil(meta.size / CHUNK)) throw new Error('Invalid metadata');
   meta.chunks.forEach((chunk, i) => {
@@ -159,7 +159,9 @@ async function smallAssetSize(request, assets, head, path) {
     return Number.isSafeInteger(size) && size > 0 && size <= CHUNK;
   }
   // ASSETS may strip Content-Length. Bound actual bytes for legacy direct small
-  // IPAs; new large IPAs always use authenticated chunk metadata above.
+  // IPAs; ALL new IPAs use authenticated chunk metadata above. This legacy
+  // native-asset compatibility fallback does not guarantee HEAD length or Range
+  // handling when the binding strips/ignores those headers; it is not new-transport evidence.
   const response = await assets.fetch(assetRequest(request, path));
   if (response.status !== 200 || !response.body ||
       (response.headers.has('Content-Encoding') && response.headers.get('Content-Encoding') !== 'identity')) {

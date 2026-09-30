@@ -1,0 +1,365 @@
+[
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents.AudioRecordingIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents.LiveActivityIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents.SystemIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "Swift.SendableMetatype"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "Swift.BitwiseCopyable"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "16NanocodexWidgets22StartLockedVoiceIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy16NanocodexWidgets016StartLockedVoiceC0V_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AudioRecordingIntent",
+      "AppIntents.LiveActivityIntent",
+      "AppIntents.SystemIntent",
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "16NanocodexWidgets22StartLockedVoiceIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Record a voice task",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "description",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentDescription",
+        "value": "Record in English or Greek and send a new agent task. Set up microphone and speech access in Nanocodex first.",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "authenticationPolicy",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentAuthenticationPolicy",
+        "value": {
+          "name": "requiresLocalDeviceAuthentication"
+        },
+        "valueKind": "Enum"
+      },
+      {
+        "availabilityAttributes": [
+          {
+            "introducedVersion": "26.0",
+            "isDeprecated": false,
+            "isUnavailable": false,
+            "platform": "iOS"
+          }
+        ],
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "supportedModes",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentModes",
+        "value": {
+          "baseType": "AppIntents.IntentModes",
+          "memberLabel": "background"
+        },
+        "valueKind": "MemberReference"
+      }
+    ],
+    "typeName": "NanocodexWidgets.StartLockedVoiceIntent"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents.AudioRecordingIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents.LiveActivityIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents.SystemIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexWidgets",
+        "protocolName": "Swift.SendableMetatype"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "16NanocodexWidgets23FinishLockedVoiceIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy16NanocodexWidgets017FinishLockedVoiceC0V_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AudioRecordingIntent",
+      "AppIntents.LiveActivityIntent",
+      "AppIntents.SystemIntent",
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "16NanocodexWidgets23FinishLockedVoiceIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_captureID",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Recording",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Stop recording",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "authenticationPolicy",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentAuthenticationPolicy",
+        "value": {
+          "name": "alwaysAllowed"
+        },
+        "valueKind": "Enum"
+      },
+      {
+        "availabilityAttributes": [
+          {
+            "introducedVersion": "26.0",
+            "isDeprecated": false,
+            "isUnavailable": false,
+            "platform": "iOS"
+          }
+        ],
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "supportedModes",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentModes",
+        "value": {
+          "baseType": "AppIntents.IntentModes",
+          "memberLabel": "background"
+        },
+        "valueKind": "MemberReference"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "captureID",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Recording",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Recording",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$captureID",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      }
+    ],
+    "typeName": "NanocodexWidgets.FinishLockedVoiceIntent"
+  }
+]

@@ -16,6 +16,7 @@ from pathlib import Path
 import plistlib
 import re
 import subprocess
+import ssl
 import sys
 import tempfile
 import zipfile
@@ -84,6 +85,17 @@ def device_receipt(path, sha):
     return value
 
 
+def verified_profile_content(path):
+    root = safe_path(HERE.parent / 'xtool/apple-pki/AppleIncRootCertificate.pem')
+    require(root.is_file() and root.stat().st_size <= 65536, 'Pinned public Apple Root CA missing or invalid.')
+    der = ssl.PEM_cert_to_DER_cert(root.read_text())
+    require(hashlib.sha256(der).hexdigest() == 'b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024',
+            'Public Apple Root CA fingerprint mismatch.')
+    return sign.run(['openssl', 'cms', '-verify', '-inform', 'DER', '-in', str(path),
+                     '-purpose', 'any', '-CAfile', str(root), '-no-CApath', '-no-CAstore'],
+                    'Embedded profile CMS does not chain to the pinned Apple Root CA.')
+
+
 def validate(ipa, receipt, device):
     sha = digest(ipa)
     report = json_file(receipt)
@@ -112,8 +124,7 @@ def validate(ipa, receipt, device):
             folder, info = bundles[bundle]
             path = Path(work) / 'profile.mobileprovision'
             path.write_bytes(archive.read(folder + '/embedded.mobileprovision'))
-            content = sign.run(['openssl', 'cms', '-verify', '-inform', 'DER', '-in', str(path), '-noverify'],
-                               'Embedded profile CMS integrity failed.')
+            content = verified_profile_content(path)
             raw = plistlib.loads(content)
             certs = [c for c in raw.get('DeveloperCertificates', []) if hashlib.sha256(c).hexdigest() == cert_sha]
             require(len(certs) == 1, 'Profile certificate does not match signing receipt.')
@@ -146,6 +157,11 @@ def validate(ipa, receipt, device):
     device_sets = [set(p['ProvisionedDevices']) for p in profiles if not p.get('ProvisionsAllDevices')]
     require(not device_sets or bool(set.intersection(*device_sets)), 'Profiles have no common provisioned device.')
     require(report.get('bundles') == summaries, 'Signing receipt bundle/profile summaries mismatch.')
+    integrity = load('linux_signature_integrity', HERE / 'verify-ios-signatures-linux.py')
+    with tempfile.TemporaryDirectory(prefix='linux-certificate-check-') as work:
+        expected = Path(work) / 'certificate.der'
+        expected.write_bytes(certs[0])
+        integrity.verify_ipa(ipa, expected)
     verify.verify(ipa)  # arm64 executable code, extension entry/classes and WebRTC
     return version, build
 

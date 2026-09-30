@@ -89,7 +89,7 @@ $sign && kind=signed
 if $sign; then
   bash apple/scripts/sign-ios-linux.sh "${ipas[0]}" "$output/Nanocodex-$build-$kind.ipa"
 else
-  cp "${ipas[0]}" "$output/Nanocodex-$build-$kind.ipa"
+  python3 apple/scripts/repack-ios-ipa.py --input "${ipas[0]}" --output "$output/Nanocodex-$build-$kind.ipa" > "$output/repack.json"
 fi
 cp apple/xtool/generated/membership.json "$output/membership.json"
 sha256sum "$output/Nanocodex-$build-$kind.ipa" > "$output/SHA256SUMS"

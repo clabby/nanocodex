@@ -52,10 +52,10 @@ def check_tree(source, tree):
     for original in source.rglob('*'):
         if not original.is_file(): continue
         rel = original.relative_to(source)
-        if original.suffix != '.ipa' or original.stat().st_size <= mod.CHUNK:
+        if original.suffix != '.ipa':
             assert digest(original) == digest(tree / rel), rel
             continue
-        assert not (tree / rel).exists(), 'Large full IPA leaked into upload tree'
+        assert not (tree / rel).exists(), 'Redundant full IPA leaked into upload tree'
         meta = json.loads((tree / (str(rel) + '.chunks.json')).read_text())
         assert meta['size'] == original.stat().st_size
         assert meta['sha256'] == digest(original)
@@ -100,11 +100,24 @@ class StagingTests(unittest.TestCase):
         rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
         self.assertLess(rss, 64 * 1024, f'Unbounded staging RSS {rss} KiB')
         print(f'51 MiB helper peak child RSS: {rss} KiB')
-    def test_small_and_exact_chunk_remain_full(self):
+    def test_small_and_exact_chunk_use_authenticated_single_chunk(self):
+        tiny = add_ipa(self.source, '37', blocks=0)
+        tiny.write_bytes(b'tiny canonical IPA transport fixture')
+        tiny.with_name('sha256.txt').write_text(digest(tiny) + '  Nanocodex.ipa\n')
         add_ipa(self.source, '1', blocks=1)
         add_ipa(self.source, '24', blocks=24)
-        mod.stage(self.source, self.destination); check_tree(self.source, self.destination)
-        self.assertFalse((self.destination/'__ota_chunks').exists())
+        before = mod.inventory(self.source)
+        result = mod.stage(self.source, self.destination); check_tree(self.source, self.destination)
+        self.assertEqual(mod.inventory(self.source), before)
+        self.assertEqual(set(result['chunked_ipas']), {f'/builds/{build}/Nanocodex.ipa' for build in ('37', '1', '24')})
+        for build in ('37', '1', '24'):
+            meta = json.loads((self.destination/f'builds/{build}/Nanocodex.ipa.chunks.json').read_text())
+            self.assertEqual(len(meta['chunks']), 1)
+            self.assertEqual(meta['chunks'][0]['size'], meta['size'])
+            self.assertEqual(meta['chunks'][0]['sha256'], meta['sha256'])
+    def test_empty_canonical_ipa_is_refused(self):
+        add_ipa(self.source, '0', blocks=0)
+        self.refused()
     def test_invalid_sources_and_paths(self):
         self.refused()
         add_ipa(self.source, '1', blocks=1)

@@ -44,6 +44,18 @@ class AuditTests(unittest.TestCase):
         codes = {x["code"] for x in audit.audit_candidate(audit.requirements(constants()), data)["findings"]}
         self.assertTrue({"mangled_type_mismatch", "explicit_authentication_policy_not_preserved", "unverified_generic_parameter_type"}.issubset(codes))
 
+    def test_authentic_string_zero_not_generic_placeholder(self):
+        decl = [{"typeName": "App.Task", "conformances": ["AppIntents.AppIntent"],
+                 "properties": [{"label": "_text", "type": "AppIntents.IntentParameter<Swift.String>"},
+                                {"label": "_date", "type": "AppIntents.IntentParameter<Swift.Optional<Foundation.Date>>"}]}]
+        data = {"actions": {"Task": {"parameters": [
+            {"name": "text", "valueType": {"primitive": {"wrapper": {"typeIdentifier": 0}}}},
+            {"name": "date", "valueType": {"primitive": {"wrapper": {"typeIdentifier": 0}}}}]}}}
+        report = audit.audit_candidate(audit.requirements(decl), data)
+        warnings = [x for x in report["findings"] if x["code"] == "unverified_generic_parameter_type"]
+        self.assertEqual([w["parameter"] for w in warnings], ["date"])
+        self.assertFalse(report["schemaCompatibilityVerified"])
+
     def test_no_findings_does_not_prove_discovery(self):
         report = audit.audit_candidate(audit.requirements([]), {})
         self.assertEqual(report["findings"], [])

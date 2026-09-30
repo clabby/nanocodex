@@ -99,7 +99,11 @@ def audit_candidate(expected, data):
             candidate = parameters.get(label)
             if candidate is None:
                 findings.append({"code": "missing_parameter", "type": name, "parameter": label})
-            elif candidate.get("valueType") == {"primitive": {"wrapper": {"typeIdentifier": 0}}}:
+            # Captured authentic Apple metadata (schema 3.0) uses code 0 for
+            # Swift.String. Only flag the universal placeholder for NON-String
+            # compiler facts; zero alone is not evidence of a broken String.
+            elif (candidate.get("valueType") == {"primitive": {"wrapper": {"typeIdentifier": 0}}}
+                  and parameter["type"] != "AppIntents.IntentParameter<Swift.String>"):
                 findings.append({"code": "unverified_generic_parameter_type", "type": name,
                                  "parameter": label, "compilerType": parameter["type"]})
     shortcuts = {s.get("actionIdentifier") for s in data.get("autoShortcuts", [])}

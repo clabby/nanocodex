@@ -149,6 +149,15 @@ paths (`IOS_SIGNING_KEY`, `IOS_SIGNING_CERT`, and the three `IOS_PROFILE_*`
 variables), then run `build-ios-linux.sh --sign`. A signed IPA
 still requires verification on the actual phone before publishing.
 
+Unsigned packaging uses a bounded lossless DEFLATE9 repacker, checking every member
+byte and preserved ZIP metadata; the complete Omarchy IPA is now17.1MB rather
+than53.2MB. zsign also requests level9. The independent Linux verifier rechecks
+supported code CMS signatures, page/special hashes and resource seals before
+signing output is published; it is not Apple's platform policy or device proof.
+A Linux-owned private key and public CSR can be prepared with
+`release-ios-linux.sh init-signing`; Apple must still issue its certificate and
+matching profiles. No Mac key export is needed for this route.
+
 The resulting IPA can feed the existing HTTPS OTA manifest/feed pipeline. This
 build script does not publish or change `latest.json`. Validate the resulting
 app, extension IDs/entitlements, native libraries, icons, and device installation
@@ -189,6 +198,13 @@ are auditor tests, not Siri or phone-discovery tests. Siri/Shortcuts indexing,
 entity queries, authentication semantics, and intent-driven controls remain
 **not validated or claimed complete** by this build route. Closing the gap
 requires a verified processor and signed, installed-device discovery tests.
+
+`appintents-linux.py` is a separate offline lossless compiler-AST analyzer,
+comparison/calibration tool and exact-reference replayer. Real paired Mac compiler
+constants match the Linux ASTs, but unknown Runtime values, complete source/context
+bindings and private metadata/NLU synthesis are not implemented. It is deliberately
+not wired into packaging. Its tests and sanitized captured public metadata are
+in `apple/xtool/appintents-fixtures`; they do not close the device-discovery gap.
 
 “Unsigned” means unprovisioned: xtool can apply ad-hoc signatures to retain
 entitlements. Such an IPA is still not an installable OTA release.

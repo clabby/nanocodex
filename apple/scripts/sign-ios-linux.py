@@ -9,6 +9,7 @@ ALL profiles with one entitlement set. No Apple account/network login occurs.
 import argparse
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -217,7 +218,7 @@ full resource/code-hash validation, or successful installation on an Apple devic
     with tempfile.TemporaryDirectory(prefix=".ios-sign-", dir=args.output.parent) as temporary:
         temp = Path(temporary)
         signed = temp / "signed.ipa"
-        command = [str(zsign), "-q", "-f", "-k", str(key), "-c", str(cert)]
+        command = [str(zsign), "-q", "-f", "-z", "9", "-k", str(key), "-c", str(cert)]
         for path in paths:
             command += ["-m", str(path)]
         command += ["-t", str(temp), "-o", str(signed), str(args.input.resolve())]
@@ -240,8 +241,14 @@ full resource/code-hash validation, or successful installation on an Apple devic
                     "provisioned_device_count": len(prov.get("ProvisionedDevices", [])),
                     "all_devices": prov.get("ProvisionsAllDevices", False),
                     "app_groups": actual.get("com.apple.security.application-groups", [])})
+        verifier_path = Path(__file__).with_name('verify-ios-signatures-linux.py')
+        spec = importlib.util.spec_from_file_location('linux_signature_integrity', verifier_path)
+        integrity = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(integrity)
+        cryptographic = integrity.verify_ipa(signed, cert)
         report = {"status": "signed-structurally-checked", "zsign_revision": ZSIGN_REVISION, "apple_device_installation_verified": False,
-                  "verification_limits": "No Apple trust/revocation, full code/resource hash, or device installation verification.",
+                  "verification_limits": "CMS, code pages and supported resource seals verified; no Apple platform policy, revocation, trusted timestamp or device installation proof.",
+                  "cms_and_code_resource_integrity_verified": True, "code_objects_verified": len(cryptographic["code_objects"]), "ipa_compression_level": 9,
                   "sha256": hashlib.sha256(signed.read_bytes()).hexdigest(),
                   "signing_certificate_sha256": hashlib.sha256(cert_der).hexdigest(),
                   "target_device_checked": bool(udid), "bundles": summaries}
