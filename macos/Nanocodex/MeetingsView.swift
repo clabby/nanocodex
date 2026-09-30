@@ -15,11 +15,41 @@ final class MacMeetingLibrary: ObservableObject {
     @Published private(set) var detailError: String?
     @Published private(set) var nextCursor: String?
     @Published var selectedID: UUID?
-    @Published var notes = ""
+    @Published var notes = "" { didSet { if !applyingEditor { rememberDraft() } } }
     @Published var query = ""
     private var detailRefreshing = false
     private var failedLoadMore = false
-    private struct PendingSave { let record: MeetingRecord; let ifMatch: Int }
+    private typealias PendingSave = MacMeetingSaveJournal.Submission
+    private var scope: String?
+    private var journal: MacMeetingSaveJournal?
+    private var journalFailure: String?
+    private var applyingEditor = false
+
+    init(journal: MacMeetingSaveJournal? = nil) {
+        do { self.journal = try journal ?? MacMeetingSaveJournal(url: MacMeetingSaveJournal.defaultURL()) }
+        catch { journalFailure = error.localizedDescription }
+    }
+    func activate(scope: String?) {
+        guard self.scope != scope else { return }
+        reset()
+        self.scope = scope
+        guard let scope, let journal else { detailError = journalFailure; return }
+        for entry in journal.entries(scope: scope) {
+            drafts[entry.record.id] = (entry.record, entry.notes)
+            if let submitted = entry.submitted { pendingSaves[entry.record.id] = submitted }
+        }
+        meetings = drafts.values.map(\.record).sorted { $0.startedAt > $1.startedAt }
+    }
+    private func setEditor(_ value: MeetingRecord?, notes: String) {
+        applyingEditor = true
+        record = value; self.notes = notes
+        applyingEditor = false
+    }
+    private func writableJournal() throws -> (String, MacMeetingSaveJournal) {
+        guard let scope else { throw MacMeetingSaveJournal.JournalError.invalidScope }
+        guard let journal else { throw MacMeetingSaveJournal.JournalError.invalidDocument }
+        return (scope, journal)
+    }
     private var pendingSaves: [UUID: PendingSave] = [:]
     private var drafts: [UUID: (record: MeetingRecord, notes: String)] = [:]
     private var epoch = 0
@@ -37,6 +67,10 @@ final class MacMeetingLibrary: ObservableObject {
         guard let record else { return }
         if canSave { drafts[record.id] = (record, notes) }
         else { drafts.removeValue(forKey: record.id) }
+        if let scope, let journal {
+            do { try journal.saveDraft(record: record, notes: notes, scope: scope) }
+            catch { detailError = error.localizedDescription }
+        }
     }
     func suspend() {
         rememberDraft()
@@ -47,11 +81,11 @@ final class MacMeetingLibrary: ObservableObject {
     func reset() {
         // The factory weakly resolves the app's *current* credential on demand,
         // so reconnecting the same account works without a scene-id change.
-        suspend(); meetings = []; record = nil; selectedID = nil
-        notes = ""; query = ""; nextCursor = nil; error = nil; detailError = nil; drafts = [:]; pendingSaves = [:]
+        suspend(); scope = nil; meetings = []; setEditor(nil, notes: ""); selectedID = nil
+        query = ""; nextCursor = nil; error = nil; detailError = nil; drafts = [:]; pendingSaves = [:]
     }
     private func begin() throws -> (UUID, ManagedClient) {
-        guard let client else { throw APIError.invalidCredential }
+        guard scope != nil, let client else { throw APIError.invalidCredential }
         let value = try client(), id = UUID(); clients[id] = value
         return (id, value)
     }
@@ -68,7 +102,10 @@ final class MacMeetingLibrary: ObservableObject {
             guard epoch == generation, !Task.isCancelled else { return }
             if more {
                 let known = Set(meetings.map(\.id)); meetings += page.meetings.filter { !known.contains($0.id) }
-            } else { meetings = page.meetings }
+            } else {
+                let listed = Set(page.meetings.map(\.id))
+                meetings = page.meetings + drafts.values.map(\.record).filter { !listed.contains($0.id) }
+            }
             nextCursor = page.nextCursor
         } catch { if epoch == generation, !Task.isCancelled { self.error = error.localizedDescription } }
     }
@@ -95,7 +132,7 @@ final class MacMeetingLibrary: ObservableObject {
             // Keep the editor mounted while refreshing. A keystroke or pending
             // save since this GET began owns the draft, never the response.
             guard notes == baselineNotes, !canSave else { return }
-            record = value; notes = value.notes; detailError = nil
+            setEditor(value, notes: value.notes); detailError = nil
         } catch {
             if epoch == generation, selectionEpoch == selection, !Task.isCancelled { detailError = error.localizedDescription }
         }
@@ -103,13 +140,19 @@ final class MacMeetingLibrary: ObservableObject {
     func select(_ id: UUID, discardDraft: Bool = false) async {
         guard !busy else { return }
         rememberDraft()
-        if discardDraft { drafts.removeValue(forKey: id); pendingSaves.removeValue(forKey: id) }
+        if discardDraft {
+            do {
+                let (scope, journal) = try writableJournal()
+                try journal.remove(id: id, scope: scope)
+                drafts.removeValue(forKey: id); pendingSaves.removeValue(forKey: id)
+            } catch { detailError = error.localizedDescription; return }
+        }
 
         selectionEpoch += 1
         let generation = epoch, selection = selectionEpoch
-        selectedID = id; record = nil; notes = ""; detailError = nil
+        selectedID = id; setEditor(nil, notes: ""); detailError = nil
         if let draft = drafts[id] {
-            record = draft.record; notes = draft.notes; detailLoading = false
+            setEditor(draft.record, notes: draft.notes); detailLoading = false
             return
         }
         detailLoading = true
@@ -118,7 +161,7 @@ final class MacMeetingLibrary: ObservableObject {
             let (key, api) = try begin(); defer { end(key) }
             let value = try await api.meeting(id: id)
             guard epoch == generation, selectionEpoch == selection, selectedID == id, !Task.isCancelled else { return }
-            record = value; notes = value.notes
+            setEditor(value, notes: value.notes)
         } catch { if epoch == generation, selectionEpoch == selection, !Task.isCancelled { detailError = error.localizedDescription } }
     }
     enum Action: Equatable { case save, summarize, delete }
@@ -126,19 +169,20 @@ final class MacMeetingLibrary: ObservableObject {
         guard let record, !busy else { return }
         let generation = epoch, selection = selectionEpoch
         busy = true; detailError = nil
+        var submission: PendingSave?
         defer { if epoch == generation { busy = false } }
         do {
             let (key, api) = try begin(); defer { end(key) }
             let value: MeetingRecord?
-            var newerNotes: String?
             switch action {
             case .save:
                 // Keep the exact payload and CAS base through a lost response.
                 // Later typing is a new draft, never a mutated idempotent retry.
-                var edited = record; edited.notes = notes; edited.revision += 1
-                let submitted = pendingSaves[record.id] ?? PendingSave(record: edited, ifMatch: record.revision)
+                let (scope, journal) = try writableJournal()
+                let submitted = try journal.prepare(record: record, notes: notes, scope: scope)
+                submission = submitted
                 pendingSaves[record.id] = submitted
-                if notes != submitted.record.notes { newerNotes = notes }
+                rememberDraft()
                 value = try await api.saveMeeting(submitted.record, ifMatch: submitted.ifMatch)
             case .summarize:
                 // Successful summaries are immutable per saved revision;
@@ -148,15 +192,37 @@ final class MacMeetingLibrary: ObservableObject {
             }
             guard epoch == generation, selectionEpoch == selection, !Task.isCancelled else { return }
             if let value {
-                self.record = value; notes = newerNotes ?? value.notes
-                if action == .save { pendingSaves.removeValue(forKey: value.id) }
+                var latestNotes = notes
+                if action == .save, let submission {
+                    let (scope, journal) = try writableJournal()
+                    // Fail closed if a later keystroke could not be persisted;
+                    // never replace that live text with an older journal copy.
+                    try journal.saveDraft(record: record, notes: notes, scope: scope)
+                    try journal.acknowledge(submission, remote: value, scope: scope)
+                    latestNotes = journal.entries(scope: scope).first(where: { $0.record.id == value.id })?.notes ?? value.notes
+                    pendingSaves.removeValue(forKey: value.id)
+                }
+                setEditor(value, notes: action == .save || latestNotes != record.notes ? latestNotes : value.notes)
                 rememberDraft()
                 if let index = meetings.firstIndex(where: { $0.id == value.id }) { meetings[index] = value }
+            } else {
+                let (scope, journal) = try writableJournal()
+                try journal.remove(id: record.id, scope: scope)
+                pendingSaves.removeValue(forKey: record.id); drafts.removeValue(forKey: record.id)
+                meetings.removeAll { $0.id == record.id }; setEditor(nil, notes: ""); selectedID = nil
             }
-            else { pendingSaves.removeValue(forKey: record.id); drafts.removeValue(forKey: record.id); meetings.removeAll { $0.id == record.id }; self.record = nil; selectedID = nil; notes = "" }
         } catch {
             guard epoch == generation, selectionEpoch == selection, !Task.isCancelled else { return }
-            if error as? APIError == .http(409) {
+            if action == .save, let submission, let failure = error as? APIError,
+               [APIError.http(400), .http(413), .http(415), .http(422)].contains(failure) {
+                do {
+                    let (scope, journal) = try writableJournal()
+                    try journal.reject(submission, scope: scope)
+                    pendingSaves.removeValue(forKey: record.id)
+                    rememberDraft()
+                    detailError = "This save was rejected. Your notes are preserved; correct the draft and save again."
+                } catch { detailError = error.localizedDescription }
+            } else if error as? APIError == .http(409) {
                 detailError = "This recording changed on another device. Your draft is preserved. Save a copy before reloading the latest version."
             } else if action == .summarize, error as? APIError == .http(413) {
                 detailError = "This recording is too large to summarize in full. No transcript was omitted or changed. Your complete transcript and notes remain available."
