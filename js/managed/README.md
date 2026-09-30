@@ -629,32 +629,41 @@ or Durable Object migration.
 
 The managed Worker exposes `browser_execute` through `env.BROWSER` and the
 Agents SDK CDP runtime, without provisioning a VM or desktop Hand. Production
-and development Wrangler configuration select `MANAGED_BROWSER_PROVIDER=kitesurf`.
+and development Wrangler configuration select `MANAGED_BROWSER_PROVIDER=chromium`.
 Local development uses a remote Browser Run binding and requires Cloudflare access.
 
 `MANAGED_BROWSER_PROVIDER` is host deployment policy, never a tool argument:
 
 - `kitesurf`: Browser Run with `browser=kitesurf` on its CDP requests.
-- `cloudflare`: Browser Run's default Chromium engine.
+- `chromium`: Browser Run's default Chromium engine through the same direct
+  upstream runtime as Kitesurf, with no browser engine override.
+- `cloudflare`: the existing retained Chromium provider with the managed CDP
+  restrictions and private browser flows.
 - `browserbase`: the existing Browserbase binding adapter; requires the
   `BROWSERBASE_API_KEY` Wrangler secret and optionally `BROWSERBASE_PROJECT_ID`.
 
-Kitesurf uses a one-shot connection: complete navigation and extraction in one
-`browser_execute` call. It cannot retain page state between calls or pause/resume.
-Chromium and Browserbase retain bounded sessions per durable agent, with separate
-storage for each provider. Credential-bearing CDP commands remain blocked.
-Kitesurf exposes ordinary browsing; private Vault and one-time secure input
-tools are unavailable with this provider. Chromium and Browserbase retain their
-existing private browser flows. Use workdir-scoped CUA when operating an
-existing computer's browser.
+`kitesurf` and `chromium` pass `env.BROWSER` directly to the upstream Agents SDK
+runtime and use one-shot sessions: complete navigation and extraction in one
+`browser_execute` call. Page state does not persist between calls. These providers
+use the upstream tools, descriptions, CDP commands, and result handling without
+Nanocodex's CDP filter or result proxy. Their default execution timeout is 90 seconds;
+`MANAGED_BROWSER_TOOL_TIMEOUT_MS` can override it. Private Vault and one-time secure
+input tools are unavailable with either one-shot provider.
+
+`cloudflare` and `browserbase` retain bounded sessions per durable agent, with
+separate storage for each provider. Their existing CDP restrictions and private
+browser flows remain in place. Use workdir-scoped CUA when operating an existing
+computer's browser. An unset `MANAGED_BROWSER_PROVIDER` selects `chromium`,
+matching the checked-in production and development Wrangler configurations.
 
 [Kitesurf is currently beta](https://developers.cloudflare.com/browser-run/kitesurf/).
 It does not support every Chromium feature or long-running authenticated state.
 Unsupported sites return their browser errors; there is no automatic VM allocation
-or silent provider fallback. Operators can select `cloudflare` when Chromium is
-needed. Neither Browser Run engine requires a Nanocodex VM.
+or silent provider fallback. Operators can explicitly select `kitesurf` for its
+beta engine or `cloudflare` for the retained private-browser integration. Neither
+Browser Run engine requires a Nanocodex VM.
 
-Run the [local Kitesurf smoke test](scripts/kitesurf-smoke.md) to verify the real
+Run the [local hosted browser smoke test](scripts/kitesurf-smoke.md) to verify the real
 remote binding through the managed runtime before rollout.
 
 ### Spotify on iPhone

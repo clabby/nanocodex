@@ -24,15 +24,21 @@ RPC is reachable through the managed service binding, never model HTTP egress.
 ## Hosted browser
 
 Managed sessions expose `browser_execute` through the Cloudflare `BROWSER` binding
-and `LOADER` Worker loader. The browser runs independently of mounted Hands and
-reuses its session between calls. Attached computer browsers continue to use
-workdir-scoped CUA. Restricted-network and multiplayer sessions do not receive
+and `LOADER` Worker loader. The browser runs independently of mounted Hands.
+The default Chromium provider uses one-shot sessions: complete navigation and
+inspection in one call; page state does not persist between calls. Attached
+computer browsers continue to use workdir-scoped CUA. Restricted-network and multiplayer sessions do not receive
 hosted browser tools. Every browser call requires current full account tool
 authority; Connect grants cannot access the account's retained browser.
 
-Production uses `MANAGED_BROWSER_PROVIDER=cloudflare`; development uses a remote
-`BROWSER` binding. Deploy the managed Worker to apply the binding and tool changes.
+Production, development, and an unset `MANAGED_BROWSER_PROVIDER` select `chromium`;
+development uses a remote `BROWSER` binding. The one-shot `chromium` and `kitesurf`
+providers do not expose private Vault or secure-input browser tools.
+Deploy the managed Worker to apply the binding and tool changes.
 Deployments without a browser binding can still serve ordinary agent turns.
+
+The retained `cloudflare` and `browserbase` providers must be explicitly selected
+for the private browser flows below. They reuse their sessions between calls.
 
 For an explicitly authorized named Vault login, use `browser_vault_status` and
 `browser_vault_fill` with the exact approved HTTPS origin. Credential entry
