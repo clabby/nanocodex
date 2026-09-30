@@ -194,3 +194,64 @@ test('SIGKILL of native worker owner closes lease and reaps synthetic native hel
   let alive = true; try { process.kill(helperPid, 0); } catch { alive = false; }
   assert.equal(alive, false, 'native worker failed to observe killed owner EOF');
 });
+
+test('stat-only local policy rejects external ownership/symlinks and allows owner preferences', async () => {
+  const configPath = '/synthetic/home/.codex/config.toml';
+  const inspectFor = metadata => async file => file === configPath ? metadata : missing();
+  await assert.rejects(checkManagedPolicy({ home: '/synthetic/home', codexHome: undefined, platform: 'linux', inspect: inspectFor({ uid: process.getuid() + 1, isSymbolicLink: () => false }) }), /Externally owned/);
+  await assert.rejects(checkManagedPolicy({ home: '/synthetic/home', codexHome: undefined, platform: 'linux', inspect: inspectFor({ uid: process.getuid(), isSymbolicLink: () => true }) }), /Externally owned/);
+  await checkManagedPolicy({ home: '/synthetic/home', codexHome: undefined, platform: 'linux', inspect: inspectFor({ uid: process.getuid(), isSymbolicLink: () => false }) });
+});
+
+test('home and absolute external CODEX_HOME enforced-source presence fails closed', async () => {
+  for (const file of ['/synthetic/home/.codex/requirements.toml', '/synthetic/home/.codex/managed_config.toml', '/synthetic/managed/requirements.toml', '/synthetic/managed/managed_config.toml']) {
+    await assert.rejects(checkManagedPolicy({ home: '/synthetic/home', codexHome: '/synthetic/managed', platform: 'linux', inspect: async checked => checked === file ? {} : missing() }), /Managed computer policy/);
+  }
+});
+
+test('relative CODEX_HOME cannot silently bypass potentially enforced policy sources', async () => {
+  const visited = [];
+  const settings = { home: '/synthetic/home', codexHome: 'relative-managed', platform: 'linux', inspect: async file => {
+    visited.push(file);
+    if (file === path.resolve('relative-managed/requirements.toml') || file === 'relative-managed/requirements.toml') return {};
+    return missing();
+  }};
+  await assert.rejects(checkManagedPolicy(settings), /policy|CODEX_HOME|absolute/i, 'relative external home was silently ignored');
+});
+
+test('cancelled queued request may reuse ID without dispatching the previous input', async t => {
+  let server;
+  const f = await fixture(t, { onSpawn(child, settings, index) { if (index === 2) { server = createServer(); server.listen(settings.env.SKY_CUA_SERVICE_NATIVE_PIPE_PATH); } } });
+  t.after(() => server && new Promise(resolve => server.close(resolve)));
+  const sent = [], replies = []; readLines(f.children[0].stdin, v => sent.push(v), assert.fail); readLines(f.output, v => replies.push(v), assert.fail);
+  f.input.write(JSON.stringify(rpc('reuse', 'tools/call', { name: 'js', arguments: { code: 'oldInput()' } })) + '\n');
+  f.input.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'reuse' } }) + '\n');
+  f.input.write(JSON.stringify(rpc('reuse', 'tools/call', { name: 'js', arguments: { code: 'newInput()' } })) + '\n');
+  for (let n = 0; n < 100 && !sent.some(v => v.method === 'tools/call'); n++) await pause(10);
+  assert.deepEqual(sent.filter(v => v.method === 'tools/call').map(v => v.params.arguments.code), ['newInput()']);
+  assert.equal(replies[0].error.code, -32800);
+});
+
+test('provider stdin EPIPE fails pending calls through orderly cleanup', async t => {
+  const f = await fixture(t), replies = []; readLines(f.output, v => replies.push(v), assert.fail);
+  f.input.write(JSON.stringify(rpc('pipe-failed', 'tools/list')) + '\n'); await tick();
+  f.children[0].stdin.emit('error', Object.assign(new Error('synthetic pipe failure'), { code: 'EPIPE' }));
+  assert.equal(replies[0].id, 'pipe-failed'); assert.match(replies[0].error.message, /uncertain/);
+  f.children.forEach(child => child.exit()); await f.completed;
+  assert.deepEqual(await readdir(f.state), []);
+});
+
+test('more than 64 queued notifications closes without dispatch', async t => {
+  const f = await fixture(t), sent = []; readLines(f.children[0].stdin, v => sent.push(v), assert.fail);
+  f.input.write(Array.from({ length: 65 }, () => JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })).join('\n') + '\n');
+  await tick(); f.children.forEach(child => child.exit()); await f.completed;
+  assert.deepEqual(sent, []); assert.deepEqual(await readdir(f.state), []);
+});
+
+test('input close without end fails pending calls instead of leaking host lease', async t => {
+  const f = await fixture(t), replies = []; readLines(f.output, v => replies.push(v), assert.fail);
+  f.input.write(JSON.stringify(rpc('input-closed', 'tools/list')) + '\n'); await tick();
+  f.input.destroy(); await tick();
+  assert.equal(replies.length, 1, 'clean close without end does not invalidate pending requests');
+  assert.match(replies[0].error.message, /uncertain/);
+});
