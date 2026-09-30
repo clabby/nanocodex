@@ -20,7 +20,7 @@ use crate::version;
 
 mod automatic;
 mod local;
-mod pr;
+mod source;
 mod store;
 mod voice;
 
@@ -145,20 +145,24 @@ pub(crate) struct Update {
     #[arg(
         value_name = "VERSION",
         value_parser = parse_requested_version,
-        conflicts_with_all = ["nightly", "pr", "path"]
+        conflicts_with_all = ["nightly", "branch", "pr", "path"]
     )]
     version: Option<Version>,
 
     /// Download and activate the latest nightly build.
-    #[arg(long, conflicts_with_all = ["version", "pr", "path"])]
+    #[arg(long, conflicts_with_all = ["version", "branch", "pr", "path"])]
     nightly: bool,
 
-    /// Download and activate a verified on-demand pull-request artifact.
+    /// Fetch, compile, and activate a branch of gakonst/nanocodex.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["version", "nightly", "pr", "path", "force", "auto", "apply", "background"])]
+    branch: Option<String>,
+
+    /// Fetch, compile, and activate the current head of an open pull request.
     #[arg(
         long,
         value_name = "NUMBER",
         value_parser = parse_pr_number,
-        conflicts_with_all = ["version", "nightly", "path"]
+        conflicts_with_all = ["version", "nightly", "branch", "path", "force", "auto", "apply", "background"]
     )]
     pr: Option<u64>,
 
@@ -167,12 +171,12 @@ pub(crate) struct Update {
         long,
         value_name = "PATH",
         value_hint = ValueHint::FilePath,
-        conflicts_with_all = ["version", "nightly", "pr"]
+        conflicts_with_all = ["version", "nightly", "branch", "pr"]
     )]
     path: Option<PathBuf>,
 
     /// Reinstall the selected release even when it is already installed.
-    #[arg(long, conflicts_with_all = ["pr", "path"])]
+    #[arg(long, conflicts_with_all = ["branch", "pr", "path"])]
     force: bool,
 
     /// nanocodex2 binary built from the same source revision as the local CLI.
@@ -184,15 +188,15 @@ pub(crate) struct Update {
     voice_archive: Option<PathBuf>,
 
     /// Enable, disable, or inspect hourly automatic update downloads.
-    #[arg(long, value_enum, conflicts_with_all = ["version", "pr", "path", "force", "apply", "background", "restart_hand"])]
+    #[arg(long, value_enum, conflicts_with_all = ["version", "branch", "pr", "path", "force", "apply", "background", "restart_hand"])]
     auto: Option<automatic::AutoUpdate>,
 
     /// Activate the verified update staged by the background updater.
-    #[arg(long, conflicts_with_all = ["version", "nightly", "pr", "path", "force", "background"])]
+    #[arg(long, conflicts_with_all = ["version", "nightly", "branch", "pr", "path", "force", "background"])]
     apply: bool,
 
     /// Download and stage an update without interrupting running work.
-    #[arg(long, hide = true, conflicts_with_all = ["version", "pr", "path", "force"])]
+    #[arg(long, hide = true, conflicts_with_all = ["version", "branch", "pr", "path", "force"])]
     background: bool,
 
     /// Restart the running Hand and its VM host to activate this update now.
@@ -308,8 +312,13 @@ impl Update {
             )
             .await;
         }
-        if let Some(pr) = self.pr {
-            return install_pr_binary(pr, &store, &previous, self.restart_hand).await;
+        if let Some(selection) = self
+            .branch
+            .as_deref()
+            .map(source::Selection::Branch)
+            .or_else(|| self.pr.map(source::Selection::Pr))
+        {
+            return install_source(selection, &store, &previous, self.restart_hand).await;
         }
 
         // Complete cached releases can still be selected offline. A legacy
@@ -455,6 +464,7 @@ pub(crate) async fn install_latest() -> Result<PathBuf> {
     Update {
         version: None,
         nightly: false,
+        branch: None,
         pr: None,
         path: None,
         force: false,
@@ -925,34 +935,26 @@ async fn install_local_binary(
     Ok(())
 }
 
-async fn install_pr_binary(
-    number: u64,
+async fn install_source(
+    selection: source::Selection<'_>,
     store: &VersionStore,
     previous: &str,
     restart_hand: bool,
 ) -> Result<()> {
-    let asset_name = binary_asset_name()?;
-    let artifact = pr::download(number, asset_name).await?;
-    let key = format!("pr-{number}-{}", artifact.head_sha);
-    if let Some(companion) = &artifact.companion {
-        store.install_bundle(
-            &key,
-            &artifact.contents,
-            companion,
-            None,
-            artifact.voice.as_deref(),
-        )?;
-    } else if artifact.voice.is_some() {
-        bail!("PR artifact includes voice without its nanocodex2 companion");
-    } else {
-        store.install(&key, &artifact.contents)?;
-    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| store.root().join("source-build/target"));
+    let build = source::build(selection, &target).await?;
+    let key = format!("{}-{}", selection.key_prefix(), build.sha);
+    store.install_bundle(&key, &build.cli, &build.hand, None, None)?;
     if !activate_coordinated(store, &key, false, restart_hand).await? {
         return Ok(());
     }
+    store.promote_manager(&key)?;
     println!(
-        "installed and activated nanocodex PR #{number} at {} ({}, previously {previous})",
-        artifact.head_sha, artifact.run_url,
+        "installed and activated nanocodex {} at {} (previously {previous})",
+        selection.description(),
+        build.sha,
     );
     Ok(())
 }

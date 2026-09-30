@@ -157,6 +157,11 @@ process protocol that applications must adopt. See
 [`bin/nanocodex`](bin/nanocodex), the [examples index](examples/README.md), and
 the [release switcher documentation](bin/nanocodex/src/update.rs).
 
+To install a branch or an open pull request from source, run
+`nanocodex update --branch master` or `nanocodex update --pr 123`. Both commands fetch the selected
+revision and compile the CLI and Hand locally with Cargo. PR selection also
+requires `gh`. These source builds do not package the native voice runtime.
+
 For managed agents, `nanocodex2 login` signs in with an SMS code and saves an
 account key; `nanocodex2 status` verifies it, and `nanocodex2 logout` removes the
 local login. `nanocodex account login/status/logout` manages the same saved account. Account
