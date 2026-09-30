@@ -1500,6 +1500,53 @@ final class InboxUITests: XCTestCase {
             app.terminate()
         }
     }
+    func testBottomAppShortcutsOpenNativeAppsAndReturnToChat() {
+        let app = launch(arguments: ["--generated-apps-ui-fixture"])
+        let conversation = selectedConversationTab(app).identifier
+        let bar = app.scrollViews["saved-apps-bar"]
+        let water = app.buttons["main-app-water"]
+        XCTAssertTrue(water.waitForExistence(timeout: 25))
+        water.tap()
+        XCTAssertTrue(app.staticTexts["Glasses: 0"].waitForExistence(timeout: 10))
+        XCTAssertTrue(water.isSelected)
+        XCTAssertFalse(app.webViews.firstMatch.exists)
+        app.buttons["Add glass"].tap()
+        XCTAssertTrue(app.staticTexts["Glasses: 1"].waitForExistence(timeout: 5))
+        capture(app, "bottom-app-water-native")
+
+        let reading = app.buttons["main-app-reading"]
+        reading.tap()
+        XCTAssertTrue(app.staticTexts["Pages: 0"].waitForExistence(timeout: 5))
+        XCTAssertTrue(reading.isSelected)
+        XCTAssertFalse(water.isSelected)
+        XCTAssertFalse(app.staticTexts["Glasses: 1"].exists)
+        app.buttons["Read page"].tap()
+        XCTAssertTrue(app.staticTexts["Pages: 1"].waitForExistence(timeout: 5))
+
+        let travel = app.buttons["main-app-travel"]
+        XCTAssertFalse(travel.isHittable, "The fixture must exercise shortcuts beyond the visible bar.")
+        for _ in 0..<5 where !travel.isHittable { bar.swipeLeft() }
+        XCTAssertTrue(travel.isHittable)
+        travel.tap()
+        XCTAssertTrue(app.staticTexts["Packed items: 0"].waitForExistence(timeout: 5))
+        XCTAssertTrue(travel.isSelected)
+        XCTAssertFalse(reading.isSelected)
+        capture(app, "bottom-app-overflow-travel")
+
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(selectedConversationTab(app).waitForExistence(timeout: 5))
+        XCTAssertEqual(selectedConversationTab(app).identifier, conversation)
+        XCTAssertFalse(travel.isSelected)
+        XCTAssertFalse(app.staticTexts["Packed items: 0"].exists)
+        capture(app, "bottom-app-return-to-chat")
+
+        for _ in 0..<5 where !water.isHittable { bar.swipeRight() }
+        water.tap()
+        XCTAssertTrue(app.staticTexts["Glasses: 1"].waitForExistence(timeout: 5), "Switching apps must reopen their saved native state.")
+        XCTAssertTrue(water.isSelected)
+        capture(app, "bottom-app-water-reopened")
+    }
+
     private func launch(_ environment: [String: String] = [:], arguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--demo"] + arguments

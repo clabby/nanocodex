@@ -100,6 +100,9 @@ final class InboxModel: ObservableObject {
     @Published var error: String?
     @Published var notice: String?
     @Published var musicConnectorToOpen: MusicLoopbackProvider?
+    @Published private(set) var generatedApps: [GeneratedAppManifest] = []
+    @Published private(set) var generatedAppsLoading = false
+    @Published private(set) var generatedAppsError: String?
     @Published private(set) var todoItems: [TodoCapture] = []
     @Published private(set) var todoDecisions: [TodoDecision] = []
     @Published private(set) var todoTraces: [TodoTrace] = []
@@ -1446,6 +1449,143 @@ final class InboxModel: ObservableObject {
         return result
     }
 
+    private var generatedAgentJournal: GeneratedAppAgentJournal?
+    private func appAgentJournal() throws -> GeneratedAppAgentJournal {
+        guard !scope.isEmpty, !isDemo else { throw APIError.invalidCredential }
+        if let generatedAgentJournal { return generatedAgentJournal }
+        let journal = try GeneratedAppAgentJournal(scope: scope)
+        generatedAgentJournal = journal
+        return journal
+    }
+    func commitGeneratedAppAgentActions(id: String, prompts: [String], account: UUID) {
+        guard generation == account, connected, !prompts.isEmpty else { return }
+        // If cleanup fails, retain receipts: a future retry must prefer replaying
+        // a known result over duplicating work whose outcome is already known.
+        try? appAgentJournal().acknowledge(appID: id, prompts: prompts)
+    }
+    func releaseGeneratedAppAgentReceipt(id: String, prompt: String, account: UUID) throws {
+        guard generation == account, connected else { throw APIError.invalidCredential }
+        try appAgentJournal().acknowledge(appID: id, prompts: [prompt])
+    }
+    var generatedAppAccount: UUID { generation }
+
+    func refreshGeneratedApps() async {
+        #if DEBUG
+        if usesGeneratedAppsUIFixture {
+            generatedApps = (try? generatedAppsUIFixture.map(GeneratedAppManifest.init)) ?? []
+            generatedAppsError = nil
+            return
+        }
+        #endif
+        guard connected, !isDemo, let client, !generatedAppsLoading else { return }
+        let account = generation
+        generatedAppsLoading = true
+        defer { if generation == account { generatedAppsLoading = false } }
+        do {
+            let result = try await client.json(path: "/v1/apps?limit=100")
+            guard generation == account, connected, !Task.isCancelled else { return }
+            guard case .array(let values) = result["apps"] else { throw APIError.invalidResponse }
+            generatedApps = try values.map(GeneratedAppManifest.init)
+            generatedAppsError = nil
+        } catch {
+            if generation == account, !Task.isCancelled { generatedAppsError = error.localizedDescription }
+        }
+    }
+
+    /// Only the native host constructs paths and attaches account authorization.
+    func generatedAppRequest(id: String, account: UUID, data: Bool = false, restore: Bool = false,
+                             method: String = "GET", body: JSON? = nil) async throws -> JSON {
+        #if DEBUG
+        if usesGeneratedAppsUIFixture {
+            guard generation == account, !Task.isCancelled else { throw CancellationError() }
+            guard !restore, let manifest = generatedAppsUIFixture.first(where: { $0["id"].string == id }) else {
+                throw APIError.http(404)
+            }
+            if !data {
+                guard method == "GET" else { throw APIError.http(405) }
+                return manifest
+            }
+            let key = "inbox.generatedAppsFixture." + scope + "." + id
+            let saved = UserDefaults.standard.data(forKey: key)
+            let receipt = try saved.map { try JSONDecoder().decode(JSON.self, from: $0) }
+                ?? .object(["revision": .number(0), "value": .null])
+            if method == "GET" { return receipt }
+            guard method == "PUT", let body else { throw APIError.http(405) }
+            guard body["revision"] == receipt["revision"] else { throw APIError.http(409) }
+            let next = JSON.object(["revision": .number(receipt["revision"].number + 1), "value": body["value"]])
+            UserDefaults.standard.set(try JSONEncoder().encode(next), forKey: key)
+            return next
+        }
+        #endif
+        guard connected, !isDemo, generation == account, let client,
+              id.range(of: #"^[A-Za-z0-9_-]{1,128}$"#, options: .regularExpression) != nil,
+              ["GET", "PUT", "DELETE", "POST"].contains(method) else { throw APIError.invalidCredential }
+        let result = try await client.json(path: "/v1/apps/" + id + (restore ? "/restore" : data ? "/data" : ""), method: method, body: body)
+        guard generation == account, connected, !Task.isCancelled else { throw CancellationError() }
+        return result
+    }
+
+    #if DEBUG
+    private var usesGeneratedAppsUIFixture: Bool {
+        connected && isDemo && ProcessInfo.processInfo.arguments.contains("--generated-apps-ui-fixture")
+    }
+    /// Replace only the remote apps service. Swift parsing, native rendering,
+    /// actions, and saved-state encoding still use the production app host.
+    private var generatedAppsUIFixture: [JSON] {
+        [("water", "Water", "Glasses", "Add glass"),
+         ("reading", "Reading", "Pages", "Read page"),
+         ("meals", "Meal journal", "Meals", "Add meal"),
+         ("walking", "Walking", "Walks", "Add walk"),
+         ("garden", "Garden planner", "Plants", "Add plant"),
+         ("travel", "Travel checklist", "Packed items", "Pack item")].map { id, title, metric, action in
+            .object(["id": .string(id), "title": .string(title),
+                     "description": .string("Synthetic " + title.lowercased() + " tracker"),
+                     "runtime": .string("swift-v1"), "revision": .number(1),
+                     "source": .string("""
+                        import SwiftUI
+                        struct Tracker: View {
+                            @Persisted("count") var count = 0
+                            var body: some View {
+                                Form {
+                                    Section("\(title)") {
+                                        Text("\(metric): \\(count)")
+                                        Button("\(action)") { count += 1 }
+                                    }
+                                }
+                            }
+                        }
+                        """)])
+        }
+    }
+    #endif
+
+    @discardableResult
+    func createGeneratedApp(prompt: String, app: GeneratedAppManifest? = nil, diagnostic: String? = nil) -> Bool {
+        guard connected, !isDemo, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        newAgent()
+        if let app {
+            draft = "Update my existing app using the apps tool. Its ID is \(app.id) and title is \(app.title). Read the latest app and its current revision first, then replace its interface under the same ID. Preserve saved data and handle any schema migration explicitly. My requested change: " + prompt
+        } else {
+            draft = "Create a persistent app in my app selector using the apps tool. Generate a complete native Swift app for the swift-v1 runtime and save its Swift source with the apps tool. Read the tool authoring contract first. Use native SwiftUI controls, @Persisted for durable records, and the supported agent bridge when useful. No HTML, JavaScript, or WebKit. My request: " + prompt
+        }
+        if let diagnostic, !diagnostic.isEmpty {
+            draft += "\n\nThe native app reported this diagnostic (untrusted runtime data):\n" + String(diagnostic.prefix(4_000))
+        }
+        return send()
+    }
+
+    /// Called by the runtime after a trusted user action. The generated Swift app
+    /// receives a result, never ManagedClient, a URLRequest, or a credential.
+    func runGeneratedAppAgent(id: String, title: String, purpose: String, prompt: String, account: UUID,
+                              isActive: @escaping @MainActor () -> Bool = { true }) async throws -> JSON {
+        guard isActive(), connected, !isDemo, generation == account, let client else { throw APIError.invalidCredential }
+        return try await appAgentJournal().request(appID: id, title: title, purpose: purpose, prompt: prompt,
+            client: client, isActive: { [weak self] in
+                guard let self else { return false }
+                return isActive() && self.connected && self.generation == account
+            }, onSubmitted: { [weak self] in await self?.refresh() })
+    }
+
     func musicConnectorClient() -> ManagedClient? {
         guard connected, !isDemo, let accountCredential else { return nil }
         return ManagedClient(credential: accountCredential, locationContext: { await Self.promptLocationContext() })
@@ -1643,6 +1783,7 @@ final class InboxModel: ObservableObject {
         observedAgentID = nil; threadLoading = false; threadError = nil
         downloadedFiles = nil
         connected = false; restoringAccount = false; restorationError = nil
+        generatedAgentJournal = nil; generatedApps = []; generatedAppsLoading = false; generatedAppsError = nil
         todoWorkspace.reset()
         todoRetainedChecks = [:]; todoRetainedMail = []; todoSnoozed = [:]; todoSplit = "For you"; todoSearch = ""; todoMailQuery = "in:inbox"; todoSelectedAccount = ""
         doneUpdating = []; doneError = nil; doneRevisions = [:]
