@@ -532,6 +532,28 @@ impl ManagedClient {
         Ok(response.settings)
     }
 
+    /// Sets an account-owned session's manual done flag without changing its turns.
+    /// Repeating the same value preserves the transition timestamp.
+    ///
+    /// # Errors
+    /// Returns an identifier, transport, HTTP, or response-schema failure.
+    pub async fn set_done(
+        &self,
+        agent_id: &str,
+        done: bool,
+    ) -> Result<crate::SessionDoneState, ManagedError> {
+        validate_id("agent", agent_id)?;
+        let body = serde_json::to_vec(&serde_json::json!({ "done": done }))
+            .map_err(|_| ManagedError::InvalidResponse("failed to encode session disposition"))?;
+        self.json(
+            Method::PUT,
+            &format!("{}/done", agent_path(agent_id)),
+            Some(&body),
+            None,
+        )
+        .await
+    }
+
     /// Deletes one account-owned managed agent.
     ///
     /// # Errors

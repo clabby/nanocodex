@@ -29,6 +29,11 @@ public struct AgentCard: Identifiable, Equatable, Sendable {
     /// Last history event actually projected into the card, excluding newer
     /// state snapshots whose events have not been read yet.
     public var appliedHistoryCursor: Cursor { previewCursor }
+    /// Manual organization only; independent of turn execution and history.
+    public var done = false
+    public var doneAt: Double?
+    public private(set) var donePresentationRevision: Double = 0
+    private var donePresentationUpdatedAt: Double = 0
     public var presentationStatus = ""
     public var presentationActivity = ""
     public var presentationLastUserPrompt = ""
@@ -58,6 +63,19 @@ public struct AgentCard: Identifiable, Equatable, Sendable {
         return activityDetail.isEmpty ? activitySummary : activityDetail
     }
     public mutating func applyPresentation(_ value: JSON) {
+        let revision: Double? = {
+            if case .number(let number) = value["revision"], number.isFinite, number >= 0 { return number }
+            return nil
+        }()
+        // Done is orthogonal to execution status but shares its server-owned ordering.
+        if case .bool(let done) = value["done"],
+           (revision.map { $0 >= donePresentationRevision }
+               ?? (donePresentationRevision == 0 && value["updatedAt"].number >= max(donePresentationUpdatedAt, presentationUpdatedAt))) {
+            self.done = done
+            doneAt = done && value["doneAt"] != .null ? value["doneAt"].number : nil
+            donePresentationRevision = revision ?? 0
+            donePresentationUpdatedAt = value["updatedAt"].number
+        }
         let labels = ["running": "Running", "stopping": "Stopping", "completed": "Ready", "cancelled": "Stopped", "failed": "Failed", "idle": "Idle"]
         guard let label = labels[value["status"].string], value["updatedAt"].number >= presentationUpdatedAt else { return }
         presentationStatus = label; presentationUpdatedAt = value["updatedAt"].number
@@ -65,6 +83,21 @@ public struct AgentCard: Identifiable, Equatable, Sendable {
         presentationLastUserMessageAt = value["lastUserMessageAt"].number
         presentationTurnID = value["activityTurnId"].string
         presentationActivity = value["activeTurnIds"].array.map(\.string).contains(value["activityTurnId"].string) ? value["activity"].string : ""
+    }
+    public mutating func applyDoneReceipt(done: Bool, doneAt: Double?, presentationRevision: Double?) {
+        if let revision = presentationRevision {
+            guard revision >= donePresentationRevision else { return }
+            donePresentationRevision = revision
+        }
+        self.done = done; self.doneAt = doneAt
+    }
+    /// Roster replies can lag an acknowledged write even after local GET fencing.
+    public mutating func mergeDone(from summary: AgentCard) {
+        guard summary.donePresentationRevision >= donePresentationRevision,
+              summary.donePresentationRevision > 0 || summary.donePresentationUpdatedAt >= donePresentationUpdatedAt else { return }
+        done = summary.done; doneAt = summary.doneAt
+        donePresentationRevision = summary.donePresentationRevision
+        donePresentationUpdatedAt = summary.donePresentationUpdatedAt
     }
     public var preview = ""
     /// Keep the visible exchange together while the focused transcript reloads.

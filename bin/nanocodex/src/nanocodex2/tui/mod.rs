@@ -573,6 +573,12 @@ struct DriverRuntime {
     )>,
     unresolved_steers: HashMap<(PaneId, components::QueueId), CancellationToken>,
     vault_tasks: JoinSet<vault::Completion>,
+    done_updates: JoinSet<(
+        String,
+        u64,
+        bool,
+        Result<nanocodex_managed::SessionDoneState, ManagedError>,
+    )>,
     share_tasks: JoinSet<(PaneId, String, u64, Result<share::Outcome, ManagedError>)>,
     vault_attempted: HashSet<(String, String)>,
     steer_receipts: HashMap<(PaneId, components::QueueId), (u64, SteerTarget, String)>,
@@ -1603,6 +1609,7 @@ impl DriverRuntime {
             && self.settings_queue.is_empty()
             && self.vault_tasks.is_empty()
             && self.share_tasks.is_empty()
+            && self.done_updates.is_empty()
             && self.voice_tasks.is_empty()
             // Keep local recordings and samples until explicitly submitted or discarded.
             && self.clone_panel.is_none()
@@ -1624,6 +1631,7 @@ impl DriverRuntime {
             && self.settings_updates.is_empty()
             && self.settings_queue.is_empty()
             && self.share_tasks.is_empty()
+            && self.done_updates.is_empty()
             && self.active_shells == 0
             && self.pending_submission.is_none()
             && self.cancel_after_admission.is_empty()
@@ -1945,6 +1953,7 @@ async fn run_inner(
         unresolved_steers: HashMap::new(),
         vault_tasks: JoinSet::new(),
         share_tasks: JoinSet::new(),
+        done_updates: JoinSet::new(),
         vault_attempted: HashSet::new(),
         steer_receipts: HashMap::new(),
         pending_withdrawals: HashSet::new(),
@@ -2205,7 +2214,7 @@ async fn run_inner(
             });
         tokio::select! {
             _ = tmux_tick.tick(), if tmux.is_some() => {
-                if let Some(publisher) = &mut tmux {
+                if let Some(publisher) = &mut tmux && !(runtime.startup_attach && runtime.agent_id.is_empty()) {
                     let status = if runtime.recovery.is_some() { "reconnecting" }
                         else if runtime.agent.is_none() { "connecting" }
                         else if !runtime.managed_events_open { "disconnected" }
@@ -2964,6 +2973,22 @@ async fn run_inner(
                     }
                 }
             }
+            Some(result) = runtime.done_updates.join_next(), if !runtime.done_updates.is_empty() => {
+                match result {
+                    Ok((agent_id, _generation, done, result)) if runtime.agent_id == agent_id => {
+                        let event = match result {
+                            Ok(receipt) if receipt.done == done => AppEvent::NotifySuccess { pane: PaneId::Main, message: if done {
+                                "Marked done · hidden from continue. /undone restores it; history and running work are unchanged.".into()
+                            } else { "Session restored to continue.".into() } },
+                            Ok(_) | Err(_) => AppEvent::NotifyError { pane: PaneId::Main, error: "Session change could not be confirmed. Check the session list before retrying; no automatic retry was made.".into() },
+                        };
+                        request_render(app.update(event), &mut scheduler);
+                    }
+                    Ok(_) => {},
+                    Err(_) => request_render(app.update(AppEvent::NotifyError { pane: PaneId::Main,
+                        error: "Session change stopped unexpectedly. Check the session list before retrying.".into() }), &mut scheduler),
+                }
+            }
             Some(result) = runtime.share_tasks.join_next(), if !runtime.share_tasks.is_empty() => {
                 match result {
                     Ok((pane, agent_id, generation, outcome)) if runtime.agent_id == agent_id
@@ -3658,6 +3683,23 @@ async fn apply_update(
                         } else {
                             runtime.pending_submission = Some((pane, id, prompt));
                         }
+                    }
+                    RootEffect::SetDone(done) => {
+                        if runtime.agent_id.is_empty() {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "No managed session yet. Attach a session before marking it done.".into() }), &mut effects, scheduler);
+                            continue;
+                        }
+                        if !runtime.done_updates.is_empty() {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "A session change is already being saved.".into() }), &mut effects, scheduler);
+                            continue;
+                        }
+                        let client = runtime.client.clone();
+                        let agent_id = runtime.agent_id.clone();
+                        let generation = runtime.connection_generation;
+                        runtime.done_updates.spawn(async move {
+                            let result = client.set_done(&agent_id, done).await;
+                            (agent_id, generation, done, result)
+                        });
                     }
                     RootEffect::Share(command) => {
                         if command == share::Command::Help {
@@ -5019,6 +5061,7 @@ mod tests {
             unresolved_steers: HashMap::new(),
             vault_tasks: JoinSet::new(),
             share_tasks: JoinSet::new(),
+            done_updates: JoinSet::new(),
             vault_attempted: HashSet::new(),
             steer_receipts: HashMap::new(),
             pending_withdrawals: HashSet::new(),

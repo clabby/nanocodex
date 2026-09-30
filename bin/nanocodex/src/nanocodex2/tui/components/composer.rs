@@ -69,6 +69,7 @@ pub(crate) enum SettingsCommand {
     Attach,
     AutoRoute,
     Reload,
+    SetDone(bool),
     Screen,
     Zoom,
     Voice(crate::voice::Command),
@@ -99,6 +100,11 @@ impl SettingsCommand {
                 Self::Invalid("Usage: /autoroute".into())
             } else {
                 Self::AutoRoute
+            }),
+            "/done" | "/undone" => Some(if parts.next().is_some() {
+                Self::Invalid(format!("Usage: {command}"))
+            } else {
+                Self::SetDone(command == "/done")
             }),
             "/reload" => Some(if parts.next().is_some() {
                 Self::Invalid("Usage: /reload".into())

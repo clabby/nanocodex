@@ -128,11 +128,11 @@ describe("agent sidebar presentation", () => {
     const post = (value: AgentPresentation) => stub.fetch(`https://user.internal/agents/${id}/presentation`, {
       method: "POST", body: JSON.stringify(value),
     });
-    expect((await post({ revision: 3, status: "completed", activeTurnIds: [], updatedAt: 30, title: "Fix sidebar", lastUserMessageAt: 15, lastUserPrompt: "Latest request" })).status).toBe(204);
+    expect((await post({ revision: 3, status: "completed", activeTurnIds: [], updatedAt: 30, title: "Fix sidebar", done: true, doneAt: 25, lastUserMessageAt: 15, lastUserPrompt: "Latest request" })).status).toBe(204);
     await post({ revision: 2, status: "running", activeTurnIds: ["a"], updatedAt: 20, activity: "I'm checking state", lastUserPrompt: "Stale request" });
-    expect((await listAgents(runtime, owner))[0]).toMatchObject({ title: "Fix sidebar", presentation: { revision: 3, status: "completed", lastUserMessageAt: 15, lastUserPrompt: "Latest request" } });
+    expect((await listAgents(runtime, owner))[0]).toMatchObject({ title: "Fix sidebar", presentation: { revision: 3, status: "completed", done: true, doneAt: 25, lastUserMessageAt: 15, lastUserPrompt: "Latest request" } });
     await post({ revision: 4, status: "running", activeTurnIds: ["scheduled"], updatedAt: 40 });
-    expect((await listAgents(runtime, owner))[0]?.presentation).toMatchObject({ lastUserMessageAt: 15, lastUserPrompt: "Latest request" });
+    expect((await listAgents(runtime, owner))[0]?.presentation).toMatchObject({ done: true, doneAt: 25, lastUserMessageAt: 15, lastUserPrompt: "Latest request" });
     expect((await post({ revision: 5, status: "idle", activeTurnIds: [], updatedAt: 50, lastUserPrompt: "x".repeat(501) })).status).toBe(400);
     expect((await post({ revision: 5, status: "idle", activeTurnIds: [], updatedAt: 50, lastUserPrompt: 42 } as unknown as AgentPresentation)).status).toBe(400);
   });

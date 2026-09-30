@@ -462,7 +462,7 @@ struct InboxView: View {
                         // Keep the direction through onEnded: GestureState can reset
                         // before that callback on iOS 18. Cancellation is handled below.
                         if drawerDragIsHorizontal == nil {
-                            drawerDragIsHorizontal = (showConversations || value.startLocation.x <= safeGeometry.safeAreaInsets.leading + 28)
+                            drawerDragIsHorizontal = ((showConversations && value.startLocation.x >= width) || (!showConversations && value.startLocation.x <= safeGeometry.safeAreaInsets.leading + 28))
                                 && abs(value.translation.width) > abs(value.translation.height) * 1.5
                                 && (showConversations || value.translation.width > 0)
                         }
@@ -778,6 +778,7 @@ private struct SidebarCard: Identifiable, Equatable {
     let id: String
     let title: String
     let lastUserMessageAt: Double
+    let done: Bool
     let sidebarStatus: String
     let sidebarActivity: String
     let lastUserPrompt: String
@@ -785,6 +786,7 @@ private struct SidebarCard: Identifiable, Equatable {
 
     init(_ card: AgentCard) {
         id = card.id; title = card.title; lastUserMessageAt = card.lastUserMessageAt
+        done = card.done
         sidebarStatus = card.sidebarStatus
         sidebarActivity = card.sidebarActivity; error = card.error
         lastUserPrompt = card.sidebarLastUserPrompt
@@ -799,13 +801,14 @@ private struct ConversationDrawer: View {
     let create: () -> Void
     let settings: () -> Void
     @State private var query = ""
+    @State private var showingDone = false
 
     var body: some View {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
         // Preview is search input, not rendered state. Streaming preview changes
         // only cross the equality boundary if they change search membership.
         let cards = model.cards.filter { card in
-            (!runningOnly || card.isRunningInSidebar) && (search.isEmpty
+            card.done == showingDone && (showingDone || !runningOnly || card.isRunningInSidebar) && (search.isEmpty
                 || card.sidebarLastUserPrompt.localizedCaseInsensitiveContains(search)
                 || card.sidebarActivity.localizedCaseInsensitiveContains(search)
                 || card.title.localizedCaseInsensitiveContains(search)
@@ -813,7 +816,10 @@ private struct ConversationDrawer: View {
                 || card.preview.localizedCaseInsensitiveContains(search))
         }.map(SidebarCard.init)
         ConversationDrawerContent(cards: cards, focusedID: model.focused?.id,
-                                  runningOnly: runningOnly, runningCount: model.cards.filter(\.isRunningInSidebar).count,
+                                  runningOnly: runningOnly, runningCount: model.cards.filter { !$0.done && $0.isRunningInSidebar }.count,
+                                  showingDone: showingDone, doneUpdating: model.doneUpdating, doneError: model.doneError,
+                                  doneFilterChanged: { showingDone = $0; query = "" },
+                                  setDone: { model.setSessionDone($0, done: $1) }, canSetDone: model.connected && !model.isDemo,
                                   filterChanged: { runningOnly = $0; query = "" },
                                   query: query, queryChanged: { query = $0 },
                                   select: select, close: close, create: create, settings: settings)
@@ -828,6 +834,12 @@ private struct ConversationDrawerContent: View, Equatable {
     let focusedID: String?
     let runningOnly: Bool
     let runningCount: Int
+    let showingDone: Bool
+    let doneUpdating: Set<String>
+    let doneError: String?
+    let doneFilterChanged: (Bool) -> Void
+    let setDone: (String, Bool) -> Void
+    let canSetDone: Bool
     let filterChanged: (Bool) -> Void
     let query: String
     let queryChanged: (String) -> Void
@@ -842,6 +854,8 @@ private struct ConversationDrawerContent: View, Equatable {
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.cards == rhs.cards && lhs.focusedID == rhs.focusedID && lhs.query == rhs.query
             && lhs.runningOnly == rhs.runningOnly && lhs.runningCount == rhs.runningCount
+            && lhs.showingDone == rhs.showingDone && lhs.doneUpdating == rhs.doneUpdating
+            && lhs.doneError == rhs.doneError && lhs.canSetDone == rhs.canSetDone
     }
 
     private var visibleCards: [SidebarCard] {
@@ -888,6 +902,18 @@ private struct ConversationDrawerContent: View, Equatable {
                 .accessibilityValue(status)
                 .accessibilityAddTraits(focusedID == card.id ? [.isSelected] : [])
                 .accessibilityIdentifier("conversation-row:" + card.id)
+                .accessibilityAction(named: card.done ? "Reopen" : "Mark Done") {
+                    if canSetDone && !doneUpdating.contains(card.id) { setDone(card.id, !card.done) }
+                }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button { setDone(card.id, !card.done) } label: {
+                Label(card.done ? "Reopen" : "Mark Done", systemImage: card.done ? "arrow.uturn.backward" : "checkmark")
+            }
+            .buttonStyle(.automatic) // Native List swipe buttons must not inherit the drawer’s plain style.
+            .tint(card.done ? .blue : .green)
+            .disabled(!canSetDone || doneUpdating.contains(card.id))
+            .accessibilityIdentifier("conversation-done:" + card.id)
         }
     }
 
@@ -895,7 +921,7 @@ private struct ConversationDrawerContent: View, Equatable {
         let visibleCards = visibleCards
         VStack(spacing: 12) {
             HStack(spacing: 4) {
-                Text("Agents").font(.headline.weight(.medium)).foregroundStyle(Ink.text)
+                Text(showingDone ? "Done" : "Agents").font(.headline.weight(.medium)).foregroundStyle(Ink.text)
                     .padding(.leading, 12)
                 Spacer()
                 Button(action: create) {
@@ -908,12 +934,23 @@ private struct ConversationDrawerContent: View, Equatable {
                 .accessibilityLabel("Return to conversation").accessibilityIdentifier("conversation-drawer-close")
             }
             .font(.system(size: 17, weight: .regular))
+            Button { doneFilterChanged(!showingDone) } label: {
+                Label(showingDone ? "Back to sessions" : "Done", systemImage: showingDone ? "arrow.left" : "checkmark.circle")
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            }
+            .accessibilityIdentifier("conversation-done-filter")
+            if let doneError {
+                Text(doneError).font(.caption).foregroundStyle(.red)
+                    .accessibilityIdentifier("conversation-done-error")
+            }
+            if !showingDone {
             Picker("Agents", selection: Binding(get: { runningOnly }, set: filterChanged)) {
                 Text("All").tag(false)
                 Text("Running (\(runningCount))").tag(true)
             }
             .pickerStyle(.segmented)
             .accessibilityIdentifier("conversation-filter")
+            }
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Ink.muted)
                 TextField("Search agents", text: Binding(get: { query }, set: queryChanged))
@@ -927,17 +964,19 @@ private struct ConversationDrawerContent: View, Equatable {
             }
             .font(.system(size: detailSize)).padding(.horizontal, 12).frame(minHeight: 44)
             .background(Ink.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            ScrollView {
-                LazyVStack(spacing: 4) {
+            List {
                     ForEach(visibleCards) { card in
                         conversationRow(card)
+                            .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 2, trailing: 0))
+                            .listRowSeparator(.hidden).listRowBackground(Color.clear)
                     }
                     if visibleCards.isEmpty {
-                        ContentUnavailableView(runningOnly && query.isEmpty ? "No running agents" : "No matching conversations", systemImage: "bubble.left.and.bubble.right",
-                                               description: Text(runningOnly ? "Choose All to open another conversation." : "Try another search."))
+                        ContentUnavailableView(showingDone && query.isEmpty ? "No done sessions" : runningOnly && query.isEmpty ? "No running agents" : "No matching conversations", systemImage: "bubble.left.and.bubble.right",
+                                               description: Text(showingDone ? "Marked sessions appear here. Reopen one to return it to the main list." : runningOnly ? "Choose All to open another conversation." : "Try another search."))
+                            .listRowBackground(Color.clear).listRowSeparator(.hidden)
                     }
-                }
             }
+            .listStyle(.plain).scrollContentBackground(.hidden)
             .scrollDismissesKeyboard(.interactively)
             .accessibilityIdentifier("conversation-list")
             Divider().overlay(Ink.border.opacity(0.3))

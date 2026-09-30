@@ -7,6 +7,9 @@ export type AgentPresentation = {
   activity?: string;
   activityTurnId?: string;
   updatedAt: number;
+  /** Manual inbox disposition, independent of runtime lifecycle. */
+  done?: boolean;
+  doneAt?: number | null;
   lastUserMessageAt?: number;
   lastUserPrompt?: string;
 };
@@ -53,9 +56,18 @@ export class AgentPresentationWriter {
   constructor(private storage: DurableObjectStorage, private publish: (value: AgentPresentation) => Promise<void>,
     private generate: (kind: "title" | "activity", source: string) => Promise<string | undefined>,
     private waitUntil: (promise: Promise<unknown>) => void) {
-    storage.sql.exec("CREATE TABLE IF NOT EXISTS agent_presentation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value TEXT NOT NULL, delivered_revision INTEGER NOT NULL DEFAULT 0)");
+    storage.sql.exec("CREATE TABLE IF NOT EXISTS agent_presentation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value TEXT NOT NULL, delivered_revision INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0)");
+    if (!storage.sql.exec<{ name: string }>("PRAGMA table_info(agent_presentation)").toArray().some(column => column.name === "retry_at"))
+      storage.sql.exec("ALTER TABLE agent_presentation ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0");
     const row = storage.sql.exec<{ value: string }>("SELECT value FROM agent_presentation WHERE singleton=1").toArray()[0];
-    this.#value = row ? JSON.parse(row.value) : { revision: 0, status: "idle", activeTurnIds: [], updatedAt: 0, lastUserMessageAt: 0 };
+    this.#value = { done: false, doneAt: null, ...(row ? JSON.parse(row.value) : { revision: 0, status: "idle", activeTurnIds: [], updatedAt: 0, lastUserMessageAt: 0 }) };
+  }
+  setDone(done: boolean): { done: boolean; done_at: number | null; presentation_revision: number } {
+    // Replays preserve both the timestamp and presentation revision.
+    if (done !== this.#value.done || this.#value.revision === 0)
+      this.#save({ ...this.#value, ...(this.#value.revision === 0 ? { lastUserMessageAt: undefined } : {}),
+        done, doneAt: done ? Date.now() : null }, false);
+    return { done: this.#value.done ?? false, done_at: this.#value.doneAt ?? null, presentation_revision: this.#value.revision };
   }
   recordUserMessage(id: string, at: number, prompt: string): void {
     this.storage.sql.exec("CREATE TABLE IF NOT EXISTS sidebar_user_messages (id TEXT PRIMARY KEY, sent_at INTEGER NOT NULL)");
@@ -94,21 +106,35 @@ export class AgentPresentationWriter {
       this.#save({ ...this.#value, activity, activityTurnId: turnId });
     }).catch(() => {}).finally(() => { this.#busy = false; }));
   }
-  async flush(): Promise<void> {
+  async flush(requireConfirmation = false): Promise<void> {
     const value = this.#value;
     try {
       await this.publish(value);
       this.storage.sql.exec("UPDATE agent_presentation SET delivered_revision=MAX(delivered_revision, ?) WHERE singleton=1", value.revision);
-    } catch { /* The session alarm retries the persisted revision. */ }
+    } catch (error) {
+      this.storage.sql.exec("UPDATE agent_presentation SET retry_at = ? WHERE singleton=1 AND json_extract(value, '$.revision') = ?", Date.now() + INTERVAL, value.revision);
+      // Runtime observations are advisory; an explicit user mutation must not
+      // claim list visibility until its account projection is acknowledged.
+      if (requireConfirmation) throw error;
+      /* The session alarm retries the persisted revision. */
+    }
   }
-  #save(value: AgentPresentation): void {
+  #save(value: AgentPresentation, publish = true): void {
     this.#value = { ...value, revision: this.#value.revision + 1, updatedAt: Date.now() };
-    this.storage.sql.exec("INSERT INTO agent_presentation(singleton,value) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET value=excluded.value", JSON.stringify(this.#value));
-    this.waitUntil(this.flush());
+    this.storage.sql.exec("INSERT INTO agent_presentation(singleton,value,retry_at) VALUES(1,?,?) ON CONFLICT(singleton) DO UPDATE SET value=excluded.value,retry_at=excluded.retry_at", JSON.stringify(this.#value), Date.now() + INTERVAL);
+    if (publish) this.waitUntil(this.flush());
   }
 }
 
 export function presentationPending(storage: DurableObjectStorage): boolean {
   if (!storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_presentation'").toArray().length) return false;
   return storage.sql.exec("SELECT singleton FROM agent_presentation WHERE delivered_revision < json_extract(value, '$.revision')").toArray().length > 0;
+}
+
+/** Keep the persisted deadline across idle reconstruction; moving it on every
+ * constructor wake would continually postpone the alarm that delivers it. */
+export function presentationRetryAt(storage: DurableObjectStorage): number | undefined {
+  if (!presentationPending(storage)) return;
+  const row = storage.sql.exec<{ value: string; retry_at?: number }>("SELECT * FROM agent_presentation WHERE singleton=1").one();
+  return row.retry_at || (JSON.parse(row.value) as AgentPresentation).updatedAt + INTERVAL;
 }
