@@ -408,6 +408,8 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
     private static var historyMedia: Bool { ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_HISTORY_MEDIA"] == "1" }
     private static var historyWindow: Bool { ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_HISTORY_WINDOW"] == "1" }
     private var stopped = false
+    private var meetingTask: URLSessionDataTask?
+    private var meetingSession: URLSession?
     private let requestID = UUID().uuidString
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host?.hasPrefix("startup-fixture-") == true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -436,6 +438,12 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
                 return
             }
             let path = request.url!.path
+            // Only the simulator fixture may bridge meetings to a real local
+            // Worker. Account bootstrap remains synthetic; meeting responses,
+            // database persistence and mutation semantics are never mocked.
+            if path == "/v1/meetings" || path.hasPrefix("/v1/meetings/") {
+                if forwardMeetingJourney() { return }
+            }
             let id = request.url!.pathComponents.dropFirst(3).first ?? "saved"
             let isStream = path.hasSuffix("/events")
             var status = 200, delay = 0.05, body = "{}"
@@ -513,8 +521,48 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
     }
     override func stopLoading() {
         Self.queue.async { [self] in
-            stopped = true; Self.historyStreams[requestID] = nil; record("stop")
+            stopped = true; meetingTask?.cancel(); meetingSession?.invalidateAndCancel(); meetingTask = nil; meetingSession = nil; Self.historyStreams[requestID] = nil; record("stop")
         }
+    }
+
+    private func forwardMeetingJourney() -> Bool {
+        guard let raw = ProcessInfo.processInfo.environment["NANOCODEX_MEETING_JOURNEY_ORIGIN"],
+              var components = URLComponents(string: raw), components.scheme == "http",
+              components.host == "127.0.0.1", let port = components.port, (1024...65535).contains(port),
+              components.user == nil, components.password == nil, components.query == nil,
+              components.fragment == nil, components.path.isEmpty || components.path == "/" else { return false }
+        components.path = request.url!.path; components.percentEncodedQuery = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.percentEncodedQuery
+        guard let url = components.url else { return false }
+        var forwarded = request; forwarded.url = url
+        if forwarded.httpBody == nil, let stream = request.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var body = Data(), buffer = [UInt8](repeating: 0, count: 8192)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count >= 0, body.count + count <= 1_048_576 else {
+                    client?.urlProtocol(self, didFailWithError: URLError(.dataLengthExceedsMaximum)); return true
+                }
+                if count == 0 { break }; body.append(contentsOf: buffer.prefix(count))
+            }
+            forwarded.httpBodyStream = nil; forwarded.httpBody = body
+        }
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = []
+        let session = URLSession(configuration: config); meetingSession = session
+        meetingTask = session.dataTask(with: forwarded) { [weak self] data, response, error in
+            Self.queue.async {
+                guard let self, !self.stopped else { return }
+                defer { self.meetingSession?.finishTasksAndInvalidate(); self.meetingSession = nil; self.meetingTask = nil }
+                if let error { self.record("meeting-network-error"); self.client?.urlProtocol(self, didFailWithError: error); return }
+                guard let response = response as? HTTPURLResponse, let data,
+                      let safeResponse = HTTPURLResponse(url: self.request.url!, statusCode: response.statusCode, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"]) else {
+                    self.client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse)); return
+                }
+                self.record("meeting-http-\(response.statusCode)", bytes: data.count)
+                self.client?.urlProtocol(self, didReceive: safeResponse, cacheStoragePolicy: .notAllowed)
+                self.client?.urlProtocol(self, didLoad: data); self.client?.urlProtocolDidFinishLoading(self)
+            }
+        }
+        meetingTask?.resume(); return true
     }
 
     private static var historyLatest: Int { historyPages * historyPageSize + (historyLive ? 1 : 0) }

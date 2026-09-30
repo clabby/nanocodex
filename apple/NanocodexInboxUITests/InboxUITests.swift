@@ -4263,6 +4263,80 @@ final class InboxUITests: XCTestCase {
         }
     }
 
+    /// Run via apple/scripts/test-meetings.sh: meetings travel over real HTTP
+    /// into the production Worker router and persistent D1, not URLProtocol JSON.
+    func testMeetingsPersistAndSyncNativeNotes() throws {
+        let app = XCUIApplication()
+        let profile = "meetings-" + UUID().uuidString.lowercased()
+        app.launchEnvironment["NANOCODEX_STARTUP_FIXTURE"] = "1"
+        app.launchEnvironment["NANOCODEX_STARTUP_PROFILE"] = profile
+        app.launchEnvironment["NANOCODEX_MEETING_JOURNEY_ORIGIN"] = ProcessInfo.processInfo.environment["NANOCODEX_MEETING_JOURNEY_ORIGIN"] ?? "http://127.0.0.1:8797"
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-meetings"].waitForExistence(timeout: 30))
+        app.buttons["main-tab-meetings"].tap()
+        XCTAssertTrue(app.buttons["meeting-new"].waitForExistence(timeout: 10))
+        app.buttons["meeting-new"].tap()
+        let title = "Native planning " + String(UUID().uuidString.prefix(8))
+        let titleField = app.textFields["meeting-title"].exists ? app.textFields["meeting-title"] : app.textViews["meeting-title"]
+        XCTAssertTrue(titleField.waitForExistence(timeout: 5))
+        // A vertical SwiftUI TextField can place the caret before its default
+        // title on a center tap. Explicitly tap the trailing edge before deleting.
+        titleField.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        let prior = titleField.value as? String ?? ""
+        titleField.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: prior.count) + title)
+        XCTAssertEqual(titleField.value as? String, title)
+        // Dismiss the title keyboard before tapping the note editor, which may
+        // extend underneath it on a compact phone.
+        app.buttons["meeting-keyboard-done"].tap()
+        let notes = app.textViews["meeting-notes"]
+        notes.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.1)).tap()
+        notes.typeText("Decision: ship the native meeting library first. Morgan sends the draft on Friday.")
+        app.buttons["meeting-keyboard-done"].tap()
+        let save = app.buttons["meeting-save"]
+        for _ in 0..<5 where !save.isHittable { app.swipeUp() }
+        XCTAssertTrue(save.isHittable)
+        capture(app, "meetings-native-capture-draft")
+        save.tap()
+        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'meeting-row-' AND label BEGINSWITH %@", title + ",")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        capture(app, "meetings-native-library")
+        row.tap()
+        XCTAssertTrue(app.textViews["meeting-document-notes"].waitForExistence(timeout: 10))
+        XCTAssertTrue((app.textViews["meeting-document-notes"].value as? String ?? "").contains("Morgan sends"))
+        app.segmentedControls["meeting-document-tabs"].buttons["Transcript"].tap()
+        let transcript = app.textViews["meeting-document-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        transcript.tap(); transcript.typeText("Morgan: I will send the draft Friday. Taylor: We agreed to ship the native meeting library first.")
+        app.buttons["meeting-keyboard-done"].tap()
+        let saveChanges = app.buttons["meeting-document-save"]
+        for _ in 0..<5 where !saveChanges.isHittable { app.swipeUp() }
+        XCTAssertTrue(saveChanges.isHittable); saveChanges.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: saveChanges)], timeout: 15), .completed)
+        for _ in 0..<5 where !app.segmentedControls["meeting-document-tabs"].isHittable { app.swipeDown() }
+        app.segmentedControls["meeting-document-tabs"].buttons["Notes"].tap()
+        let enhance = app.buttons["meeting-enhance"]
+        XCTAssertTrue(enhance.waitForExistence(timeout: 5))
+        enhance.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["meeting-enhanced-notes"].firstMatch.waitForExistence(timeout: 30))
+        capture(app, "meetings-native-enhanced-notes")
+        // A new app process reopens the protected SQLite journal and re-fetches
+        // the same cloud document. A UI sheet is never the data's lifetime.
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.buttons["main-tab-meetings"].waitForExistence(timeout: 30))
+        app.buttons["main-tab-meetings"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
+        XCTAssertTrue(app.textViews["meeting-document-notes"].waitForExistence(timeout: 10))
+        app.segmentedControls["meeting-document-tabs"].buttons["Transcript"].tap()
+        XCTAssertTrue((app.textViews["meeting-document-transcript"].value as? String ?? "").contains("Morgan: I will send"))
+        capture(app, "meetings-native-restored-transcript")
+        app.buttons["meeting-document-menu"].tap()
+        app.buttons["Delete meeting"].firstMatch.tap()
+        app.buttons["Delete meeting"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["meeting-new"].waitForExistence(timeout: 10))
+        XCTAssertFalse(row.exists)
+        capture(app, "meetings-native-deleted")
+    }
+
     private func capture(_ app: XCUIApplication, _ name: String) {
         // Native sheet/disclosure animations can outlive accessibility queries.
         // Capture their settled layout, not an intermediate clipped frame.

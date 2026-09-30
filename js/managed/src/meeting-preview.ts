@@ -79,7 +79,7 @@ export async function routeMeetingPreview(request: Request, env: MeetingPreviewE
   trustedPrincipal?: Principal): Promise<Response | undefined> {
   if (!url.pathname.startsWith("/v1/meetings/")) return undefined;
   const match = /^\/v1\/meetings\/([^/]+)\/preview$/.exec(url.pathname);
-  if (!match) return failure("not_found", 404);
+  if (!match) return undefined;
   if (!CAPTURE_ID.test(match[1]!) || url.search) return failure("invalid_request", 400);
   if (!["GET", "POST", "DELETE"].includes(request.method)) return failure("method_not_allowed", 405);
   if (env.NANOCODEX_MEETING_PREVIEW_ENABLED !== "true" || !env.NANOCODEX_MEETING_PREVIEWS || !env.AI)

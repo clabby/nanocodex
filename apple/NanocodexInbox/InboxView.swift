@@ -160,7 +160,7 @@ struct InboxView: View {
     @State private var mainSurface: MainSurface = (ProcessInfo.processInfo.arguments.contains("--demo")
         && !ProcessInfo.processInfo.arguments.contains("--todo-ui-fixture")) ? .chat : .todo
     @State private var todoInputFocused = false
-    private enum MainSurface { case todo, chat, crm }
+    private enum MainSurface { case todo, chat, crm, meetings }
     @State private var showConversations = false
     @State private var showRunningAgents = false
     @State private var drawerTranslation: CGFloat = 0
@@ -189,6 +189,9 @@ struct InboxView: View {
                     TodoBoardView(model: model)
                         .id(model.todoAccountIdentity)
                         .contentMargins(.bottom, bottomDockHeight, for: .scrollContent)
+                } else if model.connected && mainSurface == .meetings {
+                    MeetingsHomeView(model: model) { showMeeting = true }
+                        .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
                 } else if model.connected && mainSurface == .crm {
                     CRMView(model: model)
                         .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
@@ -281,7 +284,7 @@ struct InboxView: View {
             }
         }
         .sheet(isPresented: $model.showContext) { ContextInboxView(model: model).tint(Ink.accent) }
-        .sheet(isPresented: $showMeeting) { MeetingView(model: model).tint(Ink.accent) }
+        .sheet(isPresented: $showMeeting, onDismiss: { model.meetingLibrary?.reloadLocal() }) { MeetingView(model: model).tint(Ink.accent) }
         .onAppear { MeetingLockedCoordinator.shared.recoverOutstanding() }
         .onChange(of: model.screenScope) { _, _ in
             screenThreads.removeAll(); screenExpanded = false; showScreens = false; controlsScreen = nil
@@ -340,13 +343,14 @@ struct InboxView: View {
             mainNavigationButton(.todo, title: "TODO", symbol: "checkmark.square", identifier: "main-tab-todo")
             mainNavigationButton(.chat, title: "Chat", symbol: "bubble.left", identifier: "main-tab-chat")
             mainNavigationButton(.crm, title: "CRM", symbol: "person.2", identifier: "main-tab-crm")
+            mainNavigationButton(.meetings, title: "Meetings", symbol: "text.bubble", identifier: "main-tab-meetings")
         }
     }
 
     private var mainNavigation: some View {
         InboxNavigationLayout {
             navigationTabs
-            if model.focused != nil && mainSurface != .crm { MobileModelControls(model: model) }
+            if model.focused != nil && (mainSurface == .chat || mainSurface == .todo) { MobileModelControls(model: model) }
         }
         .padding(.horizontal, 5).padding(.vertical, 3)
         .accessibilityElement(children: .contain)
@@ -636,8 +640,8 @@ struct InboxView: View {
                 Label(screenThreads.contains(model.focusedConversationIdentity ?? "") ? "Hide screen" : "Screen", systemImage: "display")
             }.disabled(model.remoteService == nil || model.focused == nil).accessibilityIdentifier("conversation-remote-screens")
             if !model.isDemo {
-                Button { composerFocused = false; showMeeting = true } label: {
-                    Label("Listen to a meeting", systemImage: "waveform")
+                Button { composerFocused = false; mainSurface = .meetings } label: {
+                    Label("Meetings", systemImage: "text.bubble")
                 }.accessibilityIdentifier("inbox-meeting")
             }
             Button { composerFocused = false; model.showContext = true } label: {

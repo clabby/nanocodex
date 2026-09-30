@@ -6,7 +6,7 @@ import NanocodexRemote
 
 @MainActor
 final class AppModel: ObservableObject {
-    enum Screen { case chat, hands }
+    enum Screen { case chat, hands, meetings }
     enum WorkspaceFocus { case navigation, writing, sidebar }
     @Published var state = DesktopState() {
         didSet { updateBackgroundActivity() }
@@ -131,6 +131,7 @@ final class AppModel: ObservableObject {
     private var currentCredential: AccountKeychain.Credential? {
         didSet {
             showingScheduledJobs = false
+            meetingLibrary.reset()
             resetRemoteSharing()
             if let credential = currentCredential, let origin = URL(string: credential.baseUrl) {
                 remoteService = try? RemoteService(origin: origin) { request in
@@ -140,6 +141,17 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    let meetingLibrary = MacMeetingLibrary()
+#if DEBUG
+    var meetingClientOverride: (() throws -> ManagedClient)?
+#endif
+    func meetingsClient() throws -> ManagedClient {
+#if DEBUG
+        if let meetingClientOverride { return try meetingClientOverride() }
+#endif
+        return try schedulesClient()
+    }
+
     @Published var showingScheduledJobs = false
 
     func schedulesClient() throws -> ManagedClient {
@@ -1040,6 +1052,7 @@ final class AppModel: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
     private func resetAccount() {
+        meetingLibrary.reset()
         voice.stop(); voice.clearHistory(); preparingVoiceTabID = nil
         accountHandDiscovery?.cancel(); accountHandDiscovery = nil
         defaultHandConnection?.cancel(); defaultHandConnection = nil
@@ -1120,6 +1133,7 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
     func prepareToQuit() async {
+        meetingLibrary.suspend()
         accountHandDiscovery?.cancel(); accountHandDiscovery = nil
         backgroundActivityStopped = true; backgroundActivity.stop()
         voice.stop(); await voice.finishStopping()
@@ -1130,7 +1144,7 @@ final class AppModel: ObservableObject {
         _ = try? await runtime.request("saveLayout", [try await Self.layoutPayload(TabLayout(tabs: tabs, activeTabId: activeTabID, tabPosition: tabPosition, theme: theme, workspaceMode: workspaceMode, paneWidth: paneWidth, tiledTabIDs: tiledTabIDs, pendingMessages: pending, paneLayouts: paneLayouts), scope: state.accountScope)])
         runtime.stop()
     }
-    func shutdown() { resetRemoteSharing(); backgroundActivityStopped = true; backgroundActivity.stop(); voice.stop(); defaultHandConnection?.cancel(); accountHandDiscovery?.cancel(); persistence?.cancel(); runtime.stop() }
+    func shutdown() { meetingLibrary.suspend(); resetRemoteSharing(); backgroundActivityStopped = true; backgroundActivity.stop(); voice.stop(); defaultHandConnection?.cancel(); accountHandDiscovery?.cancel(); persistence?.cancel(); runtime.stop() }
 
     private func connectDefaultHand() {
         defaultHandConnection?.cancel()

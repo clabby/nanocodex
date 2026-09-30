@@ -18,6 +18,7 @@ import { durablePlacementOptions, withIngressPlacement } from "nanocodex/cloudfl
 import { routerDashboard } from "./router-dashboard";
 import { routeObservation } from "./router-telemetry";
 import { routeInferenceApi, type InferenceApiEnv } from "./inference-api";
+import { routeMeetingLibrary } from "./meeting-library";
 import { routeMeetingPreview, type MeetingPreviewEnv } from "./meeting-preview";
 export { MeetingPreview } from "./meeting-preview";
 export { InferenceKey, InferenceAccount } from "./inference-keys";
@@ -1596,6 +1597,8 @@ async function managedFetchRoute(
     }
     const inference = await routeInferenceApi(request, env, url, trustedAgentPrincipal, ctx);
     if (inference) return inference;
+    const meetingLibrary = await routeMeetingLibrary(request, env, url);
+    if (meetingLibrary) return meetingLibrary;
     const meetingPreview = await routeMeetingPreview(request, env, url);
     if (meetingPreview) return meetingPreview;
     if (url.pathname.startsWith("/v1/phone/bridge/")) {

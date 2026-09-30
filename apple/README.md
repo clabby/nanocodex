@@ -27,11 +27,43 @@ the app's quick voice sheet. The inline accessory is not offered because it
 cannot run an interactive recording intent; actual locked-device microphone
 behavior requires physical-device testing.
 
-For meetings, add the **Listen to a meeting** widget or Control Widget. It records from
-the Lock Screen until **Finish & send**, then transcribes bounded segments and
-starts a new conversation without opening the app. **Discard** deletes the
-capture; recognition interruptions can leave only a partial transcript. Grant
-permissions in the app once and test cold locked starts on a physical iPhone.
+## Meetings
+
+Open **Meetings** in the native iPhone/iPad navigation to record or take notes.
+The same account-owned library is available in the Mac app's **Meetings** section.
+A meeting stores its title, duration, transcript, your notes, and enhanced notes;
+it is independent of chat threads. Enhanced notes use the transcript and your
+notes to identify key points, decisions, and actions. Review generated notes
+against the transcript. **Ask Nanocodex** explicitly starts a conversation; saving
+or stopping a meeting does not start an agent task.
+
+Recording belongs to the app process, not its sheet. Leaving the screen keeps an
+explicitly started recording running. A protected, account-scoped SQLite journal
+checkpoints capture and queues final documents. Interrupted/terminated captures
+recover as partial meetings, never as automatically submitted agent tasks.
+Network failure leaves the document on the device with a visible pending state;
+retry keeps the capture UUID and revision. Account changes cannot redirect it.
+Only transcripts and notes are retained; microphone audio is not stored for
+playback, and protected audio from other apps is not captured.
+
+For locked capture, add the **Listen to a meeting** widget or Control Widget.
+**Stop Recording** finalizes recognition and saves the meeting to the same library.
+Grant Microphone and Speech Recognition access in the app first. Cold locked
+starts, interruptions, and long recordings still require physical-iPhone testing;
+a successful Simulator build does not establish those microphone behaviors.
+
+The durable library's `/v1/meetings` API requires the managed D1 migration
+`0011_meeting_library.sql` and `0012_meeting_summary_recovery.sql`. The live recap
+service remains optional and ephemeral;
+a recap outage does not prevent saving a meeting. See
+[Lock Screen capture](LOCK_SCREEN_VOICE.md) for operating constraints.
+
+Run `apple/scripts/test-meetings.sh` on macOS (after `pnpm install`) for the native
+notes → transcript → enhancement → relaunch → deletion journey against a real
+local Worker and persistent D1. The fixture uses synthetic authentication and
+inference only; it does not replace meeting storage or HTTP responses. XCTest
+screenshots, the Worker log, and the result bundle are written to
+`output/native-meetings/ios`. This journey does not simulate microphone audio.
 
 On iPhones with an Action Button, select **Settings → Action Button → Shortcut
 → Choose a Shortcut → Nanocodex → Record Voice Task**. The shortcut uses the
