@@ -95,19 +95,36 @@ Run the focused policy tests with:
 python3 apple/scripts/test-publish-mac-update.py
 ```
 
-## Optional TestFlight delivery
+## Direct installation over Wi-Fi or USB
 
-`bash apple/scripts/request-self-update.sh` remains available from a Cloudflare
-Sandbox Hand. It dispatches `ios-self-update.yml`, waits for the correlated
-GitHub-hosted macOS build, and writes a delivery receipt under
-`/brain/ios-deployments`. The workflow uses App Store Connect and Apple-managed
-TestFlight distribution, which has separate processing and installation timing.
-Its receipt is separate from this static OTA `latest.json`.
+Use the paired Mac and iPhone on the same Wi-Fi network, or connect by USB.
+Keep the phone unlocked and Developer Mode enabled. Being on the same network
+alone does not prove the paired device is reachable: check discovery first.
 
-The TestFlight workflow requires the existing App Store Connect record and its
-Actions signing secrets: `IOS_DISTRIBUTION_P12_BASE64`,
-`IOS_DISTRIBUTION_P12_PASSWORD`, `IOS_PROVISIONING_PROFILE_BASE64`,
-`IOS_SHARE_PROVISIONING_PROFILE_BASE64`, `IOS_WIDGETS_PROVISIONING_PROFILE_BASE64`,
-`APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, and
-`APP_STORE_CONNECT_PRIVATE_KEY`. Configure an internal TestFlight group with
-automatic distribution. Keep private keys out of `/brain` and workspaces.
+```sh
+xcrun devicectl list devices
+```
+
+With the shared Rust voice core built as described in `apple/README.md`, build
+with the Mac's existing signing configuration and install onto the exact paired
+phone identifier reported above:
+
+```sh
+scripts/xcodebuild-guard.sh -project apple/NanocodexInbox.xcodeproj \
+  -scheme NanocodexInbox -configuration Release \
+  -destination 'generic/platform=iOS' -derivedDataPath output/ios-device \
+  -allowProvisioningUpdates CODE_SIGN_STYLE=Automatic \
+  "CURRENT_PROJECT_VERSION=$(date -u +%s)" build
+xcrun devicectl device install app --device DEVICE_IDENTIFIER \
+  output/ios-device/Build/Products/Release-iphoneos/Nanocodex.app
+xcrun devicectl device info apps --device DEVICE_IDENTIFIER
+```
+
+Do not choose another paired phone merely because it is available. Verify the
+installation receipt and the installed bundle's build number before reporting an
+update. A connection failure or lost receipt is not proof of installation; read
+back the device state before retrying an uncertain install. App launch/UI checks
+are separate from successful installation and may require an unlocked phone.
+
+Local signing, direct installation and the signed OTA feed do not require CI.
+The normal nightly CLI/native release workflow is independent of iPhone delivery.
