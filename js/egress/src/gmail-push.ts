@@ -1,4 +1,4 @@
-import { hydrateGmailMessage, jsonBytes, type GmailMessageSnapshot } from "./gmail-message";
+import { gmailInboxExclusion, gmailProviderLabelIds, hydrateGmailMessage, jsonBytes, type GmailMessageSnapshot } from "./gmail-message";
 /** Gmail notifications are hints; the durable history cursor is authoritative. */
 export interface GmailPushEnv {
   USER_CONNECTORS: DurableObjectNamespace;
@@ -264,9 +264,12 @@ export class GmailPushMailbox {
           const message = entry?.message;
           if (!message) continue;
           // Gmail history normally includes only id/threadId. The server-side
-          // labelId filter is authoritative when labelIds are absent.
-          if (message.labelIds !== undefined && (!Array.isArray(message.labelIds) || !message.labelIds.includes("INBOX")
-            || message.labelIds.includes("DRAFT"))) continue;
+          // labelId filter admits IDs when labels are absent; full hydration
+          // independently checks the current provider labels before content admission.
+          if (message.labelIds !== undefined) {
+            const labels = gmailProviderLabelIds(message.labelIds);
+            if (!labels || gmailInboxExclusion(labels)) continue;
+          }
           if (typeof message.id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(message.id)) throw new Error("gmail_invalid_message_id");
           if (!box.recentMessageIds.includes(message.id)) ids.add(message.id);
         }
