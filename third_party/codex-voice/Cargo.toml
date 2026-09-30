@@ -22,5 +22,5 @@ ctor = "0.6"
 libc = "0.2"
 
 [patch.crates-io]
-# Minimal mixer ingress patch; see vendor/webrtc-sys/NANOCODEX.md.
+# Minimal mixer ingress patch materialized by patches/webrtc-sys/prepare.py.
 webrtc-sys = { path = "vendor/webrtc-sys" }

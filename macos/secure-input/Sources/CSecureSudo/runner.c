@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/ptrace.h>
+#include <sys/resource.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -18,6 +19,11 @@
 
 #define ASKPASS "/Library/PrivilegedHelperTools/xyz.paradigm.nanocodex.secure-askpass"
 #define ROOTDIR "/var/run/nanocodex-secure-input"
+int nc_secure_disable_core_dumps(void) {
+    struct rlimit disabled = {0, 0}, current;
+    if (setrlimit(RLIMIT_CORE, &disabled) || getrlimit(RLIMIT_CORE, &current)) return -1;
+    return current.rlim_cur == 0 && current.rlim_max == 0 ? 0 : -1;
+}
 int nc_secure_listen(const char *path, unsigned int mode) {
     struct sockaddr_un address = {0}; address.sun_family = AF_UNIX;
     if (strlen(path) >= sizeof(address.sun_path)) return -1;
@@ -66,6 +72,7 @@ static int protected_executable(const char *path) {
 }
 int nc_secure_sudo(uint32_t uid, const char *cwd, const char *executable, const char *const *arguments, size_t count, const unsigned char *password, size_t password_len) {
     if (getuid() != 0 || geteuid() != 0 || uid == 0 || count > 128 || password_len < 1 || password_len > 4096) return -1;
+    if (nc_secure_disable_core_dumps()) return -1;
     if (!protected_executable(executable)) return -1;
     if (!arguments && count) return -1;
     for (size_t i = 0; i < count; ++i) if (!arguments[i]) return -1;
@@ -86,7 +93,7 @@ int nc_secure_sudo(uint32_t uid, const char *cwd, const char *executable, const 
     pid_t child = fork();
     if (child == 0) {
         // Prevent same-user tracing in the short interval before setuid sudo exec.
-        if (ptrace(PT_DENY_ATTACH, 0, 0, 0)) _exit(126);
+        if (nc_secure_disable_core_dumps() || ptrace(PT_DENY_ATTACH, 0, 0, 0)) _exit(126);
         setpgid(0, 0);
         close(gate[1]);
         unsigned char ready;

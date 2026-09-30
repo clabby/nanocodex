@@ -29,22 +29,6 @@ class Socket extends EventTarget {
   message(body) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(body) })); }
 }
 
-test("shared cache keys preserve session lineage without adding unsupported cache options", () => {
-  const socket = new Socket();
-  const controlled = responseControlsSocket(socket, { promptCacheKey: "owner-team-key" });
-  for (const session of ["first-session", "second-session"]) {
-    const request = { type: "response.create", prompt_cache_key: session, previous_response_id: `${session}-parent`, input: [
-      { role: "developer", content: [{ type: "input_text", text: "stable instructions" }] },
-      { role: "user", content: "hello" },
-    ] };
-    controlled.send(JSON.stringify(request));
-    assert.deepEqual(socket.sent.at(-1), { ...request, prompt_cache_key: "owner-team-key" });
-  }
-  for (const promptCacheKey of ["", "x".repeat(65), 42]) {
-    assert.throws(() => responseControlsSocket(socket, { promptCacheKey }), /invalid prompt cache key/);
-  }
-});
-
 test("multiplexed lanes isolate interleaved events, scoped failures, and socket lifetime", () => {
   const socket = new Socket(); const pool = multiplex(socket);
   const a = pool.lane("a"), b = pool.lane("b"); const seenA = [], seenB = [];
@@ -81,7 +65,7 @@ test("cache controls compose with a lane whose send property is immutable", () =
 });
 
 test("HTTPS and WebSocket requests apply identical response controls", () => {
-  const controls = { promptCacheKey: "owner-team-key", promptCache: "explicit", outputSchema: { type: "object" } };
+  const controls = { promptCache: "explicit", outputSchema: { type: "object" } };
   const input = [{ role: "developer", content: [{ type: "input_text", text: "stable" }] },
     { role: "user", content: [{ type: "input_text", text: "question" }] }];
   const request = { model: "model", stream: true, input, text: { verbosity: "low" } };
@@ -91,12 +75,11 @@ test("HTTPS and WebSocket requests apply identical response controls", () => {
   delete sent.type;
   const actual = JSON.parse(responseControlsBody(JSON.stringify(request), controls));
   assert.deepEqual(actual, sent);
-  assert.equal(actual.prompt_cache_key, "owner-team-key");
   assert.deepEqual(actual.input[0].content[0].prompt_cache_breakpoint, { mode: "explicit" });
   assert.equal(actual.input[1].content[0].prompt_cache_breakpoint, undefined);
   assert.equal(actual.text.verbosity, "low");
   assert.equal(request.input[0].content[0].prompt_cache_breakpoint, undefined);
-  for (const invalid of [{ promptCacheKey: "" }, { promptCache: "other" }, { outputSchema: [] }]) {
+  for (const invalid of [{ promptCache: "other" }, { outputSchema: [] }]) {
     assert.throws(() => responseControlsBody(JSON.stringify(request), invalid), TypeError);
   }
 });
@@ -104,13 +87,13 @@ test("HTTPS and WebSocket requests apply identical response controls", () => {
 test("request observations omit content and cannot affect a sent request", async () => {
   const frames = [], observations = [];
   const socket = { send(data) { frames.push(data); return "sent"; } };
-  const wrapped = responseControlsSocket(socket, { promptCacheKey: "private-cache-key" }, shape => {
+  const wrapped = responseControlsSocket(socket, {}, shape => {
     assert.equal(frames.length, observations.length + 1, "send precedes observation");
     observations.push(shape);
     assert.ok(Object.isFrozen(shape));
     return Promise.reject(new Error("observer unavailable"));
   });
-  const request = { type: "response.create", model: "gpt-6-astra",
+  const request = { type: "response.create", model: "gpt-6-astra", prompt_cache_key: "private-cache-key",
     reasoning: { effort: "low", context: "all_turns", private_field: "private-reasoning" },
     text: { verbosity: "low" }, service_tier: "default", tool_choice: "auto",
     parallel_tool_calls: false, store: false, stream: true, generate: true,
@@ -119,7 +102,7 @@ test("request observations omit content and cannot affect a sent request", async
     tools: [{ name: "private-tool-name", parameters: { private_schema: "private" } }],
     metadata: { authorization: "private-secret" }, instructions: "private-instructions" };
   assert.equal(wrapped.send(JSON.stringify(request)), "sent");
-  assert.deepEqual(JSON.parse(frames[0]), { ...request, prompt_cache_key: "private-cache-key" });
+  assert.deepEqual(JSON.parse(frames[0]), request);
   assert.deepEqual(observations[0], { model: "gpt-6-astra", reasoning_effort: "low",
     reasoning_context: "all_turns", service_tier: "default", text_verbosity: "low", tool_choice: "auto",
     encoded_characters: frames[0].length, input_items: 1, tools_count: 1,

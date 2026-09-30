@@ -28,6 +28,7 @@ const AGENT: &str = "019fc927-b280-79a7-8445-1b9996ad2fb0";
 const REMOTE_TURN: &str = "019fc927-b281-79a7-8445-1b9996ad2fb0";
 const VAULT_ID: &str = "abcdefghijklmnopqrstuv";
 const VAULT_ORIGIN: &str = "https://vault-approval.example:8443";
+const SECURE_INPUT_ID: &str = "cbbfa5ef-2e4b-45f7-9c98-3913f8ca87cf";
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 // The Managed2 API is intentionally smaller, but interactive sessions must keep
@@ -110,6 +111,13 @@ async fn managed2_uses_the_existing_tui_for_text_turns() {
     let snapshot = terminal.screen.lock().unwrap().screen().contents();
     assert!(snapshot.contains("Managed2 TUI prompt"));
     assert!(snapshot.contains("TUI_MANAGED2_REPLY"));
+    terminal.prompt(&format!("/secure-input {AGENT} {SECURE_INPUT_ID}"), "\r");
+    terminal
+        .wait_text("Private native sudo approval is unavailable in Managed2")
+        .await;
+    assert!(
+        !String::from_utf8_lossy(&terminal.output.lock().unwrap()).contains("Password: ********")
+    );
     terminal.input("\x03\x03");
     terminal.wait_output("\x1b[?1049l").await;
     service.abort();
@@ -499,6 +507,25 @@ impl Terminal {
             .unwrap();
     }
 
+    async fn unlock_private(&mut self) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.wait_text("Type safety token (keys only):").await;
+        let token = {
+            let parser = self.screen.lock().unwrap();
+            parser
+                .screen()
+                .contents()
+                .lines()
+                .find_map(|line| {
+                    line.split_once("Type safety token (keys only): ")
+                        .map(|(_, rest)| rest[..32].to_owned())
+                })
+                .expect("fresh private token")
+        };
+        self.input(&token);
+        self.wait_text("Safety token verified").await;
+    }
+
     async fn wait_output(&self, text: &str) {
         tokio::time::timeout(TIMEOUT, async {
             loop {
@@ -562,6 +589,9 @@ struct Service {
     receipts: Arc<Mutex<std::collections::HashMap<(String, String), Value>>>,
     receipts_enabled: Arc<AtomicBool>,
     vault_writes: Arc<Mutex<Vec<Value>>>,
+    native_writes: Arc<Mutex<Vec<Value>>>,
+    native_key: Arc<p256::SecretKey>,
+    native_expiry: u64,
     routing_requests: Arc<Mutex<Vec<String>>>,
     model_route: Arc<Mutex<Option<Value>>>,
     listed_agent: Arc<Mutex<String>>,
@@ -885,6 +915,8 @@ struct Fixture {
     receipts: Arc<Mutex<std::collections::HashMap<(String, String), Value>>>,
     receipts_enabled: Arc<AtomicBool>,
     vault_writes: Arc<Mutex<Vec<Value>>>,
+    native_writes: Arc<Mutex<Vec<Value>>>,
+    native_key: Arc<p256::SecretKey>,
     routing_requests: Arc<Mutex<Vec<String>>>,
     model_route: Arc<Mutex<Option<Value>>>,
     listed_agent: Arc<Mutex<String>>,
@@ -981,12 +1013,26 @@ impl Fixture {
         let resume_gate = Arc::new(tokio::sync::Semaphore::new(1));
         let socket_paths = Arc::new(Mutex::new(Vec::new()));
         let vault_writes = Arc::new(Mutex::new(Vec::new()));
+        let native_writes = Arc::new(Mutex::new(Vec::new()));
+        let native_key = Arc::new(p256::SecretKey::random(
+            &mut p256::elliptic_curve::rand_core::OsRng,
+        ));
+        let native_expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 240_000;
         let receipts = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let receipts_enabled = Arc::new(AtomicBool::new(false));
         let routing_requests = Arc::new(Mutex::new(Vec::new()));
         let model_route = Arc::new(Mutex::new(None));
         let app = Router::new()
+            .route("/v1/me", get(|headers: axum::http::HeaderMap| async move {
+                assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer ncx_live_"));
+                Json(json!({"user":{"id":"aabbccdd-1122-4455-8899-aabbccddeeff","persistent":true},"organization":{"id":"fixture-org"},"team":{"id":"fixture-team"},"role":"owner","authentication":"api_key"}))
+            }))
             .route("/v1/credentials", get(vault_metadata))
+            .route("/v1/agents/{agent}/native-secure-input", post(native_secure_input_fixture))
             .route("/v1/credentials/vault/login/{id}/origin", put(approve_vault_origin))
             .route("/v1/account/hands/screens", get(|| async { Json(json!({"surfaces": [{"id":"desktop","machine_id":"screen-test-hand","machine_name":"SCREEN_TEST_HAND","name":"Desktop","generation":"screen-generation","width":32,"height":18,"transport":"frames-v1"}]})) }))
             .route("/v1/account/hands/view", get(test_screen_socket))
@@ -1014,6 +1060,7 @@ impl Fixture {
                 receipts: receipts.clone(),
                 receipts_enabled: receipts_enabled.clone(),
                 vault_writes: vault_writes.clone(),
+                native_writes: native_writes.clone(), native_key: native_key.clone(), native_expiry,
                 routing_requests: routing_requests.clone(),
                 model_route: model_route.clone(),
                 listed_agent: listed_agent.clone(),
@@ -1052,6 +1099,8 @@ impl Fixture {
             receipts,
             receipts_enabled,
             vault_writes,
+            native_writes,
+            native_key,
             routing_requests,
             model_route,
             listed_agent,
@@ -4101,4 +4150,332 @@ async fn terminal_reload_restarts_local_peers_without_stopping_durable_work() {
         assert!(fixture.steers.try_recv().is_err());
         assert!(fixture.cancellations.try_recv().is_err());
     }
+}
+
+// Synthetic-only private route. No administrator password or installed helper.
+async fn native_secure_input_fixture(
+    State(service): State<Service>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    use base64::engine::general_purpose::STANDARD;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use sha2_hkdf::{Digest, Sha256};
+    assert!(
+        headers["authorization"]
+            .to_str()
+            .unwrap()
+            .starts_with("Bearer ncx_live_")
+    );
+    assert_eq!(body["request_id"], SECURE_INPUT_ID);
+    assert!(!body.to_string().contains("PTY_FIXTURE_SECRET"));
+    service.native_writes.lock().unwrap().push(body.clone());
+    match body["action"].as_str() {
+        Some("describe") => {
+            // Delay to exercise key/paste interception while Loading.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let binding = json!({"arguments":["--fixture", "literal\u{202e}arg"],"cwd":"/fixture", "executable":"/usr/bin/id", "uid":1000});
+            Json(
+                json!({"request_id":SECURE_INPUT_ID,"machine_id":"fixture-machine","executable":"/usr/bin/id","arguments":binding["arguments"],"cwd":"/fixture","uid":1000,
+                "expires_at":service.native_expiry,"command_digest":STANDARD.encode(Sha256::digest(binding.to_string().as_bytes())),"public_key":STANDARD.encode(service.native_key.public_key().to_encoded_point(false).as_bytes())}),
+            )
+        }
+        Some("cancel") => Json(
+            json!({"type":"secure_input_receipt","request_id":SECURE_INPUT_ID,"status":"cancelled"}),
+        ),
+        _ => Json(
+            json!({"type":"secure_input_receipt","request_id":SECURE_INPUT_ID,"status":"completed"}),
+        ),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_native_secure_input_private_pty_roundtrip_and_no_plaintext_paths() {
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+    use base64::engine::general_purpose::STANDARD;
+    use p256::{PublicKey, ecdh::diffie_hellman};
+    let mut fixture = Fixture::start_with_history(false, true, Vec::new()).await;
+    fixture
+        .terminal
+        .prompt(&format!("/secure-input {AGENT} {SECURE_INPUT_ID}"), "\r");
+    fixture
+        .terminal
+        .wait_text("Fetching command privately")
+        .await;
+    fixture.terminal.prompt("PTY_FIXTURE_SECRET_LOADING", "");
+    fixture.terminal.wait_text("Review EVERY argument").await;
+    fixture.terminal.wait_text("Command digest").await;
+    fixture.terminal.wait_text("argv[1]").await;
+    fixture.terminal.unlock_private().await;
+    // Prequeued Ctrl+Enter+paste must not approve or retain the pasted tail.
+    fixture
+        .terminal
+        .input("\x1b[13;5u\x1b[200~PTY_FIXTURE_SECRET_STALE\x1b[201~");
+    fixture.terminal.wait_text("Password: ********").await;
+    fixture.terminal.unlock_private().await;
+    fixture.terminal.input("\r");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fixture.native_writes.lock().unwrap().len(), 1);
+    // Actual raw keys and bracketed paste both route only into the private field.
+    fixture.terminal.input("PTY_FIXTURE_");
+    fixture.terminal.prompt("SECRET", "");
+    assert_private_control_export(&fixture).await;
+    fixture.terminal.input("\r");
+    fixture
+        .terminal
+        .wait_text("Protected command completed successfully")
+        .await;
+    let submitted = tokio::time::timeout(TIMEOUT, fixture.submissions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        submitted["input"][0]["text"],
+        json!({"type":"secure_input_receipt","request_id":SECURE_INPUT_ID,"status":"completed"})
+            .to_string()
+    );
+    assert!(!submitted.to_string().contains("PTY_FIXTURE_SECRET"));
+    let writes = fixture.native_writes.lock().unwrap().clone();
+    assert_eq!(writes.len(), 2);
+    let submit = &writes[1];
+    assert_eq!(submit.as_object().unwrap().len(), 3);
+    let ephemeral = PublicKey::from_sec1_bytes(
+        &STANDARD
+            .decode(submit["ephemeral_public_key"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    let shared = diffie_hellman(
+        fixture.native_key.to_nonzero_scalar(),
+        ephemeral.as_affine(),
+    );
+    let mut key = [0u8; 32];
+    hkdf::Hkdf::<sha2_hkdf::Sha256>::new(Some(&[]), shared.raw_secret_bytes())
+        .expand(SECURE_INPUT_ID.as_bytes(), &mut key)
+        .unwrap();
+    let encrypted = STANDARD
+        .decode(submit["ciphertext"].as_str().unwrap())
+        .unwrap();
+    let plaintext = Aes256Gcm::new_from_slice(&key)
+        .unwrap()
+        .decrypt(Nonce::from_slice(&encrypted[..12]), &encrypted[12..])
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&plaintext).unwrap()["value"],
+        "PTY_FIXTURE_SECRET"
+    );
+    assert!(
+        !String::from_utf8_lossy(&fixture.terminal.output.lock().unwrap())
+            .contains("PTY_FIXTURE_SECRET")
+    );
+    assert!(
+        !fixture
+            .history
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.to_string().contains("PTY_FIXTURE_SECRET"))
+    );
+    assert!(fixture.steers.try_recv().is_err());
+    assert!(fixture.submissions.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_native_secure_input_focus_cancel_quarantines_queued_paste() {
+    let mut fixture = Fixture::start_with_history(false, true, Vec::new()).await;
+    fixture
+        .terminal
+        .prompt(&format!("/secure-input {AGENT} {SECURE_INPUT_ID}"), "\r");
+    fixture.terminal.wait_text("Review EVERY argument").await;
+    fixture.terminal.unlock_private().await;
+    fixture.terminal.input("\x1b[13;5u");
+    fixture.terminal.wait_text("Password: ********").await;
+    fixture
+        .terminal
+        .input("\x1b[O\x1b[200~PTY_FIXTURE_SECRET_TAIL\x1b[201~\r\x1b");
+    fixture.terminal.wait_text("Secure input cancelled").await;
+    fixture.terminal.input("\x1b[I");
+    fixture.terminal.unlock_private().await;
+    fixture.terminal.input("\x1b");
+    fixture
+        .terminal
+        .wait_no_text("Private protected sudo approval")
+        .await;
+    assert!(
+        !String::from_utf8_lossy(&fixture.terminal.output.lock().unwrap())
+            .contains("PTY_FIXTURE_SECRET")
+    );
+    let writes = fixture.native_writes.lock().unwrap().clone();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[1]["action"], "cancel");
+    assert!(
+        writes
+            .iter()
+            .all(|wire| !wire.to_string().contains("PTY_FIXTURE_SECRET"))
+    );
+    if let Ok(receipt) = fixture.submissions.try_recv() {
+        assert!(!receipt.to_string().contains("PTY_FIXTURE_SECRET"));
+    }
+    assert!(fixture.steers.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_native_secure_input_incomplete_paste_cannot_cross_freshness_barrier() {
+    let mut fixture = Fixture::start_with_history(false, true, Vec::new()).await;
+    fixture
+        .terminal
+        .prompt(&format!("/secure-input {AGENT} {SECURE_INPUT_ID}"), "\r");
+    fixture
+        .terminal
+        .wait_text("Fetching command privately")
+        .await;
+    fixture
+        .terminal
+        .input("\x1b[200~PTY_FIXTURE_SECRET_PARTIAL_REVIEW");
+    fixture.terminal.wait_text("Review EVERY argument").await;
+    let token = private_token(&fixture.terminal);
+    // Safety token falls INSIDE the incomplete old paste and cannot unlock.
+    fixture
+        .terminal
+        .input(&format!("{token}\x1b[201~\x1b[13;5u"));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    fixture.terminal.wait_no_text("Password: ********").await;
+    assert_eq!(fixture.native_writes.lock().unwrap().len(), 1);
+    fixture.terminal.unlock_private().await;
+    fixture.terminal.input("\x1b[13;5u");
+    fixture.terminal.wait_text("Password: ********").await;
+    fixture
+        .terminal
+        .input("\x1b[200~PTY_FIXTURE_SECRET_PARTIAL_PASSWORD");
+    let token = private_token(&fixture.terminal);
+    fixture.terminal.input(&format!("{token}\x1b[201~\r"));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(fixture.native_writes.lock().unwrap().len(), 1);
+    fixture
+        .terminal
+        .wait_text("Type safety token (keys only):")
+        .await;
+    // Even Esc followed by a partial paste cannot leak out through dismissal.
+    fixture
+        .terminal
+        .input("\x1b\x1b[200~PTY_FIXTURE_SECRET_PARTIAL_EXIT");
+    fixture.terminal.wait_text("Secure input cancelled").await;
+    let token = private_token(&fixture.terminal);
+    fixture.terminal.input(&format!("{token}\x1b[201~\x1b"));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    fixture
+        .terminal
+        .wait_text("Private protected sudo approval")
+        .await;
+    fixture.terminal.unlock_private().await;
+    fixture.terminal.input("\x1b");
+    fixture
+        .terminal
+        .wait_no_text("Private protected sudo approval")
+        .await;
+    assert!(
+        !String::from_utf8_lossy(&fixture.terminal.output.lock().unwrap())
+            .contains("PTY_FIXTURE_SECRET")
+    );
+    assert!(
+        !fixture
+            .history
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.to_string().contains("PTY_FIXTURE_SECRET"))
+    );
+    assert!(
+        fixture
+            .native_writes
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|wire| !wire.to_string().contains("PTY_FIXTURE_SECRET"))
+    );
+    if let Ok(receipt) = fixture.submissions.try_recv() {
+        assert!(!receipt.to_string().contains("PTY_FIXTURE_SECRET"));
+    }
+}
+
+fn private_token(terminal: &Terminal) -> String {
+    let parser = terminal.screen.lock().unwrap();
+    parser
+        .screen()
+        .contents()
+        .lines()
+        .find_map(|line| {
+            line.split_once("Type safety token (keys only): ")
+                .map(|(_, rest)| rest[..32].to_owned())
+        })
+        .expect("fresh private token")
+}
+
+#[cfg(unix)]
+async fn assert_private_control_export(fixture: &Fixture) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    // This registration/token belongs only to the synthetic disposable PTY.
+    let registry = fixture
+        .terminal
+        ._workspace
+        .path()
+        .join(".codex/nanocodex/tui/instances");
+    let path = std::fs::read_dir(registry)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let registration: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let socket = tokio::net::UnixStream::connect(registration["socket_path"].as_str().unwrap())
+        .await
+        .unwrap();
+    let (read, mut write) = socket.into_split();
+    let mut lines = BufReader::new(read).lines();
+    write.write_all(format!("{}\n",json!({"protocol_version":1,"instance_id":registration["instance_id"],"auth_token":registration["auth_token"]})).as_bytes()).await.unwrap();
+    let hello: Value = serde_json::from_str(
+        &tokio::time::timeout(TIMEOUT, lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!hello.to_string().contains("PTY_FIXTURE_SECRET"));
+    assert_eq!(hello["snapshot"]["state"]["ui_blocked"], true);
+    write
+        .write_all(b"{\"id\":\"private-export\",\"method\":\"state.get\"}\n")
+        .await
+        .unwrap();
+    let exported: Value = serde_json::from_str(
+        &tokio::time::timeout(TIMEOUT, lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!exported.to_string().contains("PTY_FIXTURE_SECRET"));
+    assert_eq!(exported["result"]["state"]["composer"]["text"], "");
+    let snapshot = &hello["snapshot"];
+    let mutation = json!({"id":"private-reject","method":"prompt","params":{"expected_instance_id":registration["instance_id"],"expected_session_id":AGENT,
+        "expected_active_generation":snapshot["active_generation"],"input":{"text":"NORMAL_CONTROL_MUTATION"}}});
+    write
+        .write_all(format!("{mutation}\n").as_bytes())
+        .await
+        .unwrap();
+    let rejected: Value = serde_json::from_str(
+        &tokio::time::timeout(TIMEOUT, lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rejected["id"], "private-reject");
+    assert_eq!(rejected["result"]["status"], "rejected");
+    // The bridge rejects mutation against the published private-ui block
+    // before it can reach the driver's defense-in-depth approval guard.
+    assert_eq!(rejected["result"]["code"], "ui_blocked");
+    assert!(!rejected.to_string().contains("PTY_FIXTURE_SECRET"));
 }

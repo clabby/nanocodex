@@ -15,7 +15,7 @@ function fixture(extra: Partial<Parameters<typeof createSubagentRouteController>
 describe("hosted child routing", () => {
   it.each([
     {}, { model: "astra", thinking: "max" }, { model: "luna", thinking: "xhigh" },
-    { model: "sol", thinking: "none" }, { thinking: "max" },
+    { model: "sol", thinking: "low" }, { model: "luna", thinking: "none" }, { thinking: "max" },
   ])("preserves native manual GPT choices with routing disabled: %j", async overrides => {
     const nativeAuthorize = vi.fn();
     const availability = vi.fn(() => { throw new Error("routing disabled"); });

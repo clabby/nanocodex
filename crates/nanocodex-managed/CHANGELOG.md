@@ -5,6 +5,23 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+
+### Features
+
+- [models] Migrate Sol to GPT-6.1 ([#679](https://github.com/gakonst/nanocodex/issues/679))
+- Fork committed agent boundaries and add side conversations
+
+### Miscellaneous Tasks
+
+- Remove obsolete docs, artifacts, and low-signal tests ([#568](https://github.com/gakonst/nanocodex/issues/568))
+
+### Other
+
+- Shared links as multiplayer Chat turns with live web UI ([#669](https://github.com/gakonst/nanocodex/issues/669))
+- Revocable sharing for managed threads and TUI ([#660](https://github.com/gakonst/nanocodex/issues/660))
+- Expose owner Hand call aggregates in nanocodex2 CLI ([#630](https://github.com/gakonst/nanocodex/issues/630))
+
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 
 ### Bug Fixes
@@ -19,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [router] Add Kimi and MiMo with mobile model controls ([#519](https://github.com/gakonst/nanocodex/issues/519))
 - [tui] Add authenticated rich terminal integration ([#344](https://github.com/gakonst/nanocodex/issues/344))
 - Add opt-in autoroute UX and retained provider display
+
+### Miscellaneous Tasks
+
+- Prepare release 0.6.5 ([#584](https://github.com/gakonst/nanocodex/issues/584))
 
 ### Other
 
@@ -43,7 +64,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [cli] Present first responses immediately and finish shutdown promptly
 - [cli] Make startup editable before backend discovery
 
-
 ## [0.6.4](https://github.com/gakonst/nanocodex/releases/tag/v0.6.4) - 2026-09-19
 
 ### Bug Fixes
@@ -61,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
-- Prepare release 0.6.4 with minified QuickJS fix
+- Prepare release 0.6.4 with minified QuickJS fix ([#420](https://github.com/gakonst/nanocodex/issues/420))
 - Prepare corrected release 0.6.3 ([#418](https://github.com/gakonst/nanocodex/issues/418))
 - Prepare release 0.6.2 ([#416](https://github.com/gakonst/nanocodex/issues/416))
 

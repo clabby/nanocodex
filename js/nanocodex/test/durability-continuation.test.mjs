@@ -104,7 +104,8 @@ test("a long WASM turn resumes its current batch after a lost checkpoint acknowl
 });
 
 for (const nested of [false, true]) {
-  test(`a ${nested ? "nested" : "direct"} host interruption retains the unsettled effect`, { timeout: 60_000 }, async () => {
+  test(nested ? "a nested host interruption retains the unsettled effect"
+    : "a cold WASM developer append identifies unfinished work and permits recovery", { timeout: 60_000 }, async (t) => {
     const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
     let generations = 0;
     let dispatched = 0;
@@ -116,7 +117,7 @@ for (const nested of [false, true]) {
       close() { this.readyState = 3; }
       send() {
         const index = ++generations;
-        assert.ok(index <= 2, "settled model calls cannot be repeated");
+        assert.ok(index <= (nested ? 2 : 3), "settled model calls cannot be repeated");
         const call = nested
           ? { type: "custom_tool_call", call_id: "effect", name: "exec",
               input: "try { text(await tools.fixture({})); } catch (error) { text('guest caught it'); }" }
@@ -157,14 +158,30 @@ for (const nested of [false, true]) {
       assert.ok(Object.values(pending.steps).some((step) => step.output === undefined));
       await agent.session.shutdown().catch(() => {});
       agent = await Agent.create(options);
-      // Exercise the real WASM admission failure, not a mocked Worker error.
-      // The failed host attempt left "older" pending in the durable ledger.
-      await assert.rejects(agent.turn.prompt({ id: "later", input: "follow on" }).result(), error => {
-        assert.equal(error.code, "retryable");
-        assert.equal(error.blockedBy, "older");
-        assert.match(error.message, /blocked by unfinished operation/);
-        return true;
-      });
+      const developerContext = "Synthetic startup context after recovery";
+      if (!nested) {
+        const beforeAppend = await agent.session.context();
+        await assert.rejects(agent.session.appendDeveloperMessage(developerContext), error => {
+          t.diagnostic(JSON.stringify({ stage: "blocked-developer-append", operation: "older",
+            code: error.code ?? null, blockedBy: error.blockedBy ?? null, message: error.message }));
+          assert.equal(error.code, "retryable");
+          assert.equal(error.blockedBy, "older");
+          assert.match(error.message, /standalone-checkpoint.*blocked by unfinished operation/);
+          return true;
+        });
+        assert.deepEqual(await agent.session.context(), beforeAppend,
+          "a blocked append must leave the committed conversation unchanged");
+      }
+      if (nested) {
+        // Exercise the real WASM admission failure, not a mocked Worker error.
+        // The failed host attempt left "older" pending in the durable ledger.
+        await assert.rejects(agent.turn.prompt({ id: "later", input: "follow on" }).result(), error => {
+          assert.equal(error.code, "retryable");
+          assert.equal(error.blockedBy, "older");
+          assert.match(error.message, /blocked by unfinished operation/);
+          return true;
+        });
+      }
       assert.equal(generations, 1, "blocked admission must not call the model");
       await agent.session.shutdown().catch(() => {});
       agent = await Agent.create(options);
@@ -173,6 +190,22 @@ for (const nested of [false, true]) {
       assert.equal(dispatched, 1);
       assert.equal(observedIds.length, 2);
       assert.equal(observedIds[0], observedIds[1]);
+      if (!nested) {
+        await agent.session.appendDeveloperMessage(developerContext);
+        await agent.session.shutdown();
+        agent = await Agent.create(options);
+        const context = await agent.session.context();
+        assert.equal(context.history.filter(item => item.role === "developer"
+          && item.content?.some(part => part.type === "input_text" && part.text === developerContext)).length, 1,
+          "the successful developer append must survive cold reopen exactly once");
+        const followOn = await agent.turn.prompt({ id: "later", input: "follow on" }).result();
+        assert.equal(followOn.finalMessage, "finished");
+        assert.equal(generations, 3);
+        assert.equal(dispatched, 1, "follow-on work must not redispatch the recovered effect");
+        t.diagnostic(JSON.stringify({ stage: "recovered-and-continued", recoveredOperation: "older",
+          followOnOperation: "later", finalMessage: followOn.finalMessage, modelCalls: generations,
+          effectDispatches: dispatched, sameEffectId: observedIds[0] === observedIds[1], developerCopies: 1 }));
+      }
     } finally {
       await agent.session.shutdown().catch(() => {});
     }

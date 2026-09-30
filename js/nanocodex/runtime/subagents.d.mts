@@ -76,6 +76,7 @@ export type SendOptions = Readonly<{
   message: string;
   priority?: MessagePriority | undefined;
   purpose?: MessagePurpose | undefined;
+  /** Continue the same participant pair in either direction. Required for purpose "reply", which must reverse the referenced message. */
   inReplyTo?: number | undefined;
 }>;
 export type MessageReceipt = Readonly<{

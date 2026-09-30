@@ -5,27 +5,37 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/gakonst/nanocodex/compare/v0.6.5...HEAD)
+## [Unreleased](https://github.com/gakonst/nanocodex/compare/v0.6.6...HEAD)
 
-### Other
+### Miscellaneous Tasks
 
-- Merge remote-tracking branch 'origin/master' into fix/turn-controls-merge
+- Release 0.6.6
+
+## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+
+### Miscellaneous Tasks
+
+- Release 0.6.6
 
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
+
+### Miscellaneous Tasks
+
+- Prepare release 0.6.5 ([#584](https://github.com/gakonst/nanocodex/issues/584))
 
 ### Other
 
 - Merge remote-tracking branch 'origin/master' into remove-legacy-memory
+- Merge remote-tracking branch 'origin/master' into fix/turn-controls-merge
 - Integrate GPT-6 Sol and Luna across Nanocodex ([#526](https://github.com/gakonst/nanocodex/issues/526))
 - Restore unchanged repository files omitted from frontier REST publication
 - Support configured Cloudflare REST transport for frontier inference ([#495](https://github.com/gakonst/nanocodex/issues/495))
-
 
 ## [0.6.4](https://github.com/gakonst/nanocodex/releases/tag/v0.6.4) - 2026-09-19
 
 ### Miscellaneous Tasks
 
-- Prepare release 0.6.4 with minified QuickJS fix
+- Prepare release 0.6.4 with minified QuickJS fix ([#420](https://github.com/gakonst/nanocodex/issues/420))
 - Prepare corrected release 0.6.3 ([#418](https://github.com/gakonst/nanocodex/issues/418))
 - Prepare release 0.6.2 ([#416](https://github.com/gakonst/nanocodex/issues/416))
 

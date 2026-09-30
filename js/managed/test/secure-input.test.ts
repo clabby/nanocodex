@@ -26,7 +26,7 @@ describe('one-time browser password boundary', () => {
     const spy = vi.spyOn(PrivateBrowserCdp, 'connect').mockResolvedValue({ send, close() {} } as unknown as PrivateBrowserCdp);
     const create = () => createManagedBrowserRuntime({
       ctx: { storage: { get: async (k: string) => stored.get(k), put: async (k: string, v: unknown) => { if (storageFailure && k.startsWith('browser-vault-quarantine')) throw new Error('storage unavailable'); stored.set(k,v); }, delete: async (k: string) => stored.delete(k) } } as unknown as DurableObjectState,
-      env: { BROWSER: { fetch: vi.fn() }, LOADER: {} as WorkerLoader }, sessionId: 'agent-private', authorizeVaultAccess() {},
+      env: { MANAGED_BROWSER_PROVIDER: "cloudflare", BROWSER: { fetch: vi.fn() }, LOADER: {} as WorkerLoader }, sessionId: 'agent-private', authorizeVaultAccess() {},
       createRuntime: () => ({ connector: { sessionInfo: async () => ({ sessionId: session }), closeSession: close },
         tools: { browser_execute: tool({ inputSchema: jsonSchema({ type: 'object' }), execute: ordinary }) }, runtime: {} }) as unknown as BrowserRuntime,
     });

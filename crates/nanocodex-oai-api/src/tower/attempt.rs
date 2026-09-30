@@ -10,6 +10,7 @@ use crate::{
     AgentEventKind, EventError, EventSink, Model, ResponseEvent, ResponseItem, ResponsesTransport,
     Thinking,
     responses::{RequestProfile, ResponseHistory, ResponsesInput, WarmupResponse},
+    session::state::RequestHistory,
     tower::transport_policy::SessionTransport,
 };
 use serde::Serialize;
@@ -573,24 +574,20 @@ impl ResponsesAttemptFactory {
 
     /// Builds a replayable `response.create` attempt.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn generation(
         &self,
         call_index: u32,
-        full_history: ResponseHistory,
-        incremental_history: ResponseHistory,
-        incremental_start: usize,
-        previous_response_id: Option<&str>,
+        history: &RequestHistory,
         model: Model,
         thinking: Thinking,
         fast_mode: bool,
     ) -> ResponsesAttempt {
         let mut attempt = ResponsesAttempt::generation(
             call_index,
-            full_history,
-            incremental_history,
-            incremental_start,
-            previous_response_id,
+            history.full.clone(),
+            history.incremental.clone(),
+            history.incremental_start,
+            history.previous_response_id.as_deref(),
             model,
             thinking,
             fast_mode,
@@ -602,16 +599,12 @@ impl ResponsesAttemptFactory {
         attempt
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// Builds a replayable `response.compact` attempt.
     #[must_use]
     pub fn compaction(
         &self,
         call_index: u32,
-        full_history: ResponseHistory,
-        incremental_history: ResponseHistory,
-        incremental_start: usize,
-        previous_response_id: Option<&str>,
+        history: &RequestHistory,
         trigger: ResponseItem,
         model: Model,
         thinking: Thinking,
@@ -619,10 +612,10 @@ impl ResponsesAttemptFactory {
     ) -> ResponsesAttempt {
         let mut attempt = ResponsesAttempt::compaction(
             call_index,
-            full_history,
-            incremental_history,
-            incremental_start,
-            previous_response_id,
+            history.full.clone(),
+            history.incremental.clone(),
+            history.incremental_start,
+            history.previous_response_id.as_deref(),
             trigger,
             model,
             thinking,
@@ -647,6 +640,20 @@ mod tests {
     };
     use serde_json::json;
     use tokio_tungstenite::tungstenite::Utf8Bytes;
+
+    fn request_history(
+        history: ResponseHistory,
+        incremental_start: usize,
+        previous_response_id: Option<&str>,
+    ) -> crate::session::state::RequestHistory {
+        crate::session::state::RequestHistory {
+            full: history.clone(),
+            incremental: history,
+            incremental_start,
+            previous_response_id: previous_response_id.map(str::to_owned),
+            repaired: false,
+        }
+    }
 
     struct FixtureSource {
         lines: VecDeque<String>,
@@ -706,10 +713,7 @@ mod tests {
         );
         let mut attempt = factory.generation(
             1,
-            ResponseHistory::default(),
-            ResponseHistory::default(),
-            0,
-            Some("resp-previous"),
+            &request_history(ResponseHistory::default(), 0, Some("resp-previous")),
             Model::Luna,
             Thinking::High,
             true,
@@ -740,10 +744,7 @@ mod tests {
         )]);
         let attempt = factory.compaction(
             1,
-            history.clone(),
-            history,
-            1,
-            None,
+            &request_history(history, 1, None),
             ResponseItem::compaction_trigger(),
             Model::Sol,
             Thinking::Medium,
@@ -776,10 +777,7 @@ mod tests {
         );
         let first = factory.generation(
             1,
-            ResponseHistory::default(),
-            ResponseHistory::default(),
-            0,
-            None,
+            &request_history(ResponseHistory::default(), 0, None),
             Model::Sol,
             Thinking::High,
             false,
@@ -788,10 +786,7 @@ mod tests {
 
         let next = factory.generation(
             2,
-            ResponseHistory::default(),
-            ResponseHistory::default(),
-            0,
-            None,
+            &request_history(ResponseHistory::default(), 0, None),
             Model::Sol,
             Thinking::High,
             false,
@@ -809,10 +804,7 @@ mod tests {
         );
         let fresh = fresh_factory.generation(
             1,
-            ResponseHistory::default(),
-            ResponseHistory::default(),
-            0,
-            None,
+            &request_history(ResponseHistory::default(), 0, None),
             Model::Sol,
             Thinking::High,
             false,

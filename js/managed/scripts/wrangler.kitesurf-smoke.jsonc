@@ -1,0 +1,11 @@
+{
+  "name": "nanocodex-kitesurf-local-smoke",
+  "main": "kitesurf-smoke.ts",
+  "compatibility_date": "2026-07-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "browser": { "binding": "BROWSER", "remote": true },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": { "bindings": [{ "name": "SMOKE", "class_name": "KitesurfSmoke" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KitesurfSmoke"] }],
+  "vars": { "MANAGED_BROWSER_PROVIDER": "kitesurf", "MANAGED_BROWSER_TOOL_TIMEOUT_MS": "90000" }
+}

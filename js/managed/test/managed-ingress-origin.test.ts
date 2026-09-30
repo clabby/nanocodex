@@ -66,7 +66,7 @@ describe("trusted managed ingress", () => {
   it.each([false, true])("retains creation origin without telemetry reads before generation (observation coordinator fails: %s)", async unavailable => {
     const sessions = (env as unknown as { NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession> }).NANOCODEX_SESSIONS;
     await runInDurableObject(sessions.getByName(crypto.randomUUID()), async (session, state) => {
-      const candidate = ROUTING_CANDIDATES.find(c => c.backend === "cloudflare" && c.model === "gpt-6-sol" && c.thinking === "low")!;
+      const candidate = ROUTING_CANDIDATES.find(c => c.backend === "cloudflare" && c.model === "gpt-6.1-sol" && c.thinking === "low")!;
       const childCandidate = ROUTING_CANDIDATES.find(c => c.backend === "cloudflare" && c.model === "gpt-6-astra" && c.thinking === "low")!;
       let rootCalls = 0, childCalls = 0, childId: number | undefined;
       const completed = () => ({ object: "response", status: "completed", output: [{ id: "fixture-message", type: "message", role: "assistant", content: [{ type: "output_text", text: "DONE" }] }] });

@@ -62,15 +62,11 @@ export function responseControlsBody(encoded, controls = {}) {
 }
 
 function hasResponseControls(controls) {
-  return controls.promptCacheKey !== undefined
-    || controls.outputSchema !== undefined
+  return controls.outputSchema !== undefined
     || controls.promptCache !== undefined;
 }
 
 function validateResponseControls(controls) {
-  if (controls.promptCacheKey !== undefined && (typeof controls.promptCacheKey !== "string" || controls.promptCacheKey.length === 0 || controls.promptCacheKey.length > 64)) {
-    throw new TypeError("invalid prompt cache key");
-  }
   if (controls.promptCache !== undefined && !["implicit", "explicit"].includes(controls.promptCache)) {
     throw new TypeError("invalid prompt cache mode");
   }
@@ -80,7 +76,6 @@ function validateResponseControls(controls) {
 }
 
 function applyResponseControls(body, controls) {
-  if (controls.promptCacheKey !== undefined) body.prompt_cache_key = controls.promptCacheKey;
   if (controls.outputSchema !== undefined) body.text = {
     ...body.text, format: { type: "json_schema", name: "managed_output", strict: true, schema: controls.outputSchema },
   };
@@ -102,7 +97,7 @@ function applyResponseControls(body, controls) {
 function responseRequestShape(body, encodedLength) {
   const choose = (value, allowed) => allowed.includes(value) ? value : "other_or_absent";
   const shape = {
-    model: choose(body.model, ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]),
+    model: choose(body.model, ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"]),
     reasoning_effort: choose(body.reasoning?.effort, ["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
     reasoning_context: choose(body.reasoning?.context, ["all_turns", "last_turn"]),
     service_tier: choose(body.service_tier, ["default", "auto", "priority", "flex", "fast"]),

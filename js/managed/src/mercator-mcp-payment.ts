@@ -1,6 +1,6 @@
 import { tempo } from "mppx/client";
 import { z } from "zod";
-import type { McpPayment } from "nanocodex";
+import { mcpPayment, type PaidMcpPayment } from "nanocodex/tempo";
 type QuoteClient = { callTool: (params: { name: string; arguments: unknown }, schema?: unknown,
   options?: { signal?: AbortSignal; timeout?: number }) => Promise<{
     isError?: boolean; structuredContent?: unknown; content?: Array<{ type: string; text?: string }>;
@@ -11,7 +11,7 @@ type QuoteClient = { callTool: (params: { name: string; arguments: unknown }, sc
  * material or generic signing capability enters the model or MCP transport. */
 export function mercatorMcpPayment(
   broker: Pick<Fetcher, "fetch">, owner: string, authorize: (context: unknown) => void,
-): McpPayment {
+): PaidMcpPayment {
   const context = z.custom<{
     tool: "create_job";
     input: Record<string, unknown>;
@@ -19,7 +19,7 @@ export function mercatorMcpPayment(
   }>((value) => isRecord(value) && value.tool === "create_job" && isRecord(value.input)
     && typeof value.input.idempotency_key === "string" && isRecord(value.input.plan)
     && typeof value.input.approved_total === "string");
-  return {
+  return mcpPayment({
     context: async ({ name, arguments: input }: { name: string; arguments: unknown }, call?: { signal?: AbortSignal }, client?: QuoteClient) => {
       if (name === "create_job") {
         authorize(call);
@@ -70,7 +70,7 @@ export function mercatorMcpPayment(
         return result.credential;
       },
     }],
-  };
+  });
 }
 function isRecord(value: unknown): value is Record<string, any> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

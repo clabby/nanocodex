@@ -5,16 +5,16 @@ use std::{
 };
 
 use crate::{Tool, ToolDefinition};
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 use crate::{ToolContext, ToolOutput};
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 use async_trait::async_trait;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 use serde_json::Value;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 use std::ffi::OsString;
 
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 pub(crate) const CODEX_THREAD_ID_ENV_VAR: &str = "CODEX_THREAD_ID";
 
 /// Nanocodex's model-visible tool exposure policy.
@@ -32,7 +32,7 @@ pub enum ToolExposure {
     Hidden,
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "code-mode")]
 impl ToolExposure {
     #[cfg(not(target_family = "wasm"))]
     pub(super) const fn is_direct(self) -> bool {
@@ -47,7 +47,7 @@ impl ToolExposure {
 #[derive(Clone)]
 pub(crate) struct RegisteredTool {
     pub(crate) handler: Arc<dyn Tool>,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "code-mode")]
     pub(crate) exposure: Option<ToolExposure>,
 }
 
@@ -55,7 +55,7 @@ pub(crate) struct RegisteredTool {
 ///
 /// Providers start with the agent driver, advertise only their small direct
 /// tool surface initially, and may make additional tools callable at runtime.
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 #[async_trait]
 pub trait DynamicToolProvider: Send + Sync {
     /// Starts background discovery or connection work. Implementations must be idempotent.
@@ -123,7 +123,7 @@ mod source_sealed {
     #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
     impl Sealed for crate::WorkspaceTools {}
 
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "mcp"))]
     impl Sealed for crate::mcp::Mcp {}
 }
 
@@ -154,7 +154,7 @@ impl ToolSource for crate::WorkspaceTools {
     }
 }
 
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "mcp"))]
 impl ToolSource for crate::mcp::Mcp {
     fn install(self, mut builder: ToolsBuilder) -> ToolsBuilder {
         let provider = Arc::new(self);
@@ -175,28 +175,28 @@ pub struct Tools {
     workspace: bool,
     web_search: bool,
     image_generation: bool,
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub(super) working_directory: Option<Arc<str>>,
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub(super) default_shell: Option<Arc<str>>,
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     process_environment: Arc<Vec<(OsString, OsString)>>,
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     remote_http_client: Option<reqwest::Client>,
     pub(crate) registered: Vec<RegisteredTool>,
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub(super) provider_direct: Vec<Arc<dyn Tool>>,
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub(super) providers: Vec<Arc<dyn DynamicToolProvider>>,
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "mcp"))]
     pub(crate) attachment_mcps: Vec<Arc<crate::mcp::Mcp>>,
     #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
     pub(crate) workspace_tools: Option<crate::WorkspaceTools>,
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub(super) deferred_tools_guidance_enabled: bool,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "code-mode")]
     pub(crate) embedded_host: Option<Arc<dyn crate::embedded::CodeModeHost>>,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "code-mode")]
     pub(crate) embedded_session_id: Option<Arc<str>>,
 }
 
@@ -207,34 +207,34 @@ impl Default for Tools {
             workspace: true,
             web_search: true,
             image_generation: true,
-            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+            #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
             working_directory: None,
-            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+            #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
             default_shell: None,
-            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+            #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
             process_environment: Arc::new(Vec::new()),
-            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+            #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
             remote_http_client: None,
             registered: Vec::new(),
-            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+            #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
             provider_direct: Vec::new(),
-            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+            #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
             providers: Vec::new(),
-            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+            #[cfg(all(not(target_family = "wasm"), feature = "mcp"))]
             attachment_mcps: Vec::new(),
             #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
             workspace_tools: None,
-            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+            #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
             deferred_tools_guidance_enabled: false,
-            #[cfg(feature = "native")]
+            #[cfg(feature = "code-mode")]
             embedded_host: None,
-            #[cfg(feature = "native")]
+            #[cfg(feature = "code-mode")]
             embedded_session_id: None,
         }
     }
 }
 
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 impl fmt::Debug for Tools {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let remote_http_client_configured = self.remote_http_client.is_some();
@@ -268,7 +268,7 @@ impl fmt::Debug for Tools {
                     .collect::<Vec<_>>(),
             )
             .field("provider_count", &self.providers.len())
-            .field("attachment_mcp_count", &self.attachment_mcps.len())
+            .field("attachment_mcp_count", &self.attachment_mcp_count())
             .field(
                 "workspace_tools_configured",
                 &self.workspace_tools.is_some(),
@@ -277,7 +277,7 @@ impl fmt::Debug for Tools {
     }
 }
 
-#[cfg(any(target_family = "wasm", not(feature = "native")))]
+#[cfg(any(target_family = "wasm", not(feature = "code-mode")))]
 impl fmt::Debug for Tools {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("Tools");
@@ -350,7 +350,7 @@ impl Tools {
     /// workspace commands additionally receive it through `CODEX_THREAD_ID`.
     /// This binding does not mutate other clones of the tool selection.
     #[must_use]
-    #[cfg(feature = "native")]
+    #[cfg(feature = "code-mode")]
     pub fn for_session(mut self, session_id: &str) -> Self {
         self.embedded_session_id = Some(Arc::from(session_id));
         #[cfg(not(target_family = "wasm"))]
@@ -358,25 +358,25 @@ impl Tools {
         self
     }
 
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub(super) fn process_environment(&self) -> Arc<Vec<(OsString, OsString)>> {
         Arc::clone(&self.process_environment)
     }
 
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     fn insert_process_environment(&mut self, name: OsString, value: OsString) {
         let environment = Arc::make_mut(&mut self.process_environment);
         environment.retain(|(candidate, _)| candidate != &name);
         environment.push((name, value));
     }
 
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub(super) fn remote_http_client(&self) -> Option<reqwest::Client> {
         self.remote_http_client.clone()
     }
 
     /// Starts all dynamic providers without waiting for their handshakes.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "code-mode")]
     #[cfg(not(target_family = "wasm"))]
     pub fn start_providers(&self) {
         for provider in &self.providers {
@@ -385,15 +385,29 @@ impl Tools {
     }
 
     /// Starts all dynamic providers without waiting for their handshakes.
-    #[cfg(all(feature = "native", target_family = "wasm"))]
+    #[cfg(all(feature = "code-mode", target_family = "wasm"))]
     pub const fn start_providers(&self) {}
 
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub(crate) fn has_unattachable_provider(&self) -> bool {
-        self.providers.len() != self.attachment_mcps.len()
+        self.providers.len() != self.attachment_mcp_count()
     }
 
-    #[cfg(not(feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "mcp"))]
+    fn attachment_mcp_count(&self) -> usize {
+        self.attachment_mcps.len()
+    }
+
+    #[cfg(all(
+        not(target_family = "wasm"),
+        feature = "code-mode",
+        not(feature = "mcp")
+    ))]
+    const fn attachment_mcp_count(&self) -> usize {
+        0
+    }
+
+    #[cfg(not(feature = "code-mode"))]
     pub(crate) const fn has_unattachable_provider(&self) -> bool {
         false
     }
@@ -526,7 +540,7 @@ impl ToolsBuilder {
 
     /// Overrides the default working directory described to the model.
     #[must_use]
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub fn working_directory(mut self, directory: impl Into<Arc<str>>) -> Self {
         self.tools.working_directory = Some(directory.into());
         self
@@ -534,7 +548,7 @@ impl ToolsBuilder {
 
     /// Overrides the default shell described to the model.
     #[must_use]
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub fn default_shell(mut self, shell: impl Into<Arc<str>>) -> Self {
         self.tools.default_shell = Some(shell.into());
         self
@@ -545,7 +559,7 @@ impl ToolsBuilder {
     /// Overrides are scoped to commands spawned by this tool selection and do
     /// not mutate the embedding process. A later value for the same name wins.
     #[must_use]
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub fn process_environment<I, K, V>(mut self, variables: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -561,7 +575,7 @@ impl ToolsBuilder {
 
     /// Overrides the HTTP client used by in-process remote tools.
     #[must_use]
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub fn remote_http_client(mut self, client: reqwest::Client) -> Self {
         self.tools.remote_http_client = Some(client);
         self
@@ -572,7 +586,7 @@ impl ToolsBuilder {
     pub fn tool<T: Tool + 'static>(mut self, tool: T) -> Self {
         self.tools.registered.push(RegisteredTool {
             handler: Arc::new(tool),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "code-mode")]
             exposure: None,
         });
         self
@@ -585,11 +599,11 @@ impl ToolsBuilder {
         tool: T,
         exposure: ToolExposure,
     ) -> Self {
-        #[cfg(not(feature = "native"))]
+        #[cfg(not(feature = "code-mode"))]
         let _ = exposure;
         self.tools.registered.push(RegisteredTool {
             handler: Arc::new(tool),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "code-mode")]
             exposure: Some(exposure),
         });
         self
@@ -597,7 +611,7 @@ impl ToolsBuilder {
 
     /// Adds a dynamic family of Code Mode tools.
     #[must_use]
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     pub fn provider<P: DynamicToolProvider + 'static>(mut self, provider: P) -> Self {
         let provider: Arc<dyn DynamicToolProvider> = Arc::new(provider);
         self.tools.providers.push(provider);
@@ -615,9 +629,9 @@ impl ToolsBuilder {
         if self.duplicate_workspace {
             return Err(ToolsBuildError::DuplicateSource("workspace"));
         }
-        #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+        #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
         self.refresh_provider_direct();
-        #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+        #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
         if self
             .tools
             .working_directory
@@ -626,7 +640,7 @@ impl ToolsBuilder {
         {
             return Err(ToolsBuildError::EmptyWorkingDirectory);
         }
-        #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+        #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
         if self
             .tools
             .default_shell
@@ -636,9 +650,9 @@ impl ToolsBuilder {
             return Err(ToolsBuildError::EmptyDefaultShell);
         }
         let mut names = HashSet::with_capacity(self.tools.registered.len());
-        #[cfg(feature = "native")]
+        #[cfg(feature = "code-mode")]
         let mut code_mode_names = HashMap::new();
-        #[cfg(feature = "native")]
+        #[cfg(feature = "code-mode")]
         if self.tools.exposure.is_available_in_code_mode() {
             for name in enabled_built_in_names(&self.tools) {
                 insert_code_mode_name(&mut code_mode_names, name)?;
@@ -647,9 +661,9 @@ impl ToolsBuilder {
         for tool in &self.tools.registered {
             let definition = tool.handler.definition();
             let name = definition.name();
-            #[cfg(feature = "native")]
+            #[cfg(feature = "code-mode")]
             let exposure = tool.exposure.unwrap_or_else(|| self.tools.exposure());
-            #[cfg(not(feature = "native"))]
+            #[cfg(not(feature = "code-mode"))]
             let exposure = self.tools.exposure();
             if exposure != ToolExposure::Hidden {
                 validate_registered_tool_name(
@@ -671,14 +685,14 @@ impl ToolsBuilder {
             if !names.insert(name.to_owned()) {
                 return Err(ToolsBuildError::DuplicateName(name.into()));
             }
-            #[cfg(feature = "native")]
+            #[cfg(feature = "code-mode")]
             if exposure.is_available_in_code_mode()
                 && !matches!(definition, ToolDefinition::ToolSearch { .. })
             {
                 insert_code_mode_name(&mut code_mode_names, name)?;
             }
         }
-        #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+        #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
         for tool in &self.tools.provider_direct {
             let definition = tool.definition();
             let name = definition.name();
@@ -701,7 +715,7 @@ impl ToolsBuilder {
                 insert_code_mode_name(&mut code_mode_names, name)?;
             }
         }
-        #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+        #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
         for provider in &self.tools.providers {
             for definition in provider.available_definitions() {
                 let name = definition.name();
@@ -729,7 +743,7 @@ impl ToolsBuilder {
         Ok(self.tools)
     }
 
-    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
     fn refresh_provider_direct(&mut self) {
         self.tools.deferred_tools_guidance_enabled = self.tools.providers.iter().any(|provider| {
             provider
@@ -811,7 +825,7 @@ fn valid_public_tool_name_grammar(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "code-mode")]
 fn insert_code_mode_name(
     names: &mut HashMap<String, String>,
     name: &str,
@@ -855,7 +869,7 @@ fn built_in_name(tools: &Tools, name: &str) -> bool {
         || (tools.image_generation && name == "image_gen__imagegen")
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "code-mode")]
 fn enabled_built_in_names(tools: &Tools) -> impl Iterator<Item = &'static str> {
     [
         (tools.workspace, "exec_command"),

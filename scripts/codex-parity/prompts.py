@@ -13,6 +13,7 @@ import subprocess
 
 PIN = '36430b36881cf5c289cb48e671cfc9e8b542ae7b'
 MODEL_PIN = '49e95cc73f4eb2999b1d14f863c009168df6122b'
+SOL_PIN = '5937592c07e7321f6b0469ef34dd58a03c39a84c'
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / 'scripts/codex-parity/prompts.json'
 # source -> actual consuming asset (no optional prompt inventory)
@@ -37,7 +38,7 @@ RENDERERS = ['prompts/src/permissions_instructions.rs', 'prompts/src/realtime.rs
              'ext/goal/src/runtime.rs', 'utils/template/src/lib.rs']
 MODEL_FIELDS = [
     (PIN, 'gpt-6-astra', 'crates/nanocodex-oai-api/prompts/astra.md'),
-    (MODEL_PIN, 'gpt-6-sol', 'crates/nanocodex-oai-api/prompts/sol.md'),
+    (SOL_PIN, 'gpt-6.1-sol', 'crates/nanocodex-oai-api/prompts/sol.md'),
     (MODEL_PIN, 'gpt-6-luna', 'crates/nanocodex-oai-api/prompts/luna.md'),
 ]
 
@@ -59,6 +60,7 @@ def outputs(upstream, reader=revision_bytes):
     fields = []
     catalogs = {PIN: sources[CATALOG]}
     catalogs[MODEL_PIN] = reader(upstream, MODEL_PIN, CATALOG)
+    catalogs[SOL_PIN] = reader(upstream, SOL_PIN, CATALOG)
     for revision, slug, target in MODEL_FIELDS:
         models = {m['slug']: m for m in json.loads(catalogs[revision])['models']}
         content = models[slug]['model_messages']['instructions_template'].encode()
@@ -72,13 +74,15 @@ def outputs(upstream, reader=revision_bytes):
     manifest = {
         'upstream': PIN,
         'model_upstream': MODEL_PIN,
+        'sol_upstream': SOL_PIN,
         'sources': [{'path': p, 'sha256': digest(b), 'bytes': len(b),
                      'role': 'composition reference (external only)' if p in RENDERERS else 'consumed prompt source'}
                     for p, b in sorted(sources.items())],
-        'model_sources': [{'path': CATALOG, 'upstream': MODEL_PIN,
-                           'sha256': digest(catalogs[MODEL_PIN]),
-                           'bytes': len(catalogs[MODEL_PIN]),
-                           'role': 'consumed model prompt source'}],
+        'model_sources': [{'path': CATALOG, 'upstream': revision,
+                           'sha256': digest(catalogs[revision]),
+                           'bytes': len(catalogs[revision]),
+                           'role': 'consumed model prompt source'}
+                          for revision in [MODEL_PIN, SOL_PIN]],
         'model_fields': fields,
         'outputs': [{'path': str(p.relative_to(ROOT)), 'sha256': digest(b), 'bytes': len(b)}
                     for p, b in sorted(generated.items())],
@@ -95,7 +99,7 @@ def main():
     assert not subprocess.check_output(
         ['jj', 'diff', '--summary'], cwd=args.upstream, text=True
     ).strip(), 'modified upstream'
-    for revision in [PIN, MODEL_PIN]:
+    for revision in [PIN, MODEL_PIN, SOL_PIN]:
         resolved = subprocess.check_output(
             ['jj', 'log', '-r', revision, '--no-graph', '-T', 'commit_id'],
             cwd=args.upstream,
@@ -109,7 +113,7 @@ def main():
             path.write_bytes(content)
         else:
             assert path.read_bytes() == content, f'prompt drift: {path.relative_to(ROOT)}'
-    print(f'PASS {len(FILES) + 3} consumed upstream sources; {len(RENDERERS)} external composition references; {len(expected)} outputs; {PIN}; models {MODEL_PIN}')
+    print(f'PASS {len(FILES) + 3} consumed upstream sources; {len(RENDERERS)} external composition references; {len(expected)} outputs; {PIN}; models {MODEL_PIN}; Sol {SOL_PIN}')
 
 
 if __name__ == '__main__':

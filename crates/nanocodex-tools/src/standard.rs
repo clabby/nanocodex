@@ -4,7 +4,7 @@ use nanocodex_oai_api::{responses::CustomToolFormat, tools::ToolDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[cfg(all(feature = "native", not(target_family = "wasm")))]
+#[cfg(all(feature = "code-mode", not(target_family = "wasm")))]
 pub use crate::plan::UpdatePlanTool;
 
 const APPLY_PATCH_GRAMMAR: &str = include_str!("apply_patch/apply_patch.lark");

@@ -103,6 +103,7 @@ pub struct Publisher {
     target: watch::Sender<PublisherTarget>,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
+    initially_replaced: bool,
 }
 impl Drop for Publisher {
     fn drop(&mut self) {
@@ -114,7 +115,7 @@ impl Drop for Publisher {
 impl Publisher {
     /// Whether publication has ended, including an authenticated host replacement.
     pub fn is_finished(&self) -> bool {
-        self.task.as_ref().is_none_or(JoinHandle::is_finished)
+        self.initially_replaced || self.task.as_ref().is_none_or(JoinHandle::is_finished)
     }
     pub async fn start(
         target: &PublisherTarget,
@@ -186,7 +187,7 @@ impl Publisher {
                 if matches!(result, Err(SessionError::Replaced))
                     && let Some(ready) = ready.take()
                 {
-                    let _ = ready.send(());
+                    let _ = ready.send(false);
                 }
                 let _ = tokio::time::timeout(
                     Duration::from_secs(3),
@@ -213,13 +214,19 @@ impl Publisher {
                 tokio::time::timeout(Duration::from_secs(3), backend(json!({"action":"release"})))
                     .await;
         });
-        let publisher = Self {
+        let mut publisher = Self {
             target: sender,
             stop: Some(stop),
             task: Some(task),
+            initially_replaced: false,
         };
         match tokio::time::timeout(Duration::from_secs(30), waiting).await {
-            Ok(Ok(())) => Ok(publisher),
+            Ok(Ok(published)) => {
+                // Replacement may win before the first catalog acknowledgment.
+                // Return its terminal handle, but never call it a ready screen.
+                publisher.initially_replaced = !published;
+                Ok(publisher)
+            }
             _ => {
                 let _ = publisher.shutdown().await;
                 Err(error("Hand screen did not publish within 30 seconds"))
@@ -522,7 +529,7 @@ async fn session(
     capabilities: &Value,
     input_keepalive: bool,
     require_video: bool,
-    ready: &mut Option<oneshot::Sender<()>>,
+    ready: &mut Option<oneshot::Sender<bool>>,
     providers: &Option<Arc<dyn Observation>>,
     broadcast: &mut Box<dyn Broadcast>,
     last_authorized: &mut Instant,
@@ -736,7 +743,7 @@ async fn session(
                         tracing::info!(target: "nanocodex2", stage = "screen.published", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
                         generation = value["generation"].as_str().ok_or(SessionError::Closed)?.into();
                         if socket.video.is_some() { ice.prefetch(); }
-                        if let Some(ready) = ready.take() { let _ = ready.send(()); }
+                        if let Some(ready) = ready.take() { let _ = ready.send(true); }
                     },
                     // Status is read-only and is sent when the viewer socket opens,
                     // before asynchronous ICE preparation has admitted its peer.
@@ -1655,9 +1662,9 @@ mod tests {
         })
         .await
         .unwrap();
+        publisher.shutdown().await.unwrap();
         assert!(releases.load(Ordering::SeqCst) > 0);
         peer.await.unwrap();
-        publisher.shutdown().await.unwrap();
     }
     #[tokio::test]
     async fn stalled_preparation_allows_established_input_and_lease_processing() {

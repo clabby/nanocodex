@@ -1,150 +1,140 @@
+// Behavioral gate for CI selection: real Git histories, a real Cargo workspace
+// graph, and the actual CLI entry points used by ci.yml (`select`, `verify`).
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { changedPaths, selectJobs, selectionForEvent } from "./select-jobs.mjs";
+import { families } from "./select-jobs.mjs";
 
-const keys = ["native", "voice", "python", "rust", "wasm", "bindings", "apps", "preview", "policy", "codeql"];
-const expected = (...selected) => Object.fromEntries(keys.map(key => [key, selected.includes(key)]));
-const full = expected(...keys);
-const policy = expected("policy");
-const native = expected("native", "policy");
+const script = fileURLToPath(new URL("./select-jobs.mjs", import.meta.url));
+const heavy = ["hands", "windows", "vm", "voice", "python", "rust_extra", "preview", "codeql"];
+const only = (...on) => Object.fromEntries(families.map(name => [name, on.includes(name)]));
+const everything = only(...families);
 
-const cua489 = [
-  "crates/experimental/nanocodex-computer/src/openai-cua-app-server.mjs",
-  "docs/computer/official-app-server-bridge.md", "docs/computer/upstream-provider.md",
-  "js/managed/src/namespace-tools.ts", "js/managed/test/namespace-tools.test.ts",
-  "scripts/tests/openai-cua-app-server.test.mjs",
-];
-
-test("shared configuration, Rust sources, and unknown paths fail open in either order", () => {
-  for (const path of [
-    "crates/nanocodex/src/lib.rs", "bin/tool/main.rs", "Cargo.toml", "Cargo.lock",
-    "py/bindings/Cargo.toml", ".cargo/config.toml", "rust-toolchain", "rust-toolchain.toml",
-    "scripts/ci/select-jobs.mjs", ".github/workflows/ci.yml", "third_party/code/file",
-    "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json", ".npmrc",
-    "js/account/package.json", "js/desktop-runtime/package.json", "js/account/package-lock.json",
-    "js/nanocodex/src/lib.rs", "js/nanocodex/build.rs", "js/new-package/file.ts",
-    "js/account/scripts/new-build.sh", "js/managed/Dockerfile", "apple/new.rs",
-    "crates/experimental/nanocodex-computer/src/provision.rs",
-    "crates/experimental/nanocodex-computer/src/openai-cua-new.mjs",
-    "scripts/tests/openai-cua-new.test.mjs", "scripts/tests/../build-voice-native.py",
-    "web/new-file.ts", "unknown.txt", "docs/../crates/a", "docs/Cargo.toml", "js//account/file.ts",
-  ]) {
-    assert.deepEqual(selectJobs([...cua489, path]), full, path);
-    assert.deepEqual(selectJobs([path, ...cua489]), full, path);
-  }
-});
-
-function repo(t) {
+// A miniature workspace with the real job-root package names:
+// nanocodex2-bin -> nanocodex-vm -> nanocodex-oai-api, plus a leaf crate.
+function workspace(t) {
   const cwd = mkdtempSync(join(tmpdir(), "ci-selector-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-  git("init");
-  git("config", "user.name", "CI selector test");
-  git("config", "user.email", "ci@example.invalid");
-  const write = (path, content = path) => {
+  const write = (path, content = "") => {
     mkdirSync(dirname(join(cwd, path)), { recursive: true });
     writeFileSync(join(cwd, path), content);
   };
-  const commit = () => { git("add", "-A"); git("commit", "-m", "fixture"); return git("rev-parse", "HEAD"); };
+  const crate = (dir, name, deps = {}) => {
+    write(`${dir}/Cargo.toml`, `[package]\nname = "${name}"\nversion = "0.0.0"\nedition = "2021"\n[dependencies]\n`
+      + Object.entries(deps).map(([dep, path]) => `${dep} = { path = "${path}" }\n`).join(""));
+    write(`${dir}/src/lib.rs`);
+  };
+  write("Cargo.toml", `[workspace]\nresolver = "2"\nmembers = ["crates/*", "bin/*"]\n`);
+  crate("crates/oai-api", "nanocodex-oai-api");
+  crate("crates/vm", "nanocodex-vm", { "nanocodex-oai-api": "../oai-api" });
+  crate("crates/phone", "nanocodex-phone");
+  crate("bin/nanocodex2", "nanocodex2-bin", { "nanocodex-vm": "../../crates/vm" });
   write("README.md");
+  git("init", "-q");
+  git("config", "user.name", "CI selector test");
+  git("config", "user.email", "ci@example.invalid");
+  const commit = () => { git("add", "-A"); git("commit", "-qm", "fixture"); return git("rev-parse", "HEAD"); };
   const initial = commit();
-  return { cwd, git, write, commit, initial };
+  const run = (args, env) => spawnSync(process.execPath, [script, ...args], {
+    cwd, encoding: "utf8", env: { ...process.env, GITHUB_STEP_SUMMARY: "", GITHUB_REPOSITORY: "gakonst/nanocodex", ...env },
+  });
+  // Runs the selector as ci.yml does and parses its GITHUB_OUTPUT lines.
+  const select = (eventName, event, env = {}) => {
+    const eventPath = join(cwd, ".git", "event.json");
+    const outputPath = join(cwd, ".git", "output");
+    writeFileSync(eventPath, JSON.stringify(event));
+    writeFileSync(outputPath, "");
+    const result = run([], { GITHUB_EVENT_NAME: eventName, GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath, ...env });
+    assert.equal(result.status, 0, result.stderr);
+    const raw = Object.fromEntries(readFileSync(outputPath, "utf8").trim().split("\n").map(line => line.split(/=(.*)/s).slice(0, 2)));
+    return { raw, jobs: Object.fromEntries(families.map(name => [name, raw[name] === "true"])) };
+  };
+  return { cwd, git, write, commit, initial, select, run };
 }
 
-test("push uses event endpoints, includes deletions and rename source, preserves NUL filenames", t => {
-  const r = repo(t);
-  r.write("crates/old.rs");
-  r.write("windows/deleted.ps1");
-  const before = r.commit();
-  r.git("mv", "crates/old.rs", "docs-moved.md");
-  r.git("rm", "windows/deleted.ps1");
-  r.write("docs/with space\nand newline.md");
-  const after = r.commit();
-  r.write("unrelated-new-file"); r.commit();
-  const paths = changedPaths("push", { before, after }, r.cwd);
-  assert.deepEqual(paths.sort(), ["crates/old.rs", "docs-moved.md", "docs/with space\nand newline.md", "windows/deleted.ps1"].sort());
-  assert.deepEqual(selectJobs(paths), full);
+test("changed crates select only the jobs in their reverse-dependency closure", t => {
+  const w = workspace(t);
+  const push = (...files) => {
+    const before = w.git("rev-parse", "HEAD");
+    for (const file of files) w.write(file, `// ${Math.random()}\n`);
+    return w.select("push", { before, after: w.commit() });
+  };
+  // A shared library reaches the Hand, Windows, and VM jobs through its dependents.
+  const shared = push("crates/oai-api/src/client.rs");
+  assert.deepEqual(shared.jobs, only("hands", "windows", "vm", "rust", "rust_extra", "policy"));
+  assert.equal(shared.raw.packages, "nanocodex-oai-api nanocodex-vm nanocodex2-bin");
+  // A leaf crate runs Rust quality for itself and nothing native.
+  const leaf = push("crates/phone/src/lib.rs");
+  assert.deepEqual(leaf.jobs, only("rust", "rust_extra", "policy"));
+  assert.equal(leaf.raw.packages, "nanocodex-phone");
+  // Documentation needs no compilation; JS app sources need the WASM artifact.
+  assert.deepEqual(push("docs/guide.md").jobs, only("policy"));
+  assert.deepEqual(push("js/account/src/page.tsx").jobs, only("apps", "wasm", "policy"));
+  assert.equal(shared.raw.tests, "false", "tests stay paused unless the owner switch is on");
 });
 
-test("PR compares event head to merge base even when base and checkout have advanced", t => {
-  const r = repo(t);
-  r.git("checkout", "-b", "feature");
-  r.write("docs/feature.md");
-  const head = r.commit();
-  r.git("checkout", "-b", "base", r.initial);
-  r.write("crates/base-only.rs");
-  const base = r.commit();
-  const event = { pull_request: { base: { sha: base }, head: { sha: head } } };
-  assert.deepEqual(changedPaths("pull_request", event, r.cwd), ["docs/feature.md"]);
-  assert.deepEqual(selectionForEvent("pull_request", event, r.cwd).jobs, policy);
+test("workspace-wide inputs, deleted crates, and unknown paths fail open", t => {
+  const w = workspace(t);
+  for (const path of ["Cargo.lock", ".github/workflows/ci.yml", "scripts/ci/select-jobs.mjs", "crates/gone/src/lib.rs", "unknown.txt"]) {
+    w.git("checkout", "-q", "--detach", w.initial);
+    w.write(path, path);
+    const result = w.select("push", { before: w.initial, after: w.commit() });
+    assert.deepEqual(result.jobs, everything, path);
+    assert.equal(result.raw.packages, "*", path);
+  }
 });
 
-test("CUA deletions keep native checks and renames into unknown inputs run full CI", t => {
-  const r = repo(t);
-  const source = "crates/experimental/nanocodex-computer/src/openai-cua-app-server.mjs";
-  r.write(source);
-  const before = r.commit();
-  r.git("rm", source);
-  const deleted = r.commit();
-  assert.deepEqual(selectionForEvent("push", { before, after: deleted }, r.cwd).jobs, native);
-  r.git("checkout", "-b", "rename", before);
-  r.git("mv", source, "crates/experimental/nanocodex-computer/src/new-bridge.mjs");
-  const renamed = r.commit();
-  assert.deepEqual(selectionForEvent("push", { before, after: renamed }, r.cwd).jobs, full);
+test("PRs diff against the merge base; drafts keep only the fast lane", t => {
+  const w = workspace(t);
+  w.git("checkout", "-q", "-b", "feature");
+  w.write("crates/vm/src/lib.rs", "// feature\n");
+  const head = w.commit();
+  w.git("checkout", "-q", "-b", "base", w.initial);
+  w.write("Cargo.lock", "# base-only change must not leak into the PR diff\n");
+  const base = w.commit();
+  const pr = draft => ({ pull_request: { draft, base: { sha: base }, head: { sha: head } } });
+  const ready = w.select("pull_request", pr(false));
+  assert.deepEqual(ready.jobs, only("hands", "windows", "vm", "rust", "rust_extra", "policy"));
+  assert.equal(ready.raw.heavy, "true");
+  const draft = w.select("pull_request", pr(true));
+  assert.deepEqual(draft.jobs, only("rust", "policy"));
+  assert.equal(draft.raw.heavy, "false");
+  // Unsupported events and unusable endpoints run everything; merge-queue
+  // candidates skip only the PR package preview.
+  for (const [name, event] of [["schedule", {}], ["push", { before: "0".repeat(40), after: head }]]) {
+    assert.deepEqual(w.select(name, event).jobs, everything, name);
+  }
+  assert.deepEqual(w.select("merge_group", {}).jobs, { ...everything, preview: false });
+  assert.equal(w.select("schedule", {}, { NANOCODEX_CI_TESTS: "on" }).raw.tests, "true");
 });
 
-test("unsupported events, absent endpoints, zero SHAs and unavailable history fail open", t => {
-  const r = repo(t);
-  for (const [name, event] of [
-    ["schedule", {}], ["workflow_dispatch", {}], ["unknown", {}], ["push", {}],
-    ["pull_request", {}], ["push", { before: "0".repeat(40), after: r.initial }],
-    ["push", { before: "1".repeat(40), after: r.initial }],
-    ["push", { before: "--bad", after: r.initial }],
-    ["push", { before: r.initial, after: "0".repeat(40) }],
-  ]) assert.deepEqual(selectionForEvent(name, event, r.cwd).jobs, full);
-  r.git("checkout", "--orphan", "unrelated");
-  r.git("rm", "-rf", "."); r.write("other");
-  const unrelated = r.commit();
-  assert.deepEqual(selectionForEvent("pull_request", { pull_request: { base: { sha: r.initial }, head: { sha: unrelated } } }, r.cwd).jobs, full);
-});
-
-test("CLI appends boolean output strings and readable summary; malformed payload runs full", t => {
-  const r = repo(t);
-  r.write("py/example.py"); const after = r.commit();
-  const eventPath = join(r.cwd, "event.json");
-  const outputPath = join(r.cwd, "output");
-  const summaryPath = join(r.cwd, "summary");
-  writeFileSync(outputPath, "existing=value\n");
-  writeFileSync(eventPath, JSON.stringify({ before: r.initial, after }));
-  const run = () => execFileSync(process.execPath, [fileURLToPath(new URL("./select-jobs.mjs", import.meta.url))], {
-    cwd: r.cwd, encoding: "utf8", env: { ...process.env, GITHUB_REPOSITORY: "gakonst/nanocodex", GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath, GITHUB_STEP_SUMMARY: summaryPath },
+test("ci success accepts reduced matrices and rejects failures, cancellations, and unplanned skips", t => {
+  const w = workspace(t);
+  const outputs = selected => ({ ...Object.fromEntries(families.map(name => [name, String(selected.includes(name))])), tests: "false" });
+  const jobs = {
+    test: [], "shared-hands": ["hands"], "voice-native": ["voice"], "windows-hand": ["windows"], clippy: ["rust"],
+    "rust-extra": ["rust_extra"], "vm-guest": ["vm"], policy: ["policy"], "wasm-build": ["wasm"], "js-preview": ["preview"],
+    "wasm-quality": ["wasm_rust"], bindings: ["bindings"], python: ["python"], apps: ["apps"], codeql: ["codeql"],
+  };
+  const needs = selected => ({
+    changes: { result: "success", outputs: outputs(selected) },
+    ...Object.fromEntries(Object.entries(jobs).map(([job, [family]]) => [job, { result: selected.includes(family) ? "success" : "skipped" }])),
   });
-  assert.match(run(), /classified 1 changed path/);
-  assert.equal(readFileSync(outputPath, "utf8"), "existing=value\n" + Object.entries(expected("python", "policy")).map(([key, value]) => `${key}=${value}\n`).join(""));
-  assert.match(readFileSync(summaryPath, "utf8"), /python=true/);
-  writeFileSync(eventPath, "invalid json");
-  assert.match(run(), /full CI/);
-  assert.ok(readFileSync(outputPath, "utf8").endsWith(Object.entries(full).map(([key, value]) => `${key}=${value}\n`).join("")));
-  rmSync(eventPath);
-  assert.match(run(), /full CI/);
-});
-
-test("fork CI does not require the upstream-only package publisher", t => {
-  const r = repo(t);
-  const eventPath = join(r.cwd, "event.json");
-  const outputPath = join(r.cwd, "output");
-  writeFileSync(eventPath, "{}");
-  execFileSync(process.execPath, [fileURLToPath(new URL("./select-jobs.mjs", import.meta.url))], {
-    cwd: r.cwd, env: { ...process.env, GITHUB_REPOSITORY: "example/fork", GITHUB_EVENT_NAME: "workflow_dispatch",
-      GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath, GITHUB_STEP_SUMMARY: "" },
-  });
-  const actual = Object.fromEntries(readFileSync(outputPath, "utf8").trim().split("\n").map(line => {
-    const [key, value] = line.split("="); return [key, value === "true"];
-  }));
-  assert.deepEqual(actual, { ...full, preview: false });
+  const passes = value => w.run(["verify"], { NEEDS: JSON.stringify(value) }).status === 0;
+  const draft = families.filter(name => !heavy.includes(name));
+  for (const selected of [families, draft, ["policy"]]) assert.ok(passes(needs(selected)), selected.join(","));
+  for (const job of ["changes", "clippy", "windows-hand"]) {
+    for (const result of ["failure", "cancelled", "skipped"]) {
+      assert.equal(passes({ ...needs(families), [job]: { ...needs(families)[job], result } }), false, `${job}: ${result}`);
+    }
+  }
+  assert.equal(passes({ ...needs(["policy"]), "windows-hand": { result: "success" } }), false, "unselected job ran");
+  assert.equal(passes({ ...needs(families), test: { result: "success" } }), false, "paused tests ran");
+  assert.equal(passes({ ...needs(families), changes: { result: "success", outputs: {} } }), false, "missing selection");
+  assert.equal(passes({ ...needs(families), "new-job": { result: "success" } }), false, "unmapped job");
 });

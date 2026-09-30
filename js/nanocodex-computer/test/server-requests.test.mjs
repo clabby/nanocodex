@@ -59,3 +59,23 @@ for (const [method, params] of [
     }
   });
 }
+
+// Host policy is trusted configuration, not a model tool argument.
+test("trusted blanket app-access denial reaches the provider without inheriting credentials", async t => {
+  const previous = process.env.NANOCODEX_CUA_APP_CONSENT;
+  const previousKey = process.env.NANOCODEX_API_KEY;
+  process.env.NANOCODEX_CUA_APP_CONSENT = "deny";
+  process.env.NANOCODEX_API_KEY = "synthetic-not-a-real-key";
+  t.after(() => {
+    if (previous === undefined) delete process.env.NANOCODEX_CUA_APP_CONSENT; else process.env.NANOCODEX_CUA_APP_CONSENT = previous;
+    if (previousKey === undefined) delete process.env.NANOCODEX_API_KEY; else process.env.NANOCODEX_API_KEY = previousKey;
+  });
+  const script = `require('readline').createInterface({input:process.stdin}).on('line',line=>{
+    const q=JSON.parse(line); if(q.id===undefined)return;
+    const result=q.method==='initialize'?{protocolVersion:'2025-06-18',capabilities:{tools:{}}}:q.method==='tools/list'?{tools:${JSON.stringify(catalog)}}:{content:[{type:'text',text:JSON.stringify({consent:process.env.NANOCODEX_CUA_APP_CONSENT,credential:'NANOCODEX_API_KEY' in process.env})}]};
+    process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n');
+  });`;
+  const attachment = await connectComputerTools({executable:process.execPath,args:["-e",script]}); t.after(attachment.close);
+  const result=await attachment.tool("js").handler({},context);
+  assert.deepEqual(JSON.parse(result.output[0].text),{consent:"deny",credential:false});
+});

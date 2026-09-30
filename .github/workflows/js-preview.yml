@@ -36,10 +36,7 @@ jobs:
           toolchain: "1.97"
           targets: wasm32-unknown-unknown
       - if: inputs.wasm-artifact == ''
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+        uses: ./.github/actions/rust-compiler-cache
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:

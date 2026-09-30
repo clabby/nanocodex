@@ -109,7 +109,7 @@ describe("sponsored homepage model access", () => {
     for (let index = 1; index <= 3; index += 1) {
       socket.send(JSON.stringify({
         type: "response.create",
-        model: "gpt-6-sol",
+        model: "gpt-6.1-sol",
         reasoning: { effort: "max", mode: "pro" },
         service_tier: "priority",
         input: [{

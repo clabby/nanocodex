@@ -17,7 +17,7 @@ const sse = records => new Response(records.map(value => `data: ${typeof value =
 // The request bit is a generation preference. Every returned call must retain
 // its identity through validation and history; execution policy lives in the host.
 for (const provider of ["openrouter", "vercel", "cloudflare"]) {
-  for (const model of provider === "cloudflare" ? ["gpt-6-sol"] : ["kimi-k3", "mimo-v2.6-pro", "@cf/zai-org/glm-5.3"]) {
+  for (const model of provider === "cloudflare" ? ["gpt-6.1-sol"] : ["kimi-k3", "mimo-v2.6-pro", "@cf/zai-org/glm-5.3"]) {
     for (const stream of [false, true]) test(`${provider}/${model}/${stream ? "stream" : "buffered"}: multiple calls survive false parallel preference and replay`, async () => {
       let requests = 0;
       const outcomes = [];

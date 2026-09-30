@@ -166,7 +166,7 @@ impl<F> OpenAiBuilder<F> {
     /// Prepends a namespace to supported model identifiers on the wire.
     ///
     /// For example, an OpenAI routing gateway may expose Sol as
-    /// `openai/gpt-6-sol` while Nanocodex continues to retain `Model::Sol`
+    /// `openai/gpt-6.1-sol` while Nanocodex continues to retain `Model::Sol`
     /// for model-specific behavior, pricing, compaction, and snapshots. This
     /// changes only the wire identifier for the closed [`Model`] enum; it is
     /// not an alternate provider or arbitrary-model surface. [`Self::build`]
@@ -600,6 +600,8 @@ fn validate(config: &ModelConfig) -> Result<(), OpenAiError> {
         return Err(OpenAiError::InvalidConfiguration {
             detail: (if config.model == Model::Glm53 {
                 "GLM-5.3 requires low, medium, or high reasoning effort"
+            } else if config.model == Model::Sol {
+                "GPT-6.1 Sol requires low, medium, high, xhigh, or max reasoning effort"
             } else {
                 "GPT-6 Astra requires low, medium, high, xhigh, or max reasoning effort"
             }),

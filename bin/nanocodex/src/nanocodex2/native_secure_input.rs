@@ -53,7 +53,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{io, path::Path, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+#[cfg(target_os = "macos")]
 const SOCKET: &str = "/var/run/nanocodex-secure-input.sock";
+#[cfg(target_os = "linux")]
+const SOCKET: &str = "/run/nanocodex-secure-input.sock";
 const MAX_FRAME: u64 = 32768;
 fn unavailable() -> io::Error {
     io::Error::other("Native secure input unavailable")
@@ -127,7 +130,10 @@ async fn read_frame(reader: impl AsyncRead + Unpin) -> io::Result<Response> {
         .read_to_end(&mut bytes)
         .await
         .map_err(|_| unavailable())?;
-    if bytes.len() as u64 > MAX_FRAME || bytes.last() != Some(&b'\n') {
+    if bytes.len() as u64 > MAX_FRAME
+        || bytes.last() != Some(&b'\n')
+        || bytes[..bytes.len().saturating_sub(1)].contains(&b'\n')
+    {
         return Err(unavailable());
     }
     serde_json::from_slice(&bytes).map_err(|_| unavailable())
@@ -170,7 +176,7 @@ impl Tool for NativeSecureInput {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "native_secure_input",
-            "Transport public tickets and encrypted approvals to this Mac's enrolled protected helper. Password plaintext is never accepted. Use request_native_secure_input for mobile authorization.",
+            "Transport public tickets and encrypted approvals to this computer's independently enrolled protected helper. Password plaintext is never accepted. Use request_native_secure_input for mobile authorization.",
             json!({
                 "type":"object", "properties": {
                     "operation":{"type":"string","enum":["prepare","submit","cancel"]},

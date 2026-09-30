@@ -187,6 +187,9 @@ impl ManagedClient {
         headers.insert(AUTHORIZATION, authorization);
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            // Private native approvals must never be transparently replayed.
+            // Ordinary lifecycle retries are explicit at their call sites.
+            .retry(reqwest::retry::never())
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
             // SSE sends keepalives every 15 seconds. Bound a dead connection

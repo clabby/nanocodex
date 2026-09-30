@@ -146,6 +146,10 @@ pub(crate) enum RootEvent {
     ShowAgentId(String),
     VaultReview(crate::tui::vault::Review),
     VaultReceipt(String),
+    SecureInputReceipt {
+        request_id: String,
+        status: crate::tui::secure_input::Status,
+    },
     Terminal(Event),
     PasteImage(String),
     #[cfg(test)]
@@ -305,6 +309,7 @@ pub(crate) enum RootEffect {
     Voice(crate::voice::Command),
     ShowAgentId,
     Vault(crate::tui::vault::Command),
+    SecureInput(Option<nanocodex_managed::NativeSecureInputRequest>),
     Share(crate::tui::share::Command),
     ApproveVault(crate::tui::vault::Review),
     Submit(Submission),
@@ -3032,6 +3037,19 @@ impl RootNode {
                     Vec::new()
                 }
             },
+            Some(ComposerEffect::SecureInput(command)) => {
+                let request = match &command {
+                    crate::tui::secure_input::Command::Select { agent, request } => {
+                        nanocodex_managed::NativeSecureInputRequest::selector(
+                            request.clone(),
+                            agent.clone(),
+                        )
+                        .ok()
+                    }
+                    _ => self.transcript.component().secure_input_request(&command),
+                };
+                vec![RootEffect::SecureInput(request)]
+            }
             Some(ComposerEffect::Vault(command)) => {
                 let command = if command == crate::tui::vault::Command::Latest {
                     self.transcript
@@ -4237,6 +4255,14 @@ impl Component for RootNode {
             RootEvent::HistoryReplayed { projection } => {
                 self.replay_history(*projection);
                 ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::SecureInputReceipt { request_id, status } => {
+                // Only validated UUID and a closed fixed status enum enter the
+                // model. No remote error text, command output or password.
+                let receipt = serde_json::json!({"type":"secure_input_receipt", "request_id":request_id, "status":status.wire()}).to_string();
+                self.thread = ThreadState::Started;
+                self.queue.component_mut().push(Submission::text(receipt));
+                self.submit_next_queued()
             }
             RootEvent::VaultReceipt(receipt) => {
                 self.thread = ThreadState::Started;

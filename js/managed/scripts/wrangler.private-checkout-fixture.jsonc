@@ -1,0 +1,8 @@
+{
+  "name":"nanocodex-private-checkout-fixture",
+  "main":"fixtures/private-checkout-site.ts",
+  "compatibility_date":"2026-07-29",
+  "workers_dev":true,
+  "durable_objects":{"bindings":[{"name":"FIXTURE","class_name":"PrivateCheckoutFixture"}]},
+  "migrations":[{"tag":"v1","new_sqlite_classes":["PrivateCheckoutFixture"]}]
+}

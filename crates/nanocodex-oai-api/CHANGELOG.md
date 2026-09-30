@@ -5,6 +5,29 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+
+### Bug Fixes
+
+- [voice] Align ChatGPT voice with Codex app-server lifecycle ([#648](https://github.com/gakonst/nanocodex/issues/648))
+
+### Features
+
+- [models] Migrate Sol to GPT-6.1 ([#679](https://github.com/gakonst/nanocodex/issues/679))
+
+### Miscellaneous Tasks
+
+- Remove obsolete docs, artifacts, and low-signal tests ([#568](https://github.com/gakonst/nanocodex/issues/568))
+
+### Other
+
+- Use default Mercator MCP with the funded account wallet ([#659](https://github.com/gakonst/nanocodex/issues/659))
+- Enforce strict typed subagent spawn contracts and verify live child completion ([#666](https://github.com/gakonst/nanocodex/issues/666))
+
+### Styling
+
+- Add strict JSON Schema output and expose provider-reported model ([#656](https://github.com/gakonst/nanocodex/issues/656))
+
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 
 ### Bug Fixes
@@ -18,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - [router] Add Kimi and MiMo with mobile model controls ([#519](https://github.com/gakonst/nanocodex/issues/519))
 - [tui] Add authenticated rich terminal integration ([#344](https://github.com/gakonst/nanocodex/issues/344))
+
+### Miscellaneous Tasks
+
+- Prepare release 0.6.5 ([#584](https://github.com/gakonst/nanocodex/issues/584))
 
 ### Other
 
@@ -38,7 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance
 
 - [tls] Avoid macOS root-store enumeration on connect
-
 
 ## [0.6.4](https://github.com/gakonst/nanocodex/releases/tag/v0.6.4) - 2026-09-19
 
@@ -63,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- Prepare release 0.6.4 with minified QuickJS fix ([#420](https://github.com/gakonst/nanocodex/issues/420))
 - Prepare corrected release 0.6.3 ([#418](https://github.com/gakonst/nanocodex/issues/418))
 - Prepare release 0.6.2 ([#416](https://github.com/gakonst/nanocodex/issues/416))
 

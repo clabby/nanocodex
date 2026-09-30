@@ -1,6 +1,6 @@
 export type Thinking = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ReasoningMode = "standard" | "pro";
-export type Model = "gpt-6-sol" | "gpt-6-luna" | "gpt-6-astra" | "@cf/zai-org/glm-5.3" | "kimi-k3" | "mimo-v2.6-pro";
+export type Model = "gpt-6.1-sol" | "gpt-6-luna" | "gpt-6-astra" | "@cf/zai-org/glm-5.3" | "kimi-k3" | "mimo-v2.6-pro";
 
 export type PromptItem =
   | { type: "text"; text: string }
@@ -520,6 +520,11 @@ export type CodeEvaluator = (
   environment: CodeEvaluatorEnvironment,
 ) => void | Promise<void>;
 
+declare const mcpPaymentBrand: unique symbol;
+
+/** MCP payment options returned by `mcpPayment()` from `nanocodex/tempo`. */
+export type PaidMcpPayment = McpPayment & { readonly [mcpPaymentBrand]: true };
+
 export type McpPayment = {
   /** MPPx client methods, such as `tempo.session({ account, getClient, channelStore })`. */
   methods: readonly unknown[];
@@ -562,7 +567,8 @@ export type McpServer = {
   description?: string | undefined;
   headers?: HeadersInit | undefined;
   fetch?: typeof globalThis.fetch | undefined;
-  payment?: McpPayment | undefined;
+  /** Created with `mcpPayment()` from `nanocodex/tempo` (requires the `mppx` peer). */
+  payment?: PaidMcpPayment | undefined;
   enabledTools?: readonly string[] | undefined;
   disabledTools?: readonly string[] | undefined;
   /** Declares every remote tool on this server safe for concurrent nested calls. */

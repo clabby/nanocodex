@@ -140,9 +140,19 @@ export class PrivateBrowserCdp {
  * authorized login origin. Destination guards are best effort: trusted page JS
  * already receives credentials and can make its own requests or stop propagation. */
 const VAULT_FORM_SUBMISSION = `
+  // CSP applies to native submit(), including calls that bypass submit events.
+  // Multiple policies intersect; never alter a site's form method or handlers.
+  const protectNativeForms = (blockAll = false) => {
+    if (!document.head) return false;
+    const policy = document.createElement('meta');
+    policy.httpEquiv = 'Content-Security-Policy';
+    policy.content = blockAll ? "form-action 'none'" : "form-action 'self'";
+    document.head.appendChild(policy);
+    return policy.isConnected;
+  };
   const safeLoginForm = form => {
     if (!(form instanceof HTMLFormElement) || !form.isConnected || form.getRootNode() !== document
-      || location.origin !== origin || form.method.toLowerCase() !== 'post' || (form.target && form.target !== '_self')) return false;
+      || location.origin !== origin || (form.method.toLowerCase() !== 'post' && form.hasAttribute('method')) || (form.target && form.target !== '_self')) return false;
     const action = new URL(form.action, location.href);
     return action.origin === origin && !action.username && !action.password;
   };
@@ -207,7 +217,8 @@ export class PrivateBrowserContinuationSession {
 }
 
 /** A fixed function, executed in a fresh isolated world. Selectors are data, never code.
- * Restrict to a visible, same-origin POST login form in the top frame. Atomic checks
+ * Restrict to visible, same-origin login inputs in the top frame. Methodless forms
+ * and formless SPAs retain their semantics with native submissions blocked by CSP. Atomic checks
  * and native setters are followed by input/change events and destination rechecks.
  */
 export const BROWSER_VAULT_FILL_FUNCTION = `function(origin, usernameSelector, passwordSelector, username, password, submit, dryRun = false) {
@@ -230,16 +241,16 @@ export const BROWSER_VAULT_FILL_FUNCTION = `function(origin, usernameSelector, p
     || (passwordSelector !== null && (!visible(pass) || pass.type !== 'password'))
     || (user && pass && (user === pass || user.form !== pass.form))) return false;
   const form = (user || pass).form;
-  if (!form) return false;
-  const action = new URL(form.action, location.href);
-  if (action.origin !== origin || action.username || action.password || form.method.toLowerCase() !== 'post'
-    || (form.target && form.target !== '_self')) return false;
+  if (form && !safeLoginForm(form)) return false;
   const challenge = () => [...document.querySelectorAll('iframe,[id],[class]')].slice(0,5000).some(el =>
     el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}) && /captcha|turnstile|challenge-platform/i.test([el.id, typeof el.className === 'string' ? el.className : '', el instanceof HTMLIFrameElement ? el.src : ''].join(' ')));
-  const valid = () => !challenge() && safeLoginForm(form)
+  const method = form && form.getAttribute('method');
+  const valid = () => location.origin === origin && location.protocol === 'https:' && !challenge()
+    && (!form || safeLoginForm(form) && form.getAttribute('method') === method)
     && (!user || (one(usernameSelector) === user && user.form === form && visible(user) && ['text','email'].includes(user.type)))
     && (!pass || (one(passwordSelector) === pass && pass.form === form && visible(pass) && pass.type === 'password'));
   if (dryRun) return valid();
+  if (!valid() || !protectNativeForms(!form || form.method.toLowerCase() !== 'post')) return false;
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
   for (const [input, value] of [[user, username], [pass, password]]) {
     if (!input) continue;
@@ -251,6 +262,8 @@ export const BROWSER_VAULT_FILL_FUNCTION = `function(origin, usernameSelector, p
     if (!valid()) return false;
   }
   if (submit) {
+    // Formless SPAs need a separately authorized, snapshotted control action.
+    if (!form) return 'unsupported';
     const controls = [...form.elements].filter(el => (el instanceof HTMLButtonElement || el instanceof HTMLInputElement) && el.type === 'submit');
     const usable = controls.filter(el => { const rect = el.getBoundingClientRect(); return rect.width > 0 && rect.height > 0 && rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight
       && el.contains(document.elementFromPoint(rect.left + rect.width/2, rect.top + rect.height/2)) && safeSubmitter(el) && el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})
@@ -333,37 +346,79 @@ export type BrowserVaultInspection = {
 };
 export type BrowserVaultSnapshot = BrowserVaultInspection & {
   snapshot_id: string; title: string; text: string;
-  elements: { ref: string; role: "link" | "button"; text: string }[];
+  elements: { ref: string; role: "link" | "button" | "input" | "textarea" | "select" | "checkbox" | "radio"; text: string;
+    options?: { index: number; label: string }[]; checked?: boolean }[];
 };
 const USERNAME_SELECTOR = 'input:not([type]):not([autocomplete="one-time-code"]),input[type="text"]:not([autocomplete="one-time-code"]),input[type="email"]';
 const PASSWORD_SELECTOR = 'input[type="password"]';
 const OTP_SELECTOR = 'input[autocomplete="one-time-code"],input[name="otp"],input[name="code"],input[name="verification_code"]';
 
-/** Fixed code in an isolated world: no caller JavaScript, DOM values, raw attributes,
- * scripts, subframes or hidden content are returned. Refs bind to node identity and
- * a single snapshot. Actions deliberately support native same-origin links and
- * POST form submission and explicit bounded login controls. Other custom controls
- * require human takeover; authorized page handlers can perform their own requests.
+/** Fixed isolated-world code. Only bounded visible labels and option indices leave
+ * the browser. Values and captured DOM/form state remain private. User authority
+ * is enforced by the host; control labels never grant or restrict that authority.
  */
-export const BROWSER_VAULT_CONTINUATION_FUNCTION = `function(origin, mode, snapshotId, ref, url, selectors) {
+export const BROWSER_VAULT_CONTINUATION_FUNCTION = `function(origin, mode, snapshotId, ref, url, selectors, payload) {
   if (window !== window.top || location.origin !== origin || location.protocol !== 'https:') return null;
   ${VAULT_FORM_SUBMISSION}
   const visible = (el, readingText = false) => el instanceof Element && el.isConnected && el.getRootNode() === document
-    && !el.closest('[inert],[hidden],script,style,noscript,template,textarea,select' + (readingText ? '' : ',[aria-hidden="true"]'))
+    && !el.closest('[inert],[hidden],script,style,noscript,template' + (readingText ? ',textarea,select' : ',[aria-hidden="true"]'))
     && el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}) && el.getClientRects().length > 0;
-  const safeUrl = value => { try { const u = new URL(value, location.href); return u.origin === origin && !u.username && !u.password ? u.href : null; } catch { return null; } };
-  const safeForm = form => form instanceof HTMLFormElement && form.method.toLowerCase() === 'post'
-    && (!form.target || form.target === '_self') && safeUrl(form.action);
+  const enabled = el => !el.disabled && !el.matches(':disabled') && el.getAttribute('aria-disabled') !== 'true';
+  const safeUrl = value => { try { const u = new URL(value, location.href); return u.protocol === 'https:' && u.origin === origin && !u.username && !u.password ? u.href : null; } catch { return null; } };
+  const safeForm = form => form instanceof HTMLFormElement && form.isConnected && form.getRootNode() === document
+    && ['get','post'].includes(form.method.toLowerCase()) && (!form.target || form.target === '_self') && !!safeUrl(form.action);
   const associatedForm = el => el.form || el.closest('form');
-  const customLogin = el => el instanceof HTMLElement && el.getAttribute('role') === 'button'
-    && !el.matches('a,input,button') && !el.closest('a,button,label,summary') && el.getAttribute('aria-disabled') !== 'true'
-    && /^(log in|login|sign in)$/i.test((el.textContent || '').trim())
-    && safeForm(associatedForm(el)) && [...associatedForm(el).elements].some(input =>
-      input instanceof HTMLInputElement && ['text','email','password'].includes(input.type) && visible(input) && !input.disabled && !input.readOnly);
+  const readable = root => {
+    const chunks = [], walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node, visited = 0, length = 0;
+    while ((node = walker.nextNode()) && ++visited <= 10000) {
+      const parent = node.parentElement;
+      if (!parent || !visible(parent, true) || parent.closest('input,option')) continue;
+      const value = node.textContent || '';
+      if (!value.trim() || value.length > 8192) continue;
+      if (length + value.length > 32768) break;
+      chunks.push(value); length += value.length;
+    }
+    return chunks.join(' ');
+  };
+  const label = el => {
+    const aria = el.getAttribute('aria-label');
+    if (aria && aria.length <= 8192) return aria;
+    const ids = (el.getAttribute('aria-labelledby') || '').trim().split(/\\s+/).filter(Boolean).slice(0, 20);
+    const named = ids.map(id => document.getElementById(id)).filter(node => node && visible(node, true)).map(readable).join(' ');
+    if (named) return named;
+    const labels = el.labels ? [...el.labels].filter(node => visible(node, true)).map(readable).join(' ') : '';
+    if (labels) return labels;
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      const placeholder = el.getAttribute('placeholder') || '';
+      return placeholder.length <= 8192 ? placeholder : '';
+    }
+    return el instanceof HTMLSelectElement ? '' : readable(el);
+  };
+  const sensitive = el => {
+    if (el instanceof HTMLInputElement && el.type === 'password') return true;
+    const hints = [el.id, el.getAttribute('name'), el.getAttribute('autocomplete'), el.getAttribute('inputmode'), label(el)].join(' ');
+    return /password|passcode|passwd|one.time.code|verification|security.code|totp|2fa|mfa|\\botp\\b|\\bpin\\b|\\bcode\\b|\\bcc[-_ ]|card|ccnum|cvc|cvv|expir(?:y|ation)|payment|iban|routing|sort.code|swift|bank|account.number|social.security|\\bssn\\b|tax.id|passport|national.id|driver.?s?.license|secret|token|api.key|private.key|recovery.code|sensitive/i.test(hints);
+  };
+  const role = el => {
+    if (el instanceof HTMLAnchorElement) return 'link';
+    if (el instanceof HTMLTextAreaElement) return 'textarea';
+    if (el instanceof HTMLSelectElement) return 'select';
+    if (el instanceof HTMLInputElement) return ['checkbox','radio'].includes(el.type) ? el.type
+      : ['button','submit','reset'].includes(el.type) ? 'button' : el.type !== 'hidden' && el.type !== 'image' && el.type !== 'file' ? 'input' : null;
+    return el instanceof HTMLButtonElement || (el instanceof HTMLElement && el.getAttribute('role') === 'button'
+      && !el.closest('a,button,label,summary')) ? 'button' : null;
+  };
+  const safeControl = el => {
+    const kind = role(el), form = associatedForm(el);
+    if (!kind || !visible(el) || !enabled(el) || (form && !safeForm(form))) return false;
+    if (kind === 'link') return !!safeUrl(el.href) && (!el.target || el.target === '_self') && !el.hasAttribute('download');
+    return !['formaction','formmethod','formtarget','formenctype','formnovalidate'].some(a => el.hasAttribute(a));
+  };
   const usable = selector => {
     const nodes = document.querySelectorAll(selector);
     return nodes.length === 1 && nodes[0] instanceof HTMLInputElement && visible(nodes[0])
-      && !nodes[0].disabled && !nodes[0].readOnly && !!safeForm(nodes[0].form);
+      && enabled(nodes[0]) && !nodes[0].readOnly && (!nodes[0].form || safeLoginForm(nodes[0].form));
   };
   const challenge = [...document.querySelectorAll('iframe,[id],[class]')].slice(0, 5000).some(el =>
     visible(el) && /captcha|turnstile|challenge-platform/i.test([el.id, typeof el.className === 'string' ? el.className : '', el instanceof HTMLIFrameElement ? el.src : ''].join(' ')));
@@ -377,62 +432,91 @@ export const BROWSER_VAULT_CONTINUATION_FUNCTION = `function(origin, mode, snaps
     location.assign(destination);
     return true;
   }
-  if (mode === 'click') {
+  // Live values are retained only in this isolated world for TOCTOU checks. They
+  // are never included in the return value, labels, diagnostics or CDP output.
+  const fieldState = el => [el.outerHTML, 'value' in el ? el.value : null,
+    'checked' in el ? el.checked : null, el instanceof HTMLSelectElement ? [...el.options].map(o => o.selected) : null];
+  const formState = form => form ? JSON.stringify([form.outerHTML, [...form.elements].map(fieldState)]) : null;
+  if (['click','fill','select','check'].includes(mode)) {
     const snapshot = globalThis.__nanocodexVaultSnapshot;
     if (!snapshot) return 'snapshot_missing';
     if (snapshot.id !== snapshotId) return 'stale_ref';
-    if (snapshot.href !== location.href) return 'document_changed';
+    if (snapshot.document !== document || snapshot.href !== location.href) return 'document_changed';
     const entry = snapshot.nodes.get(ref), el = entry && entry.el;
     delete globalThis.__nanocodexVaultSnapshot;
     if (challenge) return 'challenge_detected';
     if (!el) return 'stale_ref';
-    if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') return 'element_not_visible';
-    if (el.outerHTML !== entry.html
-      || (entry.form && (associatedForm(el) !== entry.form || entry.form.outerHTML !== entry.formHtml))) return 'changed_element';
-    el.scrollIntoView({block:"center", inline:"center", behavior:"instant"});
+    if (!visible(el) || !enabled(el)) return 'element_not_visible';
+    const unchanged = () => location.origin === origin && el.isConnected && el.getRootNode() === document
+      && label(el) === entry.label && JSON.stringify(fieldState(el)) === entry.state
+      && associatedForm(el) === entry.form && formState(entry.form) === entry.formState;
+    if (!unchanged()) return 'changed_element';
+    el.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
+    if (!unchanged()) return 'changed_element';
     const rect = el.getBoundingClientRect();
-    if (rect.left < 0 || rect.top < 0 || rect.right > innerWidth || rect.bottom > innerHeight) return 'outside_viewport';
+    if (rect.width <= 0 || rect.height <= 0 || rect.left < 0 || rect.top < 0 || rect.right > innerWidth || rect.bottom > innerHeight) return 'outside_viewport';
     if (!el.contains(document.elementFromPoint(rect.left + rect.width/2, rect.top + rect.height/2))) return 'occluded';
-    if (el instanceof HTMLAnchorElement && (!el.target || el.target === '_self') && !el.hasAttribute('download')) {
-      const destination = safeUrl(el.href);
-      if (!destination) return 'unsafe_destination';
-      location.assign(destination); return true;
-    }
-    if (customLogin(el)) { HTMLElement.prototype.click.call(el); return true; }
-    if ((el instanceof HTMLButtonElement || el instanceof HTMLInputElement) && el.type === 'submit' && !el.name && safeForm(el.form)
-      && !['formaction','formmethod','formtarget','formenctype','formnovalidate'].some(a => el.hasAttribute(a))) {
-      return submitLoginForm(el.form, el);
-    }
-    return 'unsupported_element';
+    if (!safeControl(el)) return 'unsafe_destination';
+    const kind = role(el);
+    if (['fill','select'].includes(mode) && sensitive(el)) return 'sensitive_field';
+    // Enforce native destinations even when page handlers call form.submit(). A
+    // credential-bearing GET form is JS-only. Page JS on the authorized origin
+    // can still make its own requests, as it could during private login.
+    const credentialGet = [...document.forms].some(form => form.method.toLowerCase() !== 'post'
+      && [...form.elements].some(field => (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) && sensitive(field)));
+    if (!protectNativeForms(credentialGet)) return 'unsafe_destination';
+    const guard = event => {
+      const form = event.target, submitter = event.submitter;
+      if (!safeForm(form) || (submitter && (submitter.form !== form || !safeControl(submitter)))
+        || (form.method.toLowerCase() !== 'post' && [...form.elements].some(sensitive))) event.preventDefault();
+    };
+    window.addEventListener('submit', guard);
+    try {
+      if (mode === 'fill') {
+        if (!['input','textarea'].includes(kind) || el.readOnly
+          || (kind === 'input' && !['text','email','tel','url','search','number','date','datetime-local','month','week','time'].includes(el.type))
+          || typeof payload !== 'string' || payload.length > 8192) return 'unsupported_element';
+        const prototype = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(prototype, 'value').set.call(el, payload);
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        if (!el.isConnected || associatedForm(el) !== entry.form || (entry.form && !safeForm(entry.form))) return 'changed_element';
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+        return true;
+      }
+      if (mode === 'select') {
+        if (kind !== 'select' || el.multiple || !Number.isInteger(payload) || payload < 0 || payload >= el.options.length) return 'unsupported_element';
+        const option = el.options[payload];
+        if (option.disabled || option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled || option.hidden || option.closest('optgroup[hidden]')) return 'unsupported_element';
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex').set.call(el, payload);
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        if (!el.isConnected || associatedForm(el) !== entry.form || (entry.form && !safeForm(entry.form))) return 'changed_element';
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+        return true;
+      }
+      if (mode === 'check') {
+        if (!['checkbox','radio'].includes(kind) || typeof payload !== 'boolean' || kind === 'radio' && !payload) return 'unsupported_element';
+        if (el.checked !== payload) HTMLElement.prototype.click.call(el);
+        return el.checked === payload;
+      }
+      if (!['link','button'].includes(kind)) return 'unsupported_element';
+      HTMLElement.prototype.click.call(el);
+      return true;
+    } finally { window.removeEventListener('submit', guard); }
   }
   if (mode !== 'snapshot') return null;
-  const readable = root => {
-    const chunks = [], walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let node, visited = 0, length = 0;
-    while ((node = walker.nextNode()) && ++visited <= 10000) {
-      const parent = node.parentElement;
-      if (!parent || !visible(parent, true) || parent.closest('input,option')) continue;
-      const value = node.textContent || '';
-      if (!value.trim() || value.length > 8192) continue; // Omit whole nodes; never return a truncated secret.
-      if (length + value.length > 32768) break;
-      chunks.push(value); length += value.length;
-    }
-    return chunks.join(' ');
-  };
   const nodes = new Map(), elements = [];
-  for (const el of [...document.querySelectorAll('a[href],button,input[type="submit"],[role="button"]')].slice(0, 2000)) {
+  for (const el of [...document.querySelectorAll('a[href],button,input,textarea,select,[role="button"]')].slice(0, 2000)) {
     if (elements.length >= 200) break;
-    if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
-    const link = el instanceof HTMLAnchorElement;
-    if (link ? (!safeUrl(el.href) || (el.target && el.target !== '_self') || el.hasAttribute('download'))
-      : (!customLogin(el) && !safeSubmitter(el))) continue;
-    if (!link && !safeForm(associatedForm(el))) continue;
+    if (!safeControl(el)) continue;
+    const kind = role(el), form = associatedForm(el), text = label(el);
+    if (form && form.elements.length > 2000 || kind === 'select' && el.options.length > 200) continue;
     const key = 'e' + (elements.length + 1);
-    nodes.set(key, {el, html:el.outerHTML, form:link ? null : associatedForm(el), formHtml:link ? null : associatedForm(el).outerHTML});
-    // Input values, including submit values, are never read.
-    elements.push({ref:key, role:link ? 'link' : 'button', text:el instanceof HTMLInputElement ? '' : readable(el)});
+    nodes.set(key, {el, label:text, state:JSON.stringify(fieldState(el)), form, formState:formState(form)});
+    // Never read submit input values as labels; options expose indices and labels only.
+    const options = kind === 'select' ? [...el.options].flatMap((option, index) => option.hidden || option.closest('optgroup[hidden]') ? [] : [{index, label:option.label.length <= 8192 ? option.label : ''}]) : undefined;
+    elements.push({ref:key, role:kind, text, ...(options ? {options} : {}), ...(['checkbox','radio'].includes(kind) ? {checked:el.checked} : {})});
   }
-  globalThis.__nanocodexVaultSnapshot = {id:snapshotId, href:location.href, nodes};
+  globalThis.__nanocodexVaultSnapshot = {id:snapshotId, document, href:location.href, nodes};
   return {status, flags, snapshot_id:snapshotId, title:document.title.length <= 8192 ? document.title : '', text:readable(document.body || document.documentElement), elements};
 }`;
 
@@ -461,12 +545,12 @@ async function privateWorld(cdp: PrivateBrowserChannel, request: BrowserVaultIde
     || verifiedFrame.loaderId !== frame.loaderId || new URL(verifiedFrame.url).origin !== request.expected_origin) throw new Error();
   return { sessionId: attached.sessionId as string, executionContextId: world.executionContextId as number, loaderId: frame.loaderId as string };
 }
-async function continuation(cdp: PrivateBrowserChannel, request: BrowserVaultIdentity, mode: string, snapshotId = "", ref = "", url = "") {
+async function continuation(cdp: PrivateBrowserChannel, request: BrowserVaultIdentity, mode: string, snapshotId = "", ref = "", url = "", payload?: string | number | boolean) {
   const world = await privateWorld(cdp, request);
   if (!world) return null;
   const result = await cdp.send("Runtime.callFunctionOn", {
     executionContextId: world.executionContextId, functionDeclaration: BROWSER_VAULT_CONTINUATION_FUNCTION,
-    arguments: [request.expected_origin, mode, snapshotId, ref, url, [USERNAME_SELECTOR, PASSWORD_SELECTOR, OTP_SELECTOR]].map(value => ({ value })),
+    arguments: [request.expected_origin, mode, snapshotId, ref, url, [USERNAME_SELECTOR, PASSWORD_SELECTOR, OTP_SELECTOR], payload ?? null].map(value => ({ value })),
     returnByValue: true, silent: true,
   }, world.sessionId);
   if (result?.exceptionDetails) throw new Error();
@@ -516,6 +600,8 @@ export function sanitizeBrowserVaultText(value: string, secrets: readonly string
   }
   // Runtime limits verification intake to numeric codes. Conservative generic
   // masking survives worker rehydration when the exact prior code is unavailable.
+  // This also masks some dates/prices; retain that conservative behavior until
+  // exact secret retention can safely replace generic numeric masking.
   // Normalize common accidental echo encodings before masking; arbitrary site
   // transformations are outside this defense-in-depth boundary.
   for (let round = 0; round < 3; round++) {
@@ -555,8 +641,18 @@ export async function snapshotBrowserVault(cdp: PrivateBrowserChannel, request: 
       || typeof value.text !== "string" || value.text.length > 65536 || !Array.isArray(value.elements) || value.elements.length > 200) throw new Error();
     const clean = (text: string, limit: number) => sanitizeBrowserVaultText(text, secrets, limit);
     const elements = value.elements.map((el: any) => {
-      if (!el || !/^e(?:[1-9][0-9]?|1[0-9]{2}|200)$/.test(el.ref) || !["link", "button"].includes(el.role) || typeof el.text !== "string" || el.text.length > 65536) throw new Error();
-      return { ref: el.ref as string, role: el.role as "link" | "button", text: clean(el.text, 256) };
+      if (!el || !/^e(?:[1-9][0-9]?|1[0-9]{2}|200)$/.test(el.ref)
+        || !["link", "button", "input", "textarea", "select", "checkbox", "radio"].includes(el.role)
+        || typeof el.text !== "string" || el.text.length > 65536) throw new Error();
+      const options = el.role === "select" ? el.options : undefined;
+      if (el.role === "select" && (!Array.isArray(options) || options.length > 200 || options.some((option: any, index: number) =>
+        !option || !Number.isInteger(option.index) || option.index < 0 || option.index >= 200 || (index > 0 && option.index <= options[index - 1].index)
+        || typeof option.label !== "string" || option.label.length > 8192))) throw new Error();
+      const checkable = el.role === "checkbox" || el.role === "radio";
+      if (checkable && typeof el.checked !== "boolean") throw new Error();
+      return { ref: el.ref as string, role: el.role as BrowserVaultSnapshot["elements"][number]["role"], text: clean(el.text, 256),
+        ...(options ? { options: options.map((option: {index: number; label: string}) => ({index: option.index, label: clean(option.label, 256)})) } : {}),
+        ...(checkable ? { checked: el.checked as boolean } : {}) };
     });
     return { ...status, snapshot_id: id, title: clean(value.title, 256), text: clean(value.text, 12000), elements };
   } catch { throw new Error("Private page snapshot is unavailable"); }
@@ -564,7 +660,7 @@ export async function snapshotBrowserVault(cdp: PrivateBrowserChannel, request: 
 
 // Only these fixed host-owned categories may cross the private diagnostic boundary.
 const CLICK_FAILURES = ["snapshot_missing", "stale_ref", "document_changed", "challenge_detected",
-  "element_not_visible", "changed_element", "outside_viewport", "occluded", "unsafe_destination", "unsupported_element"] as const;
+  "element_not_visible", "changed_element", "outside_viewport", "occluded", "unsafe_destination", "unsupported_element", "sensitive_field"] as const;
 type BrowserVaultClickFailure = typeof CLICK_FAILURES[number];
 export class BrowserVaultActionRejected extends Error {
   constructor(reason: BrowserVaultClickFailure) {
@@ -573,7 +669,11 @@ export class BrowserVaultActionRejected extends Error {
   }
 }
 
-export type BrowserVaultAction = { action: "click"; snapshot_id: string; ref: string } | { action: "navigate"; url: string };
+export type BrowserVaultAction = { action: "click"; snapshot_id: string; ref: string }
+  | { action: "fill"; snapshot_id: string; ref: string; text: string }
+  | { action: "select"; snapshot_id: string; ref: string; option_index: number }
+  | { action: "check"; snapshot_id: string; ref: string; checked: boolean }
+  | { action: "navigate"; url: string };
 export async function actBrowserVault(cdp: PrivateBrowserChannel, request: BrowserVaultIdentity, action: BrowserVaultAction): Promise<{ status: "navigation_requested" | "action_requested" }> {
   try {
     if (action.action === "navigate") {
@@ -582,8 +682,13 @@ export async function actBrowserVault(cdp: PrivateBrowserChannel, request: Brows
       if (await continuation(cdp, request, "navigate", "", "", destination.href) !== true) throw new Error();
       return { status: "navigation_requested" };
     }
-    if (action.action !== "click" || !/^[0-9a-f-]{36}$/.test(action.snapshot_id) || !/^e(?:[1-9][0-9]?|1[0-9]{2}|200)$/.test(action.ref)) throw new Error();
-    const result = await continuation(cdp, request, "click", action.snapshot_id, action.ref);
+    if (!["click", "fill", "select", "check"].includes(action.action) || !/^[0-9a-f-]{36}$/.test(action.snapshot_id)
+      || !/^e(?:[1-9][0-9]?|1[0-9]{2}|200)$/.test(action.ref)) throw new Error();
+    if (action.action === "fill" && (typeof action.text !== "string" || action.text.length > 8192)) throw new Error();
+    if (action.action === "select" && (!Number.isInteger(action.option_index) || action.option_index < 0 || action.option_index >= 200)) throw new Error();
+    if (action.action === "check" && typeof action.checked !== "boolean") throw new Error();
+    const payload = action.action === "fill" ? action.text : action.action === "select" ? action.option_index : action.action === "check" ? action.checked : undefined;
+    const result = await continuation(cdp, request, action.action, action.snapshot_id, action.ref, "", payload);
     if (typeof result === "string" && CLICK_FAILURES.includes(result as BrowserVaultClickFailure)) throw new BrowserVaultActionRejected(result as BrowserVaultClickFailure);
     if (result !== true) throw new Error();
     return { status: "action_requested" };

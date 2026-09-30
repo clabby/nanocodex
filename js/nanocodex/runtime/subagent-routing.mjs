@@ -1,6 +1,6 @@
 const modelAliases = new Map([
   ["kimi", "kimi"], ["kimi-k3", "kimi"], ["mimo", "mimo"], ["mimo-v2.6-pro", "mimo"],
-  ['sol', 'sol'], ['gpt-6-sol', 'sol'],
+  ['sol', 'sol'], ['gpt-6.1-sol', 'sol'],
   ['luna', 'luna'], ['gpt-6-luna', 'luna'],
   ['astra', 'astra'], ['gpt-6-astra', 'astra'],
   ['glm-5.3', 'glm-5.3'], ['glm53', 'glm-5.3'], ['@cf/zai-org/glm-5.3', 'glm-5.3'],
@@ -38,6 +38,7 @@ export function createSubagentRouting({ resolve, authorize, load, save }) {
         || typeof choice.thinking !== "string") throw new TypeError("subagent router returned an invalid choice");
       const model = canonicalModel(choice.model);
       if (!choice.provider.trim() || !thinkingLevels.has(choice.thinking)
+        || (model === 'sol' && choice.thinking === 'none')
         || (choice.providerModel !== undefined && (typeof choice.providerModel !== 'string' || !choice.providerModel.trim()))) {
         throw new TypeError('subagent router returned an invalid choice');
       }

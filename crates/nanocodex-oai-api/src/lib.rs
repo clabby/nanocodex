@@ -8,6 +8,9 @@ compile_error!(
     "nanocodex-oai-api supports native targets and hosted wasm*-unknown-unknown targets; WASI is not yet supported"
 );
 
+/// Duration-based audio token estimates shared by context and tool budgets.
+#[cfg(feature = "client")]
+pub mod audio;
 /// Authentication sources and managed credential snapshots.
 #[cfg(feature = "client")]
 pub mod auth;
@@ -114,7 +117,10 @@ pub mod __private {
             context::{
                 ContextManager, assign_missing_response_item_id, responses_lite_request_prefix,
             },
-            state::{ManagedSessionState, ManagedSessionStateError},
+            state::{
+                ManagedSessionState, ManagedSessionStateError, RejectedRequestRepair,
+                RequestHistory,
+            },
         },
         tower::attempt::ResponsesAttemptFactory,
     };
@@ -152,7 +158,7 @@ pub const MODEL: &str = Model::Astra.as_str();
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Model {
-    /// GPT-6 Sol.
+    /// GPT-6.1 Sol.
     Sol,
     /// GPT-6 Luna.
     Luna,
@@ -178,15 +184,15 @@ impl Model {
     #[must_use]
     pub const fn default_thinking(self) -> Thinking {
         match self {
-            Self::Astra | Self::Glm53 | Self::Kimi | Self::Mimo => Thinking::Low,
-            Self::Sol | Self::Luna => Thinking::Medium,
+            Self::Astra | Self::Sol | Self::Glm53 | Self::Kimi | Self::Mimo => Thinking::Low,
+            Self::Luna => Thinking::Medium,
         }
     }
     /// Returns the Responses API model identifier.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Sol => "gpt-6-sol",
+            Self::Sol => "gpt-6.1-sol",
             Self::Luna => "gpt-6-luna",
             Self::Astra => "gpt-6-astra",
             Self::Glm53 => "@cf/zai-org/glm-5.3",
@@ -203,8 +209,8 @@ impl Model {
             Self::Glm53 | Self::Mimo => {
                 matches!(thinking, Thinking::Low | Thinking::Medium | Thinking::High)
             }
-            Self::Sol | Self::Luna => true,
-            Self::Astra => !matches!(thinking, Thinking::None),
+            Self::Luna => true,
+            Self::Astra | Self::Sol => !matches!(thinking, Thinking::None),
         }
     }
 
@@ -243,14 +249,14 @@ impl FromStr for Model {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "gpt-6-sol" | "sol" => Ok(Self::Sol),
+            "gpt-6.1-sol" | "sol" => Ok(Self::Sol),
             "gpt-6-luna" | "luna" => Ok(Self::Luna),
             "gpt-6-astra" | "astra" => Ok(Self::Astra),
             "@cf/zai-org/glm-5.3" | "glm-5.3" | "glm53" => Ok(Self::Glm53),
             "kimi-k3" | "kimi" => Ok(Self::Kimi),
             "mimo-v2.6-pro" | "mimo" => Ok(Self::Mimo),
             _ => Err(format!(
-                "invalid model {value:?}; expected gpt-6-astra, gpt-6-sol, gpt-6-luna, @cf/zai-org/glm-5.3, kimi-k3, or mimo-v2.6-pro"
+                "invalid model {value:?}; expected gpt-6-astra, gpt-6.1-sol, gpt-6-luna, @cf/zai-org/glm-5.3, kimi-k3, or mimo-v2.6-pro"
             )),
         }
     }

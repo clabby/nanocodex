@@ -106,7 +106,7 @@ zero explicit submission are separately exercised by the Chrome/runtime journey.
 ## Enrolled native sudo
 
 `request_native_secure_input({machine_id, executable, arguments, cwd})` prepares
-one exact command on a supported native Mac Hand. Paths are absolute and
+one exact command on a supported, independently enrolled native macOS or Linux Hand. Paths are absolute and
 arguments are an array. The model receives only an opaque `native_sudo` request
 receipt, Hand ID, and expiry. The protected helper returns a signed ephemeral
 recipient key bound to the command digest, uid, request ID, and expiry. The
@@ -141,13 +141,59 @@ or discovered from untrusted Hand output. Missing bindings leave this feature
 unavailable. Repository tests do not provision keys, enroll a machine, install
 a privileged helper, change sudoers, or deploy a Worker.
 
-The phone encrypts directly to the helper. The backend and persisted Hand RPC
+The mobile app or trusted local TUI encrypts directly to the helper. The backend and persisted Hand RPC
 see only metadata, ciphertext and signatures. Ordinary Hand RPC durably retains
 the ciphertext and approval signature in its input records; it never receives
 plaintext. The native adapter forwards those
 to the root-owned helper; arbitrary terminal input and native application fields
 remain unsupported. This requires the separately installed protected helper;
 an ordinary same-user process or FIFO is not a supported substitute.
+
+## Remote Linux and local TUI boundary
+
+A live shell Hand is not sufficient to accept a sudo password. Linux needs the
+separately installed root recipient in [`linux/secure-input`](../../linux/secure-input/README.md),
+just as macOS needs its signed protected helper. Unsupported platforms and
+unenrolled devices fail closed. The existing mobile approval and the TUI use the
+same command-bound encrypted wire format; neither posts plaintext to a model tool.
+This is **sudo approval**, not a general-purpose remote terminal password API.
+
+The local TUI uses a private review/input modal. It displays the authenticated
+machine, peer uid, executable, cwd and exact argv before explicit approval.
+The TUI requires freshly typed local safety tokens at phase boundaries; this deliberate
+friction prevents already queued or partially decoded terminal paste from approving a
+command or returning private text to the normal composer. Pasting a safety token is
+not accepted. Keyboard and paste events are intercepted before the ordinary composer,
+transcript and history paths, including while the modal loads or submits.
+The private buffer is zeroized on completion, cancellation, expiry, navigation,
+account changes and shutdown. Only encrypted submission and a fixed status receipt
+leave that flow. `/secure-input` is not a chat message containing a password.
+The opt-in Managed2 protocol does not support this private endpoint and must not
+fall back to sending a value through a chat turn.
+
+The client and its terminal are trusted user interfaces. A malicious terminal,
+local keylogger, compromised OS administrator, or privileged command deliberately
+approved by the user is outside the confidentiality boundary. Disabling process
+inspection/core dumps and clearing buffers are defense in depth, not a promise
+that every copy can be erased. Never ask the user to type a production secret into
+an agent-controlled PTY, shell command, CUA target, tool argument or chat message.
+
+First privileged installation is an unavoidable local trust bootstrap. It must
+be approved through the operating system / administrator's trusted local session,
+with independently authenticated public-key enrollment. Learning a helper key
+from an ordinary Hand response and immediately pinning it is not enrollment.
+The backend private signing key must be provisioned outside the model, never
+printed, persisted in `/brain`, or passed as a tool argument. Tests use synthetic
+keys and inputs only; a test installation does not enroll a production device.
+
+Linux root enrollment explicitly binds a `transport_uid` (the actual Hand socket
+peer) to a `sudo_uid` (the authentication user displayed and signed in the ticket).
+Neither can be changed by the model or private password form. A trusted local
+administrator may deliberately enroll service998 → login1000; absent that mapping,
+a service998 Hand cannot use an unrelated human1000 password. Sudo/PAM policy
+for the enrolled authentication user remains authoritative. This is not a silent
+account substitution, sudoers relaxation, timestamp bypass or NOPASSWD workaround.
+The macOS helper continues to bind authentication directly to its socket peer.
 
 ## Local verification
 
@@ -174,7 +220,7 @@ exercise a live account. Invoke Xcode through `scripts/xcodebuild-guard.sh`.
 Native backend protocol failures and direct HTTP admission are exercised with
 `cd js/managed && node_modules/.bin/vitest run test/native-secure-input.test.ts test/browser-vault-route.test.ts test/account-hosted-tools.test.ts`.
 These use synthetic keys and a simulated Hand boundary; they do not prove a live
-privileged installation or end-to-end sudo on an enrolled Mac. Native installation
+privileged installation or end-to-end sudo on a production-enrolled Hand. Native installation
 and IPC details are in the native protocol linked above.
 
 Native validation:
@@ -185,7 +231,7 @@ Native validation:
   the production Swift client and helper together with a synthetic authenticated
   transport. It does not exercise the JavaScript backend or real sudo.
 - `cargo test -p nanocodex2-bin --bin nanocodex2 native_secure_input --jobs 3`
-  on macOS verifies the native adapter's plaintext rejection and bounded framing.
+  on macOS or Linux verifies the native adapter's plaintext rejection and bounded framing.
 - Managed `native-secure-input`, `browser-vault-route`, and the native cases in
   `hosted-tools-broker` / `account-hosted-tools` cover private HTTP admission,
   signatures, stale routes, replay and fixed receipts.
@@ -193,3 +239,24 @@ Native validation:
   production review and authorization gate using a simulated denial. Actual
   Face ID success, third-party password-manager AutoFill, signed installation,
   and privileged sudo remain separate device validation requirements.
+
+Linux and TUI validation:
+
+- `cargo test --manifest-path linux/secure-input/Cargo.toml --locked` covers
+  cryptographic and unprivileged Linux OS boundaries. `linux/secure-input/build-release.sh`
+  builds without installing; `package-release.sh` archives ordinary-mode files.
+- The separate `linux/secure-input/tests/disposable_e2e.py` is destructive and root-only.
+  Run **only in a freshly provisioned dedicated test VM/sandbox**, following its README
+  setup and explicit test marker. It generates synthetic credentials at runtime and
+  tests the unchanged release helper, actual setuid askpass, distro sudo/PAM,
+  peer998/admin1000 mapping, rejected submissions, memory/core restrictions, slowloris,
+  and the full120-second process timeout. It is never a production enrollment step.
+- `cargo test -p nanocodex-managed native_secure_input` covers private HTTP, account
+  and command review bindings, ciphertext roundtrip, bounded errors and safe receipts.
+- TUI private overlay and PTY tests use synthetic secrets only. They do not authorize
+  running an agent-controlled terminal to collect a real password.
+
+A live production hand update requires actual administrator-approved installation,
+independent helper-key pinning, the correct enrolled user mapping, a compatible Hand
+binary, and verified service restart. A successful sandbox/PAM test, a staged binary,
+or a merged PR is not evidence that those live steps have happened.

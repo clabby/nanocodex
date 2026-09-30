@@ -265,6 +265,10 @@ async fn apply_managed2_update(
                     continue;
                 }
             }
+            AppEffect::Pane { pane, effect: RootEffect::SecureInput(_) } => app.update(AppEvent::NotifyError {
+                pane,
+                error: "Private native sudo approval is unavailable in Managed2. No password was requested or submitted. Use the legacy trusted TUI or the authenticated mobile secure sheet.".into(),
+            }),
             AppEffect::Pane { pane, .. } => app.update(AppEvent::NotifyError {
                 pane,
                 error: "This control is unavailable in Managed2 text mode".into(),

@@ -122,11 +122,6 @@ impl Setup {
             match receipt["status"].as_str() {
                 Some("installed") => {
                     upstream_computer = true;
-                    if cfg!(target_os = "macos") {
-                        nanocodex_computer::provision::configure_browser_bridge()
-                            .await
-                            .map_err(eyre::Report::msg)?;
-                    }
                     eprintln!("✓ Computer Use is ready");
                     if cfg!(target_os = "macos") {
                         eprintln!(
@@ -159,11 +154,12 @@ impl Setup {
             }
         }
 
-        if cfg!(any(
-            target_os = "macos",
-            target_os = "linux",
-            target_os = "windows"
-        )) {
+        // The lean macOS MCP is native-computer-only. The official browser
+        // messaging bridge still proxies Codex app-server; don't offer it here.
+        if cfg!(target_os = "macos") && upstream_computer {
+            eprintln!("• Browser windows use native UI; dedicated Tab/DOM APIs are not installed.");
+        }
+        if cfg!(any(target_os = "linux", target_os = "windows")) {
             let home = PathBuf::from(
                 std::env::var_os("HOME")
                     .or_else(|| std::env::var_os("USERPROFILE"))

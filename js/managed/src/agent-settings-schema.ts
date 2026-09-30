@@ -8,7 +8,7 @@ const MANAGED_AGENT_SETTINGS_TABLE = `
   );
   INSERT OR IGNORE INTO managed_agent_settings
     (singleton, model, thinking, reasoning_mode, fast_mode)
-  VALUES (1, 'gpt-6-sol', 'medium', 'standard', 0);
+  VALUES (1, 'gpt-6.1-sol', 'low', 'standard', 0);
 `;
 
 type AgentSettingsSchemaStorage = Pick<DurableObjectStorage, "sql" | "transactionSync">;
