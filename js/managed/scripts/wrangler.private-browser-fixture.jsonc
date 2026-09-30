@@ -1,0 +1,8 @@
+{
+ "name":"nanocodex-private-browser-fixture",
+ "main":"fixtures/private-browser-site.ts",
+ "compatibility_date":"2026-07-29",
+ "workers_dev":true,
+ "durable_objects":{"bindings":[{"name":"FIXTURE","class_name":"PrivateBrowserFixture"}]},
+ "migrations":[{"tag":"v1","new_sqlite_classes":["PrivateBrowserFixture"]}]
+}
