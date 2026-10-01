@@ -12,7 +12,7 @@ export function VaultIntakeCard({ tool, onReceipt }: { tool: ToolActivity; onRec
   const intake = decodeVaultIntake(tool);
   if (!intake) return null;
   // Account changes unmount any open form and discard all of its values.
-  if (intake.operation === "browser_takeover") return <BrowserTakeoverCard key={`${account.account?.id}:${tool.callId}`} intake={intake} authenticated={account.account?.persistent === true} onReceipt={onReceipt} />;
+  if ((intake.operation === "browser_takeover" || intake.operation === "browser_login")) return <BrowserTakeoverCard key={`${account.account?.id}:${tool.callId}`} intake={intake} authenticated={account.account?.persistent === true} onReceipt={onReceipt} />;
   if (intake.operation === "browser_verification") return <BrowserVerificationCard key={`${account.account?.id}:${tool.callId}`} intake={intake} authenticated={account.account?.persistent === true} onReceipt={onReceipt} />;
   return <IntakeCard key={`${account.account?.persistent ? account.account.id : "signed-out"}:${tool.callId}`} intake={intake} authenticated={account.account?.persistent === true} onReceipt={onReceipt} />;
 }
