@@ -850,7 +850,10 @@ function requiredString(value, name) {
 }
 
 function fsError(code, message) {
-  return Object.assign(new Error(message), { code });
+  // just-bash filesystem safety helpers inspect errno text, not only .code.
+  // Preserve both so a missing destination is provable, without treating
+  // permission/unsupported errors as absence or bypassing identity guards.
+  return Object.assign(new Error(`${code}: ${message}`), { code });
 }
 
 function now() {
