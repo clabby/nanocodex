@@ -78,24 +78,11 @@ compatibility profile measured below. Authentication beta headers combine with
 request feature betas, so context management remains enabled alongside OAuth.
 Tools, nested model requests and compaction share the same authenticated client.
 
-The measured profile includes the fixed public first system block `You are
-Claude Code, Anthropic's official CLI for Claude.`, followed by the caller's
-instructions. This is a wire compatibility convention of the independent
-Nanocodex implementation; the process remains Nanocodex and identifies its HTTP
-implementation as `nanocodex/<version>`. No private CLI prompt, billing marker,
-account identifier or CLI session identifier is imported. The public
-OAuth/Claude feature, interleaved-thinking, effort and extended-cache betas, CLI
-workload headers and direct-browser flag match the accepted probe. Context
-management requests also add their feature beta. These are observed
-accepted settings, not a proven minimal or permanent provider contract.
+The current explicit subscription wire profile is ported from pinned OMP v18.4.4: Claude Code version/runtime headers, SHA256 billing fingerprint, final-byte XXHash64 attestation, public device/session metadata and wire-only custom-tool prefixes. See [the managed wire guide](CLAUDE_MANAGED.md#subscription-wire-compatibility) for its scope and durable migration behavior. It imports no CLI login, private prompt or credentials. Installation affinity comes from the embedding host; the authenticated subscription manager remains separate.
 
-The agent prepares this system prefix before freezing an admitted request and
-before creating its durable effect identity. Restoring an unfinished request
-keeps that original body even when the newly attached client has different
-defaults. Direct Messages callers use `client.prepare_request(&mut request)` before
-`create` or `stream`; agent builders prepare requests automatically. Custom
-endpoints opt in with `client.subscription_compatibility()`. The HTTP transport
-never silently rewrites a frozen request body.
+The raw `client.request_body(&request, streaming)` API exposes the exact final bytes. Agent builders prepare the public system blocks and freeze the attested body as the durable effect identity before sending. A bounded 401 refresh preserves those bytes; the cursor freezes public profile/identity/version so reopening under changed client defaults preserves that request. Irreconcilable legacy identity mismatches fail closed. Custom endpoints opt in with `client.subscription_compatibility()`.
+
+Earlier live admission measurements below used the former Nanocodex User-Agent profile. They are historical evidence for the auth lifecycle and native loop, not live acceptance of the new OMP profile.
 
 ## Credential persistence and failures
 

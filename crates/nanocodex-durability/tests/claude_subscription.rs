@@ -270,19 +270,22 @@ async fn subscription_rotation_tool_compaction_and_terminal_replay_survive_sqlit
             async move {
                 provider.attempts.fetch_add(1, Ordering::SeqCst);
                 assert!(!headers.contains_key("x-api-key"));
-                assert_eq!(headers["user-agent"], concat!("nanocodex/", env!("CARGO_PKG_VERSION")));
+                assert_eq!(headers["user-agent"], "claude-cli/2.1.280 (external, cli)");
                 assert_eq!(headers["x-app"], "cli");
-                assert_eq!(headers["x-claude-code-request-class"], "main");
+                assert!(!headers.contains_key("x-claude-code-request-class"));
                 assert_eq!(headers["anthropic-dangerous-direct-browser-access"], "true");
-                assert_eq!(body["system"][0]["text"], "You are Claude Code, Anthropic's official CLI for Claude.");
-                assert_eq!(body["system"][1]["text"], "Use the synthetic effect; keep its result.");
-                assert_eq!(body["system"][1]["cache_control"]["ttl"], "1h");
+                assert!(body["system"][0]["text"].as_str().unwrap().starts_with("x-anthropic-billing-header: cc_version=2.1.280."));
+                assert_eq!(body["system"][1]["text"], "You are Claude Code, Anthropic's official CLI for Claude.");
+                assert_eq!(body["system"][2]["text"], "Use the synthetic effect; keep its result.");
+                assert_eq!(body["system"][2]["cache_control"]["ttl"], "1h");
                 let betas = headers["anthropic-beta"].to_str().unwrap();
                 assert!(betas.split(',').any(|b| b == "oauth-2025-04-20"));
                 assert!(betas.split(',').any(|b| b == "context-management-2025-06-27"));
-                for beta in ["claude-code-20250219", "interleaved-thinking-2025-05-14", "effort-2025-11-24", "extended-cache-ttl-2025-04-11"] {
+                for beta in ["claude-code-20250219", "interleaved-thinking-2025-05-14", "fallback-credit-2026-06-01"] {
                     assert_eq!(betas.split(',').filter(|b| *b == beta).count(), 1);
                 }
+                assert!(!betas.split(',').any(|b|b=="extended-cache-ttl-2025-04-11"));
+                assert_eq!(betas.split(',').filter(|b|*b=="effort-2025-11-24").count(),usize::from(body.get("thinking").is_some()));
                 assert_eq!(body["cache_control"]["ttl"], "1h");
                 let authorization = headers["authorization"].to_str().unwrap();
                 if !provider.accept_original.load(Ordering::SeqCst) && authorization == "Bearer synthetic-access-1" {
@@ -291,7 +294,7 @@ async fn subscription_rotation_tool_compaction_and_terminal_replay_survive_sqlit
                 assert_eq!(authorization, if provider.accept_original.load(Ordering::SeqCst) { "Bearer synthetic-access-1" } else { "Bearer synthetic-access-2" });
                 let index = { let mut requests = provider.accepted.lock().unwrap(); requests.push(body.clone()); requests.len() };
                 let (blocks, reason) = match index {
-                    1 => (vec![json!({"type":"thinking","thinking":"","signature":"synthetic-signed"}),json!({"type":"tool_use","id":"effect-1","name":"effect","input":{}})], "tool_use"),
+                    1 => (vec![json!({"type":"thinking","thinking":"","signature":"synthetic-signed"}),json!({"type":"tool_use","id":"effect-1","name":"_effect","input":{}})], "tool_use"),
                     2 => { assert!(body.to_string().contains("synthetic-effect-complete")); (vec![json!({"type":"text","text":"effect stored"})], "end_turn") },
                     3 => (vec![json!({"type":"text","text":"Summary: synthetic effect completed; preserve result."})], "end_turn"),
                     4 => { assert!(body.to_string().contains("Summary: synthetic effect completed")); (vec![json!({"type":"text","text":"continued after reopen"})], "end_turn") },
@@ -459,11 +462,16 @@ async fn frozen_subscription_request_survives_sqlite_reopen_with_changed_client_
         let arm = armed.clone();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
+        let raw_wires = Arc::new(Mutex::new(Vec::<String>::new()));
+        let raw_capture = raw_wires.clone();
         let app = Router::new().route(
             "/v1/messages",
-            post(move |headers: HeaderMap, Json(body): Json<Value>| {
-                let (captured, arm) = (captured.clone(), arm.clone());
+            post(move |headers: HeaderMap, wire: String| {
+                let (captured, arm, raw_capture) =
+                    (captured.clone(), arm.clone(), raw_capture.clone());
                 async move {
+                    raw_capture.lock().unwrap().push(wire.clone());
+                    let body: Value = serde_json::from_str(&wire).unwrap();
                     assert_eq!(headers["authorization"], "Bearer synthetic-frozen-secret");
                     let index = {
                         let mut log = captured.lock().unwrap();
@@ -486,7 +494,10 @@ async fn frozen_subscription_request_survives_sqlite_reopen_with_changed_client_
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let generation = AtomicUsize::new(0);
         let client = |enabled: bool| {
+            let phase = generation.fetch_add(1, Ordering::SeqCst);
+
             let mut headers = HeaderMap::new();
             headers.insert(
                 "authorization",
@@ -494,11 +505,17 @@ async fn frozen_subscription_request_survives_sqlite_reopen_with_changed_client_
             );
             let client =
                 ClaudeClient::with_auth_headers(reqwest::Client::new(), &endpoint, headers);
-            if enabled {
+            let client = if enabled {
                 client.subscription_compatibility()
             } else {
                 client
-            }
+            };
+            client.with_subscription_identity(nanocodex_claude::SubscriptionIdentity {
+                install_id: Some(format!("synthetic-install-{phase}")),
+                version: Some(if phase == 0 { "2.1.280" } else { "9.8.7" }.into()),
+                platform: Some(if phase == 0 { "darwin" } else { "linux" }.into()),
+                ..Default::default()
+            })
         };
         let state = DurableSession::open(
             InterruptedStore {
@@ -584,8 +601,28 @@ async fn frozen_subscription_request_survives_sqlite_reopen_with_changed_client_
             log[0], log[1],
             "resumed HTTP body must match the frozen body despite profile and builder changes"
         );
+        let raw = raw_wires.lock().unwrap();
+        assert_eq!(
+            raw[0], raw[1],
+            "frozen exact attested UTF8 bytes survive changed profile/version/install/platform"
+        );
+        if originally_enabled {
+            assert!(
+                log[0]["system"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("cc_version=2.1.280.")
+            );
+        } else {
+            assert!(
+                log[2]["system"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("cc_version=9.8.7.")
+            );
+        }
         let expected = if originally_enabled {
-            json!([{"type":"text", "text":"You are Claude Code, Anthropic's official CLI for Claude."}, caller])
+            json!([log[0]["system"][0], {"type":"text", "text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral","ttl":"1h"}}, caller])
         } else {
             json!([caller])
         };
@@ -596,10 +633,10 @@ async fn frozen_subscription_request_survives_sqlite_reopen_with_changed_client_
             assert_eq!(log[2]["system"], "Changed caller policy");
         } else {
             assert_eq!(
-                log[2]["system"][0]["text"],
+                log[2]["system"][1]["text"],
                 "You are Claude Code, Anthropic's official CLI for Claude."
             );
-            assert_eq!(log[2]["system"][1]["text"], "Changed caller policy");
+            assert_eq!(log[2]["system"][2]["text"], "Changed caller policy");
         }
         assert_no_secrets(&path, &["synthetic-frozen-secret".into()]);
         server.abort();

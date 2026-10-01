@@ -37,6 +37,8 @@ impl Snapshot {
 pub(super) struct Cursor {
     pub(super) snapshot: Snapshot,
     pub(super) template: MessagesRequest,
+    #[serde(default)]
+    pub(super) wire_profile: Option<crate::FrozenWireProfile>,
     pub(super) threshold: u64,
     pub(super) parallel: bool,
     pub(super) tool_search: bool,
@@ -154,6 +156,7 @@ impl State {
         let mut cursor = Cursor {
             snapshot: self.snapshot(conversation).await?,
             template: self.request_template(),
+            wire_profile: Some(self.client.freeze_wire_profile()),
             threshold: self.compaction_threshold(),
             parallel: self.parallel_tools,
             tool_search: self.client_tool_search,

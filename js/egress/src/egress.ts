@@ -2521,18 +2521,23 @@ async function handleClaudeMessages(
     let credential = result.credential;
     const secrets = [credential.headers.authorization?.replace(/^Bearer /, "") ?? ""];
     const dispatch = () => {
-      // Preserve the explicit Rust subscription compatibility profile. The
-      // fixed query and non-secret protocol fields are host-owned, not caller
-      // authority or a borrowed CLI login. Keep Nanocodex's own HTTP identity.
+      // The native profile finalized body/identity before durable freezing.
+      // Forward only bounded public profile headers; never rewrite those bytes.
       const agent = request.headers.get("user-agent");
+      if (!agent || !/^claude-cli\/[0-9]+\.[0-9]+\.[0-9]+ \(external, cli\)$/.test(agent)) throw new Error("invalid Claude wire profile");
       const headers = new Headers({ "content-type": "application/json", "anthropic-version": "2023-06-01",
-        "x-app": "cli", "x-claude-code-request-class": "main", "anthropic-dangerous-direct-browser-access": "true",
-        "user-agent": agent && /^nanocodex\/[A-Za-z0-9.+-]{1,40}$/.test(agent) ? agent : "nanocodex-managed" });
+        "x-app": "cli", "anthropic-dangerous-direct-browser-access": "true", "user-agent": agent });
+      for (const name of ["x-stainless-arch", "x-stainless-lang", "x-stainless-os", "x-stainless-package-version",
+        "x-stainless-retry-count", "x-stainless-runtime", "x-stainless-runtime-version", "x-stainless-timeout",
+        "x-claude-code-session-id", "connection", "accept-encoding"]) {
+        const value = request.headers.get(name);
+        if (value !== null) { if (value.length > 256) throw new Error("invalid Claude wire header"); headers.set(name,value); }
+      }
       for (const [name, value] of Object.entries(credential.headers)) {
         if (name !== "authorization" && name !== "anthropic-beta") throw new Error("invalid Claude credential");
         headers.set(name, value);
       }
-      if (beta) headers.set("anthropic-beta", [...new Set((headers.get("anthropic-beta") + "," + beta).split(","))].join(","));
+      if (beta) headers.set("anthropic-beta", [...new Set((beta + "," + headers.get("anthropic-beta")).split(","))].join(","));
       headers.set("accept", request.headers.get("accept") === "text/event-stream" ? "text/event-stream" : "application/json");
       return upstreamFetch(new Request("https://api.anthropic.com/v1/messages?beta=true", {
         method: "POST", body, headers, redirect: "manual", signal: request.signal,

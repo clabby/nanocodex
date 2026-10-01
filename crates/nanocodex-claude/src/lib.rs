@@ -11,6 +11,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 mod auth;
+mod subscription_wire;
+pub use subscription_wire::SubscriptionIdentity;
 pub mod subscription;
 pub use auth::{ClaudeAccessToken, ClaudeTokenSource, RefreshingClaudeAuth};
 
@@ -729,12 +731,23 @@ enum ClientAuth {
     Provider(Arc<dyn ClaudeAuthProvider>),
 }
 
+/// Public protocol affinity frozen with an admitted operation, never credentials.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FrozenWireProfile {
+    enabled: bool,
+    identity: SubscriptionIdentity,
+    session: String,
+}
+
 #[derive(Clone)]
 pub struct ClaudeClient {
     http: reqwest::Client,
     endpoint: String,
     auth: ClientAuth,
     subscription_compatibility: bool,
+    subscription_identity: SubscriptionIdentity,
+    subscription_session: String,
 }
 
 impl ClaudeClient {
@@ -750,6 +763,8 @@ impl ClaudeClient {
             endpoint: endpoint.into(),
             auth: ClientAuth::ApiKey(api_key.into()),
             subscription_compatibility: false,
+            subscription_identity: SubscriptionIdentity::default(),
+            subscription_session: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -767,6 +782,8 @@ impl ClaudeClient {
             endpoint: endpoint.into(),
             auth: ClientAuth::Headers(headers),
             subscription_compatibility: false,
+            subscription_identity: SubscriptionIdentity::default(),
+            subscription_session: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -783,6 +800,8 @@ impl ClaudeClient {
             endpoint: endpoint.into(),
             auth: ClientAuth::Provider(provider),
             subscription_compatibility: false,
+            subscription_identity: SubscriptionIdentity::default(),
+            subscription_session: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -799,50 +818,127 @@ impl ClaudeClient {
     }
 
     /// Enable the observed subscription compatibility profile for an explicitly
-    /// selected endpoint. Nanocodex keeps its own HTTP User-Agent; this protocol
-    /// profile does not make it Anthropic's CLI or supply authorization.
+    /// selected endpoint. Uses OMP v18.4.4's Claude Code wire fingerprint;
+    /// this supplies neither a credential nor authorization.
     ///
     /// Agent requests are prepared before durable request freezing. Raw transport
-    /// callers must call [`Self::prepare_request`] before `create` or `stream`.
-    pub const fn subscription_compatibility(mut self) -> Self {
+    /// callers can inspect [`Self::request_body`] before `create` or `stream`.
+    /// Final bytes are attested before dispatch and before durable effect identity.
+    pub fn subscription_compatibility(mut self) -> Self {
         self.subscription_compatibility = true;
+        #[cfg(not(target_family = "wasm"))]
+        if let Ok(version) = std::env::var("PI_AI_CLAUDE_CODE_VERSION")
+            && !version.is_empty()
+        {
+            self.subscription_identity.version = Some(version);
+        }
         self
     }
 
-    /// Prepare the explicit public subscription protocol block before persisting
-    /// or hashing a request. Existing blocks and their cache markers are retained;
-    /// repeated preparation leaves an existing first protocol block unchanged.
-    /// `create` and `stream` never silently rewrite the supplied request body.
+    /// Set public OMP wire identity. No OAuth credentials are accepted here.
+    /// Reuse installation identity and version when reopening durable sessions.
+    pub fn with_subscription_identity(mut self, identity: SubscriptionIdentity) -> Self {
+        self.subscription_identity = identity;
+        self
+    }
+    pub(crate) fn bind_subscription_session(mut self, session: &str) -> Self {
+        self.subscription_session = session.to_owned();
+        self
+    }
+    /// Prepare subscription protocol blocks before freezing a logical request.
+    /// `request_body` performs wire-only names, metadata and CCH over final bytes.
+    pub(crate) fn freeze_wire_profile(&self) -> FrozenWireProfile {
+        let mut identity = self.subscription_identity.clone();
+        identity.version = Some(identity.version().to_owned());
+        identity
+            .install_id
+            .get_or_insert_with(|| self.subscription_session.clone());
+        if identity.platform.is_none() {
+            identity.platform = Some(
+                if cfg!(target_os = "macos") {
+                    "darwin"
+                } else if cfg!(target_os = "windows") {
+                    "win32"
+                } else {
+                    "linux"
+                }
+                .into(),
+            );
+        }
+        if identity.arch.is_none() {
+            identity.arch = Some(
+                if cfg!(target_arch = "aarch64") {
+                    "arm64"
+                } else if cfg!(target_arch = "x86") {
+                    "ia32"
+                } else {
+                    "x64"
+                }
+                .into(),
+            );
+        }
+        FrozenWireProfile {
+            enabled: self.subscription_compatibility,
+            identity,
+            session: self.subscription_session.clone(),
+        }
+    }
+    pub(crate) fn restore_wire_profile(&self, profile: Option<&FrozenWireProfile>) -> Self {
+        let mut client = self.clone();
+        // Old cursors predate final-byte attestation: retain their legacy body and
+        // effect identity instead of silently adopting new default transformations.
+        client.subscription_compatibility = profile.is_some_and(|p| p.enabled);
+        if let Some(profile) = profile {
+            client.subscription_identity = profile.identity.clone();
+            client.subscription_session = profile.session.clone();
+        }
+        client
+    }
+
     pub fn prepare_request(&self, request: &mut MessagesRequest) {
-        if !self.subscription_compatibility {
-            return;
+        if self.subscription_compatibility {
+            subscription_wire::prepare(request, &self.subscription_identity);
         }
-        const PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-        match request.system.as_ref() {
-            Some(Value::String(text)) if text == PREFIX => {
-                request.system = Some(serde_json::json!([{"type":"text","text":PREFIX}]));
-                return;
+    }
+    /// Exact final request bytes used both for durable identity and HTTP.
+    pub fn request_body(
+        &self,
+        request: &MessagesRequest,
+        streaming: bool,
+    ) -> Result<String, ClaudeError> {
+        if self.subscription_compatibility {
+            subscription_wire::body(
+                request,
+                streaming,
+                &self.subscription_identity,
+                &self.subscription_session,
+            )
+        } else {
+            #[derive(Serialize)]
+            struct Body<'a> {
+                #[serde(flatten)]
+                request: &'a MessagesRequest,
+                stream: bool,
             }
-            Some(Value::Array(blocks))
-                if blocks.first().is_some_and(|block| {
-                    block.get("type").and_then(Value::as_str) == Some("text")
-                        && block.get("text").and_then(Value::as_str) == Some(PREFIX)
-                }) =>
-            {
-                return;
-            }
-            _ => {}
+            Ok(serde_json::to_string(&Body {
+                request,
+                stream: streaming,
+            })?)
         }
-        let mut blocks = vec![serde_json::json!({"type":"text","text":PREFIX})];
-        match request.system.take() {
-            Some(Value::String(text)) => {
-                blocks.push(serde_json::json!({"type":"text","text":text}));
-            }
-            Some(Value::Array(existing)) => blocks.extend(existing),
-            Some(other) => blocks.push(other),
-            None => {}
+    }
+    pub(crate) fn durable_request(&self, request: &MessagesRequest) -> Result<Value, ClaudeError> {
+        if self.subscription_compatibility {
+            Ok(serde_json::json!({"subscription_wire_v1":self.request_body(request,true)?}))
+        } else {
+            Ok(serde_json::to_value(request)?)
         }
-        request.system = Some(Value::Array(blocks));
+    }
+    fn decode_block(&self, block: &mut ContentBlock) {
+        if self.subscription_compatibility
+            && let ContentBlock::ToolUse { name, .. } = block
+        {
+            subscription_wire::strip(name);
+        }
     }
 
     async fn post(
@@ -852,12 +948,7 @@ impl ClaudeClient {
     ) -> Result<(reqwest::Response, Vec<String>), ClaudeError> {
         // Reject invalid cache policy before resolving credentials or sending HTTP.
         request.validate_cache_control()?;
-        #[derive(Serialize)]
-        struct Body<'a> {
-            #[serde(flatten)]
-            request: &'a MessagesRequest,
-            stream: bool,
-        }
+        let wire_body = self.request_body(request, streaming)?;
         let mut retried = false;
         // Retain both attempted generations only for this request, so an error
         // gateway cannot reflect an earlier rejected credential into a durable
@@ -902,13 +993,36 @@ impl ClaudeClient {
                 }
             }
             if self.subscription_compatibility {
-                for beta in [
-                    "oauth-2025-04-20",
-                    "claude-code-20250219",
-                    "interleaved-thinking-2025-05-14",
-                    "effort-2025-11-24",
-                    "extended-cache-ttl-2025-04-11",
-                ] {
+                let agent = !request.tools.is_empty() || request.thinking.is_some();
+                let defaults: &[&str] = if agent {
+                    &[
+                        "claude-code-20250219",
+                        "oauth-2025-04-20",
+                        "interleaved-thinking-2025-05-14",
+                        "thinking-token-count-2026-05-13",
+                        "context-management-2025-06-27",
+                        "prompt-caching-scope-2026-01-05",
+                        "mid-conversation-system-2026-04-07",
+                    ]
+                } else {
+                    &[
+                        "oauth-2025-04-20",
+                        "interleaved-thinking-2025-05-14",
+                        "thinking-token-count-2026-05-13",
+                        "context-management-2025-06-27",
+                        "prompt-caching-scope-2026-01-05",
+                        "structured-outputs-2025-12-15",
+                    ]
+                };
+                let extras = std::mem::take(&mut betas);
+                betas.extend_from_slice(defaults);
+                if agent && request.thinking.is_some() && !betas.contains(&"effort-2025-11-24") {
+                    betas.push("effort-2025-11-24");
+                }
+                if agent && !betas.contains(&"fallback-credit-2026-06-01") {
+                    betas.push("fallback-credit-2026-06-01");
+                }
+                for beta in extras {
                     if !betas.contains(&beta) {
                         betas.push(beta);
                     }
@@ -925,17 +1039,41 @@ impl ClaudeClient {
                 headers.insert("anthropic-beta", value);
             }
             if self.subscription_compatibility {
+                let identity = &self.subscription_identity;
                 for (name, value) in [
                     (
                         "user-agent",
-                        concat!("nanocodex/", env!("CARGO_PKG_VERSION")),
+                        format!("claude-cli/{} (external, cli)", identity.version()),
                     ),
-                    ("x-app", "cli"),
-                    ("x-claude-code-request-class", "main"),
-                    ("anthropic-dangerous-direct-browser-access", "true"),
+                    ("x-app", "cli".into()),
+                    ("x-stainless-lang", "js".into()),
+                    ("x-stainless-runtime", "node".into()),
+                    ("x-stainless-runtime-version", "v26.3.0".into()),
+                    (
+                        "x-stainless-package-version",
+                        subscription_wire::CLAUDE_CODE_SDK_VERSION.into(),
+                    ),
+                    ("x-stainless-retry-count", "0".into()),
+                    ("x-stainless-timeout", "600".into()),
+                    ("x-stainless-os", identity.os()),
+                    ("x-stainless-arch", identity.arch()),
+                    (
+                        "x-claude-code-session-id",
+                        self.subscription_session.clone(),
+                    ),
+                    ("accept", "application/json".into()),
+                    ("accept-encoding", "gzip, deflate, br, zstd".into()),
+                    ("connection", "keep-alive".into()),
+                    ("anthropic-dangerous-direct-browser-access", "true".into()),
                 ] {
-                    headers.insert(name, reqwest::header::HeaderValue::from_static(value));
+                    headers.insert(
+                        name,
+                        reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+                            ClaudeError::Protocol("invalid subscription wire header".into())
+                        })?,
+                    );
                 }
+                headers.remove("x-claude-code-request-class");
             }
             for (name, value) in &headers {
                 if name == reqwest::header::AUTHORIZATION
@@ -961,10 +1099,8 @@ impl ClaudeClient {
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .headers(headers);
             let response = builder
-                .json(&Body {
-                    request,
-                    stream: streaming,
-                })
+                .header("content-type", "application/json")
+                .body(wire_body.clone())
                 .send()
                 .await?;
             // Only an explicit HTTP authentication rejection is recoverable. Do
@@ -997,14 +1133,19 @@ impl ClaudeClient {
     }
 
     pub async fn create(&self, request: &MessagesRequest) -> Result<MessageResponse, ClaudeError> {
-        Ok(self.post(request, false).await?.0.json().await?)
+        let mut response: MessageResponse = self.post(request, false).await?.0.json().await?;
+        for block in &mut response.content {
+            self.decode_block(block);
+        }
+        Ok(response)
     }
 
     pub async fn stream(&self, request: &MessagesRequest) -> Result<ClaudeStream, ClaudeError> {
         let (response, credentials) = self.post(request, true).await?;
+        let decode_subscription = self.subscription_compatibility;
         Ok(Box::pin(stream::unfold(
             SseState::new(response, credentials),
-            |mut state| async move {
+            move |mut state| async move {
                 if state.done {
                     return None;
                 }
@@ -1064,7 +1205,29 @@ impl ClaudeClient {
                                             state,
                                         ));
                                     }
-                                    Ok(event) => return Some((Ok(event), state)),
+                                    Ok(mut event) => {
+                                        if decode_subscription {
+                                            match &mut event {
+                                                StreamEvent::ContentBlockStart {
+                                                    content_block:
+                                                        ContentBlock::ToolUse { name, .. },
+                                                    ..
+                                                } => subscription_wire::strip(name),
+                                                StreamEvent::MessageStart { message } => {
+                                                    for block in &mut message.content {
+                                                        if let ContentBlock::ToolUse {
+                                                            name, ..
+                                                        } = block
+                                                        {
+                                                            subscription_wire::strip(name);
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        return Some((Ok(event), state));
+                                    }
                                 }
                             }
                         } else if let Some(name) = line.strip_prefix("event:") {

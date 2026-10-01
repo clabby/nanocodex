@@ -59,7 +59,7 @@ function sse(block, stop, id) {
   const tool = block.type === 'tool_use';
   const events = [
     {type:'message_start',message:{id,role:'assistant',model:'claude-sonnet-4-6',content:[],usage:{input_tokens:10,output_tokens:0}}},
-    {type:'content_block_start',index:0,content_block:tool?{type:'tool_use',id:block.id,name:block.name,input:{}}:block},
+    {type:'content_block_start',index:0,content_block:tool?{type:'tool_use',id:block.id,name:['web_search','code_execution','text_editor','computer'].includes(block.name.toLowerCase())?block.name:'_'+block.name,input:{}}:block},
     ...(tool?[{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify(block.input)}}]:[]),
     {type:'content_block_stop',index:0},
     {type:'message_delta',delta:{stop_reason:stop,stop_sequence:null},usage:{output_tokens:2}},
@@ -85,17 +85,26 @@ test('Claude-only public native tools/tasks/compaction/cancel across four DO reo
       for (const name of ['x-nanocodex-subject','x-nanocodex-session-model-owner','x-nanocodex-claude-host','x-api-key']) assert.equal(request.headers.has(name),false,`private ${name} stripped`);
       assert.equal(url.search,'?beta=true');
       assert.equal(request.headers.get('x-app'),'cli');
-      assert.equal(request.headers.get('x-claude-code-request-class'),'main');
+      assert.equal(request.headers.has('x-claude-code-request-class'),false);
       assert.equal(request.headers.get('anthropic-dangerous-direct-browser-access'),'true');
-      assert.match(request.headers.get('user-agent')??'',/^nanocodex\//);
-      const body = await request.json(); calls++;
+      assert.equal(request.headers.get('user-agent'),'claude-cli/2.1.280 (external, cli)');
+      assert.equal(request.headers.get('x-stainless-runtime'),'node');
+      assert.equal(request.headers.get('x-stainless-lang'),'js');
+      assert.equal(request.headers.get('x-stainless-package-version'),'0.112.1');
+      const wire = await request.text(); const body = JSON.parse(wire); calls++;
       assert.equal(body.model,'claude-sonnet-4-6'); assert.equal(body.stream,true);
+      assert.match(body.system[0].text,/^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5};$/);
+      assert.equal(body.system[1].text,"You are Claude Code, Anthropic's official CLI for Claude.");
+      assert.equal(JSON.parse(body.metadata.user_id).session_id,request.headers.get('x-claude-code-session-id'));
+      assert.equal(request.headers.get('accept'),'application/json');
       assert.equal(body.output_config.effort,'low');
       const system=JSON.stringify(body.system);
       for(const invalid of ['Code Mode','exec_command','write_stdin','tool_search','tools.exec','Promise.all'])assert.ok(!system.includes(invalid),`native system must not demand ${invalid}`);
-      const names=(body.tools??[]).map(t=>t.name);
+      const wireNames=(body.tools??[]).map(t=>t.name);
+      const names=wireNames.map(name=>name.startsWith('_')?name.slice(1):name);
+      assert.deepEqual(wireNames,names.map(name=>['web_search','code_execution','text_editor','computer'].includes(name.toLowerCase())?name:'_'+name));
       for(const name of ['exec','wait','exec_command','apply_patch','web__run','tool_search'])assert.ok(!names.includes(name),`no Responses tool ${name}`);
-      upstream.push({request:calls,model:body.model,tool_names:names,message_count:body.messages.length,
+      upstream.push({wire,request:calls,model:body.model,tool_names:names,wire_tool_names:wireNames,message_count:body.messages.length,
         tool_uses:body.messages.flatMap(message=>Array.isArray(message.content)?message.content.filter(block=>block.type==='tool_use').map(block=>block.name):[]),
         tool_result_count:body.messages.flatMap(message=>Array.isArray(message.content)?message.content.filter(block=>block.type==='tool_result'):[]).length,
         prior_proof_present:JSON.stringify(body.messages).includes('NATIVE_CLAUDE_DURABLE_PROOF'),summary_present:JSON.stringify(body.messages).includes('NATIVE_SUMMARY'),effort:body.output_config.effort});

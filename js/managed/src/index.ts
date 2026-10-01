@@ -9953,6 +9953,7 @@ export class DurableAgentSession extends DurableComputerObject {
           ].join("\n\n");
           const options: ClaudeOptions = { ...input, instructions, tools: [...claudeTools!.tools, ...(claudeTasks?.tools.filter(tool => configuredNames === undefined || configuredNames.includes(tool.name)) ?? [])],
             endpoint: "https://nanocodex.internal/v1/messages", compatibilityProfile: "subscription",
+            subscriptionIdentity: { installId: session.owner_id, platform: "linux", arch: "x64" },
             auth: { headers: () => {
               assertRuntimeOwned();
               const authorization = this.#activeTurnAuthorization() ?? this.#compactionAuthorization;

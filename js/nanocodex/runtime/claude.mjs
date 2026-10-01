@@ -7,7 +7,7 @@ import { watch } from '../actions/events.mjs';
 import { createClaudeHost } from './claude-host.mjs';
 
 const OPTION_KEYS = new Set([
-  'auth', 'fetch', 'endpoint', 'compatibilityProfile', 'model', 'instructions', 'sessionId', 'tools',
+  'auth', 'fetch', 'endpoint', 'compatibilityProfile', 'subscriptionIdentity', 'model', 'instructions', 'sessionId', 'tools',
   'serverTools', 'durability', 'durabilityId', 'module', 'maxTokens', 'workspace',
   'cache', 'adaptiveThinking', 'keepThinking', 'thinking', 'parallelTools', 'clientToolSearch',
   'contextWindowTokens', 'autoCompactWindowTokens', 'autoCompact', 'systemBlocks', 'terminalReceiptRetention',
@@ -38,9 +38,23 @@ export function toClaudeConfig(options = {}) {
   for (const key of ['systemBlocks', 'serverTools']) if (options[key] !== undefined && !Array.isArray(options[key])) throw new TypeError(`Claude ${key} must be an array`);
   if (options.terminalReceiptRetention !== undefined && (options.durability === undefined || !Number.isSafeInteger(options.terminalReceiptRetention) || options.terminalReceiptRetention < 0 || options.terminalReceiptRetention > 4096)) throw new TypeError('terminalReceiptRetention requires durability and must be 0..4096');
   if (options.durabilityId !== undefined && options.sessionId !== undefined && options.durabilityId !== options.sessionId) throw new TypeError('durable Claude sessionId must equal durabilityId');
+  if (options.subscriptionIdentity !== undefined) {
+    const identity = options.subscriptionIdentity;
+    if (options.compatibilityProfile !== 'subscription' || !identity || typeof identity !== 'object' || Array.isArray(identity)) throw new TypeError('subscriptionIdentity requires subscription compatibility');
+    for (const [key,value] of Object.entries(identity)) {
+      if (!['installId','accountUuid','userId','platform','arch','version'].includes(key) || typeof value !== 'string' || !value || value.length > 8192 || /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError('invalid subscriptionIdentity');
+    }
+  }
   const config = {};
   for (const key of OPTION_KEYS) if (!['auth', 'fetch', 'tools', 'module', 'durability', 'compatibilityProfile'].includes(key) && options[key] !== undefined) config[key] = options[key];
-  if (options.compatibilityProfile !== undefined) config.subscriptionCompatibility = true;
+  if (options.compatibilityProfile !== undefined) {
+    config.subscriptionCompatibility = true;
+    config.subscriptionIdentity = { ...config.subscriptionIdentity };
+    const process = globalThis.process;
+    if (typeof process?.platform === 'string') config.subscriptionIdentity.platform ??= process.platform;
+    if (typeof process?.arch === 'string') config.subscriptionIdentity.arch ??= process.arch;
+    if (typeof process?.env?.PI_AI_CLAUDE_CODE_VERSION === 'string' && process.env.PI_AI_CLAUDE_CODE_VERSION) config.subscriptionIdentity.version ??= process.env.PI_AI_CLAUDE_CODE_VERSION;
+  }
   // Snapshot caller-owned nested native definitions before any asynchronous loading.
   return JSON.parse(JSON.stringify(config));
 }

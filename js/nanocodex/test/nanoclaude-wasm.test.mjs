@@ -43,8 +43,9 @@ async function fixture(t, respond) {
       assert.equal(request.method, "POST");
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
-      const body = JSON.parse(Buffer.concat(chunks).toString());
-      requests.push({ body, headers: request.headers });
+      const wire = Buffer.concat(chunks).toString();
+      const body = JSON.parse(wire);
+      requests.push({ body, wire, headers: request.headers });
       response.writeHead(200, { "content-type": "text/event-stream", "access-control-allow-origin": "*" });
       const reply = await respond(requests.length, body, response);
       if (reply !== undefined) response.end(reply);
@@ -90,14 +91,14 @@ const shutdown = agent => agent.session.shutdown();
 
 // Additional acceptance scenarios below share this real HTTP/SSE fixture, not fake engines.
 
-for (const target of ["node", "browser"]) {
-  test(`actual ${target} WASM Messages tools/compaction survive SQLite reopen and terminal replay`, { timeout: 30_000 }, async t => {
+for (const [target, subscription] of [["node",false], ["browser",false], ["node",true], ["browser",true]]) {
+  test(`actual ${target} ${subscription ? "OMP subscription" : "API-key"} WASM Messages tools/compaction survive SQLite reopen and terminal replay`, { timeout: 30_000 }, async t => {
     const Claude = await sdk(target);
     const directory = await mkdtemp(join(tmpdir(), "nanoclaude-wasm-"));
     t.after(() => rm(directory, { recursive: true, force: true }));
     const path = join(directory, "state.sqlite");
     const { endpoint, requests } = await fixture(t, index => {
-      if (index === 1) return sse(signed, "tool_use", 70_000);
+      if (index === 1) return sse(subscription ? signed.map(block => block.type === "tool_use" ? {...block, name: "_" + block.name} : block) : signed, "tool_use", 70_000);
       if (index === 2) return sse(text("Preserve the synthetic original task."));
       if (index === 3) return 'event: error\ndata: {"type":"error","error":{"type":"invalid_request_error","message":"synthetic followup failure"}}\n\n';
       assert.equal(index, 4, "completed model receipts must not dispatch again");
@@ -108,6 +109,7 @@ for (const target of ["node", "browser"]) {
     const invocations = [];
     const options = {
       endpoint, model: "fixture-model", cache: "1h",
+      ...(subscription ? {compatibilityProfile: "subscription", subscriptionIdentity: {installId: "synthetic-wasm-install", platform: "linux", arch: "x64"}} : {}),
       contextWindowTokens: 100_000, autoCompactWindowTokens: 100_000,
       ...(target === "browser" ? { module: await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url)) } : {}),
       auth: { headers: async () => { authCalls++; return { "x-api-key": "synthetic-only" }; } },
@@ -116,7 +118,7 @@ for (const target of ["node", "browser"]) {
         assert.deepEqual(value, { key: "a" });
         return { content: receipt, isError: false, structuredResult: { committed: true } };
       } }],
-      durabilityId: `native-${target}`,
+      durabilityId: `native-${target}-${subscription}`,
     };
     let database = sqlite(path);
     let agent;
@@ -125,11 +127,11 @@ for (const target of ["node", "browser"]) {
       await assert.rejects(run(agent, "perform one synthetic effect", "first"), /synthetic followup failure/);
       assert.equal(effects, 1);
       assert.equal(requests.length, 3, "automatic compaction executed a real SSE summary request");
-      assert.deepEqual(requests[2].body.messages[1].content, signed);
+      assert.deepEqual(requests[2].body.messages[1].content, subscription ? signed.map(block => block.type === "tool_use" ? {...block,name: "_" + block.name} : block) : signed);
       assert.deepEqual(requests[2].body.messages[2].content[0].content, receipt);
       assert.equal(requests[2].body.messages[2].content[0].tool_use_id, "effect-once");
       assert.deepEqual(requests[0].body.cache_control, { type: "ephemeral", ttl: "1h" });
-      assert.deepEqual(requests[0].body.tools.map(tool => tool.name), ["effect"]);
+      assert.deepEqual(requests[0].body.tools.map(tool => tool.name), [subscription ? "_effect" : "effect"]);
       assert.equal(requests[0].headers["x-api-key"], "synthetic-only");
       assert.equal(invocations[0].callId, "effect-once");
       assert.ok(invocations[0].sessionId && invocations[0].turnId);
@@ -144,6 +146,20 @@ for (const target of ["node", "browser"]) {
       assert.equal(requests[3].body.container, "stable-container");
       assert.deepEqual(requests[3].body.messages.slice(0, 3), requests[2].body.messages);
       assert.deepEqual(requests[3].body.tools, requests[0].body.tools);
+      if (subscription) {
+        const identities=requests.map(({body})=>JSON.parse(body.metadata.user_id));
+        assert.equal(new Set(identities.map(id=>id.device_id)).size,1);
+        assert.equal(new Set(identities.map(id=>id.session_id)).size,1);
+        for (const {body,headers,wire} of requests) {
+          assert.equal(headers['user-agent'],'claude-cli/2.1.280 (external, cli)');
+          assert.equal(headers['x-stainless-runtime-version'],'v26.3.0');
+          assert.equal(headers['accept'],'application/json');
+          assert.match(body.system[0].text,/^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5};$/);
+          assert(wire.includes('"system":[{"type":"text","text":"x-anthropic-billing-header:'));
+          assert.equal(body.system[1].text,"You are Claude Code, Anthropic's official CLI for Claude.");
+        }
+        assert(database.stateText().includes('subscription_wire_v1'), 'durable model identity contains final attested wire bytes');
+      }
       await shutdown(agent); agent = undefined;
       database.close(); database = sqlite(path);
       const beforeAuth = authCalls;
@@ -161,7 +177,7 @@ for (const target of ["node", "browser"]) {
         "durable payloads and immutable records must not retain auth credentials or callbacks");
       await assert.rejects(run(agent, "different input", "recovery"), /different|conflict|identity|request/i);
       assert.equal(authCalls, beforeAuth);
-      t.diagnostic(`actual ${target}: 4 loopback requests including compaction/failure/recovery; effect=1; terminal auth/network/tool deltas=0`);
+      t.diagnostic(`actual ${target} ${subscription ? "OMP subscription" : "API-key"}: 4 loopback requests including compaction/failure/recovery; effect=1; terminal auth/network/tool deltas=0`);
     } finally { if (agent) await shutdown(agent).catch(() => {}); database.close(); }
   });
 }

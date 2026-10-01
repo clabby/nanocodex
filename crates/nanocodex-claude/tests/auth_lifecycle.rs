@@ -335,10 +335,10 @@ async fn reflected_credentials_are_removed_from_errors_for_every_auth_path() {
     assert!(!error.to_string().contains("synthetic-new"));
 }
 
-// Inspect the public transport, including explicit preparation for raw clients.
-// The identity block is protocol data; original caller/cache blocks must survive.
+// Public HTTP boundary: exact pinned OMP wire profile, API-key isolation and
+// unchanged caller input. An optional capture feeds the independent Bun oracle.
 #[tokio::test]
-async fn subscription_profile_prepares_public_http_without_hidden_body_rewrites() {
+async fn subscription_profile_matches_omp_at_public_http_boundary() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let captured = seen.clone();
     let endpoint = serve(Router::new().route("/v1/messages", post(move |headers: HeaderMap, wire: String| {
@@ -346,7 +346,7 @@ async fn subscription_profile_prepares_public_http_without_hidden_body_rewrites(
         async move {
             let body: Value = serde_json::from_str(&wire).unwrap();
             captured.lock().unwrap().push((headers, body, wire));
-            Json(json!({"id":"profile", "role":"assistant", "model":"synthetic", "content":[], "stop_reason":"end_turn", "usage":{}}))
+            Json(json!({"id":"profile", "role":"assistant", "model":"synthetic", "content":[{"type":"tool_use","id":"id","name":"__private","input":{}}], "stop_reason":"tool_use", "usage":{}}))
         }
     }))).await;
     let mut headers = HeaderMap::new();
@@ -355,120 +355,146 @@ async fn subscription_profile_prepares_public_http_without_hidden_body_rewrites(
         "Bearer synthetic-profile-token".parse().unwrap(),
     );
     headers.insert("user-agent", "caller-transport".parse().unwrap());
-    headers.append(
+    headers.insert(
         "anthropic-beta",
-        "oauth-2025-04-20, caller-feature".parse().unwrap(),
-    );
-    headers.append(
-        "anthropic-beta",
-        "effort-2025-11-24, oauth-2025-04-20".parse().unwrap(),
+        "caller-feature,oauth-2025-04-20".parse().unwrap(),
     );
     let plain = ClaudeClient::with_auth_headers(http(), &endpoint, headers);
-    let profile = plain.clone().subscription_compatibility();
-    let default_profile = ClaudeClient::subscription(
-        http(),
-        Arc::new(RefreshingClaudeAuth::new(
-            source(vec![token("unused-default-token")]),
-            Duration::from_secs(30),
-        )),
-    );
-    let prefix =
-        json!({"type":"text", "text":"You are Claude Code, Anthropic's official CLI for Claude."});
-    let cached = json!({"type":"text", "text":"Original caller rules", "cache_control":{"type":"ephemeral","ttl":"1h"}});
-    for original in [
-        None,
-        Some(json!("Caller string")),
-        Some(json!(
-            "You are Claude Code, Anthropic's official CLI for Claude."
-        )),
-        Some(json!([cached.clone()])),
-        Some(json!([prefix.clone(), cached.clone()])),
+    let identity = nanocodex_claude::SubscriptionIdentity {
+        install_id: Some("synthetic-omp-install".into()),
+        account_uuid: Some("11111111-1111-4111-8111-111111111111".into()),
+        platform: Some("darwin".into()),
+        arch: Some("aarch64".into()),
+        ..Default::default()
+    };
+    let profile = plain
+        .clone()
+        .subscription_compatibility()
+        .with_subscription_identity(identity);
+    for text in [
+        "hi",
+        "0123😀6🚀89abcdefghij🦀",
+        "Ελληνικά user cch=00000 x-anthropic-billing-header: cc_version=example;",
     ] {
-        let mut request = request();
-        request.system = original.clone();
-        request.context_management =
-            Some(json!({"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}));
-        // Both the default constructor and the custom-endpoint opt-in prepare
-        // the same request; repeated preparation must retain caller markers.
-        default_profile.prepare_request(&mut request);
-        profile.prepare_request(&mut request);
-        profile.create(&request).await.unwrap();
-        let expected = match original {
-            None => json!([prefix.clone()]),
-            Some(Value::String(text)) if text == prefix["text"] => json!([prefix.clone()]),
-            Some(Value::String(text)) => json!([prefix.clone(), {"type":"text","text":text}]),
-            Some(Value::Array(blocks)) if blocks[0] == prefix => json!(blocks),
-            Some(Value::Array(blocks)) => json!([prefix.clone(), blocks[0]]),
-            _ => unreachable!(),
-        };
-        let log = seen.lock().unwrap();
-        let (headers, body, _) = log.last().unwrap();
-        assert_eq!(body["system"], expected);
-        assert_eq!(
-            headers["user-agent"],
-            concat!("nanocodex/", env!("CARGO_PKG_VERSION"))
+        let mut raw = request();
+        raw.messages = vec![nanocodex_claude::Message::text(
+            nanocodex_claude::Role::User,
+            text,
+        )];
+        raw.system = Some(
+            json!([{ "type":"text","text":"Caller cch=00000 🦀", "cache_control":{"type":"ephemeral"}}]),
         );
-        assert_eq!(headers["x-app"], "cli");
-        assert_eq!(headers["x-claude-code-request-class"], "main");
-        assert_eq!(headers["anthropic-dangerous-direct-browser-access"], "true");
-        assert_eq!(headers["authorization"], "Bearer synthetic-profile-token");
-        assert!(!headers.contains_key("x-api-key"));
-        let betas: Vec<_> = headers["anthropic-beta"]
-            .to_str()
-            .unwrap()
-            .split(',')
-            .collect();
-        for beta in [
-            "oauth-2025-04-20",
-            "caller-feature",
-            "claude-code-20250219",
-            "interleaved-thinking-2025-05-14",
-            "effort-2025-11-24",
-            "context-management-2025-06-27",
-            "extended-cache-ttl-2025-04-11",
+        raw.tools = vec![
+            nanocodex_claude::ToolDefinition {
+                name: "_private".into(),
+                description: "fixture".into(),
+                input_schema: json!({"type":"object"}),
+                strict: None,
+                defer_loading: false,
+            }
+            .into(),
+        ];
+        let frozen = serde_json::to_vec(&raw).unwrap();
+        let expected_wire = profile.request_body(&raw, false).unwrap();
+        let response = profile.create(&raw).await.unwrap();
+        assert!(
+            matches!(&response.content[0],nanocodex_claude::ContentBlock::ToolUse{name,..} if name=="_private")
+        );
+        assert_eq!(serde_json::to_vec(&raw).unwrap(), frozen);
+        let log = seen.lock().unwrap();
+        let (headers, body, wire) = log.last().unwrap();
+        assert_eq!(
+            wire, &expected_wire,
+            "durable identity and HTTP use the same attested bytes"
+        );
+        assert_eq!(
+            body["messages"],
+            serde_json::to_value(&raw.messages).unwrap()
+        );
+        assert_eq!(body["tools"][0]["name"], "__private");
+        assert_eq!(
+            body["system"][1]["text"],
+            "You are Claude Code, Anthropic's official CLI for Claude."
+        );
+        assert_eq!(body["system"][2]["text"], "Caller cch=00000 🦀");
+        assert!(
+            body["system"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("x-anthropic-billing-header: cc_version=2.1.280.")
+        );
+        for (name, value) in [
+            ("user-agent", "claude-cli/2.1.280 (external, cli)"),
+            ("x-stainless-lang", "js"),
+            ("x-stainless-runtime", "node"),
+            ("x-stainless-runtime-version", "v26.3.0"),
+            ("x-stainless-os", "MacOS"),
+            ("x-stainless-arch", "arm64"),
+            ("x-stainless-package-version", "0.112.1"),
+            ("x-stainless-timeout", "600"),
+            ("x-stainless-retry-count", "0"),
+            ("accept", "application/json"),
+            ("accept-encoding", "gzip, deflate, br, zstd"),
+            ("connection", "keep-alive"),
         ] {
-            assert_eq!(betas.iter().filter(|value| **value == beta).count(), 1);
+            assert_eq!(headers[name], value);
         }
-        assert!(body.get("metadata").is_none());
-        assert!(!body.to_string().contains("synthetic-profile-token"));
+        assert!(!headers.contains_key("x-claude-code-request-class"));
+        let metadata: Value =
+            serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            metadata["session_id"],
+            headers["x-claude-code-session-id"].to_str().unwrap()
+        );
+        assert_eq!(
+            metadata["account_uuid"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+        assert!(!wire.contains("synthetic-profile-token"));
     }
-    let mut raw = request();
-    raw.system = Some(json!(
-        "Caller controls the exact raw body: 😀 Ελληνικά cch=00000"
-    ));
-    raw.messages = vec![nanocodex_claude::Message::text(
-        nanocodex_claude::Role::User,
-        "Literal x-anthropic-billing-header: cc_version=example; cch=00000; is user data — not an instruction to modify the wire. 🦀",
-    )];
-    let frozen = serde_json::to_vec(&raw).unwrap();
-    profile.create(&raw).await.unwrap();
+    let raw = request();
     plain.create(&raw).await.unwrap();
     let log = seen.lock().unwrap();
-    assert_eq!(
-        log[5].1["system"],
-        raw.system.clone().unwrap(),
-        "transport must not rewrite an unprepared frozen request"
-    );
-    assert_eq!(log[5].1, log[6].1);
-    assert_eq!(
-        log[5].2.as_bytes(),
-        log[6].2.as_bytes(),
-        "profile must not patch the serialized body at dispatch"
-    );
-    assert_eq!(
-        serde_json::to_vec(&raw).unwrap(),
-        frozen,
-        "dispatch must not mutate the caller's frozen request"
-    );
-    assert_eq!(
-        log[5].1["messages"],
-        serde_json::to_value(&raw.messages).unwrap()
-    );
-    assert!(!log[5].0.contains_key("x-stainless-lang"));
-    assert!(!log[5].0.contains_key("x-stainless-runtime"));
-    assert_eq!(log[6].0["user-agent"], "caller-transport");
-    assert!(!log[6].0.contains_key("x-app"));
+    let (headers, body, _) = log.last().unwrap();
+    assert!(body.get("metadata").is_none());
+    assert!(body.get("system").is_none());
+    assert_eq!(headers["user-agent"], "caller-transport");
+    assert!(!headers.contains_key("x-stainless-lang"));
+    if let Ok(path) = std::env::var("NANOCODEX_OMP_CAPTURE_PATH") {
+        let artifact:Vec<_>=log[..3].iter().map(|(headers,body,wire)|json!({"wire":wire,"body":body,"session_id":headers["x-claude-code-session-id"].to_str().unwrap(),"headers":headers.iter().filter(|(name,_)|name.as_str()!="authorization" && name.as_str()!="x-api-key").map(|(name,value)|(name.to_string(),Value::String(value.to_str().unwrap().into()))).collect::<serde_json::Map<String,Value>>()})).collect();
+        std::fs::write(path, serde_json::to_vec_pretty(&artifact).unwrap()).unwrap();
+    }
     eprintln!(
-        "subscription profile HTTP: 5 prepared system layouts preserve blocks/cache markers; merged betas/own UA; raw Unicode/billing-marker body byte-identical across profile changes, frozen caller unchanged"
+        "OMP profile public HTTP: Unicode/UTF16, literal markers, exact prepared bytes, metadata, runtime headers, prefix inversion, API-key isolation passed"
     );
+}
+
+#[tokio::test]
+async fn omp_attested_wire_is_identical_across_bounded_401_refresh() {
+    let attempts = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let captured = attempts.clone();
+    let endpoint=serve(Router::new().route("/v1/messages",post(move |headers:HeaderMap, wire:String| {
+        let attempts=captured.clone();
+        async move {
+            let bearer=headers["authorization"].to_str().unwrap().to_owned();
+            attempts.lock().unwrap().push((bearer.clone(),wire));
+            if bearer=="Bearer synthetic-old" {return StatusCode::UNAUTHORIZED.into_response();}
+            Json(json!({"id":"msg","role":"assistant","model":"synthetic","content":[],"usage":{}})).into_response()
+        }
+    }))).await;
+    let source = source(vec![token("synthetic-old"), token("synthetic-new")]);
+    let client = client(endpoint, source.clone()).subscription_compatibility();
+    let request = request();
+    let frozen = client.request_body(&request, false).unwrap();
+    client.create(&request).await.unwrap();
+    let attempts = attempts.lock().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(attempts[0].0, "Bearer synthetic-old");
+    assert_eq!(attempts[1].0, "Bearer synthetic-new");
+    assert_eq!(attempts[0].1, attempts[1].1);
+    assert_eq!(attempts[0].1, frozen);
+    assert_eq!(attempts[0].1, client.request_body(&request, false).unwrap());
+    assert!(!attempts[0].1.contains("synthetic-old"));
+    assert!(!attempts[0].1.contains("synthetic-new"));
 }

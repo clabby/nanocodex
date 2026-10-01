@@ -42,6 +42,8 @@ export type Options = Readonly<{
   fetch?: typeof globalThis.fetch;
   /** Protocol compatibility only; supplies neither authentication nor product parity. Requires endpoint. */
   compatibilityProfile?: 'subscription';
+  /** Public stable OMP wire affinity. Reuse installId across sessions/restarts; never supply credentials. */
+  subscriptionIdentity?: Readonly<{ installId?: string; accountUuid?: string; userId?: string; platform?: string; arch?: string; version?: string }>;
   instructions?: string;
   systemBlocks?: readonly Record<string, unknown>[];
   /** Defaults to durabilityId for durable sessions; an explicit ID must match it. */

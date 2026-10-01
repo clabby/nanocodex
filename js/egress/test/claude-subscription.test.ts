@@ -40,7 +40,7 @@ async function login(user: string, scenario: string) {
 function messages(user: string, extra: Record<string,string> = {}) {
   return new Request('https://nanocodex.internal/v1/messages',{method:'POST',
     headers:{'content-type':'application/json',authorization:'Bearer NANOCODEX_PROVIDER_CREDENTIAL',
-      'x-nanocodex-subject':subject,'x-nanocodex-session-model-owner':user,'x-private':'ignored','user-agent':'nanocodex/0.6.6',...extra},
+      'x-nanocodex-subject':subject,'x-nanocodex-session-model-owner':user,'x-private':'ignored','user-agent':'claude-cli/2.1.280 (external, cli)',...extra},
     body:JSON.stringify({model:'claude-synthetic-a',max_tokens:64,messages:[{role:'user',content:'Hello'}]})});
 }
 async function trace(scenario: string) {
@@ -81,7 +81,7 @@ describe('real workerd broker and Rust WASM Claude account journeys', () => {
       method:'POST',headers:messages(user).headers,body:'{}',
     }))).status).toBe(403);
     expect(await trace('features')).toEqual({exchange:1,profile:1,messages:1});
-    console.info('CLAUDE_JOURNEY',{journey:'native-subscription-profile',query:'beta=true',featureBetasPreserved:true,oauthBetaDeduplicated:true,ownHttpIdentity:true});
+    console.info('CLAUDE_JOURNEY',{journey:'native-subscription-profile',query:'beta=true',featureBetasPreserved:true,oauthBetaDeduplicated:true,ompWireIdentity:true});
   });
   it('keeps unsupported OAuth catalog access unavailable instead of guessing entitlement',async()=>{
     const user='claude-catalog-unsupported'; await login(user,'catalog-unsupported');

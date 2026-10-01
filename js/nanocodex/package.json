@@ -195,7 +195,8 @@
     "index.mjs",
     "wasm.d.mts",
     "types.d.mts",
-    "README.md"
+    "README.md",
+    "THIRD-PARTY-LICENSES"
   ],
   "publishConfig": {
     "access": "public",

@@ -57,9 +57,9 @@ export async function claudeProvider(request) {
     }
     if ((key === 'refresh' || key === 'refresh-uncertain') && !auth.endsWith('-refreshed')) return Response.json({error:'unauthorized'}, {status:401});
     if (key === 'message-uncertain') return Response.json({error:'synthetic overload'}, {status:503});
-    if (request.headers.get('x-app') !== 'cli' || request.headers.get('x-claude-code-request-class') !== 'main'
+    if (request.headers.get('x-app') !== 'cli' || request.headers.has('x-claude-code-request-class')
       || request.headers.get('anthropic-dangerous-direct-browser-access') !== 'true'
-      || !/^nanocodex(?:\/[A-Za-z0-9.+-]{1,40}|-managed)$/.test(request.headers.get('user-agent') ?? '')) return new Response(null,{status:400});
+      || !/^claude-cli\/2\.1\.280 \(external, cli\)$/.test(request.headers.get('user-agent') ?? '')) return new Response(null,{status:400});
     if (key === 'features') {
       const betas = request.headers.get('anthropic-beta').split(',');
       if (betas.filter(beta => beta === 'oauth-2025-04-20').length !== 1

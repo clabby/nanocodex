@@ -19,6 +19,16 @@ test('Claude validates explicit opt-in config and serializes no credentials', ()
   assert.throws(() => toClaudeConfig({ model: MODEL, endpoint: 'secret' }), (e) => !String(e).includes('secret'));
 });
 
+test('public subscription identity is explicit, bounded and never an auth source', () => {
+  const input={auth:{headers:()=>({authorization:'Bearer synthetic-only'})},model:MODEL,endpoint:'https://approved.test/messages',compatibilityProfile:'subscription',subscriptionIdentity:{installId:'stable-install',accountUuid:'public-account',platform:'darwin',arch:'arm64',version:'2.1.280'}};
+  const cfg=toClaudeConfig(input);
+  assert.deepEqual(cfg.subscriptionIdentity,input.subscriptionIdentity);
+  for(const identity of [{installId:''},{installId:'bad\nvalue'},{installId:'a'.repeat(8193)},{password:'never-accepted'},{arch:42}]) {
+    assert.throws(()=>toClaudeConfig({...input,subscriptionIdentity:identity}),TypeError);
+  }
+  assert.throws(()=>toClaudeConfig({...input,compatibilityProfile:undefined}),TypeError);
+});
+
 test('Claude authentication is instance-scoped, refreshed per request, redacted and released', async () => {
   const left = createClaudeHost({ auth: { apiKey: 'left-secret' } });
   let n = 0;

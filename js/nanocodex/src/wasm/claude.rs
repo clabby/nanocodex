@@ -56,6 +56,7 @@ struct ClaudeConfig {
     endpoint: Option<String>,
     #[serde(default)]
     subscription_compatibility: bool,
+    subscription_identity: Option<nanocodex_claude::SubscriptionIdentity>,
     host_definition_id: Option<u32>,
     #[serde(default)]
     tools: Vec<ToolDefinition>,
@@ -278,6 +279,16 @@ impl WasmNanoclaude {
         };
         if config.subscription_compatibility {
             client = client.subscription_compatibility();
+            if let Some(identity) = config.subscription_identity {
+                identity
+                    .validate()
+                    .map_err(|_| js_error("invalid subscription identity"))?;
+                client = client.with_subscription_identity(identity);
+            }
+        } else if config.subscription_identity.is_some() {
+            return Err(js_error(
+                "subscription identity requires subscription compatibility",
+            ));
         }
         let mut builder = RustNanocodex::builder(Claude::new(client, config.model))
             .parallel_tools(config.parallel_tools);

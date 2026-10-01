@@ -17,6 +17,8 @@ workspace-files = ["tools"]
 base64.workspace = true
 getrandom = { workspace = true, features = ["wasm_js"] }
 sha2.workspace = true
+regex.workspace = true
+xxhash-rust = { version = "0.8.15", features = ["xxh64"] }
 url.workspace = true
 nanocodex-claude-tools = { path = "../nanocodex-claude-tools", version = "0.6.6", default-features = false, optional = true }
 futures-util.workspace = true
@@ -24,7 +26,7 @@ nanocodex-agent = { path = "../nanocodex-agent", version = "0.6.6", default-feat
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
 web-time.workspace = true
 uuid.workspace = true
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["stream", "gzip", "brotli", "deflate", "zstd"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

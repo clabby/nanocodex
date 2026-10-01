@@ -709,7 +709,7 @@ impl ClaudeBuilder {
         let (runtime, events) = BackendRuntime::new(session_id.clone());
         let driver = Driver {
             state: Arc::new(State {
-                client: self.claude.client,
+                client: self.claude.client.bind_subscription_session(&session_id),
                 model: self.claude.model,
                 max_tokens: self.max_tokens,
                 effort: self.effort,
@@ -1386,6 +1386,7 @@ struct ResponseContext<'a> {
     container: Option<&'a str>,
     previous_message_id: Option<&'a str>,
     template: Option<&'a MessagesRequest>,
+    wire_profile: Option<&'a crate::FrozenWireProfile>,
     effect: Option<Effect<'a>>,
 }
 impl State {
@@ -1402,7 +1403,7 @@ impl State {
         });
     }
     fn request_template(&self) -> MessagesRequest {
-        let mut request = MessagesRequest {
+        MessagesRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
             cache_control: self.automatic_cache.then(|| crate::CacheControl {
@@ -1426,9 +1427,7 @@ impl State {
             messages: Vec::new(),
             container: None,
             tools: self.available_tools(),
-        };
-        self.client.prepare_request(&mut request);
-        request
+        }
     }
     async fn response(
         &self,
@@ -1439,6 +1438,7 @@ impl State {
         index: u32,
         context: ResponseContext<'_>,
     ) -> std::result::Result<crate::MessageResponse, ResponseFailure> {
+        let client = self.client.restore_wire_profile(context.wire_profile);
         let mut recovery = (!context.disable_tools
             && tools
                 .iter()
@@ -1455,7 +1455,10 @@ impl State {
             request.diagnostics = Some(json!({"previous_message_id":context.previous_message_id}));
         }
         request.tool_choice = context.disable_tools.then(|| json!({"type":"none"}));
+        // Preserve the embedding's stable caller prefix before adding OMP's
+        // own identity cache marker; that marker is not caller cache policy.
         request.cache_system_prefix().map_err(provider_error)?;
+        client.prepare_request(&mut request);
         if cancel.flag.load(Ordering::SeqCst) && context.effect.is_none() {
             return Err(NanocodexError::TurnCancelled.into());
         }
@@ -1463,7 +1466,7 @@ impl State {
             && let Step::Replay(value) = effect
                 .begin(
                     "model",
-                    serde_json::to_value(&request).map_err(provider_error)?,
+                    client.durable_request(&request).map_err(provider_error)?,
                 )
                 .await?
         {
@@ -1474,7 +1477,7 @@ impl State {
             return Err(NanocodexError::TurnCancelled.into());
         }
         let mut stream = tokio::select! {
-            result = self.client.stream(&request) => match result {
+            result = client.stream(&request) => match result {
                 Ok(stream) => stream,
                 Err(error) => {
                     // A rejected request has no remote effect. A transport or
@@ -1699,6 +1702,7 @@ impl State {
                     container: context.container.as_deref(),
                     previous_message_id: context.previous_message_id.as_deref(),
                     template: Some(&cursor.template),
+                    wire_profile: cursor.wire_profile.as_ref(),
                     effect: cursor.effect(self, step),
                 },
             )
@@ -1957,6 +1961,7 @@ impl State {
                         container: conversation.container.as_deref(),
                         previous_message_id: previous_message_id.as_deref(),
                         template: Some(&cursor.template),
+                        wire_profile: cursor.wire_profile.as_ref(),
                         effect: cursor.effect(self, &format!("model-{index}")),
                     },
                 )
@@ -2007,6 +2012,10 @@ impl State {
                     .flat_map(|message| &message.content)
                     .chain(&response.content),
                 &cursor.template.tools,
+                cursor
+                    .wire_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.enabled),
             );
             let validated = (|| -> Result<_> {
                 if let Some(container) = &response.container {
@@ -2405,6 +2414,7 @@ impl State {
 fn server_discovered_tools<'a>(
     blocks: impl IntoIterator<Item = &'a ContentBlock>,
     tools: &[ClaudeToolSpec],
+    subscription: bool,
 ) -> HashSet<&'a str> {
     let mut search_ids = HashSet::new();
     let mut names = HashSet::new();
@@ -2413,7 +2423,7 @@ fn server_discovered_tools<'a>(
             ContentBlock::ServerToolUse { id, name, .. }
                 if tools.iter().any(|tool| {
                     matches!(tool, ClaudeToolSpec::Server(tool)
-                    if tool.name == *name && tool.kind.starts_with("tool_search_tool_"))
+                    if (tool.name == *name || (subscription && crate::subscription_wire::prefix(&tool.name)==*name)) && tool.kind.starts_with("tool_search_tool_"))
                 }) =>
             {
                 search_ids.insert(id.as_str());
@@ -2435,7 +2445,7 @@ fn server_discovered_tools<'a>(
                                     == Some("tool_reference")
                             })
                             .filter_map(|reference| {
-                                reference.get("tool_name").and_then(Value::as_str)
+                                reference.get("tool_name").and_then(Value::as_str).map(|name|if subscription {name.strip_prefix('_').unwrap_or(name)} else {name})
                             }),
                     );
                 }
@@ -2810,5 +2820,23 @@ mod session_identity_tests {
         assert_eq!(agent.agent_id(), "host-session");
         agent.shutdown().await.expect("shutdown");
         assert!(Nanocodex::builder(backend).session_id(" ").build().is_err());
+    }
+}
+
+#[cfg(test)]
+mod subscription_discovery_tests {
+    use super::*;
+    #[test]
+    fn prefixed_server_discovery_names_are_local_only_without_opaque_rewrites() {
+        let blocks:Vec<ContentBlock>=serde_json::from_value(json!([
+            {"type":"server_tool_use","id":"search","name":"_tool_search_tool_regex","input":{}},
+            {"type":"tool_search_tool_result","tool_use_id":"search","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"_Read"},{"type":"tool_reference","tool_name":"__custom"}]}}
+        ])).unwrap();
+        let before = serde_json::to_value(&blocks).unwrap();
+        let tools = vec![crate::ServerToolDefinition::tool_search_regex().into()];
+        let found = server_discovered_tools(&blocks, &tools, true);
+        assert_eq!(found, HashSet::from(["Read", "_custom"]));
+        assert!(server_discovered_tools(&blocks, &tools, false).is_empty());
+        assert_eq!(serde_json::to_value(&blocks).unwrap(), before);
     }
 }

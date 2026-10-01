@@ -79,27 +79,20 @@ See the [Claude runtime](CLAUDE_RUNTIME.md),
 
 ## Subscription wire compatibility
 
-The subscription profile is explicit and shared by native and managed execution.
-It prepares the compatibility system block before durable request freezing, merges
-OAuth/feature betas and uses the subscription Messages route. Dispatch preserves
-the prepared request; egress adds private authorization without rewriting its
-body. Nanocodex retains its own HTTP User-Agent and native tool names.
+The explicit subscription profile uses the pinned [OMP v18.4.4 wire helpers](https://github.com/can1357/oh-my-pi/blob/v18.4.4/packages/ai/src/providers/anthropic.ts#L634-L709), ported under MIT into `nanocodex-claude`. This replaces the former Nanocodex User-Agent profile, at the user's request. Native, WASM and managed execution share one implementation:
 
-The pinned [OMP v18.4.4 implementation](https://github.com/can1357/oh-my-pi/blob/v18.4.4/packages/ai/src/providers/anthropic.ts#L634-L709)
-adds a different layer: a first-system-block Claude Code version fingerprint and
-a `cch` checksum over exact serialized UTF-8 bytes, patched immediately before
-OAuth fetch. Its nearby client code also uses Claude Code/JavaScript runtime
-identity headers and prefixes custom tool names. Those are not OAuth exchange or
-refresh operations, and that third-party implementation is not evidence that the
-provider requires them for Nanocodex.
+- Claude Code `2.1.280` / SDK `0.112.1` fingerprint headers and ordered OAuth utility/agent betas; `PI_AI_CLAUDE_CODE_VERSION` or explicit public version overrides the fallback.
+- First-system-block billing fingerprint: SHA256 with OMP's salt and JavaScript UTF-16 indices 4/7/20 from the first user text. The following public identity block carries the selected cache policy.
+- Exact OMP `cch`: XXHash64 with seed `0x4d659218e32a3268`, low 20 bits, anchored to system[0] and patched over the final serialized UTF-8 bytes. Literal markers in caller content are not changed.
+- OMP's account-scoped device hash and JSON-string `metadata.user_id`, with stable session affinity and preservation of supported caller metadata IDs. Custom tool names acquire one wire-only `_`; the four pinned native names are exempt and local tool names stay unchanged.
 
-Nanocodex does not manufacture a Claude Code version/runtime identity or add that
-billing checksum. The public transport journey checks unchanged wire bytes and
-caller content, including Unicode and literal billing-marker text. Consequently,
-OMP wire parity is **not** claimed. If a live admission check establishes an
-additional protocol requirement, implement it in the shared native client before
-request freezing, reconcile durable request identity and test the actual managed
-outbound bytes; do not bolt a body rewriter onto managed egress.
+Managed execution binds installation identity to the owning account, with stable session IDs across DO reopens. It does not invent an Anthropic account UUID. SDK embedders may supply public `subscriptionIdentity` (installation/account/session affinity is not a credential). Without an explicit installation ID, native callers use the stable backend session ID.
+
+The public wire profile (version, installation, platform and session affinity) is frozen in the admitted cursor. Reopening under changed client defaults keeps that profile; only new operations use the new defaults. The final attested bytes, including metadata and tool mapping, become the durable model effect identity **before** HTTP. A bounded 401 credential refresh resends identical bytes. Private egress only adds authorization and forwards the public fingerprint; it never computes a checksum or rewrites the body. API-key/non-profile behavior is unchanged. Completed receipts still replay without HTTP. Old cursors without a wire profile retain legacy request/effect encoding rather than silently adopting OMP transformations. Any irreconcilable recorded identity still fails closed; no external effect is replaced under a new identity.
+
+This copies the subscription wire helpers, not OMP's entire model registry, prompt-cache placement policy, TLS stack or automatic version-adoption/retry engine. In particular, a server-requested version change cannot mutate an already frozen durable operation. Nanocodex retains its own bounded refresh/recovery rules. The pinned independent oracle requires Bun >=1.4; Bun 1.2.4 gives a different seeded checksum and is not a valid OMP runtime for this comparison.
+
+Synthetic public-HTTP and actual WASM/managed restart tests establish protocol behavior, **not** new live-provider admission, subscription billing or production deployment. The earlier live admission evidence used the previous profile and does not prove this new profile has been accepted live.
 
 ## Deployment and acceptance
 
