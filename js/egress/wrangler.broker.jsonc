@@ -7,6 +7,7 @@
   "alias": {
     "node-rsa": "../nanocodex/tools/browser/unsupportedNodeRsa.mjs"
   },
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm", "nanocodex/wasm"], "fallthrough": true }],
   "workers_dev": false,
   "minify": true,
   "upload_source_maps": true,

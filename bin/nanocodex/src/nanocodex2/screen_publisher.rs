@@ -3,8 +3,8 @@ use super::observation_providers::{Context, Registry};
 use super::screen_video::VideoSource;
 use futures_util::future::BoxFuture;
 use nanocodex_managed::ManagedError;
+use nanocodex_oai_tools::attachment::{AttachmentMachine, AttachmentTarget};
 use nanocodex_remote::{runtime, target::PublisherTarget};
-use nanocodex_tools::attachment::{AttachmentMachine, AttachmentTarget};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 

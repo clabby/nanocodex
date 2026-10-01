@@ -13,14 +13,14 @@ use nanocodex_oai_api::{
         ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
     },
 };
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolOutput, runtime::DynamicToolProvider,
 };
 use tower::Service;
 
 struct PanickingProvider;
 
-#[nanocodex_tools::contract::async_trait]
+#[nanocodex_oai_tools::contract::async_trait]
 impl DynamicToolProvider for PanickingProvider {
     fn start(&self) {}
 

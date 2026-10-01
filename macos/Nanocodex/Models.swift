@@ -1,7 +1,6 @@
 import Foundation
 import InboxCore
 import NanocodexUI
-import InboxCore
 
 indirect enum JSONValue: Codable, Equatable, Sendable {
     case object([String: JSONValue]), array([JSONValue]), string(String), number(Double), bool(Bool), null
@@ -56,19 +55,19 @@ indirect enum JSONValue: Codable, Equatable, Sendable {
 }
 
 struct AgentSettings: Codable, Equatable, Sendable {
-    var model = "gpt-6.1-sol"
+    // Empty until the authenticated account catalog supplies a default.
+    var model = ""
     var thinking = "low"
     var reasoning_mode = "standard"
     var fast_mode = false
-    var modelName: String { ["gpt-6-astra": "Astra", "gpt-6.1-sol": "Sol", "gpt-6-luna": "Luna"][model] ?? model }
-    var supportsProReasoning: Bool { model != "gpt-6-astra" }
-    var supportsNoReasoning: Bool { model == "gpt-6-luna" }
+    var modelName: String { ModelChoice.find(model)?.name ?? (model.isEmpty ? "Choose model" : model) }
 
-    /// Normalize only an explicit model change; retained settings keep their values.
-    mutating func selectModel(_ value: String) {
-        model = value
-        if !supportsNoReasoning && thinking == "none" { thinking = model == "gpt-6-astra" ? "high" : "low" }
-        if !supportsProReasoning && reasoning_mode == "pro" { reasoning_mode = "standard" }
+    /// Capabilities come from the authenticated catalog, not provider-name heuristics.
+    mutating func selectModel(_ choice: ModelChoice) {
+        model = choice.id
+        if !choice.efforts.contains(thinking) { thinking = choice.efforts.first ?? "low" }
+        if !choice.reasoningModes.contains(reasoning_mode) { reasoning_mode = choice.reasoningModes.first ?? "standard" }
+        if !choice.fastMode { fast_mode = false }
     }
 }
 struct AgentThread: Codable, Identifiable, Equatable, Sendable {

@@ -1,6 +1,6 @@
 use super::VmToolClient;
 use nanocodex_computer::ComputerExecutor;
-use nanocodex_tools::{ToolContext, ToolResult};
+use nanocodex_oai_tools::{ToolContext, ToolResult};
 use std::sync::Arc;
 
 pub(super) struct ComputerProxy(pub(super) Arc<dyn VmToolClient>);

@@ -56,9 +56,11 @@ use nanocodex_voice_protocol::{
 };
 
 mod claude;
+mod claude_subscription;
 mod transport;
 
 pub use claude::WasmNanoclaude;
+pub use claude_subscription::WasmClaudeSubscription;
 
 use transport::JavaScriptResponsesHost;
 

@@ -7,7 +7,7 @@ use serde::{
 };
 use serde_json::{Value, value::RawValue};
 
-use crate::{ManagedError, client::validate_id};
+use crate::{ManagedError, ManagedModel, client::validate_id};
 
 /// User input accepted by a managed turn or live steer operation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -348,6 +348,8 @@ pub enum RouteProvider {
     Openrouter,
     /// Vercel AI Gateway.
     Vercel,
+    /// Claude subscription transport.
+    Claude,
 }
 impl RouteProvider {
     /// Human-readable transport label, independent of the model family.
@@ -358,6 +360,7 @@ impl RouteProvider {
             Self::WorkersAi => "Workers AI",
             Self::Openrouter => "OpenRouter",
             Self::Vercel => "Vercel",
+            Self::Claude => "Claude",
         }
     }
 }
@@ -368,8 +371,7 @@ pub struct ModelRoute {
     /// Actual transport selected for this conversation.
     pub backend: RouteProvider,
     /// Canonical model selected by the router.
-    #[serde(with = "model_serde")]
-    pub model: Model,
+    pub model: ManagedModel,
     /// Reasoning effort selected for this conversation.
     pub thinking: Thinking,
 }
@@ -403,8 +405,7 @@ pub struct AutoRoutingStatus {
 #[serde(deny_unknown_fields)]
 pub struct AgentSettings {
     /// Hosted model selected for this agent.
-    #[serde(with = "model_serde")]
-    pub model: Model,
+    pub model: ManagedModel,
     /// Requested reasoning effort.
     pub thinking: Thinking,
     /// Requested reasoning execution mode.
@@ -417,7 +418,7 @@ pub struct AgentSettings {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
-            model: Model::default(),
+            model: Model::default().into(),
             thinking: Thinking::default(),
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
@@ -426,10 +427,28 @@ impl Default for AgentSettings {
 }
 
 impl AgentSettings {
+    /// Creates a standard, non-fast policy with the model's default effort.
+    ///
+    /// Accepts native Responses models through `Into`, as well as managed
+    /// Claude identities. Explicit struct literals using a native model should
+    /// convert the field with `.into()`.
+    #[must_use]
+    pub fn new(model: impl Into<ManagedModel>) -> Self {
+        let model = model.into();
+        Self {
+            model,
+            thinking: model.default_thinking(),
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+        }
+    }
+
     pub(crate) fn validate(self) -> Result<Self, ManagedError> {
         if !self.model.supports_thinking(self.thinking) {
             return Err(ManagedError::Configuration(
-                (if self.model == Model::Glm53 {
+                (if self.model.oai().is_none() {
+                    "Claude requires low, medium, or high reasoning effort"
+                } else if self.model == Model::Glm53 {
                     "GLM-5.3 requires low, medium, or high reasoning effort"
                 } else if self.model == Model::Sol {
                     "GPT-6.1 Sol requires low, medium, high, xhigh, or max reasoning effort"
@@ -441,12 +460,19 @@ impl AgentSettings {
         }
         if !self.model.supports_reasoning_mode(self.reasoning_mode) {
             return Err(ManagedError::Configuration(
-                (if self.model == Model::Glm53 {
+                (if self.model.oai().is_none() {
+                    "Claude does not support pro reasoning mode"
+                } else if self.model == Model::Glm53 {
                     "GLM-5.3 does not support pro reasoning mode"
                 } else {
                     "GPT-6 Astra does not support pro reasoning mode"
                 })
                 .to_owned(),
+            ));
+        }
+        if self.fast_mode && !self.model.supports_fast_mode() {
+            return Err(ManagedError::Configuration(
+                "Selected model does not support fast mode".to_owned(),
             ));
         }
         Ok(self)
@@ -455,13 +481,14 @@ impl AgentSettings {
     pub(crate) const fn is_valid(&self) -> bool {
         self.model.supports_thinking(self.thinking)
             && self.model.supports_reasoning_mode(self.reasoning_mode)
+            && (!self.fast_mode || self.model.supports_fast_mode())
     }
 }
 
 #[derive(Default, Serialize)]
 pub(crate) struct AgentSettingsPatch {
     #[serde(skip_serializing_if = "Option::is_none", with = "optional_model_serde")]
-    pub(crate) model: Option<Model>,
+    pub(crate) model: Option<ManagedModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) thinking: Option<Thinking>,
     #[serde(
@@ -491,10 +518,13 @@ pub(crate) struct AgentSettingsResponse {
 }
 
 mod optional_model_serde {
-    use nanocodex_oai_api::Model;
+    use crate::ManagedModel;
     use serde::Serializer;
 
-    pub(super) fn serialize<S>(model: &Option<Model>, serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(
+        model: &Option<ManagedModel>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -521,41 +551,6 @@ mod optional_reasoning_mode_serde {
             mode.expect("skipped optional reasoning mode must be present")
                 .as_str(),
         )
-    }
-}
-
-mod model_serde {
-    use nanocodex_oai_api::Model;
-    use serde::{Deserialize, Deserializer, Serializer, de};
-
-    pub(super) fn serialize<S>(model: &Model, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(model.as_str())
-    }
-
-    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Model, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match String::deserialize(deserializer)?.as_str() {
-            "gpt-6.1-sol" => Ok(Model::Sol),
-            "gpt-6-luna" => Ok(Model::Luna),
-            "gpt-6-astra" => Ok(Model::Astra),
-            "@cf/zai-org/glm-5.3" => Ok(Model::Glm53),
-            "kimi-k3" => Ok(Model::Kimi),
-            "mimo-v2.6-pro" => Ok(Model::Mimo),
-            value => Err(de::Error::unknown_variant(
-                value,
-                &[
-                    "gpt-6.1-sol",
-                    "gpt-6-luna",
-                    "gpt-6-astra",
-                    "@cf/zai-org/glm-5.3",
-                ],
-            )),
-        }
     }
 }
 
@@ -799,7 +794,7 @@ mod settings_tests {
     #[test]
     fn glm53_settings_round_trip_with_canonical_identity() {
         let settings = AgentSettings {
-            model: Model::Glm53,
+            model: Model::Glm53.into(),
             thinking: Thinking::Medium,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
@@ -845,7 +840,7 @@ mod settings_tests {
         }
         assert_eq!(
             serde_json::to_value(AgentSettingsPatch {
-                model: Some(Model::Astra),
+                model: Some(Model::Astra.into()),
                 ..AgentSettingsPatch::default()
             })
             .expect("settings patch should serialize"),
@@ -856,7 +851,7 @@ mod settings_tests {
     #[test]
     fn astra_settings_reject_none_reasoning_before_transport() {
         let error = AgentSettings {
-            model: Model::Astra,
+            model: Model::Astra.into(),
             thinking: Thinking::None,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
@@ -870,7 +865,7 @@ mod settings_tests {
     #[test]
     fn astra_settings_reject_pro_reasoning_before_transport() {
         let error = AgentSettings {
-            model: Model::Astra,
+            model: Model::Astra.into(),
             thinking: Thinking::Max,
             reasoning_mode: ReasoningMode::Pro,
             fast_mode: false,

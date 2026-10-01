@@ -418,6 +418,10 @@ impl Terminal {
             })
             .unwrap();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_nanocodex2"));
+        command.env_clear();
+        command.env("PATH", std::env::var_os("PATH").unwrap_or_default());
+        command.env("HOME", workspace.path());
+        command.env("NANOCODEX_HOME", workspace.path().join(".nanocodex"));
         if attach {
             command.args(["attach", AGENT]);
         }
@@ -926,7 +930,13 @@ impl Fixture {
         .await;
         fixture
             .terminal
-            .wait_text(if active { "Enter steer" } else { "actions" })
+            .wait_text(if active {
+                "Enter steer"
+            } else if attach {
+                "Enter send"
+            } else {
+                "actions"
+            })
             .await;
         fixture
     }
@@ -986,6 +996,16 @@ impl Fixture {
         let routing_requests = Arc::new(Mutex::new(Vec::new()));
         let model_route = Arc::new(Mutex::new(None));
         let app = Router::new()
+            .route("/v1/models", get(|headers: axum::http::HeaderMap| async move {
+                let authorization = format!("Bearer ncx_live_{}_{}", "a".repeat(12), "b".repeat(43));
+                assert_eq!(headers.get("authorization").and_then(|value| value.to_str().ok()), Some(authorization.as_str()));
+                Json(json!({
+                    "object": "list", "default_model": "gpt-6-astra",
+                    "data": [{"id": "gpt-6-astra", "name": "Astra", "provider": "openai",
+                        "thinking": ["low"],
+                        "fast_mode": false, "reasoning_modes": ["standard"]}]
+                }))
+            }))
             .route("/v1/credentials", get(vault_metadata))
             .route("/v1/credentials/vault/login/{id}/origin", put(approve_vault_origin))
             .route("/v1/account/hands/screens", get(|| async { Json(json!({"surfaces": [{"id":"desktop","machine_id":"screen-test-hand","machine_name":"SCREEN_TEST_HAND","name":"Desktop","generation":"screen-generation","width":32,"height":18,"transport":"frames-v1"}]})) }))

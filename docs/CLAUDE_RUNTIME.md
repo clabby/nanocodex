@@ -2,6 +2,43 @@
 
 `nanocodex-claude` implements a separate Messages-based backend behind the common `nanocodex-agent` lifecycle. Tool registration is explicit; it never imports the OpenAI tool catalog or Claude Code credentials. Embeddings supply authentication and host-authorized capabilities.
 
+## Tool crate migration
+
+The former `nanocodex-tools` monolith is split by provider. Claude integrations
+must depend on `nanocodex-claude-tools`, not `nanocodex-oai-tools` (the renamed
+OpenAI runtime). Enable `nanocodex-claude`'s `tools` feature; `workspace-files`
+remains an alias for existing callers. Imports now use the clean modules
+`bash`, `host`, `notebook`, `tasks`, `web`, and `workspace_files`, with primary
+adapter and capability types also exported at the crate root. For example,
+`nanocodex_tools::claude_host::ClaudeHost` becomes
+`nanocodex_claude_tools::host::ClaudeHost` and
+`nanocodex_tools::ClaudeWorkspaceFiles` becomes
+`nanocodex_claude_tools::ClaudeWorkspaceFiles`.
+
+The standalone tools crate has no OpenAI API/tools or agent dependency.
+`HostContext` carries the actual model, session, turn, call and output budget,
+without a Responses history. Host outputs use native text/image blocks,
+`is_error`, and optional structured data/metadata; `ClaudeBuilder::host_tools`
+encodes these directly as Claude results. Hosts must migrate their old shared
+`ToolContext`/Responses content DTOs instead of passing `input_*` wire items.
+Unsupported media produces an explicit error, never a silently truncated block.
+Portable capability contracts, tasks, Bash and web adapters are available on
+WASM; filesystem/notebook execution and the builder's native adapters remain
+native-target-only.
+
+`ClaudeMcp` intentionally requires a caller implementation of
+`ClaudeMcpProvider`, returning `McpToolDefinition` schemas and native
+`ToolOutput` results. The old OpenAI `DynamicToolProvider` bridge is not retained
+as an alias or wrapper. The embedding may reuse its own authorized MCP service,
+but it owns connections, OAuth, discovery, validation, capture limits and
+lifecycle. Read `definitions()` at each request boundary; schema changes and
+removals are live, duplicate/non-MCP/malformed entries fail closed, and racing
+removals or provider errors remain failures. Result blocks, structured data and
+metadata survive adapter dispatch. This interface does not automatically wire
+a dynamic MCP catalog into `ClaudeBuilder` or implement MCP resources/waiting.
+The split establishes package and protocol boundaries, not production host
+wiring, lifecycle equivalence or full Claude Code parity.
+
 ## Shared durability
 
 Enable the `claude` feature of `nanocodex-durability`, import `DurableAgentExt`, and attach the same `DurableSession` with `.durability(state).await?.build()?`. The [Claude adapter](../crates/nanocodex-durability/src/claude.rs) uses the existing store, owner fencing, operation admission, continuation, effect receipt and terminal-result machinery. Without this attachment, the builder remains an in-memory agent. See the [durability setup](../crates/nanocodex-durability/README.md) for construction and store selection.
@@ -52,12 +89,14 @@ Bash requires an injected sandbox executor; web tools require explicit provider/
 
 The [SQLite integration suite](../crates/nanocodex-durability/tests/claude.rs) runs the public builder and localhost Messages/SSE journey through real store reopen. Its fault matrix learns the write boundaries of a model/tool/automatic-compaction operation, then fails every observed write both before commit and after commit with a lost acknowledgement. It checks frozen request configuration, terminal replay, committed-effect reuse and task-board reconstruction, while allowing an uncommitted external effect to run again. Other scenarios cover signed compaction suffixes, discovery/container recovery, sticky interruption notices, detached clients, owner fencing, cancellation during recovery, missing task boards and aborted admission/compaction callers.
 
-Reproduce that coverage with `cargo test -p nanocodex-durability --features claude,sqlite --test claude`. The separate [host adapter tests](../crates/nanocodex-tools/src/claude_host_tests.rs) cover pending questions, host-owned background task identity/stop, denied or unsupported input, and dynamic MCP schema/error preservation. The [builder-level host integration tests](../crates/nanocodex-claude/tests/host_tools.rs) also exercise real Messages continuations: answers stay pending until the host responds, host failures remain error results, structured results and metadata survive on tool events, image output becomes Claude image content, and unsupported audio returns an explicit error. These synthetic journeys establish boundary behavior, not a deployed product's host services or live provider parity.
+Reproduce that coverage with `cargo test -p nanocodex-durability --features claude,sqlite --test claude`. The separate [host adapter tests](../crates/nanocodex-claude-tools/src/host_tests.rs) cover pending questions, host-owned background task identity/stop, and denied or unsupported input. The [native caller MCP journey](../crates/nanocodex-claude/tests/mcp_native.rs) uses actual loopback JSON-RPC HTTP to exercise intact input/context, live schema refresh/removal, error status, structured results, metadata and ordered media. The caller owns discovery/transport; this does not establish automatic dynamic-catalog wiring into the builder or full MCP transport parity. The [builder-level host integration tests](../crates/nanocodex-claude/tests/host_tools.rs) also exercise real Messages continuations: answers stay pending until the host responds, host failures remain error results, structured results and metadata survive on tool events, image output becomes Claude image content, and unsupported audio returns an explicit error. These synthetic journeys establish boundary behavior, not a deployed product's host services or live provider parity.
 
-The Claude backend and shared durability adapter compile for `wasm32-unknown-unknown`; provider streaming, auth futures and clock handling have WASM paths. The additive [JavaScript API](CLAUDE_JAVASCRIPT.md) exposes explicit host-owned authentication and tools through a separate `Nanoclaude` WASM handle while reusing the common JS lifecycle and shared durability store. It does not switch managed agents to Claude, create a subscription sign-in UI, or install native host capabilities. Browser Claude runs in the current isolate rather than silently creating the Codex module Worker. Actual synthetic WASM execution evidence is recorded separately from compilation and prior live native subscription measurements.
+The [canonical tools-feature checkpoint regression](../crates/nanocodex-claude/tests/tools_checkpoint.rs) runs with `cargo test -p nanocodex-claude --no-default-features --features tools --test tools_checkpoint`. It writes a provider-native task checkpoint to a temporary file through a synthetic host execution policy and reopens a fresh board/builder, continuing through actual Messages/SSE TaskGet and TaskCreate calls to check task content, next-ID watermark and sequential durable dispatch. Synthetic request/checkpoint transcripts are written to local ignored evidence. It does not depend on activating the `workspace-files` alias and does not replace the SQLite store/fencing integration suite.
+
+The Claude backend and shared durability adapter compile for `wasm32-unknown-unknown`; provider streaming, auth futures and clock handling have WASM paths. The additive [JavaScript API](CLAUDE_JAVASCRIPT.md) exposes explicit host-owned authentication and tools through a separate `Nanoclaude` WASM handle while reusing the common JS lifecycle and shared durability store. The standalone SDK does not switch existing managed agents or install ambient host capabilities. The [managed integration](CLAUDE_MANAGED.md) adds a separate private account connection, native tool catalog and subscription-backed routing. Browser Claude runs in the current isolate rather than silently creating the Codex module Worker. Actual synthetic WASM execution evidence is recorded separately from compilation and prior live native subscription measurements.
 
 The fallback estimate after an unknown/invalid response includes packed messages, system context and the tool catalog from the frozen request template until the next successful usage anchor. Invalid-response evidence is capped at 64 KiB with a truncation/unknown-effects marker; valid completed boundaries remain intact. Live interactive Claude Code measurements remain separate and do not establish every CLI tool, model, or exact prompt/compaction parity.
 
-The Rust subscription manager supplies PKCE login, callback validation, persisted token exchange/refresh and account continuity through a host-owned private secret store and HTTP capability. Its defaults follow measured Claude Code 2.1.283 behavior. OAuth state is separate from agent checkpoints; the authenticated client is reattached on reopen. A composed SQLite journey covers login, tools, compaction, refresh, restart and logout. Live native subscription admission was verified with the observed public compatibility profile, including tool use, cache hits, compaction and recall after a real SQLite reopen. Fresh native PKCE authorization/refresh, billing and product sign-in UI remain unverified. See [authentication setup and measured protocol](claude-authentication.md).
+The Rust subscription manager supplies PKCE login, callback validation, persisted token exchange/refresh and account continuity through a host-owned private secret store and HTTP capability. Its defaults follow measured Claude Code 2.1.283 behavior. OAuth state is separate from agent checkpoints; the authenticated client is reattached on reopen. A composed SQLite journey covers login, tools, compaction, refresh, restart and logout. Live native subscription admission was verified with the observed public compatibility profile, including tool use, cache hits, compaction and recall after a real SQLite reopen. A separate fresh native PKCE authorization and deliberately triggered real refresh also completed provider inference. Natural expiry, managed live admission and billing remain separate acceptance boundaries. See [authentication setup and measured protocol](claude-authentication.md).
 
-Remaining gaps include complete host service wiring, background Bash/PTY sessions, multimodal/PDF Read, skill and MCP-resource surfaces, account scheduling/workflows, paged transcript storage, and managed product/provider integration above. See [the tool matrix](CLAUDE_TOOL_MATRIX.md) for individual capabilities and [interactive compaction measurements](research/nanoclaude-auto-compaction-measured.md) for the observed reference behavior. No full Claude Code parity is claimed.
+Remaining gaps include complete host service wiring, background Bash/PTY sessions, multimodal/PDF Read, skill and MCP-resource surfaces, account scheduling/workflows, paged transcript storage, and the explicitly unsupported managed operations described in the [managed guide](CLAUDE_MANAGED.md). See [the tool matrix](CLAUDE_TOOL_MATRIX.md) for individual capabilities and [interactive compaction measurements](research/nanoclaude-auto-compaction-measured.md) for the observed reference behavior. No full Claude Code parity is claimed.

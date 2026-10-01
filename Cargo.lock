@@ -5700,11 +5700,12 @@ dependencies = [
  "axum",
  "nanocodex-agent",
  "nanocodex-claude",
+ "nanocodex-claude-tools",
  "nanocodex-durability",
  "nanocodex-managed",
  "nanocodex-oai-api",
+ "nanocodex-oai-tools",
  "nanocodex-observability",
- "nanocodex-tools",
  "reqwest",
  "rustls",
  "serde_json",
@@ -5722,7 +5723,7 @@ dependencies = [
  "futures-util",
  "iana-time-zone",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "reqwest",
  "serde",
  "serde_json",
@@ -5775,9 +5776,9 @@ dependencies = [
  "nanocodex-egress",
  "nanocodex-eval",
  "nanocodex-eval-adapters",
+ "nanocodex-oai-tools",
  "nanocodex-observability",
  "nanocodex-subagents",
- "nanocodex-tools",
  "nanocodex-tui-control",
  "nanocodex-vm",
  "nanocodex-voice",
@@ -5830,7 +5831,7 @@ dependencies = [
  "futures-util",
  "image",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "nanocodex-vm",
  "percent-encoding",
  "reflink-copy",
@@ -5859,7 +5860,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "nanocodex-agent",
- "nanocodex-tools",
+ "nanocodex-claude-tools",
  "reqwest",
  "rustls",
  "serde",
@@ -5872,6 +5873,18 @@ dependencies = [
  "uuid",
  "wasm-bindgen-futures",
  "web-time",
+]
+
+[[package]]
+name = "nanocodex-claude-tools"
+version = "0.6.6"
+dependencies = [
+ "regex",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -5919,8 +5932,9 @@ dependencies = [
  "futures-util",
  "nanocodex-agent",
  "nanocodex-claude",
+ "nanocodex-claude-tools",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "reqwest",
  "rusqlite",
  "rustls",
@@ -5975,7 +5989,7 @@ dependencies = [
  "jiff",
  "nanocodex-agent",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "nanocodex-vm",
  "nix 0.31.3",
  "reqwest",
@@ -6098,7 +6112,7 @@ dependencies = [
  "futures-util",
  "nanocodex-agent",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "nanocodex-voice-protocol",
  "reqwest",
  "rustls",
@@ -6150,6 +6164,55 @@ dependencies = [
  "uuid",
  "web-time",
  "webrtc",
+]
+
+[[package]]
+name = "nanocodex-oai-tools"
+version = "0.6.6"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bm25",
+ "criterion",
+ "eyre",
+ "futures-util",
+ "getrandom 0.4.3",
+ "http",
+ "image",
+ "nanocodex-oai-api",
+ "nanocodex-oai-tools-macros",
+ "nix 0.31.3",
+ "oauth2",
+ "portable-pty",
+ "regex",
+ "reqwest",
+ "rmcp",
+ "rquickjs",
+ "rustix 1.1.4",
+ "rustls",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "nanocodex-oai-tools-macros"
+version = "0.6.6"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -6228,7 +6291,7 @@ dependencies = [
  "jsonschema",
  "nanocodex-agent",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "serde",
  "serde_json",
  "tokio",
@@ -6237,55 +6300,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
-]
-
-[[package]]
-name = "nanocodex-tools"
-version = "0.6.6"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bm25",
- "criterion",
- "eyre",
- "futures-util",
- "getrandom 0.4.3",
- "http",
- "image",
- "nanocodex-oai-api",
- "nanocodex-tools-macros",
- "nix 0.31.3",
- "oauth2",
- "portable-pty",
- "regex",
- "reqwest",
- "rmcp",
- "rquickjs",
- "rustix 1.1.4",
- "rustls",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "sha1 0.11.0",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "nanocodex-tools-macros"
-version = "0.6.6"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -6320,7 +6334,7 @@ dependencies = [
  "libkrun",
  "nanocodex-computer",
  "nanocodex-hand",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "nix 0.31.3",
  "oci-client",
  "reflink-copy",
@@ -6434,10 +6448,10 @@ dependencies = [
  "nanocodex-computer",
  "nanocodex-hand",
  "nanocodex-managed",
+ "nanocodex-oai-tools",
  "nanocodex-observability",
  "nanocodex-remote",
  "nanocodex-subagents",
- "nanocodex-tools",
  "nanocodex-tui-control",
  "nanocodex-vm",
  "nanocodex-voice-native",

@@ -51,7 +51,7 @@ test('real Docker contexts have stable recipes and reconstruct their external ta
         writeFileSync(source, `${original}\n// Recipe cache source-edit probe.\n`);
         assert.equal(prepare(directory), baseline, 'editing an existing Rust source preserves the dependency layer');
         writeFileSync(source, original);
-        const asset = join(directory, 'crates/nanocodex-tools/src/code_mode/bootstrap.js');
+        const asset = join(directory, 'crates/nanocodex-oai-tools/src/code_mode/bootstrap.js');
         const assetOriginal = readFileSync(asset, 'utf8');
         writeFileSync(asset, `${assetOriginal}\n// Embedded-asset probe.\n`);
         assert.equal(prepare(directory), baseline, 'embedded assets belong to the final source layer');
@@ -94,12 +94,12 @@ test('real Docker contexts have stable recipes and reconstruct their external ta
     }
     // Overlay real sources exactly as Docker COPY does; entrypoints and embedded
     // assets must replace/augment the dummies before application compilation.
-    for (const path of ['bin/nanocodex/src/nanocodex2/main.rs', 'examples/phone_voice.rs', 'crates/nanocodex-tools/src/code_mode/bootstrap.js', 'third_party/codex-voice/webrtc-host/build.rs']) {
+    for (const path of ['bin/nanocodex/src/nanocodex2/main.rs', 'examples/phone_voice.rs', 'crates/nanocodex-oai-tools/src/code_mode/bootstrap.js', 'third_party/codex-voice/webrtc-host/build.rs']) {
       assert.ok(existsSync(join(managed, path)));
     }
     cpSync(managed, skeleton, { recursive: true });
     assert.equal(readFileSync(join(skeleton, 'examples/phone_voice.rs'), 'utf8'), readFileSync(join(root, 'examples/phone_voice.rs'), 'utf8'));
-    assert.equal(readFileSync(join(skeleton, 'crates/nanocodex-tools/src/code_mode/bootstrap.js'), 'utf8'), readFileSync(join(root, 'crates/nanocodex-tools/src/code_mode/bootstrap.js'), 'utf8'));
+    assert.equal(readFileSync(join(skeleton, 'crates/nanocodex-oai-tools/src/code_mode/bootstrap.js'), 'utf8'), readFileSync(join(root, 'crates/nanocodex-oai-tools/src/code_mode/bootstrap.js'), 'utf8'));
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }

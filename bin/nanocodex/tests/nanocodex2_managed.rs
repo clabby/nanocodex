@@ -29,7 +29,8 @@ const PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[tokio::test]
 async fn hand_help_exposes_the_vm_and_machine_contract() {
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+    let home = tempfile::tempdir().unwrap();
+    let output = fixture_command(home.path())
         .env("NANOCODEX_DISABLE_HAND", "1")
         .args(["hand", "--help"])
         .output()
@@ -68,6 +69,7 @@ async fn hand_help_exposes_the_vm_and_machine_contract() {
 
 #[tokio::test]
 async fn hand_rejects_mixed_options_and_removed_native_command() {
+    let home = tempfile::tempdir().unwrap();
     for args in [
         vec!["native-hand", "--workspace", "."],
         vec!["hand", "--docker", "image"],
@@ -112,7 +114,7 @@ async fn hand_rejects_mixed_options_and_removed_native_command() {
             "--vm-no-network",
         ],
     ] {
-        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+        let output = fixture_command(home.path())
             .env("NANOCODEX_DISABLE_HAND", "1")
             .args(&args)
             .env_remove("NANOCODEX_VM_GUEST_RUNTIME")
@@ -131,7 +133,8 @@ async fn hand_rejects_mixed_options_and_removed_native_command() {
 
 #[tokio::test]
 async fn host_help_exposes_the_bounded_vm_pool_contract() {
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+    let home = tempfile::tempdir().unwrap();
+    let output = fixture_command(home.path())
         .env("NANOCODEX_DISABLE_HAND", "1")
         .args(["host", "--help"])
         .output()
@@ -181,7 +184,7 @@ async fn hand_json_tracing_exposes_resources_without_paths_or_credentials() {
     let api_key = format!("ncx_live_{}_{}", "7".repeat(12), "8".repeat(43));
     let root_parent = tempfile::tempdir().unwrap();
     let missing_root = root_parent.path().join("private-root-sentinel.ext4");
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+    let output = fixture_command(root_parent.path())
         .env("NANOCODEX_DISABLE_HAND", "1")
         .args([
             "hand",
@@ -198,7 +201,7 @@ async fn hand_json_tracing_exposes_resources_without_paths_or_credentials() {
             "--log-format",
             "json",
             "--log-filter",
-            "warn,nanocodex2=info,nanocodex_tools::attachment=info",
+            "warn,nanocodex2=info,nanocodex_oai_tools::attachment=info",
         ])
         .env("NANOCODEX_MANAGED_URL", "http://127.0.0.1:9")
         .env("NC_API_KEY", &api_key)
@@ -247,11 +250,12 @@ async fn hand_json_tracing_exposes_resources_without_paths_or_credentials() {
 ))]
 #[tokio::test]
 async fn vm_child_entrypoint_does_not_require_managed_credentials() {
+    let home = tempfile::tempdir().unwrap();
     let missing = tempfile::tempdir()
         .unwrap()
         .path()
         .join("missing-launch-record");
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+    let output = fixture_command(home.path())
         .env("NANOCODEX_DISABLE_HAND", "1")
         .args(["__vm-run-config", "--config"])
         .arg(missing)
@@ -291,7 +295,10 @@ async fn run_flushes_each_assistant_delta_before_completion() {
 
     let next = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::clone(&next);
-    let app = Router::new().route("/v1/agents/live", get(move |upgrade: WebSocketUpgrade| {
+    let app = Router::new()
+        .route("/v1/models", fixture_catalog(format!("Bearer ncx_live_{}_{}", "a".repeat(12), "b".repeat(43))))
+        .route("/v1/agents/live", get(move |Query(query): Query<HashMap<String, String>>, upgrade: WebSocketUpgrade| {
+        assert_catalog_creation_query(&query);
         let gate = Arc::clone(&gate);
         async move {
             upgrade.on_upgrade(move |mut socket| async move {
@@ -320,7 +327,7 @@ async fn run_flushes_each_assistant_delta_before_completion() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let workspace = tempfile::tempdir().unwrap();
     let (config_home, decoy) = configure_workspace(workspace.path());
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+    let mut child = fixture_command(config_home.path())
         .env("NANOCODEX_DISABLE_HAND", "1")
         .args([
             "run",
@@ -409,6 +416,7 @@ async fn run_workspace_lifecycle(pinned: bool) {
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
+        .route("/v1/models", fixture_catalog(state.authorization.clone()))
         .route(
             "/v1/agents",
             post(
@@ -448,7 +456,7 @@ async fn run_workspace_lifecycle(pinned: bool) {
     let (config_home, decoy) = configure_workspace(workspace.path());
     let output = tokio::time::timeout(
         PROCESS_TIMEOUT,
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+        fixture_command(config_home.path())
             .env("NANOCODEX_DISABLE_HAND", "1")
             .args([
                 "run",
@@ -548,6 +556,7 @@ async fn run_rejects_a_malformed_create_live_ready_frame() {
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
+        .route("/v1/models", fixture_catalog(state.authorization.clone()))
         .route("/v1/agents/live", get(failed_create_live_socket))
         .with_state(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -556,7 +565,7 @@ async fn run_rejects_a_malformed_create_live_ready_frame() {
 
     let output = tokio::time::timeout(
         PROCESS_TIMEOUT,
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+        fixture_command(config_home.path())
             .env("NANOCODEX_DISABLE_HAND", "1")
             .args(["run", "this turn must not submit"])
             .env("NANOCODEX_COMPUTER", "off")
@@ -601,6 +610,7 @@ async fn run_keeps_the_durable_agent_when_local_tools_are_initially_unavailable(
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
+        .route("/v1/models", fixture_catalog(state.authorization.clone()))
         .route("/v1/agents/live", get(create_live_socket))
         .route("/v1/agents/{agent}", get(agent_state))
         .route("/v1/agents/{agent}/tool-host", get(tool_host))
@@ -614,7 +624,7 @@ async fn run_keeps_the_durable_agent_when_local_tools_are_initially_unavailable(
 
     let output = tokio::time::timeout(
         PROCESS_TIMEOUT,
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+        fixture_command(config_home.path())
             .env("NANOCODEX_DISABLE_HAND", "1")
             .args([
                 "run",
@@ -673,6 +683,7 @@ async fn run_reconnects_the_same_local_host_after_a_ready_socket_disconnect() {
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
+        .route("/v1/models", fixture_catalog(state.authorization.clone()))
         .route("/v1/agents/live", get(create_live_socket))
         .route("/v1/agents/{agent}", get(agent_state))
         .route("/v1/agents/{agent}/tool-host", get(tool_host))
@@ -686,7 +697,7 @@ async fn run_reconnects_the_same_local_host_after_a_ready_socket_disconnect() {
 
     let output = tokio::time::timeout(
         PROCESS_TIMEOUT,
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+        fixture_command(config_home.path())
             .env("NANOCODEX_DISABLE_HAND", "1")
             .args([
                 "run",
@@ -747,6 +758,7 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
         tool_completed: Arc::new(tokio::sync::Notify::new()),
     };
     let app = Router::new()
+        .route("/v1/models", fixture_catalog(state.authorization.clone()))
         .route("/v1/agents/live", get(durable_create_live_socket))
         .route("/v1/agents/{agent}", get(durable_agent_state))
         .route("/v1/agents/{agent}/tool-host", get(durable_tool_host))
@@ -773,7 +785,7 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
 
     let first = tokio::time::timeout(
         PROCESS_TIMEOUT,
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+        fixture_command(config_home.path())
             .env("NANOCODEX_DISABLE_HAND", "1")
             .args([
                 "run",
@@ -816,7 +828,7 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
 
     let second = tokio::time::timeout(
         PROCESS_TIMEOUT,
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+        fixture_command(config_home.path())
             .env("NANOCODEX_DISABLE_HAND", "1")
             .args([
                 "run",
@@ -915,6 +927,7 @@ struct DurableState {
 
 async fn durable_create_live_socket(
     State(state): State<DurableState>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
@@ -923,6 +936,7 @@ async fn durable_create_live_socket(
     }
     state.creates.fetch_add(1, Ordering::SeqCst);
     state.event_cursors.lock().unwrap().push("0".to_owned());
+    assert_catalog_creation_query(&query);
     upgrade
         .on_upgrade(move |socket| serve_durable_socket(socket, state, "0".to_owned()))
         .into_response()
@@ -1321,12 +1335,14 @@ async fn managed_socket(
 
 async fn create_live_socket(
     State(state): State<TestState>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
     if !authorized(&state, &headers) {
         return unauthorized();
     }
+    assert_catalog_creation_query(&query);
     upgrade
         .on_upgrade(move |mut socket| async move {
             if state.disconnect_after_ready {
@@ -1517,10 +1533,18 @@ async fn serve_tool_host(mut socket: WebSocket, state: TestState, disconnect_aft
             .keys()
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>(),
-        ["type", "tools", "machines", "attachment_id", "capabilities"]
-            .into_iter()
-            .collect(),
+        [
+            "type",
+            "tools",
+            "machines",
+            "attachment_id",
+            "capabilities",
+            "runtime_id"
+        ]
+        .into_iter()
+        .collect(),
     );
+    assert!(uuid::Uuid::parse_str(catalog["runtime_id"].as_str().unwrap()).is_ok());
     assert_eq!(
         catalog["capabilities"],
         serde_json::json!(["turn_metadata"])
@@ -1533,9 +1557,27 @@ async fn serve_tool_host(mut socket: WebSocket, state: TestState, disconnect_aft
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         names,
-        ["apply_patch", "exec_command", "view_image", "write_stdin"]
-            .into_iter()
-            .collect(),
+        [
+            "apply_patch",
+            "exec_command",
+            "view_image",
+            "write_stdin",
+            "mcp__mercator__create_job",
+            "mcp__mercator__create_job_review",
+            "mcp__mercator__describe_service",
+            "mcp__mercator__get_connection_status",
+            "mcp__mercator__get_job",
+            "mcp__mercator__get_job_details",
+            "mcp__mercator__get_job_review",
+            "mcp__mercator__get_suggested_queries",
+            "mcp__mercator__list_jobs",
+            "mcp__mercator__open_mercator",
+            "mcp__mercator__quote_plan",
+            "mcp__mercator__search_services",
+            "mcp__mercator__send_product_feedback",
+        ]
+        .into_iter()
+        .collect(),
     );
     state.catalogs.lock().unwrap().push(catalog);
     if state.delay_ready_until_submission {
@@ -1732,6 +1774,64 @@ fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Body> 
         .unwrap()
 }
 
+// An inherited login, Keychain reference, provider key, or installed Hand must
+// never become authority for a synthetic-account fixture subprocess.
+fn fixture_command(home: &std::path::Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"));
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("NANOCODEX_HOME", home)
+        .env("NANOCODEX_DISABLE_HAND", "1")
+        .env("NANOCODEX_COMPUTER", "off");
+    command
+}
+
+fn assert_catalog_creation_query(query: &HashMap<String, String>) {
+    assert_eq!(query.get("model").map(String::as_str), Some("gpt-6-astra"));
+    assert_eq!(query.get("thinking").map(String::as_str), Some("low"));
+    assert_eq!(
+        query.get("reasoning_mode").map(String::as_str),
+        Some("standard")
+    );
+    assert_eq!(query.get("fast_mode").map(String::as_str), Some("false"));
+}
+
+fn fixture_model_catalog() -> serde_json::Value {
+    // This synthetic account offers a restricted Astra default matching its
+    // ready frames, plus Sol for the explicit pinned/settings journeys.
+    serde_json::json!({
+        "object": "list", "default_model": "gpt-6-astra", "data": [
+            {"id": "gpt-6-astra", "name": "Astra", "provider": "openai",
+                "thinking": ["low"], "fast_mode": false, "reasoning_modes": ["standard"]},
+            {"id": "gpt-6.1-sol", "name": "Sol", "provider": "openai",
+                "thinking": ["low", "medium", "high", "xhigh", "max"],
+                "fast_mode": true, "reasoning_modes": ["standard", "pro"]}
+        ]
+    })
+}
+
+fn fixture_catalog<S>(authorization: String) -> axum::routing::MethodRouter<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    get(move |headers: HeaderMap| {
+        let authorization = authorization.clone();
+        async move {
+            if headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                != Some(authorization.as_str())
+            {
+                return unauthorized();
+            }
+            json_response(StatusCode::OK, fixture_model_catalog())
+        }
+    })
+}
+
 fn configure_workspace(workspace: &std::path::Path) -> (tempfile::TempDir, tempfile::TempDir) {
     let config_home = tempfile::tempdir().unwrap();
     let decoy = tempfile::tempdir().unwrap();
@@ -1762,6 +1862,11 @@ async fn headless_settings_and_cron_use_the_managed_contract() {
             let path = request.uri().path().to_owned();
             let body = axum::body::to_bytes(request.into_body(), 128 * 1024).await.unwrap();
             let body: Value = if body.is_empty() { Value::Null } else { serde_json::from_slice(&body).unwrap() };
+            // Catalog reads are authenticated, but are not settings/cron writes.
+            if path == "/v1/models" {
+                assert_eq!(method, axum::http::Method::GET);
+                return Json(fixture_model_catalog()).into_response();
+            }
             observed.lock().unwrap().push((method.to_string(), path.clone(), body));
             if method == axum::http::Method::DELETE {
                 return StatusCode::NO_CONTENT.into_response();
@@ -1825,7 +1930,7 @@ async fn headless_settings_and_cron_use_the_managed_contract() {
     ] {
         let output = tokio::time::timeout(
             PROCESS_TIMEOUT,
-            tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+            fixture_command(cwd.path())
                 .env("NANOCODEX_DISABLE_HAND", "1")
                 .args(&args)
                 .current_dir(cwd.path())
@@ -1868,7 +1973,7 @@ async fn headless_settings_and_cron_use_the_managed_contract() {
     ] {
         let output = tokio::time::timeout(
             PROCESS_TIMEOUT,
-            tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+            fixture_command(cwd.path())
                 .env("NANOCODEX_DISABLE_HAND", "1")
                 .args(&args)
                 .current_dir(cwd.path())
@@ -2227,6 +2332,9 @@ async fn docker_preflight_errors_are_actionable_before_account_login() {
             .env("NANOCODEX_DISABLE_HAND", "1")
             .env("PATH", dir.path())
             .env("NANOCODEX_HOME", dir.path())
+            .env("HOME", dir.path())
+            .env("CODEX_HOME", dir.path().join(".codex"))
+            .env("NANOCODEX_COMPUTER", "off")
             // VM environment defaults must not invalidate Docker selection.
             .env("NANOCODEX_VM_GUEST_RUNTIME", "/missing/guest")
             .env("NANOCODEX_KRUNFW_DIR", "/missing/firmware")

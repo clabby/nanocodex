@@ -1,0 +1,52 @@
+import { gatewayAvailability, type GatewaySecrets } from "./gateway-runtime";
+import { fetchResponseWithDeadline } from "./deadline";
+import { DEFAULT_AGENT_SETTINGS, type ManagedAgentSettings } from "./agent-settings";
+
+/** Catalog admission comes from the account broker, never a client label. */
+export async function availableManagedModels(broker: Fetcher, userId: string, runtime: GatewaySecrets & { NANOCODEX_THREAD_ROUTING?: string } = {}) {
+  const status = await fetchResponseWithDeadline(broker,
+    `https://broker.internal/users/${encodeURIComponent(userId)}/credentials`, {}, 10_000,
+    "model availability", async response => {
+      if (!response.ok) throw new Error("model availability broker is unavailable");
+      return response.json<Record<string, unknown>>();
+    });
+  const connected = (value: unknown) => !!value && typeof value === "object" && (value as { connected?: unknown }).connected === true;
+  const data: Array<{ id: ManagedAgentSettings["model"]; name: string; provider: string; thinking: string[]; fast_mode: boolean; reasoning_modes: string[] }> = [];
+  if (connected(status.chatgpt) || connected(status.openai)) {
+    for (const [id, name] of [["gpt-6-astra", "GPT-6 Astra"], ["gpt-6.1-sol", "GPT-6.1 Sol"], ["gpt-6-luna", "GPT-6 Luna"]] as const)
+      data.push({ id, name, provider: "openai", thinking: [...(id === "gpt-6-luna" ? ["none"] : []), "low", "medium", "high", "xhigh", "max"], fast_mode: true, reasoning_modes: id === "gpt-6-astra" ? ["standard"] : ["standard", "pro"] });
+  }
+  // Provider access is independent from credentials being connected. The public
+  // catalog is the intersection of that live grant and this runtime's verified
+  // effort-capable models; unknown/gated models are not silently advertised.
+  // https://platform.claude.com/docs/en/about-claude/models/overview
+  // https://platform.claude.com/docs/en/build-with-claude/effort
+  let claudeUnavailable = false;
+  let claudePartial = false;
+  const routing = runtime.NANOCODEX_THREAD_ROUTING === "true" && typeof runtime.AI?.run === "function";
+  if (routing) {
+    if (typeof runtime.AI?.run === "function") data.push({ id: "@cf/zai-org/glm-5.3", name: "GLM 5.3", provider: "workers_ai", thinking: ["low", "medium", "high"], fast_mode: false, reasoning_modes: ["standard"] });
+    const gateway = gatewayAvailability(runtime);
+    if (gateway.openrouter || gateway.vercel) {
+      data.push({ id: "kimi-k3", name: "Kimi K3", provider: "gateway", thinking: ["low", "high"], fast_mode: false, reasoning_modes: ["standard"] });
+      data.push({ id: "mimo-v2.6-pro", name: "MiMo V2.6 Pro", provider: "gateway", thinking: ["low", "medium", "high"], fast_mode: false, reasoning_modes: ["standard"] });
+    }
+  }
+  if (connected(status.claude)) {
+    try {
+    const allowed = await fetchResponseWithDeadline(broker,
+      `https://broker.internal/users/${encodeURIComponent(userId)}/credentials/claude/models`, {}, 15_000,
+      "Claude model availability", async response => {
+        if (!response.ok) throw new Error("Claude model catalog is unavailable");
+        return response.json<{ models: Array<{ id: string; display_name?: string }>; has_more: boolean }>();
+      });
+    claudePartial = allowed.has_more === true;
+    if (!Array.isArray(allowed.models)) throw new Error("invalid Claude model catalog");
+    for (const [id, name] of [["claude-sonnet-4-6", "Claude Sonnet 4.6"], ["claude-opus-4-6", "Claude Opus 4.6"],
+      ["claude-sonnet-5-5", "Claude Sonnet 5.5"], ["claude-opus-5-5", "Claude Opus 5.5"]] as const) {
+      if (allowed.models.some(model => model.id === id)) data.push({ id, name, provider: "claude", thinking: ["low", "medium", "high"], fast_mode: false, reasoning_modes: ["standard"] });
+    }
+    } catch { claudeUnavailable = true; if (!data.length) throw new Error("Claude model catalog is unavailable"); }
+  }
+  return { partial: claudeUnavailable || claudePartial, availability: { claude: { connected: connected(status.claude), available: data.some(model => model.provider === "claude"), ...(claudeUnavailable ? { error: "claude_models_unavailable" } : {}) } }, object: "list" as const, data, default_model: data.find(model => model.id === DEFAULT_AGENT_SETTINGS.model)?.id ?? data.find(model => model.provider === "claude")?.id ?? data[0]?.id ?? null };
+}

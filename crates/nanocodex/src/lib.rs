@@ -26,27 +26,27 @@ pub use nanocodex_managed::{Managed, ManagedApiKey};
 #[cfg_attr(docsrs, doc(cfg(feature = "openai")))]
 pub use nanocodex_oai_api::OpenAi;
 pub use nanocodex_oai_api::{Model, ReasoningMode, Thinking};
-#[cfg(feature = "tools")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tools")))]
-pub use nanocodex_tools::Tool;
+#[cfg(feature = "oai-tools")]
+#[cfg_attr(docsrs, doc(cfg(feature = "oai-tools")))]
+pub use nanocodex_oai_tools::Tool;
 #[cfg(all(
-    feature = "tools",
+    feature = "oai-tools",
     any(feature = "openai", not(target_family = "wasm"))
 ))]
 #[cfg_attr(
     docsrs,
     doc(cfg(all(
-        feature = "tools",
+        feature = "oai-tools",
         any(feature = "openai", not(target_family = "wasm"))
     )))
 )]
-pub use nanocodex_tools::Tools;
-#[cfg(all(feature = "openai", feature = "tools", not(target_family = "wasm")))]
+pub use nanocodex_oai_tools::Tools;
+#[cfg(all(feature = "openai", feature = "oai-tools", not(target_family = "wasm")))]
 #[cfg_attr(
     docsrs,
-    doc(cfg(all(feature = "openai", feature = "tools", not(target_family = "wasm"))))
+    doc(cfg(all(feature = "openai", feature = "oai-tools", not(target_family = "wasm"))))
 )]
-pub use nanocodex_tools::tool;
+pub use nanocodex_oai_tools::tool;
 
 /// Owned agent lifecycle, builders, turns, branching, and snapshots.
 ///
@@ -86,11 +86,26 @@ pub use nanocodex_durability as durability;
 #[doc(inline)]
 pub use nanocodex_oai_api as oai;
 
-/// Tool registry, built-ins, MCP, tool search, and Code Mode.
-#[cfg(feature = "tools")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tools")))]
+/// OpenAI Responses tool registry, built-ins, MCP, tool search, and Code Mode.
+///
+/// Compatibility facade for [`crate::oai_tools`]; Claude adapters live under
+/// `nanocodex::claude_tools` with the `claude-tools` feature.
+#[cfg(feature = "oai-tools")]
+#[cfg_attr(docsrs, doc(cfg(feature = "oai-tools")))]
 #[doc(inline)]
-pub use nanocodex_tools as tools;
+pub use nanocodex_oai_tools as tools;
+
+/// OpenAI-specific tool contracts, catalog and execution runtime.
+#[cfg(feature = "oai-tools")]
+#[cfg_attr(docsrs, doc(cfg(feature = "oai-tools")))]
+#[doc(inline)]
+pub use nanocodex_oai_tools as oai_tools;
+
+/// Claude-native tool adapters and host capability contracts.
+#[cfg(feature = "claude-tools")]
+#[cfg_attr(docsrs, doc(cfg(feature = "claude-tools")))]
+#[doc(inline)]
+pub use nanocodex_claude_tools as claude_tools;
 
 /// Native account-managed backend, administration client, and durable event transport.
 #[cfg(all(not(target_family = "wasm"), feature = "managed"))]
@@ -118,25 +133,25 @@ pub mod prelude {
     #[cfg(feature = "durability")]
     #[cfg_attr(docsrs, doc(cfg(feature = "durability")))]
     pub use crate::DurableAgentExt;
-    #[cfg(feature = "tools")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "tools")))]
+    #[cfg(feature = "oai-tools")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "oai-tools")))]
     pub use crate::Tool;
     #[cfg(all(
-        feature = "tools",
+        feature = "oai-tools",
         any(feature = "openai", not(target_family = "wasm"))
     ))]
     #[cfg_attr(
         docsrs,
         doc(cfg(all(
-            feature = "tools",
+            feature = "oai-tools",
             any(feature = "openai", not(target_family = "wasm"))
         )))
     )]
     pub use crate::Tools;
-    #[cfg(all(feature = "openai", feature = "tools", not(target_family = "wasm")))]
+    #[cfg(all(feature = "openai", feature = "oai-tools", not(target_family = "wasm")))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(all(feature = "openai", feature = "tools", not(target_family = "wasm"))))
+        doc(cfg(all(feature = "openai", feature = "oai-tools", not(target_family = "wasm"))))
     )]
     pub use crate::tool;
     pub use crate::{Model, Nanocodex};
@@ -145,8 +160,8 @@ pub mod prelude {
     pub use crate::{NanocodexBuilder, OpenAi};
 }
 
-#[cfg(all(feature = "openai", feature = "tools", not(target_family = "wasm")))]
+#[cfg(all(feature = "openai", feature = "oai-tools", not(target_family = "wasm")))]
 #[doc(hidden)]
 pub mod __private {
-    pub use nanocodex_tools::__private::*;
+    pub use nanocodex_oai_tools::__private::*;
 }

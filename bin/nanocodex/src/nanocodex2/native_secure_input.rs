@@ -48,7 +48,7 @@ mod tests {
     }
 }
 
-use nanocodex_tools::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult};
+use nanocodex_oai_tools::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{io, path::Path, time::Duration};

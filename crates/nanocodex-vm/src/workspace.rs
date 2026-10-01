@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use nanocodex_tools::ToolsBuilder;
+use nanocodex_oai_tools::ToolsBuilder;
 use tokio::process::Command;
 
 use crate::{
@@ -143,14 +143,14 @@ impl VmWorkspace {
     /// into this retained VM.
     pub async fn tools_builder(
         &self,
-    ) -> Result<ToolsBuilder, nanocodex_tools::contract::ToolError> {
+    ) -> Result<ToolsBuilder, nanocodex_oai_tools::contract::ToolError> {
         Ok(self.configure_tools(self.tools().tools_builder().await?))
     }
 
     /// Returns an attachment-safe builder with only VM-backed workspace tools.
     pub async fn attachment_tools_builder(
         &self,
-    ) -> Result<ToolsBuilder, nanocodex_tools::contract::ToolError> {
+    ) -> Result<ToolsBuilder, nanocodex_oai_tools::contract::ToolError> {
         Ok(self.configure_tools(self.tools().attachment_tools_builder().await?))
     }
 

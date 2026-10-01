@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import NanocodexRemote
+import InboxCore
 @testable import Nanocodex
 
 final class ProtocolTests: XCTestCase {
@@ -862,10 +863,170 @@ final class ProtocolTests: XCTestCase {
         XCTAssertFalse(cursorIsNewer("00012", than: "12"))
     }
 
+    /// Native public client journey with a synthetic HTTPS transport, not live OAuth.
+    @MainActor
+    func testClaudeAuthorizationQueryFormEncoding() async throws {
+        MacModelBrokerFixture.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MacModelBrokerFixture.self]
+        let client = ManagedClient(credential: try AccountCredential(origin: "https://example.invalid", apiKey: MacModelBrokerFixture.key), configuration: configuration)
+        defer { client.close(); MacModelBrokerFixture.reset() }
+        let canonical = MacModelBrokerFixture.registeredAuthorizeURL
+        for encoded in [canonical, canonical.replacingOccurrences(of: "+", with: "%20")] {
+            MacModelBrokerFixture.authorizationURL = encoded
+            let destination = try await client.startClaudeLogin()
+            XCTAssertTrue(destination.absoluteString == encoded, "Accepted destination preserves its original public form encoding")
+        }
+        // Literal form '+' is a space; escaped %2B is a literal plus, not a scope separator.
+        // Only the public code=true authorize flag may be present, never private callback code.
+        let rejected = [
+            canonical.replacingOccurrences(of: "+", with: "%2B"),
+            canonical.replacingOccurrences(of: "code=true", with: "code=fixture-private-callback"),
+            canonical + "&code_verifier=fixture-private-verifier",
+            canonical + "&state=" + MacModelBrokerFixture.state,
+            canonical.replacingOccurrences(of: "claude.com", with: "provider.invalid"),
+            canonical.replacingOccurrences(of: "user%3Aplugins", with: "user%3Aunknown")
+        ]
+        for encoded in rejected {
+            MacModelBrokerFixture.authorizationURL = encoded
+            do {
+                _ = try await client.startClaudeLogin()
+                XCTFail("Nonregistered public destination must be rejected")
+            } catch {
+                XCTAssertEqual(error as? APIError, .invalidResponse)
+                XCTAssertFalse(String(reflecting: error).contains("fixture-private"))
+            }
+        }
+        XCTAssertTrue(MacModelBrokerFixture.allReadsWereAuthenticatedAndUncached)
+        try writeModelEvidence("native-form-query-journey.txt", "Actual ManagedClient accepted canonical Rust '+' scope separators and equivalent %20 form spaces, preserving original public destination. Rejected escaped literal-plus separators, private callback code, verifier/extra key, duplicate state, wrong origin and unregistered scope. All failures fixed APIError.invalidResponse; authenticated uncached synthetic URLProtocol only, no live OAuth.\n")
+    }
+
+    func testClaudeConnectionPublicClientJourney() async throws {
+        MacModelBrokerFixture.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MacModelBrokerFixture.self]
+        let client = ManagedClient(credential: try AccountCredential(origin: "https://example.invalid", apiKey: MacModelBrokerFixture.key), configuration: configuration)
+        defer { client.close() }
+        var trace: [String] = []
+        var status = try await client.claudeConnectionStatus()
+        XCTAssertFalse(status.connected); XCTAssertFalse(status.pending)
+        let initialCatalog = try await client.modelCatalog()
+        XCTAssertTrue(initialCatalog.models.isEmpty)
+        trace.append("disconnected: safe status; empty authenticated catalog")
+
+        let destination = try await client.startClaudeLogin()
+        XCTAssertEqual(destination.host, "claude.com")
+        XCTAssertEqual(destination.path, "/cai/oauth/authorize")
+        let query = try XCTUnwrap(URLComponents(url: destination, resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(query.first { $0.name == "redirect_uri" }?.value, "https://platform.claude.com/oauth/code/callback")
+        XCTAssertEqual(query.first { $0.name == "response_type" }?.value, "code")
+        XCTAssertEqual(query.first { $0.name == "code_challenge_method" }?.value, "S256")
+        XCTAssertEqual(query.first { $0.name == "code" }?.value, "true")
+        XCTAssertEqual(query.first { $0.name == "client_id" }?.value, "9d1c250a-e61b-44d9-88ed-5944d1962f5e")
+        XCTAssertEqual(query.first { $0.name == "state" }?.value, MacModelBrokerFixture.state)
+        status = try await client.claudeConnectionStatus()
+        XCTAssertFalse(status.connected); XCTAssertTrue(status.pending)
+        trace.append("start: exact registered eight-parameter Claude PKCE/manual-callback URL accepted, including public code=true flag and Rust form-encoded scope separators; private completion uses matching 43-character state")
+
+        try await client.completeClaudeLogin(code: MacModelBrokerFixture.privateCode)
+        XCTAssertTrue(MacModelBrokerFixture.acceptedPrivateCompletion)
+        status = try await client.claudeConnectionStatus()
+        XCTAssertTrue(status.connected); XCTAssertFalse(status.pending)
+        let catalog = try await client.modelCatalog()
+        XCTAssertEqual(catalog.defaultModel, "claude-sonnet-4-6")
+        XCTAssertEqual(catalog.models.map(\.id), MacModelBrokerFixture.claudeIDs)
+        XCTAssertTrue(catalog.models.allSatisfy { $0.provider == "claude" && $0.efforts == ["low", "medium", "high"] && !$0.fastMode && $0.reasoningModes == ["standard"] })
+        trace.append("complete: private direct request accepted; refreshed Claude-only catalog/default and standard/no-fast capabilities")
+
+        try await client.disconnectClaude()
+        status = try await client.claudeConnectionStatus()
+        XCTAssertFalse(status.connected); XCTAssertFalse(status.pending)
+        let disconnectedCatalog = try await client.modelCatalog()
+        XCTAssertTrue(disconnectedCatalog.models.isEmpty)
+        trace.append("disconnect: safe disconnected status; model grants removed")
+        MacModelBrokerFixture.failModels = true
+        do {
+            _ = try await client.modelCatalog()
+            XCTFail("A failed catalog read must throw, not return previous model grants")
+        } catch {
+            XCTAssertEqual(error as? APIError, .http(503))
+            XCTAssertFalse(error.localizedDescription.contains("fixture-sensitive-diagnostic"))
+        }
+        MacModelBrokerFixture.failModels = false
+        let recoveredCatalog = try await client.modelCatalog()
+        XCTAssertTrue(recoveredCatalog.models.isEmpty)
+        XCTAssertNil(recoveredCatalog.defaultModel)
+        trace.append("catalog error/recovery: HTTP 503 without raw diagnostic; subsequent read remains empty with no stale Claude/OpenAI fallback")
+        do {
+            try await client.completeClaudeLogin(code: MacModelBrokerFixture.privateCode)
+            XCTFail("Expired/nonpending completion must fail")
+        } catch {
+            XCTAssertEqual(error as? APIError, .http(409))
+            XCTAssertFalse(error.localizedDescription.contains(MacModelBrokerFixture.privateCode))
+            XCTAssertFalse(error.localizedDescription.contains("fixture-sensitive-diagnostic"))
+            trace.append("error: HTTP 409 surfaced without response diagnostic or private input")
+        }
+        // Exercise all auth operations outside UI so error reflection is safe at
+        // the SDK boundary, not just behind a sanitized Settings message.
+        for failure in [MacModelBrokerFixture.AuthFailure.http, .malformed, .oversized, .transport] {
+            MacModelBrokerFixture.authFailure = failure
+            for operation in ["status", "start", "complete", "disconnect"] {
+                do {
+                    switch operation {
+                    case "status": _ = try await client.claudeConnectionStatus()
+                    case "start": _ = try await client.startClaudeLogin()
+                    case "complete": try await client.completeClaudeLogin(code: MacModelBrokerFixture.privateCode)
+                    default: try await client.disconnectClaude()
+                    }
+                    XCTFail("Auth boundary must reject synthetic " + failure.rawValue + " for " + operation)
+                } catch {
+                    XCTAssertEqual(error as? APIError, failure == .http ? .http(409) : .invalidResponse)
+                    for description in [error.localizedDescription, String(reflecting: error)] {
+                        XCTAssertFalse(description.contains(MacModelBrokerFixture.privateCode))
+                        XCTAssertFalse(description.contains(MacModelBrokerFixture.providerURL))
+                        XCTAssertFalse(description.contains("fixture-sensitive-diagnostic"))
+                    }
+                }
+            }
+            trace.append("auth SDK boundary: " + failure.rawValue + " rejected for status/start/complete/delete; localized and reflective errors contain no synthetic private input/provider URL")
+        }
+        MacModelBrokerFixture.authFailure = .invalidState
+        for operation in ["complete", "disconnect"] {
+            do {
+                if operation == "complete" { try await client.completeClaudeLogin(code: MacModelBrokerFixture.privateCode) }
+                else { try await client.disconnectClaude() }
+                XCTFail("Auth success must prove authenticated completion or signed-out deletion")
+            } catch {
+                XCTAssertEqual(error as? APIError, .invalidResponse)
+                for description in [error.localizedDescription, String(reflecting: error)] {
+                    XCTAssertFalse(description.contains(MacModelBrokerFixture.privateCode))
+                    XCTAssertFalse(description.contains(MacModelBrokerFixture.providerURL))
+                }
+            }
+        }
+        MacModelBrokerFixture.authFailure = .none
+        trace.append("auth SDK boundary: mismatched completion/delete success states rejected without diagnostic reflection")
+        XCTAssertTrue(MacModelBrokerFixture.allReadsWereAuthenticatedAndUncached)
+        trace += MacModelBrokerFixture.safeTrace
+        try writeModelEvidence("claude-client-journey.txt", trace.joined(separator: "\n") + "\n")
+    }
+
     @MainActor
     func testUnsentTabKeepsSelectedSettingsAcrossRelaunch() async throws {
+        // Obtain the authored settings/default from the actual public native client
+        // before testing the desktop layout boundary. No AppModel-only test API.
+        MacModelBrokerFixture.reset(connected: true, includeLuna: true)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MacModelBrokerFixture.self]
+        let client = ManagedClient(credential: try AccountCredential(origin: "https://example.invalid", apiKey: MacModelBrokerFixture.key), configuration: configuration)
+        defer { client.close() }
+        let catalog = try await client.modelCatalog()
+        let luna = try XCTUnwrap(catalog.models.first { $0.id == "gpt-6-luna" })
+        let defaultChoice = try XCTUnwrap(catalog.models.first { $0.id == catalog.defaultModel })
+        var selected = AgentSettings(); selected.selectModel(luna); selected.thinking = "low"; selected.fast_mode = true
+        var defaults = AgentSettings(); defaults.selectModel(defaultChoice)
         let model = AppModel(runtimeDirectory: "/tmp/native-draft-settings-" + UUID().uuidString)
-        model.tabs = [WorkspaceTab(id: "draft"), WorkspaceTab(id: "other")]
+        model.tabs = [WorkspaceTab(id: "draft", draftSettings: selected), WorkspaceTab(id: "other", draftSettings: defaults)]
         model.activeTabID = "draft"
         var saved: JSONValue = .null
         model.runtime.requestOverride = { method, args in
@@ -873,23 +1034,156 @@ final class ProtocolTests: XCTestCase {
             return .null
         }
         model.updateDraft("Keep this unsent draft")
-        model.changeSettings(tabID: "draft") {
-            $0.selectModel("gpt-6-luna"); $0.thinking = "low"; $0.fast_mode = true
-        }
+        XCTAssertEqual(model.settingsForTab("other").model, "claude-sonnet-4-6", "Another draft retains the account's authoritative default, not a hardcoded OpenAI model")
         await model.prepareToQuit()
         let restored = AppModel(runtimeDirectory: "/tmp/native-draft-settings-restored-" + UUID().uuidString)
         restored.runtime.requestOverride = { _, _ in .null }
         defer { restored.shutdown() }
-        guard case .object(var state) = Self.connectedState else { return XCTFail("Missing state fixture") }
+        guard case .object(var state) = Self.modelBrokerConnectedState else { return XCTFail("Missing state fixture") }
         state["layout"] = saved
         var wire = try JSONEncoder().encode(JSONValue.object(["event": .object(["type": .string("state"), "state": .object(state)])])); wire.append(10)
         restored.runtime.receiveForTesting(wire)
-        for _ in 0..<30 where restored.activeTabID != "draft" { try await Task.sleep(for: .milliseconds(10)) }
+        try await waitForModelState(timeout: 5) { restored.activeTabID == "draft" }
         XCTAssertEqual(restored.activeTab?.draft, "Keep this unsent draft")
-        XCTAssertEqual(restored.settingsForTab("draft"), AgentSettings(model: "gpt-6-luna", thinking: "low", fast_mode: true))
-        XCTAssertEqual(restored.settingsForTab("other"), AgentSettings(), "A draft's selection must not alter another tab's defaults")
+        XCTAssertEqual(restored.settingsForTab("draft"), selected)
+        XCTAssertEqual(restored.settingsForTab("other"), defaults)
         restored.closeTab("draft"); restored.reopenTab()
         XCTAssertEqual(restored.settingsForTab("draft").model, "gpt-6-luna")
+        XCTAssertNil(restored.modelCatalog)
+        XCTAssertFalse(restored.canSend("draft"), "Retaining a selection does not grant availability before the app's authenticated catalog loads")
+        restored.newTab()
+        XCTAssertTrue(restored.settingsForTab(restored.activeTabID).model.isEmpty, "A new draft without authenticated availability must not inherit a hardcoded model")
+        XCTAssertFalse(restored.canSend())
+        try writeModelEvidence("native-model-draft-journey.txt", "Actual ManagedClient synthetic authenticated catalog supplied per-tab explicit selection and Claude default; native layout save/reopen retained exact settings/text; cached selections did not grant availability; new draft without AppModel catalog remained empty and submission disabled. This retention check does not test AppModel's URLSession transport.\n" + MacModelBrokerFixture.safeTrace.joined(separator: "\n") + "\n")
+        try await runMixedProviderOutageJourney(configuration: configuration)
+    }
+
+    /// Native admission boundary: no microphone, provider call, or thread creation.
+    @MainActor
+    func testClaudeVoiceRejectedBeforeAdmissionForRequestedPane() async throws {
+        let model = AppModel(runtimeDirectory: "/tmp/native-claude-text-only-" + UUID().uuidString)
+        defer { model.shutdown() }
+        model.tabs = [
+            WorkspaceTab(id: "claude-draft", draft: "Keep this text", draftSettings: AgentSettings(model: "claude-sonnet-4-6")),
+            WorkspaceTab(id: "claude-retained", threadId: "claude-thread"),
+            WorkspaceTab(id: "openai-draft", draftSettings: AgentSettings(model: "gpt-6-luna"))
+        ]
+        model.snapshots["claude-thread"] = ThreadSnapshot(id: "claude-thread", events: [], hasMore: false, connected: true, activeTurns: [], settings: AgentSettings(model: "claude-opus-5-5"))
+        model.activeTabID = "openai-draft"
+        var runtimeCalls: [String] = []
+        model.runtime.requestOverride = { method, _ in runtimeCalls.append(method); return .null }
+        for id in ["claude-draft", "claude-retained"] {
+            XCTAssertFalse(model.supportsVoice(id))
+            do {
+                _ = try await model.voiceConfiguration(tabID: id)
+                XCTFail("Claude voice must be rejected before admission")
+            } catch {
+                let reason = error.localizedDescription.lowercased()
+                XCTAssertTrue(reason.contains("claude") && reason.contains("voice"), "Surface the unsupported capability, not credential/provider diagnostics")
+            }
+        }
+        XCTAssertTrue(model.supportsVoice("openai-draft"), "Voice gating must follow the requested pane, not the active pane")
+        XCTAssertTrue(runtimeCalls.isEmpty, "Unsupported voice must not create a thread or call the runtime")
+        XCTAssertFalse(model.voice.isEngaged)
+        XCTAssertEqual(model.tab("claude-draft")?.draft, "Keep this text")
+        XCTAssertNil(model.tab("claude-draft")?.threadId)
+        XCTAssertEqual(model.tab("claude-retained")?.threadId, "claude-thread")
+        try writeModelEvidence("claude-input-capabilities.txt", "Native voiceConfiguration rejected Claude draft and retained requested panes before credential/runtime/thread admission; no runtime calls; voice disengaged; text draft and retained thread preserved. Non-Claude pane remains voice-capable. Composer is plain text; plus menu offers folder/Hands/connections only, no file/photo upload input. Existing transcript media display/download is read-only and retained. Interactive control appearance and live text/voice provider E2E are not covered by this preflight check.\n")
+    }
+
+    /// Real AppModel client/catalog admission and layout boundary; only the
+    /// unavailable remote broker transport and runtime process are synthetic.
+    @MainActor
+    private func runMixedProviderOutageJourney(configuration: URLSessionConfiguration) async throws {
+        MacModelBrokerFixture.reset(connected: true, includeLuna: true)
+        let model = AppModel(runtimeDirectory: "/tmp/native-provider-outage-" + UUID().uuidString, modelConnectionConfiguration: configuration)
+        defer { model.shutdown() }
+        var saved: JSONValue = .null
+        var settingsCalls = 0
+        var prompts = 0
+        model.runtime.requestOverride = { method, args in
+            if method == "connect" { return Self.modelBrokerConnectedState }
+            if method == "saveLayout" { saved = args[0] }
+            if method == "settings" { settingsCalls += 1; return args[0]["settings"] }
+            if method == "queuePrompt" || method == "createThread" { prompts += 1 }
+            return .null
+        }
+        try await model.connect(baseUrl: "https://example.invalid", key: MacModelBrokerFixture.key, remember: false)
+        try await waitForModelState(timeout: 5) { model.modelCatalog != nil && !model.modelCatalogLoading }
+        model.tabs = [WorkspaceTab(id: "explicit", draft: "Do not reroute this prompt", draftSettings: AgentSettings(model: "claude-sonnet-4-6")), WorkspaceTab(id: "untouched"), WorkspaceTab(id: "openai", draftSettings: AgentSettings(model: "gpt-6-luna"))]
+        model.activeTabID = "explicit"
+        model.changeSettings(tabID: "explicit") { $0.thinking = "high" }
+        XCTAssertEqual(model.settingsForTab("explicit").thinking, "high", "Initial Claude effort remains selectable")
+        model.tabs.append(WorkspaceTab(id: "accepted-claude", threadId: "accepted-claude-thread"))
+        model.snapshots["accepted-claude-thread"] = ThreadSnapshot(id: "accepted-claude-thread", events: [], hasMore: false, connected: true, activeTurns: [], settings: AgentSettings(model: "claude-sonnet-4-6", thinking: "low"), acceptedTurns: 1)
+        XCTAssertTrue(model.effortSettingsLocked("accepted-claude"))
+        model.changeSettings(tabID: "accepted-claude") { $0.thinking = "high" }
+        XCTAssertEqual(model.settingsForTab("accepted-claude").thinking, "low")
+        model.activeTabID = "accepted-claude"
+        model.settings = model.settingsForTab("accepted-claude"); model.settings.thinking = "high"
+        model.updateSettings()
+        XCTAssertEqual(model.settings.thinking, "low", "Legacy settings mutation also rejects pinned Claude effort")
+        model.tabs.append(WorkspaceTab(id: "accepted-openai", threadId: "accepted-openai-thread"))
+        model.snapshots["accepted-openai-thread"] = ThreadSnapshot(id: "accepted-openai-thread", events: [], hasMore: false, connected: true, activeTurns: [], settings: AgentSettings(model: "gpt-6-luna", thinking: "low"), acceptedTurns: 1)
+        XCTAssertFalse(model.effortSettingsLocked("accepted-openai"))
+        model.changeSettings(tabID: "accepted-openai") { $0.thinking = "high" }
+        try await waitForModelState(timeout: 5) { settingsCalls == 1 }
+        XCTAssertEqual(model.settingsForTab("accepted-openai").thinking, "high", "OpenAI live effort behavior preserved")
+        model.activeTabID = "explicit"
+        MacModelBrokerFixture.omitClaude = true
+        await model.refreshModelCatalog()
+        XCTAssertEqual(model.modelCatalog?.models.map(\.id), ["gpt-6-luna"])
+        XCTAssertEqual(model.modelCatalog?.defaultModel, "gpt-6-luna")
+        XCTAssertEqual(model.settingsForTab("explicit").model, "claude-sonnet-4-6")
+        XCTAssertEqual(model.settingsForTab("explicit").thinking, "high")
+        XCTAssertEqual(model.tab("explicit")?.draft, "Do not reroute this prompt")
+        XCTAssertFalse(model.canSend("explicit"))
+        XCTAssertTrue(model.canSend("openai"))
+        XCTAssertEqual(model.settingsForTab("untouched").model, "gpt-6-luna")
+        await model.send(tabID: "explicit")
+        XCTAssertEqual(prompts, 0, "Unavailable explicit Claude prompt must not create/admit a different-provider thread")
+        await model.prepareToQuit()
+        let reopened = AppModel(runtimeDirectory: "/tmp/native-provider-outage-restored-" + UUID().uuidString, modelConnectionConfiguration: configuration)
+        defer { reopened.shutdown() }
+        reopened.runtime.requestOverride = { method, _ in
+            if method == "connect", case .object(var state) = Self.modelBrokerConnectedState {
+                state["layout"] = saved; return .object(state)
+            }
+            return .null
+        }
+        try await reopened.connect(baseUrl: "https://example.invalid", key: MacModelBrokerFixture.key, remember: false)
+        try await waitForModelState(timeout: 5) { reopened.modelCatalog != nil && !reopened.modelCatalogLoading }
+        XCTAssertEqual(reopened.settingsForTab("explicit").model, "claude-sonnet-4-6")
+        XCTAssertEqual(reopened.settingsForTab("explicit").thinking, "high")
+        XCTAssertEqual(reopened.tab("explicit")?.draft, "Do not reroute this prompt")
+        XCTAssertFalse(reopened.canSend("explicit"))
+        XCTAssertTrue(reopened.canSend("openai"))
+        reopened.changeSettings(tabID: "explicit") { $0.selectModel(reopened.availableModel("gpt-6-luna")!) }
+        XCTAssertEqual(reopened.settingsForTab("explicit").model, "gpt-6-luna", "A conscious user model choice restores availability")
+        XCTAssertTrue(reopened.canSend("explicit"))
+        try writeModelEvidence("native-provider-outage-journey.txt", "Actual AppModel connect/ManagedClient catalog refresh: mixed providers -> Claude absent, healthy OpenAI default. Explicit Claude model/high effort and text preserved, submission disabled/no thread or prompt admission; empty untouched draft defaulted to OpenAI. Native save/reopen refreshed same catalog and preserved unavailable Claude intent; conscious model choice restored availability. Initial Claude effort selectable; accepted Claude effort rejected through both mutation entry points without runtime request; accepted OpenAI effort changed via one runtime settings request. Synthetic URLProtocol broker transport/runtime only; not live provider or interactive UI.\n" + MacModelBrokerFixture.safeTrace.joined(separator: "\n") + "\n")
+    }
+
+    private static var modelBrokerConnectedState: JSONValue {
+        guard case .object(var value) = connectedState else { return .null }
+        value["defaultHandEnabled"] = .bool(false)
+        return .object(value)
+    }
+    @MainActor
+    private func waitForModelState(timeout: TimeInterval, condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else { throw RuntimeFailure(message: "Native model catalog journey timed out") }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+    private func writeModelEvidence(_ filename: String, _ text: String) throws {
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("outputs/provider-managed-20261001/ui/mac")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(filename)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        let attachment = XCTAttachment(contentsOfFile: url); attachment.lifetime = .keepAlways; add(attachment)
     }
 
     @MainActor
@@ -2244,4 +2538,143 @@ final class NativeServiceTests: XCTestCase {
 
 private final class EvidenceWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+}
+
+/// Synthetic broker boundary. Production ManagedClient request/decoding/cache/error code runs unchanged.
+/// No provider login, TLS trust mutation, or live service traffic is performed.
+private final class MacModelBrokerFixture: URLProtocol {
+    static let key = "ncx_live_" + String(repeating: "a", count: 12) + "_" + String(repeating: "b", count: 43)
+    static let state = String(repeating: "s", count: 43)
+    static let privateCode = "fixture-private-code#" + state
+    static let providerURL = "https://provider.invalid/oauth?code=fixture-echo"
+    // Source-equivalent Rust form encoding, including literal '+' scope separators.
+    static let registeredAuthorizeURL = "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload+user%3Aplugins&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=sssssssssssssssssssssssssssssssssssssssssss&code_challenge=ccccccccccccccccccccccccccccccccccccccccccc&code_challenge_method=S256"
+    private static var authorizationOverride: String?
+    static var authorizationURL: String? {
+        get { lock.lock(); defer { lock.unlock() }; return authorizationOverride }
+        set { lock.lock(); defer { lock.unlock() }; authorizationOverride = newValue }
+    }
+    enum AuthFailure: String { case none, http, malformed, oversized, transport, invalidState }
+    private static var failure: AuthFailure = .none
+    static var authFailure: AuthFailure {
+        get { lock.lock(); defer { lock.unlock() }; return failure }
+        set { lock.lock(); defer { lock.unlock() }; failure = newValue }
+    }
+    static let claudeIDs = ["claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-5-5", "claude-opus-5-5"]
+    private static let lock = NSLock()
+    private static var connected = false
+    private static var pending = false
+    private static var luna = false
+    private static var modelFailure = false
+    private static var claudeUnavailable = false
+    static var omitClaude: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return claudeUnavailable }
+        set { lock.lock(); defer { lock.unlock() }; claudeUnavailable = newValue }
+    }
+    private static var accepted = false
+    private static var secureReads = true
+    private static var trace: [String] = []
+    static var failModels: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return modelFailure }
+        set { lock.lock(); defer { lock.unlock() }; modelFailure = newValue }
+    }
+    static var acceptedPrivateCompletion: Bool { lock.lock(); defer { lock.unlock() }; return accepted }
+    static var allReadsWereAuthenticatedAndUncached: Bool { lock.lock(); defer { lock.unlock() }; return secureReads }
+    static var safeTrace: [String] { lock.lock(); defer { lock.unlock() }; return trace }
+    static func reset(connected value: Bool = false, includeLuna: Bool = false) {
+        lock.lock(); defer { lock.unlock() }
+        connected = value; pending = false; luna = includeLuna; modelFailure = false
+        accepted = false; secureReads = true; trace = []; failure = .none; claudeUnavailable = false; authorizationOverride = nil
+    }
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "example.invalid" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        if let error = Self.transportFailure(request) {
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
+        let (status, data) = Self.respond(request)
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json", "Cache-Control": "no-store"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+    private static func transportFailure(_ request: URLRequest) -> NSError? {
+        lock.lock(); defer { lock.unlock() }
+        guard failure == .transport, request.url?.path.hasPrefix("/v1/credentials") == true else { return nil }
+        secureReads = secureReads && request.value(forHTTPHeaderField: "Authorization") == "Bearer " + key && request.cachePolicy == .reloadIgnoringLocalCacheData
+        trace.append("\(request.httpMethod ?? "GET") \(request.url?.path ?? "") -> synthetic transport failure")
+        return NSError(domain: "fixture-sensitive-diagnostic", code: -1001, userInfo: [NSLocalizedDescriptionKey: privateCode + " " + providerURL, NSURLErrorFailingURLErrorKey: URL(string: providerURL)!])
+    }
+    private static func body(_ request: URLRequest) -> Data {
+        if let data = request.httpBody { return data }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open(); defer { stream.close() }
+        var result = Data(), buffer = [UInt8](repeating: 0, count: 1024)
+        while result.count <= 8192 {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count <= 0 { break }
+            result.append(contentsOf: buffer.prefix(count))
+        }
+        return result
+    }
+    private static func respond(_ request: URLRequest) -> (Int, Data) {
+        lock.lock(); defer { lock.unlock() }
+        let method = request.httpMethod ?? "GET", path = request.url?.path ?? ""
+        let authorized = request.value(forHTTPHeaderField: "Authorization") == "Bearer " + key
+        secureReads = secureReads && authorized && request.cachePolicy == .reloadIgnoringLocalCacheData
+        var status = authorized ? 200 : 401
+        var response: [String: Any] = [:]
+        if authorized && path.hasPrefix("/v1/credentials") && failure != .none {
+            let echo = "fixture-sensitive-diagnostic: " + privateCode + " " + providerURL
+            let data: Data
+            switch failure {
+            case .http:
+                status = 409; data = try! JSONSerialization.data(withJSONObject: ["error": echo])
+            case .malformed:
+                data = Data(("{\"error\":\"" + echo).utf8)
+            case .oversized:
+                data = try! JSONSerialization.data(withJSONObject: ["error": echo, "padding": String(repeating: "x", count: 65_537)])
+            case .invalidState:
+                data = try! JSONSerialization.data(withJSONObject: ["state": "pending", "connected": true, "error": echo])
+            default:
+                data = Data()
+            }
+            trace.append("\(method) \(path) -> \(status) synthetic " + failure.rawValue)
+            return (status, data)
+        }
+        let expiresAt = Int64(Date().timeIntervalSince1970 * 1000) + 600_000
+        if authorized {
+            switch (method, path) {
+            case ("GET", "/v1/credentials"):
+                response = ["claude": ["connected": connected, "state": pending ? "pending" : connected ? "authenticated" : "signed_out"]]
+            case ("POST", "/v1/credentials/claude/login"):
+                pending = true
+                response = ["state": "pending", "authorization_url": authorizationOverride ?? registeredAuthorizeURL, "expires_at": expiresAt]
+            case ("POST", "/v1/credentials/claude/login/complete"):
+                let input = (try? JSONSerialization.jsonObject(with: body(request))) as? [String: String]
+                if pending && input?["code"] == privateCode {
+                    accepted = true; connected = true; pending = false
+                    response = ["state": "authenticated", "account_id": "fixture-account", "organization_id": "fixture-organization", "expires_at": expiresAt]
+                } else {
+                    status = 409
+                    response = ["error": "fixture-sensitive-diagnostic: " + privateCode + " " + providerURL]
+                }
+            case ("DELETE", "/v1/credentials/claude"):
+                connected = false; pending = false; response = ["connected": false, "state": "signed_out"]
+            case ("GET", "/v1/models"):
+                if modelFailure { status = 503; response = ["error": "fixture-sensitive-diagnostic"] }
+                else {
+                    var models: [[String: Any]] = connected && !claudeUnavailable ? claudeIDs.map { ["id": $0, "name": "Claude " + $0, "provider": "claude", "thinking": ["low", "medium", "high"], "fast_mode": false, "reasoning_modes": ["standard"]] } : []
+                    if connected && luna { models.append(["id": "gpt-6-luna", "name": "Luna", "provider": "openai", "thinking": ["none", "low", "medium", "high", "xhigh", "max"], "fast_mode": true, "reasoning_modes": ["standard", "pro"]]) }
+                    response = ["object": "list", "data": models, "default_model": models.first?["id"] ?? NSNull()]
+                }
+            default: status = 404
+            }
+        }
+        // Never record authorization headers, request bodies, returned URLs, or error bodies.
+        trace.append("\(method) \(path) -> \(status)")
+        return (status, (try? JSONSerialization.data(withJSONObject: response)) ?? Data())
+    }
 }

@@ -278,7 +278,7 @@ pub enum NanocodexError {
     /// The configured tool registry or runtime could not be built.
     #[cfg(feature = "openai")]
     #[error("failed to build tools for an agent driver: {0}")]
-    Tools(#[from] nanocodex_tools::ToolsBuildError),
+    Tools(#[from] nanocodex_oai_tools::ToolsBuildError),
 }
 
 impl NanocodexError {

@@ -1,5 +1,5 @@
 import {
-  activateHost, bindHostSession, createAgentClient, createEventChannel, createSessionId,
+  CLOUDFLARE_SESSION_RESERVATION, activateCloudflareAgentSession, activateHost, bindHostSession, createAgentClient, createEventChannel, createSessionId,
   defineRuntime, loadDurabilityRuntime, registerDefinitionHost, releaseDefinitionHost,
   releaseHostSession, prompt, compact, shutdown, getTurnHostId,
 } from '../internal.mjs';
@@ -7,7 +7,7 @@ import { watch } from '../actions/events.mjs';
 import { createClaudeHost } from './claude-host.mjs';
 
 const OPTION_KEYS = new Set([
-  'auth', 'endpoint', 'compatibilityProfile', 'model', 'instructions', 'sessionId', 'tools',
+  'auth', 'fetch', 'endpoint', 'compatibilityProfile', 'model', 'instructions', 'sessionId', 'tools',
   'serverTools', 'durability', 'durabilityId', 'module', 'maxTokens', 'workspace',
   'cache', 'adaptiveThinking', 'keepThinking', 'thinking', 'parallelTools', 'clientToolSearch',
   'contextWindowTokens', 'autoCompactWindowTokens', 'autoCompact', 'systemBlocks', 'terminalReceiptRetention',
@@ -17,6 +17,7 @@ export function toClaudeConfig(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Claude options must be an object');
   for (const key of Object.keys(options)) if (!OPTION_KEYS.has(key)) throw new TypeError('unsupported Claude option');
   if (typeof options.model !== 'string' || !options.model.trim()) throw new TypeError('Claude model must be non-empty');
+  if (options.fetch !== undefined && typeof options.fetch !== 'function') throw new TypeError('Claude fetch must be a function');
   if (options.compatibilityProfile !== undefined && options.compatibilityProfile !== 'subscription') throw new TypeError('unsupported Claude compatibilityProfile');
   if (options.compatibilityProfile !== undefined && options.endpoint === undefined) throw new TypeError('Claude compatibilityProfile requires an explicit endpoint');
   if (options.endpoint !== undefined) {
@@ -38,7 +39,7 @@ export function toClaudeConfig(options = {}) {
   if (options.terminalReceiptRetention !== undefined && (options.durability === undefined || !Number.isSafeInteger(options.terminalReceiptRetention) || options.terminalReceiptRetention < 0 || options.terminalReceiptRetention > 4096)) throw new TypeError('terminalReceiptRetention requires durability and must be 0..4096');
   if (options.durabilityId !== undefined && options.sessionId !== undefined && options.durabilityId !== options.sessionId) throw new TypeError('durable Claude sessionId must equal durabilityId');
   const config = {};
-  for (const key of OPTION_KEYS) if (!['auth', 'tools', 'module', 'durability', 'compatibilityProfile'].includes(key) && options[key] !== undefined) config[key] = options[key];
+  for (const key of OPTION_KEYS) if (!['auth', 'fetch', 'tools', 'module', 'durability', 'compatibilityProfile'].includes(key) && options[key] !== undefined) config[key] = options[key];
   if (options.compatibilityProfile !== undefined) config.subscriptionCompatibility = true;
   // Snapshot caller-owned nested native definitions before any asynchronous loading.
   return JSON.parse(JSON.stringify(config));
@@ -46,11 +47,12 @@ export function toClaudeConfig(options = {}) {
 
 /** Shared host lifecycle; loader selects the actual Nanoclaude WASM class. */
 export async function createClaude(options, load, type) {
+  const reservation = options?.[CLOUDFLARE_SESSION_RESERVATION];
   const config = toClaudeConfig(options);
   config.sessionId ??= options.durabilityId ?? createSessionId();
   const { durability, durabilityId, module } = options;
   const events = createEventChannel();
-  const host = createClaudeHost({ auth: options.auth, tools: options.tools, onEvent: events.emit });
+  const host = createClaudeHost({ auth: options.auth, tools: options.tools, onEvent: events.emit, fetch: options.fetch, endpoint: options.endpoint });
   options = undefined; // Do not retain caller credentials in runtime lifecycle closures.
   const hostDefinitionId = registerDefinitionHost(host);
   config.hostDefinitionId = hostDefinitionId;
@@ -101,18 +103,19 @@ export async function createClaude(options, load, type) {
         const Nanoclaude = await load(module);
         activateHost(host);
         if (typeof Nanoclaude?.create !== 'function') throw new Error('this WASM build does not expose Nanoclaude');
-        bindHostSession(host, config.sessionId);
+        bindHostSession(host, config.sessionId, reservation);
         const raw = await Nanoclaude.create(JSON.stringify(config));
         if (!raw || typeof raw.prompt !== 'function') {
           raw?.free?.();
           throw new TypeError('the runtime returned an invalid Nanoclaude handle');
         }
+        if (reservation) activateCloudflareAgentSession(reservation);
         return raw;
       } catch (error) { cleanup(); throw error; }
     },
     adopt(raw) {
       owner?.retain();
-      try { bindHostSession(host, raw.sessionId); events.addSource(raw); }
+      try { bindHostSession(host, raw.sessionId, reservation); events.addSource(raw); }
       catch (error) { cleanup(); throw error; }
     },
     release(raw) {
@@ -156,6 +159,6 @@ export async function createClaude(options, load, type) {
       } },
     })),
   });
-  try { return await createAgentClient(runtime, { sessionId: config.sessionId }); }
+  try { return await createAgentClient(runtime, { sessionId: config.sessionId }, reservation); }
   catch (error) { cleanup(); throw error; }
 }

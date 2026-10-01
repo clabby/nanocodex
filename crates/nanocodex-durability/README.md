@@ -30,7 +30,7 @@ OpenAI client and tool registry have been composed into an agent:
 ```rust,ignore
 use nanocodex_agent::{Nanocodex, OpenAi, PromptRequest};
 use nanocodex_durability::{DurableAgentExt, DurableSession, MemoryStore};
-use nanocodex_tools::Tools;
+use nanocodex_oai_tools::Tools;
 
 let openai = OpenAi::new(std::env::var("OPENAI_API_KEY")?)?;
 let tools = Tools::builder().without_defaults().build()?;

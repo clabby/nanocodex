@@ -93,7 +93,7 @@ use nanocodex_managed::{
     AgentSettings, AgentState, EventCursor, Managed, ManagedClient, ManagedError, ManagedEvent,
     PromptInput, validate_vm_factory_name,
 };
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tools, WorkspaceTools,
     attachment::{Attachment, AttachmentMetadata, AttachmentTarget},
     mcp::{Mcp, McpServer},
@@ -765,7 +765,7 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::Host(_)) => unreachable!("handled before managed client setup"),
         Some(Command::New(settings)) => {
             let account = settings.chatgpt_account.clone();
-            let settings = settings.resolve();
+            let settings = settings.resolve_for_account(&client).await?;
             let receipt = match account {
                 Some(account) => {
                     client
@@ -1072,7 +1072,11 @@ fn supported_agent_page_origin(url: &Url) -> bool {
 async fn run_turn(client: &ManagedClient, command: Run) -> Result<(), ManagedError> {
     let created = command.agent.is_none();
     let account = command.settings.chatgpt_account.clone();
-    let settings = command.settings.resolve();
+    let settings = if command.agent.is_none() || account.is_some() {
+        command.settings.resolve_for_account(client).await?
+    } else {
+        command.settings.resolve()
+    };
     let requested_agent = match account {
         Some(account) => Some(
             client
@@ -1122,14 +1126,14 @@ async fn open_workspace_agent_from(
     state: Option<AgentState>,
     event_observer: Option<tokio::sync::mpsc::UnboundedSender<ManagedEvent>>,
 ) -> Result<(Nanocodex, AgentEvents, String, std::path::PathBuf), ManagedError> {
-    open_workspace_agent_with_settings(
-        client,
-        agent_id,
-        state,
-        control::InitialSettings::default().resolve(),
-        event_observer,
-    )
-    .await
+    let settings = if agent_id.is_none() {
+        control::InitialSettings::default()
+            .resolve_for_account(client)
+            .await?
+    } else {
+        control::InitialSettings::default().resolve()
+    };
+    open_workspace_agent_with_settings(client, agent_id, state, settings, event_observer).await
 }
 
 async fn open_workspace_agent_with_settings(

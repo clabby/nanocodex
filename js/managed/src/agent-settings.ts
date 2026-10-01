@@ -25,8 +25,7 @@ export function parseAgentCreateBody(encoded: string): ManagedAgentCreateBody {
   }
   const body = value as Record<string, unknown>;
   const keys = Object.keys(body);
-  if (keys.length === 0
-    || keys.some((key) => !["durability", "settings", "configuration", "definition_id", "environment_template_id"].includes(key))
+  if (keys.some((key) => !["durability", "settings", "configuration", "definition_id", "environment_template_id"].includes(key))
     || (Object.hasOwn(body, "durability") && body.durability === undefined)
     || (Object.hasOwn(body, "settings") && body.settings === undefined)) {
     throw new TypeError("agent creation body contains unsupported or missing fields");

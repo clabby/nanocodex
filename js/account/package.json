@@ -12,7 +12,7 @@
     "dev:app": "CLOUDFLARE_ENV=development vite",
     "sync": "node scripts/sync-nanocodex.mjs",
     "publish:repository": "node scripts/publish-repository.mjs",
-    "test": "npm run test:web",
+    "test": "npm run test:web && npm run test:claude-connection",
     "test:wallet": "node scripts/wallet-smoke.mjs",
     "test:web": "node --experimental-strip-types --test src/*.test.ts worker/*.test.ts container/*.test.mjs",
     "typecheck": "tsc --noEmit",
@@ -20,7 +20,8 @@
     "gen:types": "wrangler types",
     "build": "tsc --noEmit && vite build && npm run check:docs",
     "deploy": "wrangler deploy --env=\"\" --config dist/nanocodex/wrangler.json",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:claude-connection": "node scripts/claude-connection-smoke.mjs"
   },
   "portless": {
     "name": "nanocodex",
@@ -67,7 +68,9 @@
     "typescript": "5.9.3",
     "vite": "8.2.1",
     "wrangler": "4.137.0",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "esbuild": "0.28.1",
+    "playwright-core": "1.62.1"
   },
   "overrides": {
     "ws": "^8.21.3"

@@ -77,7 +77,7 @@ storage, multimodal helpers and generated browser bundles.
 ```sh
 node --test js/nanocodex/test/code-{runtime,mode-parity,mode-upstream,tools-conformance,mode-lifecycle-parity}.test.mjs
 node --test js/nanocodex/test/{quickjs-evaluator,worker-evaluator,quickjs-bundle,code-mode-browser-bundle,browser-compiler-worker}.test.mjs
-cargo test -p nanocodex-tools --lib code_mode
+cargo test -p nanocodex-oai-tools --lib code_mode
 ```
 
 These tests establish the covered cases, not complete V8 equivalence. Engine

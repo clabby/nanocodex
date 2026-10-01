@@ -26,9 +26,9 @@ use nanocodex_oai_api::{
     events::{AgentEvent, AgentEvents},
 };
 #[cfg(feature = "openai")]
-use nanocodex_tools::Tools;
+use nanocodex_oai_tools::Tools;
 #[cfg(feature = "openai")]
-use nanocodex_tools::ToolsBuildError;
+use nanocodex_oai_tools::ToolsBuildError;
 #[cfg(feature = "openai")]
 use tokio::sync::oneshot;
 #[cfg(feature = "openai")]

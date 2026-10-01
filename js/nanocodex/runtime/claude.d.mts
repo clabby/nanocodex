@@ -38,6 +38,8 @@ export type Options = Readonly<{
   auth: Auth;
   model: string;
   endpoint?: string;
+  /** Explicit host Messages fetch; never serialized into model/session state. */
+  fetch?: typeof globalThis.fetch;
   /** Protocol compatibility only; supplies neither authentication nor product parity. Requires endpoint. */
   compatibilityProfile?: 'subscription';
   instructions?: string;

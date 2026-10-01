@@ -26,7 +26,7 @@ use crate::{
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use history::PromptHistory;
 use layout::{VisualLayout, byte_at_column, grapheme_at_column};
-use nanocodex::Model;
+use nanocodex_managed::ManagedModel as Model;
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -128,12 +128,19 @@ impl SettingsCommand {
                     return Some(Self::OpenModel);
                 };
                 if parts.next().is_some() {
-                    return Some(Self::Invalid("Usage: /model [astra|sol|luna]".to_owned()));
+                    return Some(Self::Invalid("Usage: /model [managed-model-id]".to_owned()));
                 }
-                Some(match argument.parse() {
-                    Ok(model) => Self::SetModel(model),
-                    Err(error) => Self::Invalid(error),
-                })
+                Some(
+                    match argument.parse::<Model>().or_else(|_| {
+                        argument
+                            .parse::<nanocodex::Model>()
+                            .map(Model::from)
+                            .map_err(|_| "Unsupported managed model ID")
+                    }) {
+                        Ok(model) => Self::SetModel(model),
+                        Err(error) => Self::Invalid(error.to_owned()),
+                    },
+                )
             }
             "/effort" | "/reasoning" | "/thinking" => {
                 let Some(argument) = parts.next() else {
@@ -832,10 +839,10 @@ impl Composer {
             return "Auto · choosing…".to_owned();
         };
         let label = match model {
-            Model::Glm53 => "glm-5.3",
-            Model::Astra => "Astra",
-            Model::Sol => "Sol",
-            Model::Luna => "Luna",
+            Model::Oai(nanocodex::Model::Glm53) => "glm-5.3",
+            Model::Oai(nanocodex::Model::Astra) => "Astra",
+            Model::Oai(nanocodex::Model::Sol) => "Sol",
+            Model::Oai(nanocodex::Model::Luna) => "Luna",
             _ => model.as_str(),
         };
         match self.routed_provider {
@@ -1053,6 +1060,12 @@ impl Composer {
     }
 
     fn submit(&mut self) -> ComposerUpdate {
+        if self.model().oai().is_none() && !self.images.is_empty() {
+            return ComposerUpdate::effect(ComposerEffect::Settings(SettingsCommand::Invalid(
+                "Claude currently supports text only; remove image attachments before submitting".into()
+            )), false);
+        }
+
         if self.draft.trim().is_empty() {
             return ComposerUpdate::unchanged();
         }
@@ -1079,6 +1092,12 @@ impl Composer {
     }
 
     fn queue(&mut self) -> ComposerUpdate {
+        if self.model().oai().is_none() && !self.images.is_empty() {
+            return ComposerUpdate::effect(ComposerEffect::Settings(SettingsCommand::Invalid(
+                "Claude currently supports text only; remove image attachments before submitting".into()
+            )), false);
+        }
+
         // An editor owns its save/cancel boundary. Tab must not consume its
         // draft as a separate message or interpret it as a settings command.
         if self.input_mode.is_some() {
@@ -2089,10 +2108,8 @@ mod tests {
         tui::theme::Theme,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use nanocodex::{
-        Model,
-        agent::input::{PromptInput, UserInput},
-    };
+    use nanocodex::agent::input::{PromptInput, UserInput};
+    use nanocodex_managed::ManagedModel as Model;
     use ratatui::{
         Terminal,
         backend::TestBackend,
@@ -2152,7 +2169,7 @@ mod tests {
     #[test]
     fn autoroute_chrome_tracks_pending_resolved_and_disabled_routes() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
-        composer.update(ComposerEvent::SetModel(Model::Astra));
+        composer.update(ComposerEvent::SetModel(Model::Oai(nanocodex::Model::Astra)));
         composer.update(ComposerEvent::RoutingHydrated {
             enabled: true,
             provider: None,
@@ -2160,7 +2177,7 @@ mod tests {
             effort: None,
         });
         // Default placeholder settings can arrive after enabling routing.
-        composer.update(ComposerEvent::SetModel(Model::Astra));
+        composer.update(ComposerEvent::SetModel(Model::Oai(nanocodex::Model::Astra)));
         composer.update(ComposerEvent::SetEffort(ReasoningEffort::High));
         let pending = rows(&render(&mut composer, 100, 5))[0].clone();
         assert!(pending.contains("Auto · choosing…"));
@@ -2169,10 +2186,26 @@ mod tests {
         assert!(!pending.contains("high"));
 
         for (model, provider, label) in [
-            (Model::Glm53, "Vercel", "glm-5.3 · Vercel"),
-            (Model::Glm53, "Workers AI", "glm-5.3 · Workers AI"),
-            (Model::Astra, "OpenRouter", "Astra · OpenRouter"),
-            (Model::Sol, "ChatGPT", "Sol · ChatGPT"),
+            (
+                Model::Oai(nanocodex::Model::Glm53),
+                "Vercel",
+                "glm-5.3 · Vercel",
+            ),
+            (
+                Model::Oai(nanocodex::Model::Glm53),
+                "Workers AI",
+                "glm-5.3 · Workers AI",
+            ),
+            (
+                Model::Oai(nanocodex::Model::Astra),
+                "OpenRouter",
+                "Astra · OpenRouter",
+            ),
+            (
+                Model::Oai(nanocodex::Model::Sol),
+                "ChatGPT",
+                "Sol · ChatGPT",
+            ),
         ] {
             composer.update(ComposerEvent::RoutingHydrated {
                 enabled: true,
@@ -2181,7 +2214,7 @@ mod tests {
                 effort: Some(ReasoningEffort::Low),
             });
             // An ordinary settings refresh must not overwrite the chosen route.
-            composer.update(ComposerEvent::SetModel(Model::Astra));
+            composer.update(ComposerEvent::SetModel(Model::Oai(nanocodex::Model::Astra)));
             composer.update(ComposerEvent::SetEffort(ReasoningEffort::High));
             let resolved = rows(&render(&mut composer, 100, 5))[0].clone();
             assert!(resolved.contains(label), "{resolved}");
@@ -2194,11 +2227,11 @@ mod tests {
         composer.update(ComposerEvent::RoutingHydrated {
             enabled: false,
             provider: Some("Vercel".into()),
-            model: Some(Model::Glm53),
+            model: Some(Model::Oai(nanocodex::Model::Glm53)),
             effort: Some(ReasoningEffort::Low),
         });
         let disabled = rows(&render(&mut composer, 100, 5))[0].clone();
-        assert!(disabled.contains(Model::Astra.as_str()));
+        assert!(disabled.contains(Model::Oai(nanocodex::Model::Astra).as_str()));
         assert!(disabled.contains("high"));
         assert!(!disabled.contains("Vercel"));
         assert!(!composer.auto_routing());
@@ -2216,7 +2249,7 @@ mod tests {
             composer.update(ComposerEvent::RoutingHydrated {
                 enabled: true,
                 provider: provider.map(str::to_owned),
-                model: Some(Model::Glm53),
+                model: Some(Model::Oai(nanocodex::Model::Glm53)),
                 effort: Some(ReasoningEffort::Low),
             });
             let rendered = rows(&render(&mut composer, 100, 5))[0].clone();

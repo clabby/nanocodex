@@ -8,7 +8,7 @@
 ))]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     ToolContext, ToolInput,
     contract::{ToolOutputBody, ToolOutputContent},
     runtime::ToolRuntime,

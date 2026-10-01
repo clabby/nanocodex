@@ -134,8 +134,8 @@ pub struct ClaudeBuilder {
     client_tool_search: bool,
     policy: Option<Arc<dyn ClaudeExecutionPolicy>>,
     restored: Option<Snapshot>,
-    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
-    task_board: Option<Arc<nanocodex_tools::claude_tasks::ClaudeTasks>>,
+    #[cfg(all(feature = "tools", not(target_family = "wasm")))]
+    task_board: Option<Arc<nanocodex_claude_tools::tasks::ClaudeTasks>>,
 }
 impl ClaudeBuilder {
     fn new(claude: Claude) -> Self {
@@ -164,7 +164,7 @@ impl ClaudeBuilder {
             client_tool_search: false,
             policy: None,
             restored: None,
-            #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
+            #[cfg(all(feature = "tools", not(target_family = "wasm")))]
             task_board: None,
         }
     }
@@ -313,10 +313,10 @@ impl ClaudeBuilder {
         self
     }
     /// Install explicitly provided host orchestration and UI capabilities.
-    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
-    pub fn host_tools<H: nanocodex_tools::claude_host::ClaudeHost + 'static>(
+    #[cfg(all(feature = "tools", not(target_family = "wasm")))]
+    pub fn host_tools<H: nanocodex_claude_tools::host::ClaudeHost + 'static>(
         mut self,
-        host: Arc<nanocodex_tools::claude_host::ClaudeHostTools<H>>,
+        host: Arc<nanocodex_claude_tools::host::ClaudeHostTools<H>>,
     ) -> Self {
         for schema in host.definitions() {
             let definition: ToolDefinition =
@@ -327,11 +327,10 @@ impl ClaudeBuilder {
                 let host = host.clone();
                 let name = name.clone();
                 async move {
-                    let context = nanocodex_tools::ToolContext::new(
+                    let context = nanocodex_claude_tools::HostContext::new(
                         &invocation.model,
                         &invocation.session_id,
                         &invocation.call_id,
-                        &[],
                         16_000,
                     )
                     .with_turn_id(Some(&invocation.turn_id));
@@ -347,9 +346,12 @@ impl ClaudeBuilder {
     /// This is opt-in. In-process path checks are not a sandbox; a hostile
     /// concurrent process can race filesystem operations. No Codex tool name or
     /// definition is ever forwarded to the model.
-    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
-    pub fn workspace_files(mut self, files: Arc<nanocodex_tools::ClaudeWorkspaceFiles>) -> Self {
-        for schema in nanocodex_tools::ClaudeWorkspaceFiles::definitions() {
+    #[cfg(all(feature = "tools", not(target_family = "wasm")))]
+    pub fn workspace_files(
+        mut self,
+        files: Arc<nanocodex_claude_tools::ClaudeWorkspaceFiles>,
+    ) -> Self {
+        for schema in nanocodex_claude_tools::ClaudeWorkspaceFiles::definitions() {
             let definition: ToolDefinition = serde_json::from_value(schema)
                 .expect("built-in Claude file tool schema must remain valid");
             let name = definition.name.clone();
@@ -365,10 +367,10 @@ impl ClaudeBuilder {
     /// Register a separately scoped session-local Claude task board; never a
     /// Codex plan or account scheduler. With the durability extension attached,
     /// task state is checkpointed and restored when the host reopens the session.
-    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
-    pub fn tasks(mut self, tasks: Arc<nanocodex_tools::claude_tasks::ClaudeTasks>) -> Self {
+    #[cfg(all(feature = "tools", not(target_family = "wasm")))]
+    pub fn tasks(mut self, tasks: Arc<nanocodex_claude_tools::tasks::ClaudeTasks>) -> Self {
         self.task_board = Some(tasks.clone());
-        for schema in nanocodex_tools::claude_tasks::ClaudeTasks::definitions() {
+        for schema in nanocodex_claude_tools::tasks::ClaudeTasks::definitions() {
             let definition: ToolDefinition = serde_json::from_value(schema)
                 .expect("built-in Claude task schema must remain valid");
             let name = definition.name.clone();
@@ -383,12 +385,12 @@ impl ClaudeBuilder {
     }
     /// Register a notebook editor for an explicitly host-authorized, isolated
     /// workspace. Its path checks alone do not constitute an OS sandbox.
-    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
+    #[cfg(all(feature = "tools", not(target_family = "wasm")))]
     pub fn notebook(
         mut self,
-        notebook: Arc<nanocodex_tools::claude_notebook::ClaudeNotebook>,
+        notebook: Arc<nanocodex_claude_tools::notebook::ClaudeNotebook>,
     ) -> Self {
-        for schema in nanocodex_tools::claude_notebook::ClaudeNotebook::definitions() {
+        for schema in nanocodex_claude_tools::notebook::ClaudeNotebook::definitions() {
             let definition: ToolDefinition = serde_json::from_value(schema)
                 .expect("built-in Claude notebook schema must remain valid");
             let name = definition.name.clone();
@@ -405,12 +407,12 @@ impl ClaudeBuilder {
     /// capability that enforces permissions, deadlines, and process cleanup.
     /// No ambient shell executor is constructed here; background/bypass modes
     /// are rejected by the adapter.
-    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
-    pub fn sandbox_bash<E>(mut self, bash: Arc<nanocodex_tools::claude_bash::ClaudeBash<E>>) -> Self
+    #[cfg(all(feature = "tools", not(target_family = "wasm")))]
+    pub fn sandbox_bash<E>(mut self, bash: Arc<nanocodex_claude_tools::bash::ClaudeBash<E>>) -> Self
     where
-        E: nanocodex_tools::claude_bash::SandboxBashExecutor + 'static,
+        E: nanocodex_claude_tools::bash::SandboxBashExecutor + 'static,
     {
-        for schema in nanocodex_tools::claude_bash::ClaudeBash::<E>::definitions() {
+        for schema in nanocodex_claude_tools::bash::ClaudeBash::<E>::definitions() {
             let definition: ToolDefinition = serde_json::from_value(schema)
                 .expect("built-in Claude Bash schema must remain valid");
             let name = definition.name.clone();
@@ -426,12 +428,12 @@ impl ClaudeBuilder {
     /// Opt in to Claude Code client-side WebSearch and WebFetch using only an
     /// embedding-provided, per-request approved web capability. This is separate
     /// from Anthropic-executed `web_search` and `web_fetch` server tools.
-    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
-    pub fn approved_web<P>(mut self, web: Arc<nanocodex_tools::claude_web::ClaudeWeb<P>>) -> Self
+    #[cfg(all(feature = "tools", not(target_family = "wasm")))]
+    pub fn approved_web<P>(mut self, web: Arc<nanocodex_claude_tools::web::ClaudeWeb<P>>) -> Self
     where
-        P: nanocodex_tools::claude_web::ApprovedWebProvider + 'static,
+        P: nanocodex_claude_tools::web::ApprovedWebProvider + 'static,
     {
-        for schema in nanocodex_tools::claude_web::ClaudeWeb::<P>::definitions() {
+        for schema in nanocodex_claude_tools::web::ClaudeWeb::<P>::definitions() {
             let definition: ToolDefinition = serde_json::from_value(schema)
                 .expect("built-in Claude client web schema must remain valid");
             let name = definition.name.clone();
@@ -449,10 +451,10 @@ impl ClaudeBuilder {
     /// auxiliary Claude Messages summarization. No ambient fetcher is installed,
     /// and no Anthropic server `web_fetch` is sent. The CLI's private
     /// `/api/web/domain_info` policy service is not reproduced here.
-    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
+    #[cfg(all(feature = "tools", not(target_family = "wasm")))]
     pub fn web_fetch_with_source<P>(mut self, source: Arc<P>, deferred: bool) -> Self
     where
-        P: nanocodex_tools::claude_web::ApprovedWebFetchSource + 'static,
+        P: nanocodex_claude_tools::web::ApprovedWebFetchSource + 'static,
     {
         let client = self.claude.client.clone();
         self = self.tool(
@@ -689,7 +691,7 @@ impl ClaudeBuilder {
             .as_ref()
             .map_or(session_id, |policy| policy.state_id().to_owned());
         let restored = self.restored.unwrap_or_default();
-        #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
+        #[cfg(all(feature = "tools", not(target_family = "wasm")))]
         if let Some(tasks) = &restored.tasks {
             self.task_board
                 .as_ref()
@@ -697,10 +699,10 @@ impl ClaudeBuilder {
                 .restore(tasks.clone())
                 .map_err(provider_error)?;
         }
-        #[cfg(not(all(feature = "workspace-files", not(target_family = "wasm"))))]
+        #[cfg(not(all(feature = "tools", not(target_family = "wasm"))))]
         if restored.tasks.is_some() {
             return Err(unsupported(
-                "Claude task restoration requires a native target with workspace-files and a task board",
+                "Claude task restoration requires a native target with tools and a task board",
             ));
         }
         *discovered.try_lock().expect("new discovery lock") = restored.discovered;
@@ -733,7 +735,7 @@ impl ClaudeBuilder {
                 admission: Mutex::new(()),
                 idle: Notify::new(),
                 compaction_cancel: Mutex::new(None),
-                #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
+                #[cfg(all(feature = "tools", not(target_family = "wasm")))]
                 task_board: self.task_board,
                 cancellations: Mutex::new(HashMap::new()),
                 stopped: AtomicBool::new(false),
@@ -744,54 +746,53 @@ impl ClaudeBuilder {
     }
 }
 
-#[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
-fn host_reply(output: nanocodex_tools::ToolOutput) -> std::result::Result<ClaudeToolReply, String> {
-    let structured_result = Some(output.structured_result());
-    let metadata = output
-        .metadata
-        .as_ref()
-        .map(|value| serde_json::from_str(value.get()))
-        .transpose()
-        .map_err(|error| error.to_string())?;
-    let body = serde_json::to_value(output.output).map_err(|error| error.to_string())?;
-    let content = if let Some(text) = body.as_str() {
-        ToolResultContent::Text(text.to_owned())
-    } else {
-        let items = body.as_array().ok_or("invalid host tool output")?;
-        let mut blocks = Vec::new();
-        for item in items {
-            match item["type"].as_str() {
-                Some("input_text") => blocks.push(json!({"type":"text","text":item["text"]})),
-                Some("input_image") => {
-                    let url = item["image_url"].as_str().ok_or("host image has no URL")?;
-                    let source = if let Some(data) = url.strip_prefix("data:") {
-                        let (media, data) = data
-                            .split_once(";base64,")
-                            .ok_or("host image must use base64 data URL")?;
-                        if !matches!(
-                            media,
-                            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-                        ) {
-                            return Err("unsupported Claude image media type".into());
-                        }
-                        json!({"type":"base64","media_type":media,"data":data})
-                    } else if url.starts_with("https://") {
-                        json!({"type":"url","url":url})
-                    } else {
-                        return Err("host image URL must be HTTPS or base64 data".into());
-                    };
-                    blocks.push(json!({"type":"image","source":source}));
-                }
-                _ => return Err("host returned media unsupported by the Claude adapter".into()),
+#[cfg(all(feature = "tools", not(target_family = "wasm")))]
+fn host_reply(
+    output: nanocodex_claude_tools::ToolOutput,
+) -> std::result::Result<ClaudeToolReply, String> {
+    use nanocodex_claude_tools::{ImageSource, ToolContent, ToolResultBlock};
+    let content = match output.content {
+        ToolContent::Text(text) => ToolResultContent::Text(text),
+        ToolContent::Blocks(items) => {
+            let mut blocks = Vec::with_capacity(items.len());
+            for item in items {
+                blocks.push(match item {
+                    ToolResultBlock::Text { text } => json!({"type":"text","text":text}),
+                    ToolResultBlock::Image { source } => {
+                        let source = match source {
+                            ImageSource::Base64 { media_type, data } => {
+                                if !matches!(
+                                    media_type.as_str(),
+                                    "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+                                ) {
+                                    return Err("unsupported Claude image media type".into());
+                                }
+                                json!({"type":"base64","media_type":media_type,"data":data})
+                            }
+                            ImageSource::Url { url } => {
+                                if !url.starts_with("https://") {
+                                    return Err("host image URL must be HTTPS".into());
+                                }
+                                json!({"type":"url","url":url})
+                            }
+                        };
+                        json!({"type":"image","source":source})
+                    }
+                    ToolResultBlock::UnsupportedMedia { media_type } => {
+                        return Err(format!(
+                            "host returned media unsupported by the Claude adapter: {media_type}"
+                        ));
+                    }
+                });
             }
+            ToolResultContent::Blocks(blocks)
         }
-        ToolResultContent::Blocks(blocks)
     };
     Ok(ClaudeToolReply {
         content,
-        is_error: !output.success,
-        metadata,
-        structured_result,
+        is_error: output.is_error,
+        metadata: output.metadata,
+        structured_result: output.structured_result,
     })
 }
 
@@ -971,13 +972,13 @@ async fn nested_web_search(
     Err("nested search exceeded pause limit".into())
 }
 
-#[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
-async fn web_fetch_with_source<P: nanocodex_tools::claude_web::ApprovedWebFetchSource>(
+#[cfg(all(feature = "tools", not(target_family = "wasm")))]
+async fn web_fetch_with_source<P: nanocodex_claude_tools::web::ApprovedWebFetchSource>(
     client: &ClaudeClient,
     source: &P,
     input: Value,
 ) -> std::result::Result<String, String> {
-    use nanocodex_tools::claude_web::{MAX_WEB_OUTPUT_BYTES, WebFetchRequest};
+    use nanocodex_claude_tools::web::{MAX_WEB_OUTPUT_BYTES, WebFetchRequest};
     let fields = input
         .as_object()
         .ok_or("WebFetch input must be an object")?;
@@ -1283,8 +1284,8 @@ struct State {
     admission: Mutex<()>,
     idle: Notify,
     compaction_cancel: Mutex<Option<Arc<Cancellation>>>,
-    #[cfg(all(feature = "workspace-files", not(target_family = "wasm")))]
-    task_board: Option<Arc<nanocodex_tools::claude_tasks::ClaudeTasks>>,
+    #[cfg(all(feature = "tools", not(target_family = "wasm")))]
+    task_board: Option<Arc<nanocodex_claude_tools::tasks::ClaudeTasks>>,
     cancellations: Mutex<HashMap<BackendTurnKey, Arc<Cancellation>>>,
     stopped: AtomicBool,
     sequence: AtomicU64,

@@ -198,6 +198,8 @@ final class InboxModel: ObservableObject {
     private var protectedHistorySelection: (ids: Set<String>, revision: UUID)?
     @Published var selectedTurn = ""
     @Published private(set) var modelSettingsBusy = Set<String>()
+    @Published private(set) var availableModels: [ModelChoice] = []
+    @Published private(set) var modelCatalogError: String?
     @Published private(set) var modelSettingsError: String?
     @Published private var pendingCreations = Set<String>()
     @Published private var creationErrors: [String: String] = [:]
@@ -285,6 +287,8 @@ final class InboxModel: ObservableObject {
     private var focusedHistoryLoaded = false
     private var streamReceivedFrame = false
     private var generation = UUID()
+    /// Account-scoped form identity resets private input when account lifetime changes.
+    var accountGeneration: UUID { generation }
     private var additionalHistoryGaps: [Cursor] = []
     private var readableHistoryRecovery: Task<Void, Never>?
     private var observation = UUID() {
@@ -627,6 +631,9 @@ final class InboxModel: ObservableObject {
     var focusedAttachments: [MessageAttachment] { attachmentDrafts[focused?.id ?? ""] ?? [] }
     var preparingAttachments: Bool { (attachmentImports[focused?.id ?? ""] ?? 0) > 0 }
     var attachmentError: String? { attachmentErrors[focused?.id ?? ""] }
+    var focusedSupportsRichInput: Bool {
+        isDemo || focused.map { !$0.model.isEmpty && !$0.model.hasPrefix("claude-") } == true
+    }
     var canSend: Bool {
         focused != nil && !hasUnconfirmedMessage && !preparingAttachments
             && !modelSettingsBusy.contains(focused?.id ?? "")
@@ -634,7 +641,7 @@ final class InboxModel: ObservableObject {
             && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !focusedAttachments.isEmpty)
     }
     func captureAttachmentTarget() -> AttachmentTarget? {
-        guard let id = focused?.id, connected, !isDemo else { return nil }
+        guard let id = focused?.id, connected, !isDemo, focusedSupportsRichInput else { return nil }
         attachmentErrors[id] = nil
         return AttachmentTarget(agentID: id, generation: generation, scope: scope)
     }
@@ -736,6 +743,8 @@ final class InboxModel: ObservableObject {
     }
     private func beginAttachmentImport(count: Int, target: AttachmentTarget) -> Bool {
         guard generation == target.generation else { return false }
+        guard let card = cards.first(where: { $0.id == resolvedAgentID(target.agentID) }),
+              !card.model.isEmpty, !card.model.hasPrefix("claude-") else { return false }
         guard count > 0 else { return false }
         attachmentImports[resolvedAgentID(target.agentID), default: 0] += 1; attachmentErrors[resolvedAgentID(target.agentID)] = nil
         return true
@@ -1414,7 +1423,7 @@ final class InboxModel: ObservableObject {
                 handedOff = true
             }
         }
-        connected = true; connection = "Connecting"; reconcile(); resume(initialListing: initial)
+        connected = true; Task { await refreshModelCatalog() }; connection = "Connecting"; reconcile(); resume(initialListing: initial)
         updateDeviceHand(); scheduleHandRefresh()
     }
     private func crmPath(id: String?, section: String?, query: [String: String]) -> String {
@@ -1562,6 +1571,44 @@ final class InboxModel: ObservableObject {
         pending.append(message); busy.insert(agentID); persist()
         Task { await submit(message, epoch: account) }
     }
+    func refreshModelCatalog() async {
+        guard let client, connected, !isDemo else { return }
+        let epoch = generation
+        do {
+            let catalog = try await client.modelCatalog()
+            guard generation == epoch, self.client === client else { return }
+            availableModels = catalog.models; modelCatalogError = nil
+        } catch {
+            guard generation == epoch else { return }
+            availableModels = []; modelCatalogError = "Couldn’t load available models. Refresh your connections."
+        }
+    }
+    func claudeConnectionStatus() async throws -> (connected: Bool, pending: Bool) {
+        guard let client, connected, !isDemo else { throw APIError.invalidCredential }
+        let epoch = generation
+        let status = try await client.claudeConnectionStatus()
+        guard generation == epoch, self.client === client else { throw CancellationError() }
+        return (status.connected, status.pending)
+    }
+    func startClaudeLogin() async throws -> URL {
+        guard let client, connected, !isDemo else { throw APIError.invalidCredential }
+        let epoch = generation
+        let url = try await client.startClaudeLogin()
+        guard generation == epoch, self.client === client else { throw CancellationError() }
+        return url
+    }
+    func completeClaudeLogin(_ code: String) async throws {
+        guard let client, connected, !isDemo else { throw APIError.invalidCredential }
+        let epoch = generation
+        try await client.completeClaudeLogin(code: code)
+        guard generation == epoch, self.client === client else { throw CancellationError() }
+    }
+    func disconnectClaude() async throws {
+        guard let client, connected, !isDemo else { throw APIError.invalidCredential }
+        let epoch = generation
+        try await client.disconnectClaude()
+        guard generation == epoch, self.client === client else { throw CancellationError() }
+    }
     func cachedConnectorOverview() async -> ConnectorOverview? {
         guard let client, connected, !isDemo else { return nil }
         let epoch = generation
@@ -1638,6 +1685,7 @@ final class InboxModel: ObservableObject {
         projection?.cancel(); projection = nil; eventBytes = []; retainedBytes = 0; navigation = []; deferred = [:]
         observedAgentID = nil; threadLoading = false; threadError = nil
         downloadedFiles = nil
+        availableModels = []; modelCatalogError = nil
         connected = false; restoringAccount = false; restorationError = nil
         todoWorkspace.reset()
         todoRetainedChecks = [:]; todoRetainedMail = []; todoSnoozed = [:]; todoSplit = "For you"; todoSearch = ""; todoMailQuery = "in:inbox"; todoSelectedAccount = ""
@@ -1667,7 +1715,7 @@ final class InboxModel: ObservableObject {
         if active && restoringAccount && restorationError != nil {
             Task { await restoreSavedAccount() }
         }
-        if active { refreshContext() }
+        if active { refreshContext(); Task { await refreshModelCatalog() } }
         if active { if isDemo { connection = "Demo" } else { resume() }; resumeOverview() }
         else { persistFocusedHistory(); focusedState?.cancel(); focusedState = nil; focusedHistoryRequest?.cancel(); focusedHistoryRequest = nil; finishPreferencesInBackground(); suspendOverview(); scheduleHandRefresh(); polling?.cancel(); streaming?.cancel(); streaming = nil; observation = UUID(); connection = "Paused" }
         agentNotificationUpdate?.cancel(); agentNotificationUpdate = nil
@@ -2938,7 +2986,14 @@ final class InboxModel: ObservableObject {
     }
     func voiceConfiguration(agentID: String) async throws -> VoiceConfiguration {
         guard connected, !isDemo else { throw ManagedError(code: "account_required", message: "Sign in to use interactive voice.") }
+        let epoch = generation
+        guard let client else { throw APIError.invalidCredential }
         let agentID = try await readyAgent(agentID)
+        let current = try await client.state(agentID)
+        guard generation == epoch, self.client === client else { throw CancellationError() }
+        guard !current["settings"]["model"].string.isEmpty, !current["settings"]["model"].string.hasPrefix("claude-") else {
+            throw ManagedError(code: "unsupported_claude_voice", message: "Claude managed chats support text messages only. Voice is not available.")
+        }
         try Task.checkCancellation()
         guard let card = cards.first(where: { $0.id == agentID }),
               let credential = accountCredential, let url = URL(string: credential.origin) else { throw APIError.invalidResponse }
@@ -2950,6 +3005,10 @@ final class InboxModel: ObservableObject {
     // or another tap can change focus. The server owns the queued follow-up.
     func send() -> Bool {
         guard let card = focused, canSend else { return false }
+        if card.model.hasPrefix("claude-"), !focusedAttachments.isEmpty {
+            error = "Claude managed chats support text messages only. Remove attachments before sending."
+            return false
+        }
         let request = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !request.isEmpty || !focusedAttachments.isEmpty else { return false }
         refreshContext()
@@ -3097,8 +3156,13 @@ final class InboxModel: ObservableObject {
     private func submissionWithAttachments(_ message: PendingMessage, epoch: UUID) async throws -> AgentCommand {
             var command = message.submission
             if let attachments = message.attachments, !attachments.isEmpty {
-                let store = try AttachmentStore(scope: scope)
                 guard let client else { throw APIError.invalidCredential }
+                let current = try await client.state(resolvedAgentID(message.agentID))
+                guard generation == epoch, self.client === client else { throw CancellationError() }
+                guard !current["settings"]["model"].string.isEmpty, !current["settings"]["model"].string.hasPrefix("claude-") else {
+                    throw ManagedError(code: "unsupported_claude_attachments", message: "Claude managed chats support text messages only. Attachments are not available.")
+                }
+                let store = try AttachmentStore(scope: scope)
                 guard generation == epoch,
                       let pendingIndex = pending.firstIndex(where: { $0.id == message.id }),
                       pending[pendingIndex].phase != .cancelling else { throw CancellationError() }
@@ -3625,18 +3689,20 @@ final class InboxModel: ObservableObject {
         return card.modelLocked || busy.contains(card.id) || pending.contains { $0.agentID == card.id }
     }
     func chooseModel(_ modelID: String) {
-        guard let card = focused, !modelChoiceLocked, let choice = ModelChoice.find(modelID) else { return }
-        let effort = choice.efforts.contains(card.thinking) ? card.thinking : "low"
-        updateModelControls(["model": .string(modelID), "thinking": .string(effort)])
+        guard let card = focused, !modelChoiceLocked, let choice = (isDemo ? ModelChoice.all : availableModels).first(where: { $0.id == modelID }) else { return }
+        let effort = choice.efforts.contains(card.thinking) ? card.thinking : (choice.efforts.first ?? "low")
+        updateModelControls(["model": .string(modelID), "thinking": .string(effort),
+            "fast_mode": .bool(false),
+            "reasoning_mode": .string("standard")])
     }
     func toggleAutoRoute() {
         guard let card = focused, !modelChoiceLocked else { return }
-        if card.routingAutomatic { chooseModel(card.model.isEmpty ? "gpt-6-astra" : card.model) }
+        if card.routingAutomatic { chooseModel(card.model) }
         else { updateModelControls([:]) }
     }
     func chooseEffort(_ effort: String) {
         guard let card = focused, !card.effortLocked, !card.routingAutomatic,
-              let choice = ModelChoice.find(card.model.isEmpty ? "gpt-6-astra" : card.model), choice.efforts.contains(effort) else { return }
+              let choice = (isDemo ? ModelChoice.all : availableModels).first(where: { $0.id == card.model }), choice.efforts.contains(effort) else { return }
         if card.modelLocked {
             // Only the existing native settings path can append a cache-safe effort update.
             updateModelControls(["thinking": .string(effort)], effortOnly: true)

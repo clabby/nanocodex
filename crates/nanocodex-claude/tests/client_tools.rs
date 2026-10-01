@@ -273,7 +273,7 @@ async fn failed_nested_search_yields_one_error_result_without_retrying_it() {
     server.abort();
 }
 
-#[cfg(feature = "workspace-files")]
+#[cfg(feature = "tools")]
 #[tokio::test]
 async fn web_fetch_uses_approved_page_then_auxiliary_haiku_not_server_fetch() {
     assert_approved_fetch(
@@ -283,7 +283,7 @@ async fn web_fetch_uses_approved_page_then_auxiliary_haiku_not_server_fetch() {
     .await;
 }
 
-#[cfg(feature = "workspace-files")]
+#[cfg(feature = "tools")]
 #[tokio::test]
 async fn web_fetch_long_answer_keeps_complete_source() {
     assert_approved_fetch(
@@ -293,9 +293,9 @@ async fn web_fetch_long_answer_keeps_complete_source() {
     .await;
 }
 
-#[cfg(feature = "workspace-files")]
+#[cfg(feature = "tools")]
 async fn assert_approved_fetch(prompt: &str, answer: String) {
-    use nanocodex_tools::claude_web::{ApprovedPage, ApprovedWebFetchSource, WebFetchRequest};
+    use nanocodex_claude_tools::web::{ApprovedPage, ApprovedWebFetchSource, WebFetchRequest};
     struct FixtureSource(Arc<Mutex<Vec<WebFetchRequest>>>);
     impl ApprovedWebFetchSource for FixtureSource {
         async fn fetch_source(&self, request: WebFetchRequest) -> Result<ApprovedPage, String> {

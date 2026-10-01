@@ -53,10 +53,10 @@ pub use nanocodex_oai_api::{Model, ReasoningMode, Thinking, events::AgentEvents}
 pub use nanocodex_oai_api::{OpenAi, ResponseError, ResponseErrorKind};
 #[cfg(all(feature = "openai", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "openai", not(target_family = "wasm")))))]
-pub use nanocodex_tools::tool;
+pub use nanocodex_oai_tools::tool;
 #[cfg(feature = "openai")]
 #[cfg_attr(docsrs, doc(cfg(feature = "openai")))]
-pub use nanocodex_tools::{Tool, Tools};
+pub use nanocodex_oai_tools::{Tool, Tools};
 pub use usage::{
     CostStatus, EstimatedUsdCost, ReportedTurnUsage, ServiceTier, TurnUsage, UsdAmount,
 };
@@ -108,11 +108,11 @@ pub mod transport {
 #[cfg_attr(docsrs, doc(cfg(feature = "openai")))]
 pub mod tools {
     #[doc(inline)]
-    pub use nanocodex_tools::*;
+    pub use nanocodex_oai_tools::*;
 }
 
 #[cfg(all(feature = "openai", not(target_family = "wasm")))]
 #[doc(hidden)]
 pub mod __private {
-    pub use nanocodex_tools::__private::*;
+    pub use nanocodex_oai_tools::__private::*;
 }

@@ -12,14 +12,14 @@ use serde::{Deserialize, de::DeserializeOwned};
 use url::{Host, Url};
 use zeroize::Zeroize;
 
-use nanocodex_oai_api::{Model, ReasoningMode, Thinking};
+use nanocodex_oai_api::{ReasoningMode, Thinking};
 
 use crate::{
     AgentList, AgentReceipt, AgentSettings, AgentSettingsPatch, AgentSettingsResponse, AgentState,
     AutoRoutingStatus, EventCursor, EventHistoryPage, FindSessionsRequest, FindSessionsResponse,
-    ManagedApiKey, ManagedError, ManagedEventStream, PromptInput, ReadSessionBody,
-    ReadSessionRequest, ReadSessionResponse, RoutingStatus, SteerReceipt, SteerReceiptState,
-    SteerWithdrawal, TurnAction, TurnSteer, TurnSubmission, TurnView,
+    ManagedApiKey, ManagedError, ManagedEventStream, ManagedModel, ModelCatalog, PromptInput,
+    ReadSessionBody, ReadSessionRequest, ReadSessionResponse, RoutingStatus, SteerReceipt,
+    SteerReceiptState, SteerWithdrawal, TurnAction, TurnSteer, TurnSubmission, TurnView,
 };
 
 const MAX_HISTORY_PAGE: u16 = 256;
@@ -188,6 +188,9 @@ impl ManagedClient {
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
+            // Only our explicit operation policy may replay a request. In
+            // particular private OAuth writes must never retry protocol NACKs.
+            .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(10))
             // SSE sends keepalives every 15 seconds. Bound a dead connection
             // without limiting the lifetime of a healthy event stream.
@@ -301,6 +304,11 @@ impl ManagedClient {
             return Err(ManagedError::InvalidResponse("invalid ChatGPT account ID"));
         }
         let settings = settings.validate()?;
+        if settings.model.oai().is_none() {
+            return Err(ManagedError::Configuration(
+                "Claude cannot be pinned to a ChatGPT account".to_owned(),
+            ));
+        }
         let body = serde_json::to_vec(&serde_json::json!({
             "settings": settings,
             "configuration": { "chatgpt_account_id": account_id },
@@ -310,6 +318,101 @@ impl ManagedClient {
             .json(Method::POST, "v1/agents", Some(&body), None)
             .await?;
         validate_agent_receipt(receipt)
+    }
+
+    /// Reads authoritative model availability for the authenticated account.
+    /// No local static picker catalog implies provider availability.
+    ///
+    /// # Errors
+    /// Returns transport, HTTP, schema, or incompatible catalog failures.
+    pub async fn models(&self) -> Result<ModelCatalog, ManagedError> {
+        let catalog: ModelCatalog = self.json(Method::GET, "v1/models", None, None).await?;
+        if catalog.object != "list"
+            || catalog
+                .default_model
+                .is_some_and(|model| !catalog.data.iter().any(|entry| entry.id == model))
+            || catalog.data.iter().any(|entry| {
+                entry.thinking.is_empty()
+                    || entry.reasoning_modes.is_empty()
+                    || entry
+                        .thinking
+                        .iter()
+                        .any(|effort| !entry.id.supports_thinking(*effort))
+                    || entry
+                        .reasoning_modes
+                        .iter()
+                        .any(|mode| !entry.id.supports_reasoning_mode(*mode))
+                    || (entry.fast_mode && !entry.id.supports_fast_mode())
+            })
+        {
+            return Err(ManagedError::InvalidResponse(
+                "incompatible managed model catalog",
+            ));
+        }
+        Ok(catalog)
+    }
+
+    /// Resolves a safe zero-configuration policy from authoritative availability.
+    ///
+    /// Used only for default creation. Explicit and retained model policies are
+    /// never coerced. Reasoning is standard, fast mode is off, and effort follows
+    /// the selected model when offered (otherwise the catalog's first effort).
+    ///
+    /// # Errors
+    /// Returns catalog failures or an error when no standard default is offered.
+    pub async fn default_settings(&self) -> Result<AgentSettings, ManagedError> {
+        let catalog = self.models().await?;
+        let model = catalog.default_model.ok_or_else(|| {
+            ManagedError::Configuration(
+                "No managed model is available; connect a provider subscription first".to_owned(),
+            )
+        })?;
+        let entry = catalog.data.iter().find(|entry| entry.id == model).ok_or(
+            ManagedError::InvalidResponse("catalog default model is unavailable"),
+        )?;
+        let mut settings = AgentSettings::new(model);
+        if !entry.thinking.contains(&settings.thinking) {
+            settings.thinking = entry.thinking[0];
+        }
+        if !entry.reasoning_modes.contains(&settings.reasoning_mode) {
+            return Err(ManagedError::Configuration(
+                "Catalog default does not offer standard reasoning; select an explicit policy"
+                    .to_owned(),
+            ));
+        }
+        settings.validate()
+    }
+
+    /// Compacts retained session history using the authenticated account endpoint.
+    ///
+    /// This write is single-shot and returns only after server completion. On an
+    /// unknown outcome inspect retained history before retrying. The server
+    /// requires full-account agent-write and tool-use authority and rejects busy
+    /// sessions and Connect grants.
+    ///
+    /// # Errors
+    /// Returns transport, HTTP, or invalid acknowledgement failures.
+    pub async fn compact(&self, agent_id: &str) -> Result<(), ManagedError> {
+        validate_id("agent", agent_id)?;
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Compacted {
+            compacted: bool,
+        }
+        let receipt: Compacted = self
+            .json(
+                Method::POST,
+                &format!("{}/compact", agent_path(agent_id)),
+                None,
+                None,
+            )
+            .await?;
+        if !receipt.compacted {
+            return Err(ManagedError::InvalidResponse(
+                "managed compaction was not acknowledged",
+            ));
+        }
+        Ok(())
     }
 
     /// Lists account-owned managed agents.
@@ -432,12 +535,12 @@ impl ManagedClient {
     pub async fn set_model(
         &self,
         agent_id: &str,
-        model: Model,
+        model: impl Into<ManagedModel>,
     ) -> Result<AgentSettings, ManagedError> {
         self.patch_settings(
             agent_id,
             AgentSettingsPatch {
-                model: Some(model),
+                model: Some(model.into()),
                 ..AgentSettingsPatch::default()
             },
         )
@@ -1009,7 +1112,7 @@ impl ManagedClient {
     /// Resolves the authenticated reverse-tool endpoint for one owned agent.
     ///
     /// The returned target redacts its bearer credential from debug output and
-    /// can be passed directly to [`nanocodex_tools::Tools::attach`].
+    /// can be passed directly to [`nanocodex_oai_tools::Tools::attach`].
     ///
     /// # Errors
     ///
@@ -1019,7 +1122,7 @@ impl ManagedClient {
     pub fn attachment_target(
         &self,
         agent_id: &str,
-    ) -> Result<nanocodex_tools::attachment::AttachmentTarget, ManagedError> {
+    ) -> Result<nanocodex_oai_tools::attachment::AttachmentTarget, ManagedError> {
         validate_id("agent", agent_id)?;
         self.attachment_target_at(&format!("/v1/agents/{agent_id}/tool-host"))
     }
@@ -1028,7 +1131,7 @@ impl ManagedClient {
     /// Resolves the authenticated reverse-tool endpoint for the account.
     ///
     /// The returned target redacts its bearer credential from debug output and
-    /// can be passed directly to [`nanocodex_tools::Tools::attach`].
+    /// can be passed directly to [`nanocodex_oai_tools::Tools::attach`].
     ///
     /// # Errors
     ///
@@ -1036,7 +1139,7 @@ impl ManagedClient {
     #[cfg_attr(docsrs, doc(cfg(feature = "tools")))]
     pub fn account_attachment_target(
         &self,
-    ) -> Result<nanocodex_tools::attachment::AttachmentTarget, ManagedError> {
+    ) -> Result<nanocodex_oai_tools::attachment::AttachmentTarget, ManagedError> {
         self.attachment_target_at("/v1/account/tool-host")
     }
 
@@ -1044,7 +1147,7 @@ impl ManagedClient {
     fn attachment_target_at(
         &self,
         path: &str,
-    ) -> Result<nanocodex_tools::attachment::AttachmentTarget, ManagedError> {
+    ) -> Result<nanocodex_oai_tools::attachment::AttachmentTarget, ManagedError> {
         let mut endpoint = self.base_url.clone();
         endpoint
             .set_scheme(if endpoint.scheme() == "https" {
@@ -1056,7 +1159,7 @@ impl ManagedClient {
                 ManagedError::Configuration("invalid managed attachment URL".to_owned())
             })?;
         endpoint.set_path(path);
-        nanocodex_tools::attachment::AttachmentTarget::new(
+        nanocodex_oai_tools::attachment::AttachmentTarget::new(
             endpoint.as_str(),
             self.bearer.to_string(),
         )
@@ -1202,8 +1305,15 @@ impl ManagedClient {
             request = request.header("x-nanocodex-client-context", origin.clone());
         }
         let eligible = (url.path() == "/v1/agents" || url.path().starts_with("/v1/agents/"))
-            && !["ws", "events", "tool-host", "device-host", "sideband"]
-                .contains(&url.path().rsplit('/').next().unwrap_or_default());
+            && ![
+                "ws",
+                "events",
+                "tool-host",
+                "device-host",
+                "sideband",
+                "compact",
+            ]
+            .contains(&url.path().rsplit('/').next().unwrap_or_default());
         let began = Instant::now();
         let token = if eligible {
             self.access

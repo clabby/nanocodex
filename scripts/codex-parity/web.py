@@ -15,7 +15,7 @@ src = (u/'codex-rs/codex-api/src/search.rs').read_text()
 start = src.index('#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, JsonSchema)]')
 end = src.index('#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]\n#[serde(rename_all = "snake_case")]')
 commands = src[start:end]
-local_wire = (ROOT/'crates/nanocodex-tools/src/web_search/wire.rs').read_text()
+local_wire = (ROOT/'crates/nanocodex-oai-tools/src/web_search/wire.rs').read_text()
 assert commands.replace('pub ', 'pub(super) ') in local_wire, 'web command wire drift'
 schema = (u/'codex-rs/ext/web-search/src/schema.rs').read_text().replace('use codex_api::SearchCommands;', '')
 with tempfile.TemporaryDirectory(prefix='codex-web-') as directory:
@@ -26,9 +26,9 @@ with tempfile.TemporaryDirectory(prefix='codex-web-') as directory:
     schema_json = json.loads(subprocess.check_output(['cargo','run','--quiet','--manifest-path',str(directory/'Cargo.toml')], text=True, env={**os.environ, 'CARGO_TARGET_DIR': str(ROOT/'target/codex-parity')}))
 description = (u/'codex-rs/ext/web-search/web_run_description.md').read_text()
 outputs = {
- ROOT/'crates/nanocodex-tools/tests/fixtures/codex-parity/web.json': json.dumps(schema_json, indent=2, sort_keys=True)+'\n',
+ ROOT/'crates/nanocodex-oai-tools/tests/fixtures/codex-parity/web.json': json.dumps(schema_json, indent=2, sort_keys=True)+'\n',
  ROOT/'js/nanocodex-tools/tools/webParameters.generated.mjs': '// Generated from pinned codex-rs by scripts/codex-parity/web.py.\nexport default '+json.dumps(schema_json, indent=2, sort_keys=True)+';\n',
- ROOT/'crates/nanocodex-tools/src/web_search/web_run_description.md': description,
+ ROOT/'crates/nanocodex-oai-tools/src/web_search/web_run_description.md': description,
 }
 for path, expected in outputs.items():
     if a.write: path.write_text(expected)

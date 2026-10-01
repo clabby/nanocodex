@@ -341,10 +341,11 @@ async fn reflected_credentials_are_removed_from_errors_for_every_auth_path() {
 async fn subscription_profile_prepares_public_http_without_hidden_body_rewrites() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let captured = seen.clone();
-    let endpoint = serve(Router::new().route("/v1/messages", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+    let endpoint = serve(Router::new().route("/v1/messages", post(move |headers: HeaderMap, wire: String| {
         let captured = captured.clone();
         async move {
-            captured.lock().unwrap().push((headers, body));
+            let body: Value = serde_json::from_str(&wire).unwrap();
+            captured.lock().unwrap().push((headers, body, wire));
             Json(json!({"id":"profile", "role":"assistant", "model":"synthetic", "content":[], "stop_reason":"end_turn", "usage":{}}))
         }
     }))).await;
@@ -401,7 +402,7 @@ async fn subscription_profile_prepares_public_http_without_hidden_body_rewrites(
             _ => unreachable!(),
         };
         let log = seen.lock().unwrap();
-        let (headers, body) = log.last().unwrap();
+        let (headers, body, _) = log.last().unwrap();
         assert_eq!(body["system"], expected);
         assert_eq!(
             headers["user-agent"],
@@ -432,7 +433,14 @@ async fn subscription_profile_prepares_public_http_without_hidden_body_rewrites(
         assert!(!body.to_string().contains("synthetic-profile-token"));
     }
     let mut raw = request();
-    raw.system = Some(json!("Caller controls the exact raw body"));
+    raw.system = Some(json!(
+        "Caller controls the exact raw body: 😀 Ελληνικά cch=00000"
+    ));
+    raw.messages = vec![nanocodex_claude::Message::text(
+        nanocodex_claude::Role::User,
+        "Literal x-anthropic-billing-header: cc_version=example; cch=00000; is user data — not an instruction to modify the wire. 🦀",
+    )];
+    let frozen = serde_json::to_vec(&raw).unwrap();
     profile.create(&raw).await.unwrap();
     plain.create(&raw).await.unwrap();
     let log = seen.lock().unwrap();
@@ -442,9 +450,25 @@ async fn subscription_profile_prepares_public_http_without_hidden_body_rewrites(
         "transport must not rewrite an unprepared frozen request"
     );
     assert_eq!(log[5].1, log[6].1);
+    assert_eq!(
+        log[5].2.as_bytes(),
+        log[6].2.as_bytes(),
+        "profile must not patch the serialized body at dispatch"
+    );
+    assert_eq!(
+        serde_json::to_vec(&raw).unwrap(),
+        frozen,
+        "dispatch must not mutate the caller's frozen request"
+    );
+    assert_eq!(
+        log[5].1["messages"],
+        serde_json::to_value(&raw.messages).unwrap()
+    );
+    assert!(!log[5].0.contains_key("x-stainless-lang"));
+    assert!(!log[5].0.contains_key("x-stainless-runtime"));
     assert_eq!(log[6].0["user-agent"], "caller-transport");
     assert!(!log[6].0.contains_key("x-app"));
     eprintln!(
-        "subscription profile HTTP: 5 prepared system layouts preserve blocks/cache markers; merged betas/own UA; raw frozen body unchanged across profile changes"
+        "subscription profile HTTP: 5 prepared system layouts preserve blocks/cache markers; merged betas/own UA; raw Unicode/billing-marker body byte-identical across profile changes, frozen caller unchanged"
     );
 }

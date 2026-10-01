@@ -1,16 +1,14 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { Check, ChevronDown, ChevronRight, Zap } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ManagedCreateSettings } from "nanocodex/managed";
+import { useAccountSession } from "./AccountSession";
+import { useAccountQuery } from "./useAccountQuery";
+import { decodeModelCatalog } from "./modelCatalog";
 import { clientFailureMessage } from "./clientFailure";
 
 type Model = ManagedCreateSettings["model"];
 type Thinking = ManagedCreateSettings["thinking"];
-const models: readonly [Model, string][] = [
-  ["gpt-6-astra", "GPT-6 Astra"],
-  ["gpt-6.1-sol", "GPT-6.1 Sol"],
-  ["gpt-6-luna", "GPT-6 Luna"],
-];
 const efforts: readonly [Thinking, string][] = [
   ["none", "None"],
   ["low", "Low"],
@@ -22,6 +20,7 @@ const efforts: readonly [Thinking, string][] = [
 
 export function AgentModelMenu({
   agentReady,
+  managed = true,
   modelLocked,
   settings,
   onFastMode,
@@ -29,12 +28,23 @@ export function AgentModelMenu({
   onThinking,
 }: {
   agentReady: boolean;
+  managed?: boolean;
   modelLocked: boolean;
   settings: ManagedCreateSettings;
   onFastMode(enabled: boolean): Promise<unknown>;
-  onModel(model: Model): Promise<unknown>;
+  onModel(model: Model, normalized: Pick<ManagedCreateSettings, "thinking" | "fastMode" | "reasoningMode">): Promise<unknown>;
   onThinking(thinking: Thinking): Promise<unknown>;
 }) {
+  const accountId = useAccountSession().account?.id;
+  const { query, refresh } = useAccountQuery(accountId, "/v1/models", decodeModelCatalog, { staleTime: 0 });
+  useEffect(() => {
+    const changed = () => { void refresh(); };
+    window.addEventListener("nanocodex:model-credential-changed", changed);
+    return () => window.removeEventListener("nanocodex:model-credential-changed", changed);
+  }, [refresh]);
+  const models = (query.error ? [] : query.data?.models ?? []).filter(model => managed || model.provider === "openai");
+  const selected = models.find(model => model.id === settings.model);
+  const effortPinned = modelLocked && settings.model.startsWith("claude-");
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
   async function run(operation: () => Promise<unknown>) {
@@ -52,12 +62,12 @@ export function AgentModelMenu({
     }
   }
   const modelName =
-    models.find(([id]) => id === settings.model)?.[1] ?? settings.model;
+    selected?.name ?? settings.model;
   const effortName =
     efforts.find(([id]) => id === settings.thinking)?.[1] ?? settings.thinking;
   return (
     <div className="agent-runtime-controls">
-      <Menu.Root>
+      <Menu.Root onOpenChange={(open) => { if (open) void refresh(); }}>
         <Menu.Trigger
           className="agent-model-trigger"
           disabled={!agentReady || pending}
@@ -100,17 +110,28 @@ export function AgentModelMenu({
                   <Menu.RadioGroup
                     value={settings.model}
                     onValueChange={(value) =>
-                      void run(() => onModel(value as Model))
+                      void run(() => {
+                        const choice = models.find(model => model.id === value);
+                        if (!choice) throw new Error("This model is no longer available. Refresh your connections.");
+                        return onModel(choice.id, {
+                          thinking: choice.thinking.includes(settings.thinking) ? settings.thinking : choice.thinking[0],
+                          fastMode: choice.fastMode && settings.fastMode,
+                          reasoningMode: choice.reasoningModes.includes(settings.reasoningMode) ? settings.reasoningMode : "standard",
+                        });
+                      })
                     }
                   >
-                    {models.map(([id, label]) => (
+                    {!models.length ? <Menu.Label className="agent-model-menu-label">
+                      {query.error ? "Couldn’t load available models" : query.isPending ? "Loading available models…" : "Connect a model subscription in account settings"}
+                    </Menu.Label> : null}
+                    {models.map(({id, name}) => (
                       <Menu.RadioItem
                         className="agent-model-menu-item"
                         key={id}
                         value={id}
                         disabled={modelLocked || pending}
                       >
-                        <span>{label}</span>
+                        <span>{name}</span>
                         <Menu.ItemIndicator>
                           <Check />
                         </Menu.ItemIndicator>
@@ -136,12 +157,15 @@ export function AgentModelMenu({
                   collisionPadding={12}
                 >
                   <Menu.Label className="agent-model-menu-label">
-                    Thinking
+                    {effortPinned ? "Thinking fixed for this Claude conversation" : "Thinking"}
                   </Menu.Label>
                   <Menu.RadioGroup
                     value={settings.thinking}
                     onValueChange={(value) =>
-                      void run(() => onThinking(value as Thinking))
+                      void run(() => {
+                        if (effortPinned) throw new Error("Thinking is fixed for this Claude conversation. Start a new chat to change it.");
+                        return onThinking(value as Thinking);
+                      })
                     }
                   >
                     {efforts.map(([id, label]) => (
@@ -150,8 +174,8 @@ export function AgentModelMenu({
                         key={id}
                         value={id}
                         disabled={
-                          pending ||
-                          (["gpt-6-astra", "gpt-6.1-sol"].includes(settings.model) && id === "none")
+                          pending || effortPinned ||
+                          !selected?.thinking.includes(id)
                         }
                       >
                         <span>{label}</span>
@@ -168,7 +192,7 @@ export function AgentModelMenu({
             <Menu.CheckboxItem
               className="agent-model-menu-item"
               checked={settings.fastMode}
-              disabled={pending}
+              disabled={pending || !selected?.fastMode}
               onCheckedChange={(value) => void run(() => onFastMode(value))}
             >
               <span className="agent-model-fast">
@@ -182,9 +206,9 @@ export function AgentModelMenu({
           </Menu.Content>
         </Menu.Portal>
       </Menu.Root>
-      {error ? (
+      {error || query.error ? (
         <p className="agent-model-error" role="alert">
-          {error}
+          {error ?? "Couldn’t load available models. Reopen model settings to retry."}
         </p>
       ) : null}
     </div>

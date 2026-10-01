@@ -2,7 +2,7 @@
 use super::screen_publisher::{ScreenBackend, ScreenPublisher};
 use clap::Args;
 use nanocodex_managed::{ManagedClient, ManagedError};
-use nanocodex_tools::attachment::{AttachmentMachine, AttachmentTarget};
+use nanocodex_oai_tools::attachment::{AttachmentMachine, AttachmentTarget};
 use std::path::{Path, PathBuf};
 
 #[derive(Args)]

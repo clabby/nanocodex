@@ -1,6 +1,7 @@
 import InboxCore
 import SwiftUI
 import NanocodexRemote
+import NanocodexUI
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
@@ -49,6 +50,23 @@ struct SettingsView: View {
                 } else {
                     Button("Sign In…") { switchingAccount = true }.buttonStyle(.borderedProminent)
                 }
+            }
+            if model.state.connected {
+                ClaudeConnectionSection(read: {
+                    let client = try model.schedulesClient(); defer { client.close() }
+                    let status = try await client.claudeConnectionStatus()
+                    return (status.connected, status.pending)
+                }, start: {
+                    let client = try model.schedulesClient(); defer { client.close() }
+                    return try await client.startClaudeLogin()
+                }, complete: { privateCode in
+                    let client = try model.schedulesClient(); defer { client.close() }
+                    try await client.completeClaudeLogin(code: privateCode)
+                }, disconnect: {
+                    let client = try model.schedulesClient(); defer { client.close() }
+                    try await client.disconnectClaude()
+                }, changed: { await model.refreshModelCatalog() })
+                .id(model.state.accountScope)
             }
             Section("Background Hands") {
                 LaunchAtLoginSettings(launch: model.launchAtLogin)

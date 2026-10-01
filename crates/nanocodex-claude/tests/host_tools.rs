@@ -1,4 +1,4 @@
-#![cfg(feature = "workspace-files")]
+#![cfg(feature = "tools")]
 //! Host bridge protocol scenarios: preserve actual session/turn/call identity,
 //! await real answers, and retain host failure status in Claude tool results.
 //! Defined while the context-aware builder integration was being implemented.
@@ -7,9 +7,9 @@ use axum::{Json, Router, routing::post};
 use futures_util::StreamExt;
 use nanocodex_agent::{Nanocodex, events::AgentEventKind};
 use nanocodex_claude::{Claude, ClaudeClient};
-use nanocodex_tools::{
-    ToolContext, ToolOutput,
-    claude_host::{ClaudeHost, ClaudeHostTools, HostRequest, HostTool, QuestionsRequest},
+use nanocodex_claude_tools::{
+    HostContext, ToolOutput,
+    host::{ClaudeHost, ClaudeHostTools, HostRequest, HostTool, QuestionsRequest},
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -51,7 +51,7 @@ impl ClaudeHost for QuestionHost {
     async fn execute(
         &self,
         request: HostRequest,
-        context: ToolContext<'_>,
+        context: HostContext<'_>,
     ) -> Result<ToolOutput, String> {
         self.invocations.lock().unwrap().push(Invocation {
             model: context.model().to_owned(),
@@ -242,7 +242,7 @@ async fn host_bridge_waits_for_user_and_preserves_real_identity_and_failures() {
         serde_json::to_vec_pretty(&result_events).unwrap(),
     )
     .unwrap();
-    std::fs::write(artifact.join("scenario.txt"), "Command: cargo test -p nanocodex-claude --features workspace-files --test host_tools\nInput: synthetic loopback SSE AskUserQuestion -> TaskOutput -> TaskStop.\nExpected: no continuation before user answer; true session/turn/call identity; answer retained; both host error forms are is_error:true.\n").unwrap();
+    std::fs::write(artifact.join("scenario.txt"), "Command: cargo test -p nanocodex-claude --features tools --test host_tools\nInput: synthetic loopback SSE AskUserQuestion -> TaskOutput -> TaskStop.\nExpected: no continuation before user answer; true session/turn/call identity; answer retained; both host error forms are is_error:true.\n").unwrap();
     std::fs::write(artifact.join("invocations.json"), serde_json::to_vec_pretty(&json!({
         "expected_session":session_id,"expected_turn":turn_id,
         "observed":observed.iter().map(|item| json!({"model":item.model,"session":item.session,"turn":item.turn,"call":item.call})).collect::<Vec<_>>()
@@ -270,24 +270,30 @@ impl ClaudeHost for MediaHost {
     async fn execute(
         &self,
         request: HostRequest,
-        _: ToolContext<'_>,
+        _: HostContext<'_>,
     ) -> Result<ToolOutput, String> {
         let HostRequest::TaskOutput(request) = request else {
             return Err("unavailable".into());
         };
+        use nanocodex_claude_tools::{ImageSource, ToolResultBlock};
         let content = match request.task_id.as_str() {
-            "image-task" => json!([
-                {"type":"input_text","text":"Rendered task output"},
-                {"type":"input_image","image_url":format!("data:image/png;base64,{PIXEL}"),"detail":"high"}
-            ]),
-            "audio-task" => {
-                json!([{"type":"input_audio","audio_url":"data:audio/wav;base64,UklGRg=="}])
-            }
+            "image-task" => vec![
+                ToolResultBlock::Text {
+                    text: "Rendered task output".into(),
+                },
+                ToolResultBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: PIXEL.into(),
+                    },
+                },
+            ],
+            "audio-task" => vec![ToolResultBlock::UnsupportedMedia {
+                media_type: "audio/wav".into(),
+            }],
             _ => return Err("unknown task".into()),
         };
-        Ok(ToolOutput::content(
-            serde_json::from_value(content).unwrap(),
-        ))
+        Ok(ToolOutput::content(content))
     }
 }
 

@@ -175,5 +175,5 @@ intentionally does not repeat sibling convenience exports: provider
 configuration belongs under [`oai`], tool implementation belongs under
 [`tools`], and lifecycle state belongs under [`agent`]. Applications that need
 only one component can depend on its package directly and use
-`nanocodex_oai_api`, `nanocodex_tools`, `nanocodex_agent`, or
+`nanocodex_oai_api`, `nanocodex_oai_tools`, `nanocodex_agent`, or
 `nanocodex_durability`.

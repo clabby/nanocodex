@@ -20,29 +20,31 @@ rustdoc-args = ["-D", "warnings"]
 [features]
 default = ["durability", "mcp", "openai", "tools"]
 claude = ["dep:nanocodex-claude", "nanocodex-durability?/claude"]
+claude-tools = ["claude", "dep:nanocodex-claude-tools", "nanocodex-claude/tools"]
 durability = ["dep:nanocodex-durability", "openai"]
 managed = ["dep:nanocodex-managed"]
-mcp = ["tools", "nanocodex-tools/mcp"]
+mcp = ["tools", "nanocodex-oai-tools/mcp"]
 observability = ["dep:nanocodex-observability"]
 openai = ["nanocodex-agent/openai", "nanocodex-oai-api/client"]
 realtime = ["openai", "nanocodex-oai-api/realtime"]
-tools = [
-    "dep:nanocodex-tools",
+tools = ["oai-tools"]
+oai-tools = [
+    "dep:nanocodex-oai-tools",
     "nanocodex-managed?/tools",
-    "nanocodex-tools/attachment",
+    "nanocodex-oai-tools/attachment",
 ]
 workspace-tools = [
     "tools",
-    "nanocodex-tools/workspace-runtime",
-    "nanocodex-claude?/workspace-files",
+    "nanocodex-oai-tools/workspace-runtime",
 ]
 
 [dependencies]
 nanocodex-agent = { path = "../nanocodex-agent", version = "0.6.6", default-features = false }
 nanocodex-claude = { workspace = true, optional = true }
+nanocodex-claude-tools = { workspace = true, optional = true }
 nanocodex-durability = { workspace = true, optional = true }
 nanocodex-oai-api = { path = "../nanocodex-oai-api", version = "0.6.6", default-features = false, features = ["events"] }
-nanocodex-tools = { path = "../nanocodex-tools", version = "0.6.6", default-features = false, optional = true }
+nanocodex-oai-tools = { path = "../nanocodex-oai-tools", version = "0.6.6", default-features = false, optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 nanocodex-managed = { workspace = true, optional = true }

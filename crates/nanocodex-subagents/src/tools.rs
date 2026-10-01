@@ -15,7 +15,7 @@ use super::{
 use async_trait::async_trait;
 use futures_util::future::join_all;
 use nanocodex_agent::{AgentHandle, Model, SpawnOptions, Thinking};
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, Tools,
     runtime::ToolsBuildError,
 };

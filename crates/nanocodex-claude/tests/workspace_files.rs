@@ -1,9 +1,9 @@
-#![cfg(feature = "workspace-files")]
+#![cfg(feature = "tools")]
 
 use axum::{Json, Router, routing::post};
 use nanocodex_agent::Nanocodex;
 use nanocodex_claude::{Claude, ClaudeClient};
-use nanocodex_tools::ClaudeWorkspaceFiles;
+use nanocodex_claude_tools::ClaudeWorkspaceFiles;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -143,10 +143,10 @@ async fn completed_file_write_survives_followup_transport_error_in_session() {
 
 #[tokio::test]
 async fn opt_in_tasks_notebook_and_sandbox_bash_route_without_host_shell() {
-    use nanocodex_tools::{
-        claude_bash::{BashRequest, BashResult, ClaudeBash, SandboxBashExecutor},
-        claude_notebook::ClaudeNotebook,
-        claude_tasks::ClaudeTasks,
+    use nanocodex_claude_tools::{
+        bash::{BashRequest, BashResult, ClaudeBash, SandboxBashExecutor},
+        notebook::ClaudeNotebook,
+        tasks::ClaudeTasks,
     };
     struct FakeSandbox;
     impl SandboxBashExecutor for FakeSandbox {

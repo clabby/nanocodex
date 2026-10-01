@@ -127,10 +127,11 @@ shared durability crate's at-least-once semantics.
 `status()` returns public lifecycle state and authenticated account/organization
 identity, never token values. The credential lifecycle is Rust/WASM portable;
 the host remains responsible for storage placement, callback UI and networking.
-This library does not install the product's sign-in screen. The additive
-[JavaScript runtime](CLAUDE_JAVASCRIPT.md) accepts a host-owned auth callback; it
-does not expose the native PKCE manager as a JS login UI or switch managed
-provider selection.
+The standalone library does not install a sign-in screen. The Worker SDK
+exposes the same Rust lifecycle through `ClaudeSubscription.open`; its private
+store and HTTP remain caller-owned. The
+[managed platform integration](CLAUDE_MANAGED.md) supplies encrypted account
+storage, a private connection form and authoritative model selection.
 
 ## API keys and other token sources
 
@@ -164,8 +165,10 @@ provider rule or the meaning of the earlier rate-limit error. Applications shoul
 validate their selected model and approved subscription integration against the
 live provider; a synthetic transport test cannot establish admission or billing.
 
-A fresh real provider PKCE exchange and native refresh remain unverified; their
-lifecycle coverage is the synthetic integration above. Product sign-in and
-billing are separate integration work. Anthropic documents third-party
+A separate fresh native PKCE login and deliberately triggered real refresh
+were verified with provider-backed inference after each exchange and terminal
+replay after process reopen. Natural expiry was not exercised. This is distinct
+from managed product login/catalog admission and subscription billing; those
+require their own authorized live acceptance. Anthropic documents third-party
 subscription use in its [Agent SDK guidance](https://code.claude.com/docs/en/agent-sdk/overview)
 and user login paths in [Claude Code authentication](https://code.claude.com/docs/en/authentication).

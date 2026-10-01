@@ -9,14 +9,16 @@ description = "Typed Anthropic Messages protocol and streaming transport"
 
 [features]
 default = []
-workspace-files = ["dep:nanocodex-tools", "nanocodex-tools/workspace-runtime"]
+tools = ["dep:nanocodex-claude-tools"]
+# Compatibility alias for existing callers.
+workspace-files = ["tools"]
 
 [dependencies]
 base64.workspace = true
 getrandom = { workspace = true, features = ["wasm_js"] }
 sha2.workspace = true
 url.workspace = true
-nanocodex-tools = { path = "../nanocodex-tools", version = "0.6.6", default-features = false, optional = true }
+nanocodex-claude-tools = { path = "../nanocodex-claude-tools", version = "0.6.6", default-features = false, optional = true }
 futures-util.workspace = true
 nanocodex-agent = { path = "../nanocodex-agent", version = "0.6.6", default-features = false }
 tokio = { workspace = true, features = ["macros", "sync", "time"] }

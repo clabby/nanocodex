@@ -350,8 +350,10 @@ jobs:
         run: |
           cargo check --locked --package nanocodex-oai-api
           cargo check --locked --package nanocodex-observability
-          cargo check --locked --package nanocodex-tools
+          cargo check --locked --package nanocodex-oai-tools
+          cargo check --locked --package nanocodex-claude-tools --all-features
           cargo check --locked --package nanocodex-agent
+          cargo check --locked --package nanocodex-claude --no-default-features --features tools
           cargo check --locked --package nanocodex-examples --bins
       - run: cargo doc --workspace --all-features --no-deps --locked
         if: matrix.check == 'docs'
@@ -504,6 +506,8 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
       - run: cargo deny check
         if: needs.changes.outputs.rust == 'true'
+      - run: ./scripts/release-crates.sh check
+        if: needs.changes.outputs.rust == 'true'
       - run: ./scripts/check-crate-boundaries.sh
         if: needs.changes.outputs.rust == 'true'
       - run: ./scripts/check-rustls-provider.sh
@@ -603,7 +607,7 @@ jobs:
         run: |
           cargo clippy --locked --target wasm32-unknown-unknown \
             --package nanocodex-oai-api \
-            --package nanocodex-tools \
+            --package nanocodex-oai-tools \
             --package nanocodex-agent \
             --package nanocodex \
             --package nanocodex-wasm \
@@ -681,6 +685,19 @@ jobs:
           pnpm --filter @nanocodex/x-api run test
           pnpm --filter nanocodex-managed-service run test:media
           pnpm --filter nanocodex-managed-service exec vitest run test/account-info.test.ts test/agent-run.test.ts test/default-mcp.test.ts test/startup-context.test.ts
+      - name: Test managed Claude account and session journeys
+        if: needs.changes.outputs.tests == 'true'
+        run: |
+          pnpm --filter nanocodex-egress-service exec vitest run test/claude-subscription.test.ts
+          pnpm --filter nanocodex-managed-service run test:claude-managed
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && needs.changes.outputs.tests == 'true'
+        with:
+          name: managed-claude-journeys
+          path: |
+            output/claude-managed/public-api-trace.json
+            output/claude-managed/provider-trace.json
+          if-no-files-found: warn
       - name: Test connector SDK compatibility
         if: needs.changes.outputs.tests == 'true'
         run: |
@@ -805,6 +822,20 @@ jobs:
             --filter nanocodex-web
           npm run typecheck --prefix examples/astra-mpp-trial
           npm run build --prefix examples/astra-mpp-trial
+      - name: Test private Claude connection and model picker
+        if: needs.changes.outputs.tests == 'true'
+        run: |
+          pnpm --filter nanocodex-web exec playwright-core install --with-deps chromium
+          CLAUDE_BROWSER_CHANNEL=chromium pnpm --filter nanocodex-web run test:claude-connection
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && needs.changes.outputs.tests == 'true'
+        with:
+          name: claude-connection-ui
+          path: |
+            output/claude-connection/browser-api-trace.json
+            output/claude-connection/inline-*.png
+            output/claude-connection/popover-*.png
+          if-no-files-found: warn
       - name: Test Astra MPP example
         if: needs.changes.outputs.tests == 'true'
         run: npm test --prefix examples/astra-mpp-trial

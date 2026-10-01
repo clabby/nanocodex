@@ -534,7 +534,7 @@ impl nanocodex_durability::StateStore for FaultStore {
 }
 
 async fn transaction_recovery(fail_at: Option<usize>, after_commit: bool) -> usize {
-    use nanocodex_tools::claude_tasks::ClaudeTasks;
+    use nanocodex_claude_tools::ClaudeTasks;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
@@ -718,7 +718,7 @@ async fn every_sqlite_write_recovers_before_commit_and_after_lost_acknowledgemen
 
 #[tokio::test]
 async fn completed_task_mutation_replays_without_handler_into_reconstructed_board() {
-    use nanocodex_tools::claude_tasks::ClaudeTasks;
+    use nanocodex_claude_tools::ClaudeTasks;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
@@ -1029,7 +1029,7 @@ async fn pending_task_receipt_fixture() -> (
     tokio::task::JoinHandle<()>,
     Arc<std::sync::atomic::AtomicUsize>,
 ) {
-    use nanocodex_tools::claude_tasks::ClaudeTasks;
+    use nanocodex_claude_tools::ClaudeTasks;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
@@ -1085,7 +1085,7 @@ async fn pending_task_receipt_fixture() -> (
 
 #[tokio::test]
 async fn recovery_cancel_on_admission_preserves_committed_tool_and_task_receipt() {
-    use nanocodex_tools::claude_tasks::ClaudeTasks;
+    use nanocodex_claude_tools::ClaudeTasks;
     use std::sync::atomic::Ordering;
     let (directory, client, requests, server, effects) = pending_task_receipt_fixture().await;
     let path = directory.path().join("state.sqlite");
@@ -1160,7 +1160,7 @@ async fn recovery_cancel_on_admission_preserves_committed_tool_and_task_receipt(
 
 #[tokio::test]
 async fn recovery_missing_task_board_leaves_pending_operation_recoverable() {
-    use nanocodex_tools::claude_tasks::ClaudeTasks;
+    use nanocodex_claude_tools::ClaudeTasks;
     use std::sync::atomic::Ordering;
     let (directory, client, requests, server, effects) = pending_task_receipt_fixture().await;
     let path = directory.path().join("state.sqlite");

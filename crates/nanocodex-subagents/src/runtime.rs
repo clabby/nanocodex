@@ -2200,7 +2200,9 @@ mod tests {
             let (parent, _events) = Nanocodex::builder(openai)
                 .tools_factory(move |handle| {
                     handles.send(handle).unwrap();
-                    nanocodex_tools::Tools::builder().without_defaults().build()
+                    nanocodex_oai_tools::Tools::builder()
+                        .without_defaults()
+                        .build()
                 })
                 .build()
                 .unwrap();
@@ -3979,7 +3981,9 @@ mod tests {
                     .entry(handle.session_id().to_owned())
                     .or_default() += 1;
                 factory_registry.register_handle(handle);
-                nanocodex_tools::Tools::builder().without_defaults().build()
+                nanocodex_oai_tools::Tools::builder()
+                    .without_defaults()
+                    .build()
             })
             .build()
             .unwrap();

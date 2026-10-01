@@ -42,7 +42,31 @@ export function resolveClaudeTools(tools = []) {
 }
 
 /** Credentials remain in this host closure, never the WASM configuration. */
-export function createClaudeHost({ auth, tools = [], onEvent = () => {} }) {
+const messagesFetches = new Map();
+let messagesFetchInstalled = false;
+const MESSAGES_HOST_HEADER = 'x-nanocodex-claude-host';
+// reqwest WASM resolves the isolate fetch. Multiplex only explicit Messages host
+// capabilities; never replace arbitrary networking or retain a bearer in config.
+function ownMessagesFetch(fetchImpl, endpoint) {
+  if (typeof fetchImpl !== 'function' || typeof endpoint !== 'string') throw new TypeError('Claude fetch requires explicit endpoint');
+  const id = globalThis.crypto.randomUUID();
+  if (!messagesFetchInstalled) {
+    const nativeFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = (input, init) => {
+      const request = new Request(input, init);
+      const hostId = request.headers.get(MESSAGES_HOST_HEADER);
+      if (hostId === null) return nativeFetch(request);
+      const host = messagesFetches.get(hostId);
+      if (!host || request.url !== host.endpoint || request.method !== 'POST') throw new Error('Claude Messages host unavailable');
+      request.headers.delete(MESSAGES_HOST_HEADER);
+      return host.fetch(request);
+    };
+    messagesFetchInstalled = true;
+  }
+  messagesFetches.set(id, { fetch: fetchImpl, endpoint });
+  return { id, release() { messagesFetches.delete(id); } };
+}
+export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, endpoint }) {
   if (!auth || typeof auth !== 'object' || Array.isArray(auth)
     || Object.keys(auth).some((key) => !['apiKey', 'headers'].includes(key))
     || (auth.headers !== undefined && typeof auth.headers !== 'function')
@@ -67,6 +91,7 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {} }) {
     if (turnId !== undefined) turns?.get(turnId)?.abort();
     else for (const value of turns?.values() ?? []) value.abort();
   };
+  const messagesFetch = fetch === undefined ? undefined : ownMessagesFetch(fetch, endpoint);
   const host = {
     connect() { throw new Error('Claude uses Messages HTTP only'); },
     async claudeAuthHeaders() {
@@ -74,6 +99,7 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {} }) {
       try {
         const headers = new Headers(apiKey === undefined ? await headerProvider() : { 'x-api-key': apiKey });
         if (![...headers].length) throw new Error();
+        if (messagesFetch) headers.set(MESSAGES_HOST_HEADER, messagesFetch.id);
         return JSON.stringify(Object.fromEntries(headers));
       } catch { throw new Error('Claude authentication unavailable'); }
     },
@@ -125,6 +151,7 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {} }) {
     },
     dispose() {
       disposed = true;
+      messagesFetch?.release();
       apiKey = undefined;
       headerProvider = undefined;
       for (const sessionId of sessions.keys()) abort(sessionId);

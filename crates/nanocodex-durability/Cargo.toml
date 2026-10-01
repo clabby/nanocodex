@@ -41,14 +41,15 @@ rusqlite = { workspace = true, optional = true }
 tokio-postgres = { workspace = true, optional = true }
 
 [dev-dependencies]
+nanocodex-claude-tools.workspace = true
 futures-util.workspace = true
-nanocodex-claude = { workspace = true, features = ["workspace-files"] }
+nanocodex-claude = { workspace = true, features = ["tools"] }
 axum.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 eyre.workspace = true
 nanocodex-oai-api.workspace = true
-nanocodex-tools = { workspace = true, features = ["code-mode"] }
+nanocodex-oai-tools = { workspace = true, features = ["code-mode"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 tower.workspace = true
