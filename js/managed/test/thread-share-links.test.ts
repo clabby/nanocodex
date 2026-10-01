@@ -228,7 +228,7 @@ it("root sharing tool manages scoped links and atomically closes all guest feeds
   expect((await invoke({ operation: "list", session_id: secondId })).data).toHaveLength(1);
   for (const denied of [undefined, other, { ...owner, authorizationEpoch: 2 },
     { ...owner, capabilities: ["agents:read", "agents:write"] as const },
-    { ...owner, connectGrant: { grantId: `0x${"a".repeat(64)}`, connectors: ["chatgpt"], mcpIds: [] } }]) {
+    { ...owner, connectGrant: { grantId: `0x${"a".repeat(64)}`, connectors: ["chatgpt"] as const, mcpIds: [] } }]) {
     actor = denied;
     await expect(invoke({ operation: "revoke_all" })).rejects.toThrow(/authorization/);
   }

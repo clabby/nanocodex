@@ -1,5 +1,30 @@
 use super::*;
 
+fn observed_tool_text(request: &Value, call_id: &str) -> Result<String> {
+    let output = request["input"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["call_id"] == call_id))
+        .and_then(|item| item.get("output"))
+        .ok_or_else(|| eyre!("missing {call_id} output: {request}"))?;
+    match output {
+        Value::String(text) => Ok(text.clone()),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| {
+                if part["type"] != "input_text" {
+                    return Err(eyre!("unexpected non-text fixture output: {part}"));
+                }
+                part["text"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| eyre!("malformed text fixture output: {part}"))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(|text| text.join("\n")),
+        _ => Err(eyre!("unsupported fixture output: {output}")),
+    }
+}
+
 // A public Agent/Turn journey through the real WebSocket Responses transport,
 // QuickJS evaluator and shell runtime. Only the model provider is a fixture.
 #[tokio::test]
@@ -19,11 +44,7 @@ async fn instant_steering_yields_exec_and_wait_without_replaying_effects() -> Re
             "input":"// @exec: {\"yield_time_ms\": 120000}\ntext(\"prefix-before-steering\"); const result = await tools.exec_command({cmd: \"printf x >> effect-count; touch started; while [ ! -f release ]; do sleep 0.01; done; printf final-effect\", yield_time_ms: 300000}); text(result.output);"
         })])).await?;
         let yielded = timeout(std::time::Duration::from_secs(3), next_json(&mut socket)).await??;
-        let output = yielded["input"]
-            .as_array()
-            .and_then(|items| items.iter().find(|item| item["call_id"] == "origin-exec"))
-            .and_then(|item| item["output"].as_str())
-            .ok_or_else(|| eyre!("missing exec output: {yielded}"))?;
+        let output = observed_tool_text(&yielded, "origin-exec")?;
         assert!(output.contains("prefix-before-steering"), "{output}");
         assert!(output.contains("Script running with cell ID"), "{output}");
         let cell = output
@@ -54,11 +75,7 @@ async fn instant_steering_yields_exec_and_wait_without_replaying_effects() -> Re
         waiting.send(1)?;
         let yielded_wait =
             timeout(std::time::Duration::from_secs(3), next_json(&mut socket)).await??;
-        let output = yielded_wait["input"]
-            .as_array()
-            .and_then(|items| items.iter().find(|item| item["call_id"] == "first-wait"))
-            .ok_or_else(|| eyre!("missing first-wait output: {yielded_wait}"))?["output"]
-            .to_string();
+        let output = observed_tool_text(&yielded_wait, "first-wait")?;
         assert!(
             output.contains(&format!("Script running with cell ID {cell}")),
             "{output}"
@@ -88,11 +105,7 @@ async fn instant_steering_yields_exec_and_wait_without_replaying_effects() -> Re
         waiting.send(2)?;
         let completed =
             timeout(std::time::Duration::from_secs(5), next_json(&mut socket)).await??;
-        let output = completed["input"]
-            .as_array()
-            .and_then(|items| items.iter().find(|item| item["call_id"] == "second-wait"))
-            .ok_or_else(|| eyre!("missing second-wait output: {completed}"))?["output"]
-            .to_string();
+        let output = observed_tool_text(&completed, "second-wait")?;
         assert!(
             output.contains("Script completed") && output.contains("final-effect"),
             "{output}"
