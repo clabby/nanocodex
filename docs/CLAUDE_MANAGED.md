@@ -46,7 +46,7 @@ claim to undo a previously accepted model request or external action.
 
 A connected grant is not an entitlement to every model. The server obtains the
 provider's authenticated model catalog and intersects it with models supported
-by this runtime. A failed catalog lookup is an explicit availability error, not
+by this runtime. Catalog lookup follows provider cursors under one 15-second provider-HTTP deadline, at most 10 pages of 100 rows (1 MiB per page), and one explicit-401 credential recovery for the whole lookup. Missing/repeated cursors, exceeded bounds or later-page failures produce an availability error rather than advertising a first-page catalog as complete. A failed catalog lookup is an explicit availability error, not
 a fabricated list or an OpenAI fallback. The picker and native clients consume
 the authoritative catalog. A Claude-only account can select its catalog default
 and start a conversation without first connecting an OpenAI credential.

@@ -36,7 +36,7 @@ export async function claudeProvider(request) {
     if (!auth.startsWith('Bearer synthetic-claude-')) return new Response(null, {status:401});
     return Response.json({account:{uuid:`account-${key}`},organization:{uuid:`organization-${key}`}});
   }
-  if (url.href === 'https://api.anthropic.com/v1/models' && request.method === 'GET') {
+  if (url.origin === 'https://api.anthropic.com' && url.pathname === '/v1/models' && request.method === 'GET') {
     const auth = request.headers.get('authorization') ?? '';
     const key = auth.replace(/^Bearer synthetic-claude-/, '').replace(/-refreshed$/, '');
     bump(key, 'models');
@@ -44,6 +44,33 @@ export async function claudeProvider(request) {
     if (request.headers.get('anthropic-version') !== '2023-06-01' || request.headers.get('anthropic-beta') !== 'oauth-2025-04-20'
       || request.headers.get('accept') !== 'application/json' || request.headers.has('x-api-key')) return new Response(null,{status:400});
     if (key === 'catalog-unsupported') return new Response(null,{status:403});
+    if (url.searchParams.has('limit') && url.searchParams.get('limit') !== '100') return new Response(null,{status:400});
+    const cursor = url.searchParams.get('after_id');
+    if (key.startsWith('catalog-')) {
+      if (key === 'catalog-pages' || key === 'catalog-later-failure' || key === 'catalog-refresh' || key === 'catalog-repeat-401' || key === 'catalog-reflection') {
+        if (cursor === null) return Response.json({data:[{id:'claude-synthetic-a',display_name:key === 'catalog-reflection' ? 'synthetic-claude-catalog-reflection-refreshed' : 'Synthetic A'}],has_more:true,last_id:'claude-synthetic-a'});
+        if (cursor !== 'claude-synthetic-a') return new Response(null,{status:400});
+        if (key === 'catalog-later-failure') return new Response(null,{status:503});
+        if (((key === 'catalog-refresh' || key === 'catalog-reflection') && !auth.endsWith('-refreshed')) || key === 'catalog-repeat-401') return new Response(null,{status:401});
+        return Response.json({data:[{id:'claude-synthetic-a',display_name:'Duplicate'}, {id:'claude-sonnet-4-6',display_name:'Entitled Sonnet'}],has_more:false});
+      }
+      if (key === 'catalog-deadline') {
+        await new Promise(resolve=>setTimeout(resolve,8000));
+        return Response.json(cursor === null ? {data:[{id:'claude-synthetic-a'}],has_more:true,last_id:'claude-synthetic-a'} : {data:[{id:'claude-sonnet-4-6'}],has_more:false});
+      }
+      if (key === 'catalog-missing-cursor') return Response.json({data:[{id:'claude-synthetic-a'}],has_more:true});
+      if (key === 'catalog-repeat-cursor') return Response.json({data:[{id:'claude-synthetic-a'}],has_more:true,last_id:'claude-synthetic-a'});
+      if (key === 'catalog-wrong-cursor') return Response.json({data:[{id:'claude-synthetic-a'}],has_more:true,last_id:'claude-not-last'});
+      if (key === 'catalog-nonboolean') return Response.json({data:[{id:'claude-synthetic-a'}],has_more:'true'});
+      if (key === 'catalog-limit') {
+        const id='claude-page-'+calls.get(key).models;
+        return Response.json({data:[{id}],has_more:true,last_id:id});
+      }
+      if (key === 'catalog-large-body') return new Response('x'.repeat(1024*1024+1));
+      if (key === 'catalog-rich') return Response.json({data:Array.from({length:100},(_,i)=>({id:'claude-rich-'+i,capabilities:{description:'x'.repeat(1000)}})),has_more:false});
+      if (key === 'catalog-large-page') return Response.json({data:Array.from({length:101},(_,i)=>({id:'claude-row-'+i})),has_more:false});
+    }
+
     return Response.json({data:[{id:'claude-synthetic-a',display_name:'Synthetic A'}, {id:'claude-synthetic-b',display_name:'Synthetic B'}],has_more:false});
   }
   if (url.href === 'https://api.anthropic.com/v1/messages?beta=true' && request.method === 'POST') {

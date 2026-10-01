@@ -91,6 +91,58 @@ describe('real workerd broker and Rust WASM Claude account journeys', () => {
     expect(await trace('catalog-unsupported')).toEqual({exchange:1,profile:1,models:1});
     console.info('CLAUDE_JOURNEY',{journey:'catalog-rollout-gate',unsupportedOAuthCatalog:'unavailable',guessedModels:0});
   });
+  it('follows later catalog pages and deduplicates without hiding supported entitlement', async () => {
+    const user='claude-catalog-pages'; await login(user,'catalog-pages');
+    const catalog=await control(user,'/claude/models'); expect(catalog.status).toBe(200);
+    expect(await catalog.json()).toEqual({models:[{id:'claude-synthetic-a',display_name:'Synthetic A'},
+      {id:'claude-sonnet-4-6',display_name:'Entitled Sonnet'}],has_more:false});
+    expect(await trace('catalog-pages')).toEqual({exchange:1,profile:1,models:2});
+  });
+  it('accepts bounded rich model metadata exceeding the old64KiB page cap', async () => {
+    const user='claude-catalog-rich'; await login(user,'catalog-rich');
+    const catalog=await control(user,'/claude/models'); expect(catalog.status).toBe(200);
+    const value=await catalog.json<{models:{id:string}[];has_more:boolean}>();
+    expect(value.models).toHaveLength(100); expect(value.has_more).toBe(false);
+    expect(JSON.stringify(value)).not.toContain('capabilities');
+    expect(await trace('catalog-rich')).toEqual({exchange:1,profile:1,models:1});
+  });
+  it('retries the identical later-page cursor after one explicit401 and retains rotation', async () => {
+    const user='claude-catalog-refresh'; await login(user,'catalog-refresh');
+    const catalog=await control(user,'/claude/models'); expect(catalog.status).toBe(200);
+    expect(await catalog.json()).toMatchObject({models:[{id:'claude-synthetic-a'},{id:'claude-sonnet-4-6'}],has_more:false});
+    expect(await trace('catalog-refresh')).toEqual({exchange:1,profile:2,models:3,refresh:1});
+    expect((await control(user,'/claude/models')).status).toBe(200);
+    expect(await trace('catalog-refresh')).toEqual({exchange:1,profile:2,models:5,refresh:1});
+  });
+  it('rechecks earlier-page names against a later rotated private credential', async () => {
+    const user='claude-catalog-reflection'; await login(user,'catalog-reflection');
+    const catalog=await control(user,'/claude/models'); expect(catalog.status).toBe(200);
+    expect(await catalog.json()).toEqual({models:[{id:'claude-synthetic-a',display_name:'claude-synthetic-a'},
+      {id:'claude-sonnet-4-6',display_name:'Entitled Sonnet'}],has_more:false});
+    expect(await trace('catalog-reflection')).toEqual({exchange:1,profile:2,models:3,refresh:1});
+  });
+  it('uses one cumulative provider deadline across slow catalog pages', async () => {
+    const user='claude-catalog-deadline'; await login(user,'catalog-deadline');
+    const started=Date.now(); const catalog=await control(user,'/claude/models');
+    expect(catalog.status).toBe(503); expect(await catalog.json()).toEqual({error:'claude_models_unavailable'});
+    expect(Date.now()-started).toBeGreaterThanOrEqual(14000); expect(Date.now()-started).toBeLessThan(19500);
+    expect(await trace('catalog-deadline')).toEqual({exchange:1,profile:1,models:2});
+  }, 25000);
+  it('never refreshes twice within one paginated catalog lookup', async () => {
+    const user='claude-catalog-repeat-401'; await login(user,'catalog-repeat-401');
+    const catalog=await control(user,'/claude/models'); expect(catalog.status).toBe(503);
+    expect(await catalog.json()).toEqual({error:'claude_models_unavailable'});
+    expect(await trace('catalog-repeat-401')).toEqual({exchange:1,profile:2,models:3,refresh:1});
+  });
+  it.each([
+    ['catalog-later-failure',2], ['catalog-missing-cursor',1], ['catalog-repeat-cursor',2],
+    ['catalog-wrong-cursor',1], ['catalog-nonboolean',1], ['catalog-limit',10], ['catalog-large-page',1], ['catalog-large-body',1],
+  ])('fails closed for %s instead of advertising an exhausted first page', async (scenario, count) => {
+    const user='claude-'+scenario; await login(user,scenario);
+    const catalog=await control(user,'/claude/models'); expect(catalog.status).toBe(503);
+    expect(await catalog.json()).toEqual({error:'claude_models_unavailable'});
+    expect(await trace(scenario)).toEqual({exchange:1,profile:1,models:count});
+  });
   it('reopens encrypted grant after actual DO abort and preserves current authorization',async()=>{
     const user='claude-reopen'; await login(user,'reopen');
     await expect(runInDurableObject(worker.USER_CREDENTIALS.getByName(user),(_instance,state)=>{

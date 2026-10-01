@@ -66,8 +66,9 @@ Node executes WASM in the current process. Browser Claude executes in the
 **current Web API isolate**, not the implicit module Worker created by Codex's
 browser Agent. A caller-owned Worker can supply the WASM module explicitly.
 Browser credentials remain accessible to that browser host: do not distribute
-account-wide secrets to an untrusted frontend. Production managed provider
-selection and sign-in UI are separate integration work.
+account-wide secrets to an untrusted frontend. The SDK does not install account sign-in UI. The managed platform adds private
+subscription connection, authoritative model selection and egress around this same
+WASM runtime; see [managed Claude](CLAUDE_MANAGED.md).
 
 Supply exactly one `auth: { apiKey }` or `auth: { headers: async () => ({
 authorization: "Bearer ..." }) }`. The callback owns authorized credential

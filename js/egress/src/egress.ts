@@ -2464,32 +2464,63 @@ async function handleClaudeModels(env: EgressEnv, userId: string): Promise<Respo
     if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
     let credential = result.credential;
     const secrets = [credential.headers.authorization?.replace(/^Bearer /, "") ?? ""];
-    const dispatch = () => fetch("https://api.anthropic.com/v1/models", {
-      method: "GET", redirect: "manual", signal: AbortSignal.timeout(15000),
-      headers: { ...credential.headers, "anthropic-version": "2023-06-01", accept: "application/json" },
-    });
-    let response = await dispatch();
-    if (response.status === 401) {
-      await cancelResponseBody(response);
-      result = consumeRpcData(await userBroker(env, userId).resolveClaudeCredential(true, credential.revision));
-      if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
-      credential = result.credential;
-      secrets.push(credential.headers.authorization?.replace(/^Bearer /, "") ?? "");
-      response = await dispatch();
+    // One provider-HTTP deadline and one explicit-401 recovery, not per page.
+    const signal = AbortSignal.timeout(15000);
+    let refreshed = false;
+    let afterId: string | undefined;
+    const cursors = new Set<string>();
+    const models = new Map<string, { id: string; display_name: string }>();
+    // At most 1,000 rows / 10 pages, plus one bounded authentication retry.
+    // Never advertise an exhausted catalog if the provider says more remain.
+    for (let page = 0; page < 10; page++) {
+      if (signal.aborted) throw new Error("Claude catalog deadline");
+      const url = new URL("https://api.anthropic.com/v1/models");
+      url.searchParams.set("limit", "100");
+      if (afterId !== undefined) url.searchParams.set("after_id", afterId);
+      const dispatch = () => fetch(url.href, {
+        method: "GET", redirect: "manual", signal,
+        headers: { ...credential.headers, "anthropic-version": "2023-06-01", accept: "application/json" },
+      });
+      let response = await dispatch();
+      if (response.status === 401 && !refreshed) {
+        await cancelResponseBody(response);
+        refreshed = true;
+        result = consumeRpcData(await userBroker(env, userId).resolveClaudeCredential(true, credential.revision));
+        if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
+        credential = result.credential;
+        secrets.push(credential.headers.authorization?.replace(/^Bearer /, "") ?? "");
+        response = await dispatch();
+      }
+      if (!response.ok) { await cancelResponseBody(response); return jsonError(503, "claude_models_unavailable"); }
+      const value: unknown = JSON.parse(await readBoundedText(response, 1024 * 1024));
+      if (!isRecord(value) || !Array.isArray(value.data) || value.data.length > 100
+        || typeof value.has_more !== "boolean") throw new Error("invalid Claude catalog");
+      for (const item of value.data) {
+        if (!isRecord(item) || typeof item.id !== "string") throw new Error("invalid Claude catalog");
+        const id = item.id;
+        if (!/^claude-[A-Za-z0-9._-]{1,120}$/.test(id)) throw new Error("invalid Claude catalog");
+        const name = item.display_name;
+        if (!models.has(id)) models.set(id, { id, display_name: typeof name === "string" && name.length > 0 && name.length <= 120
+          && !/[\u0000-\u001f\u007f]/.test(name) ? name : id });
+      }
+      if (!value.has_more) {
+        // Recheck earlier pages against every credential used, including rotated ones.
+        const rows = [...models.values()];
+        for (const model of rows) {
+          if (secrets.some(secret => secret && model.id.includes(secret))) throw new Error("invalid Claude catalog");
+          if (secrets.some(secret => secret && model.display_name.includes(secret))) model.display_name = model.id;
+        }
+        return json({ models: rows, has_more: false }, 200);
+      }
+      const last = value.data[value.data.length - 1];
+      const cursor = value.last_id;
+      if (typeof cursor !== "string" || !/^claude-[A-Za-z0-9._-]{1,120}$/.test(cursor)
+        || !isRecord(last) || last.id !== cursor || cursors.has(cursor)
+        || secrets.some(secret => secret && cursor.includes(secret))) throw new Error("invalid Claude catalog cursor");
+      cursors.add(cursor);
+      afterId = cursor;
     }
-    if (!response.ok) { await cancelResponseBody(response); return jsonError(503, "claude_models_unavailable"); }
-    const value: unknown = JSON.parse(await readBoundedText(response, 64 * 1024));
-    if (!isRecord(value) || !Array.isArray(value.data) || value.data.length > 1000) return jsonError(503, "claude_models_unavailable");
-    const models = value.data.map((item: unknown) => {
-      if (!isRecord(item) || typeof item.id !== "string") throw new Error("invalid Claude catalog");
-      const id = item.id;
-      if (!/^claude-[A-Za-z0-9._-]{1,120}$/.test(id)
-        || secrets.some(secret => secret && id.includes(secret))) throw new Error("invalid Claude catalog");
-      const name = item.display_name;
-      return { id: item.id, display_name: typeof name === "string" && name.length > 0 && name.length <= 120
-        && !/[\u0000-\u001f\u007f]/.test(name) && !secrets.some(secret => secret && name.includes(secret)) ? name : item.id };
-    });
-    return json({ models, has_more: value.has_more === true }, 200);
+    throw new Error("Claude catalog pagination limit");
   } catch { return jsonError(503, "claude_models_unavailable"); }
 }
 

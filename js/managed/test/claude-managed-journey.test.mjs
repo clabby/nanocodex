@@ -77,6 +77,9 @@ test('Claude-only public native tools/tasks/compaction/cancel across four DO reo
       if(catalogOutage)return new Response('synthetic catalog unavailable',{status:503});
       assert.match(request.headers.get('authorization')??'',/^Bearer synthetic-claude-(?:managed-runtime|profile-uncertain)/);
       if(catalogUnsupportedOnly)return Response.json({data:[{id:'claude-gated-unverified',display_name:'Not supported'}],has_more:false});
+      assert.equal(url.searchParams.get('limit'),'100');
+      if (!url.searchParams.has('after_id')) return Response.json({data:[{id:'claude-gated-unverified',display_name:'Not supported'}],has_more:true,last_id:'claude-gated-unverified'});
+      assert.equal(url.searchParams.get('after_id'),'claude-gated-unverified');
       return Response.json({data:[{id:'claude-sonnet-4-6',display_name:'Claude Sonnet 4.6'},
         {id:'claude-opus-4-6',display_name:'Claude Opus 4.6'}, {id:'claude-gated-unverified',display_name:'Not supported'}],has_more:false});
     }
