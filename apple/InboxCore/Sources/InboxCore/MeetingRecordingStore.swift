@@ -58,6 +58,10 @@ public final class MeetingRecordingStore: @unchecked Sendable {
                 .sorted { $0.record.startedAt > $1.record.startedAt }
         }
     }
+    /// Capture checkpoints must not decode every prior meeting's full transcript.
+    public func entry(id: UUID, scope: String) throws -> Entry? {
+        try database.read { db in try read(db, id: id, scope: scope) }
+    }
     private func read(_ db: Database, id: UUID, scope: String) throws -> Entry? {
         guard let data = try Data.fetchOne(db, sql: "SELECT entry FROM meeting_recordings WHERE scope = ? AND id = ?", arguments: [scope, id.uuidString]) else { return nil }
         return try JSONDecoder().decode(Entry.self, from: data)

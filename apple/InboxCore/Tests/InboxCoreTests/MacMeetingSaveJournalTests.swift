@@ -90,6 +90,52 @@ final class MacMeetingSaveJournalTests: XCTestCase {
         XCTAssertEqual(try MacMeetingSaveJournal(url: url).entries(scope: "a").first?.submitted, corrected)
     }
     @MainActor
+    func testTranscriptReplacementRejectionRestartCorrectionAndAcknowledgement() throws {
+        let url = try location(), base = MeetingRecord(transcript: "Saved source", notes: "Unchanged", revision: 6)
+        var journal = try MacMeetingSaveJournal(url: url)
+        let rejected = try journal.prepare(record: base, notes: base.notes, transcript: "Recovered source", scope: "a")
+        try journal.reject(rejected, scope: "a")
+        try journal.saveDraft(record: base, notes: base.notes, transcript: "Recovered source", scope: "a")
+        journal = try MacMeetingSaveJournal(url: url)
+        let draft = try XCTUnwrap(journal.entries(scope: "a").first)
+        XCTAssertEqual(draft.record, base)
+        XCTAssertEqual(draft.transcript, "Recovered source")
+        XCTAssertNil(draft.submitted)
+        let corrected = try journal.prepare(record: draft.record, notes: draft.notes, transcript: "Shortened recovery", scope: "a")
+        XCTAssertEqual(corrected.ifMatch, base.revision)
+        XCTAssertEqual(corrected.record.transcript, "Shortened recovery")
+        journal = try MacMeetingSaveJournal(url: url)
+        XCTAssertEqual(try journal.prepare(record: base, notes: base.notes, transcript: "Later recovery", scope: "a"), corrected)
+        try journal.acknowledge(corrected, remote: corrected.record, scope: "a")
+        journal = try MacMeetingSaveJournal(url: url)
+        let later = try XCTUnwrap(journal.entries(scope: "a").first)
+        XCTAssertEqual(later.transcript, "Later recovery")
+        XCTAssertEqual(later.record, corrected.record)
+        let final = try journal.prepare(record: later.record, notes: later.notes, transcript: later.transcript, scope: "a")
+        try journal.acknowledge(final, remote: final.record, scope: "a")
+        XCTAssertTrue(try MacMeetingSaveJournal(url: url).entries(scope: "a").isEmpty)
+    }
+    @MainActor
+    func testTranscriptReversionDuringUncertainSaveAndLegacyJournalDecode() throws {
+        let url = try location(), base = MeetingRecord(transcript: "Original", notes: "Notes")
+        let journal = try MacMeetingSaveJournal(url: url)
+        let submitted = try journal.prepare(record: base, notes: base.notes, transcript: "Sent replacement", scope: "a")
+        try journal.saveDraft(record: base, notes: base.notes, transcript: nil, scope: "a")
+        try journal.acknowledge(submitted, remote: submitted.record, scope: "a")
+        XCTAssertEqual(try MacMeetingSaveJournal(url: url).entries(scope: "a").first?.transcript, "Original")
+        // Older journals have no transcript key and must still replay their
+        // exact uncertain notes submission after upgrading.
+        try journal.remove(id: base.id, scope: "a")
+        let notes = try journal.prepare(record: base, notes: "Legacy notes", scope: "a")
+        var document = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var entries = try XCTUnwrap(document["entries"] as? [[String: Any]])
+        entries[0].removeValue(forKey: "transcript"); document["entries"] = entries
+        try JSONSerialization.data(withJSONObject: document).write(to: url, options: .atomic)
+        let restored = try MacMeetingSaveJournal(url: url)
+        XCTAssertNil(restored.entries(scope: "a").first?.transcript)
+        XCTAssertEqual(restored.entries(scope: "a").first?.submitted, notes)
+    }
+    @MainActor
     func testBoundsFailClosedWithoutEvictingUncertainPayloadAcrossAccounts() throws {
         let url = try location(), base = MeetingRecord()
         var journal = try MacMeetingSaveJournal(url: url, maxEntries: 1)

@@ -5,46 +5,77 @@ import InboxCore
 import OSLog
 import Speech
 
-/// The audio callback never touches SwiftUI or actor-isolated state. Swapping the
-/// request under the same lock as append gives adjacent segments a single boundary:
-/// every buffer belongs to exactly one recognition request.
+/// Speech runs on a separate bounded queue. A stalled recognizer must not block
+/// the microphone callback, the raw writer, or the main actor's Stop controls.
 private final class MeetingAudioRouter: @unchecked Sendable {
     private let lock = NSLock()
+    private let queue = DispatchQueue(label: "xyz.paradigm.nanocodex.meeting-speech", qos: .userInitiated)
     private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var pool: [AVAudioPCMBuffer] = []
+    private var epoch = UUID()
+    private var overflow = false
     private var recentLevels: [UInt8] = []
     private var lastLevelAt: TimeInterval = 0
 
-    func append(_ buffer: AVAudioPCMBuffer) {
-        // Quantized amplitude only; no audio content is retained for Lock Screen UI.
+    func prepare(format: AVAudioFormat) throws {
+        var buffers: [AVAudioPCMBuffer] = []
+        for _ in 0..<16 {
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192) else { throw CocoaError(.fileWriteUnknown) }
+            buffers.append(buffer)
+        }
+        lock.withLock { epoch = UUID(); pool = buffers; overflow = false }
+    }
+
+    func append(_ source: AVAudioPCMBuffer) {
         let now = ProcessInfo.processInfo.systemUptime
         var nextLevel: UInt8?
-        if let samples = buffer.floatChannelData?.pointee {
-            let frames = Int(buffer.frameLength)
+        if let samples = source.floatChannelData?.pointee {
+            let frames = Int(source.frameLength)
             var peak: Float = 0
-            for index in stride(from: 0, to: frames, by: max(1, frames / 64)) {
-                peak = max(peak, abs(samples[index]))
-            }
+            for index in stride(from: 0, to: frames, by: max(1, frames / 64)) { peak = max(peak, abs(samples[index])) }
             nextLevel = UInt8(min(15, max(1, Int(peak * 55))))
         }
         lock.lock()
-        request?.append(buffer)
+        defer { lock.unlock() }
         if let nextLevel, now - lastLevelAt >= 0.12 {
             recentLevels.append(nextLevel)
             if recentLevels.count > 28 { recentLevels.removeFirst() }
             lastLevelAt = now
         }
-        lock.unlock()
+        guard let request else { return }
+        guard let buffer = pool.popLast() else { overflow = true; return }
+        guard source.frameLength <= buffer.frameCapacity else { pool.append(buffer); overflow = true; return }
+        buffer.frameLength = source.frameLength
+        let inputs = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: source.audioBufferList))
+        let outputs = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        guard inputs.count == outputs.count else { pool.append(buffer); overflow = true; return }
+        for index in inputs.indices {
+            guard let src = inputs[index].mData, let dst = outputs[index].mData,
+                  inputs[index].mDataByteSize <= outputs[index].mDataByteSize else { pool.append(buffer); overflow = true; return }
+            memcpy(dst, src, Int(inputs[index].mDataByteSize))
+        }
+        let run = epoch
+        // Enqueue while holding the short copy lock so replacement queues endAudio
+        // strictly after the last admitted buffer for its previous request.
+        queue.async { [self, buffer, request] in
+            request.append(buffer)
+            lock.withLock { if epoch == run { pool.append(buffer) } }
+        }
     }
 
+    var ready: Bool { lock.withLock { !pool.isEmpty } }
+    func takeFailure() -> Bool { lock.withLock { let value = overflow; overflow = false; return value } }
     func levels() -> [UInt8] { lock.withLock { recentLevels } }
     func resetLevels() { lock.withLock { recentLevels.removeAll(); lastLevelAt = 0 } }
 
+    @discardableResult
     func replace(with next: SFSpeechAudioBufferRecognitionRequest?) -> SFSpeechAudioBufferRecognitionRequest? {
-        lock.lock()
-        let previous = request
-        request = next
-        lock.unlock()
-        return previous
+        lock.withLock {
+            let previous = request
+            request = next
+            if let previous { queue.async { previous.endAudio() } }
+            return previous
+        }
     }
 }
 
@@ -91,6 +122,14 @@ final class MeetingRecorder: ObservableObject {
     @Published private(set) var waveform: [UInt8] = []
     @Published private(set) var accountScope: String?
     @Published private(set) var persistenceError: String?
+    @Published private(set) var transcriptionWarning: String?
+    private var audioCapture: MeetingAudioCapture?
+    private var audioFinishing = false
+    private var recognitionRetry: Task<Void, Never>?
+    private var transcriptUpdate: Task<Void, Never>?
+    private var lastTranscriptUpdate = Date.distantPast
+    private var speechAllowed = false
+    private var recognitionRetrySeconds = 2
     private var lifecycleObservers: [AnyCancellable] = []
     private var lastCheckpoint = Date.distantPast
 
@@ -137,7 +176,7 @@ final class MeetingRecorder: ObservableObject {
     private var stopReason: String?
     /// Recognition may finish with a partial transcript after an interruption or
     /// timeout. Never auto-submit that text on the ordinary Stop path.
-    var completedWithWarning: Bool { stopReason != nil }
+    var completedWithWarning: Bool { stopReason != nil || transcriptionWarning != nil }
     // Apple's Speech API documents a ~one-minute audio limit per recognition.
     // 25 seconds provides preview segments while leaving ample headroom.
     static let segmentSeconds = MeetingSegmentPolicy.segmentSeconds
@@ -151,10 +190,12 @@ final class MeetingRecorder: ObservableObject {
         }
         // A notes-only draft may become a recording without losing its title,
         // notes or UUID. Completed captures are already durable before reset.
-        if accountScope != pinnedScope || !transcript.isEmpty || requestedID != nil {
+        if accountScope != pinnedScope || !transcript.isEmpty || requestedID != nil ||
+            MeetingAudioStore.shared.exists(scope: pinnedScope, id: captureID) {
             guard discard() else { return }
         }
         accountScope = pinnedScope
+        stopReason = nil; transcriptionWarning = nil
         if let requestedID { captureID = requestedID }
         if startedAt == nil { startedAt = Date() }
         reviewing = false
@@ -165,11 +206,15 @@ final class MeetingRecorder: ObservableObject {
             return
         }
         QuickVoiceRecorder.audioOwner = self
+        permissionRun = UUID() // Each permission attempt has its own continuation fence.
         let run = permissionRun
         working = true
         status = "Requesting Microphone and Speech Recognition access…"
         let allowed: Bool
-        if permissionsGranted { allowed = QuickVoiceRecorder.permissionsGranted }
+        if permissionsGranted {
+            allowed = AVAudioApplication.shared.recordPermission == .granted
+            speechAllowed = SFSpeechRecognizer.authorizationStatus() == .authorized
+        }
         else {
             let speech = await withCheckedContinuation { continuation in
                 SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
@@ -177,21 +222,21 @@ final class MeetingRecorder: ObservableObject {
             guard permissionRun == run, working, !reviewing else { return }
             let microphone = await AVAudioApplication.requestRecordPermission()
             guard permissionRun == run, working, !reviewing else { return }
-            allowed = speech == .authorized && microphone
+            allowed = microphone
+            speechAllowed = speech == .authorized
         }
         guard permissionRun == run, working, !reviewing else { return }
         guard (try? model.lockedVoiceAccountScope()) == pinnedScope else {
             stopWithWarning("Account changed. Recording retained for the original account."); return
         }
         guard allowed else {
-            stopWithWarning("Allow Microphone and Speech Recognition in Settings, then try again.")
+            stopWithWarning("Allow Microphone in Settings, then try again.")
             return
         }
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)), recognizer.isAvailable else {
-            stopWithWarning("Speech Recognition is unavailable for this language. Try again when connected.")
-            return
+        self.recognizer = speechAllowed ? SFSpeechRecognizer(locale: Locale(identifier: locale)) : nil
+        if self.recognizer?.isAvailable != true {
+            transcriptionWarning = "Live transcription unavailable. Audio is still being recorded."
         }
-        self.recognizer = recognizer
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers])
@@ -205,10 +250,17 @@ final class MeetingRecorder: ObservableObject {
                 stopWithWarning("No microphone is available.")
                 return
             }
-            // Prepare the first recognizer before delivering any microphone buffers.
-            let first = newSegment(run: run)
-            _ = router.replace(with: first.request)
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { [router] buffer, _ in
+            // Original audio is independent of Speech: request rotation or a
+            // recognizer outage must never create a gap in the saved recording.
+            try router.prepare(format: format)
+            let audioCapture = try MeetingAudioCapture(format: format, scope: pinnedScope, id: captureID)
+            self.audioCapture = audioCapture
+            if recognizer?.isAvailable == true {
+                let first = newSegment(run: run)
+                _ = router.replace(with: first.request)
+            }
+            input.installTap(onBus: 0, bufferSize: 1024, format: format) { [router, audioCapture] buffer, _ in
+                audioCapture.append(buffer)
                 router.append(buffer)
             }
             tapped = true
@@ -219,13 +271,21 @@ final class MeetingRecorder: ObservableObject {
             startedAt = Date()
             status = "Recording. Tap Stop Recording to save the meeting."
             _ = checkpointDurably(final: false)
-            scheduleRotation(run: run)
+            if segments.isEmpty { scheduleRecognitionRetry(run: run) }
+            else { scheduleRotation(run: run) }
             clock = Task { [weak self] in
                 while !Task.isCancelled {
                     do { try await Task.sleep(for: .seconds(1)) } catch { return }
                     guard let self, self.permissionRun == run, self.recording else { return }
                     self.seconds = Int(Date().timeIntervalSince(self.startedAt ?? Date()))
                     self.waveform = self.router.levels()
+                    if self.router.takeFailure() {
+                        self.transcriptionWarning = "Transcription is falling behind; some words may be missing. Original audio is retained."
+                        self.suspendTranscription(run: run)
+                    }
+                    if let error = self.audioCapture?.error {
+                        self.stopWithWarning(error); return
+                    }
                     if Date().timeIntervalSince(self.lastCheckpoint) >= 5 { _ = self.checkpointDurably(final: false) }
                     if (try? model.lockedVoiceAccountScope()) != pinnedScope {
                         self.interrupt("Account changed. Partial meeting retained for the original account.")
@@ -259,13 +319,23 @@ final class MeetingRecorder: ObservableObject {
                 }
                 if let error {
                     let failure = error as NSError
+                    if failure.domain == "kAFAssistantErrorDomain", failure.code == 1110 {
+                        let isCurrent = self.segments.last === segment
+                        self.settle(segment, confirmed: true)
+                        if self.recording, isCurrent { self.rotate(run: run) }
+                        else { self.checkCompletion() }
+                        return
+                    }
                     self.log.error("Meeting speech failed: domain=\(failure.domain, privacy: .public) code=\(failure.code)")
+                    let isCurrent = self.segments.last === segment
                     self.settle(segment)
-                    if self.recording { self.stopWithWarning("Speech Recognition stopped. Review the partial transcript; some words may be missing.") }
+                    self.transcriptionWarning = "Transcription interrupted; some words may be missing. Original audio is retained."
+                    if self.recording, isCurrent { self.suspendTranscription(run: run) }
                     else { self.checkCompletion() }
                 } else if final {
                     let isCurrent = self.segments.last === segment
                     self.settle(segment, confirmed: true)
+                    self.recognitionRetrySeconds = 2
                     if self.recording, isCurrent {
                         // A pause can finalize a task before the timer. It must not
                         // finish the meeting or submit anything.
@@ -288,19 +358,47 @@ final class MeetingRecorder: ObservableObject {
 
     private func rotate(run: UUID) {
         guard recording, permissionRun == run, let previous = segments.last else { return }
-        // If Speech stalls, do not silently build an unbounded queue of unsent
-        // audio. Stop visibly and let the user review the partial text.
+        // Keep recognition bounded without sacrificing the independent original
+        // recording. A stalled recognizer is restarted with a visible gap warning.
         guard ledger.canRotate(sealedPending: segments.filter({ $0.sealed && !$0.settled }).count) else {
-            stopWithWarning("Transcription is falling behind. Review the partial transcript; some words may be missing.")
+            transcriptionWarning = "Transcription is catching up; some words may be missing. Original audio is retained."
+            suspendTranscription(run: run)
             return
         }
         let next = newSegment(run: run)
-        let oldRequest = router.replace(with: next.request)
+        _ = router.replace(with: next.request)
         previous.sealed = true
-        oldRequest?.endAudio()
         if previous.settled { release(previous) }
         seconds = Int(Date().timeIntervalSince(startedAt ?? Date()))
         scheduleRotation(run: run)
+    }
+
+    private func suspendTranscription(run: UUID) {
+        rotation?.cancel(); rotation = nil
+        _ = router.replace(with: nil)
+        for segment in Array(segments) {
+            segment.sealed = true
+            segment.task?.cancel()
+            if !segment.settled { settle(segment) } else { release(segment) }
+        }
+        updateTranscript(force: true)
+        scheduleRecognitionRetry(run: run)
+    }
+
+    private func scheduleRecognitionRetry(run: UUID) {
+        guard speechAllowed, recognizer != nil, recording else { return }
+        recognitionRetry?.cancel()
+        let delay = recognitionRetrySeconds
+        recognitionRetrySeconds = min(30, delay * 2)
+        recognitionRetry = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard let self, self.permissionRun == run, self.recording else { return }
+            if self.recognizer?.isAvailable == true, self.router.ready {
+                let next = self.newSegment(run: run)
+                _ = self.router.replace(with: next.request)
+                self.scheduleRotation(run: run)
+            } else { self.scheduleRecognitionRetry(run: run) }
+        }
     }
 
     func finish() {
@@ -310,7 +408,6 @@ final class MeetingRecorder: ObservableObject {
             return
         }
         stopCapture()
-        stopReason = nil
         status = "Finishing transcription…"
         awaitCompletion()
     }
@@ -329,13 +426,33 @@ final class MeetingRecorder: ObservableObject {
 
     private func stopCapture() {
         rotation?.cancel(); rotation = nil
+        recognitionRetry?.cancel(); recognitionRetry = nil
         clock?.cancel(); clock = nil
         if recording { seconds = Int(Date().timeIntervalSince(startedAt ?? Date())) }
         recording = false
         let last = router.replace(with: nil)
         engine.stop()
         if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
-        if let last, let current = segments.last { current.sealed = true; last.endAudio(); if current.settled { release(current) } }
+        if let capture = audioCapture {
+            audioCapture = nil; audioFinishing = true
+            let run = permissionRun, scope = accountScope
+            Task { [weak self] in
+                // A slow/full disk must not freeze Stop or the native UI. The
+                // microphone is already detached; finalize its bounded queue.
+                let failure = await Task.detached(priority: .utility) { capture.finish() }.value
+                guard let self else { return }
+                if self.permissionRun == run {
+                    self.audioFinishing = false
+                    if let failure { self.stopReason = failure }
+                    self.checkCompletion()
+                } else if let scope {
+                    // Resetting for a new capture cannot orphan the old file's
+                    // upload. Its already-checkpointed document remains partial.
+                    await InboxModel.shared.syncMeetingRecording(accountScope: scope)
+                }
+            }
+        }
+        if last != nil, let current = segments.last { current.sealed = true; if current.settled { release(current) } }
         if sessionActive {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             sessionActive = false
@@ -345,12 +462,12 @@ final class MeetingRecorder: ObservableObject {
 
     private func awaitCompletion() {
         checkCompletion()
-        guard working else { return }
+        guard working, ledger.unfinished > 0 else { return }
         let run = permissionRun
         completion?.cancel()
         completion = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(10)) } catch { return }
-            guard let self, self.permissionRun == run else { return }
+            guard let self, self.permissionRun == run, self.ledger.unfinished > 0 else { return }
             self.stopReason = "Transcription timed out. Review the partial transcript; some words may be missing."
             for segment in Array(self.segments) where !segment.settled {
                 segment.task?.cancel()
@@ -363,12 +480,13 @@ final class MeetingRecorder: ObservableObject {
     private func checkCompletion() {
         guard !recording, ledger.unfinished == 0 else { return }
         completion?.cancel(); completion = nil
+        guard !audioFinishing else { return }
         // Assemble the final ledger while working is still true. Turning it off
         // first made updateTranscript skip the last recognition result.
-        updateTranscript()
+        updateTranscript(force: true)
         working = false
         reviewing = true
-        status = stopReason ?? (transcript.isEmpty ? "No words recognized. Meeting saved; edit the transcript or record again." : "Meeting saved. Review transcript and notes in your library.")
+        status = stopReason ?? transcriptionWarning ?? (transcript.isEmpty ? "No words recognized. Meeting saved; edit the transcript or record again." : "Meeting saved. Review transcript and notes in your library.")
         if checkpointDurably(final: true), let accountScope {
             Task { await InboxModel.shared.syncMeetingRecording(accountScope: accountScope) }
         }
@@ -395,7 +513,22 @@ final class MeetingRecorder: ObservableObject {
         segments.removeAll { $0 === segment }
     }
 
-    private func updateTranscript() {
+    private func updateTranscript(force: Bool = false) {
+        // Coalesce rapid partial revisions, not the actual audio or ledger. This
+        // bounds full-document joins and SwiftUI publications during long calls.
+        if !force, Date().timeIntervalSince(lastTranscriptUpdate) < 0.15 {
+            guard transcriptUpdate == nil else { return }
+            let run = permissionRun
+            transcriptUpdate = Task { [weak self] in
+                do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+                guard let self, self.permissionRun == run else { return }
+                self.transcriptUpdate = nil
+                self.updateTranscript(force: true)
+            }
+            return
+        }
+        transcriptUpdate?.cancel(); transcriptUpdate = nil
+        lastTranscriptUpdate = Date()
         // Results can arrive out of order after rotation; assemble by capture order.
         // Once in review, edits belong to the user, not late Speech callbacks.
         guard working else { return }
@@ -439,7 +572,7 @@ final class MeetingRecorder: ObservableObject {
             guard let store = InboxModel.shared.meetingRecordingStore else {
                 throw CocoaError(.fileWriteUnknown)
             }
-            let previous = try store.entries(scope: accountScope).first { $0.id == captureID }?.record
+            let previous = try store.entry(id: captureID, scope: accountScope)?.record
             var record = previous ?? MeetingRecord(id: captureID, startedAt: startedAt)
             record.title = meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Meeting" : meetingTitle
             record.notes = meetingNotes
@@ -447,7 +580,7 @@ final class MeetingRecorder: ObservableObject {
             record.partial = !final || completedWithWarning
             try store.put(record, scope: accountScope, state: final ? .pending : .capturing)
             lastCheckpoint = Date(); persistenceError = nil
-            if InboxModel.shared.meetingLibrary?.scope == accountScope { InboxModel.shared.meetingLibrary?.reloadLocal() }
+            if InboxModel.shared.meetingLibrary?.scope == accountScope { InboxModel.shared.meetingLibrary?.reloadLocal(id: captureID) }
             return true
         } catch {
             persistenceError = "Meeting could not be saved on this device: " + error.localizedDescription
@@ -504,11 +637,16 @@ final class MeetingRecorder: ObservableObject {
     func discard() -> Bool {
         // Resetting never deletes a journal row, and a disk failure must not
         // clear the last in-memory copy while preparing the next capture.
-        if working { stopReason = "Recording stopped before transcription completed. Partial meeting retained." }
+        if working {
+            stopReason = "Recording stopped before transcription completed. Partial meeting retained."
+            stopCapture()
+            updateTranscript(force: true)
+        }
         if startedAt != nil, !checkpointDurably(final: true) { return false }
         permissionRun = UUID() // Invalidate permission continuations and callbacks.
         captureID = permissionRun
         completion?.cancel(); completion = nil
+        transcriptUpdate?.cancel(); transcriptUpdate = nil
         stopCapture()
         for segment in segments { segment.task?.cancel() }
         segments.removeAll()
@@ -529,6 +667,11 @@ final class MeetingRecorder: ObservableObject {
         accountScope = nil
         persistenceError = nil
         stopReason = nil
+        transcriptionWarning = nil
+        recognitionRetrySeconds = 2
+        audioFinishing = false
+        speechAllowed = false
+        lastTranscriptUpdate = .distantPast
         reviewing = false
         working = false
         return true

@@ -3,7 +3,7 @@ import Foundation
 
 public enum MeetingSummaryStatus: String, Codable, Sendable { case none, ready, unavailable }
 
-/// A transcript and notes document. Microphone audio is not retained or playable.
+/// A transcript and notes document. Original audio syncs separately by capture UUID.
 public struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var title: String
@@ -65,19 +65,26 @@ public struct MeetingPage: Sendable {
 public final class MeetingLibrary: ObservableObject {
     @Published public private(set) var entries: [MeetingRecordingStore.Entry] = []
     @Published public private(set) var error: String?
+    @Published public private(set) var audioError: String?
     @Published public private(set) var loading = false
     @Published public private(set) var nextCursor: String?
     public private(set) var scope: String?
     private let store: MeetingRecordingStore
+    private let audioStore: MeetingAudioStore
     private var client: ManagedClient?
     private var epoch = UUID()
     private var flushing = false
     private var retryRequested = false
-    public init(store: MeetingRecordingStore) { self.store = store }
+    private var audioTask: Task<Void, Never>?
+    private var audioRetryRequested = false
+    public init(store: MeetingRecordingStore, audioStore: MeetingAudioStore = .shared) { self.store = store; self.audioStore = audioStore }
 
     public func activate(scope: String?, client: ManagedClient?, activeCaptureID: UUID? = nil) {
+        audioTask?.cancel(); audioTask = nil; audioRetryRequested = false; audioError = nil
         epoch = UUID(); self.scope = scope; self.client = client; entries = []; error = nil; loading = false; flushing = false; retryRequested = false; nextCursor = nil
         guard let scope else { return }
+        do { try audioStore.recover(scope: scope, excluding: activeCaptureID) }
+        catch { audioError = "Some recording audio could not be recovered: " + error.localizedDescription }
         do {
             try store.recover(scope: scope, excluding: activeCaptureID)
             entries = try store.entries(scope: scope)
@@ -86,6 +93,16 @@ public final class MeetingLibrary: ObservableObject {
     public func reloadLocal() {
         guard let scope else { return }
         do { entries = try store.entries(scope: scope) } catch { self.error = error.localizedDescription }
+    }
+    /// A capture checkpoint updates one row without decoding prior transcripts.
+    public func reloadLocal(id: UUID) {
+        guard let scope else { return }
+        do {
+            let entry = try store.entry(id: id, scope: scope)
+            entries.removeAll { $0.id == id }
+            if let entry, entry.state != .deleting, entry.state != .deleted { entries.append(entry) }
+            entries.sort { $0.record.startedAt > $1.record.startedAt }
+        } catch { self.error = error.localizedDescription }
     }
     public func refresh(loadMore: Bool = false) async {
         guard let scope, let client, !loading else { return }
@@ -107,6 +124,7 @@ public final class MeetingLibrary: ObservableObject {
                     } catch APIError.http(404) {
                         guard epoch == token else { return }
                         try store.removeDeleted(id: entry.id, scope: scope)
+                        try audioStore.remove(scope: scope, id: entry.id)
                     }
                 }
             }
@@ -123,7 +141,7 @@ public final class MeetingLibrary: ObservableObject {
         do { record = try await client.meeting(id: id) }
         catch APIError.http(404) {
             guard epoch == token else { throw APIError.invalidCredential }
-            try store.removeDeleted(id: id, scope: scope); reloadLocal()
+            try store.removeDeleted(id: id, scope: scope); try audioStore.remove(scope: scope, id: id); reloadLocal()
             throw APIError.http(404)
         }
         guard epoch == token, self.scope == scope else { throw APIError.invalidCredential }
@@ -138,7 +156,25 @@ public final class MeetingLibrary: ObservableObject {
     public func delete(id: UUID) async throws {
         guard let scope else { throw APIError.invalidCredential }
         try store.markDeleted(id: id, scope: scope); reloadLocal()
+        do { try audioStore.remove(scope: scope, id: id) }
+        catch { audioError = "Local audio deletion needs retry: " + error.localizedDescription }
         await retry()
+    }
+    /// Play locally when available; a second device downloads the verified
+    /// original only when requested, without transferring every library entry.
+    public func audioURL(id: UUID) async throws -> URL {
+        guard let scope else { throw APIError.invalidCredential }
+        guard let entry = try store.entry(id: id, scope: scope), entry.state != .deleting, entry.state != .deleted else { throw APIError.http(404) }
+        if let local = audioStore.url(scope: scope, id: id) { return local }
+        guard let client else { throw APIError.invalidCredential }
+        let token = epoch
+        let download = try await client.downloadMeetingAudio(id: id)
+        defer { try? FileManager.default.removeItem(at: download) }
+        guard token == epoch, self.scope == scope else { throw APIError.invalidCredential }
+        guard let current = try store.entry(id: id, scope: scope), current.state != .deleting, current.state != .deleted else { throw APIError.http(404) }
+        try audioStore.install(download: download, scope: scope, id: id)
+        guard let local = audioStore.url(scope: scope, id: id) else { throw APIError.invalidResponse }
+        return local
     }
     /// Explicit user choice: discard local edits and load the current cloud
     /// document. Callers should offer copying the local draft before this action.
@@ -178,6 +214,7 @@ public final class MeetingLibrary: ObservableObject {
         defer {
             if epoch == token {
                 flushing = false; reloadLocal()
+                startAudioSync(scope: scope, client: client, token: token)
                 if entries.contains(where: { $0.state == .conflicted }), error == nil {
                     error = "A meeting changed on another device. Your local draft and the cloud copy are both preserved. Open it to choose which version to keep."
                 }
@@ -198,6 +235,7 @@ public final class MeetingLibrary: ObservableObject {
                 if entry.state == .deleting {
                     try await client.deleteMeeting(id: entry.id)
                     guard token == epoch else { return }
+                    try audioStore.remove(scope: scope, id: entry.id)
                     try store.removeDeleted(id: entry.id, scope: scope)
                 } else {
                     // Drain a coalesced edit after acknowledging the previous immutable
@@ -217,10 +255,12 @@ public final class MeetingLibrary: ObservableObject {
                             } catch APIError.http(404) {
                                 guard token == epoch else { return }
                                 try store.removeDeleted(id: entry.id, scope: scope)
+                                try audioStore.remove(scope: scope, id: entry.id)
                             }
                         } catch APIError.http(410) {
                             guard token == epoch else { return }
                             try store.removeDeleted(id: entry.id, scope: scope)
+                            try audioStore.remove(scope: scope, id: entry.id)
                         } catch APIError.http(let code) where [400, 413, 415, 422].contains(code) {
                             guard token == epoch else { return }
                             try store.rejectUpload(id: entry.id, scope: scope, revision: attempted.revision)
@@ -235,4 +275,47 @@ public final class MeetingLibrary: ObservableObject {
             }
         } catch { if token == epoch { self.error = error.localizedDescription } }
     }
+    private func startAudioSync(scope: String, client: ManagedClient, token: UUID) {
+        if audioTask != nil { audioRetryRequested = true; return }
+        audioError = nil
+        audioTask = Task { [weak self] in
+            guard let self else { return }
+            await self.syncAudio(scope: scope, client: client, token: token)
+            guard self.epoch == token else { return }
+            self.audioTask = nil
+            if self.audioRetryRequested {
+                self.audioRetryRequested = false
+                self.startAudioSync(scope: scope, client: client, token: token)
+            }
+        }
+    }
+    private func syncAudio(scope: String, client: ManagedClient, token: UUID) async {
+        do {
+            // Audio has its own durable receipt. A document acknowledgement must
+            // not make a failed or interrupted original upload disappear from
+            // retry; only finalized files attached to synced documents qualify.
+            for entry in try store.entries(scope: scope) where entry.state == .synced {
+                guard token == epoch else { return }
+                guard !audioStore.hasUploaded(scope: scope, id: entry.id),
+                      let local = audioStore.url(scope: scope, id: entry.id) else { continue }
+                do {
+                    try await client.uploadMeetingAudio(id: entry.id, source: local)
+                    guard token == epoch else { return }
+                    guard let current = try store.entry(id: entry.id, scope: scope), current.state != .deleting, current.state != .deleted,
+                          audioStore.url(scope: scope, id: entry.id) != nil else { continue }
+                    try audioStore.markUploaded(scope: scope, id: entry.id)
+                } catch is CancellationError { return }
+                catch {
+                    guard token == epoch, !Task.isCancelled else { return }
+                    guard let current = try store.entry(id: entry.id, scope: scope),
+                          current.state != .deleting, current.state != .deleted else { continue }
+                    let reason = (error as? APIError) == .http(413)
+                        ? "The original exceeds the 2 GiB cloud audio limit."
+                        : error.localizedDescription
+                    self.audioError = "Audio for \"" + String(entry.record.title.prefix(60)) + "\" remains on this device. " + reason + " Retry sync to try again."
+                }
+            }
+        } catch { if token == epoch { audioError = error.localizedDescription } }
+    }
+
 }

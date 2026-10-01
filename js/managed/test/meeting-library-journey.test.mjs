@@ -118,3 +118,74 @@ test("meeting library HTTP journey: durable revisions, isolation, summaries and 
   await writeFile(output+"/README.md",`# Meeting library HTTP journey\nCommand: cd js/managed && node --test test/meeting-library-journey.test.mjs\nRuntime: Miniflare/workerd HTTP edge -> shipped account proxy -> shipped meeting router -> durable D1. Only trusted authentication boundary and unavoidable external inference provider are synthetic.\nAssertions: direct authorization/origin, owner/org/team isolation, arbitrary positive first revision, replay/conflict, edit, keyset pagination, persistence after two restarts, ready summary per-revision idempotency, recoverable bounded failure retry, full-source rolling summary including middle decisions and notes, weighted quota and expired crash lease recovery, racing summaries and edits, permanent deletion including unknown UUID, body/media limits, persisted summary/storage quotas and atomic If-Match multi-device conflict/replay.\nTrace: http-trace.json (${trace.length} requests).\n`);
  }
 });
+
+test("raw meeting audio HTTP journey: resumable immutable parts, hour-long CAF, isolation and deletion", {timeout:120000}, async()=>{
+ const {createHash}=await import("node:crypto"),http=await import("node:http");
+ const output=resolve("../../output/meeting-audio-journey"),persist=output+"/state",trace=[];
+ await rm(persist,{recursive:true,force:true});await mkdir(output,{recursive:true});
+ let fixture=await startMeetingFixture({port:0,persist});
+ const id=crypto.randomUUID(),hash=b=>createHash("sha256").update(b).digest("hex"),partSize=8*1024*1024;
+ // One hour of 16kHz mono 16-bit PCM: 115MB total, above single-request ingress.
+ const size=16000*2*3600+68,header=Buffer.alloc(68);header.write("caff");header.writeUInt16BE(1,4);
+ header.write("desc",8);header.writeBigInt64BE(32n,12);header.writeDoubleBE(16000,20);header.write("lpcm",28);
+ header.writeUInt32BE(12,32);header.writeUInt32BE(2,36);header.writeUInt32BE(1,40);header.writeUInt32BE(1,44);header.writeUInt32BE(16,48);
+ header.write("data",52);header.writeBigInt64BE(BigInt(size-64),56);
+ const part=number=>{const bytes=Buffer.alloc(Math.min(partSize,size-(number-1)*partSize),number);if(number===1)header.copy(bytes);return bytes;};
+ const count=Math.ceil(size/partSize),digest=createHash("sha256");for(let n=1;n<=count;n++)digest.update(part(n));const sha=digest.digest("hex");
+ const source={revision:1,title:"Synthetic hour-long recording",started_at:"2026-09-30T10:00:00Z",duration_seconds:3600,transcript:"Original retained.",notes:"",partial:false};
+ async function call(path,method="GET",body,key=fixtureKeys.owner,expected=200,extra={}) {
+  const r=await fetch(new URL("/v1/meetings"+path,fixture.base),{method,headers:{...(key?{authorization:"Bearer "+key}:{}),...(body?{"content-type":body instanceof Buffer?"application/octet-stream":"application/json"}:{}),...extra},...(body===undefined?{}:{body:body instanceof Buffer?body:JSON.stringify(body)})});
+  const bytes=Buffer.from(await r.arrayBuffer()),data=r.headers.get("content-type")?.includes("json")?JSON.parse(bytes):undefined;
+  trace.push({path,method,principal:Object.keys(fixtureKeys).find(k=>fixtureKeys[k]===key)??"session_or_unauthenticated",expected,status:r.status,bytes:bytes.length,...(data?{data}:{})});
+  assert.equal(r.status,expected,method+" "+path+": "+(r.status===200?"":bytes));return {r,bytes,data};
+ }
+ const audio="/"+id+"/audio",start=(key=fixtureKeys.owner,expected=200,extra={})=>call(audio,"POST",{size,sha256:sha},key,expected,extra);
+ const put=(number,body=part(number),expected=200,extra={},path=audio)=>call(path+"/parts/"+number,"PUT",body,fixtureKeys.owner,expected,{"x-content-sha256":hash(body),...extra});
+ async function downloaded(path,expectedSha,expectedSize){
+  const r=await fetch(new URL("/v1/meetings"+path,fixture.base),{headers:{authorization:"Bearer "+fixtureKeys.owner}});assert.equal(r.status,200);
+  assert.equal(r.headers.get("content-type"),"application/x-caf");assert.equal(r.headers.get("content-length"),String(expectedSize));assert.equal(r.headers.get("cache-control"),"no-store");assert.equal(r.headers.get("x-content-sha256"),expectedSha);
+  let read=0;const digest=createHash("sha256");for await(const chunk of r.body){read+=chunk.length;digest.update(chunk);}assert.equal(read,expectedSize);assert.equal(digest.digest("hex"),expectedSha);
+  trace.push({boundary:"streamed_original_download",path,bytes:read,sha256:expectedSha,content_length:r.headers.get("content-length"),status:r.status});
+ }
+ try{
+  await call("/"+id,"PUT",source);await call(audio,"GET",undefined,fixtureKeys.owner,404);
+  await start(null,401);await start(fixtureKeys.connect,403);await start(fixtureKeys.readonly,403);
+  await start(null,403,{cookie:"meeting_fixture_session=owner"});
+  for(const key of [fixtureKeys.other,fixtureKeys.organization,fixtureKeys.team])await start(key,404);
+  await call(audio,"POST",{size:2*1024*1024*1024+1,sha256:sha},fixtureKeys.owner,413);
+  const admission=(await start()).data;assert.equal(admission.audio.part_size,partSize);assert.equal(admission.audio.count,count);assert.deepEqual(admission.uploaded_parts,[]);
+  await call(audio,"POST",{size,sha256:"0".repeat(64)},fixtureKeys.owner,409);
+  await put(1,Buffer.alloc(partSize),400);await put(1,part(1),400,{"x-content-sha256":"0".repeat(64)});
+  await put(1,header,415,{"content-type":"audio/wav"});
+  await put(1);await put(1);const changed=part(1);changed[100]^=1;await put(1,changed,409);
+  await call(audio+"/complete","POST",undefined,fixtureKeys.owner,409);await call(audio,"GET",undefined,fixtureKeys.owner,404);
+  await fixture.mf.dispose();fixture=await startMeetingFixture({port:0,persist});assert.deepEqual((await start()).data.uploaded_parts,[1]);
+  // A device continues after restart; competing immutable writers can only win once.
+  const changed2=part(2);changed2[100]^=1;
+  const raced=await Promise.all([part(2),part(2)].map(body=>put(2,body)));assert.equal(raced.length,2);await put(2,changed2,409);
+  for(let n=3;n<=count;n++)await put(n);
+  const completed=(await call(audio+"/complete","POST")).data;assert.equal(completed.complete,true);assert.equal(completed.audio.sha256,sha);
+  assert.equal((await start()).data.complete,true);await call(audio+"/complete","POST");
+  await downloaded(audio,sha,size);
+  for(const key of [fixtureKeys.other,fixtureKeys.organization,fixtureKeys.team])await call(audio,"GET",undefined,key,404);
+  await fixture.mf.dispose();fixture=await startMeetingFixture({port:0,persist});await downloaded(audio,sha,size);
+  await call("/"+id,"PUT",{...source,revision:2,notes:"Text edits preserve audio."});await downloaded(audio,sha,size);
+  const chunked=await fetch(new URL("/v1/meetings"+audio+"/parts/1",fixture.base),{method:"PUT",duplex:"half",headers:{authorization:"Bearer "+fixtureKeys.owner,"content-type":"application/octet-stream","x-content-sha256":sha},body:new ReadableStream({start(c){c.enqueue(header);c.close()}})});assert.equal(chunked.status,411);await chunked.text();trace.push({boundary:"unknown_part_length",expected:411,status:chunked.status});
+  const over=await new Promise((resolve,reject)=>{const req=http.request(new URL("/v1/meetings"+audio+"/parts/1",fixture.base),{method:"PUT",headers:{authorization:"Bearer "+fixtureKeys.owner,"content-type":"application/octet-stream","x-content-sha256":sha,"content-length":partSize+1}},r=>{r.resume();r.on("end",()=>resolve(r.statusCode))});req.on("error",reject);req.end(header);});assert.equal(over,413);trace.push({boundary:"part_size_cap",expected:413,status:over});
+  // A delete completes while a part body is still arriving. Either admission
+  // order must end with a permanent tombstone and no retained part objects.
+  const racing=crypto.randomUUID(),racingPath="/"+racing+"/audio",racingBytes=part(1);
+  await call("/"+racing,"PUT",source);await call(racingPath,"POST",{size:racingBytes.length,sha256:hash(racingBytes)});
+  let release;const tail=new Promise(resolve=>release=resolve);
+  const pending=fetch(new URL("/v1/meetings"+racingPath+"/parts/1",fixture.base),{method:"PUT",duplex:"half",headers:{authorization:"Bearer "+fixtureKeys.owner,"content-type":"application/octet-stream","content-length":String(racingBytes.length),"x-content-sha256":hash(racingBytes)},body:new ReadableStream({async start(c){c.enqueue(racingBytes.subarray(0,68));await tail;c.enqueue(racingBytes.subarray(68));c.close();}})});
+  await call("/"+racing,"DELETE",undefined,fixtureKeys.owner,204);release();const raceReply=await pending;assert.equal(raceReply.status,410);await raceReply.text();trace.push({boundary:"delete_racing_part_upload",status:410});
+  await call("/"+id,"DELETE",undefined,fixtureKeys.other,204);await downloaded(audio,sha,size);
+  await call("/"+id,"DELETE",undefined,fixtureKeys.owner,204);await call(audio,"GET",undefined,fixtureKeys.owner,404);await start(fixtureKeys.owner,410);await put(1,part(1),410);
+  const bucket=await fixture.mf.getR2Bucket("NANOCODEX_WORKSPACES","managed");assert.equal((await bucket.list()).objects.length,0);
+  await fixture.mf.dispose();fixture=await startMeetingFixture({port:0,persist});await start(fixtureKeys.owner,410);
+  trace.push({boundary:"physical_audio_deletion_and_persistent_tombstone",remaining_objects:0});
+ }finally{
+  await fixture.mf.dispose();await writeFile(output+"/http-trace.json",JSON.stringify(trace,null,2));
+  await writeFile(output+"/README.md","Command: cd js/managed && node --test test/meeting-library-journey.test.mjs\nReal HTTP -> shipped account proxy -> meeting routes -> persistent D1/R2 in workerd. Synthetic authentication only. An hour-long 16kHz LPCM CAF (115,200,068 bytes) is uploaded in 8MiB parts, resumed after restart, completed with full checksum verification, downloaded across restarts and text edits, and physically deleted. Auth, account/org/team isolation, origin, format/checksum rejection, immutable concurrent writes, unknown/oversized part admission, and delete/upload race asserted. Trace: http-trace.json.\n");
+ }
+});

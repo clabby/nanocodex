@@ -1,8 +1,9 @@
+import { meetingAudio, meetingAudioKey, deleteMeetingAudio } from "./meeting-audio";
 import { authenticateVaultAccount, requireSameOriginMutation, type AccountAuthEnv, type Principal } from "./account-auth";
 import { executeStatelessInferenceResponse, type InferenceSessionEnv } from "./inference-session";
 import { OSS_MODEL } from "./thread-model-routing";
 
-export type MeetingLibraryEnv = AccountAuthEnv & Omit<InferenceSessionEnv, "AI"> & { AI?: InferenceSessionEnv["AI"]; NANOCODEX_CRM?: D1Database };
+export type MeetingLibraryEnv = AccountAuthEnv & Omit<InferenceSessionEnv, "AI"> & { AI?: InferenceSessionEnv["AI"]; NANOCODEX_CRM?: D1Database; NANOCODEX_WORKSPACES?: R2Bucket };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const enc = new TextEncoder();
 const MAX_BODY = 1024 * 1024;
@@ -53,14 +54,14 @@ export async function routeMeetingLibrary(request: Request, env: MeetingLibraryE
   trustedPrincipal?: Principal): Promise<Response | undefined> {
   if (url.pathname !== "/v1/meetings" && !url.pathname.startsWith("/v1/meetings/")) return undefined;
   if (/\/preview$/.test(url.pathname)) return undefined;
-  const match = /^\/v1\/meetings(?:\/([^/]+)(\/summarize)?)?$/.exec(url.pathname);
+  const match = /^\/v1\/meetings(?:\/([^/]+)(\/(?:summarize|audio(?:\/(?:complete|parts\/[1-9]\d*))?))?)?$/.exec(url.pathname);
   if (!match || (match[1] && !UUID.test(match[1]))) return fail("not_found", 404);
   const principal = trustedPrincipal ?? await authenticateVaultAccount(request, env, url);
   if (!principal) return fail("unauthorized", 401);
   if (!["account_session", "api_key"].includes(principal.kind) || principal.connectGrant
     || !principal.capabilities.includes("agents:read") || !principal.capabilities.includes("agents:write") || !principal.capabilities.includes("tools:use")) return fail("forbidden", 403);
-  const id = match[1]?.toLowerCase(), summary = !!match[2];
-  if (!(id ? summary ? request.method === "POST" : ["GET", "PUT", "DELETE"].includes(request.method) : request.method === "GET")) return fail("method_not_allowed", 405);
+  const id = match[1]?.toLowerCase(), summary = match[2] === "/summarize", audio = match[2]?.startsWith("/audio") ?? false;
+  if (!(id ? audio ? match[2]!.includes("/parts/") ? request.method === "PUT" : match[2]!.endsWith("/complete") ? request.method === "POST" : ["GET", "POST"].includes(request.method) : summary ? request.method === "POST" : ["GET", "PUT", "DELETE"].includes(request.method) : request.method === "GET")) return fail("method_not_allowed", 405);
   if (request.method !== "GET") { const origin = requireSameOriginMutation(request, url, principal); if (origin) return origin; }
   if (id && url.search) return fail("invalid_request", 400);
   if (!env.NANOCODEX_CRM) return fail("meeting_library_unavailable", 503);
@@ -90,13 +91,16 @@ export async function routeMeetingLibrary(request: Request, env: MeetingLibraryE
       return json({ meetings: page.map(row => view(row, true)), next_cursor: rows.length > limit && end
         ? btoa(JSON.stringify({ scope: await hash(JSON.stringify(scope)), at: end.started_at, id: end.id })) : null });
     }
+    if (audio) return await meetingAudio(request, env.NANOCODEX_WORKSPACES, await meetingAudioKey(scope, id!), read, match[2]!.slice(7));
     if (request.method === "DELETE") {
+      if (!env.NANOCODEX_WORKSPACES) return fail("meeting_audio_unavailable", 503);
       // Even deleting an unknown UUID closes it permanently. Count tombstones in the admission quota.
       await db.prepare(`INSERT INTO meeting_library(owner_id,organization_id,team_id,id,title,started_at,updated_at,duration_seconds,transcript,notes,partial,revision,content_hash,deleted)
         SELECT ?,?,?,?,'','',?,0,'','',0,1,'',1 WHERE EXISTS(SELECT 1 FROM meeting_library WHERE ${where}) OR (SELECT count(*) FROM meeting_library WHERE owner_id=?) < 10000
         ON CONFLICT(owner_id,organization_id,team_id,id) DO UPDATE SET title='',started_at='',duration_seconds=0,partial=0,revision=1,transcript='',notes='',summary='',summary_status='none',summary_revision=NULL,summary_claim_until=0,summary_attempts=0,content_hash='',deleted=1,updated_at=excluded.updated_at`)
         .bind(...scope, id, new Date().toISOString(), ...scope, id, principal.userId).run();
       if (!(await read())?.deleted) return fail("meeting_storage_quota", 429);
+      await deleteMeetingAudio(env.NANOCODEX_WORKSPACES, await meetingAudioKey(scope, id));
       return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
     }
     if (request.method === "PUT") {

@@ -34,8 +34,10 @@ The same account-owned library is available in the Mac app's **Meetings** sectio
 A meeting stores its title, duration, transcript, your notes, and enhanced notes;
 it is independent of chat threads. Enhanced notes use the transcript and your
 notes to identify key points, decisions, and actions. Review generated notes
-against the transcript. **Ask Nanocodex** explicitly starts a conversation; saving
-or stopping a meeting does not start an agent task.
+against the transcript. **Ask Nanocodex** sends your question with a snapshot of
+the current transcript and notes, including provisional speech during recording.
+Opening the conversation leaves capture running; saving or stopping a meeting
+does not start an agent task.
 
 Recording belongs to the app process, not its sheet. Leaving the screen keeps an
 explicitly started recording running. A protected, account-scoped SQLite journal
@@ -43,12 +45,33 @@ checkpoints capture and queues final documents. Interrupted/terminated captures
 recover as partial meetings, never as automatically submitted agent tasks.
 Network failure leaves the document on the device with a visible pending state;
 retry keeps the capture UUID and revision. Account changes cannot redirect it.
-Only transcripts and notes are retained; microphone audio is not stored for
-playback, and protected audio from other apps is not captured.
+Original microphone audio is retained as PCM16 CAF at the input sample rate and
+channel count, separately from the transcript. A bounded writer keeps file I/O
+off the microphone callback. Recognition failures restart transcription with a
+visible missing-words warning while audio continues; storage failure stops capture
+visibly and retains its written prefix. Live partial transcript revisions are
+coalesced within 150 ms of delivery from Speech; recognition-service latency is
+additional. Speech requests rotate every 25 seconds. Protected audio from other
+apps is not captured.
+
+Saved meetings expose **Load recording**, playback, export, and **Re-transcribe
+recording**. Re-transcription runs in bounded Speech requests, preserves the old
+transcript on failure, and asks before replacing it. Playback and re-transcription
+are unavailable during active mobile capture. The Mac library can download and
+play recordings from the same account.
+
+Original audio sync runs independently of document sync and enhancement. Transfers
+resume immutable 8 MiB parts with per-part checksums and a verified complete-file
+manifest, up to 2 GiB per capture. Larger files remain on the recording device with
+an explicit sync error. Other devices download originals on demand, and deleting a
+meeting deletes its audio. The managed `NANOCODEX_WORKSPACES` R2 binding stores audio;
+no new D1 migration is required for audio. Local originals use account-hashed paths
+and remain available during a locked recording after first device unlock.
 
 For locked capture, add the **Listen to a meeting** widget or Control Widget.
 **Stop Recording** finalizes recognition and saves the meeting to the same library.
-Grant Microphone and Speech Recognition access in the app first. Cold locked
+Grant Microphone access in the app first; Speech Recognition permission enables
+live transcription but is not required to retain audio. Cold locked
 starts, interruptions, and long recordings still require physical-iPhone testing;
 a successful Simulator build does not establish those microphone behaviors.
 
@@ -64,6 +87,10 @@ local Worker and persistent D1. The fixture uses synthetic authentication and
 inference only; it does not replace meeting storage or HTTP responses. XCTest
 screenshots, the Worker log, and the result bundle are written to
 `output/native-meetings/ios`. This journey does not simulate microphone audio.
+Run `swift test --package-path apple/InboxCore --filter MeetingAudioCaptureJourneyTests`
+on macOS for real PCM capture, flush/reopen/decoding, account isolation, and killed
+writer recovery. Set `NANOCODEX_MEETING_AUDIO_EVIDENCE_DIR` to retain its CAF and JSON
+evidence. The HTTP audio journey runs with `pnpm --filter nanocodex-managed-service test:meetings` and exercises resumable transfer, checksums, isolation and deletion.
 
 On iPhones with an Action Button, select **Settings → Action Button → Shortcut
 → Choose a Shortcut → Nanocodex → Record Voice Task**. The shortcut uses the
