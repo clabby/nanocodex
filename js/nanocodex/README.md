@@ -847,6 +847,14 @@ session and are invalidated when the host shuts down; a persisted `wait` never
 restarts missing work. Embedded cells retain ownership of all nested tool calls
 until they finish or are cancelled.
 
+Opt into observer-only instant steering with `instantToolSteering: true` in
+Node/browser or Cloudflare Agent creation. Managed creation uses
+`configuration: { instant_tool_steering: true }`. The default is false. Accepted
+steering yields a foreground `exec`/`wait` with its output and live cell ID,
+without cancelling evaluation or nested effects. Later `wait` resumes that
+same cell. Model streams are not interrupted by this option; see
+[the runtime boundaries](../../docs/codex-code-mode.md#observer-only-instant-steering).
+
 Custom evaluators receive `audio`, `notify`, `yield_control`, `setTimeout`, and
 `clearTimeout` alongside the existing globals in `CodeEvaluatorEnvironment`.
 Forward those helpers into the guest environment to preserve the model-visible

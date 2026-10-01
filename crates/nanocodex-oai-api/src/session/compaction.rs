@@ -332,7 +332,7 @@ fn truncate_retained_messages_with_provenance(
         };
         let has_images = !developer
             && matches!(&item, ResponseItem::Message { content, .. }
-            if content.iter().any(|part| matches!(part, ContentItem::InputImage { .. })));
+            if content.iter().any(|part| matches!(part, ContentItem::InputImage { .. } | ContentItem::InputImageFile { .. })));
         // Do not backfill with older history when an oversized image consumes the boundary.
         if has_images {
             remaining = 0;
@@ -389,7 +389,9 @@ fn message_text_token_count(item: &ResponseItem) -> usize {
 fn content_text(content: &ContentItem) -> Option<&str> {
     match content {
         ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => Some(text),
-        ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
+        ContentItem::InputImage { .. }
+        | ContentItem::InputImageFile { .. }
+        | ContentItem::InputAudio { .. } => None,
     }
 }
 
@@ -416,7 +418,9 @@ fn truncate_message_text(mut item: ResponseItem, max_tokens: usize) -> Option<Re
                     truncated.push(content_item);
                 }
             }
-            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
+            ContentItem::InputImage { .. }
+            | ContentItem::InputImageFile { .. }
+            | ContentItem::InputAudio { .. } => {
                 truncated.push(content_item);
             }
         }

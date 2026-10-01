@@ -18,13 +18,20 @@ function createValueHelpers() {
     },
 
     normalizeImage(value, detail) {
-      const expected = "image expects a non-empty image URL string, an object with image_url and optional detail, or a raw MCP image block";
+      const expected = "image expects a non-empty image URL string, an object with exactly one of image_url or file_id and optional detail, or a raw MCP image block";
       if (detail != null && typeof detail !== "string") throw "image detail must be a string when provided";
       let url;
+      let fileId;
       let embedded;
       if (typeof value === "string") url = value;
       else if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-        if (value.image_url !== undefined) {
+        if (value.file_id !== undefined) {
+          if (value.image_url !== undefined || typeof value.file_id !== "string"
+            || !/^[A-Za-z0-9_-]{1,512}$/.test(value.file_id)) throw "image file_id is malformed or ambiguous";
+          fileId = value.file_id;
+          embedded = value.detail;
+          if (embedded != null && typeof embedded !== "string") throw "image detail must be a string when provided";
+        } else if (value.image_url !== undefined) {
           url = value.image_url;
           if (typeof url !== "string") throw expected;
           embedded = value.detail;
@@ -41,12 +48,12 @@ function createValueHelpers() {
           if (["auto", "low", "high", "original"].includes(metadata)) embedded = metadata;
         }
       } else throw expected;
-      if (!url) throw expected;
-      if (/^https?:/i.test(url)) throw "Tool call failed: remote image URLs are not supported in tool outputs. Pass a base64 data URI instead";
-      if (!/^data:/i.test(url)) throw "Tool call failed: invalid image output. Pass a base64 data URI instead";
+      if (!url && !fileId) throw expected;
+      if (url && /^https?:/i.test(url)) throw "Tool call failed: remote image URLs are not supported in tool outputs. Pass a base64 data URI instead";
+      if (url && !/^data:/i.test(url)) throw "Tool call failed: invalid image output. Pass a base64 data URI instead";
       const selected = (detail ?? embedded ?? "high").replace(/[A-Z]/g, (c) => c.toLowerCase());
       if (!["auto", "low", "high", "original"].includes(selected)) throw "image detail must be one of: auto, low, high, original";
-      return { type: "input_image", image_url: url, detail: selected };
+      return { type: "input_image", ...(fileId ? { file_id: fileId } : { image_url: url }), detail: selected };
     },
 
     normalizeAudio(value) {

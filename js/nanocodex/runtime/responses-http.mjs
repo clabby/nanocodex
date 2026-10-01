@@ -1,3 +1,5 @@
+import { retryAfterAdvice } from "./retry-after.mjs";
+
 /** Pull-based fetch ownership. Successful Responses bodies are never buffered. */
 export function createResponsesHttp(open) {
   const requests = new Map();
@@ -11,15 +13,15 @@ export function createResponsesHttp(open) {
       entry.ready = Promise.resolve().then(async () => {
         if (entry.closed) throw new Error("HTTPS request cancelled");
         const response = await open(endpoint, apiKey, sessionId, metadata, body, controller.signal);
+        const advice = retryAfterAdvice(response.headers.get("retry-after"));
         if (entry.closed) {
           await response.body?.cancel();
           throw new Error("HTTPS request cancelled");
         }
         if (!response.ok) {
           const body = await response.text();
-          const delay = response.headers.get("retry-after");
           throw JSON.stringify({ kind: "handshake_rejected", status: response.status, body,
-            ...(/^\d+$/.test(delay ?? "") ? { retry_after: Number(delay) } : {}) });
+            ...advice });
         }
         if (!response.body) throw new Error("HTTPS response omitted its streaming body");
         entry.reader = response.body.getReader();

@@ -117,7 +117,9 @@ enum HostFailureWire {
         #[serde(default)]
         body: String,
         #[serde(default)]
-        retry_after: Option<f64>,
+        retry_after: Option<serde_json::Value>,
+        #[serde(default)]
+        retry_after_deadline_ms: Option<serde_json::Value>,
     },
 }
 
@@ -197,11 +199,20 @@ impl HostTransport for JavaScriptResponsesHost {
 
     fn sleep<'a>(&'a self, session_id: &'a str, duration: Duration) -> HostFuture<'a, ()> {
         Box::pin(async move {
-            let milliseconds = u32::try_from(duration.as_millis()).unwrap_or(u32::MAX);
-            let Ok(promise) = host_sleep(session_id, milliseconds) else {
-                return;
-            };
-            drop(JsFuture::from(promise).await);
+            // JS timers overflow beyond signed 32-bit milliseconds. Round up
+            // submillisecond advice and split long waits rather than retry early.
+            let mut milliseconds =
+                duration.as_millis() + u128::from(duration.subsec_nanos() % 1_000_000 != 0);
+            while milliseconds > 0 {
+                let chunk = milliseconds.min(i32::MAX as u128) as u32;
+                let Ok(promise) = host_sleep(session_id, chunk) else {
+                    return;
+                };
+                if JsFuture::from(promise).await.is_err() {
+                    return;
+                }
+                milliseconds -= u128::from(chunk);
+            }
         })
     }
 }
@@ -280,10 +291,19 @@ fn decode_host_error(error: &JsValue, reconnectable: bool) -> HostError {
             status,
             body,
             retry_after,
+            retry_after_deadline_ms,
         } => HostError::handshake_rejected(
             status,
             body,
-            retry_after.and_then(|seconds| Duration::try_from_secs_f64(seconds).ok()),
+            retry_after_deadline_ms
+                .and_then(|value| value.as_u64())
+                .and_then(nanocodex::oai::transport::RetryAfter::from_unix_ms)
+                .or_else(|| {
+                    retry_after
+                        .and_then(|value| value.as_f64())
+                        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+                        .and_then(nanocodex::oai::transport::RetryAfter::from_delay)
+                }),
         ),
     }
 }

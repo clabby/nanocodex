@@ -621,17 +621,10 @@ where
         }
 
         let outcome = {
-            let TurnSteering {
-                receiver,
-                retained,
-                model_call_index,
-            } = steering;
             let task = self.drive_session(
                 &mut session,
-                receiver,
-                retained,
+                steering,
                 resumed && phase == ExecutionPhase::Generate,
-                model_call_index,
                 fork_snapshots,
             );
             tokio::pin!(task);
@@ -778,12 +771,17 @@ where
     pub(super) async fn drive_session(
         &mut self,
         session: &mut ModelSessionState,
-        steers: crate::agent::execution::SteerQueue,
-        retained_steers: Vec<QueuedSteer>,
+        steering: TurnSteering,
         resumed: bool,
-        model_call_index: Arc<tokio::sync::Mutex<u32>>,
         fork_snapshots: &watch::Sender<Option<ModelCheckpoint>>,
     ) -> Result<String> {
+        let TurnSteering {
+            receiver: steers,
+            retained: retained_steers,
+            mut preempt,
+            instant_tool_steering,
+            model_call_index,
+        } = steering;
         // Match Codex's ordering: always sample the turn's initial prompt once
         // before injecting input that arrived while that first request ran.
         let mut can_drain_steers = false;
@@ -909,15 +907,38 @@ where
                 .iter()
                 .any(|call| call.name == "exec")
                 .then(|| Arc::new(session.conversation.flattened_history()));
-            self.execute_model_tools(
-                &session.tools,
-                &mut session.conversation,
-                call_index,
-                code_calls,
-                history,
-                session.factory.profile().turn_id(),
-            )
-            .await?;
+            {
+                let tool_control = session.tools.control();
+                let tools = self.execute_model_tools(
+                    &session.tools,
+                    &mut session.conversation,
+                    call_index,
+                    code_calls,
+                    history,
+                    session.factory.profile().turn_id(),
+                );
+                tokio::pin!(tools);
+                loop {
+                    tokio::select! {
+                        biased;
+                        outcome = &mut tools => { outcome?; break; }
+                        changed = preempt.changed(), if instant_tool_steering => {
+                            if changed.is_err() { break tools.await?; }
+                            // Withdrawal before this safe boundary must not wake an observer.
+                            // The same tool future stays pinned: never replay/cancel effects.
+                            let deliveries = steers.lock().await.iter()
+                                .map(|steer| Arc::clone(&steer.delivery)).collect::<Vec<_>>();
+                            let mut pending = false;
+                            for delivery in deliveries {
+                                pending |= *delivery.lock().await == crate::agent::execution::SteerDelivery::Pending;
+                            }
+                            if pending {
+                                tool_control.preempt_turn().await;
+                            }
+                        }
+                    }
+                }
+            }
             let compacted = self
                 .maybe_compact(
                     call_index,

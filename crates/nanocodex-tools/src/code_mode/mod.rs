@@ -19,7 +19,7 @@ use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnord
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::{
-    sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore, mpsc, oneshot},
+    sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
     time::Duration,
 };
@@ -55,10 +55,13 @@ pub(crate) struct CodeModeRuntime {
     stored: Arc<Mutex<HashMap<String, Value>>>,
     host: Arc<Mutex<SharedJsHost>>,
     current_turn: Arc<AtomicU64>,
+    preempt: watch::Sender<(u64, u64)>,
 }
 
 #[derive(Clone)]
 pub(crate) struct CodeModeControl {
+    current_turn: Arc<AtomicU64>,
+    preempt: watch::Sender<(u64, u64)>,
     admission: Arc<Mutex<()>>,
     admission_epoch: Arc<AtomicU64>,
     #[cfg(test)]
@@ -294,11 +297,14 @@ impl CodeModeRuntime {
             stored: Arc::new(Mutex::new(HashMap::new())),
             host: Arc::new(Mutex::new(SharedJsHost::prewarmed())),
             current_turn,
+            preempt: watch::channel((0, 0)).0,
         }
     }
 
     pub(super) fn control(&self) -> CodeModeControl {
         CodeModeControl {
+            current_turn: Arc::clone(&self.current_turn),
+            preempt: self.preempt.clone(),
             admission: Arc::clone(&self.admission),
             admission_epoch: Arc::clone(&self.admission_epoch),
             #[cfg(test)]
@@ -386,6 +392,12 @@ impl CodeModeRuntime {
         started_at: Instant,
         observer: &mut dyn CodeModeObserver,
     ) -> CodeModeExecution {
+        // Subscribe before admission: steering can arrive while cell startup awaits a lock.
+        // A fresh subscription never inherits an earlier observation's preemption.
+        let preempt = (
+            self.preempt.subscribe(),
+            self.current_turn.load(Ordering::Acquire),
+        );
         let admission_epoch = self.admission_epoch.load(Ordering::Acquire);
         let source = match parse_exec_source(source) {
             Ok(source) => source,
@@ -438,7 +450,7 @@ impl CodeModeRuntime {
             &cell,
             observation,
             started_at,
-            ObservationMode::YieldAfter(yield_after),
+            ObservationMode::YieldAfter(yield_after, preempt),
             Some(output_token_budget),
             observer,
         )
@@ -464,6 +476,10 @@ impl CodeModeRuntime {
         input: &str,
         observer: &mut dyn CodeModeObserver,
     ) -> CodeModeExecution {
+        let preempt = (
+            self.preempt.subscribe(),
+            self.current_turn.load(Ordering::Acquire),
+        );
         let started_at = Instant::now();
         let arguments = match serde_json::from_str::<WaitArguments>(input) {
             Ok(arguments) => arguments,
@@ -531,7 +547,7 @@ impl CodeModeRuntime {
             &cell,
             observation,
             started_at,
-            ObservationMode::YieldAfter(yield_time),
+            ObservationMode::YieldAfter(yield_time, preempt),
             output_token_budget,
             observer,
         )
@@ -570,6 +586,13 @@ fn observer_yield_timeout(yield_time: Duration) -> Duration {
 }
 
 impl CodeModeControl {
+    /// Wake current observers without cancelling cells, nested calls, or their host.
+    pub(super) fn preempt_turn(&self) {
+        let turn = self.current_turn.load(Ordering::Acquire);
+        self.preempt
+            .send_modify(|generation| *generation = (turn, generation.1.wrapping_add(1)));
+    }
+
     pub(super) async fn terminate_turn(&self, turn_id: u64) {
         #[cfg(test)]
         self.admission_attempts.add_permits(1);
@@ -865,7 +888,7 @@ impl CellLifecycle {
 }
 
 enum ObservationMode {
-    YieldAfter(Duration),
+    YieldAfter(Duration, (watch::Receiver<(u64, u64)>, u64)),
     Terminate,
 }
 
@@ -879,17 +902,55 @@ async fn observe_cell(
     max_output_tokens: Option<usize>,
     observer: &mut dyn CodeModeObserver,
 ) -> (CodeModeExecution, bool) {
-    let (yield_after, terminating) = match mode {
-        ObservationMode::YieldAfter(yield_after) => (Some(yield_after), false),
-        ObservationMode::Terminate => (None, true),
+    let (yield_after, terminating, mut preempt) = match mode {
+        ObservationMode::YieldAfter(yield_after, preempt) => {
+            (Some(yield_after), false, Some(preempt))
+        }
+        ObservationMode::Terminate => (None, true, None),
     };
     let mut yield_timer = yield_after.map(|yield_after| Box::pin(tokio::time::sleep(yield_after)));
+    let mut preempt_remaining = None;
     loop {
         let yield_deadline_elapsed = yield_timer
             .as_ref()
             .is_some_and(|yield_timer| yield_timer.deadline() <= tokio::time::Instant::now());
-        let update = tokio::select! {
+        if preempt_remaining.is_none()
+            && preempt.as_ref().is_some_and(|(signal, turn)| {
+                signal.has_changed().unwrap_or(false) && signal.borrow().0 == *turn
+            })
+        {
+            // Drain only the already queued prefix, not an unbounded busy producer.
+            preempt_remaining = Some(observation.updates.len());
+        }
+        let preempted = preempt_remaining.is_some();
+        if preempt_remaining == Some(0) {
+            let buffered = std::mem::take(&mut observation.buffered);
+            return running_observation(
+                cell.id,
+                started_at,
+                buffered.content,
+                max_output_tokens,
+                buffered.nested_calls,
+                buffered.notifications,
+            );
+        }
+        let update = if preempted {
+            // The snapshot prefix is already queued and has a single receiver.
+            // Drain it without borrowing that receiver in two select branches.
+            observation.updates.recv().await
+        } else {
+            tokio::select! {
             biased;
+            () = async {
+                match preempt.as_mut() {
+                    Some((signal, turn)) => loop {
+                        if signal.changed().await.is_err() { std::future::pending::<()>().await; }
+                        if signal.borrow().0 == *turn { break; }
+                    },
+                    None => std::future::pending().await,
+                }
+            }, if !preempted => { preempt_remaining = Some(observation.updates.len()); continue; }
+
             () = async {
                 match yield_timer.as_mut() {
                     Some(timer) => timer.as_mut().await,
@@ -907,7 +968,11 @@ async fn observe_cell(
                 );
             }
             update = observation.updates.recv(), if !yield_deadline_elapsed => update,
+            }
         };
+        if let Some(remaining) = &mut preempt_remaining {
+            *remaining = remaining.saturating_sub(1);
+        }
         match update {
             Some(CellUpdate::NestedCallStarted {
                 call_id,
@@ -1102,6 +1167,7 @@ fn expose_running_shell_sessions(
             .filter_map(|item| match item {
                 ToolOutputContent::InputText { text } => Some(text),
                 ToolOutputContent::InputImage { .. }
+                | ToolOutputContent::InputImageFile { .. }
                 | ToolOutputContent::InputAudio { .. }
                 | ToolOutputContent::EncryptedContent { .. } => None,
             })

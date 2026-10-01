@@ -93,3 +93,54 @@ here and rejected by Codex's module parser. Helper lexical bindings do not imply
 that `globalThis.text` or `globalThis.tools` is available. This patch does not
 replace the module loader or claim global-object equivalence. Optional console
 bridging and host capabilities remain Nanocodex-specific.
+
+## Observer-only instant steering
+
+The observer-preemption contract follows the `execute`/`wait` distinction in
+OpenAI Codex `60947e234156ac12bdb7fba2477d3965f166bd34`:
+[session protocol](https://github.com/openai/codex/blob/60947e234156ac12bdb7fba2477d3965f166bd34/codex-rs/code-mode-protocol/src/session.rs#L155-L170).
+This is **not** full upstream `instant_interrupt` parity.
+
+Steering-triggered observation preemption is opt-in and disabled by default:
+
+- Rust: `Nanocodex::builder(openai).instant_tool_steering(true)`.
+- Node/browser SDK: `Agent.create({ ..., instantToolSteering: true })`.
+- Durable Cloudflare SDK: `CloudflareAgent.create(owner, { instantToolSteering: true })`.
+- Managed SDK/HTTP: create the agent with
+  `configuration: { instant_tool_steering: true }`. This is retained in its
+  configuration, validated as a boolean at admission, and reapplied on recovery.
+  The runtime setting is not a model provider feature flag.
+
+Accepted steering (including new input routed to an active turn) notifies the
+agent tool boundary. While the same pinned tool future is in flight, that
+boundary asks the runtime to yield current `exec`/`wait` observers. The normal
+result includes accumulated output, a live cell ID and its original call
+identity. Evaluation, nested tools, promises and effects continue. Later
+`wait` observes that same cell; it does not rerun the source. Completed nested
+results and metadata are retained through the existing cell observation queue.
+New observations do not inherit an earlier signal. Native notifications are
+turn-scoped; JS host notifications target active observations in the bound
+session/current turn. A withdrawn queued message is never injected. If withdrawal is processed
+before the tool boundary sees pending input, no observer wake is requested;
+withdrawal after an observer yielded cannot reverse that observation.
+
+Embedders can explicitly call `ToolRuntimeControl::preempt_turn()`. Embedded
+hosts implement `CodeModeHost::preempt_turn(session_id)`; the default is a
+conservative no-op for existing custom hosts. The shipped Node/browser WASM
+bridge forwards it to `nanocodexHost.preemptCodeTurn(sessionId)`. JS hosts also
+expose `preemptCode(sessionId, callId)` for an exact foreground observation.
+These controls are host APIs, not new model tools or cancellation authority.
+
+`wait(terminate: true)`, cancellation, turn teardown and host shutdown remain
+separate terminal controls. Preemption never interrupts an evaluator or an
+external tool. In particular, an uncertain write is not rolled back by a yield
+and is not permission to retry the write. Cells remain in-memory runtime
+resources: this does not make them recoverable after a process/Worker restart.
+
+Model streams still finish at their existing committed-response boundary;
+assistant prefixes, continuation IDs and tool history are not rewritten by
+this option. A native QuickJS host thread can be busy while its Rust observer
+yields. In JS, a non-yielding guest on the host's own event loop prevents any
+control delivery; use a separate Worker evaluator for reachable observation
+preemption. Killing or interrupting that guest would drop pending promises and
+is deliberately not used as a substitute.

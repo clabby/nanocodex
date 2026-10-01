@@ -969,6 +969,10 @@ fn managed_prompt(prompt: Prompt) -> nanocodex_agent::Result<PromptInput> {
                     image_url,
                     detail: detail.map(image_detail),
                 }),
+                UserInput::ImageFile { file_id, detail } => Ok(PromptContent::ImageFile {
+                    file_id,
+                    detail: detail.map(image_detail),
+                }),
                 UserInput::Audio { audio_url } => Ok(PromptContent::Audio { audio_url }),
                 UserInput::LocalImage { .. } | UserInput::LocalAudio { .. } => {
                     Err(NanocodexError::UnsupportedCapability {
@@ -1052,4 +1056,21 @@ fn turn_error(turn_id: String, state: &'static str, message: String) -> Nanocode
         state: state.to_owned(),
         message,
     })
+}
+
+#[cfg(test)]
+mod image_file_driver_tests {
+    use super::*;
+    #[test]
+    fn native_file_image_prompt_is_forwarded_without_url_translation() {
+        let prompt = Prompt::content([UserInput::ImageFile {
+            file_id: "file-driver_123".into(),
+            detail: Some(nanocodex_oai_api::ImageDetail::Original),
+        }]);
+        let output = managed_prompt(prompt).unwrap();
+        assert_eq!(
+            serde_json::to_value(output).unwrap(),
+            serde_json::json!([{"type":"image","file_id":"file-driver_123","detail":"original"}])
+        );
+    }
 }

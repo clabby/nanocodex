@@ -21,6 +21,7 @@ pub(crate) struct ResponsesSocket {
 pub(crate) struct ReceivedText {
     pub text: String,
     pub received_ns: u64,
+    pub retry_receipt: crate::transport::RetryReceipt,
 }
 
 impl ResponsesSocket {
@@ -102,6 +103,7 @@ impl ResponsesSocket {
                 Ok(ReceivedText {
                     text,
                     received_ns: monotonic_now_ns(),
+                    retry_receipt: crate::transport::RetryReceipt::now(),
                 })
             }
             HostMessage::Closed { detail } => Err(ResponsesError::Closed { detail }),

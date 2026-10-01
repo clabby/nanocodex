@@ -218,6 +218,15 @@ pub trait CodeModeHost: Send + Sync + 'static {
     /// Starts a logical turn without cancelling cells retained by earlier turns.
     fn begin_turn(&self, _session_id: &str) {}
 
+    /// Non-destructive early foreground yield. Custom hosts may conservatively
+    /// retain timed observations by leaving this default implementation unchanged.
+    fn preempt_turn<'a>(
+        &'a self,
+        _session_id: &'a str,
+    ) -> HostFuture<'a, Result<(), CodeModeHostError>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Cancels cells created or observed during the current logical turn.
     fn cancel_turn<'a>(
         &'a self,

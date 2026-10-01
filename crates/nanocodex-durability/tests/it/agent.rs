@@ -4282,6 +4282,7 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for ExhaustedCom
             self.0.compactions.fetch_add(1, Ordering::SeqCst);
             let error = if self.1 {
                 nanocodex_oai_api::transport::ResponsesError::Api {
+                retry_after: None,
                     event: json!({"type": "error", "code": "misalignment_policy_violation", "message": "stop this conversation"}).to_string(),
                 }
             } else {

@@ -20,7 +20,7 @@ pub enum PromptInput {
 }
 
 /// One item in a multimodal managed prompt.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PromptContent {
     /// UTF-8 text content.
@@ -34,6 +34,16 @@ pub enum PromptContent {
         image_url: String,
         /// Optional provider image-detail hint.
         #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// Image addressed by opaque provider file identity.
+    #[serde(rename = "image")]
+    ImageFile {
+        /// Nonempty bounded ASCII provider file ID, never a URL or local path.
+        #[serde(serialize_with = "serialize_image_file_id")]
+        file_id: String,
+        /// Optional provider image-detail hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
     /// Audio content addressed by URL or data URL.
@@ -1349,5 +1359,88 @@ mod presentation_contract_tests {
             .remove("presentation");
         let list: super::AgentList = serde_json::from_value(value).unwrap();
         assert!(list.summaries["synthetic"].presentation.is_none());
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(remote = "PromptContent", tag = "type", rename_all = "snake_case")]
+enum PromptContentFields {
+    /// UTF-8 text content.
+    Text {
+        /// Complete text value.
+        text: String,
+    },
+    /// Image content addressed by URL or data URL.
+    Image {
+        /// Image URL or data URL.
+        image_url: String,
+        /// Optional provider image-detail hint.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// Audio content addressed by URL or data URL.
+    Audio {
+        /// Audio URL or data URL.
+        audio_url: String,
+    },
+}
+
+fn serialize_image_file_id<S: serde::Serializer>(
+    file_id: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if !nanocodex_oai_api::responses::valid_image_file_id(file_id) {
+        return Err(serde::ser::Error::custom("invalid image file_id"));
+    }
+    serializer.serialize_str(file_id)
+}
+impl<'de> Deserialize<'de> for PromptContent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("image") {
+            let mut object = value
+                .as_object()
+                .cloned()
+                .ok_or_else(|| serde::de::Error::custom("expected image object"))?;
+            object.remove("type");
+            let detail = object.remove("detail");
+            let reference: nanocodex_oai_api::responses::ImageReference =
+                serde_json::from_value(serde_json::Value::Object(object))
+                    .map_err(serde::de::Error::custom)?;
+            let detail: Option<String> =
+                serde_json::from_value(detail.unwrap_or(serde_json::Value::Null))
+                    .map_err(serde::de::Error::custom)?;
+            return Ok(match reference {
+                nanocodex_oai_api::responses::ImageReference::Inline { image_url } => {
+                    Self::Image { image_url, detail }
+                }
+                nanocodex_oai_api::responses::ImageReference::File { file_id } => {
+                    Self::ImageFile { file_id, detail }
+                }
+            });
+        }
+        PromptContentFields::deserialize(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod image_file_prompt_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn managed_image_file_content_has_exclusive_image_wire_shape() {
+        let wire = json!({"type":"image","file_id":"file-managed_123","detail":"original"});
+        let item: PromptContent = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(&item, PromptContent::ImageFile { .. }));
+        assert_eq!(serde_json::to_value(item).unwrap(), wire);
+        for wire in [
+            json!({"type":"image"}),
+            json!({"type":"image","file_id":"bad/id"}),
+            json!({"type":"image","file_id":"file-a","image_url":"url"}),
+            json!({"type":"image","file_id":null}),
+            json!({"type":"image","file_id":"file-a","extra":1}),
+        ] {
+            assert!(serde_json::from_value::<PromptContent>(wire).is_err());
+        }
     }
 }

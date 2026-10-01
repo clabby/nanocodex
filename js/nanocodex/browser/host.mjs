@@ -616,6 +616,8 @@ export function createBrowserHost(options = {}) {
     waitCode: code.waitCodeObserved,
     beginCodeTurn: code.beginTurn,
     cancelCodeTurn: code.cancelTurn,
+    preemptCode: code.preempt,
+    preemptCodeTurn: code.preemptTurn,
     nextCodeUpdate: code.nextCodeUpdate,
     executeTool: code.executeTool,
     routeSubagent: (request) => {

@@ -10,6 +10,7 @@ pub(super) fn model_visible_len(item: &ResponseItem) -> usize {
                     text.len()
                 }
                 ContentItem::InputImage { image_url, detail } => image_bytes(image_url, *detail),
+                ContentItem::InputImageFile { .. } => RESIZED_IMAGE_BYTES_ESTIMATE,
                 ContentItem::InputAudio { audio_url } => audio_bytes(audio_url),
             })
             .fold(0, usize::saturating_add),
@@ -124,6 +125,7 @@ fn output_bytes(output: &FunctionOutputBody) -> usize {
                 FunctionOutputContent::InputImage { image_url, detail } => {
                     image_bytes(image_url, *detail)
                 }
+                FunctionOutputContent::InputImageFile { .. } => RESIZED_IMAGE_BYTES_ESTIMATE,
                 FunctionOutputContent::InputAudio { audio_url } => audio_bytes(audio_url),
                 FunctionOutputContent::EncryptedContent { encrypted_content } => {
                     encrypted_content.len().saturating_mul(9).div_ceil(16)
@@ -249,6 +251,30 @@ mod tests {
         ] {
             let fallback = url.len().div_ceil(4) * 4;
             assert_eq!(model_visible_len(&message(url)), fallback);
+        }
+    }
+    #[test]
+    fn file_image_context_cost_is_independent_of_identifier_and_detail() {
+        for detail in [None, Some(ImageDetail::Original), Some(ImageDetail::High)] {
+            for file_id in ["file-a".to_owned(), "x".repeat(512)] {
+                let message = ResponseItem::message(
+                    MessageRole::User,
+                    [ContentItem::InputImageFile {
+                        file_id: file_id.clone().into(),
+                        detail,
+                    }],
+                );
+                assert_eq!(model_visible_len(&message), RESIZED_IMAGE_BYTES_ESTIMATE);
+                let output = ResponseItem::custom_tool_output(
+                    "c".to_owned(),
+                    None,
+                    FunctionOutputBody::Content(vec![FunctionOutputContent::InputImageFile {
+                        file_id: file_id.into(),
+                        detail,
+                    }]),
+                );
+                assert_eq!(model_visible_len(&output), RESIZED_IMAGE_BYTES_ESTIMATE + 1);
+            }
         }
     }
 }

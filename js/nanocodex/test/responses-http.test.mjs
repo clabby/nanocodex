@@ -47,14 +47,15 @@ test("close while awaiting headers aborts fetch and disposes a late response", a
   assert.equal(cancelled, true);
 });
 
-test("HTTP rejection preserves status, body and retry delay for Rust policy", async () => {
+test("HTTP rejection preserves status, body and retry delay for Rust policy", async (t) => {
+  t.mock.method(Date, "now", () => 1_000);
   const http = createResponsesHttp(async () => new Response('{"error":"overloaded"}', {
     status: 429, headers: { "retry-after": "7" },
   }));
   const handle = http.httpOpen("https://provider.test/responses", "key", "root", {}, "{}");
   await assert.rejects(http.httpReady(handle), (error) => {
     assert.deepEqual(JSON.parse(error), { kind: "handshake_rejected", status: 429,
-      body: '{"error":"overloaded"}', retry_after: 7 });
+      body: '{"error":"overloaded"}', retry_after: 7, retry_after_deadline_ms: 8_000 });
     return true;
   });
   http.dispose();
@@ -104,4 +105,39 @@ test("global bridge routes HTTPS by thread host and cleans up its handle", async
     assert.equal(cancelled, true);
     bridge.httpClose(handle);
   } finally { releaseHostSession(host, "http-child"); host.dispose(); }
+});
+
+test("HTTP captures date advice before a delayed rejected body", async (t) => {
+  let now = Date.UTC(2026, 8, 30, 20);
+  t.mock.method(Date, "now", () => now);
+  const deadline = now + 2_000;
+  const http = createResponsesHttp(async () => ({
+    ok: false, status: 503,
+    headers: new Headers({ "retry-after": "Wed, 30 Sep 2026 20:00:02 GMT" }),
+    async text() { now += 5_000; return "slow rejection"; },
+  }));
+  const handle = http.httpOpen("https://provider.test/responses", "key", "root", {}, "{}");
+  await assert.rejects(http.httpReady(handle), (error) => {
+    const advice = JSON.parse(error);
+    assert.equal(advice.retry_after_deadline_ms, deadline);
+    assert.equal(advice.retry_after, 2);
+    assert.ok(advice.retry_after_deadline_ms < now);
+    return true;
+  });
+  http.dispose();
+});
+
+test("socket host error bridge retains original validated deadline", async () => {
+  const host = { async connect() { throw Object.assign(new Error("overloaded"), {
+    status: 429, body: "rate_limit_exceeded", retryAfter: 7, retry_after_deadline_ms: 8_000,
+  }); } };
+  bindHostSession(host, "retry-child");
+  installHostBridge();
+  try {
+    await assert.rejects(globalThis.nanocodexHost.connect("wss://provider.test", "key", null, false, "root", "retry-child", null), (error) => {
+      assert.deepEqual(JSON.parse(error), { kind: "handshake_rejected", status: 429,
+        body: "rate_limit_exceeded", retry_after: 7, retry_after_deadline_ms: 8_000 });
+      return true;
+    });
+  } finally { releaseHostSession(host, "retry-child"); }
 });

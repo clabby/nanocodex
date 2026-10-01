@@ -1,4 +1,4 @@
-import type { NamedTool } from "../types.mjs";
+import type { NamedTool, ToolContext } from "../types.mjs";
 import type { Workspace } from "../runtime/workspace.mjs";
 export * from "./artifact.mjs";
 export type JsonToolOptions = Readonly<{
@@ -8,9 +8,12 @@ export type JsonToolOptions = Readonly<{
   headers?: Readonly<Record<string, string>> | undefined;
 }>;
 
+/** Provider references are opaque: the tool never uploads or fetches file IDs. */
+export type ImageReference = { image_url: string; file_id?: never } | { file_id: string; image_url?: never };
+
 export type ImageGenerationOptions = JsonToolOptions & Readonly<{
-  recentImages?(sessionId: string, count: number): string[];
-  rememberImage?(sessionId: string, imageUrl: string): void;
+  recentImages?(sessionId: string, count: number): readonly (string | ImageReference)[] | Promise<readonly (string | ImageReference)[]>;
+  rememberImage?(sessionId: string, image: string | ImageReference, context: ToolContext): void | Promise<void>;
   workspace?: Readonly<{ readFile(path: string): Promise<Uint8Array> }> | undefined;
 }>;
 

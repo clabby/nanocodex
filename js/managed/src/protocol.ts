@@ -97,9 +97,13 @@ export function validatePromptInput(input: unknown): asserts input is PromptInpu
       continue;
     }
     if (value.type === "image") {
-      exactKeys(value, ["type", "image_url", "detail"]);
-      if (typeof value.image_url !== "string" || !value.image_url.trim()) {
-        throw new ProtocolError("invalid_prompt", "image prompt entries require image_url");
+      exactKeys(value, ["type", "image_url", "file_id", "detail"]);
+      const hasUrl = value.image_url !== undefined;
+      const hasFile = value.file_id !== undefined;
+      if (hasUrl === hasFile
+        || (hasUrl && (typeof value.image_url !== "string" || !value.image_url.trim()))
+        || (hasFile && (typeof value.file_id !== "string" || !/^[A-Za-z0-9_-]{1,512}$/.test(value.file_id)))) {
+        throw new ProtocolError("invalid_prompt", "image prompt entries require exactly one valid image_url or file_id");
       }
       if (value.detail !== undefined && !IMAGE_DETAILS.has(String(value.detail))) {
         throw new ProtocolError("invalid_prompt", "image detail must be auto, low, high, or original");

@@ -84,7 +84,7 @@ async fn generation_uses_codex_images_request_and_persists_result() -> Result<()
         request.body,
         json!({
             "prompt": "paint a blue whale",
-            "background": "auto",
+            "background": "opaque",
             "model": "gpt-image-2",
             "quality": "auto",
             "size": "auto"
@@ -104,6 +104,7 @@ async fn edit_accepts_original_local_images_and_recent_conversation_images() -> 
             prompt: "add a red hat".to_owned(),
             referenced_image_paths: Some(vec![local_path]),
             num_last_images_to_include: None,
+            transparent_background: false,
         },
         &[],
     )
@@ -114,9 +115,7 @@ async fn edit_accepts_original_local_images_and_recent_conversation_images() -> 
     };
     assert_eq!(local_request.images.len(), 1);
     assert!(
-        local_request.images[0]
-            .image_url
-            .starts_with("data:image/png;base64,")
+        matches!(&local_request.images[0], nanocodex_oai_api::responses::ImageReference::Inline { image_url } if image_url.starts_with("data:image/png;base64,"))
     );
 
     let history: Vec<ResponseItem> = serde_json::from_value(json!([
@@ -140,6 +139,7 @@ async fn edit_accepts_original_local_images_and_recent_conversation_images() -> 
             prompt: "combine these".to_owned(),
             referenced_image_paths: None,
             num_last_images_to_include: Some(2),
+            transparent_background: false,
         },
         &history,
     )
@@ -152,7 +152,11 @@ async fn edit_accepts_original_local_images_and_recent_conversation_images() -> 
         recent_request
             .images
             .iter()
-            .map(|image| image.image_url.as_str())
+            .map(|image| match image {
+                nanocodex_oai_api::responses::ImageReference::Inline { image_url } =>
+                    image_url.as_str(),
+                _ => panic!("expected inline"),
+            })
             .collect::<Vec<_>>(),
         vec!["data:image/png;base64,old", "data:image/png;base64,new"]
     );

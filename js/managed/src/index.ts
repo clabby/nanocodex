@@ -93,6 +93,8 @@ import { Agent as ManagedAgent } from "nanocodex/managed";
 import { imageGeneration, updatePlan, web } from "nanocodex/tools";
 import { createWorkspaceFilesystem, resolveNamespaceCwd } from "nanocodex-tools";
 import { SessionAttachments } from "./attachments";
+import { createManagedImageFetch, managedImageReference } from "./managed-image-fetch";
+import { recentSessionImages, SESSION_IMAGE_REMEMBER_EVENT } from "./session-images";
 import { createR2ViewImage } from "./attachment-image";
 import { createBrainWorkspace } from "./brain-workspace";
 import { createBrainBucket } from "./brain-bucket";
@@ -9572,6 +9574,25 @@ export class DurableAgentSession extends DurableComputerObject {
         url: "https://managed-tools.internal/image-generation",
         fetch: managedImageFetch(this.env, this.#credentialSubject(), configuration.chatgpt_account_id),
         workspace: sharedBrainWorkspace,
+        recentImages: async (sessionId, count) => {
+          const rootSessionId = this.#imageSessionRoot(sessionId);
+          // A shared guest never inherits the owner's private image history.
+          if (this.#imageSessionAuthorization(sessionId, rootSessionId)?.guestShareLinkId) return [];
+          return recentSessionImages({ sessionId, rootSessionId, count,
+            history: (before, limit) => this.#eventArchive.history(this.#eventLog, before, limit) });
+        },
+        rememberImage: async (sessionId, value, context) => {
+          const rootSessionId = this.#imageSessionRoot(sessionId);
+          if (this.#imageSessionAuthorization(sessionId, rootSessionId)?.guestShareLinkId) return;
+          const reference = managedImageReference(value);
+          if (!reference) throw new Error("generated image reference is invalid");
+          this.#assertDurabilityAdmissionActive();
+          const event = this.ctx.storage.transactionSync(() => this.#eventLog.append({
+            type: "event", event: { protocol_version: 1, request_id: sessionId, seq: 0,
+              type: SESSION_IMAGE_REMEMBER_EVENT, payload: { reference, call_id: context.callId, parent_call_id: context.parentCallId } },
+          }, this.#eventTurnId ?? null));
+          this.#publish(event);
+        },
       }),
       brainViewImage,
       updatePlan(),
@@ -9741,6 +9762,7 @@ export class DurableAgentSession extends DurableComputerObject {
         ).toArray()[0]?.state_id ?? durabilityId;
       } catch { /* The adapter creates its identity table on first construction. */ }
       const agentOptions: NonNullable<Parameters<typeof CloudflareAgent.create>[1]> = {
+        instantToolSteering: configuration.instant_tool_steering ?? false,
         durabilityId,
         eventPersistence: "caller",
         terminalReceiptRetention: MANAGED_TERMINAL_RECEIPT_RETENTION,
@@ -10149,6 +10171,24 @@ export class DurableAgentSession extends DurableComputerObject {
     const row = turnId === undefined ? undefined : this.#managedTurn(turnId);
     try { return row ? parseTurnAuthorization(row.authorization_json) : undefined; }
     catch { return undefined; }
+  }
+
+  #imageSessionRoot(sessionId: string): string {
+    const rootSessionId = this.ctx.storage.sql.exec<{ session_id: string }>(
+      "SELECT session_id FROM nanocodex_cloudflare_agent WHERE singleton = 1",
+    ).toArray()[0]?.session_id;
+    if (!rootSessionId || (sessionId !== rootSessionId
+      && this.#subagentBindings.authorizations.get(sessionId)?.root_session_id !== rootSessionId)) {
+      throw new Error("image history session is not owned by this conversation");
+    }
+    return rootSessionId;
+  }
+
+  #imageSessionAuthorization(sessionId: string, rootSessionId: string): TurnAuthorization | undefined {
+    const authorization = sessionId === rootSessionId ? this.#activeTurnAuthorization()
+      : parseTurnAuthorization(this.#subagentBindings.authorizations.get(sessionId)!.authorization_json);
+    if (!authorization) throw new Error("image history session has no active authorization");
+    return authorization;
   }
 
   #authorizationForToolContext(
@@ -13217,50 +13257,7 @@ function managedWebFetch(env: Env, subject: string, accountId?: string): typeof 
 }
 
 function managedImageFetch(env: Env, subject: string, accountId?: string): typeof fetch {
-  return async (input, init) => {
-    const incoming = new Request(input, init);
-    const value = await incoming.json<{
-      images?: unknown;
-      prompt?: unknown;
-    }>();
-    const images = Array.isArray(value.images)
-      ? value.images.filter((image): image is string => typeof image === "string")
-      : [];
-    if (typeof value.prompt !== "string" || !value.prompt.trim()
-      || images.length > 5 || images.some((image) => !image.startsWith("data:image/"))) {
-      return json({ error: "invalid managed image request" }, { status: 400 });
-    }
-    const upstream = await fetchManagedTool(
-      env,
-      subject,
-      images.length ? "/v1/images/edits" : "/v1/images/generations",
-      {
-        ...(images.length ? { images: images.map((image_url) => ({ image_url })) } : {}),
-        prompt: value.prompt.trim(),
-        background: "auto",
-        model: "gpt-image-2",
-        quality: "auto",
-        size: "auto",
-      },
-      accountId,
-    );
-    const payload = await upstream.json<{
-      data?: Array<{ b64_json?: unknown }>;
-      error?: unknown;
-    }>().catch(() => undefined);
-    if (!upstream.ok) {
-      const error = payload?.error && typeof payload.error === "object"
-        && !Array.isArray(payload.error)
-        && typeof (payload.error as { message?: unknown }).message === "string"
-        ? (payload.error as { message: string }).message
-        : `HTTP ${upstream.status}`;
-      return json({ error: `image generation failed: ${error}` }, { status: 502 });
-    }
-    const encoded = payload?.data?.[0]?.b64_json;
-    return typeof encoded === "string" && encoded
-      ? json({ image_url: `data:image/png;base64,${encoded}` })
-      : json({ error: "image generation returned no image" }, { status: 502 });
-  };
+  return createManagedImageFetch((path, body) => fetchManagedTool(env, subject, path, body, accountId));
 }
 
 function fetchManagedTool(

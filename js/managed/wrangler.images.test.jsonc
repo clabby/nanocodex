@@ -1,0 +1,9 @@
+{
+  "name": "managed-image-journey-test",
+  "main": "test-fixtures/image-history-worker.ts",
+  "compatibility_date": "2026-07-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "r2_buckets": [{ "binding": "IMAGE_ARCHIVE", "bucket_name": "managed-image-journey-archive" }],
+  "durable_objects": { "bindings": [{ "name": "IMAGE_HISTORY", "class_name": "ImageHistory" }] },
+  "migrations": [{ "tag": "image-history-v1", "new_sqlite_classes": ["ImageHistory"] }]
+}

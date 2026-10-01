@@ -51,7 +51,7 @@ pub struct InternalMessageMetadata {
 }
 
 /// One ordered multimodal part of a message.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentItem {
     /// Model-visible text input.
@@ -65,6 +65,16 @@ pub enum ContentItem {
         image_url: Box<str>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         /// Requested image-detail policy.
+        detail: Option<ImageDetail>,
+    },
+    /// Opaque provider file image input; never fetched or decoded locally.
+    #[serde(rename = "input_image")]
+    InputImageFile {
+        /// Validated opaque provider file identity.
+        #[serde(serialize_with = "crate::responses::image_reference::serialize_file_id")]
+        file_id: Box<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Requested model image detail.
         detail: Option<ImageDetail>,
     },
     /// Model-visible audio input.
@@ -317,9 +327,116 @@ pub enum FunctionOutputBody {
 }
 
 /// One multimodal part of a function or custom-tool output.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FunctionOutputContent {
+    /// Text output.
+    InputText {
+        /// Output text.
+        text: Box<str>,
+    },
+    /// Image output.
+    InputImage {
+        /// Data URL or remote image URL.
+        image_url: Box<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Requested image-detail policy.
+        detail: Option<ImageDetail>,
+    },
+    /// Opaque provider file image input; never fetched or decoded locally.
+    #[serde(rename = "input_image")]
+    InputImageFile {
+        /// Validated opaque provider file identity.
+        #[serde(serialize_with = "crate::responses::image_reference::serialize_file_id")]
+        file_id: Box<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Requested model image detail.
+        detail: Option<ImageDetail>,
+    },
+    /// Audio output.
+    InputAudio {
+        /// Data URL or remote audio URL.
+        audio_url: Box<str>,
+    },
+    /// Opaque encrypted provider content.
+    EncryptedContent {
+        /// Provider-generated encrypted payload.
+        encrypted_content: Box<str>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(remote = "ContentItem", tag = "type", rename_all = "snake_case")]
+enum ContentItemFields {
+    /// Model-visible text input.
+    InputText {
+        /// Input text.
+        text: Box<str>,
+    },
+    /// Model-visible image input.
+    InputImage {
+        /// Data URL or remote image URL.
+        image_url: Box<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Requested image-detail policy.
+        detail: Option<ImageDetail>,
+    },
+    /// Model-visible audio input.
+    InputAudio {
+        /// Data URL or remote audio URL.
+        audio_url: Box<str>,
+    },
+    /// Assistant text output.
+    OutputText {
+        /// Output text.
+        text: Box<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Provider citations and file annotations.
+        annotations: Option<Vec<OutputTextAnnotation>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Token log probabilities when requested.
+        logprobs: Option<Vec<OutputTextLogprob>>,
+    },
+}
+
+impl<'de> Deserialize<'de> for ContentItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("input_image") {
+            let serde_json::Value::Object(mut object) = value else {
+                return Err(serde::de::Error::custom("expected image object"));
+            };
+            object.remove("type");
+            // Deserialize detail separately so the strict reference object sees only its keys.
+            let detail = object.remove("detail");
+            let reference: crate::responses::ImageReference =
+                serde_json::from_value(serde_json::Value::Object(object))
+                    .map_err(serde::de::Error::custom)?;
+            let detail: Option<ImageDetail> =
+                serde_json::from_value(detail.unwrap_or(serde_json::Value::Null))
+                    .map_err(serde::de::Error::custom)?;
+            return Ok(match reference {
+                crate::responses::ImageReference::Inline { image_url } => Self::InputImage {
+                    image_url: image_url.into(),
+                    detail,
+                },
+                crate::responses::ImageReference::File { file_id } => Self::InputImageFile {
+                    file_id: file_id.into(),
+                    detail,
+                },
+            });
+        }
+        ContentItemFields::deserialize(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    remote = "FunctionOutputContent",
+    tag = "type",
+    rename_all = "snake_case"
+)]
+enum FunctionOutputContentFields {
     /// Text output.
     InputText {
         /// Output text.
@@ -343,4 +460,35 @@ pub enum FunctionOutputContent {
         /// Provider-generated encrypted payload.
         encrypted_content: Box<str>,
     },
+}
+
+impl<'de> Deserialize<'de> for FunctionOutputContent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("input_image") {
+            let serde_json::Value::Object(mut object) = value else {
+                return Err(serde::de::Error::custom("expected image object"));
+            };
+            object.remove("type");
+            // Deserialize detail separately so the strict reference object sees only its keys.
+            let detail = object.remove("detail");
+            let reference: crate::responses::ImageReference =
+                serde_json::from_value(serde_json::Value::Object(object))
+                    .map_err(serde::de::Error::custom)?;
+            let detail: Option<ImageDetail> =
+                serde_json::from_value(detail.unwrap_or(serde_json::Value::Null))
+                    .map_err(serde::de::Error::custom)?;
+            return Ok(match reference {
+                crate::responses::ImageReference::Inline { image_url } => Self::InputImage {
+                    image_url: image_url.into(),
+                    detail,
+                },
+                crate::responses::ImageReference::File { file_id } => Self::InputImageFile {
+                    file_id: file_id.into(),
+                    detail,
+                },
+            });
+        }
+        FunctionOutputContentFields::deserialize(value).map_err(serde::de::Error::custom)
+    }
 }

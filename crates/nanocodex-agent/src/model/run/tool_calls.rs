@@ -126,6 +126,7 @@ impl CodeModeObserver for NestedToolEventObserver<'_> {
                         result: &call.output,
                         structured_result: &call.structured_result,
                         metadata: call.metadata.as_deref(),
+                        cell: None,
                     },
                 )
             }
@@ -479,6 +480,7 @@ where
                 result: &completed.output,
                 structured_result: &completed.structured_result,
                 metadata: completed.metadata.as_deref(),
+                cell: completed.cell.as_ref(),
             },
         )?;
         Ok(())
@@ -515,6 +517,7 @@ where
                 result: &output,
                 structured_result: &structured_result,
                 metadata: None,
+                cell: None,
             },
         )?;
         Ok(output)

@@ -1144,6 +1144,7 @@ where
                 .as_ref()
                 .map(|_| latest_fork_checkpoint.clone());
             let execution_steps = execution_turn.steps();
+            let (steer_preempt, steer_preempt_rx) = watch::channel(0_u64);
             let steer_rx: SteerQueue = Arc::new(tokio::sync::Mutex::new(VecDeque::new()));
             let steers = Arc::downgrade(&steer_rx);
             let mut accepted_steers = retained_steers
@@ -1180,6 +1181,8 @@ where
                         fast_mode,
                         logical_turn_index,
                         TurnSteering {
+                            preempt: steer_preempt_rx,
+                            instant_tool_steering: self.spawner.instant_tool_steering,
                             receiver: steer_rx,
                             retained: retained_steers,
                             model_call_index: Arc::clone(&model_call_index),
@@ -1271,6 +1274,7 @@ where
                                     &self.execution,
                                     &input_events,
                                     &steers,
+                                    &steer_preempt,
                                     &mut accepted_steers,
                                     None,
                                     &execution_turn,
@@ -1304,7 +1308,7 @@ where
                                     drop(result.send(Err(NanocodexError::InvalidRequest("steer identity was already used in this turn".into()))));
                                     continue;
                                 }
-                                let outcome = accept_turn_steer(&self.execution, &input_events, &steers, &mut accepted_steers, Some(id), &execution_turn, &model_call_index, prompt).await;
+                                let outcome = accept_turn_steer(&self.execution, &input_events, &steers, &steer_preempt, &mut accepted_steers, Some(id), &execution_turn, &model_call_index, prompt).await;
                                 let reopen = outcome_requires_reopen(&outcome);
                                 drop(result.send(outcome));
                                 if reopen {
@@ -1345,6 +1349,7 @@ where
                                     &self.execution,
                                     &input_events,
                                     &steers,
+                                    &steer_preempt,
                                     &mut accepted_steers,
                                     None,
                                     &execution_turn,
@@ -1798,6 +1803,7 @@ async fn accept_turn_steer(
     execution: &Execution,
     events: &EventSink,
     steers: &SteerSender,
+    preempt: &watch::Sender<u64>,
     accepted: &mut Vec<(Option<String>, SteerReceipt)>,
     id: Option<String>,
     execution_turn: &ExecutionTurn,
@@ -1836,6 +1842,7 @@ async fn accept_turn_steer(
         },
     ));
     steers.lock().await.push_back(steer);
+    preempt.send_modify(|generation| *generation = generation.wrapping_add(1));
     Ok(())
 }
 
@@ -2291,6 +2298,7 @@ mod tests {
     fn misalignment_failure_stops_the_agent_session() {
         let error = NanocodexError::Response(ResponseError::from(ResponsesServiceError::from(
             ResponsesError::Api {
+                retry_after: None,
                 event: serde_json::json!({
                     "type": "error",
                     "code": "misalignment_policy_violation",

@@ -89,6 +89,8 @@ export type Environment = Readonly<{
   network?: NetworkPolicy;
 }>;
 export type Configuration = Readonly<{
+  /** Yield active exec/wait observers on accepted steering; default false. */
+  instant_tool_steering?: boolean;
   /** Pin this session to one connected ChatGPT account; disables automatic account failover. */
   chatgpt_account_id?: string;
   settings?: Readonly<{ model: CreateSettings["model"]; thinking: CreateSettings["thinking"]; reasoning_mode: "standard" | "pro"; fast_mode: boolean }>;

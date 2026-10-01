@@ -567,6 +567,18 @@ where
         api.event = %raw_event.get(),
         "OpenAI Responses API event"
     );
+    // Classify before raw/normalized observers run. Queueing and processing
+    // must not restart numeric advice carried in an error frame.
+    let decode_started_at = Instant::now();
+    let decoded = decode_event::<ServerEvent>(raw_event);
+    let initial_decode_duration_ns = elapsed_ns(decode_started_at);
+    let failure = matches!(
+        &decoded,
+        Ok(ServerEvent::Error | ServerEvent::Failed | ServerEvent::Incomplete)
+    )
+    .then(|| {
+        ResponsesError::api_event_received(raw_event.get().to_owned(), received.retry_receipt)
+    });
     let emit_started_at = Instant::now();
     let api_event_seq = observer.events.emit_with_source_sequence(
         AgentEventKind::ApiEvent,
@@ -585,13 +597,14 @@ where
         .saturating_add(elapsed_ns(emit_started_at));
 
     let decode_started_at = Instant::now();
-    let event = decode_event::<ServerEvent>(raw_event)?;
+    let event = decoded?;
     if let Some(event) = event.normalized() {
         observer.emit_response(event).await;
     }
     timing.pipeline.decode_duration_ns = timing
         .pipeline
         .decode_duration_ns
+        .saturating_add(initial_decode_duration_ns)
         .saturating_add(elapsed_ns(decode_started_at));
     if matches!(
         event,
@@ -604,11 +617,8 @@ where
     ) {
         timing.first_output_ns.get_or_insert(elapsed);
     }
-    if matches!(
-        event,
-        ServerEvent::Error | ServerEvent::Failed | ServerEvent::Incomplete
-    ) {
-        return Err(ResponsesError::api_event(raw_event.get().to_owned()).into());
+    if let Some(failure) = failure {
+        return Err(failure.into());
     }
     Ok(ReceivedServerEvent {
         event,
@@ -692,6 +702,7 @@ fn output_text(content: &[ContentItem]) -> String {
             ContentItem::OutputText { text, .. } => Some(text.as_ref()),
             ContentItem::InputText { .. }
             | ContentItem::InputImage { .. }
+            | ContentItem::InputImageFile { .. }
             | ContentItem::InputAudio { .. } => None,
         })
         .collect()

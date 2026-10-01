@@ -1,12 +1,12 @@
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use nanocodex_oai_api::{
     auth::{OpenAiAuth, OpenAiAuthMode, OpenAiAuthSnapshot},
-    responses::{ContentItem, FunctionOutputBody, FunctionOutputContent, ResponseItem},
+    responses::{
+        ContentItem, FunctionOutputBody, FunctionOutputContent, ImageReference, ResponseItem,
+        valid_image_file_id,
+    },
     tools::ToolDefinition,
 };
 use reqwest::header::{AUTHORIZATION, USER_AGENT};
@@ -21,7 +21,6 @@ use super::{
 const DESCRIPTION: &str = include_str!("imagegen_description.md");
 const IMAGE_MODEL: &str = "gpt-image-2";
 const MAX_EDIT_IMAGES: usize = 5;
-const ERROR_BODY_LIMIT: usize = 4_096;
 const MAX_OUTPUT_HINT_BYTES: usize = 1_024;
 
 pub(super) struct ImageGenerationHandler {
@@ -73,43 +72,76 @@ impl ImageGenerationHandler {
                     .await
             }
         };
-        let result = match response {
-            Ok(response) => match response.data.into_iter().next() {
-                Some(data) => data.b64_json,
-                None => {
-                    return ToolOutput::error("image generation returned no image data");
-                }
-            },
-            Err(error) => return ToolOutput::error(format!("image generation failed: {error}")),
+        let (response, imagegen_request_id) = match response {
+            Ok(response) => response,
+            Err(error) => return error.output(),
         };
-        let saved_path = match save_result(
-            &self.save_root,
-            context.session_id(),
-            context.call_id(),
-            &result,
-        )
-        .await
-        {
-            Ok(path) => Some(path),
-            Err(error) => {
-                tracing::warn!(%error, "failed to save generated image");
-                None
-            }
-        };
-        let output_hint = saved_path.as_ref().and_then(|path| image_output_hint(path));
-        let image_url = format!("data:image/png;base64,{result}");
-        let mut output_items = vec![ToolOutputContent::InputImage {
-            image_url: image_url.clone(),
-            detail: ImageDetail::High,
-        }];
-        let mut structured_result = json!({ "image_url": image_url });
-        if let Some(output_hint) = output_hint {
-            output_items.push(ToolOutputContent::InputText {
-                text: output_hint.clone(),
+        let generation_id = response
+            .generation_id
+            .as_deref()
+            .and_then(safe_image_id)
+            .or_else(|| {
+                response
+                    .data
+                    .first()
+                    .and_then(|data| data.generation_id.as_deref())
+                    .and_then(safe_image_id)
             });
-            structured_result["output_hint"] = Value::String(output_hint);
+        let metadata = image_ids(imagegen_request_id.clone(), generation_id.clone());
+        let Some(data) = response.data.into_iter().next() else {
+            return ImageRequestFailure {
+                message: "image generation returned no image data".to_owned(),
+                imagegen_request_id,
+                generation_id,
+            }
+            .output();
+        };
+        let mut structured_result = metadata.clone();
+        let mut output_items = Vec::new();
+        match (data.b64_json, data.file_id) {
+            (Some(result), None) if !result.is_empty() => {
+                let saved_path = save_result(
+                    &self.save_root,
+                    context.session_id(),
+                    context.call_id(),
+                    &result,
+                )
+                .await
+                .ok();
+                let image_url = format!("data:image/png;base64,{result}");
+                output_items.push(ToolOutputContent::InputImage {
+                    image_url: image_url.clone(),
+                    detail: ImageDetail::High,
+                });
+                structured_result["image_url"] = Value::String(image_url);
+                if let Some(output_hint) =
+                    saved_path.as_ref().and_then(|path| image_output_hint(path))
+                {
+                    output_items.push(ToolOutputContent::InputText {
+                        text: output_hint.clone(),
+                    });
+                    structured_result["output_hint"] = Value::String(output_hint);
+                }
+            }
+            (None, Some(file_id)) if valid_image_file_id(&file_id) => {
+                output_items.push(ToolOutputContent::InputImageFile {
+                    file_id: file_id.clone(),
+                    detail: ImageDetail::High,
+                });
+                structured_result["file_id"] = Value::String(file_id);
+            }
+            _ => {
+                return ImageRequestFailure {
+                    message: "image generation returned an invalid image reference".to_owned(),
+                    imagegen_request_id,
+                    generation_id,
+                }
+                .output();
+            }
         }
-        ToolOutput::content(output_items).with_structured_result(structured_result)
+        ToolOutput::content(output_items)
+            .with_structured_result(structured_result)
+            .with_metadata(metadata)
     }
 
     async fn post_image_request<R: Serialize + ?Sized>(
@@ -117,7 +149,7 @@ impl ImageGenerationHandler {
         endpoint: &str,
         request: &R,
         operation: &str,
-    ) -> Result<ImageResponse, String> {
+    ) -> Result<(ImageResponse, Option<String>), ImageRequestFailure> {
         let auth = self
             .auth
             .snapshot()
@@ -141,18 +173,37 @@ impl ImageGenerationHandler {
             response
         };
         let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| format!("failed to read {operation} response: {error}"))?;
+        let imagegen_request_id = response
+            .headers()
+            .get("x-codex-imagegen-request-id")
+            .and_then(|value| value.to_str().ok())
+            .and_then(safe_image_id);
+        let body = response.bytes().await.map_err(|_| ImageRequestFailure {
+            message: format!("failed to read {operation} response"),
+            imagegen_request_id: imagegen_request_id.clone(),
+            generation_id: None,
+        })?;
+        let generation_id = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("generation_id")
+                    .and_then(Value::as_str)
+                    .and_then(safe_image_id)
+            });
         if !status.is_success() {
-            return Err(format!(
-                "{operation} returned HTTP {status}: {}",
-                body_preview(&body)
-            ));
+            return Err(ImageRequestFailure {
+                message: format!("{operation} returned HTTP {status}"),
+                imagegen_request_id,
+                generation_id,
+            });
         }
-        serde_json::from_slice(&body)
-            .map_err(|error| format!("failed to decode {operation} response: {error}"))
+        let parsed = serde_json::from_slice(&body).map_err(|_| ImageRequestFailure {
+            message: format!("failed to decode {operation} response"),
+            imagegen_request_id: imagegen_request_id.clone(),
+            generation_id,
+        })?;
+        Ok((parsed, imagegen_request_id))
     }
 
     async fn send_authorized<R: Serialize + ?Sized>(
@@ -190,6 +241,7 @@ impl Tool for ImageGenerationHandler {
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string" },
+                    "transparent_background": { "type": "boolean", "default": false },
                     "referenced_image_paths": {
                         "type": ["array", "null"],
                         "items": {
@@ -218,6 +270,8 @@ impl Tool for ImageGenerationHandler {
 struct ImagegenArgs {
     prompt: String,
     #[serde(default)]
+    transparent_background: bool,
+    #[serde(default)]
     referenced_image_paths: Option<Vec<PathBuf>>,
     #[serde(default)]
     num_last_images_to_include: Option<usize>,
@@ -234,7 +288,7 @@ struct ImageGenerationRequest {
 
 #[derive(Debug, PartialEq, Serialize)]
 struct ImageEditRequest {
-    images: Vec<ImageUrl>,
+    images: Vec<ImageReference>,
     prompt: String,
     background: &'static str,
     model: &'static str,
@@ -242,21 +296,64 @@ struct ImageEditRequest {
     size: &'static str,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
-struct ImageUrl {
-    image_url: String,
-}
-
 #[derive(Deserialize)]
 struct ImageResponse {
-    #[serde(rename = "created")]
-    _created: u64,
+    #[serde(default)]
+    generation_id: Option<String>,
     data: Vec<ImageData>,
 }
 
 #[derive(Deserialize)]
 struct ImageData {
-    b64_json: String,
+    #[serde(default)]
+    b64_json: Option<String>,
+    #[serde(default)]
+    file_id: Option<String>,
+    #[serde(default)]
+    generation_id: Option<String>,
+}
+
+struct ImageRequestFailure {
+    message: String,
+    imagegen_request_id: Option<String>,
+    generation_id: Option<String>,
+}
+impl From<String> for ImageRequestFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            imagegen_request_id: None,
+            generation_id: None,
+        }
+    }
+}
+impl ImageRequestFailure {
+    fn output(self) -> ToolOutput {
+        let metadata = image_ids(self.imagegen_request_id, self.generation_id);
+        let mut result = metadata.clone();
+        result["error"] = Value::String(self.message.clone());
+        ToolOutput::error(self.message)
+            .with_structured_result(result)
+            .with_metadata(metadata)
+    }
+}
+fn safe_image_id(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')))
+    .then(|| value.to_owned())
+}
+fn image_ids(request_id: Option<String>, generation_id: Option<String>) -> Value {
+    let mut result = json!({});
+    if let Some(id) = request_id {
+        result["imagegen_request_id"] = Value::String(id);
+    }
+    if let Some(id) = generation_id {
+        result["generation_id"] = Value::String(id);
+    }
+    result
 }
 
 #[derive(Debug, PartialEq)]
@@ -269,6 +366,11 @@ async fn request_for_args(
     args: &ImagegenArgs,
     history: &[ResponseItem],
 ) -> Result<ImageRequest, String> {
+    let background = if args.transparent_background {
+        "transparent"
+    } else {
+        "opaque"
+    };
     let paths = args.referenced_image_paths.as_deref().unwrap_or_default();
     if paths.len() > MAX_EDIT_IMAGES {
         return Err(format!(
@@ -279,7 +381,7 @@ async fn request_for_args(
         (true, None) => {
             return Ok(ImageRequest::Generate(ImageGenerationRequest {
                 prompt: args.prompt.clone(),
-                background: "auto",
+                background,
                 model: IMAGE_MODEL,
                 quality: "auto",
                 size: "auto",
@@ -294,7 +396,7 @@ async fn request_for_args(
                         path.display()
                     ));
                 }
-                images.push(ImageUrl {
+                images.push(ImageReference::Inline {
                     image_url: local_image_url(path.clone()).await?,
                 });
             }
@@ -323,10 +425,22 @@ async fn request_for_args(
         }
     };
 
+    for image in &images {
+        match image {
+            ImageReference::File { file_id } if valid_image_file_id(file_id) => {}
+            ImageReference::Inline { image_url } if image_url.starts_with("data:image/") => {}
+            _ => {
+                return Err(
+                    "selected conversation image has an invalid or unsupported reference"
+                        .to_owned(),
+                );
+            }
+        }
+    }
     Ok(ImageRequest::Edit(ImageEditRequest {
         images,
         prompt: args.prompt.clone(),
-        background: "auto",
+        background,
         model: IMAGE_MODEL,
         quality: "auto",
         size: "auto",
@@ -359,45 +473,24 @@ async fn local_image_url(path: PathBuf) -> Result<String, String> {
     })
 }
 
-fn recent_images(history: &[ResponseItem], count: usize) -> Vec<ImageUrl> {
-    let mut function_call_ids = HashSet::new();
-    let mut custom_tool_call_ids = HashSet::new();
-    for item in history {
-        match item {
-            ResponseItem::FunctionCall { call_id, .. } => {
-                function_call_ids.insert(call_id.as_ref());
-            }
-            ResponseItem::CustomToolCall { call_id, .. } => {
-                custom_tool_call_ids.insert(call_id.as_ref());
-            }
-            _ => {}
-        }
-    }
-
+fn recent_images(history: &[ResponseItem], count: usize) -> Vec<ImageReference> {
     let mut images = Vec::with_capacity(count);
     'history: for item in history.iter().rev() {
-        let mut image_urls = Vec::new();
-        match item {
+        let references: Vec<ImageReference> = match item {
             ResponseItem::Message { content, .. } => {
-                image_urls.extend(content.iter().rev().filter_map(content_image_url));
+                content.iter().rev().filter_map(content_image).collect()
             }
-            ResponseItem::FunctionCallOutput {
-                call_id, output, ..
-            } if function_call_ids.contains(call_id.as_ref()) => {
-                image_urls.extend(output_image_urls(output));
-            }
-            ResponseItem::CustomToolCallOutput {
-                call_id, output, ..
-            } if custom_tool_call_ids.contains(call_id.as_ref()) => {
-                image_urls.extend(output_image_urls(output));
-            }
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => output_images(output).collect(),
             ResponseItem::ImageGenerationCall { result, .. } if !result.is_empty() => {
-                image_urls.push(format!("data:image/png;base64,{result}"));
+                vec![ImageReference::Inline {
+                    image_url: format!("data:image/png;base64,{result}"),
+                }]
             }
-            _ => {}
-        }
-        for image_url in image_urls {
-            images.push(ImageUrl { image_url });
+            _ => Vec::new(),
+        };
+        for reference in references {
+            images.push(reference);
             if images.len() == count {
                 break 'history;
             }
@@ -406,25 +499,35 @@ fn recent_images(history: &[ResponseItem], count: usize) -> Vec<ImageUrl> {
     images.reverse();
     images
 }
-
-fn output_image_urls(output: &FunctionOutputBody) -> impl Iterator<Item = String> + '_ {
+fn output_images(output: &FunctionOutputBody) -> impl Iterator<Item = ImageReference> + '_ {
     let content = match output {
         FunctionOutputBody::Content(content) => Some(content.as_slice()),
         FunctionOutputBody::Text(_) => None,
     };
-    content.into_iter().flatten().rev().filter_map(|content| {
-        let FunctionOutputContent::InputImage { image_url, .. } = content else {
-            return None;
-        };
-        Some(image_url.to_string())
-    })
+    content
+        .into_iter()
+        .flatten()
+        .rev()
+        .filter_map(|content| match content {
+            FunctionOutputContent::InputImage { image_url, .. } => Some(ImageReference::Inline {
+                image_url: image_url.to_string(),
+            }),
+            FunctionOutputContent::InputImageFile { file_id, .. } => Some(ImageReference::File {
+                file_id: file_id.to_string(),
+            }),
+            _ => None,
+        })
 }
-
-fn content_image_url(item: &ContentItem) -> Option<String> {
-    let ContentItem::InputImage { image_url, .. } = item else {
-        return None;
-    };
-    Some(image_url.to_string())
+fn content_image(item: &ContentItem) -> Option<ImageReference> {
+    match item {
+        ContentItem::InputImage { image_url, .. } => Some(ImageReference::Inline {
+            image_url: image_url.to_string(),
+        }),
+        ContentItem::InputImageFile { file_id, .. } => Some(ImageReference::File {
+            file_id: file_id.to_string(),
+        }),
+        _ => None,
+    }
 }
 
 async fn save_result(
@@ -482,16 +585,6 @@ fn image_output_hint(path: &Path) -> Option<String> {
         path.display()
     );
     (hint.len() <= MAX_OUTPUT_HINT_BYTES).then_some(hint)
-}
-
-fn body_preview(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    let mut end = text.len().min(ERROR_BODY_LIMIT);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let suffix = if end < text.len() { "…" } else { "" };
-    format!("{}{suffix}", &text[..end])
 }
 
 #[cfg(test)]

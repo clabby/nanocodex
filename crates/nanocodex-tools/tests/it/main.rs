@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 mod oauth;
+mod preempt;
 mod support;
 mod tool_macro;
 mod tracing;

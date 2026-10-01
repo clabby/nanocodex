@@ -39,6 +39,7 @@ export function imageGeneration(options = {}) {
       type: "object",
       properties: {
         prompt: { type: "string" },
+        transparent_background: { type: "boolean", default: false, description: "Request a transparent background; omitted/false produces an opaque image, including edits." },
         referenced_image_paths: {
           type: ["array", "null"],
           items: { type: "string", description: "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute." },
@@ -52,7 +53,14 @@ export function imageGeneration(options = {}) {
     },
     async handler(input, context) {
       const args = requireObject(input, "image_gen__imagegen");
+      if (Object.keys(args).some(key => !["prompt", "referenced_image_paths", "num_last_images_to_include", "transparent_background"].includes(key))) {
+        throw new Error("unknown image generation argument");
+      }
       const prompt = requireString(args.prompt, "image_gen__imagegen.prompt");
+      const transparent = args.transparent_background ?? false;
+      if (args.transparent_background === null || typeof transparent !== "boolean") {
+        throw new Error("transparent_background must be a boolean");
+      }
       const paths = optionalStringArray(args.referenced_image_paths);
       const count = optionalInteger(args.num_last_images_to_include);
       if (paths.length > 5) throw new Error("referenced_image_paths accepts at most 5 paths");
@@ -64,16 +72,28 @@ export function imageGeneration(options = {}) {
       }
       const images = paths.length
         ? await Promise.all(paths.map((path) => workspaceImage(options.workspace, path)))
-        : count === undefined ? [] : recentImages(context.sessionId, count);
+        : count === undefined ? [] : await recentImages(context.sessionId, count);
       if (count !== undefined && images.length !== count) {
         throw new Error(`requested ${count} recent images, but only ${images.length} are available`);
       }
-      const result = requireObject(
-        await request({ images, prompt }, context.signal),
-        "image_gen__imagegen response",
-      );
-      const imageUrl = requireString(result.image_url, "image_gen__imagegen response.image_url");
-      rememberImage(context.sessionId, imageUrl);
+      let result;
+      try {
+        result = requireObject(
+          await request({ images: images.map(value => {
+            const ref = imageReference(value);
+            // Preserve existing inline-only transport payloads for custom hosts.
+            return typeof value === "string" ? ref.image_url : ref;
+          }), prompt, transparent_background: transparent }, context.signal),
+          "image_gen__imagegen response",
+        );
+      } catch (error) {
+        if (!error.image_ids) throw error;
+        const failure = { error: error.message, ...error.image_ids };
+        return toolResult(error.message, failure, { success: false, value: failure, metadata: error.image_ids });
+      }
+      const reference = imageReference(result);
+      // Keep existing inline history hooks compatible; file IDs are opaque references.
+      await rememberImage(context.sessionId, reference.image_url ?? reference, context);
       return result;
     },
   });
@@ -199,7 +219,14 @@ function jsonRequester(options, defaultUrl) {
     const payload = await response.json().catch(() => undefined);
     if (!response.ok) {
       const message = typeof payload?.error === "string" ? payload.error : `HTTP ${response.status}`;
-      throw new Error(message);
+      const error = new Error(message);
+      const ids = {};
+      for (const key of ["imagegen_request_id", "generation_id"]) {
+        const id = payload?.[key];
+        if (typeof id === "string" && /^[A-Za-z0-9_.:-]{1,256}$/.test(id)) ids[key] = id;
+      }
+      if (Object.keys(ids).length) error.image_ids = ids;
+      throw error;
     }
     return payload;
   };
@@ -307,3 +334,24 @@ function base64(bytes) {
   return btoa(binary);
 }
 
+
+// Normalize references without fetching URLs or decoding provider file IDs.
+export function imageReference(value) {
+  if (typeof value === "string") value = { image_url: value };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("image reference requires image_url or file_id");
+  }
+  const hasUrl = value.image_url !== undefined;
+  const hasFile = value.file_id !== undefined;
+  if (hasUrl === hasFile) throw new Error("image reference requires exactly one of image_url or file_id");
+  if (hasFile) {
+    if (typeof value.file_id !== "string" || !/^[A-Za-z0-9_-]{1,512}$/.test(value.file_id)) {
+      throw new Error("image reference file_id is malformed");
+    }
+    return { file_id: value.file_id };
+  }
+  if (typeof value.image_url !== "string" || !value.image_url.startsWith("data:image/")) {
+    throw new Error("image reference requires an inline image data URL");
+  }
+  return { image_url: value.image_url };
+}

@@ -146,3 +146,19 @@ test("Cloudflare EGRESS exposes bounded broker rejection metadata without readin
   );
   assert.equal(cancelled, 1);
 });
+
+test("broker date advice is captured before delayed cancellation", async (t) => {
+  let now = Date.UTC(2026, 8, 30, 20);
+  t.mock.method(Date, "now", () => now);
+  const deadline = now + 2_000;
+  const options = cloudflareEgress({ binding: { async fetch() {
+    return { status: 503, headers: new Headers({ "retry-after": "Wed, 30 Sep 2026 20:00:02 GMT" }),
+      body: { async cancel() { now += 5_000; } } };
+  } } });
+  await assert.rejects(options.createWebSocket(options.websocketUrl, "root", { authorization: "preconnect" }), (error) => {
+    assert.equal(error.retryAfter, 2);
+    assert.equal(error.retry_after_deadline_ms, deadline);
+    assert.ok(deadline < now);
+    return true;
+  });
+});

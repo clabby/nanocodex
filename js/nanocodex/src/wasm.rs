@@ -146,6 +146,9 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = beginCodeTurn)]
     fn host_begin_code_turn(session_id: &str);
 
+    #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = preemptCodeTurn)]
+    fn host_preempt_code_turn(session_id: &str);
+
     #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = cancelCodeTurn)]
     fn host_cancel_code_turn(session_id: &str);
 
@@ -835,6 +838,16 @@ impl CodeModeHost for JavaScriptCodeModeHost {
         host_begin_code_turn(session_id);
     }
 
+    fn preempt_turn<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> HostFuture<'a, Result<(), CodeModeHostError>> {
+        Box::pin(async move {
+            host_preempt_code_turn(session_id);
+            Ok(())
+        })
+    }
+
     fn cancel_turn<'a>(
         &'a self,
         session_id: &'a str,
@@ -1096,6 +1109,8 @@ struct WasmConfig {
     reasoning_mode: String,
     #[serde(default)]
     fast_mode: bool,
+    #[serde(default)]
+    instant_tool_steering: bool,
     #[serde(default)]
     websocket_warmup: bool,
     #[serde(default = "default_raw_api_events")]
@@ -1543,6 +1558,7 @@ impl WasmNanocodex {
         } else {
             (RustNanocodex::builder(openai).tools(tools), None)
         };
+        builder = builder.instant_tool_steering(config.instant_tool_steering);
         if config.before_compaction {
             builder = builder.before_compaction(JavaScriptBeforeCompaction { host_definition_id });
         }

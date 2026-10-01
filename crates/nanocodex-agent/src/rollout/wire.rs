@@ -25,6 +25,10 @@ pub(super) struct UserMessage {
     pub(super) images: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) image_details: Vec<Option<ImageDetail>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) image_file_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) image_file_details: Vec<Option<ImageDetail>>,
     pub(super) local_images: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) local_image_details: Vec<Option<ImageDetail>>,
@@ -36,6 +40,8 @@ impl UserMessage {
         let mut message = String::new();
         let mut images = Vec::new();
         let mut image_details = Vec::new();
+        let mut image_file_ids = Vec::new();
+        let mut image_file_details = Vec::new();
         let mut local_images = Vec::new();
         let mut local_image_details = Vec::new();
         match &prompt.instruction {
@@ -47,6 +53,10 @@ impl UserMessage {
                         UserInput::Image { image_url, detail } => {
                             images.push(image_url.clone());
                             image_details.push(*detail);
+                        }
+                        UserInput::ImageFile { file_id, detail } => {
+                            image_file_ids.push(file_id.clone());
+                            image_file_details.push(*detail);
                         }
                         UserInput::LocalImage { path, detail } => {
                             local_images.push(path.clone());
@@ -70,6 +80,8 @@ impl UserMessage {
             message,
             images,
             image_details,
+            image_file_ids,
+            image_file_details,
             local_images,
             local_image_details,
             text_elements: Vec::new(),
@@ -180,4 +192,20 @@ pub(super) struct WorldStateItem<'a> {
 pub(super) struct PersistedContextState<'a> {
     pub(super) nanocodex_context: &'a ContextBaseline,
     pub(super) nanocodex_client_authored: &'a std::collections::BTreeSet<String>,
+}
+
+#[cfg(test)]
+mod image_file_rollout_tests {
+    use super::*;
+    #[test]
+    fn file_images_are_retained_separately_from_inline_urls() {
+        let prompt = Prompt::content([UserInput::ImageFile {
+            file_id: "file-rollout_123".into(),
+            detail: Some(ImageDetail::Original),
+        }]);
+        let value = serde_json::to_value(UserMessage::from_prompt(&prompt)).unwrap();
+        assert_eq!(value["image_file_ids"][0], "file-rollout_123");
+        assert_eq!(value["image_file_details"][0], "original");
+        assert_eq!(value["images"], serde_json::json!([]));
+    }
 }

@@ -1,3 +1,4 @@
+import { retryAfterAdvice } from "../runtime/retry-after.mjs";
 import { responsesHttpHeaders } from "../runtime/responses-http.mjs";
 import { cloudflareEgressSubject } from "./egress-subject.mjs";
 
@@ -87,9 +88,10 @@ async function openBrokeredWebSocket(
   const response = await binding.fetch(url, { method: "GET", headers });
   const socket = response?.webSocket;
   if (response?.status !== 101 || !socket || typeof socket.accept !== "function") {
+    const rejection = brokerRejection(response);
     if (socket && typeof socket.close === "function") socket.close();
     await response?.body?.cancel?.();
-    throw brokerRejection(response);
+    throw rejection;
   }
   socket.binaryType = "arraybuffer";
   socket.accept();
@@ -118,16 +120,14 @@ function exactWebSocketEndpoint(endpoint, expected) {
 
 function brokerRejection(response) {
   const status = Number.isInteger(response?.status) ? response.status : 502;
-  const retryAfterHeader = response?.headers?.get("retry-after") ?? null;
-  const retryAfter = Number(retryAfterHeader);
+  const advice = retryAfterAdvice(response?.headers?.get("retry-after"));
   return Object.assign(
     new Error(`Cloudflare EGRESS broker rejected the Responses WebSocket with HTTP ${status}`),
     {
       status,
       body: "credential_broker_rejected",
-      ...(retryAfterHeader !== null && Number.isFinite(retryAfter) && retryAfter >= 0
-        ? { retryAfter }
-        : {}),
+      ...advice,
+      ...(advice.retry_after !== undefined ? { retryAfter: advice.retry_after } : {}),
     },
   );
 }

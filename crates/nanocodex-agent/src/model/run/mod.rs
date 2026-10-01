@@ -103,6 +103,8 @@ pub(crate) struct ModelRun<S> {
 }
 
 pub(crate) struct TurnSteering {
+    pub(crate) preempt: watch::Receiver<u64>,
+    pub(crate) instant_tool_steering: bool,
     pub(crate) receiver: crate::agent::execution::SteerQueue,
     pub(crate) retained: Vec<QueuedSteer>,
     pub(crate) model_call_index: Arc<tokio::sync::Mutex<u32>>,

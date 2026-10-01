@@ -1,3 +1,4 @@
+import { retryAfterAdvice } from "../runtime/retry-after.mjs";
 import { createBeforeCompaction } from "../runtime/before-compaction.mjs";
 import { createResponsesHttp, responsesHttpHeaders } from "../runtime/responses-http.mjs";
 import { Console } from "node:console";
@@ -118,6 +119,7 @@ export function createNodeHost(options = {}) {
       socket.on("unexpected-response", (_request, response) => {
         if (settled) return;
         settled = true;
+        const advice = retryAfterAdvice(header(response.headers, "retry-after"));
         response.setEncoding("utf8");
         const chunks = [];
         response.on("data", (chunk) => chunks.push(chunk));
@@ -125,8 +127,8 @@ export function createNodeHost(options = {}) {
           const error = new Error(`WebSocket handshake was rejected with HTTP ${response.statusCode}`);
           error.status = response.statusCode;
           error.body = chunks.length ? chunks.join("") : "empty response body";
-          const retryAfter = Number(header(response.headers, "retry-after"));
-          if (Number.isFinite(retryAfter) && retryAfter >= 0) error.retryAfter = retryAfter;
+          Object.assign(error, advice);
+          if (advice.retry_after !== undefined) error.retryAfter = advice.retry_after;
           reject(error);
         });
       });
@@ -335,6 +337,8 @@ export function createNodeHost(options = {}) {
     waitCode: code.waitCodeObserved,
     beginCodeTurn: code.beginTurn,
     cancelCodeTurn: code.cancelTurn,
+    preemptCode: code.preempt,
+    preemptCodeTurn: code.preemptTurn,
     nextCodeUpdate: code.nextCodeUpdate,
     executeTool: code.executeTool,
     bindSubagentSession: code.bindSubagentSession,

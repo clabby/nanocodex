@@ -9,6 +9,32 @@ followers, and following. `environment().apis` advertises the tool independently
 of connector authentication. It calls the private [X Worker](../x-api/README.md)
 through `NANOCODEX_X`; deploy it with `pnpm deploy:x` before `pnpm deploy:managed`.
 
+## Images
+
+The hosted image tool relays generation and editing through the account's existing
+subscription broker. `transparent_background: true` requests transparency;
+omission or `false` explicitly requests an opaque background, including edits.
+Edit references are exclusive `{ image_url }` inline data or `{ file_id }` objects
+(legacy inline data strings remain accepted). Invalid targets fail before broker
+I/O; the relay never uploads or downloads references.
+
+Recent images come from this conversation's durable event history, including
+archived history, scoped to the authorized invoking owner or non-guest child
+session. In that scope, generated references are durably remembered before the
+tool returns. Shared guests neither read nor append the owner's image history. Reads inspect at most
+four 64-event pages within a 24 MiB history window and return at most five
+references within a 24 MiB reference
+budget; older images outside that window are unavailable rather than silently
+substituted. A selected legacy wait image whose operation identity is unavailable
+requires reattachment rather than guessing or skipping a possible duplicate. Inline
+edit references are limited to 20 MiB each. Prompt and steer image entries also accept
+an exclusive `file_id` without fetching it.
+
+Run the provider-mocked real Code Mode/SQLite and Workers SQLite/R2 journeys with
+`pnpm --dir js/managed test:images`. The first journey also runs standalone with
+`pnpm --dir js/managed test:images:node`; it reopens real disk SQLite but does not
+claim to emulate Cloudflare or R2.
+
 ## Ownership and security
 
 `DurableAgentSession` exclusively owns an agent's mutable runtime: retained

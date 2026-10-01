@@ -27,6 +27,7 @@ fn truncate_text_only(
         .filter_map(|item| match item {
             ToolOutputContent::InputText { text } => Some(text.as_str()),
             ToolOutputContent::InputImage { .. }
+            | ToolOutputContent::InputImageFile { .. }
             | ToolOutputContent::InputAudio { .. }
             | ToolOutputContent::EncryptedContent { .. } => None,
         })
@@ -85,7 +86,8 @@ fn truncate_mixed(
                     remaining = 0;
                 }
             }
-            image @ ToolOutputContent::InputImage { .. } => output.push(image),
+            image @ (ToolOutputContent::InputImage { .. }
+            | ToolOutputContent::InputImageFile { .. }) => output.push(image),
             encrypted @ ToolOutputContent::EncryptedContent { .. } => output.push(encrypted),
             ToolOutputContent::InputAudio { audio_url } => {
                 let cost = super::audio::estimate_audio_token_count(&audio_url);
@@ -199,7 +201,10 @@ mod tests {
             &output[0],
             ToolOutputContent::InputText { text } if text == "abcdefgh"
         ));
-        assert!(matches!(output[1], ToolOutputContent::InputImage { .. }));
+        assert!(matches!(
+            output[1],
+            ToolOutputContent::InputImage { .. } | ToolOutputContent::InputImageFile { .. }
+        ));
         assert!(matches!(
             &output[2],
             ToolOutputContent::InputText { text } if text == "[omitted 1 text items ...]"

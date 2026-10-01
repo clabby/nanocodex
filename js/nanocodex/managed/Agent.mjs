@@ -1,3 +1,4 @@
+import { attachRetryAfterAdvice, retryAfterAdvice, retryAfterRemaining } from "../runtime/retry-after.mjs";
 import { steerInputKey } from "../runtime/steer-receipt.mjs";
 import { requestOriginContext } from "../tools/environment.mjs";
 import { ManagedError } from "./ManagedError.mjs";
@@ -17,6 +18,14 @@ const TERMINAL_TYPES = new Set([
   "turn_cancelled",
   "turn_failed",
 ]);
+// Typed terminal failures override an otherwise retryable HTTP status.
+const TERMINAL_RETRY_CODES = new Set([
+  "context_length_exceeded", "insufficient_quota", "usage_not_included",
+  "cyber_policy", "misalignment_policy_violation", "invalid_prompt", "bio_policy",
+]);
+// Private event-reconnect veto; does not alter public code precedence or the
+// independent creation/mutation retry policy.
+const terminalResponseErrors = new WeakSet();
 const TERMINAL_CACHE_CAPACITY = 256;
 const TERMINAL_CACHE_BYTES = 8 * 1024 * 1024;
 const SUBSCRIBER_QUEUE_CAPACITY = 4_096;
@@ -1323,8 +1332,8 @@ async function* readEvents(client, agentId, initialCursor, signal, onControlCurs
     }
     if (!response.ok) {
       const error = await responseError(response);
-      if (response.status !== 429 && response.status < 500) throw error;
-      await delay(reconnectDelay, signal);
+      if ((terminalResponseErrors.has(error) || TERMINAL_RETRY_CODES.has(error.code)) || (response.status !== 429 && response.status < 500)) throw error;
+      await waitForRetryAdvice(error, reconnectDelay, signal);
       continue;
     }
     if (!response.body) throw new ManagedError("invalid_response", "managed event stream has no body");
@@ -1373,6 +1382,16 @@ async function* readEvents(client, agentId, initialCursor, signal, onControlCurs
       void reader.cancel().catch(() => {});
     }
     if (!signal?.aborted) await delay(reconnectDelay, signal);
+  }
+}
+
+async function waitForRetryAdvice(advice, fallback, signal) {
+  let remaining = retryAfterRemaining(advice);
+  if (remaining === undefined) return delay(fallback, signal);
+  while (remaining > 0) {
+    // Timers coerce larger delays to ~1ms; chunking preserves the original deadline.
+    await delay(Math.min(remaining, 2_147_483_647), signal);
+    remaining = retryAfterRemaining(advice);
   }
 }
 
@@ -1569,11 +1588,21 @@ function managedClient(options) {
 }
 
 async function responseError(response) {
+  const advice = retryAfterAdvice(response.headers.get("retry-after"));
   let body;
   try { body = await response.json(); } catch { body = undefined; }
-  const code = typeof body?.error === "string" ? body.error : `http_${response.status}`;
+  const code = typeof body?.error === "string" ? body.error
+    : typeof body?.error?.code === "string" ? body.error.code
+      : typeof body?.code === "string" ? body.code
+        : typeof body?.error?.type === "string" ? body.error.type : `http_${response.status}`;
   const message = typeof body?.message === "string" ? body.message : `managed request failed (${response.status})`;
-  return new ManagedError(code, message, { status: response.status });
+  const error = attachRetryAfterAdvice(new ManagedError(code, message, { status: response.status }), advice);
+  const discriminators = [body?.error, body?.code, body?.type,
+    body?.error?.code, body?.error?.type, body?.response?.error?.code, body?.response?.error?.type];
+  if (discriminators.some((value) => typeof value === "string" && TERMINAL_RETRY_CODES.has(value))) {
+    terminalResponseErrors.add(error);
+  }
+  return error;
 }
 
 function validateOptions(options) {

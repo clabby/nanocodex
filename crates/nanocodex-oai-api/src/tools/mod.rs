@@ -29,17 +29,30 @@ pub enum ToolOutputBody {
 
 impl ToolOutputBody {
     /// Replaces malformed image envelopes before embedded outputs enter model history.
-    /// This validates MIME and base64 syntax, not image decoding or dimensions.
+    /// Inline images validate MIME and base64 syntax, not decoding or dimensions.
+    /// File images validate only their opaque ID; they are never fetched or decoded.
     pub fn replace_invalid_image_envelopes(&mut self) {
         let Self::Content(content) = self else {
             return;
         };
         for item in content {
-            if let ToolOutputContent::InputImage { image_url, .. } = item
-                && !valid_tool_image_data_url(image_url)
-            {
+            let invalid = match item {
+                ToolOutputContent::InputImage { image_url, .. } => {
+                    !valid_tool_image_data_url(image_url)
+                }
+                ToolOutputContent::InputImageFile { file_id, .. } => {
+                    !crate::responses::valid_image_file_id(file_id)
+                }
+                _ => false,
+            };
+            if invalid {
+                let text = if matches!(item, ToolOutputContent::InputImageFile { .. }) {
+                    "image content omitted because its file ID was malformed"
+                } else {
+                    "image content omitted because its data URL was malformed"
+                };
                 *item = ToolOutputContent::InputText {
-                    text: "image content omitted because its data URL was malformed".to_owned(),
+                    text: text.to_owned(),
                 };
             }
         }
@@ -56,7 +69,7 @@ impl ToolOutputBody {
 }
 
 /// One model-visible item in a multimodal tool output.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolOutputContent {
     /// Text input returned to the model.
@@ -68,6 +81,15 @@ pub enum ToolOutputContent {
     InputImage {
         /// Data URL or provider-supported image URL.
         image_url: String,
+        /// Requested model image detail.
+        detail: ImageDetail,
+    },
+    /// Opaque provider file image input; never fetched or decoded locally.
+    #[serde(rename = "input_image")]
+    InputImageFile {
+        /// Validated opaque provider file identity.
+        #[serde(serialize_with = "crate::responses::image_reference::serialize_file_id")]
+        file_id: String,
         /// Requested model image detail.
         detail: ImageDetail,
     },
@@ -564,4 +586,62 @@ pub trait Tool: Send + Sync + 'static {
 
     /// Executes one invocation.
     async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult;
+}
+
+#[derive(Deserialize)]
+#[serde(remote = "ToolOutputContent", tag = "type", rename_all = "snake_case")]
+enum ToolOutputContentFields {
+    /// Text input returned to the model.
+    InputText {
+        /// Complete text.
+        text: String,
+    },
+    /// Image input returned to the model.
+    InputImage {
+        /// Data URL or provider-supported image URL.
+        image_url: String,
+        /// Requested model image detail.
+        detail: ImageDetail,
+    },
+    /// Audio input returned to the model.
+    InputAudio {
+        /// Data URL or provider-supported audio URL.
+        audio_url: String,
+    },
+    /// Opaque encrypted provider content returned without exposing plaintext.
+    EncryptedContent {
+        /// Provider-generated encrypted payload.
+        encrypted_content: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for ToolOutputContent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("input_image") {
+            let serde_json::Value::Object(mut object) = value else {
+                return Err(serde::de::Error::custom("expected image object"));
+            };
+            object.remove("type");
+            // Deserialize detail separately so the strict reference object sees only its keys.
+            let detail = object.remove("detail");
+            let reference: crate::responses::ImageReference =
+                serde_json::from_value(serde_json::Value::Object(object))
+                    .map_err(serde::de::Error::custom)?;
+            let detail: ImageDetail =
+                serde_json::from_value(detail.unwrap_or(serde_json::Value::Null))
+                    .map_err(serde::de::Error::custom)?;
+            return Ok(match reference {
+                crate::responses::ImageReference::Inline { image_url } => Self::InputImage {
+                    image_url: image_url.into(),
+                    detail,
+                },
+                crate::responses::ImageReference::File { file_id } => Self::InputImageFile {
+                    file_id: file_id.into(),
+                    detail,
+                },
+            });
+        }
+        ToolOutputContentFields::deserialize(value).map_err(serde::de::Error::custom)
+    }
 }

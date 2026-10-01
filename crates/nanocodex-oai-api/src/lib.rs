@@ -88,7 +88,9 @@ pub(crate) use tower::{
 #[cfg(feature = "client")]
 pub(crate) use transport::EncodedRequest;
 #[cfg(feature = "client")]
-pub(crate) use transport::{ResponsesError, ResponsesHistory, ResponsesTransport, RetryAdvice};
+pub(crate) use transport::{
+    ResponsesError, ResponsesHistory, ResponsesTransport, RetryAdvice, RetryAfter,
+};
 
 #[cfg(feature = "client")]
 pub(crate) use tower::{attempt, middleware, service, service_error, stream};
@@ -538,7 +540,7 @@ impl From<&str> for PromptInput {
 }
 
 /// One ordered user-supplied prompt item.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UserInput {
     /// Model-visible text.
@@ -551,6 +553,16 @@ pub enum UserInput {
         /// Image URL visible to the model.
         image_url: String,
         /// Optional image-detail policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
+    },
+    /// Image addressed by opaque provider file identity.
+    #[serde(rename = "image")]
+    ImageFile {
+        /// Nonempty bounded ASCII provider file ID, never a URL or local path.
+        #[serde(serialize_with = "serialize_image_file_id")]
+        file_id: String,
+        /// Optional provider image-detail hint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<ImageDetail>,
     },
@@ -595,6 +607,7 @@ impl UserInput {
         match self {
             Self::Text { text } => text.len(),
             Self::Image { .. }
+            | Self::ImageFile { .. }
             | Self::LocalImage { .. }
             | Self::Audio { .. }
             | Self::LocalAudio { .. } => 0,
@@ -607,6 +620,7 @@ impl UserInput {
         match self {
             Self::Text { text } => text.chars().count(),
             Self::Image { .. }
+            | Self::ImageFile { .. }
             | Self::LocalImage { .. }
             | Self::Audio { .. }
             | Self::LocalAudio { .. } => 0,
@@ -619,6 +633,7 @@ impl UserInput {
         match self {
             Self::Text { text } => text.trim().is_empty(),
             Self::Image { .. }
+            | Self::ImageFile { .. }
             | Self::LocalImage { .. }
             | Self::Audio { .. }
             | Self::LocalAudio { .. } => false,
@@ -826,5 +841,120 @@ mod instruction_revision_tests {
         assert_eq!(restored.instruction_revision(), Some(17));
         let legacy: Prompt = serde_json::from_str(r#"{"instruction":"hello"}"#).unwrap();
         assert_eq!(legacy.instruction_revision(), None);
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(
+    remote = "UserInput",
+    tag = "type",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum UserInputFields {
+    /// Model-visible text.
+    Text {
+        /// Text supplied by the user.
+        text: String,
+    },
+    /// An image supplied as a URL or data URL.
+    Image {
+        /// Image URL visible to the model.
+        image_url: String,
+        /// Optional image-detail policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
+    },
+    /// An image loaded from the local filesystem by a native runtime.
+    LocalImage {
+        /// Path to the local image.
+        path: PathBuf,
+        /// Optional image-detail policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
+    },
+    /// A reserved remote audio input.
+    Audio {
+        /// Audio URL retained by the input contract.
+        audio_url: String,
+    },
+    /// A reserved local audio input.
+    LocalAudio {
+        /// Path retained by the input contract.
+        path: PathBuf,
+    },
+}
+
+fn serialize_image_file_id<S: serde::Serializer>(
+    file_id: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if !crate::responses::valid_image_file_id(file_id) {
+        return Err(serde::ser::Error::custom("invalid image file_id"));
+    }
+    serializer.serialize_str(file_id)
+}
+impl<'de> Deserialize<'de> for UserInput {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("image") {
+            let serde_json::Value::Object(mut object) = value else {
+                return Err(serde::de::Error::custom("expected image object"));
+            };
+            object.remove("type");
+            let detail = object.remove("detail");
+            let reference: crate::responses::ImageReference =
+                serde_json::from_value(serde_json::Value::Object(object))
+                    .map_err(serde::de::Error::custom)?;
+            let detail: Option<ImageDetail> =
+                serde_json::from_value(detail.unwrap_or(serde_json::Value::Null))
+                    .map_err(serde::de::Error::custom)?;
+            return Ok(match reference {
+                crate::responses::ImageReference::Inline { image_url } => {
+                    Self::Image { image_url, detail }
+                }
+                crate::responses::ImageReference::File { file_id } => {
+                    Self::ImageFile { file_id, detail }
+                }
+            });
+        }
+        UserInputFields::deserialize(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod image_file_prompt_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn prompt_file_images_roundtrip_without_charging_identifier_as_text() {
+        let wire = json!({"type":"image","file_id":"file-prompt_123","detail":"original"});
+        let item: UserInput = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(&item, UserInput::ImageFile { .. }));
+        assert_eq!(item.text_bytes(), 0);
+        assert_eq!(item.text_chars(), 0);
+        assert!(!item.is_empty());
+        assert_eq!(serde_json::to_value(&item).unwrap(), wire);
+        let prompt = Prompt::content([item]);
+        assert!(prompt.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(&prompt).unwrap()["instruction"][0],
+            wire
+        );
+        let inline: UserInput =
+            serde_json::from_value(json!({"type":"image","image_url":"url"})).unwrap();
+        assert!(matches!(inline, UserInput::Image { detail: None, .. }));
+    }
+    #[test]
+    fn malformed_prompt_image_references_do_not_fall_through_duplicate_tags() {
+        for wire in [
+            json!({"type":"image"}),
+            json!({"type":"image","file_id":"bad/id"}),
+            json!({"type":"image","file_id":"file-a","image_url":"url"}),
+            json!({"type":"image","file_id":null}),
+            json!({"type":"image","file_id":"file-a","extra":1}),
+        ] {
+            assert!(serde_json::from_value::<UserInput>(wire).is_err());
+        }
     }
 }
