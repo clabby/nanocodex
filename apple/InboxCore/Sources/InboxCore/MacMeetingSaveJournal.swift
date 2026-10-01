@@ -12,6 +12,8 @@ public final class MacMeetingSaveJournal {
         public let scope: String
         public var record: MeetingRecord
         public var notes: String
+        /// Nil uses the saved baseline; optional decoding preserves older journals.
+        public var transcript: String?
         public var submitted: Submission?
     }
     public enum JournalError: Error, LocalizedError {
@@ -63,29 +65,32 @@ public final class MacMeetingSaveJournal {
         try data.write(to: url, options: .atomic)
         document = next
     }
-    public func saveDraft(record: MeetingRecord, notes: String, scope: String) throws {
+    public func saveDraft(record: MeetingRecord, notes: String, transcript: String? = nil, scope: String) throws {
         guard !scope.isEmpty else { throw JournalError.invalidScope }
+        let draftTranscript = transcript == record.transcript ? nil : transcript
         var entries = document.entries
         if let index = entries.firstIndex(where: { $0.scope == scope && $0.record.id == record.id }) {
             entries[index].notes = notes
+            entries[index].transcript = draftTranscript
             // An uncertain submission owns its original editor/CAS baseline.
             if entries[index].submitted == nil { entries[index].record = record }
-            if entries[index].submitted == nil && notes == record.notes { entries.remove(at: index) }
-        } else if notes != record.notes {
-            entries.append(Entry(scope: scope, record: record, notes: notes))
+            if entries[index].submitted == nil && notes == record.notes && draftTranscript == nil { entries.remove(at: index) }
+        } else if notes != record.notes || draftTranscript != nil {
+            entries.append(Entry(scope: scope, record: record, notes: notes, transcript: draftTranscript))
         }
         try commit(entries)
     }
-    public func prepare(record: MeetingRecord, notes: String, scope: String) throws -> Submission {
+    public func prepare(record: MeetingRecord, notes: String, transcript: String? = nil, scope: String) throws -> Submission {
         guard !scope.isEmpty else { throw JournalError.invalidScope }
-        try saveDraft(record: record, notes: notes, scope: scope)
+        try saveDraft(record: record, notes: notes, transcript: transcript, scope: scope)
         if let submitted = entries(scope: scope).first(where: { $0.record.id == record.id })?.submitted { return submitted }
-        var edited = record; edited.notes = notes; edited.revision += 1
+        var edited = record; edited.notes = notes; edited.transcript = transcript ?? record.transcript; edited.revision += 1
+        if edited.transcript != record.transcript { edited.summary = ""; edited.summaryStatus = .none }
         let submitted = Submission(record: edited, ifMatch: record.revision)
         var entries = document.entries
         if let index = entries.firstIndex(where: { $0.scope == scope && $0.record.id == record.id }) {
             entries[index].submitted = submitted
-        } else { entries.append(Entry(scope: scope, record: record, notes: notes, submitted: submitted)) }
+        } else { entries.append(Entry(scope: scope, record: record, notes: notes, transcript: transcript == record.transcript ? nil : transcript, submitted: submitted)) }
         try commit(entries)
         return submitted
     }
@@ -95,9 +100,11 @@ public final class MacMeetingSaveJournal {
         guard remote.id == submitted.record.id,
               let index = entries.firstIndex(where: { $0.scope == scope && $0.record.id == remote.id }),
               entries[index].submitted == submitted else { throw JournalError.staleAcknowledgement }
+        let latestTranscript = entries[index].transcript ?? entries[index].record.transcript
         entries[index].record = remote; entries[index].submitted = nil
+        entries[index].transcript = latestTranscript == submitted.record.transcript || latestTranscript == remote.transcript ? nil : latestTranscript
         if entries[index].notes == submitted.record.notes { entries[index].notes = remote.notes }
-        if entries[index].notes == remote.notes { entries.remove(at: index) }
+        if entries[index].notes == remote.notes && entries[index].transcript == nil { entries.remove(at: index) }
         try commit(entries)
     }
     /// Definitive validation rejection means this payload was not admitted.

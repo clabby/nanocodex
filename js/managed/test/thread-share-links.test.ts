@@ -3,6 +3,7 @@ import { expect, it } from "vitest";
 import worker, { type DurableAgentSession } from "../src/index";
 import type { Principal } from "../src/account-auth";
 import { DurableEventLog } from "../src/durable-events";
+import { threadSharingTools } from "../src/thread-sharing-tool";
 
 const owner: Principal = {
   kind: "account_session", userId: "11111111-1111-4111-8111-111111111111",
@@ -146,7 +147,7 @@ it("write link admits real owner-thread turns, isolates identities, limits abuse
   expect((await api(`/v1/shared/${id}/comments`, "GET", undefined, undefined, secondToken)).status).toBe(404);
 });
 
-it("streams only safe guest transcript events and closes the feed when its link is revoked", async () => {
+it("streams completed safe guest transcript events and closes the feed when its link is revoked", async () => {
   id = crypto.randomUUID(); await seed();
   // A real final-answer delta and an unrelated tool event share the durable log.
   await runInDurableObject(sessions().getByName(id), async (_, state) => {
@@ -155,6 +156,7 @@ it("streams only safe guest transcript events and closes the feed when its link 
       phase: "final_answer", text: "safe live token", hidden: "SECRET_DELTA_METADATA",
     } } }, "synthetic-turn");
     log.record({ type: "event", event: { type: "reasoning.summary.delta", payload: { text: "SECRET_REASONING" } } }, "synthetic-turn");
+    log.record({ type: "event", event: { type: "assistant.message", payload: { phase: "final_answer", text: "safe live message", hidden: "SECRET_MESSAGE_METADATA" } } }, "synthetic-turn");
   });
   const path = `/v1/agents/${id}/share-links`;
   const created = await api(path, "POST", owner, { permission: "read" }, undefined, "https://nanocodex.example");
@@ -168,7 +170,7 @@ it("streams only safe guest transcript events and closes the feed when its link 
   expect(stream.headers.get("content-type")).toContain("text/event-stream");
   const reader = stream.body!.getReader();
   let transcript = "";
-  for (let index = 0; index < 12 && !transcript.includes("SECRET_REASONING"); index++) {
+  for (let index = 0; index < 12 && !transcript.includes("safe live message"); index++) {
     const next = await reader.read();
     if (next.done) break;
     transcript += new TextDecoder().decode(next.value);
@@ -176,9 +178,10 @@ it("streams only safe guest transcript events and closes the feed when its link 
   expect(transcript).toContain('event: turn_accepted');
   expect(transcript).toContain('event: turn_completed');
   expect(transcript).toContain('event: event');
-  expect(transcript).toContain('"text":"safe live token"');
+  expect(transcript).toContain('"text":"safe live message"');
   expect(transcript).toContain("SECRET_TOOL_OUTPUT");
-  expect(transcript).toContain("SECRET_REASONING");
+  expect(transcript).not.toContain("SECRET_REASONING");
+  expect(transcript).not.toContain("safe live token");
   expect(transcript).not.toMatch(/SECRET_USAGE|SECRET_ACCEPTED_METADATA|nsl_/);
   // Anonymous guests are capped below the owner's stream capacity.
   const otherStreams: Response[] = [];
@@ -198,4 +201,145 @@ it("streams only safe guest transcript events and closes the feed when its link 
   const closed = await reader.read().catch(() => ({ done: true }));
   expect(closed.done).toBe(true);
   expect((await api(`/v1/shared/${id}/events?after=0`, "GET", undefined, undefined, token)).status).toBe(404);
+});
+
+it("root sharing tool manages scoped links and atomically closes all guest feeds", async () => {
+  id = crypto.randomUUID(); secondId = crypto.randomUUID(); await seed(); await seed(secondId);
+  const context = { sessionId: "synthetic-runtime", callId: "synthetic-call", parentCallId: "", model: "test", signal: new AbortController().signal };
+  let actor: Principal | undefined = owner;
+  const tool = threadSharingTools({ sessionId: id, ownerId: owner.userId,
+    authorizationEpoch: owner.authorizationEpoch, origin: "https://nanocodex.example",
+    authorization: () => actor,
+    request: (request, principal) => worker.fetch(request, env as Parameters<typeof worker.fetch>[1], createExecutionContext(), principal),
+  })[0]!;
+  const invoke = (input: unknown, ctx = context) => tool.handler(input, ctx) as Promise<Record<string, any>>;
+  const trace: unknown[] = [];
+  const read = await invoke({ operation: "create" });
+  const write = await invoke({ operation: "create", permission: "write" });
+  expect(read).toMatchObject({ session_id: id, permission: "read" });
+  expect(write).toMatchObject({ session_id: id, permission: "write" });
+  const tokens = [read, write].map(link => new URL(link.url).hash.slice(7));
+  const list = await invoke({ operation: "list" });
+  expect(list.data).toHaveLength(2);
+  expect(JSON.stringify(list)).not.toMatch(/nsl_|#token=/);
+  trace.push({ operation: "create/list", permissions: [read.permission, write.permission], active: list.data.length, bearer_metadata: false });
+  const target = await invoke({ operation: "create", session_id: secondId });
+  expect(target.session_id).toBe(secondId);
+  expect((await invoke({ operation: "list", session_id: secondId })).data).toHaveLength(1);
+  for (const denied of [undefined, other, { ...owner, authorizationEpoch: 2 },
+    { ...owner, capabilities: ["agents:read", "agents:write"] as const },
+    { ...owner, connectGrant: { grantId: `0x${"a".repeat(64)}`, connectors: ["chatgpt"], mcpIds: [] } }]) {
+    actor = denied;
+    await expect(invoke({ operation: "revoke_all" })).rejects.toThrow(/authorization/);
+  }
+  actor = { ...owner, capabilities: ["agents:read", "tools:use"] };
+  expect((await invoke({ operation: "list" })).data).toHaveLength(2);
+  await expect(invoke({ operation: "create" })).rejects.toThrow(/agents:write/);
+  await expect(invoke({ operation: "revoke_all" })).rejects.toThrow(/agents:write/);
+  actor = owner;
+  await expect(invoke({ operation: "revoke_all" }, { ...context, subagent: {} } as typeof context)).rejects.toThrow(/root authorization/);
+  for (const input of [{ operation: "revoke_all", permission: "write" }, { operation: "revoke_all", link_id: read.id },
+    { operation: "revoke_all", session_id: "../other" }, { operation: "create", owner_id: other.userId },
+    { operation: "revoke" }, { operation: "create", permission: "admin" }]) {
+    await expect(invoke(input)).rejects.toThrow(/argument/);
+  }
+  // Route-level owner/scope isolation remains authoritative for other threads.
+  const foreignId = crypto.randomUUID();
+  await runInDurableObject(sessions().getByName(foreignId), async (_, state) => {
+    state.storage.sql.exec(`INSERT INTO session_state
+      (singleton, session_id, owner_id, organization_id, team_id, authorization_epoch, public_origin, runtime_profile, last_active)
+      VALUES (1,?,?,?,?,1,'https://nanocodex.example','managed',?)`,
+      foreignId, other.userId, owner.organizationId, owner.teamId, Date.now());
+  });
+  await expect(invoke({ operation: "revoke_all", session_id: foreignId })).rejects.toThrow(/HTTP 404/);
+  actor = { ...owner, teamId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" };
+  await expect(invoke({ operation: "revoke_all" })).rejects.toThrow(/HTTP 404/);
+  actor = owner;
+  expect((await invoke({ operation: "list" })).data).toHaveLength(2);
+  trace.push({ operation: "authorization", root_only: true, connect_denied: true, readonly_mutation_denied: true, stale_epoch_denied: true, foreign_thread_denied: true });
+  const feeds = [];
+  for (const token of tokens) {
+    const guest = `/v1/shared/${id}`;
+    expect((await api(guest, "GET", undefined, undefined, token)).status).toBe(200);
+    const feed = await api(`${guest}/events?after=3`, "GET", undefined, undefined, token);
+    expect(feed.status).toBe(200);
+    const reader = feed.body!.getReader();
+    await reader.read(); // Initial SSE comment; next read waits for an event or close.
+    feeds.push(reader);
+  }
+  const revoked = await invoke({ operation: "revoke_all" });
+  expect(revoked).toMatchObject({ session_id: id, revoked_count: 2, active_links: 0 });
+  expect(new Set(revoked.revoked_ids)).toEqual(new Set([read.id, write.id]));
+  for (const reader of feeds) expect((await reader.read().catch(() => ({ done: true }))).done).toBe(true);
+  for (const token of tokens) for (const path of [`/v1/shared/${id}`, `/v1/shared/${id}/events/history`, `/v1/shared/${id}/events?after=3`]) {
+    expect((await api(path, "GET", undefined, undefined, token)).status).toBe(404);
+  }
+  expect((await invoke({ operation: "list" })).data).toEqual([]);
+  expect(await invoke({ operation: "revoke_all" })).toMatchObject({ revoked_count: 0, active_links: 0 });
+  expect((await invoke({ operation: "list", session_id: secondId })).data).toHaveLength(1);
+  expect(await invoke({ operation: "revoke", session_id: secondId, link_id: target.id })).toMatchObject({ id: target.id, revoked: true });
+  await expect(invoke({ operation: "revoke", session_id: secondId, link_id: target.id })).rejects.toThrow(/HTTP 404/);
+  trace.push({ operation: "revoke_all", revoked: 2, closed_feeds: feeds.length, guest_routes_after_revoke: 404, replay_revoked: 0, other_thread_preserved: true, single_revoke_confirmed: true });
+  console.info("thread-sharing journey: " + JSON.stringify(trace));
+});
+
+it("shared history and SSE cannot redistribute new write or cross-thread bearer links", async () => {
+  id = crypto.randomUUID(); secondId = crypto.randomUUID(); await seed(); await seed(secondId);
+  const context = { sessionId: "synthetic-runtime", callId: "synthetic-call", parentCallId: "", model: "test", signal: new AbortController().signal };
+  const tool = threadSharingTools({ sessionId: id, ownerId: owner.userId,
+    authorizationEpoch: owner.authorizationEpoch, origin: "https://nanocodex.example", authorization: () => owner,
+    request: (request, principal) => worker.fetch(request, env as Parameters<typeof worker.fetch>[1], createExecutionContext(), principal),
+  })[0]!;
+  const invoke = (input: unknown) => tool.handler(input, context) as Promise<Record<string, any>>;
+  const existing = await invoke({ operation: "create" });
+  const elevated = await invoke({ operation: "create", permission: "write" });
+  const foreign = await invoke({ operation: "create", session_id: secondId });
+  const existingToken = new URL(existing.url).hash.slice(7);
+  const elevatedToken = new URL(elevated.url).hash.slice(7);
+  const foreignToken = new URL(foreign.url).hash.slice(7);
+  await runInDurableObject(sessions().getByName(id), async (_, state) => {
+    const log = new DurableEventLog<{ type: string; [key: string]: unknown }>(state.storage);
+    state.storage.sql.exec("UPDATE session_state SET first_prompt=? WHERE singleton=1", elevated.url);
+    log.record({ type: "event", event: { type: "tool.result", payload: { tool: "thread_sharing", call_id: "synthetic-create", result: elevated, structured_result: elevated } } }, "synthetic-create");
+    log.record({ type: "event", event: { type: "tool.result", payload: { tool: "functions.exec", call_id: "synthetic-code", result: JSON.stringify(foreign), content: [{ text: foreign.url }], structured_result: { [foreign.url]: elevated.url } } } }, "synthetic-code");
+    log.record({ type: "event", event: { type: "assistant.delta", payload: { phase: "final_answer", text: elevated.url.slice(0, elevated.url.indexOf("nsl_") + 12) } } }, "synthetic-reply");
+    log.record({ type: "event", event: { type: "assistant.delta", payload: { phase: "final_answer", text: elevated.url.slice(elevated.url.indexOf("nsl_") + 12) } } }, "synthetic-reply");
+    log.record({ type: "event", event: { type: "reasoning.summary.delta", payload: { text: foreign.url.slice(0, foreign.url.indexOf("nsl_") + 12) } } }, "synthetic-reply");
+    log.record({ type: "event", event: { type: "reasoning.summary.delta", payload: { text: foreign.url.slice(foreign.url.indexOf("nsl_") + 12) } } }, "synthetic-reply");
+    log.record({ type: "event", event: { type: "assistant.message", payload: { phase: "final_answer", text: elevated.url } } }, "synthetic-reply");
+    log.record({ type: "turn_accepted", id: "synthetic-link-input", input: foreign.url, replayed: false }, "synthetic-link-input");
+    log.record({ type: "turn_completed", id: "synthetic-reply", final_message: foreign.url + " redaction-end" }, "synthetic-reply");
+  });
+  const ownerHistory = await api(`/v1/agents/${id}/events/history`, "GET", owner);
+  expect(ownerHistory.status).toBe(200);
+  const privateTranscript = await ownerHistory.text();
+  expect(privateTranscript).toContain(elevatedToken);
+  expect(privateTranscript).toContain(foreignToken);
+  const guest = `/v1/shared/${id}`;
+  const metadata = await api(guest, "GET", undefined, undefined, existingToken);
+  expect(metadata.status).toBe(200);
+  expect(await metadata.text()).not.toMatch(/nsl_/);
+  const history = await api(`${guest}/events/history`, "GET", undefined, undefined, existingToken);
+  expect(history.status).toBe(200);
+  const publicTranscript = await history.text();
+  expect(publicTranscript).not.toMatch(/nsl_|#token=nsl_/);
+  expect(publicTranscript).not.toMatch(/assistant\.delta|reasoning\.summary\.delta/);
+  expect(publicTranscript).toContain("[redacted share token]");
+  expect(publicTranscript).toContain("SECRET_TOOL_OUTPUT"); // Ordinary shared tool output still works.
+  const feed = await api(`${guest}/events?after=0`, "GET", undefined, undefined, existingToken);
+  expect(feed.status).toBe(200);
+  const reader = feed.body!.getReader();
+  let live = "";
+  while (!live.includes("redaction-end")) {
+    const next = await reader.read();
+    expect(next.done).toBe(false);
+    live += new TextDecoder().decode(next.value);
+  }
+  expect(live).not.toMatch(/nsl_/);
+  expect(live).not.toMatch(/assistant\.delta|reasoning\.summary\.delta/);
+  expect(live).toContain("[redacted share token]");
+  await reader.cancel();
+  await invoke({ operation: "revoke_all" });
+  await invoke({ operation: "revoke_all", session_id: secondId });
+  console.info("thread-sharing redaction journey: owner transcript intact; guest metadata, history and live SSE redact direct/nested/Code Mode/input/final bearer links and object keys");
 });

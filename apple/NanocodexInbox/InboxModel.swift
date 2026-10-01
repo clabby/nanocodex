@@ -3248,8 +3248,9 @@ final class InboxModel: ObservableObject {
         if let index = cards.firstIndex(where: { $0.id == card.id }) { cards[index].noteSubmittedPrompt(request, at: Date().timeIntervalSince1970 * 1000) }
         pending.append(message); drafts[card.id] = ""; selectedContext[card.id] = nil; excludedContext[card.id] = nil; busy.insert(card.id); notice = nil; persist()
         let epoch = generation
+        // Ordinary chat runs in the cloud. Continued-processing runtime has its
+        // own system failure UI and is reserved for the explicit device shortcut.
         if target != nil { startSteering(message.id) }
-        else if deviceHandEnabled, !isDemo { startHandTask(message, epoch: epoch) }
         else { Task { await submit(message, epoch: epoch) } }
         return true
     }
@@ -3260,8 +3261,7 @@ final class InboxModel: ObservableObject {
         pending[index].phase = .submitting; pending[index].error = nil
         let message = pending[index], epoch = generation
         busy.insert(message.agentID); persist()
-        if deviceHandEnabled, !isDemo { startHandTask(message, epoch: epoch) }
-        else { Task { await submit(message, epoch: epoch) } }
+        Task { await submit(message, epoch: epoch) }
     }
 
     @discardableResult

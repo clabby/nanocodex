@@ -21,10 +21,9 @@ I/O; the relay never uploads or downloads references.
 Recent images come from this conversation's durable event history, including
 archived history, scoped to the authorized invoking owner or non-guest child
 session. In that scope, generated references are durably remembered before the
-tool returns. Shared guests neither read nor append the owner's image history. Reads inspect at most
-four 64-event pages within a 24 MiB history window and return at most five
-references within a 24 MiB reference
-budget; older images outside that window are unavailable rather than silently
+tool returns. Shared guests neither read nor append the owner's image history.
+Reads inspect at most four 64-event pages within a 24 MiB history window and return at most five
+references within a 24 MiB reference budget; older images outside that window are unavailable rather than silently
 substituted. A selected legacy wait image whose operation identity is unavailable
 requires reattachment rather than guessing or skipping a possible duplicate. Inline
 edit references are limited to 20 MiB each. Prompt and steer image entries also accept
@@ -34,6 +33,46 @@ Run the provider-mocked real Code Mode/SQLite and Workers SQLite/R2 journeys wit
 `pnpm --dir js/managed test:images`. The first journey also runs standalone with
 `pnpm --dir js/managed test:images:node`; it reopens real disk SQLite but does not
 claim to emulate Cloudflare or R2.
+
+## Thread sharing tool
+
+`thread_sharing` exposes `list`, `create`, `revoke`, and `revoke_all`. Omit
+`session_id` to target the current thread; explicit targets must have the same
+owner, organization, team, and authorization epoch. Calls require a direct
+account root with `agents:read` and `tools:use`; mutations also require
+`agents:write`. Connect grants, shared guests, and subagents cannot use it.
+
+To disable all current sharing, call:
+
+```js
+await tools.thread_sharing({ operation: "revoke_all" });
+```
+
+`list` returns active link IDs, permissions, and creation times, never bearer
+URLs. `revoke` takes a listed `link_id`. `create` returns a one-time bearer URL
+and defaults to `permission: "read"`; `write` permits guest turn submission and
+must be explicitly requested. Creating or distributing links requires user
+authorization. Never automatically retry uncertain creation; inspect active
+links and resolve the outcome first. Listing cannot recover a lost bearer URL.
+
+The tool reuses the public owner-authenticated `/v1/agents/:id/share-links`
+router. `DELETE` on that collection atomically revokes all active links and
+returns `revoked_ids`, `revoked_count`, and `active_links: 0`. Live streams for
+those links close immediately. Repeating it returns an empty result. Individual
+`DELETE /share-links/:link_id` retains its existing 204/404 behavior. Revocation
+does not cancel guest turns already admitted to the owner thread.
+
+Guest metadata, history, and SSE redact share bearer tokens, including nested
+Code Mode output and object keys, so creating another link cannot implicitly
+redistribute write or cross-thread authority. Guest text updates use completed
+assistant messages; assistant/reasoning delta fragments are owner-only because
+tokens split across fragments could otherwise be reconstructed. Owner events
+and ordinary shared tool results remain unchanged.
+
+Run the Workerd route/tool journeys with
+`pnpm --filter nanocodex-managed-service exec vitest run test/thread-share-links.test.ts`.
+They emit sanitized journey traces for authorization, revocation, live-feed
+closure, and bearer redaction.
 
 ## Ownership and security
 

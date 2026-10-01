@@ -71,7 +71,7 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
 /// A download task writes into URLSession's temporary file, not memory. Stop it
 /// during transfer rather than waiting for the entire response to reach disk.
-private final class BoundedOutputDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+final class BoundedOutputDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     let maximumBytes: Int64
     private let lock = NSLock()
     private var exceeded = false
@@ -122,7 +122,7 @@ enum ManagedResponseCache {
 public final class ManagedClient: @unchecked Sendable {
     static let maximumOutputDownloadSize: Int64 = 256 * 1024 * 1024
     let credential: AccountCredential
-    private let session: URLSession
+    let session: URLSession
     private let responseCache: URLCache?
     private let snapshots: PersistentReadCache
     private let snapshotLifetimeLock = NSLock()

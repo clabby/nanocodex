@@ -16,7 +16,7 @@ final class MeetingLockedCoordinator {
         var errorDescription: String? {
             switch self {
             case .busy: "Finish the current recording first."
-            case .permissions: "Open Nanocodex once to grant Microphone and Speech Recognition access."
+            case .permissions: "Open Nanocodex once to grant Microphone access."
             case .account: "Sign in to Nanocodex before recording from the Lock Screen."
             case .unavailable: "The microphone or Live Activity is unavailable."
             case .stale: "That recording is no longer available."
@@ -67,7 +67,7 @@ final class MeetingLockedCoordinator {
         if let stale = capture, !stale.ownsRecorder { finishCapture(stale, phase: "saved") }
         guard QuickVoiceRecorder.audioOwner == nil,
               !model.voice.isEngaged, !MeetingRecorder.shared.working else { throw CaptureError.busy }
-        guard QuickVoiceRecorder.permissionsGranted else { throw CaptureError.permissions }
+        guard AVAudioApplication.shared.recordPermission == .granted else { throw CaptureError.permissions }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw CaptureError.unavailable }
         let account: String
         do { account = try model.lockedVoiceAccountScope() }
@@ -103,6 +103,12 @@ final class MeetingLockedCoordinator {
         current.observers.append(current.recorder.$reviewing.dropFirst().sink { [weak self] ready in
             guard ready else { return }
             Task { @MainActor in self?.becameReady(id: id) }
+        })
+        current.observers.append(current.recorder.$transcriptionWarning.dropFirst().sink { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let active = self.capture, active.id == id, active.ownsRecorder, active.recorder.recording else { return }
+                self.update(active, phase: "listening")
+            }
         })
         current.observers.append(current.recorder.$transcript.dropFirst().sink { [weak self] text in
             Task { @MainActor in self?.checkpoint(id: id, text: text) }
@@ -393,7 +399,7 @@ final class MeetingLockedCoordinator {
         current.phase = phase
         let previous = current.pendingUpdate
         let next = ActivityContent<MeetingLockedActivityAttributes.ContentState>(
-            state: .init(phase: phase, seconds: current.recorder.seconds, warning: warning,
+            state: .init(phase: phase, seconds: current.recorder.seconds, warning: warning || current.recorder.completedWithWarning,
                          recap: phase == "listening" ? current.recap : nil),
             staleDate: ["preparing", "listening", "transcribing"].contains(phase)
                 ? Date().addingTimeInterval(90) : nil)

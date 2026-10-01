@@ -19,9 +19,11 @@ async fn instant_steering_yields_exec_and_wait_without_replaying_effects() -> Re
             "input":"// @exec: {\"yield_time_ms\": 120000}\ntext(\"prefix-before-steering\"); const result = await tools.exec_command({cmd: \"printf x >> effect-count; touch started; while [ ! -f release ]; do sleep 0.01; done; printf final-effect\", yield_time_ms: 300000}); text(result.output);"
         })])).await?;
         let yielded = timeout(std::time::Duration::from_secs(3), next_json(&mut socket)).await??;
-        let output = yielded["input"][0]["output"]
-            .as_str()
-            .ok_or_else(|| eyre!("missing exec output"))?;
+        let output = yielded["input"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["call_id"] == "origin-exec"))
+            .and_then(|item| item["output"].as_str())
+            .ok_or_else(|| eyre!("missing exec output: {yielded}"))?;
         assert!(output.contains("prefix-before-steering"), "{output}");
         assert!(output.contains("Script running with cell ID"), "{output}");
         let cell = output
@@ -52,7 +54,11 @@ async fn instant_steering_yields_exec_and_wait_without_replaying_effects() -> Re
         waiting.send(1)?;
         let yielded_wait =
             timeout(std::time::Duration::from_secs(3), next_json(&mut socket)).await??;
-        let output = yielded_wait["input"][0]["output"].to_string();
+        let output = yielded_wait["input"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["call_id"] == "first-wait"))
+            .ok_or_else(|| eyre!("missing first-wait output: {yielded_wait}"))?["output"]
+            .to_string();
         assert!(
             output.contains(&format!("Script running with cell ID {cell}")),
             "{output}"
@@ -82,7 +88,11 @@ async fn instant_steering_yields_exec_and_wait_without_replaying_effects() -> Re
         waiting.send(2)?;
         let completed =
             timeout(std::time::Duration::from_secs(5), next_json(&mut socket)).await??;
-        let output = completed["input"][0]["output"].to_string();
+        let output = completed["input"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["call_id"] == "second-wait"))
+            .ok_or_else(|| eyre!("missing second-wait output: {completed}"))?["output"]
+            .to_string();
         assert!(
             output.contains("Script completed") && output.contains("final-effect"),
             "{output}"
@@ -111,7 +121,12 @@ async fn instant_steering_yields_exec_and_wait_without_replaying_effects() -> Re
     .await
     .map_err(|_| eyre!("shell did not start"))?;
     turn.steer("first steering").await?;
-    assert_eq!(waiting_rx.recv().await, Some(1));
+    let first = waiting_rx.recv().await;
+    if first.is_none() {
+        server.await??;
+        return Err(eyre!("provider fixture ended before admitting wait"));
+    }
+    assert_eq!(first, Some(1));
     // Wait for the public tool admission event, not an assumed timer duration.
     timeout(std::time::Duration::from_secs(3), async {
         while let Some(event) = events.recv().await {
@@ -125,7 +140,12 @@ async fn instant_steering_yields_exec_and_wait_without_replaying_effects() -> Re
     })
     .await??;
     turn.steer("second steering").await?;
-    assert_eq!(waiting_rx.recv().await, Some(2));
+    let second = waiting_rx.recv().await;
+    if second.is_none() {
+        server.await??;
+        return Err(eyre!("provider fixture ended before admitting final wait"));
+    }
+    assert_eq!(second, Some(2));
     assert_eq!(
         std::fs::read_to_string(workspace.join("effect-count"))?,
         "x"

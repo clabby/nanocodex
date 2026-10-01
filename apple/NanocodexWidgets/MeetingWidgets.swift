@@ -62,7 +62,7 @@ struct MeetingLockedActivityWidget: Widget {
                 }.frame(width: 52, height: 52)
             }.buttonStyle(.plain)
                 .accessibilityLabel("Stop Recording")
-                .accessibilityHint("Stops recording and saves the meeting transcript and notes")
+                .accessibilityHint("Stops recording and saves the original audio, transcript and notes")
         } else if !context.isStale && context.state.phase == "ready" {
             Button("Retry saving meeting", intent: SendMeetingLockedIntent(captureID: context.attributes.captureID))
                 .buttonStyle(.bordered)
@@ -72,7 +72,7 @@ struct MeetingLockedActivityWidget: Widget {
         if context.isStale { return context.state.phase == "listening" ? "Meeting status delayed" : "Meeting status unavailable" }
         switch context.state.phase {
         case "preparing": return "Preparing microphone…"
-        case "listening": return "Meeting recording"
+        case "listening": return context.state.warning ? "Recording · transcript incomplete" : "Meeting recording"
         case "transcribing": return "Finishing transcript…"
         case "ready": return context.state.warning ? "Partial meeting saved" : "Meeting saved on device"
         case "sending": return "Syncing meeting…"

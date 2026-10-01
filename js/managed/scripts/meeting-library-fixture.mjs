@@ -38,9 +38,9 @@ export async function startMeetingFixture({ port = 8797, persist = resolve(root,
  const bundle = await build({ stdin: { contents: source, resolveDir: root }, bundle: true, write: false, format: "esm", target: "es2022", platform: "browser", external: ["cloudflare:workers", "node:*"], alias: {"node-rsa":resolve(root,"node_modules/nanocodex/tools/browser/unsupportedNodeRsa.mjs")} });
  await mkdir(persist,{recursive:true});
  const script=bundle.outputFiles[0].text;
- const mf=new Miniflare({host:"127.0.0.1",port,d1Persist:persist,workers:[
+ const mf=new Miniflare({host:"127.0.0.1",port,d1Persist:persist,r2Persist:persist+"/audio",workers:[
   {name:"edge",script,modules:true,compatibilityDate:"2026-07-29",compatibilityFlags:["nodejs_compat","enable_request_signal"],bindings:{EDGE:true},serviceBindings:{NANOCODEX_BACKEND:"managed"}},
-  {name:"managed",script,modules:true,compatibilityDate:"2026-07-29",compatibilityFlags:["nodejs_compat","enable_request_signal"],d1Databases:{NANOCODEX_CRM:"fixture-meeting-library"}},
+  {name:"managed",script,modules:true,compatibilityDate:"2026-07-29",compatibilityFlags:["nodejs_compat","enable_request_signal"],d1Databases:{NANOCODEX_CRM:"fixture-meeting-library"},r2Buckets:{NANOCODEX_WORKSPACES:"fixture-meeting-audio"}},
  ]});
  await mf.ready;
  const db=await mf.getD1Database("NANOCODEX_CRM","managed");
