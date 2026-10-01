@@ -2,6 +2,26 @@ import XCTest
 import UIKit
 
 final class InboxUITests: XCTestCase {
+    func testPrivateLoginUsesNativeSecureReviewPane() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--browser-login-ui-fixture"]
+        app.launch()
+        let open = app.buttons["browser-login-open"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10))
+        open.tap()
+        XCTAssertTrue(app.staticTexts["https://auth.example.com"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Done"].exists)
+        XCTAssertTrue(app.buttons["browser-login-approve"].exists)
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "native-private-login-review"; attachment.lifetime = .keepAlways
+        add(attachment)
+        app.buttons["browser-login-cancel"].tap()
+        XCTAssertTrue(app.staticTexts["Private sign-in cancelled"].waitForExistence(timeout: 5))
+        open.tap()
+        app.buttons["browser-login-approve"].tap()
+        XCTAssertTrue(app.staticTexts["Private browser approved"].waitForExistence(timeout: 5))
+    }
+
     func testNativeCommandReviewAndDeniedAuthentication() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--native-secure-input-ui-fixture"]

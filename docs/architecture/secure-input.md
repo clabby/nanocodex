@@ -268,7 +268,11 @@ or a merged PR is not evidence that those live steps have happened.
 Vault item. Supply a stable operation UUID, the public HTTPS login URL and a
 bounded list of exact origins needed for redirects and embedded authentication
 frames. The returned `/browser-login` link opens the account-authenticated web
-client, including from an older iPhone build. The link is not an access grant:
+client, including from an older iPhone build. Updated iPhone clients recognize
+`request_browser_login` and automatically present the native secure sheet in the
+active conversation. That sheet reviews the same exact sites before enabling
+private browser input, and sends only the bound Done/Cancel receipt back to chat.
+The web link remains a fallback for older clients. The link is not an access grant:
 the existing private-browser HTTP endpoint checks account ownership and CSRF.
 
 The user reviews the sites before enabling the private viewport. Keyboard input,

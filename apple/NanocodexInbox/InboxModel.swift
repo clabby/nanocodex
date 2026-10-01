@@ -1762,13 +1762,15 @@ final class InboxModel: ObservableObject {
         try await client.submitBrowserVerification(intake: intake, code: code)
         guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
     }
-    func publishBrowserVerificationReceipt(intake: VaultIntake, agentID: String, account: UUID) {
+    func publishBrowserVerificationReceipt(intake: VaultIntake, agentID: String, account: UUID, cancelled: Bool = false) {
         guard generation == account, connected, !isDemo, intake.agentID == agentID,
               let challenge = intake.challengeID, cards.contains(where: { $0.id == agentID }) else { return }
-        let value: JSON = .object(["type": .string(intake.operation == "browser_takeover" ? "browser_vault_takeover_receipt" : "browser_vault_challenge_receipt"),
+        let value: JSON = intake.operation == "browser_login" ? .object(["type": .string("browser_login_receipt"), "request_id": .string(challenge), "status": .string(cancelled ? "cancelled" : "finished")]) : .object(["type": .string(intake.operation == "browser_takeover" ? "browser_vault_takeover_receipt" : "browser_vault_challenge_receipt"),
             "status": .string(intake.operation == "browser_takeover" ? "finished" : "submitted"), "challenge_id": .string(challenge)])
         let predecessor = pending.last(where: { $0.agentID == agentID })?.id ?? (focused?.id == agentID ? focusedTurn : "")
-        let message = PendingMessage(agentID: agentID, input: value.pretty, predecessor: predecessor)
+        let message = PendingMessage(agentID: agentID, input: value.pretty, predecessor: predecessor,
+            id: intake.operation == "browser_login" ? "browser-login-\(challenge)-\(cancelled ? "cancelled" : "finished")" : UUID().uuidString)
+        guard !pending.contains(where: { $0.id == message.id }) else { return }
         pending.append(message); busy.insert(agentID); persist()
         Task { await submit(message, epoch: account) }
     }

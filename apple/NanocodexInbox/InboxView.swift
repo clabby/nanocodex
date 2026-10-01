@@ -3472,14 +3472,14 @@ private struct VaultIntakeCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(intake.operation == "browser_takeover" ? "Control browser privately" : intake.operation == "browser_verification" ? (verificationSubmitted ? "Code submitted" : "Verify browser login") : (receipt == nil ? "Add to Vault securely" : "Saved to Vault"), systemImage: "lock.shield")
+            Label(intake.operation == "browser_login" ? "Sign in privately" : intake.operation == "browser_takeover" ? "Control browser privately" : intake.operation == "browser_verification" ? (verificationSubmitted ? "Code submitted" : "Verify browser login") : (receipt == nil ? "Add to Vault securely" : "Saved to Vault"), systemImage: "lock.shield")
                 .font(.headline)
             if verificationSubmitted { Text("Browser verification is pending.") } else if let receipt {
                 Text(receipt.name).font(.subheadline)
             } else {
                 if !intake.name.isEmpty { Text(intake.name).font(.subheadline) }
                 if let origin = intake.origin { Text(origin).font(.caption).textSelection(.enabled) }
-                Text(intake.operation == "browser_takeover" ? "Control the browser privately. The screen and input stay out of chat." : intake.operation == "browser_verification" ? "The code goes directly to this browser session. It stays out of chat and is not saved to Vault." : "Your information goes directly to your encrypted Vault. It stays out of chat.")
+                Text(intake.operation == "browser_login" ? "Sign in in the secure pane. Your password and codes stay out of chat and are not saved to Vault." : intake.operation == "browser_takeover" ? "Control the browser privately. The screen and input stay out of chat." : intake.operation == "browser_verification" ? "The code goes directly to this browser session. It stays out of chat and is not saved to Vault." : "Your information goes directly to your encrypted Vault. It stays out of chat.")
                     .font(.subheadline).foregroundStyle(.secondary)
                 Button("Open secure form") { receiptAgentID = model.focused?.id ?? ""; showingForm = true }
                     .buttonStyle(.borderedProminent)
@@ -3499,7 +3499,9 @@ private struct VaultIntakeCard: View {
             BrowserTakeoverSheet(model: model, intake: intake)
         }
         .sheet(isPresented: Binding(get: { showingForm && intake.operation != "browser_takeover" }, set: { showingForm = $0 })) {
-            if intake.operation == "browser_verification" {
+            if intake.operation == "browser_login" {
+                BrowserTakeoverSheet(model: model, intake: intake)
+            } else if intake.operation == "browser_verification" {
                 BrowserVerificationSheet(model: model, intake: intake, agentID: receiptAgentID) { verificationSubmitted = true }
             } else { VaultLoginSheet(model: model, intake: intake, agentID: receiptAgentID) { receipt = $0 } }
         }
@@ -3688,6 +3690,9 @@ private struct BrowserTakeoverSheet: View {
     @State private var viewport = CGSize(width: 390, height: 700)
     @State private var finishing = false
     @State private var touching = false
+    @State private var reviewed = false
+    @State private var currentOrigin: String?
+    private var login: Bool { intake.operation == "browser_login" }
 
     private func clear() {
         generation = UUID(); submission?.cancel(); submission = nil
@@ -3706,11 +3711,12 @@ private struct BrowserTakeoverSheet: View {
     }
     private func enqueue(_ action: [String: JSON]) {
         guard scenePhase == .active, account == model.vaultIntakeAccount, !finishing else { return }
-        guard failure == nil || action["action"] == .string("finish") else { return }
+        guard failure == nil || ["finish", "cancel", "approve"].contains(action["action"]?.string ?? "") else { return }
+        guard !login || reviewed || ["approve", "cancel"].contains(action["action"]?.string ?? "") else { return }
         if action["action"] == .string("touch") {
             touching = action["phase"] == .string("start") || action["phase"] == .string("move")
         }
-        if action["action"] == .string("finish") { finishing = true; keyboardVisible = false }
+        if action["action"] == .string("finish") || action["action"] == .string("cancel") { finishing = true; keyboardVisible = false }
         // Only replace adjacent unsent moves. Text, keys and gesture boundaries retain order.
         if action["phase"] == .string("move"), queue.last?["phase"] == .string("move") {
             queue[queue.count - 1] = action
@@ -3726,6 +3732,17 @@ private struct BrowserTakeoverSheet: View {
                 guard !Task.isCancelled, generation == token, scenePhase == .active,
                       account == model.vaultIntakeAccount else { return }
                 switch frame {
+                case .approved:
+                    guard login, action["action"] == .string("approve") else { throw APIError.invalidResponse }
+                    reviewed = true; failure = nil; submission = nil; observe(configureViewport: true); return
+                case .cancelled:
+                    guard login, action["action"] == .string("cancel") else { throw APIError.invalidResponse }
+                    model.publishBrowserVerificationReceipt(intake: intake, agentID: intake.agentID ?? "", account: account, cancelled: true)
+                    clear(); dismiss(); return
+                case .loginActive(let data, let hint, let regions, let origin):
+                    guard let image = UIImage(data: data) else { throw APIError.invalidResponse }
+                    screen = image; keyboard = hint; inputs = regions; currentOrigin = origin
+                    if hint != nil { keyboardVisible = true }
                 case .finished:
                     guard action["action"] == .string("finish") else { throw APIError.invalidResponse }
                     model.publishBrowserVerificationReceipt(intake: intake, agentID: intake.agentID ?? "", account: account)
@@ -3748,6 +3765,11 @@ private struct BrowserTakeoverSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                if login && !reviewed {
+                    BrowserLoginReview(origin: intake.origin ?? "", sites: intake.allowedOrigins ?? [], busy: submission != nil,
+                        approve: { failure = nil; enqueue(["action": .string("approve")]) },
+                        cancel: { enqueue(["action": .string("cancel")]) })
+                } else {
                 GeometryReader { geometry in
                     PrivateBrowserCanvas(image: screen, keyboard: keyboard, inputs: inputs,
                         keyboardVisible: keyboardVisible && failure == nil && !finishing && scenePhase == .active,
@@ -3756,28 +3778,32 @@ private struct BrowserTakeoverSheet: View {
                         .onAppear { viewport = geometry.size }
                         .onChange(of: geometry.size) { _, size in if !keyboardVisible { viewport = size } }
                 }
+                }
                 if let failure { Text(failure).font(.footnote).foregroundStyle(.red).padding(8) }
             }
-            .background(Color.black).privacySensitive()
+            .background(login && !reviewed ? Color(uiColor: .systemBackground) : Color.black).privacySensitive()
             .overlay {
-                if screen == nil && failure == nil {
+                if screen == nil && failure == nil && (!login || reviewed) {
                     ProgressView("Opening private browser…").tint(.white).foregroundStyle(.white)
                 }
             }
-            .navigationTitle(intake.origin ?? "Private browser")
+            .navigationTitle(currentOrigin ?? (login && !reviewed ? "Private sign-in" : intake.origin ?? "Private browser"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { enqueue(["action": .string("finish")]) }
-                        .disabled(finishing || scenePhase != .active)
+                    if !login || reviewed { Button("Done") { enqueue(["action": .string("finish")]) }
+                        .disabled(finishing || scenePhase != .active) }
                 }
                 ToolbarItemGroup(placement: .bottomBar) {
+                    if !login || reviewed {
+                    if login { Button("Cancel") { enqueue(["action": .string("cancel")]) }.disabled(finishing) }
                     Button { guard submission == nil else { return }; failure = nil; observe(configureViewport: true) } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }.disabled(submission != nil || finishing || touching)
                     Spacer()
                     Button { keyboardVisible.toggle() } label: { Label("Keyboard", systemImage: "keyboard") }
                         .disabled(screen == nil || failure != nil || finishing)
+                    }
                 }
             }
             .overlay { if scenePhase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
@@ -3785,12 +3811,12 @@ private struct BrowserTakeoverSheet: View {
         .presentationDetents([.large]).presentationDragIndicator(.hidden)
         .interactiveDismissDisabled()
         .task {
-            account = model.vaultIntakeAccount; observe(configureViewport: true)
+            account = model.vaultIntakeAccount; if !login { observe(configureViewport: true) }
             observing = Task { @MainActor in
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(1))
                     guard !Task.isCancelled else { return }
-                    if submission == nil && queue.isEmpty && failure == nil && !finishing && !touching { observe() }
+                    if (!login || reviewed) && submission == nil && queue.isEmpty && failure == nil && !finishing && !touching { observe() }
                 }
             }
         }
@@ -3800,6 +3826,35 @@ private struct BrowserTakeoverSheet: View {
         }
         .onChange(of: model.vaultIntakeAccount) { _, _ in clear(); dismiss() }
         .onChange(of: model.connected) { _, connected in if !connected { clear(); dismiss() } }
+    }
+}
+
+private struct BrowserLoginReview: View {
+    let origin: String
+    let sites: [String]
+    let busy: Bool
+    let approve: () -> Void
+    let cancel: () -> Void
+    var body: some View {
+        Form {
+            Section("Sign in privately") {
+                Label(origin, systemImage: "lock.shield")
+                Text("Your password, verification codes and browser screen stay out of chat. Credentials are not saved to Vault.")
+                    .foregroundStyle(.secondary)
+            }
+            Section("Allowed websites") {
+                ForEach(sites, id: \.self) { Text($0) }
+            }
+            Section {
+                Text("When you tap Done, the agent checks your sign-in and continues in this browser.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button("Continue to private login", action: approve).disabled(busy)
+                    .accessibilityIdentifier("browser-login-approve")
+                Button("Cancel", role: .cancel, action: cancel).disabled(busy)
+                    .accessibilityIdentifier("browser-login-cancel")
+            }
+        }
+        .accessibilityIdentifier("browser-login-review")
     }
 }
 
@@ -4408,6 +4463,29 @@ private struct SecureBrowserField: View {
     }
 }
 #if DEBUG && targetEnvironment(simulator)
+struct BrowserLoginUIFixture: View {
+    @State private var showing = false
+    @State private var result = ""
+    var body: some View {
+        VStack {
+            Text("Conversation")
+            Button("Open secure form") { showing = true }
+                .accessibilityIdentifier("browser-login-open")
+            Text(result).accessibilityIdentifier("browser-login-result")
+        }
+        .sheet(isPresented: $showing) {
+            NavigationStack {
+                BrowserLoginReview(origin: "https://example.com", sites: ["https://example.com", "https://auth.example.com"], busy: false,
+                    approve: { result = "Private browser approved"; showing = false },
+                    cancel: { result = "Private sign-in cancelled"; showing = false })
+                    .navigationTitle("Private sign-in")
+            }
+            .presentationDetents([.large])
+            .interactiveDismissDisabled()
+        }
+    }
+}
+
 struct NativeSecureInputUIFixture: View {
     private let description: NativeSecureInputDescription
     @State private var password = ""
