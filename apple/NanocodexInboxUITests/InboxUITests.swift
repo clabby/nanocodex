@@ -185,6 +185,89 @@ final class InboxUITests: XCTestCase {
         capture(app, "crm-related-profile")
     }
 
+    // The app selector belongs to the shell, not a directory or pushed profile.
+    // Switching apps from a nested profile must leave that navigation stack.
+    func testAppSelectorSurvivesCRMProfileNavigation() {
+        let app = XCUIApplication()
+        app.launchEnvironment["NANOCODEX_STARTUP_FIXTURE"] = "1"
+        app.launchEnvironment["NANOCODEX_STARTUP_PROFILE"] = UUID().uuidString
+        app.launch()
+        defer { XCUIDevice.shared.orientation = .portrait }
+
+        func assertSelector(_ name: String) {
+            capture(app, name)
+            for id in ["main-tab-todo", "main-tab-chat", "main-tab-crm", "main-tab-meetings", "main-tab-apps"] {
+                let button = app.buttons[id]
+                XCTAssertTrue(button.waitForExistence(timeout: 5), id)
+                XCTAssertEqual(app.buttons.matching(identifier: id).count, 1, "One persistent selector: " + id)
+                XCTAssertTrue(button.isHittable, id)
+                XCTAssertTrue(app.frame.contains(button.frame), id)
+            }
+        }
+
+        XCTAssertTrue(app.buttons["main-tab-crm"].waitForExistence(timeout: 25))
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 10))
+        assertSelector("selector-crm-directory")
+        let globalInput = app.textViews["new-thread-composer"]
+        XCTAssertTrue(globalInput.waitForExistence(timeout: 5))
+        globalInput.tap(); globalInput.typeText("Keep this new thread draft")
+        app.buttons["main-tab-crm"].tap()
+        app.buttons["crm-record-alex"].tap()
+        XCTAssertTrue(app.staticTexts["Example University"].waitForExistence(timeout: 5))
+        assertSelector("selector-crm-person")
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        XCTAssertTrue(app.textViews["new-thread-composer"].isHittable)
+        for _ in 0..<4 where !app.buttons["crm-related-sam"].isHittable { app.swipeUp() }
+        app.buttons["crm-related-sam"].tap()
+        XCTAssertTrue(app.staticTexts["Sam Rivera"].waitForExistence(timeout: 5))
+        assertSelector("selector-crm-related-person")
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        app.swipeUp()
+        assertSelector("selector-crm-related-scrolled")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in app.frame.width > app.frame.height }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 5), .completed)
+        assertSelector("selector-crm-related-landscape")
+        XCUIDevice.shared.orientation = .portrait
+        let portrait = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in app.frame.width < app.frame.height }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [portrait], timeout: 5), .completed)
+
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Example University"].exists)
+        let input = composer(app)
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap(); input.typeText("Keep this unsent navigation draft")
+        assertSelector("selector-chat-keyboard")
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["crm-related-sam"].exists, "Tab switches must leave the pushed profile")
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(composer(app).waitForExistence(timeout: 10))
+        XCTAssertEqual(composer(app).value as? String, "Keep this unsent navigation draft")
+        app.buttons["main-tab-apps"].tap()
+        app.buttons["Your apps"].tap()
+        XCTAssertTrue(app.buttons["create-generated-app"].waitForExistence(timeout: 10))
+        assertSelector("selector-your-apps")
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        app.buttons["main-tab-meetings"].tap()
+        XCTAssertTrue(app.textFields["meetings-search"].waitForExistence(timeout: 10))
+        assertSelector("selector-meetings")
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        app.buttons["main-tab-todo"].tap()
+        assertUnifiedInbox(app)
+        assertSelector("selector-todo")
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.textViews["new-thread-composer"].waitForExistence(timeout: 25))
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(composer(app).waitForExistence(timeout: 10))
+        XCTAssertEqual(composer(app).value as? String, "Keep this unsent navigation draft")
+        capture(app, "selector-independent-drafts-after-relaunch")
+    }
+
     func testCRMHistoryPaginationAndCalendarStatuses() {
         let app = XCUIApplication()
         app.launchEnvironment["NANOCODEX_STARTUP_FIXTURE"] = "1"
@@ -261,8 +344,14 @@ final class InboxUITests: XCTestCase {
             if !typing {
                 XCTAssertLessThanOrEqual(dock.frame.width, 380 + 0.01,
                                          "The floating app/model selector should stay compact")
-                XCTAssertLessThan(app.frame.maxY - dock.frame.maxY, 30,
-                                  "The dock should sit just above the home indicator, not above a white band")
+                XCTAssertGreaterThanOrEqual(app.frame.maxY - dock.frame.maxY, 0,
+                                            "The complete dock must remain on screen")
+                XCTAssertLessThan(app.frame.maxY - dock.frame.maxY, 60,
+                                  "Leave the native home-indicator safe area and footer insets, not an arbitrary downward transform")
+                let composerShell = app.descendants(matching: .any)["composer-input"].firstMatch
+                XCTAssertTrue(composerShell.exists); XCTAssertTrue(composerShell.isHittable)
+                XCTAssertLessThanOrEqual(composerShell.frame.maxY, dock.frame.minY,
+                                         "Reserve the complete composer shell above the selector")
             }
             if typing {
                 XCTAssertTrue(app.keyboards.firstMatch.exists)
@@ -587,16 +676,32 @@ final class InboxUITests: XCTestCase {
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
         XCTAssertTrue(app.buttons["todo-compose"].waitForExistence(timeout: 10))
+        assertUnifiedInbox(app)
+        let filter = app.buttons["todo-filter-menu"]
+        revealInboxElement(filter, in: app); filter.tap()
+        let prepare = app.buttons["todo-prepare-thought"]
+        XCTAssertTrue(prepare.waitForExistence(timeout: 5)); prepare.tap()
         let input = app.descendants(matching: .any)["todo-capture"].firstMatch
         input.tap(); input.typeText("Review the launch agenda")
         app.buttons["todo-capture-save"].tap()
+        app.buttons["todo-capture-done"].tap()
         XCTAssertTrue(app.staticTexts["Review the launch agenda"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Pending"].exists, "Capture delegates preparation rather than claiming completion")
         let ready = app.buttons["todo-row:capture:fixture-ready-capture"]
         revealInboxElement(ready, in: app); ready.swipeRight()
         app.buttons["todo-complete:fixture-ready-capture"].tap()
+        XCTAssertTrue(ready.waitForNonExistence(timeout: 5), "Completing the capture removes it from the unified Inbox")
         XCTAssertTrue(app.buttons["Undo"].waitForExistence(timeout: 5)); app.buttons["Undo"].tap()
+        // Unified Inbox keeps the capture's row identity across preparation states.
+        // Undo requeues the same capture; it must not restore the ready proposal.
         XCTAssertTrue(ready.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons.matching(identifier: "todo-row:capture:fixture-ready-capture").count, 1)
+        revealInboxElement(ready, in: app)
+        XCTAssertTrue(ready.staticTexts["Plan the launch review"].exists)
+        XCTAssertTrue(ready.staticTexts["Pending"].exists, "Undo requeues preparation; it must not pretend the old proposal is still ready")
+        XCTAssertFalse(ready.staticTexts["Ready"].exists)
+        XCTAssertFalse(ready.staticTexts["Hold a focused review"].exists, "Undo must discard the old ready recommendation")
+        capture(app, "todo-undo-requeues-same-capture")
         selectInboxScope(app, "Mail")
         let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
         XCTAssertTrue(thread.waitForExistence(timeout: 5)); revealInboxElement(thread, in: app); thread.swipeLeft()
@@ -4824,6 +4929,218 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.buttons["meeting-new"].waitForExistence(timeout: 10))
         XCTAssertFalse(row.exists)
         capture(app, "meetings-native-deleted")
+    }
+
+    func testGlobalComposerAndSelectorClearOtherInputKeyboards() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["NANOCODEX_STARTUP_FIXTURE": "1", "NANOCODEX_STARTUP_PROFILE": UUID().uuidString.lowercased()]
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-todo"].waitForExistence(timeout: 20))
+        assertUnifiedInbox(app)
+        selectInboxScope(app, "Mail")
+        selectInboxScope(app, "Inbox")
+        XCTAssertFalse(app.descendants(matching: .any)["todo-capture"].firstMatch.exists,
+                       "Prepare a thought is an explicit sheet, not the always-new-thread bottom composer")
+        XCTAssertTrue(app.buttons["new-thread-send"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["new-thread-send"].isEnabled)
+        func assertChrome(_ name: String) {
+            let keyboard = app.keyboards.firstMatch
+            XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+            let editor = composerJourneyField(app, identifier: "new-thread-composer")
+            XCTAssertTrue(editor.isHittable)
+            XCTAssertLessThanOrEqual(editor.frame.maxY, keyboard.frame.minY + 1)
+            for id in ["main-tab-todo", "main-tab-chat", "main-tab-crm", "main-tab-meetings", "main-tab-apps"] {
+                let button = app.buttons[id]
+                XCTAssertTrue(button.exists); XCTAssertTrue(button.isHittable)
+                XCTAssertLessThanOrEqual(button.frame.maxY, keyboard.frame.minY + 1)
+                XCTAssertGreaterThanOrEqual(button.frame.minY, editor.frame.maxY - 1)
+            }
+            capture(app, name)
+        }
+        app.buttons["todo-search-open"].tap()
+        let inboxSearch = app.textFields["todo-search"]
+        XCTAssertTrue(inboxSearch.waitForExistence(timeout: 5))
+        inboxSearch.tap(); inboxSearch.typeText("launch")
+        assertChrome("global-chrome-above-inbox-search-keyboard")
+        app.buttons["main-tab-crm"].tap()
+        let crmSearch = app.textFields["crm-search"]
+        XCTAssertTrue(crmSearch.waitForExistence(timeout: 5))
+        crmSearch.tap(); crmSearch.typeText("Alex")
+        assertChrome("global-chrome-above-crm-search-keyboard")
+        let draft = composerJourneyField(app, identifier: "new-thread-composer")
+        draft.tap(); draft.typeText("Unsent global input")
+        assertChrome("global-chrome-above-new-thread-keyboard")
+        XCTAssertTrue(app.buttons["crm-record-alex"].exists, "Typing in the composer must not filter or leave the directory")
+        XCTAssertFalse(app.buttons["conversation-title:composer-agent-1"].exists, "Typing must not create a thread")
+        app.buttons["main-tab-todo"].tap()
+        assertUnifiedInbox(app)
+        let inboxDraft = composerJourneyField(app, identifier: "new-thread-composer")
+        XCTAssertEqual(inboxDraft.value as? String, "Unsent global input")
+        // Search visibility is local view state; the query belongs to the model.
+        let restoredSearch = app.textFields["todo-search"]
+        if !restoredSearch.exists { app.buttons["todo-search-open"].tap() }
+        XCTAssertTrue(restoredSearch.waitForExistence(timeout: 5))
+        XCTAssertEqual(restoredSearch.value as? String, "launch",
+                       "The unified Inbox query is independent of the global thread draft")
+        // UIKit owns the tap-selected caret; explicitly select all before editing.
+        inboxDraft.tap()
+        inboxDraft.typeKey("a", modifierFlags: .command)
+        inboxDraft.typeText("Unsent global input from Inbox")
+        assertChrome("global-chrome-above-unified-inbox-composer-keyboard")
+        XCTAssertEqual(inboxDraft.value as? String, "Unsent global input from Inbox")
+        XCTAssertEqual(app.textFields["todo-search"].value as? String, "launch")
+        XCTAssertTrue(app.buttons["new-thread-send"].isEnabled)
+        XCTAssertFalse(app.descendants(matching: .any)["todo-capture"].firstMatch.exists,
+                       "Typing in Inbox must not open or submit thought preparation")
+        XCTAssertFalse(app.buttons["conversation-title:composer-agent-1"].exists, "An unsent Inbox draft must not create a thread")
+    }
+
+    private func launchComposerTransportJourney(failCreationOnce: Bool = false) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment = [
+            "NANOCODEX_STARTUP_FIXTURE": "1",
+            "NANOCODEX_STARTUP_PROFILE": UUID().uuidString.lowercased(),
+            "NANOCODEX_STARTUP_COMPOSER_JOURNEY": "1",
+            "NANOCODEX_STARTUP_COMPOSER_CREATE_FAIL_ONCE": failCreationOnce ? "1" : "0"
+        ]
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-crm"].waitForExistence(timeout: 20))
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 10))
+        app.buttons["crm-record-alex"].tap()
+        XCTAssertTrue(app.staticTexts["Example University"].waitForExistence(timeout: 10))
+        return app
+    }
+
+    private func composerJourneyField(_ app: XCUIApplication, identifier: String) -> XCUIElement {
+        let field = app.textFields[identifier]
+        if field.waitForExistence(timeout: 3) { return field }
+        let editor = app.textViews[identifier]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), "Expected the production native composer: \(identifier)")
+        return editor
+    }
+
+    private func composerRecordedRequests(_ app: XCUIApplication, creates: Int, turns: Int) -> [[String: Any]] {
+        let prefix = "Composer fixture transport ledger: "
+        let rows = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix))
+        for row in rows.allElementsBoundByIndex.reversed() {
+            let text = row.label
+            guard text.hasPrefix(prefix), let bytes = String(text.dropFirst(prefix.count)).data(using: .utf8),
+                  let entries = (try? JSONSerialization.jsonObject(with: bytes)) as? [[String: Any]] else { continue }
+            let creationCount = entries.filter { $0["path"] as? String == "/v1/agents" }.count
+            let turnCount = entries.filter { ($0["path"] as? String ?? "").hasSuffix("/turns") }.count
+            if creationCount == creates && turnCount == turns { return entries }
+        }
+        return []
+    }
+
+    private func awaitComposerRecordedRequests(_ app: XCUIApplication, creates: Int, turns: Int,
+                                               selectedAgent: String = "composer-agent-1",
+                                               file: StaticString = #filePath, line: UInt = #line) -> [[String: Any]] {
+        let recorded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !self.composerRecordedRequests(app, creates: creates, turns: turns).isEmpty
+        }, object: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [recorded], timeout: 15), .completed,
+                       "Await external JSONL POST records, not just local UI labels/bubbles.", file: file, line: line)
+        let entries = composerRecordedRequests(app, creates: creates, turns: turns)
+        XCTAssertEqual(entries.count, creates + turns, file: file, line: line)
+        for entry in entries {
+            XCTAssertEqual(entry["method"] as? String, "POST", file: file, line: line)
+            XCTAssertFalse((entry["idempotency"] as? String ?? "").isEmpty, file: file, line: line)
+            if (entry["path"] as? String ?? "").hasSuffix("/turns") {
+                XCTAssertEqual(entry["idempotency"] as? String, "inbox:" + (entry["id"] as? String ?? ""), file: file, line: line)
+            }
+        }
+        XCTAssertTrue(app.buttons["conversation-title:" + selectedAgent].exists, file: file, line: line)
+        XCTAssertTrue(app.buttons["conversation-title:" + selectedAgent].isSelected, file: file, line: line)
+        XCTAssertTrue(app.buttons["send"].exists, "Non-Chat Send must switch to the ordinary Chat composer", file: file, line: line)
+        XCTAssertFalse(app.buttons["new-thread-send"].exists, file: file, line: line)
+        return entries
+    }
+
+    func testCRMGlobalSendCreatesOneAgentThenChatReusesItsTransportIdentity() {
+        let app = launchComposerTransportJourney()
+        let first = "Synthetic CRM composer first prompt"
+        let reply = "Synthetic Chat same agent follow-up"
+        let draft = composerJourneyField(app, identifier: "new-thread-composer")
+        draft.tap(); draft.typeText(first)
+        XCTAssertTrue(app.staticTexts["Example University"].exists, "Typing must not navigate away from the CRM person")
+        XCTAssertTrue(app.buttons["new-thread-send"].isEnabled)
+        app.buttons["new-thread-send"].tap()
+        let initial = awaitComposerRecordedRequests(app, creates: 1, turns: 1)
+        let firstTurn = initial.first { ($0["path"] as? String ?? "").hasSuffix("/turns") }
+        XCTAssertEqual(firstTurn?["path"] as? String, "/v1/agents/composer-agent-1/turns")
+        XCTAssertEqual(firstTurn?["input"] as? String, first)
+        capture(app, "crm-global-send-new-agent-external-recorder")
+
+        let chatDraft = composerJourneyField(app, identifier: "composer")
+        chatDraft.tap(); chatDraft.typeText(reply)
+        XCTAssertTrue(app.buttons["send"].isEnabled)
+        app.buttons["send"].tap()
+        let afterReply = awaitComposerRecordedRequests(app, creates: 1, turns: 2)
+        let firstThreadTurns = afterReply.filter { ($0["path"] as? String ?? "").hasSuffix("/turns") }
+        XCTAssertEqual(firstThreadTurns.map { $0["path"] as? String ?? "" },
+                       ["/v1/agents/composer-agent-1/turns", "/v1/agents/composer-agent-1/turns"])
+        XCTAssertEqual(firstThreadTurns.map { $0["input"] as? String ?? "" }, [first, reply])
+        XCTAssertEqual(Set(firstThreadTurns.map { $0["id"] as? String ?? "" }).count, 2)
+        capture(app, "chat-reply-same-agent-no-extra-create-external-recorder")
+
+        // Leaving Chat must restore the global new-thread composer; its next
+        // Send must create another identity, never reuse the previously focused ID.
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 5))
+        app.buttons["crm-record-alex"].tap()
+        XCTAssertTrue(app.staticTexts["Example University"].waitForExistence(timeout: 5))
+        let next = "Synthetic second nonchat new thread prompt"
+        let nextDraft = composerJourneyField(app, identifier: "new-thread-composer")
+        let emptyValue = nextDraft.value as? String ?? ""
+        XCTAssertTrue(emptyValue.isEmpty || emptyValue == nextDraft.placeholderValue)
+        nextDraft.tap(); nextDraft.typeText(next)
+        app.buttons["new-thread-send"].tap()
+        let afterSecondGlobal = awaitComposerRecordedRequests(app, creates: 2, turns: 3, selectedAgent: "composer-agent-2")
+        let creations = afterSecondGlobal.filter { $0["path"] as? String == "/v1/agents" }
+        XCTAssertEqual(Set(creations.map { $0["idempotency"] as? String ?? "" }).count, 2)
+        let allTurns = afterSecondGlobal.filter { ($0["path"] as? String ?? "").hasSuffix("/turns") }
+        XCTAssertEqual(allTurns.map { $0["path"] as? String ?? "" },
+                       ["/v1/agents/composer-agent-1/turns", "/v1/agents/composer-agent-1/turns", "/v1/agents/composer-agent-2/turns"])
+        XCTAssertEqual(allTurns.map { $0["input"] as? String ?? "" }, [first, reply, next])
+        capture(app, "second-nonchat-send-different-agent-external-recorder")
+    }
+
+    func testCRMGlobalSendCreationFailureRetriesSameCreationAndPrompt() {
+        let app = launchComposerTransportJourney(failCreationOnce: true)
+        let prompt = "Synthetic creation failure preserved prompt"
+        let draft = composerJourneyField(app, identifier: "new-thread-composer")
+        draft.tap(); draft.typeText(prompt)
+        app.buttons["new-thread-send"].tap()
+        let retry = app.buttons["retry-pending"].firstMatch
+        XCTAssertTrue(retry.waitForExistence(timeout: 15), "Definite backend creation failure must retain the pending first message")
+        XCTAssertTrue(app.staticTexts[prompt].exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Composer fixture transport ledger:")).firstMatch.exists,
+                       "Rejected creation must not fabricate an admitted turn")
+        XCTAssertTrue(app.buttons["retry-creation"].exists)
+        capture(app, "crm-create-failure-prompt-retained")
+        XCTAssertTrue(retry.isEnabled)
+        retry.tap() // real PendingMessage -> readyAgent -> same creation key
+        let retried = awaitComposerRecordedRequests(app, creates: 2, turns: 1)
+        let creations = retried.filter { $0["path"] as? String == "/v1/agents" }
+        XCTAssertEqual(Set(creations.map { $0["idempotency"] as? String ?? "" }).count, 1)
+        let admitted = retried.first { ($0["path"] as? String ?? "").hasSuffix("/turns") }
+        XCTAssertEqual(admitted?["path"] as? String, "/v1/agents/composer-agent-1/turns")
+        XCTAssertEqual(admitted?["input"] as? String, prompt)
+        XCTAssertFalse(app.buttons["retry-pending"].exists)
+        capture(app, "crm-create-retry-one-agent-one-admitted-prompt-external-recorder")
+
+        let next = "Synthetic follow-up after creation retry"
+        let chatDraft = composerJourneyField(app, identifier: "composer")
+        chatDraft.tap(); chatDraft.typeText(next)
+        app.buttons["send"].tap()
+        let followUp = awaitComposerRecordedRequests(app, creates: 2, turns: 2)
+        let turns = followUp.filter { ($0["path"] as? String ?? "").hasSuffix("/turns") }
+        XCTAssertEqual(turns.map { $0["path"] as? String ?? "" },
+                       ["/v1/agents/composer-agent-1/turns", "/v1/agents/composer-agent-1/turns"])
+        XCTAssertEqual(turns.map { $0["input"] as? String ?? "" }, [prompt, next])
+        capture(app, "crm-create-retry-chat-reuses-created-agent-external-recorder")
     }
 
     private func capture(_ app: XCUIApplication, _ name: String) {

@@ -68,7 +68,7 @@ private enum TodoQueueRow: Identifiable {
     }
 }
 
-/// A dense action inbox, with the existing capture composer and app selector below.
+/// A dense action inbox, with the global new-thread composer and app selector below.
 struct TodoBoardView: View {
     @ObservedObject var model: InboxModel
     @ObservedObject private var workspace: TodoWorkspace
@@ -80,6 +80,8 @@ struct TodoBoardView: View {
     @State private var notice: String?
     @State private var showSearch = false
     @State private var assistant: InboxAIRequest?
+    @State private var showCapture = false
+    @State private var captureFocused = false
     @State private var pendingActions = Set<String>()
     @State private var captureOperations: [String: UUID] = [:]
 
@@ -255,9 +257,23 @@ struct TodoBoardView: View {
                 }
                 .padding(.leading, 14).padding(.trailing, 4).padding(.vertical, 4)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-                .padding(.horizontal, 12).padding(.bottom, 138)
+                .padding(.horizontal, 12).padding(.bottom, 12)
                 .accessibilityIdentifier("todo-notice")
             }
+        }
+        .sheet(isPresented: $showCapture) {
+            NavigationStack {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Delegate a thought for research and preparation.")
+                        .font(.subheadline).foregroundStyle(.secondary).padding(.horizontal, 16)
+                    TodoCaptureComposer(model: model, inputFocused: $captureFocused)
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 16).navigationTitle("On your mind")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showCapture = false }.accessibilityIdentifier("todo-capture-done") } }
+            }
+            .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
         }
         .onAppear { os_signpost(.event, log: DecisionUXMetrics.log, name: "DecisionInboxRendered") }
         .refreshable { await refreshAll(liveCalendar: true) }
@@ -304,6 +320,9 @@ struct TodoBoardView: View {
                 ForEach(["Inbox", "Mail", "Snoozed", "Drafts", "Sent", "All mail"], id: \.self) { value in
                     Button(value) { selectFilter(value) }.accessibilityIdentifier("todo-filter:" + value)
                 }
+                Divider()
+                Button("Prepare a thought") { showCapture = true }
+                    .accessibilityIdentifier("todo-prepare-thought")
             } label: {
                 Image(systemName: model.todoInboxFilter == "Inbox" ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill").frame(width: 44, height: 44)
             }.accessibilityLabel("Filter inbox").accessibilityIdentifier("todo-filter-menu")

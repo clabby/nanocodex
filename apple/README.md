@@ -14,6 +14,15 @@ workspace, agent activity menu bar, and automatic background Mac Hand. This
 project targets iPhone and iPad only; Mac Catalyst and the Designed for iPad
 Mac destination are disabled. It connects directly to the managed HTTP/SSE
 contract without a bundled Node runtime.
+The app selector remains available across normal navigation, including CRM profiles,
+related people, meeting documents, and connector pages. Switching apps leaves the
+pushed page without discarding the conversation draft. A persistent composer on
+Inbox, CRM, Meetings, Apps, and other navigation pages starts a new thread;
+Chat continues replying to its selected thread. The global draft is saved per
+account, separately from conversation drafts. Inbox’s filter menu includes an
+explicit **Prepare a thought** action, keeping research/preparation separate
+from starting a thread.
+
 Its authenticated native Hand can also bridge [Bluetooth Low Energy devices](../docs/bluetooth-le.md), including typed [Flipper Zero](../docs/flipper-zero.md) RPC tools without custom Flipper firmware.
 
 For Lock Screen voice tasks, add the circular or rectangular **Speak to Nanocodex** widget after

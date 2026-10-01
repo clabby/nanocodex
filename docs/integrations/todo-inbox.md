@@ -1,6 +1,6 @@
 # Mobile Inbox
 
-The bottom-left **Inbox** tab is one default mixed actionable queue: upcoming Calendar events, prepared decisions, captured tasks, review drafts, recent agent work, and Gmail conversations. It is not a permanent For you/Mail/Later tab split. The full-width app selector and “On your mind…” capture composer remain in the bottom dock.
+The bottom-left **Inbox** tab is one default mixed actionable queue: upcoming Calendar events, prepared decisions, captured tasks, review drafts, recent agent work, and Gmail conversations. It is not a permanent For you/Mail/Later tab split. The full-width app selector and global new-thread composer remain below normal navigation, including CRM profiles. The global composer starts a fresh thread; Chat replies to its selected thread. The filter menu’s explicit **Prepare a thought** action opens the separate “On your mind” research/preparation capture sheet.
 
 The optional filter menu offers **Inbox**, **Mail**, **Snoozed**, **Drafts**, **Sent**, and **All mail**, with a clear-filter action to return to the mixed queue. The account menu selects all or one connected account. Search uses Gmail syntax for mail and local matching for loaded non-mail rows. Drafts are Nanocodex review drafts, separate from Gmail's native Drafts folder. The default queue shows events within the next day and recent running/ready/failed agent work updated within the last day; older conversations remain reachable in Chat. Opening agent work does not mark it done.
 

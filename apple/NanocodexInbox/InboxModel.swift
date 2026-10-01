@@ -42,6 +42,16 @@ final class InboxModel: ObservableObject {
     }
     @Published var filter: Filter = .all { didSet { rosterRevision = UUID(); reconcile() } }
     @Published var drafts: [String: String] = [:]
+    // Global entry is independent of every existing conversation's reply draft.
+    @Published var newThreadDraft = "" {
+        didSet {
+            guard !restoringNewThreadDraft, !scope.isEmpty, newThreadDraft != oldValue else { return }
+            let key = "inbox.newThreadDraft." + scope, value = newThreadDraft
+            preferences.enqueue { $0.set(value, forKey: key) }
+        }
+    }
+    @Published private(set) var newThreadError: String?
+    private var restoringNewThreadDraft = false
     @Published var rows: [TranscriptRow] = [] {
         didSet {
             rowsRevision = UUID(); queueProjection.invalidate()
@@ -507,7 +517,7 @@ final class InboxModel: ObservableObject {
         draft = text
         return send()
     }
-    private var scope = "" { didSet { restoreThreadScreens(); scheduleAgentNotifications() } }
+    private var scope = "" { didSet { restoreNewThreadDraft(); restoreThreadScreens(); scheduleAgentNotifications() } }
     private lazy var agentNotifications = AgentNotificationController(open: { [weak self] url in self?.openAgentActivity(url) })
     private var agentNotificationUpdate: Task<Void, Never>?
     private var pendingActivityURL: URL?
@@ -1465,6 +1475,9 @@ final class InboxModel: ObservableObject {
                     "id": .string(capture.id), "body": .string(capture.body),
                     "watch_hint": .string(capture.watchHint), "status": .string(done ? "done" : "captured"),
                     "version": .number(Double(capture.version + 1)), "created_at": .string(capture.createdAt),
+                    // The backend blocks completed preparation and requeues it on Undo.
+                    "preparation": .object(["status": .string(done ? "blocked" : "pending"),
+                        "error": .string(done ? "capture_completed" : "")]),
                 ]))
             } else if let client {
                 result = try await client.updateTodoCapture(capture, status: done ? "done" : "captured", operationID: operationID)
@@ -4120,6 +4133,50 @@ final class InboxModel: ObservableObject {
                 if generation == epoch { modelSettingsError = error.localizedDescription }
             }
         }
+    }
+
+    private func restoreNewThreadDraft() {
+        restoringNewThreadDraft = true
+        newThreadDraft = scope.isEmpty ? "" : UserDefaults.standard.string(forKey: "inbox.newThreadDraft." + scope) ?? ""
+        newThreadError = nil
+        restoringNewThreadDraft = false
+    }
+
+    var canStartNewThread: Bool {
+        connected && !newThreadDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // Checkpoint the fresh creation and its first message in one transaction
+    // before changing the draft/focus or allowing any external effect. Existing
+    // Chat still uses send(); this entry never inherits that thread's context.
+    func startNewThreadFromDraft() -> Bool {
+        guard canStartNewThread else { return false }
+        let text = newThreadDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = "draft-" + UUID().uuidString
+        let message = PendingMessage(agentID: id, input: text, predecessor: "")
+        let snapshot = MobileOutboxStore.Snapshot(pending: pending + [message], cancellations: cancellations,
+            steeringTransfers: steeringTransfers, pendingCreations: pendingCreations.union([id]))
+        do {
+            try requireDurableOutbox()
+            try durableOutbox().save(snapshot, scope: scope)
+        } catch {
+            newThreadError = "Couldn't save your new thread. Your text is still here. " + error.localizedDescription
+            return false
+        }
+        committedOutbox = snapshot
+        pending = snapshot.pending; pendingCreations = snapshot.pendingCreations
+        var card = newConversationCard(id)
+        card.noteSubmittedPrompt(text, at: Date().timeIntervalSince1970 * 1000)
+        cards.insert(card, at: 0)
+        if isDemo { demoRows[id] = [] }
+        busy.insert(id); error = nil; notice = nil
+        select(id)
+        newThreadDraft = ""; newThreadError = nil
+        persist()
+        let epoch = generation
+        // submit flushes the draft clear before readyAgent can create remotely.
+        Task { await submit(message, epoch: epoch) }
+        return true
     }
 
     func newAgent() {

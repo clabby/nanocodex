@@ -172,8 +172,8 @@ struct InboxView: View {
     @ObservedObject var model: InboxModel
     @State private var mainSurface: MainSurface = (ProcessInfo.processInfo.arguments.contains("--demo")
         && !ProcessInfo.processInfo.arguments.contains("--todo-ui-fixture")) ? .chat : .todo
-    @State private var todoInputFocused = false
-    private enum MainSurface { case todo, chat, crm, meetings, apps }
+    @State private var newThreadInputFocused = false
+    private enum MainSurface: Hashable { case todo, chat, crm, meetings, apps }
     @State private var selectedGeneratedApp: String?
     @State private var showCreateApp = false
     @State private var showConversations = false
@@ -199,49 +199,64 @@ struct InboxView: View {
     @State private var bottomDockHeight: CGFloat = 0
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if model.connected && mainSurface == .todo {
-                    TodoBoardView(model: model, onChat: { mainSurface = .chat })
-                        .id(model.todoAccountIdentity)
-                        .contentMargins(.bottom, bottomDockHeight, for: .scrollContent)
-                } else if model.connected && mainSurface == .meetings {
-                    MeetingsHomeView(model: model) { showMeeting = true }
-                        .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
-                } else if model.connected && mainSurface == .crm {
-                    CRMView(model: model)
-                        .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
-                } else if model.connected && mainSurface == .apps {
-                    GeneratedAppsView(model: model, selection: $selectedGeneratedApp, create: { showCreateApp = true }, openChat: { mainSurface = .chat; model.openThread() })
-                        .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
-                } else { inbox }
-            }
-                .environment(\.conversationComposerHeight, bottomDockHeight)
-                #if os(iOS)
-                .navigationTitle("Conversations")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar(.hidden, for: .navigationBar)
-                #endif
-                .navigationDestination(isPresented: $showScheduledJobs) {
-                    ScheduledJobsView(model: model) {
-                        showScheduledJobs = false
-                        composerFocused = false
-                    }
-                    #if os(iOS)
-                    .toolbar(.visible, for: .navigationBar)
-                    .navigationBarTitleDisplayMode(.inline)
-                    #endif
+        VStack(spacing: 0) {
+            NavigationStack {
+                Group {
+                    if model.connected && mainSurface == .todo {
+                        TodoBoardView(model: model, onChat: { selectMainSurface(.chat) })
+                            .id(model.todoAccountIdentity)
+                    } else if model.connected && mainSurface == .meetings {
+                        MeetingsHomeView(model: model) { showMeeting = true }
+                    } else if model.connected && mainSurface == .crm {
+                        CRMView(model: model)
+                    } else if model.connected && mainSurface == .apps {
+                        GeneratedAppsView(model: model, selection: $selectedGeneratedApp, create: { showCreateApp = true }, openChat: { selectMainSurface(.chat); model.openThread() })
+                    } else { inbox }
                 }
-                .navigationDestination(isPresented: $showConnectors) {
-                    ConnectorsView(model: model)
+                    .environment(\.conversationComposerHeight, bottomDockHeight)
+                    #if os(iOS)
+                    .navigationTitle("Conversations")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar(.hidden, for: .navigationBar)
+                    #endif
+                    .navigationDestination(isPresented: $showScheduledJobs) {
+                        ScheduledJobsView(model: model) {
+                            showScheduledJobs = false
+                            composerFocused = false
+                        }
                         #if os(iOS)
                         .toolbar(.visible, for: .navigationBar)
                         .navigationBarTitleDisplayMode(.inline)
                         #endif
+                    }
+                    .navigationDestination(isPresented: $showConnectors) {
+                        ConnectorsView(model: model)
+                            #if os(iOS)
+                            .toolbar(.visible, for: .navigationBar)
+                            .navigationBarTitleDisplayMode(.inline)
+                            #endif
+                    }
+            }
+            // A tab switch must leave implicit pushed destinations such as CRM profiles.
+            .id(mainSurface)
+            // Shell-owned controls remain available through pushed destinations.
+            // Reserve actual viewport space, not a safe-area inset that the Chat
+            // panel deliberately extends through.
+            if model.connected {
+                VStack(spacing: 0) {
+                    if showsNewThreadComposer {
+                        NewThreadComposer(model: model, focused: $newThreadInputFocused) {
+                            if model.startNewThreadFromDraft() { selectMainSurface(.chat) }
+                        }
+                        .frame(maxWidth: InboxChrome.maximumWidth).frame(maxWidth: .infinity)
+                    }
+                    mainNavigation
                 }
+                .background(Ink.background.ignoresSafeArea(edges: .bottom))
+            }
         }
         .sheet(isPresented: $showCreateApp) {
-            CreateGeneratedAppSheet(model: model) { mainSurface = .chat; model.openThread() }
+            CreateGeneratedAppSheet(model: model) { selectMainSurface(.chat); model.openThread() }
         }
         .task(id: model.screenScope) {
             while !Task.isCancelled {
@@ -251,9 +266,6 @@ struct InboxView: View {
         }
         // Account changes discard navigation destinations and their private state.
         .id(model.screenScope)
-        .overlay(alignment: .bottom) {
-            if model.connected && mainSurface == .todo { bottomDock }
-        }
         .safeAreaInset(edge: .top, spacing: 0) {
             if !model.isDemo, let update = appUpdates.update {
                 HStack(spacing: 12) {
@@ -316,6 +328,8 @@ struct InboxView: View {
         .onAppear { MeetingLockedCoordinator.shared.recoverOutstanding() }
         .onChange(of: model.screenScope) { _, _ in
             screenThreads.removeAll(); screenExpanded = false; showScreens = false; controlsScreen = nil
+            selectedGeneratedApp = nil; showCreateApp = false
+            resetSurfaceNavigation(); bottomDockHeight = 0
         }
         .onChange(of: model.focused?.id) { _, _ in screenExpanded = false }
         .onChange(of: showScreens) { _, visible in
@@ -338,22 +352,15 @@ struct InboxView: View {
         .onChange(of: model.connected) { _, connected in
             if connected { Task { await model.refreshGeneratedApps() } }
             if connected && model.musicConnectorToOpen != nil { showConnectors = true }
-            if !connected { selectedGeneratedApp = nil; showCreateApp = false; mainSurface = .todo; screenThreads.removeAll(); screenExpanded = false; showConversations = false; showScreens = false; showScheduledJobs = false; showConnectors = false; showSettings = false; readingPositions.values.removeAll() }
+            if !connected { selectedGeneratedApp = nil; showCreateApp = false; mainSurface = .todo; screenThreads.removeAll(); screenExpanded = false; resetSurfaceNavigation(); bottomDockHeight = 0; showScreens = false; showSettings = false; readingPositions.values.removeAll() }
         }
 
     }
 
     @ViewBuilder
     private var bottomDock: some View {
-        if !showScreens && !showScheduledJobs && !showConnectors {
-            VStack(spacing: 0) {
-                if mainSurface == .todo {
-                    TodoCaptureComposer(model: model, inputFocused: $todoInputFocused)
-                } else {
-                    conversationBottomControls
-                }
-                mainNavigation
-            }
+        if !showScreens && !showsNewThreadComposer {
+            conversationBottomControls
             .frame(maxWidth: InboxChrome.maximumWidth)
             .frame(maxWidth: .infinity)
             .background(Ink.background.ignoresSafeArea(edges: .bottom))
@@ -361,10 +368,25 @@ struct InboxView: View {
                 LinearGradient(colors: [Ink.background.opacity(0), Ink.background], startPoint: .top, endPoint: .bottom)
                     .frame(height: 16).offset(y: -16).allowsHitTesting(false)
             }
-            // Keep the idle dock near the home indicator, restoring keyboard clearance on focus.
-            .offset(y: composerFocused || todoInputFocused ? 0 : 14)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomDockHeight = $0 }
         }
+    }
+
+    private var showsNewThreadComposer: Bool {
+        mainSurface != .chat || model.focused == nil || showScheduledJobs || showConnectors
+    }
+
+    private func resetSurfaceNavigation() {
+        composerFocused = false; newThreadInputFocused = false
+        showScheduledJobs = false; showConnectors = false
+        showConversations = false; drawerTranslation = 0; drawerDragIsHorizontal = nil
+    }
+
+    private func selectMainSurface(_ surface: MainSurface) {
+        resetSurfaceNavigation()
+        if mainSurface != surface { bottomDockHeight = 0 }
+        mainSurface = surface
+        if surface == .todo { Task { await model.refreshTodo() } }
     }
 
     private var navigationTabs: some View {
@@ -377,18 +399,16 @@ struct InboxView: View {
                 Menu {
                     ForEach(model.generatedApps) { app in
                         Button(app.title) {
-                            composerFocused = false; todoInputFocused = false
-                            selectedGeneratedApp = app.id; mainSurface = .apps
+                            selectedGeneratedApp = app.id; selectMainSurface(.apps)
                         }
                         .accessibilityIdentifier("app-store-app-\(app.id)")
                     }
                     if !model.generatedApps.isEmpty { Divider() }
                     Button {
-                        composerFocused = false; todoInputFocused = false
-                        selectedGeneratedApp = nil; mainSurface = .apps
+                        selectedGeneratedApp = nil; selectMainSurface(.apps)
                     } label: { Label("Your apps", systemImage: "square.grid.2x2") }
                     Button {
-                        composerFocused = false; todoInputFocused = false
+                        composerFocused = false; newThreadInputFocused = false
                         showCreateApp = true
                     } label: { Label("Create an app", systemImage: "plus") }
                 } label: {
@@ -418,10 +438,7 @@ struct InboxView: View {
 
     private func mainNavigationButton(_ surface: MainSurface, title: String, symbol: String, identifier: String) -> some View {
         Button {
-            composerFocused = false
-            todoInputFocused = false
-            mainSurface = surface
-            if surface == .todo { Task { await model.refreshTodo() } }
+            selectMainSurface(surface)
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: 19, weight: .medium))
@@ -698,7 +715,7 @@ struct InboxView: View {
                 Label(screenThreads.contains(model.focusedConversationIdentity ?? "") ? "Hide screen" : "Screen", systemImage: "display")
             }.disabled(model.remoteService == nil || model.focused == nil).accessibilityIdentifier("conversation-remote-screens")
             if !model.isDemo {
-                Button { composerFocused = false; mainSurface = .meetings } label: {
+                Button { selectMainSurface(.meetings) } label: {
                     Label("Meetings", systemImage: "text.bubble")
                 }.accessibilityIdentifier("inbox-meeting")
             }
@@ -1097,6 +1114,45 @@ private struct ConnectionStatusView: View {
             do { try await Task.sleep(for: .seconds(5)) } catch { return }
             showDelay = true
         }
+    }
+}
+
+private struct NewThreadComposer: View {
+    @ObservedObject var model: InboxModel
+    @Binding var focused: Bool
+    let send: () -> Void
+    @State private var overflowing = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let error = model.newThreadError {
+                Text(error).font(.caption).foregroundStyle(Ink.amber)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                ChatComposerEditor(text: $model.newThreadDraft, focused: $focused,
+                                   overflowing: $overflowing, accessibilityLabel: "New thread")
+                    .accessibilityIdentifier("new-thread-composer")
+                    .overlay(alignment: .topLeading) {
+                        if model.newThreadDraft.isEmpty {
+                            Text("Start a new thread…").font(.body).foregroundStyle(.tertiary)
+                                .padding(.top, 8).allowsHitTesting(false).accessibilityHidden(true)
+                        }
+                    }
+                Button(action: send) {
+                    Image(systemName: "arrow.up").font(.system(size: 16, weight: .semibold))
+                        .frame(width: 32, height: 32)
+                        .background(Ink.accent.opacity(model.canStartNewThread ? 1 : 0.22), in: Circle())
+                        .foregroundStyle(Ink.background)
+                        .frame(width: 44, height: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!model.canStartNewThread)
+                .accessibilityLabel("Start new thread").accessibilityIdentifier("new-thread-send")
+                .keyboardShortcut(.return, modifiers: .command)
+            }
+            .padding(.leading, 16).padding(.trailing, 4).padding(.vertical, 4)
+        }
+        .modifier(InboxComposerShell(focused: focused))
     }
 }
 
