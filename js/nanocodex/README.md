@@ -864,6 +864,12 @@ That scope does not promise cold replay of a non-durable task. Absent or malform
 metadata still interrupts before effects. Generic explicit runtimes without
 an identity resolver retain their existing session/parent identity semantics.
 `turnId` is diagnostic metadata, not the effect replay key.
+Child event forwarding may race the host invocation. The owned SDK rendezvous
+with the exact accepted session/turn and fresh tool-call metadata before journal
+admission (one-second deadline, at most 128 waiters, abort/release/dispose cleanup).
+It never derives effect authority from a parent correlation envelope or reuses
+consumed model-call metadata. Parallel nested calls share one identity promise;
+missing or conflicting metadata fails closed without effect dispatch.
 This covers direct application tools (`toolMode: "direct"`) as well as tools
 invoked by Code Mode. Direct contexts use `parentCallId = callId` and
 `source = "host-tool:" + name`; nested contexts use the exact guest source
