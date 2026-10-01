@@ -63,3 +63,31 @@ execution placement; peer filesystem access requires a conforming native adapter
 Each call captures its Hand connection. Retained process sessions remain pinned
 to that Hand; reconnecting never retargets admitted work. Subagents share this
 mount policy while keeping model state private. Coordinate concurrent file writes.
+
+
+## Native screen ownership
+
+Screen startup, display allocation, capture-helper supervision and reconnects
+belong to the shared Rust Hand lifecycle. The ordinary `nanocodex2 hand` and
+installed device Hand call the same `NativeScreen`/`screen_supervisor` code.
+No per-machine shell watchdog, JPEG fallback, socket-unlink script or factory
+restart is part of screen recovery. On headless Linux the Hand starts its own
+private Xvfb desktop, reserves an explicit display with a retained file lease
+and normal X server PID lock, and repairs a lost owned socket in place. It never
+unlinks another display or weakens display authentication. Native desktop live
+media requires WebRTC H.264; agent-requested screenshots are separate.
+
+The supported Debian/Ubuntu remote installer provisions FFmpeg with Xvfb,
+Openbox, XTerm and fonts. Setup waits for the connected Hand and its controllable
+positive-size video desktop, rejecting JPEG-frame catalogs as readiness. This is
+installation/provisioning, not a runtime download or privilege escalation.
+Runtime recovery runs as the existing non-root Hand owner.
+
+This is not yet a dependency-free Linux binary: an existing Wayland desktop
+still requires an accessible compositor session, Waymote and Grim, and native
+OS capture/input permissions must be granted normally. The Debian/Ubuntu remote
+installer does not provision those Wayland helpers or support Arch/Omarchy
+package installation. Native Wayland capture does not depend on an `X0 -> X0_`
+alias; an optional upstream X11 CUA integration may have separate requirements.
+These packaging/session boundaries must not be described as fixed merely because
+a configured machine's screen passed a live check.

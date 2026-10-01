@@ -19,6 +19,19 @@ use tokio::process::Command;
 const ROOT: &str = "/opt/nanocodex";
 const STATE: &str = "/srv/nanocodex";
 const SERVICE: &str = "nanocodex-hand.service";
+// Native headless screens are video-only. Provision their encoder alongside
+// display/input prerequisites; users must not repair a fresh install over SSH.
+const DESKTOP_PACKAGES: &[&str] = &[
+    "ca-certificates",
+    "libpulse0",
+    "libxkbcommon0",
+    "xvfb",
+    "openbox",
+    "xterm",
+    "xauth",
+    "fonts-dejavu-core",
+    "ffmpeg",
+];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -254,18 +267,8 @@ async fn install_dependencies() -> Result<()> {
     {
         bail!("automatic dependency installation currently supports Debian and Ubuntu");
     }
-    let packages = [
-        "ca-certificates",
-        "libpulse0",
-        "libxkbcommon0",
-        "xvfb",
-        "openbox",
-        "xterm",
-        "xauth",
-        "fonts-dejavu-core",
-    ];
     let mut missing = Vec::new();
-    for package in packages {
+    for &package in DESKTOP_PACKAGES {
         let output = Command::new("dpkg-query")
             .args(["-W", "-f=${Status}", package])
             .output()
@@ -465,20 +468,40 @@ async fn wait_ready(request: &Request, machine: &str) -> Result<()> {
     while Instant::now() < deadline {
         let hands = account_get(&client, request, "/v1/account/hands").await;
         let screens = account_get(&client, request, "/v1/account/hands/screens").await;
-        if let (Ok(hands), Ok(screens)) = (hands, screens) {
-            let hand_ready = hands["data"]
-                .as_array()
-                .is_some_and(|hands| hands.iter().any(|hand| hand["id"] == machine));
-            let screen_ready = screens["surfaces"].as_array().is_some_and(|screens| {
-                screens.iter().any(|screen| screen["machine_id"] == machine)
-            });
-            if hand_ready && screen_ready {
-                return Ok(());
-            }
+        if let (Ok(hands), Ok(screens)) = (hands, screens)
+            && catalog_ready(&hands, &screens, machine)
+        {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    bail!("the service started but its Hand and desktop did not appear in the account catalog")
+    bail!(
+        "the service started but its Hand and controllable video desktop did not appear in the account catalog"
+    )
+}
+
+fn catalog_ready(hands: &Value, screens: &Value, machine: &str) -> bool {
+    // /v1/account/hands already filters offline machines server-side. Do not
+    // invent an `online` field or accept a screen without its attached Hand.
+    let hand_ready = hands["data"]
+        .as_array()
+        .is_some_and(|hands| hands.iter().any(|hand| hand["id"] == machine));
+    let screen_ready = screens["surfaces"].as_array().is_some_and(|screens| {
+        screens.iter().any(|screen| {
+            screen["machine_id"] == machine
+                && screen["id"] == "desktop"
+                && screen["kind"] == "desktop"
+                && screen["controllable"] == true
+                && ["width", "height"].iter().all(|key| {
+                    screen[key].as_u64().is_some_and(|size| (1..=16384).contains(&size))
+                })
+                // WebRTC is the existing catalog default (no transport field),
+                // not a literal `webrtc` value. Frame catalogs are not ready.
+                && screen.get("transport").is_none()
+                && screen.get("frame_window").is_none()
+        })
+    });
+    hand_ready && screen_ready
 }
 
 async fn account_get(client: &reqwest::Client, request: &Request, path: &str) -> Result<Value> {
@@ -516,6 +539,75 @@ mod tests {
             };
             assert!(validate_request(&invalid).is_err(), "{origin}");
         }
+    }
+
+    fn ready_catalogs() -> (Value, Value) {
+        (
+            json!({"data": [{"id": "fixture"}]}),
+            json!({"surfaces": [{"machine_id": "fixture", "id": "desktop",
+                "kind": "desktop", "controllable": true, "width": 1920, "height": 1080}]}),
+        )
+    }
+
+    #[test]
+    fn headless_dependencies_include_the_required_video_encoder() {
+        for package in [
+            "xvfb",
+            "openbox",
+            "xterm",
+            "xauth",
+            "fonts-dejavu-core",
+            "ffmpeg",
+        ] {
+            assert!(DESKTOP_PACKAGES.contains(&package), "missing {package}");
+        }
+    }
+
+    #[test]
+    fn readiness_accepts_the_actual_default_webrtc_catalog_without_online_field() {
+        let (hands, screens) = ready_catalogs();
+        assert!(hands["data"][0].get("online").is_none());
+        assert!(screens["surfaces"][0].get("transport").is_none());
+        assert!(catalog_ready(&hands, &screens, "fixture"));
+    }
+
+    #[test]
+    fn readiness_rejects_frame_catalogs_and_foreign_or_unusable_surfaces() {
+        let (hands, valid) = ready_catalogs();
+        for (key, value) in [
+            ("transport", json!("frames-v1")),
+            ("transport", json!("webrtc")),
+            ("transport", Value::Null),
+            ("frame_window", json!(1)),
+            ("machine_id", json!("other")),
+            ("id", json!("phone")),
+            ("kind", json!("window")),
+            ("controllable", json!(false)),
+            ("width", json!(0)),
+            ("height", json!(16385)),
+            ("width", json!("1920")),
+        ] {
+            let mut screens = valid.clone();
+            screens["surfaces"][0][key] = value;
+            assert!(
+                !catalog_ready(&hands, &screens, "fixture"),
+                "accepted {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_requires_both_the_connected_hand_and_its_video_desktop() {
+        let (hands, screens) = ready_catalogs();
+        assert!(!catalog_ready(&json!({"data": []}), &screens, "fixture"));
+        assert!(!catalog_ready(
+            &json!({"data": [{"id": "other"}]}),
+            &screens,
+            "fixture"
+        ));
+        assert!(!catalog_ready(&hands, &json!({"surfaces": []}), "fixture"));
+        assert!(!catalog_ready(&Value::Null, &screens, "fixture"));
+        assert!(!catalog_ready(&hands, &Value::Null, "fixture"));
     }
 
     #[test]
