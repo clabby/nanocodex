@@ -351,6 +351,17 @@ pub(crate) async fn serve(mut prepared: Prepared) -> Result<(), ManagedError> {
     } else {
         Some(Desktop::start(&prepared).await?)
     };
+    // Keep recordings outside the disposable compositor runtime. The scoped
+    // endpoint and machine identify a stable owner-local directory across restarts.
+    use sha2::Digest as _;
+    let recording_key = sha2::Sha256::digest(
+        format!("{}\0{}", prepared.command.url, prepared.command.machine_id).as_bytes(),
+    );
+    let recording_root = super::host::config_path().ok().map(|config| {
+        config
+            .with_file_name("recordings")
+            .join(hex::encode(&recording_key[..12]))
+    });
     let mut markers = Markers::new(&prepared.command.credential_file);
     markers.write(false, b"ready\n")?;
     let signal = super::service::shutdown_signal();
@@ -361,7 +372,7 @@ pub(crate) async fn serve(mut prepared: Prepared) -> Result<(), ManagedError> {
         let target = attachment(&prepared.target)?;
         let started = tokio::select! {
             result = &mut signal => { if let Some(desktop) = desktop.take() { desktop.stop().await; } return result; }
-            result = NativeScreen::start(&target, &prepared.machine, prepared.runtime.path()) => result,
+            result = NativeScreen::start_with_recordings(&target, &prepared.machine, prepared.runtime.path(), recording_root.as_deref()) => result,
         };
         match started {
             Ok(screen) => break screen,

@@ -34,6 +34,7 @@ pub(crate) async fn serve_desktop(command: DesktopCommand) -> Result<(), Managed
 }
 pub(crate) struct NativeScreen {
     publisher: Option<ScreenPublisher>,
+    recorder: Option<super::hand_recording::Recorder>,
     #[cfg(target_os = "linux")]
     desktop: Option<DesktopChild>,
     #[cfg(target_os = "linux")]
@@ -86,6 +87,20 @@ impl NativeScreen {
         machine: &AttachmentMachine,
         directory: &Path,
     ) -> Result<Self, ManagedError> {
+        Self::start_with_recordings(
+            target,
+            machine,
+            directory,
+            Some(&directory.join("recordings")),
+        )
+        .await
+    }
+    pub(crate) async fn start_with_recordings(
+        target: &AttachmentTarget,
+        machine: &AttachmentMachine,
+        directory: &Path,
+        recording_root: Option<&Path>,
+    ) -> Result<Self, ManagedError> {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let _ = directory;
@@ -110,6 +125,8 @@ impl NativeScreen {
                     .map_err(configuration)?
                 })
             });
+            let (recorder, backend) =
+                super::hand_recording::attach(recording_root, None, backend).await;
             let publisher = ScreenPublisher::start(
                 target,
                 machine,
@@ -122,6 +139,7 @@ impl NativeScreen {
             .await?;
             Ok(Self {
                 publisher: Some(publisher),
+                recorder,
             })
         }
         #[cfg(target_os = "linux")]
@@ -131,10 +149,12 @@ impl NativeScreen {
                     && std::env::var_os("WAYLAND_DISPLAY").is_some())
             {
                 let wayland = super::screen_wayland::Platform::start().await?;
+                let (recorder, backend) =
+                    super::hand_recording::attach(recording_root, None, wayland.backend()).await;
                 let publisher = match ScreenPublisher::start(
                     target,
                     machine,
-                    wayland.backend(),
+                    backend,
                     Some(wayland.video()),
                     None,
                     super::screen_audio::native_source(),
@@ -150,6 +170,7 @@ impl NativeScreen {
                 };
                 return Ok(Self {
                     publisher: Some(publisher),
+                    recorder,
                     desktop: None,
                     wayland: Some(wayland),
                     runtime: directory.join("desktop"),
@@ -173,6 +194,7 @@ impl NativeScreen {
             let desktop = Self::spawn_desktop(Path::new(machine.workspace()), &runtime)?;
             let mut screen = Self {
                 publisher: None,
+                recorder: None,
                 desktop: Some(desktop),
                 wayland: None,
                 runtime: runtime.clone(),
@@ -181,11 +203,16 @@ impl NativeScreen {
             };
             let ready = async {
                 screen.wait_desktop().await?;
+                let recording_runtime = runtime.clone();
                 let video_runtime = runtime.clone();
                 let backend: ScreenBackend = std::sync::Arc::new(move |input| {
                     let runtime = runtime.clone();
                     Box::pin(async move { desktop_request(runtime, input).await })
                 });
+                let (recorder, backend) =
+                    super::hand_recording::attach(recording_root, Some(recording_runtime), backend)
+                        .await;
+                screen.recorder = recorder;
                 screen.publisher = Some(
                     ScreenPublisher::start(
                         target,
@@ -309,6 +336,9 @@ impl NativeScreen {
             .is_none_or(ScreenPublisher::is_finished)
     }
     pub(crate) async fn shutdown(mut self) -> Result<(), ManagedError> {
+        if let Some(recorder) = self.recorder.take() {
+            recorder.shutdown().await;
+        }
         let result = if let Some(publisher) = self.publisher.take() {
             publisher.shutdown().await
         } else {

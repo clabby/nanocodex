@@ -25,3 +25,9 @@ mod macos_audio;
 pub use macos_audio::{capture_audio, capture_video, main_display_dimensions};
 mod video;
 pub use video::VideoSettings;
+
+/// Bounded persistent workflow recording.
+pub mod recording;
+
+/// Native privacy-aware recording observations.
+pub mod recording_observer;

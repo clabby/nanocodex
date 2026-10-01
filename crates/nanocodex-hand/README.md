@@ -1,6 +1,6 @@
 # Nanocodex Hand
 
-Native screen capture and input for Nanocodex Hands. This package is part of the supported Rust workspace. Platform permission prompts and capture/input APIs remain owned by the native host.
+Native screen capture, input and workflow recording for Nanocodex Hands. This package is part of the supported Rust workspace. Platform permission prompts and capture/input APIs remain owned by the native host.
 
 macOS requires macOS 26 or later for native observation. It captures the current main-display rectangle directly through ScreenCaptureKit, without enumerating windows or caching screenshots. Remote viewing uses hardware H.264 over the shared WebRTC publisher; encoder failure is reported and retried rather than silently switching to screenshot streaming. FFmpeg must be available on PATH.
 
@@ -38,3 +38,7 @@ main display, encodes with VideoToolbox, negotiates a local WebRTC connection,
 and requires Chromium to decode at least 60 H.264 frames. It uses an isolated
 browser profile, sends no desktop input, and logs only aggregate decoder metrics.
 Set `NANOCODEX_TEST_CHROME` to choose a Chromium executable.
+
+Native workflow recordings are owned by the Hand and continue independently of
+connected model or screen clients. See [recording operations and platform limits](../../docs/hand-recording.md)
+for explicit scopes, local controls, privacy filtering, evidence retrieval and native E2E journeys.

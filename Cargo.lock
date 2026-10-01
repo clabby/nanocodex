@@ -6041,6 +6041,7 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "dispatch2",
+ "fs2",
  "image",
  "objc2",
  "objc2-core-audio-types",
@@ -6052,10 +6053,14 @@ dependencies = [
  "objc2-screen-capture-kit",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "windows 0.62.2",
  "windows-sys 0.61.2",
+ "x11rb",
+ "x11rb-protocol",
 ]
 
 [[package]]

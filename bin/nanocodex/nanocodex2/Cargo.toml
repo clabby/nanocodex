@@ -22,6 +22,7 @@ vergen = { workspace = true, features = ["build", "git", "gitcl"] }
 [dependencies]
 nanocodex-tui-control = { path = "../tui-control", version = "0.6.6" }
 nanocodex-remote = { path = "../../../crates/nanocodex-remote", version = "0.6.6" }
+nanocodex-hand = { version = "0.6.6", path = "../../../crates/nanocodex-hand" }
 anyhow.workspace = true
 async-trait.workspace = true
 nanocodex-computer.workspace = true
@@ -78,9 +79,6 @@ opusic-c.workspace = true
 [target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
 fs2.workspace = true
 nanocodex-vm.workspace = true
-
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-nanocodex-hand = { version = "0.6.6", path = "../../../crates/nanocodex-hand" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-ioctls = "0.24.0"

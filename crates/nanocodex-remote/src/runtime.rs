@@ -621,6 +621,7 @@ async fn session(
     let mut job = None;
     let mut frame = None;
     let mut request_id = String::new();
+    let mut recording_job = false;
     let broadcast_supported = broadcast.supported();
     // The mutex lends mutable ownership to a single scoped future. Dropping the
     // session cancels it before the publisher calls stop; no worker is detached.
@@ -688,8 +689,9 @@ async fn session(
             },
             result = completed(&mut job) => {
                 job=None;
-                if lease.owner().starts_with("agent:") { release(&mut lease,backend,&mut socket).await?; }
-                let mut result=checked_result(result); result["type"]=json!("agent_result"); result["request_id"]=json!(std::mem::take(&mut request_id));
+                if !recording_job && lease.owner().starts_with("agent:") { release(&mut lease,backend,&mut socket).await?; }
+                let mut result=if recording_job { checked_recording_result(result) } else { checked_result(result) };
+                recording_job = false; result["type"]=json!("agent_result"); result["request_id"]=json!(std::mem::take(&mut request_id));
                 send(&mut socket,result).await?;
             },
             _ = frame_tick.tick(), if frame.is_none() && !pending_frames.is_empty() => {
@@ -736,6 +738,13 @@ async fn session(
                         connection=value["connection_id"].as_str().filter(|s|!s.is_empty()).ok_or(SessionError::Closed)?.into();
                         let mut surface=json!({"id":"desktop","name":"Desktop","kind":if base.path().starts_with("/v1/vm-host-attachments/"){"vm"}else{"desktop"},"width":dimensions.0,"height":dimensions.1,"controllable":true,"agent_tools":true});
                         surface["broadcast"]=json!(broadcast_supported);
+                        surface["recording"] = recording_capability(capabilities).cloned().unwrap_or(json!(false));
+                        let details = &capabilities["recordingCapabilities"];
+                        if capabilities["status"] == "ok" && details["schemaVersion"] == 1
+                            && details["available"].is_boolean() && details["available"] == surface["recording"]
+                            && serde_json::to_vec(details).is_ok_and(|bytes| bytes.len() <= 8192) {
+                            surface["recordingCapabilities"] = details.clone();
+                        }
                         if socket.video.is_none(){surface["transport"]=json!("frames-v1");surface["frame_window"]=json!(6);}
                         send(&mut socket,json!({"type":"catalog","machine_id":machine.id(),"machine_name":machine.name(),"surfaces":[surface]})).await?;
                     },
@@ -870,14 +879,33 @@ async fn session(
                             if result["status"]!="ok" {release(&mut lease,backend,&mut socket).await?;}
                         }
                     },
-                    "agent_cancel"=>{if value["request_id"]==request_id && cancel_job(&mut job).await{release(&mut lease,backend,&mut socket).await?;send(&mut socket,json!({"type":"agent_result","request_id":std::mem::take(&mut request_id),"status":"cancelled"})).await?;}},
+                    "agent_cancel"=>{if value["request_id"]==request_id && cancel_job(&mut job).await{if !recording_job && lease.owner().starts_with("agent:"){release(&mut lease,backend,&mut socket).await?;}recording_job=false;send(&mut socket,json!({"type":"agent_result","request_id":std::mem::take(&mut request_id),"status":"cancelled"})).await?;}},
                     "agent_call"=>{
                         let id=value["request_id"].as_str().unwrap_or("");let action=&value["input"];let now=now_ms();let deadline=value["deadline_at"].as_u64().unwrap_or(0);
                         let job_deadline = tokio::time::Instant::now() + Duration::from_millis(deadline.saturating_sub(now).min(10_000));
                         let owner=format!("agent:{}",value["agent_id"].as_str().unwrap_or(""));
                         let status=if value["surface_id"]!="desktop" || value["generation"]!=generation || !valid_id(id) || !valid_id(value["agent_id"].as_str().unwrap_or("")) || deadline<=now || deadline>now+10_000 {Some("invalid")}
-                        else if job.is_some() || (!lease.owner().is_empty() && !lease.expired() && action["action"]!="observe" && lease.owner()!=owner) {Some("busy")} else {None};
+                        else if job.is_some() || (!lease.owner().is_empty() && !lease.expired() && action["action"]!="observe" && action["action"]!="recording" && lease.owner()!=owner) {Some("busy")} else {None};
                         if let Some(status)=status{send(&mut socket,json!({"type":"agent_result","request_id":id,"status":status})).await?;continue;}
+                        if action["action"] == "recording" {
+                            if !recording_capability(capabilities).is_some_and(|value| value == true || value["available"] == true) {
+                                send(&mut socket,json!({"type":"agent_result","request_id":id,"status":"unavailable"})).await?;
+                                continue;
+                            }
+                            // Recording belongs to the native Hand. Preserve its JSON contract
+                            // and the authenticated envelope without acquiring an input lease.
+                            let backend = backend.clone();
+                            let action = action.clone();
+                            request_id = id.into();
+                            recording_job = true;
+                            job = Some(OwnedJob(tokio::spawn(async move {
+                                if tokio::time::Instant::now() >= job_deadline { return json!({"status":"cancelled"}); }
+                                tokio::time::timeout_at(job_deadline, backend(action)).await
+                                    .map(|result| result.unwrap_or_else(|_|json!({"status":"unavailable"})))
+                                    .unwrap_or_else(|_|json!({"status":"cancelled"}))
+                            })));
+                            continue;
+                        }
                         if action["action"]=="release" {if lease.owner()==owner{release(&mut lease,backend,&mut socket).await?;}send(&mut socket,json!({"type":"agent_result","request_id":id,"status":"ok"})).await?;continue;}
                         let steps=match steps(action){Ok(steps)=>steps,Err(())=>{send(&mut socket,json!({"type":"agent_result","request_id":id,"status":"invalid"})).await?;continue;}};
                         if action.get("context").is_some() && action["action"] != "observe" {send(&mut socket,json!({"type":"agent_result","request_id":id,"status":"invalid"})).await?;continue;}
@@ -971,6 +999,34 @@ fn valid_frame(value: &Value) -> bool {
         && ["width", "height"]
             .iter()
             .all(|key| value[*key].as_u64().is_some_and(|v| v > 0 && v <= 1280))
+}
+fn recording_capability(capabilities: &Value) -> Option<&Value> {
+    let value = &capabilities["recording"];
+    (capabilities["status"] == "ok"
+        && (value.is_boolean() || (value["schemaVersion"] == 1 && value["available"].is_boolean()))
+        && serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= 8192))
+    .then_some(value)
+}
+// The broker accepts at most 750,000 UTF-8 bytes. Leave room for its envelope,
+// and retain native recording errors/metadata without treating them as screenshots.
+fn checked_recording_result(value: Value) -> Value {
+    if !value.is_object()
+        || !["ok", "error", "busy", "invalid", "unavailable", "cancelled"]
+            .contains(&value["status"].as_str().unwrap_or(""))
+        || serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > 740_000)
+    {
+        return json!({"status":"unavailable"});
+    }
+    let status = if value["status"] == "error" {
+        match value["error"].as_str() {
+            Some("invalid_request" | "not_found") => "invalid",
+            Some("conflict") => "busy",
+            _ => "unavailable",
+        }
+    } else {
+        value["status"].as_str().unwrap_or("unavailable")
+    };
+    json!({"status": status, "recording": value})
 }
 fn checked_result(value: Value) -> Value {
     let status = value["status"].as_str().unwrap_or("unavailable");
@@ -1103,6 +1159,13 @@ mod tests {
         serde_json::from_str(message.to_text().unwrap()).unwrap()
     }
     async fn test_session(backend: Backend, options: Options) -> (Publisher, TestWire) {
+        let (publisher, wire, _) = test_session_catalog(backend, options).await;
+        (publisher, wire)
+    }
+    async fn test_session_catalog(
+        backend: Backend,
+        options: Options,
+    ) -> (Publisher, TestWire, Value) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target = PublisherTarget::from_attachment(
             &format!(
@@ -1114,16 +1177,26 @@ mod tests {
         .unwrap();
         let peer = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut wire = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut wire = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                    assert_eq!(request.headers()["authorization"], "Bearer test-token");
+                    assert_eq!(request.uri().path(), "/v1/account/hands/host");
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
             wire_send(&mut wire, json!({"type":"ready","connection_id":"test"})).await;
-            assert_eq!(wire_read(&mut wire).await["type"], "catalog");
+            let catalog = wire_read(&mut wire).await;
+            assert_eq!(catalog["type"], "catalog");
             wire_send(&mut wire, json!({"type":"published","generation":"g"})).await;
             wire_send(
                 &mut wire,
                 json!({"type":"viewer","viewer_id":"v","surface_id":"desktop"}),
             )
             .await;
-            wire
+            (wire, catalog)
         });
         let publisher = Publisher::start(
             &target,
@@ -1133,8 +1206,144 @@ mod tests {
         )
         .await
         .unwrap();
-        (publisher, peer.await.unwrap())
+        let (wire, catalog) = peer.await.unwrap();
+        (publisher, wire, catalog)
     }
+    #[tokio::test]
+    async fn recording_transport_preserves_human_control_and_bounds_native_results() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let backend: Backend = Arc::new(move |input| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                seen.lock().unwrap().push(input.clone());
+                Ok(match input["action"].as_str().unwrap_or("") {
+                    "capabilities" => {
+                        json!({"status":"ok","recording":true,"recordingCapabilities":{"schemaVersion":1,"available":true,"operations":["start","status","frame","export"],"capture":{"native_observer":true}}})
+                    }
+                    "recording" => match input["operation"].as_str().unwrap_or("") {
+                        "pause" => json!({"status":"error","error":"conflict"}),
+                        "frame" => json!({"status":"ok","data_base64":"a".repeat(740_000)}),
+                        "export" => {
+                            std::future::pending::<()>().await;
+                            unreachable!()
+                        }
+                        _ => {
+                            json!({"status":"ok","id":"rec_00000000000000000000000000000000","state":"recording"})
+                        }
+                    },
+                    _ => json!({"status":"ok","width":1,"height":1,"jpeg":"/9j/2Q=="}),
+                })
+            })
+        });
+        let (publisher, mut wire, catalog) =
+            test_session_catalog(backend, Options::default()).await;
+        assert_eq!(catalog["surfaces"][0]["recording"], true);
+        assert_eq!(
+            catalog["surfaces"][0]["recordingCapabilities"],
+            json!({"schemaVersion":1,"available":true,"operations":["start","status","frame","export"],"capture":{"native_observer":true}})
+        );
+        wire_send(
+            &mut wire,
+            json!({"type":"control","viewer_id":"v","data":{"type":"acquire"}}),
+        )
+        .await;
+        let grant = wire_read(&mut wire).await;
+        assert_eq!(grant["data"]["type"], "granted");
+        let input_generation = grant["data"]["generation"].clone();
+        calls.lock().unwrap().clear();
+        let request = json!({"type":"agent_call","request_id":"recording-request","agent_id":"a","surface_id":"desktop","generation":"g","deadline_at":now_ms()+8000,"input":{"action":"recording","operation":"start","scope":{"apps":["pid:1"]}}});
+        for (field, value) in [
+            ("surface_id", json!("other")),
+            ("generation", json!("stale")),
+            ("deadline_at", json!(0)),
+        ] {
+            let mut stale = request.clone();
+            stale[field] = value;
+            wire_send(&mut wire, stale).await;
+            assert_eq!(wire_read(&mut wire).await["status"], "invalid");
+            eprintln!(
+                "RECORDING_EVIDENCE {}",
+                json!({"transport":"publisher-websocket","rejected_envelope_field":field,"backend_calls":0})
+            );
+        }
+        assert!(calls.lock().unwrap().is_empty());
+        wire_send(&mut wire, request.clone()).await;
+        let result = wire_read(&mut wire).await;
+        eprintln!(
+            "RECORDING_EVIDENCE {}",
+            json!({"transport":"publisher-websocket","capability":catalog["surfaces"][0]["recordingCapabilities"],"input":request["input"],"result":result})
+        );
+        assert_eq!(result["recording"]["state"], "recording");
+        assert_eq!(*calls.lock().unwrap(), [request["input"].clone()]);
+        let mut conflict = request.clone();
+        conflict["input"]["operation"] = json!("pause");
+        wire_send(&mut wire, conflict).await;
+        let conflict = wire_read(&mut wire).await;
+        assert_eq!(conflict["status"], "busy");
+        assert_eq!(
+            conflict["recording"],
+            json!({"status":"error","error":"conflict"})
+        );
+        let mut frame = request.clone();
+        frame["input"]["operation"] = json!("frame");
+        wire_send(&mut wire, frame).await;
+        assert_eq!(
+            wire_read(&mut wire).await,
+            json!({"type":"agent_result","request_id":"recording-request","status":"unavailable"})
+        );
+        let mut expired = request.clone();
+        expired["input"]["operation"] = json!("export");
+        expired["deadline_at"] = json!(now_ms() + 50);
+        wire_send(&mut wire, expired).await;
+        assert_eq!(wire_read(&mut wire).await["status"], "cancelled");
+        let mut stalled = request.clone();
+        stalled["input"]["operation"] = json!("export");
+        wire_send(&mut wire, stalled).await;
+        wire_send(
+            &mut wire,
+            json!({"type":"agent_cancel","request_id":"recording-request"}),
+        )
+        .await;
+        assert_eq!(wire_read(&mut wire).await["status"], "cancelled");
+        wire_send(&mut wire, json!({"type":"input","viewer_id":"v","data":{"generation":input_generation,"sequence":1,"kind":"text","text":"still-controlled"}})).await;
+        // A status request fences processing of the preceding human input.
+        let mut status = request;
+        status["input"]["operation"] = json!("status");
+        wire_send(&mut wire, status).await;
+        assert_eq!(wire_read(&mut wire).await["status"], "ok");
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|value| value["action"] == "input"));
+        assert!(!calls.iter().any(|value| value["action"] == "release"));
+        eprintln!(
+            "RECORDING_EVIDENCE {}",
+            json!({"transport":"publisher-websocket","native_conflict":"busy","oversized_frame":"unavailable","deadline":"cancelled","cancel":"cancelled","human_input_accepted":true,"input_release_calls":0})
+        );
+        publisher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recording_transport_requires_native_capability() {
+        let backend: Backend = Arc::new(|input| {
+            Box::pin(async move {
+                assert_ne!(input["action"], "recording");
+                Ok(
+                    json!({"status":"ok","width":1,"height":1,"jpeg":"/9j/2Q==","recording":false,"recordingCapabilities":{"schemaVersion":1,"available":false,"reason":"store_unavailable"}}),
+                )
+            })
+        });
+        let (publisher, mut wire, catalog) =
+            test_session_catalog(backend, Options::default()).await;
+        assert_eq!(catalog["surfaces"][0]["recording"], false);
+        assert_eq!(
+            catalog["surfaces"][0]["recordingCapabilities"],
+            json!({"schemaVersion":1,"available":false,"reason":"store_unavailable"})
+        );
+        wire_send(&mut wire, json!({"type":"agent_call","request_id":"unsupported","agent_id":"a","surface_id":"desktop","generation":"g","deadline_at":now_ms()+8000,"input":{"action":"recording","operation":"start","scope":{"apps":["pid:1"]}}})).await;
+        assert_eq!(wire_read(&mut wire).await["status"], "unavailable");
+        publisher.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn early_broadcast_status_does_not_cancel_webrtc_preparation() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

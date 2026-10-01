@@ -21,11 +21,11 @@ function next(socket: WebSocket): Promise<any> {
     socket.addEventListener("message", receive);
   });
 }
-async function host(machine: string) {
+async function host(machine: string, recording: boolean | Record<string, unknown> = false, controllable = true) {
   const stub = namespace().getByName(owner);
   const response = await stub.fetch("https://account-tools.internal/hands/host", { headers: { "x-nanocodex-owner-id": owner, upgrade: "websocket" } });
   const socket = response.webSocket!, ready = next(socket); socket.accept(); const state = await ready;
-  const published = next(socket); socket.send(JSON.stringify({ type: "catalog", machine_id: machine, machine_name: machine, surfaces: [surface] })); await published;
+  const published = next(socket); socket.send(JSON.stringify({ type: "catalog", machine_id: machine, machine_name: machine, surfaces: [{ ...surface, controllable, ...(typeof recording === "object" ? { recording: recording.available, recordingCapabilities: recording } : recording ? { recording } : {}) }] })); await published;
   const snapshot = await stub.fetch("https://account-tools.internal/snapshot", { method: "POST", body: JSON.stringify({ owner_id: owner }) });
   const catalog: any = await snapshot.json();
   const tool = catalog.tools.find((tool: any) => tool.route_token.includes(machine));
@@ -107,6 +107,106 @@ describe("agent screen protocol", () => {
     replacement.socket.send(JSON.stringify({ type: "agent_result", request_id: releaseRequest.request_id, status: "ok" }));
     expect(await release).toMatchObject({ success: true });
     viewer.close(); connected.socket.close(); replacement.socket.close();
+  });
+  it("records through discovered CUA with bounded native results and authenticated host fences", async () => {
+    const connected = await host("recording-hand", { schemaVersion: 1, available: true, operations: ["sources", "start", "pause", "resume", "stop", "status", "list", "read", "frame", "export", "delete"] }, false), otherHost = await host("recording-other", { schemaVersion: 1, available: false, reason: "store_unavailable" });
+    const provider = new AccountHostedToolsProvider(namespace(), owner, () => true);
+    await provider.refresh();
+    const runtime = createNamespaceExecutionRuntime(() => provider.screenMachines(), () => undefined, undefined,
+      (id, context) => provider.screenTool(id, context));
+    const cua = runtime.tools[CUA_JS_NAME]!;
+    const context = { sessionId: "recording-session", callId: "recording-call", parentCallId: "recording-cell", model: "fixture", signal: new AbortController().signal };
+    const discovered: any = await cua.handler({ workdir: "/recording-hand" }, context);
+    expect(discovered.definitions[0].parameters.properties.action.enum).toContain("recording");
+    expect(discovered.definitions[0].parameters.properties.length.maximum).toBe(375_000);
+    const unsupported: any = await cua.handler({ workdir: "/recording-other" }, context);
+    expect(unsupported.definitions[0].parameters.properties.action.enum).not.toContain("recording");
+    expect(await cua.handler({ workdir: "/recording-other", action: "recording", operation: "start", scope: { apps: ["pid:1"] } }, context))
+      .toMatchObject({ success: false, structuredResult: { status: "unavailable" } });
+    const id = "rec_" + "0".repeat(32), sha256 = "a".repeat(64);
+    const sources = [{ app_id: "pid:1", window_id: "x11:2", process_id: 1 }];
+    for (const input of [
+      { action: "recording", operation: "sources" },
+      { action: "recording", operation: "start", scope: { apps: ["pid:1"], capture_frames: false }, limits: { max_duration_ms: 2000, max_events: 1, max_bytes: 4096 } },
+      { action: "recording", operation: "status", id },
+      { action: "recording", operation: "pause", id },
+      { action: "recording", operation: "resume", id },
+      { action: "recording", operation: "stop", id },
+      { action: "recording", operation: "list", cursor: 0, limit: 50 },
+      { action: "recording", operation: "read", id, cursor: 0, limit: 200 },
+      { action: "recording", operation: "export", id, cursor: 0, limit: 200 },
+      { action: "recording", operation: "frame", id, sha256, offset: 0, length: 375_000 },
+      { action: "recording", operation: "delete", id },
+    ]) {
+      const requested = next(connected.socket);
+      const pending = cua.handler({ workdir: "/recording-hand", ...input }, { ...context, callId: "recording-" + input.operation });
+      const request = await requested;
+      expect(request).toMatchObject({ type: "agent_call", surface_id: "desktop", generation: connected.state.generation, input });
+      expect(request.deadline_at).toBeGreaterThan(Date.now());
+      const recording = input.operation === "sources" ? { status: "ok", sources } : input.operation === "pause" ? { status: "error", error: "conflict" } : input.operation === "frame"
+        ? { status: "ok", id, sha256, bytes: 400_000, offset: 0, length: 375_000, next_cursor: 375_000, data_base64: "A".repeat(500_000) }
+        : { status: "ok", id, state: "stopped", next_cursor: null };
+      // A different authenticated Hand cannot settle this request.
+      otherHost.socket.send(JSON.stringify({ type: "agent_result", request_id: request.request_id, status: "busy" }));
+      connected.socket.send(JSON.stringify({ type: "agent_result", request_id: request.request_id, status: input.operation === "pause" ? "busy" : "ok", recording }));
+      const result: any = await pending;
+      expect(result).toMatchObject({ success: input.operation !== "pause", structuredResult: { status: input.operation === "pause" ? "busy" : "ok", recording } });
+      console.log("RECORDING_EVIDENCE " + JSON.stringify({ transport: "CUA-AccountHostedTools-WebSocket", input: request.input,
+        status: result.structuredResult.status, native_status: recording.status, response_bytes: new TextEncoder().encode(JSON.stringify(recording)).length }));
+    }
+    // A primary CUA provider must not hide the Hand-owned recording route.
+    const primary = { definition: { description: "Attached CUA fixture", parameters: { type: "object", required: ["code"], properties: { code: { type: "string" } } } },
+      handler: () => { throw new Error("Recording must not reach the interactive CUA provider"); } };
+    const dualRuntime = createNamespaceExecutionRuntime(() => provider.screenMachines(),
+      (_id, name) => name === CUA_JS_NAME || name === CUA_RESET_NAME ? primary : undefined,
+      undefined, (id, context) => provider.screenTool(id, context));
+    const dualCua = dualRuntime.tools[CUA_JS_NAME]!;
+    const dualDiscovery: any = await dualCua.handler({ workdir: "/recording-hand" }, context);
+    expect(dualDiscovery.definitions[0].parameters.anyOf[1].properties.action.enum).toEqual(["recording"]);
+    expect(dualDiscovery.definitions[0].parameters.anyOf[1].properties.operation.enum).toContain("sources");
+    const dualRequested = next(connected.socket);
+    const dualPending = dualCua.handler({ workdir: "/recording-hand", action: "recording", operation: "sources" }, context);
+    const dualRequest = await dualRequested;
+    expect(dualRequest.input).toEqual({ action: "recording", operation: "sources" });
+    connected.socket.send(JSON.stringify({ type: "agent_result", request_id: dualRequest.request_id, status: "ok", recording: { status: "ok", sources } }));
+    expect(await dualPending).toMatchObject({ success: true, structuredResult: { recording: { sources } } });
+    for (const input of [
+      { action: "recording", operation: "sources", id },
+      { action: "recording", operation: "start", context: { app: "App", window: "Window" } },
+      { action: "recording", operation: "start", scope: { apps: ["pid:1"] }, limits: { max_events: 1 } },
+      { action: "recording", operation: "start", scope: { apps: [] } },
+      { action: "recording", operation: "start", scope: { windows: ["Window title"] } },
+      { action: "recording", operation: "start", scope: { apps: ["pid:1"], capture_frames: "true" } },
+      { action: "recording", operation: "delete", id: "../escape" },
+      { action: "recording", operation: "list", limit: 51 },
+      { action: "recording", operation: "frame", id, sha256, length: 375_001 },
+      { action: "recording", operation: "frame", id, sha256, offset: -1 },
+      { action: "recording", operation: "export", id, path: "/private" },
+    ]) expect(await cua.handler({ workdir: "/recording-hand", ...input }, context))
+      .toMatchObject({ success: false, structuredResult: { status: "invalid" } });
+    const unauthorized = await connected.stub.fetch("https://account-tools.internal/invoke", { method: "POST", body: JSON.stringify({
+      owner_id: other, name: connected.tool.definition.name, route_token: connected.tool.route_token,
+      session_id: "11111111-1111-4111-8111-111111111199", call_id: "recording-unauthorized", input: { action: "recording", operation: "status", id },
+    }) });
+    expect(unauthorized.status).toBe(404);
+    const abort = new AbortController(), cancelling = next(connected.socket);
+    const cancelled = Promise.resolve(cua.handler({ workdir: "/recording-hand", action: "recording", operation: "export", id },
+      { ...context, signal: abort.signal, callId: "recording-cancel" })).then(() => ({ name: "unexpected_success" }), (error: Error) => error);
+    const admitted = await cancelling;
+    const cancellation = next(connected.socket);
+    abort.abort();
+    expect(await cancellation).toEqual({ type: "agent_cancel", request_id: admitted.request_id });
+    expect((await cancelled).name).toBe("AbortError");
+    // Oversized native results close the offending host and settle its request as unknown.
+    const requested = next(connected.socket);
+    const pending = cua.handler({ workdir: "/recording-hand", action: "recording", operation: "status", id }, context);
+    const request = await requested;
+    connected.socket.send(JSON.stringify({ type: "agent_result", request_id: request.request_id, status: "ok", recording: { status: "ok", data_base64: "A".repeat(740_000) } }));
+    expect(await pending).toMatchObject({ success: false, structuredResult: { status: "unavailable" } });
+    console.log("RECORDING_EVIDENCE " + JSON.stringify({ transport: "CUA-AccountHostedTools-WebSocket", native_capability_discovered: true,
+      primary_cua_recording_routed: true, wrong_owner: unauthorized.status, other_host_result_ignored: true,
+      cancelled_request_id: admitted.request_id, malformed_requests: "invalid", oversized_response: "unavailable" }));
+    otherHost.socket.close(); connected.socket.close();
   });
   it("rejects mixed, unbounded, and malformed input before sending anything", () => {
     for (const value of [ { action: "click", x: 0.2, y: 0.4, text: "mixed" }, { action: "drag", x: 0, y: 0, endX: 1, endY: 1, durationMs: 5000 },
