@@ -540,6 +540,67 @@ pub(crate) async fn recover_hand_update() -> Result<()> {
     let previous = if journal.exists() {
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&journal)?)?;
         let plan = recovery_plan(&value, store.active()?.as_deref())?;
+        #[cfg(target_os = "linux")]
+        if let Some(record) = value.get("linuxHand") {
+            let record: crate::linux_hand_service::RecoveryRecord =
+                serde_json::from_value(record.clone())?;
+            match &plan {
+                RecoveryPlan::Finalize { candidate, .. } => {
+                    store.validate_activation(candidate)?;
+                    crate::linux_hand_service::recover(&record, true).await?;
+                }
+                RecoveryPlan::Rollback(previous) => {
+                    store.validate_activation(previous)?;
+                    crate::linux_hand_service::recover(&record, false).await?;
+                    store.activate(previous)?;
+                }
+            }
+            fs::remove_file(&journal)?;
+            println!("Recovered the coordinated CLI and independent Linux Hand transaction");
+            return Ok(());
+        }
+        if cfg!(target_os = "windows") {
+            let record = match value.get("windowsHand") {
+                Some(record) => Some(
+                    serde_json::from_value::<crate::windows_hand::RecoveryRecord>(record.clone())?,
+                ),
+                None => crate::windows_hand::pending_recovery_record()?,
+            };
+            if let Some(record) = record {
+                let candidate = value["candidate"]
+                    .as_str()
+                    .ok_or_else(|| eyre!("Windows recovery candidate is missing"))?;
+                let expected_candidate = store
+                    .version_dir(candidate)
+                    .join("nanocodex2.exe")
+                    .canonicalize()
+                    .wrap_err("Windows recovery candidate path is missing or ambiguous")?;
+                if record.candidate() != expected_candidate {
+                    bail!("Windows task backup does not match the interrupted CLI transaction");
+                }
+                match &plan {
+                    RecoveryPlan::Finalize { candidate, .. } => {
+                        store.validate_activation(candidate)?;
+                        crate::windows_hand::recover(&record, true).await?;
+                    }
+                    RecoveryPlan::Rollback(previous) => {
+                        store.validate_activation(previous)?;
+                        crate::windows_hand::recover(&record, false).await?;
+                        store.activate(previous)?;
+                        store.sync_windows_entrypoints(previous)?;
+                        crate::windows_hand::finish_rollback(&record).await?;
+                    }
+                }
+                fs::remove_file(&journal)?;
+                println!("Recovered the coordinated CLI and independent Windows Hand transaction");
+                return Ok(());
+            }
+            if value["service"] != false {
+                bail!(
+                    "Windows Hand rollback evidence is missing; refusing to guess or start a previous task"
+                );
+            }
+        }
         if let RecoveryPlan::Finalize { candidate, service } = &plan {
             store.validate_activation(candidate)?;
             if *service {
@@ -549,7 +610,7 @@ pub(crate) async fn recover_hand_update() -> Result<()> {
                     "nanocodex2"
                 });
                 if cfg!(target_os = "windows") {
-                    crate::windows_hand::ensure(Some(executable)).await?;
+                    bail!("Windows committed Hand transaction lacks its recovery record");
                 } else {
                     let state = crate::hand_service::status().await?;
                     if state.loaded {
@@ -579,15 +640,30 @@ pub(crate) async fn recover_hand_update() -> Result<()> {
     } else {
         None
     };
-    if cfg!(target_os = "windows") {
+    #[cfg(target_os = "linux")]
+    {
         if let Some(previous) = previous {
-            crate::windows_hand::ensure(Some(store.version_dir(&previous).join("nanocodex2.exe")))
-                .await?;
             store.activate(&previous)?;
             fs::remove_file(&journal)?;
-            println!("Restored Nanocodex {previous} and its Hand service");
+            println!("Restored Nanocodex {previous}; no system Hand transaction was recorded");
         } else {
-            crate::windows_hand::ensure(None).await?;
+            println!("No interrupted coordinated update is recorded");
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "linux"))]
+    if cfg!(target_os = "windows") {
+        if let Some(previous) = previous {
+            store.activate(&previous)?;
+            store.sync_windows_entrypoints(&previous)?;
+            fs::remove_file(&journal)?;
+            println!("Restored Nanocodex {previous}; this was a CLI-only transaction");
+        } else if let Some(record) = crate::windows_hand::pending_recovery_record()? {
+            crate::windows_hand::recover(&record, false).await?;
+            crate::windows_hand::finish_rollback(&record).await?;
+            println!("Recovered the interrupted Windows Hand task without changing CLI selection");
+        } else {
+            println!("No interrupted coordinated update is recorded");
         }
     } else {
         crate::hand_service::recover().await?;
@@ -597,6 +673,7 @@ pub(crate) async fn recover_hand_update() -> Result<()> {
             println!("Restored Nanocodex {previous} and its Hand service");
         }
     }
+    #[cfg(not(target_os = "linux"))]
     Ok(())
 }
 
@@ -611,28 +688,63 @@ fn stage_update(store: &VersionStore, key: &str) -> Result<bool> {
         return Ok(false);
     }
     store.stage_pending(key)?;
+    #[cfg(target_os = "linux")]
     println!(
-        "Verified update {key} is ready. It will apply when you next start the stopped Hand; use nanocodex update --apply --restart-hand to restart the Hand and VM host now."
+        "Verified update {key} is staged for the independent systemd Hand. Use nanocodex update --apply --restart-hand to activate it; retained VM factories and guests are not restarted."
+    );
+    #[cfg(not(target_os = "linux"))]
+    println!(
+        "Verified update {key} is staged for the independent device Hand. Use nanocodex update --apply --restart-hand to activate it with an explicit service restart."
     );
     Ok(false)
 }
 
-pub(crate) async fn start_hand() -> Result<()> {
-    let store = VersionStore::discover()?;
-    let loaded = if cfg!(target_os = "windows") {
-        crate::windows_hand::status().await?.loaded
-    } else {
-        crate::hand_service::status().await?.loaded
-    };
-    if !loaded && let Some(key) = store.pending()? {
-        activate_coordinated(&store, &key, false, true).await?;
-        store.promote_manager(&key)?;
+async fn platform_hand_loaded() -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        return Ok(crate::linux_hand_service::status().await?.loaded);
     }
+    #[cfg(not(target_os = "linux"))]
     if cfg!(target_os = "windows") {
-        crate::windows_hand::start_and_wait().await
+        Ok(crate::windows_hand::status().await?.loaded)
+    } else {
+        Ok(crate::hand_service::status().await?.loaded)
+    }
+}
+
+async fn platform_hand_action(restart: bool) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        return crate::linux_hand_service::service_action(if restart {
+            "restart"
+        } else {
+            "start"
+        })
+        .await;
+    }
+    #[cfg(not(target_os = "linux"))]
+    if cfg!(target_os = "windows") {
+        if restart {
+            crate::windows_hand::restart().await
+        } else {
+            crate::windows_hand::start_and_wait().await
+        }
+    } else if restart {
+        crate::hand_service::restart().await
     } else {
         crate::hand_service::start().await
     }
+}
+
+pub(crate) async fn start_hand() -> Result<()> {
+    let store = VersionStore::discover()?;
+    if !platform_hand_loaded().await?
+        && let Some(key) = store.pending()?
+    {
+        activate_coordinated(&store, &key, false, true).await?;
+        store.promote_manager(&key)?;
+    }
+    platform_hand_action(false).await
 }
 
 pub(crate) async fn restart_hand() -> Result<()> {
@@ -640,17 +752,10 @@ pub(crate) async fn restart_hand() -> Result<()> {
     if let Some(key) = store.pending()? {
         activate_coordinated(&store, &key, false, true).await?;
         store.promote_manager(&key)?;
-        return if cfg!(target_os = "windows") {
-            crate::windows_hand::start_and_wait().await
-        } else {
-            crate::hand_service::start().await
-        };
+        // A successful transaction already started the independent service.
+        return Ok(());
     }
-    if cfg!(target_os = "windows") {
-        crate::windows_hand::restart().await
-    } else {
-        crate::hand_service::restart().await
-    }
+    platform_hand_action(true).await
 }
 
 /// Background updates defer any installed Hand until an explicit start/restart.
@@ -681,8 +786,20 @@ async fn activate_coordinated(
         let state = crate::windows_hand::status().await?;
         state.installed || state.loaded
     } else {
-        false
+        #[cfg(target_os = "linux")]
+        {
+            let state = crate::linux_hand_service::status().await?;
+            state.installed || state.loaded
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     };
+    #[cfg(target_os = "linux")]
+    if installed {
+        crate::linux_hand_service::validate_candidate(&companion).await?;
+    }
     if defer_activation(installed, restart_hand) {
         return stage_update(store, key);
     }
@@ -698,40 +815,85 @@ async fn activate_coordinated(
     if journal.exists() {
         bail!("An interrupted update needs recovery; run nanocodex hand recover first");
     }
+    if cfg!(target_os = "windows") && crate::windows_hand::pending_recovery_record()?.is_some() {
+        bail!(
+            "An interrupted Windows Hand update needs recovery; run nanocodex hand recover first"
+        );
+    }
     let previous = store.active()?;
     if previous.is_none() {
         bail!("An active CLI version is required before coordinated activation");
     }
-    store::atomic_write(
-        &journal,
-        &serde_json::to_vec(&serde_json::json!({"previous":previous,"candidate":key}))?,
-        false,
-    )?;
+    #[cfg(target_os = "linux")]
+    let linux_record = if installed {
+        // Denied administrator authorization cannot have changed the root
+        // service and must not strand an otherwise untouched CLI journal.
+        crate::linux_hand_service::authorize().await?;
+        Some(crate::linux_hand_service::RecoveryRecord::new(&companion)?)
+    } else {
+        None
+    };
+    let mut journal_value =
+        serde_json::json!({"previous":previous,"candidate":key,"service":installed});
+    #[cfg(target_os = "linux")]
+    if let Some(record) = &linux_record {
+        journal_value["linuxHand"] = serde_json::to_value(record)?;
+    }
+    store::atomic_write(&journal, &serde_json::to_vec(&journal_value)?, false)?;
     let service = if cfg!(target_os = "windows") {
         crate::windows_hand::prepare_update(&companion, restart_hand)
             .await
             .map(|service| service.map(PlatformServiceUpdate::Windows))
     } else {
-        crate::hand_service::prepare_update(&companion, restart_hand)
-            .await
-            .map(|service| service.map(PlatformServiceUpdate::Mac))
+        #[cfg(target_os = "linux")]
+        {
+            match linux_record.clone() {
+                Some(record) => crate::linux_hand_service::ServiceUpdate::prepare(record)
+                    .await
+                    .map(|service| Some(PlatformServiceUpdate::Linux(service))),
+                None => Ok(None),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            crate::hand_service::prepare_update(&companion, restart_hand)
+                .await
+                .map(|service| service.map(PlatformServiceUpdate::Mac))
+        }
     };
     let mut service = match service {
         Ok(service) => service,
         Err(error) => {
+            // A Linux root helper may already have journaled preparation before
+            // the response was lost. Preserve the same operation for recovery.
+            #[cfg(target_os = "linux")]
+            if linux_record.is_some() {
+                return Err(error);
+            }
             fs::remove_file(&journal)?;
             return Err(error);
         }
     };
+    if installed && service.is_none() {
+        fs::remove_file(&journal)?;
+        bail!(
+            "The installed Hand owner disappeared during update preparation; CLI selection is unchanged"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(PlatformServiceUpdate::Linux(update)) = &service {
+        journal_value["linuxHand"] = serde_json::to_value(update.recovery_record())?;
+        store::atomic_write(&journal, &serde_json::to_vec(&journal_value)?, false)?;
+    }
+    if let Some(PlatformServiceUpdate::Windows(update)) = &service {
+        journal_value["windowsHand"] = serde_json::to_value(update.recovery_record())?;
+        store::atomic_write(&journal, &serde_json::to_vec(&journal_value)?, false)?;
+    }
     let result = activate_transaction(store, key, service.as_mut()).await;
     if result.is_ok() {
-        store::atomic_write(
-            &journal,
-            &serde_json::to_vec(
-                &serde_json::json!({"previous":previous,"candidate":key,"phase":"committed","service":service.is_some()}),
-            )?,
-            false,
-        )?;
+        journal_value["phase"] = "committed".into();
+        journal_value["service"] = service.is_some().into();
+        store::atomic_write(&journal, &serde_json::to_vec(&journal_value)?, false)?;
         if let Some(service) = service.as_mut() {
             service.commit().await?;
         }
@@ -747,6 +909,8 @@ trait ServiceTransaction: Send {
 }
 
 enum PlatformServiceUpdate {
+    #[cfg(target_os = "linux")]
+    Linux(crate::linux_hand_service::ServiceUpdate),
     Mac(crate::hand_service::ServiceUpdate),
     Windows(crate::windows_hand::ServiceUpdate),
 }
@@ -754,6 +918,8 @@ enum PlatformServiceUpdate {
 impl PlatformServiceUpdate {
     async fn commit(&mut self) -> Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::Linux(service) => service.commit().await,
             Self::Mac(service) => service.commit().await,
             Self::Windows(service) => service.commit().await,
         }
@@ -764,12 +930,16 @@ impl PlatformServiceUpdate {
 impl ServiceTransaction for PlatformServiceUpdate {
     async fn apply(&mut self) -> Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::Linux(service) => service.apply().await,
             Self::Mac(service) => service.apply().await,
             Self::Windows(service) => service.apply().await,
         }
     }
     async fn rollback(&mut self) -> Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::Linux(service) => service.rollback().await,
             Self::Mac(service) => service.rollback().await,
             Self::Windows(service) => service.rollback().await,
         }

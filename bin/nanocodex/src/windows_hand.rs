@@ -6,10 +6,11 @@
 
 use eyre::{Result, WrapErr, bail, eyre};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::{
     ffi::{OsStr, OsString},
     fs,
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -598,11 +599,289 @@ pub(crate) async fn restart() -> Result<()> {
     start_and_wait().await
 }
 
-pub(crate) struct ServiceUpdate {
-    candidate: PathBuf,
+// The stable sibling can be overwritten by sync_windows_entrypoints after the
+// task has switched. A path alone is therefore never rollback evidence.
+const UPDATE_BACKUP: &str = "task.update-backup";
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoveryRecord {
     previous: PathBuf,
+    candidate: PathBuf,
+    previous_sha256: String,
+    candidate_sha256: String,
+    definition_sha256: String,
+    record_sha256: Option<String>,
     was_loaded: bool,
     start_candidate: bool,
+}
+
+impl RecoveryRecord {
+    pub(crate) fn candidate(&self) -> &Path {
+        &self.candidate
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateSnapshot {
+    owner: String,
+    recovery: RecoveryRecord,
+    definition: String,
+    // Preserve absence as well as the exact original sidecar bytes. No account
+    // file is read, copied, or written by this transaction.
+    record: Option<Vec<u8>>,
+}
+
+pub(crate) struct ServiceUpdate {
+    recovery: RecoveryRecord,
+    backup: PathBuf,
+}
+
+fn backup_path() -> Result<PathBuf> {
+    Ok(data_directory()?.join(UPDATE_BACKUP))
+}
+
+fn regular_file(path: &Path) -> Result<fs::Metadata> {
+    let metadata = fs::symlink_metadata(path).wrap_err_with(|| {
+        format!(
+            "Required Windows Hand update evidence is missing: {}",
+            path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        bail!(
+            "Windows Hand update evidence must be a regular file: {}",
+            path.display()
+        );
+    }
+    Ok(metadata)
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    regular_file(path)?;
+    let mut file = fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(hex::encode(hash.finalize()))
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn same_executable(left: &Path, right: &Path) -> bool {
+    left == right
+        || left
+            .canonicalize()
+            .ok()
+            .is_some_and(|left| right.canonicalize().ok().as_deref() == Some(left.as_path()))
+}
+
+fn read_snapshot(backup: &Path) -> Result<UpdateSnapshot> {
+    if !fs::symlink_metadata(backup)
+        .wrap_err("Windows Hand update backup is missing; refusing to guess previous task state")?
+        .is_dir()
+    {
+        bail!("Windows Hand update backup must be a regular directory");
+    }
+    let manifest = backup.join("snapshot.json");
+    if regular_file(&manifest)?.len() > 1024 * 1024 {
+        bail!("Windows Hand update snapshot is too large");
+    }
+    let snapshot: UpdateSnapshot = serde_json::from_slice(&fs::read(manifest)?)?;
+    let record = &snapshot.recovery;
+    if snapshot.owner != OWNER
+        || !record.previous.is_absolute()
+        || !record.candidate.is_absolute()
+        || !snapshot.definition.contains(OWNER)
+        || !command_from_definition(&snapshot.definition)
+            .is_some_and(|command| same_executable(&command, &record.previous))
+        || sha256_bytes(snapshot.definition.as_bytes()) != record.definition_sha256
+        || snapshot.record.as_deref().map(sha256_bytes) != record.record_sha256
+        || snapshot
+            .record
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() > 16 * 1024)
+    {
+        bail!("Windows Hand update snapshot is invalid");
+    }
+    if let Some(bytes) = &snapshot.record {
+        let sidecar: TaskRecord = serde_json::from_slice(bytes)?;
+        if sidecar.owner != OWNER || sidecar.executable != record.previous {
+            bail!("Windows Hand update snapshot sidecar does not match the previous executable");
+        }
+    }
+    if sha256_file(&backup.join("previous.exe"))? != record.previous_sha256 {
+        bail!("Windows Hand update backup executable failed checksum verification");
+    }
+    Ok(snapshot)
+}
+
+fn save_snapshot(backup: &Path, snapshot: &UpdateSnapshot) -> Result<()> {
+    if fs::symlink_metadata(backup).is_ok() {
+        bail!("A Windows Hand update backup already exists; run nanocodex hand recover first");
+    }
+    let parent = backup
+        .parent()
+        .ok_or_else(|| eyre!("Update backup has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let temporary = tempfile::Builder::new()
+        .prefix("task-update-")
+        .tempdir_in(parent)?;
+    let previous = temporary.path().join("previous.exe");
+    let mut retained = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&previous)?;
+    std::io::copy(
+        &mut fs::File::open(&snapshot.recovery.previous)?,
+        &mut retained,
+    )?;
+    retained.set_permissions(fs::metadata(&snapshot.recovery.previous)?.permissions())?;
+    retained.sync_all()?;
+    drop(retained);
+    if sha256_file(&previous)? != snapshot.recovery.previous_sha256 {
+        bail!("Windows Hand previous executable changed during update preparation");
+    }
+    let mut manifest = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temporary.path().join("snapshot.json"))?;
+    serde_json::to_writer(&mut manifest, snapshot)?;
+    manifest.write_all(b"\n")?;
+    manifest.sync_all()?;
+    drop(manifest);
+    // Publish only a complete snapshot. It is never updated or re-used for a
+    // different candidate, and survives process exit/crash until commit.
+    fs::rename(temporary.path(), backup)?;
+    Ok(())
+}
+
+fn replace_file(path: &Path, source: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => bail!("Windows Hand executable must be a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    regular_file(source)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| eyre!("Hand executable has no parent"))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut fs::File::open(source)?, &mut file)?;
+    file.as_file()
+        .set_permissions(fs::metadata(source)?.permissions())?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    Ok(())
+}
+
+fn restore_record(path: &Path, bytes: Option<&[u8]>) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => bail!("Windows Hand task record must be a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if let Some(bytes) = bytes {
+        let parent = path
+            .parent()
+            .ok_or_else(|| eyre!("Task record has no parent"))?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(bytes)?;
+        file.as_file().sync_all()?;
+        file.persist(path)?;
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn definition_with_executable(definition: &str, candidate: &Path) -> Result<String> {
+    let (before, command) = definition
+        .split_once("<Command>")
+        .ok_or_else(|| eyre!("Windows Hand task has no executable"))?;
+    let (_, after) = command
+        .split_once("</Command>")
+        .ok_or_else(|| eyre!("Windows Hand task has an invalid executable"))?;
+    if after.contains("<Command>") {
+        bail!("Windows Hand task contains more than one executable");
+    }
+    let candidate = xml(candidate
+        .to_str()
+        .ok_or_else(|| eyre!("Windows Hand executable path must be valid Unicode"))?)?;
+    Ok(format!("{before}<Command>{candidate}</Command>{after}"))
+}
+
+async fn stop_update_task(record: &RecoveryRecord) -> Result<()> {
+    let Some(definition) = task_definition().await? else {
+        return Ok(());
+    };
+    // Do not rely on a sidecar that may not yet have been written after /Create.
+    let selected = command_from_definition(&definition)
+        .ok_or_else(|| eyre!("Windows Hand task has no executable"))?;
+    if !same_executable(&selected, &record.previous)
+        && !same_executable(&selected, &record.candidate)
+    {
+        bail!("Windows Hand task changed outside the update; refusing to stop it");
+    }
+    if worker(&selected).is_none() {
+        return Ok(());
+    }
+    checked(
+        "schtasks.exe",
+        &["/End", "/TN", TASK],
+        "stop the Windows Hand update task",
+    )
+    .await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while worker(&selected).is_some() {
+        if tokio::time::Instant::now() >= deadline {
+            bail!("Windows Hand did not stop before update timeout");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(())
+}
+
+async fn restore_definition(definition: &str) -> Result<()> {
+    // Query output may declare UTF-16. Preserve the whole task configuration,
+    // only normalizing the declaration to the encoding used by this import.
+    let body = definition.trim_start_matches('\u{feff}');
+    let body = if body.starts_with("<?xml") {
+        body.split_once("?>")
+            .ok_or_else(|| eyre!("Invalid Windows task XML declaration"))?
+            .1
+    } else {
+        body
+    };
+    let mut task = tempfile::Builder::new().suffix(".xml").tempfile()?;
+    task.write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>")?;
+    task.write_all(body.as_bytes())?;
+    task.as_file().sync_all()?;
+    let path = task
+        .path()
+        .to_str()
+        .ok_or_else(|| eyre!("Temporary task path must be valid Unicode"))?;
+    checked(
+        "schtasks.exe",
+        &["/Create", "/TN", TASK, "/XML", path, "/F"],
+        "restore the previous Windows Hand task",
+    )
+    .await
 }
 
 pub(crate) async fn prepare_update(
@@ -610,44 +889,219 @@ pub(crate) async fn prepare_update(
     start_candidate: bool,
 ) -> Result<Option<ServiceUpdate>> {
     let candidate = validate_candidate(candidate).await?;
-    let state = status().await?;
-    if !state.installed {
+    let Some(definition) = task_definition().await? else {
         return Ok(None);
-    }
-    let previous = state
-        .executable
+    };
+    let sidecar = read_record()?;
+    let previous = sidecar
+        .as_ref()
+        .map(|record| record.executable.clone())
+        .or_else(|| command_from_definition(&definition))
         .ok_or_else(|| eyre!("Windows Hand task has no executable"))?;
-    validate_candidate(&previous).await?;
-    Ok(Some(ServiceUpdate {
-        candidate,
+    if !previous.is_absolute() {
+        bail!("Windows Hand task executable must be absolute");
+    }
+    let selected = validate_candidate(&previous).await?;
+    let task_command = command_from_definition(&definition)
+        .ok_or_else(|| eyre!("Windows Hand task has no executable"))?;
+    if executable(&task_command)? != selected {
+        bail!("Windows Hand task command and private record disagree; inspect before updating");
+    }
+    let record = if sidecar.is_some() {
+        Some(fs::read(record_path()?)?)
+    } else {
+        None
+    };
+    let recovery = RecoveryRecord {
         previous,
-        was_loaded: state.loaded,
+        candidate: candidate.clone(),
+        previous_sha256: sha256_file(&selected)?,
+        candidate_sha256: sha256_file(&candidate)?,
+        definition_sha256: sha256_bytes(definition.as_bytes()),
+        record_sha256: record.as_deref().map(sha256_bytes),
+        was_loaded: worker(&selected).is_some(),
         start_candidate,
-    }))
+    };
+    let backup = backup_path()?;
+    save_snapshot(
+        &backup,
+        &UpdateSnapshot {
+            owner: OWNER.to_owned(),
+            recovery: recovery.clone(),
+            definition,
+            record,
+        },
+    )?;
+    Ok(Some(ServiceUpdate { recovery, backup }))
 }
 
 impl ServiceUpdate {
+    pub(crate) fn recovery_record(&self) -> &RecoveryRecord {
+        &self.recovery
+    }
+
     pub(crate) async fn apply(&mut self) -> Result<()> {
-        stop().await?;
-        install_task(&self.candidate).await?;
-        if self.start_candidate {
+        let snapshot = read_snapshot(&self.backup)?;
+        if snapshot.recovery != self.recovery {
+            bail!("Windows Hand update backup belongs to a different transaction");
+        }
+        if sha256_file(&self.recovery.candidate)? != self.recovery.candidate_sha256 {
+            bail!("Windows Hand candidate changed after update preparation");
+        }
+        stop_update_task(&self.recovery).await?;
+        restore_definition(&definition_with_executable(
+            &snapshot.definition,
+            &self.recovery.candidate,
+        )?)
+        .await?;
+        write_record(&self.recovery.candidate)?;
+        if self.recovery.start_candidate {
             start_and_wait().await?;
+        } else {
+            stop_update_task(&self.recovery).await?;
         }
         Ok(())
     }
 
     pub(crate) async fn rollback(&mut self) -> Result<()> {
-        stop().await?;
-        install_task(&self.previous).await?;
-        if self.was_loaded {
-            start_and_wait().await?;
+        // Validate all backup evidence before any service action. A missing or
+        // corrupt backup must not install a guessed task or start a stopped one.
+        let snapshot = read_snapshot(&self.backup)?;
+        if snapshot.recovery != self.recovery {
+            bail!("Windows Hand update backup belongs to a different transaction");
         }
+        stop_update_task(&self.recovery).await?;
+        replace_file(&self.recovery.previous, &self.backup.join("previous.exe"))?;
+        restore_definition(&snapshot.definition).await?;
+        restore_record(&record_path()?, snapshot.record.as_deref())?;
+        if self.recovery.was_loaded {
+            start_and_wait().await?;
+        } else {
+            stop_update_task(&self.recovery).await?;
+        }
+        // Retain evidence until the outer CLI journal has committed/recovered.
         Ok(())
     }
 
     pub(crate) async fn commit(&mut self) -> Result<()> {
-        Ok(())
+        finish_recovery(&self.recovery).await
     }
+}
+
+/// Also handles the crash between backup publication and adding windowsHand to
+/// the outer journal. Missing evidence is not permission to re-render a task.
+pub(crate) fn pending_recovery_record() -> Result<Option<RecoveryRecord>> {
+    let backup = backup_path()?;
+    match fs::symlink_metadata(&backup) {
+        Ok(_) => Ok(Some(read_snapshot(&backup)?.recovery)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn finish_recovery(record: &RecoveryRecord) -> Result<()> {
+    let state = status().await?;
+    let selected = state.executable.as_deref().map(executable).transpose()?;
+    let definition = task_definition()
+        .await?
+        .ok_or_else(|| eyre!("Committed Windows Hand task is missing"))?;
+    let command = command_from_definition(&definition)
+        .ok_or_else(|| eyre!("Committed Windows Hand task has no executable"))?;
+    if !same_executable(&command, &record.candidate)
+        || !state.installed
+        || selected.as_deref() != Some(record.candidate.as_path())
+        || sha256_file(&record.candidate)? != record.candidate_sha256
+        || state.loaded != record.start_candidate
+    {
+        bail!(
+            "Committed Windows Hand no longer matches the selected update/state; inspect before recovery"
+        );
+    }
+    if record.start_candidate {
+        // Never start the task here: a committed stopped task stays stopped, and
+        // a missing running task is an ambiguous state, not a repair request.
+        wait_ready(&record.candidate).await?;
+    }
+    let backup = backup_path()?;
+    match fs::symlink_metadata(&backup) {
+        Ok(_) => {
+            if read_snapshot(&backup)?.recovery != *record {
+                bail!("Windows Hand update backup belongs to a different transaction");
+            }
+            fs::remove_dir_all(backup)?;
+        }
+        // Commit may have removed its backup just before the outer journal was
+        // removed. The recorded candidate hash and start state still prove it.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+async fn verify_restored(record: &RecoveryRecord) -> Result<()> {
+    let state = status().await?;
+    let definition = task_definition()
+        .await?
+        .ok_or_else(|| eyre!("Restored Windows Hand task is missing"))?;
+    let command = command_from_definition(&definition)
+        .ok_or_else(|| eyre!("Restored Windows Hand task has no executable"))?;
+    let sidecar = match fs::read(record_path()?) {
+        Ok(bytes) => Some(sha256_bytes(&bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if !state.installed
+        || state.loaded != record.was_loaded
+        || !same_executable(&command, &record.previous)
+        || sha256_bytes(definition.as_bytes()) != record.definition_sha256
+        || sidecar != record.record_sha256
+        || sha256_file(&record.previous)? != record.previous_sha256
+    {
+        bail!(
+            "Windows Hand rollback evidence is missing and the exact previous task/bytes/state cannot be verified"
+        );
+    }
+    if record.was_loaded {
+        wait_ready(&record.previous).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn recover(record: &RecoveryRecord, committed: bool) -> Result<()> {
+    supported()?;
+    if committed {
+        return finish_recovery(record).await;
+    }
+    let backup = backup_path()?;
+    if !backup.try_exists()? {
+        // Cleanup may have completed just before the outer CLI journal was
+        // removed. Verify the exact old task, sidecar, bytes and loaded state;
+        // do not synthesize a task or blindly restart it from a missing backup.
+        return verify_restored(record).await;
+    }
+    let mut update = ServiceUpdate {
+        recovery: record.clone(),
+        backup,
+    };
+    update.rollback().await
+}
+
+/// Called only after old CLI entrypoints have also been restored. Separating
+/// cleanup from rollback keeps evidence if the coordinator's CLI recovery fails.
+pub(crate) async fn finish_rollback(record: &RecoveryRecord) -> Result<()> {
+    verify_restored(record).await?;
+    let backup = backup_path()?;
+    if !backup.try_exists()? {
+        return Ok(());
+    }
+    if read_snapshot(&backup)?.recovery != *record {
+        bail!("Windows Hand update backup belongs to a different transaction");
+    }
+    if sha256_file(&record.previous)? != record.previous_sha256 {
+        bail!("Restored Windows Hand executable no longer matches the update backup");
+    }
+    fs::remove_dir_all(backup)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -713,5 +1167,239 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(decode_task_xml(&utf16), expected);
         assert_eq!(decode_task_xml(expected.as_bytes()), expected);
+    }
+
+    fn snapshot_fixture(directory: &Path, was_loaded: bool) -> UpdateSnapshot {
+        let previous = directory.join("previous & worker.exe");
+        let candidate = directory.join("candidate.exe");
+        fs::write(&previous, b"immutable old worker").unwrap();
+        fs::write(&candidate, b"new worker").unwrap();
+        let definition = render(&previous, directory, directory, directory, "fixture\\user")
+            .unwrap()
+            .replace("<Priority>7</Priority>", "<Priority>11</Priority>");
+        let mut record = serde_json::to_vec(&TaskRecord {
+            owner: OWNER.to_owned(),
+            executable: previous.clone(),
+        })
+        .unwrap();
+        record.extend_from_slice(b"\n");
+        UpdateSnapshot {
+            owner: OWNER.to_owned(),
+            recovery: RecoveryRecord {
+                previous: previous.clone(),
+                candidate: candidate.clone(),
+                previous_sha256: sha256_file(&previous).unwrap(),
+                candidate_sha256: sha256_file(&candidate).unwrap(),
+                definition_sha256: sha256_bytes(definition.as_bytes()),
+                record_sha256: Some(sha256_bytes(&record)),
+                was_loaded,
+                start_candidate: true,
+            },
+            definition,
+            record: Some(record),
+        }
+    }
+
+    #[test]
+    fn snapshot_restores_immutable_bytes_after_stable_sibling_overwrite() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = snapshot_fixture(directory.path(), true);
+        let backup = directory.path().join(UPDATE_BACKUP);
+        save_snapshot(&backup, &snapshot).unwrap();
+        fs::write(
+            &snapshot.recovery.previous,
+            b"new worker overwrote stable sibling",
+        )
+        .unwrap();
+        let retained = read_snapshot(&backup).unwrap();
+        assert_eq!(retained.recovery, snapshot.recovery);
+        assert_eq!(retained.definition, snapshot.definition);
+        assert_eq!(retained.record, snapshot.record);
+        assert_eq!(
+            fs::read(backup.join("previous.exe")).unwrap(),
+            b"immutable old worker"
+        );
+        replace_file(&retained.recovery.previous, &backup.join("previous.exe")).unwrap();
+        assert_eq!(
+            fs::read(&snapshot.recovery.previous).unwrap(),
+            b"immutable old worker"
+        );
+        assert_eq!(
+            sha256_file(&snapshot.recovery.previous).unwrap(),
+            snapshot.recovery.previous_sha256
+        );
+        // Rollback evidence remains available for an outer CLI recovery failure.
+        assert!(backup.exists());
+    }
+
+    #[test]
+    fn snapshot_preserves_loaded_and_stopped_state_without_guessing() {
+        for was_loaded in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut snapshot = snapshot_fixture(directory.path(), was_loaded);
+            snapshot.recovery.start_candidate = false;
+            let backup = directory.path().join(UPDATE_BACKUP);
+            save_snapshot(&backup, &snapshot).unwrap();
+            let retained = read_snapshot(&backup).unwrap();
+            assert_eq!(retained.recovery.was_loaded, was_loaded);
+            assert!(!retained.recovery.start_candidate);
+            let journal = serde_json::to_vec(&retained.recovery).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<RecoveryRecord>(&journal).unwrap(),
+                snapshot.recovery
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_to_overwrite_existing_transaction_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = snapshot_fixture(directory.path(), false);
+        let backup = directory.path().join(UPDATE_BACKUP);
+        save_snapshot(&backup, &snapshot).unwrap();
+        let manifest = fs::read(backup.join("snapshot.json")).unwrap();
+        assert!(
+            save_snapshot(&backup, &snapshot)
+                .unwrap_err()
+                .to_string()
+                .contains("already exists")
+        );
+        assert_eq!(fs::read(backup.join("snapshot.json")).unwrap(), manifest);
+    }
+
+    #[tokio::test]
+    async fn missing_or_corrupt_backup_fails_before_task_scheduler_actions() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = snapshot_fixture(directory.path(), false);
+        let backup = directory.path().join(UPDATE_BACKUP);
+        let mut update = ServiceUpdate {
+            recovery: snapshot.recovery.clone(),
+            backup: backup.clone(),
+        };
+        assert!(
+            update
+                .rollback()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("backup is missing")
+        );
+        save_snapshot(&backup, &snapshot).unwrap();
+        fs::write(backup.join("previous.exe"), b"corrupt backup").unwrap();
+        assert!(
+            update
+                .rollback()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("checksum verification")
+        );
+        assert_eq!(
+            fs::read(&snapshot.recovery.previous).unwrap(),
+            b"immutable old worker"
+        );
+        assert!(backup.exists());
+    }
+
+    #[tokio::test]
+    async fn changed_candidate_fails_before_stopping_the_previous_task() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = snapshot_fixture(directory.path(), true);
+        let backup = directory.path().join(UPDATE_BACKUP);
+        save_snapshot(&backup, &snapshot).unwrap();
+        fs::write(&snapshot.recovery.candidate, b"changed candidate").unwrap();
+        let mut update = ServiceUpdate {
+            recovery: snapshot.recovery.clone(),
+            backup: backup.clone(),
+        };
+        assert!(
+            update
+                .apply()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("candidate changed")
+        );
+        assert_eq!(
+            fs::read(&snapshot.recovery.previous).unwrap(),
+            b"immutable old worker"
+        );
+        assert!(backup.exists());
+    }
+
+    #[test]
+    fn preserves_exact_sidecar_bytes_and_original_absence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task.json");
+        let previous = b"{\n  \"owner\": \"fixture\"\n}\n";
+        fs::write(&path, b"new record").unwrap();
+        restore_record(&path, Some(previous)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        restore_record(&path, None).unwrap();
+        assert!(!path.exists());
+        restore_record(&path, None).unwrap();
+    }
+
+    #[test]
+    fn candidate_definition_changes_only_executable_and_preserves_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = snapshot_fixture(directory.path(), false);
+        let candidate = directory.path().join("new & worker.exe");
+        let switched = definition_with_executable(&snapshot.definition, &candidate).unwrap();
+        assert_eq!(command_from_definition(&switched).unwrap(), candidate);
+        assert!(switched.contains("<Priority>11</Priority>"));
+        assert!(switched.contains("new &amp; worker.exe"));
+        assert_eq!(
+            definition_with_executable(&switched, &snapshot.recovery.previous).unwrap(),
+            snapshot.definition
+        );
+        assert!(
+            definition_with_executable("<Command>a</Command><Command>b</Command>", &candidate)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn modified_task_configuration_and_sidecar_fail_snapshot_verification() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut snapshot = snapshot_fixture(directory.path(), false);
+        let backup = directory.path().join(UPDATE_BACKUP);
+        snapshot.definition = snapshot
+            .definition
+            .replace("<Priority>11</Priority>", "<Priority>8</Priority>");
+        save_snapshot(&backup, &snapshot).unwrap();
+        assert!(
+            read_snapshot(&backup)
+                .unwrap_err()
+                .to_string()
+                .contains("snapshot is invalid")
+        );
+        fs::remove_dir_all(&backup).unwrap();
+        let mut snapshot = snapshot_fixture(directory.path(), false);
+        snapshot.record = None;
+        save_snapshot(&backup, &snapshot).unwrap();
+        assert!(
+            read_snapshot(&backup)
+                .unwrap_err()
+                .to_string()
+                .contains("snapshot is invalid")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_backup_evidence_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = snapshot_fixture(directory.path(), false);
+        let backup = directory.path().join(UPDATE_BACKUP);
+        save_snapshot(&backup, &snapshot).unwrap();
+        let link = directory.path().join("linked-backup");
+        symlink(&backup, &link).unwrap();
+        assert!(read_snapshot(&link).is_err());
+        let original = backup.join("previous.exe");
+        fs::remove_file(&original).unwrap();
+        symlink(&snapshot.recovery.previous, &original).unwrap();
+        assert!(read_snapshot(&backup).is_err());
     }
 }

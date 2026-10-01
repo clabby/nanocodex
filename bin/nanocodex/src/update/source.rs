@@ -1,6 +1,9 @@
 //! Build an explicitly selected upstream revision before installing either binary.
 
-use std::{path::Path, process::Output};
+use std::{
+    path::{Path, PathBuf},
+    process::Output,
+};
 
 use eyre::{Context, Result, bail, eyre};
 use serde::Deserialize;
@@ -117,6 +120,11 @@ pub(super) async fn build(selection: Selection<'_>, target: &Path) -> Result<Bui
     } else {
         std::env::current_dir()?.join(target)
     };
+    // Build helpers from the fetched revision's pinned inputs, never from the
+    // updating CLI's checkout or an arbitrary inherited bundle. Keep them alive
+    // until both the build and shipped-payload verification have completed.
+    let helpers = tempfile::tempdir().wrap_err("failed to create helper build directory")?;
+    let screen_bundle = prepare_screen_bundle(root, helpers.path(), &sha).await?;
     for (package, binary, features) in [
         ("nanocodex-bin", "nanocodex", true),
         ("nanocodex2-bin", "nanocodex2", false),
@@ -125,6 +133,7 @@ pub(super) async fn build(selection: Selection<'_>, target: &Path) -> Result<Bui
         let mut command = Command::new("cargo");
         command
             .current_dir(root)
+            .env_remove("NANOCODEX_LINUX_SCREEN_BUNDLE")
             .env("CARGO_TARGET_DIR", &target)
             .env("VERGEN_GIT_SHA", &sha)
             .env("STABLE_GIT_COMMIT", &sha)
@@ -137,6 +146,11 @@ pub(super) async fn build(selection: Selection<'_>, target: &Path) -> Result<Bui
                 "--bin",
                 binary,
             ]);
+        if binary == "nanocodex2"
+            && let Some(bundle) = &screen_bundle
+        {
+            command.env("NANOCODEX_LINUX_SCREEN_BUNDLE", bundle);
+        }
         if features {
             command.args(["--features", "tempo"]);
         }
@@ -166,11 +180,77 @@ pub(super) async fn build(selection: Selection<'_>, target: &Path) -> Result<Bui
         }
     }
     local::verify_pair(&cli_path, &hand_path).await?;
+    if let Some(bundle) = screen_bundle {
+        let status = Command::new("python3")
+            .arg(root.join("scripts/tests/linux-screen-helpers-bundle.py"))
+            .arg("--binary")
+            .arg(&hand_path)
+            .arg(&bundle)
+            .status()
+            .await
+            .wrap_err(
+                "python3 is required to verify the compiled Hand's embedded screen payload",
+            )?;
+        if !status.success() {
+            bail!(
+                "compiled Hand screen payload verification failed: {status}; nothing was installed"
+            );
+        }
+    }
     Ok(Build {
         sha,
         cli: std::fs::read(&cli_path).wrap_err("failed to read the compiled CLI")?,
         hand: std::fs::read(&hand_path).wrap_err("failed to read the compiled Hand")?,
     })
+}
+
+async fn prepare_screen_bundle(root: &Path, work: &Path, sha: &str) -> Result<Option<PathBuf>> {
+    if !cfg!(target_os = "linux") {
+        return Ok(None);
+    }
+    if !cfg!(target_arch = "x86_64") {
+        bail!(
+            "self-contained Linux source updates require x86_64; this architecture has no supported Wayland helper payload"
+        );
+    }
+    for file in [
+        "scripts/build-linux-screen-helpers.sh",
+        "scripts/build-linux-screen-helpers.py",
+        "scripts/build-linux-screen-helpers.Dockerfile",
+        "scripts/tests/linux-screen-helpers-bundle.py",
+        "bin/nanocodex/nanocodex2/build.rs",
+        "bin/nanocodex/src/nanocodex2/screen_helpers.rs",
+    ] {
+        if !root.join(file).is_file() {
+            bail!(
+                "source revision {sha} predates the self-contained Linux screen-helper packaging contract (missing {file}); refusing to install a Hand without helpers. Use an explicitly selected historical release only if its legacy host-provisioned screen dependencies are acceptable"
+            );
+        }
+    }
+    let bundle = work.join("linux-screen-helpers.tar.gz");
+    eprintln!("preparing embedded Linux Waymote/Grim helpers from source revision {sha}...");
+    let status = Command::new("bash")
+        .current_dir(root)
+        .env_remove("NANOCODEX_LINUX_SCREEN_BUNDLE")
+        .arg(root.join("scripts/build-linux-screen-helpers.sh"))
+        .arg("--auto")
+        .arg(&bundle)
+        .arg(work.join("build"))
+        .status()
+        .await
+        .wrap_err("bash is required to prepare Linux screen helpers")?;
+    if !status.success() {
+        bail!(
+            "failed to prepare Linux screen helpers at {sha}: {status}; install the documented native build prerequisites or provide a working Docker daemon. No host packages were installed and no candidate binaries were activated"
+        );
+    }
+    let size = std::fs::metadata(&bundle)
+        .wrap_err("helper builder did not produce the requested Linux screen bundle")?
+        .len();
+    if size == 0 || size > 64 * 1024 * 1024 {
+        bail!("helper builder produced an empty or oversized Linux screen bundle");
+    }
+    Ok(Some(bundle))
 }
 
 async fn git(cwd: Option<&Path>, args: &[&str]) -> Result<Vec<u8>> {

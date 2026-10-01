@@ -1,52 +1,94 @@
 #!/usr/bin/env python3
 """Exercise a real payload after relocation with no helpers on PATH.
 
-Usage: python3 scripts/tests/linux-screen-helpers-bundle.py BUNDLE.tar.gz
+Usage: python3 scripts/tests/linux-screen-helpers-bundle.py [--verify-only] BUNDLE.tar.gz
+       python3 scripts/tests/linux-screen-helpers-bundle.py --binary HAND BUNDLE.tar.gz
+--verify-only checks archive integrity without running helpers (build-time).
+--binary additionally requires the exact verified payload in the shipped Hand.
 Checks the public manifest contract, DT_NEEDED resolution via the bundled
 loader, real upstream help, and rejection of a tampered payload. Does not
 require a compositor/session and is not evidence of successful screen capture.
 """
+import argparse
+import gzip
 import hashlib
 import json
-import os
+import mmap
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
-import sys
 import tarfile
 import tempfile
+from contextlib import contextmanager
+
+
+@contextmanager
+def verified_tar(archive):
+    # tarfile's streaming gzip reader does not check the gzip trailer. Drain a
+    # real GzipFile first so CRC/truncation/trailing-stream damage fails closed,
+    # with a bound on decompression even for a hostile concatenated gzip stream.
+    with tempfile.TemporaryFile() as expanded:
+        with gzip.open(archive, 'rb') as source:
+            total = 0
+            while chunk := source.read(1024 * 1024):
+                total += len(chunk)
+                if total > 130 * 1024 * 1024:
+                    raise ValueError('decompressed archive size limit')
+                expanded.write(chunk)
+        expanded.seek(0)
+        with tarfile.open(fileobj=expanded, mode='r|') as tar:
+            yield tar
 
 
 def extract_and_verify(archive, root):
     if archive.stat().st_size > 64 * 1024 * 1024:
         raise ValueError('compressed size limit')
-    with tarfile.open(archive, 'r:gz') as tar:
-        members = tar.getmembers()
-        if not members or members[0].name != "manifest.json":
-            raise ValueError("manifest must be the first archive entry")
+    with verified_tar(archive) as tar:
         paths = set()
-        if sum(m.size for m in members) > 128 * 1024 * 1024:
-            raise ValueError('expanded size limit')
-        for member in members:
+        total = 0
+        for index, member in enumerate(tar):
+            if index == 0 and member.name != "manifest.json":
+                raise ValueError("manifest must be the first archive entry")
+            if index > 512:
+                raise ValueError('file count limit')
+            total += member.size
+            if total > 128 * 1024 * 1024:
+                raise ValueError('expanded size limit')
             path = PurePosixPath(member.name)
-            if not member.isfile() or path.is_absolute() or '..' in path.parts or member.name in paths:
+            if (not member.isfile() or path.is_absolute() or '..' in path.parts
+                or str(path) != member.name or '\\' in member.name
+                or any(ord(c) < 32 or ord(c) == 127 for c in member.name)
+                or len(member.name) > 512 or len(path.parts) > 8 or member.name in paths):
                 raise ValueError('unsafe archive member')
+            if member.name == 'manifest.json' and member.size > 1024 * 1024:
+                raise ValueError('manifest size limit')
+            if member.mode not in (0o644, 0o755):
+                raise ValueError('unsupported file mode')
             paths.add(member.name)
             dest = root / member.name
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(tar.extractfile(member).read())
+            with tar.extractfile(member) as source, dest.open('wb') as output:
+                while chunk := source.read(1024 * 1024):
+                    output.write(chunk)
             dest.chmod(member.mode)
+        if not paths:
+            raise ValueError('empty archive')
     manifest = json.loads((root / 'manifest.json').read_text())
-    if manifest['version'] != 1 or manifest['architecture'] != 'x86_64':
+    if type(manifest['version']) is not int or manifest['version'] != 1 or manifest['architecture'] != 'x86_64':
         raise ValueError('manifest version/architecture')
+    if not isinstance(manifest['files'], list) or len(manifest['files']) > 512:
+        raise ValueError('manifest file count limit')
     declared = set()
     for file in manifest['files']:
         path = file['path']
-        if path in declared or path not in paths or path == 'manifest.json':
+        if (path in declared or path not in paths or path == 'manifest.json'
+            or file['mode'] not in (0o644, 0o755)
+            or not re.fullmatch('[0-9a-fA-F]{64}', file['sha256'])
+            or type(file['bytes']) is not int or file['bytes'] < 0):
             raise ValueError('invalid manifest paths')
         declared.add(path)
         target = root / path
-        if (hashlib.sha256(target.read_bytes()).hexdigest() != file['sha256']
+        if (hashlib.sha256(target.read_bytes()).hexdigest() != file['sha256'].lower()
             or target.stat().st_size != file['bytes']
             or (target.stat().st_mode & 0o777) != file['mode']):
             raise ValueError('file hash/size/mode mismatch: ' + path)
@@ -55,17 +97,36 @@ def extract_and_verify(archive, root):
     required = {'bin/waymote-streamd', 'bin/grim', 'lib/ld-linux-x86-64.so.2', 'upstream.json'}
     if not required <= declared or not any(p.startswith('licenses/') for p in declared):
         raise ValueError('missing required helper/provenance')
+    for file in manifest['files']:
+        if file['path'] in {'bin/waymote-streamd', 'bin/grim', 'lib/ld-linux-x86-64.so.2'}:
+            with (root / file['path']).open('rb') as binary:
+                header = binary.read(20)
+            if file['mode'] != 0o755 or not header.startswith(b'\x7fELF\x02\x01') or header[18:20] != b'\x3e\x00':
+                raise ValueError('required helper is not an executable x86_64 ELF file')
     if any(re.search(r'(^|/)(ffmpeg|labwc|weston)(\.|$)', p) for p in paths):
         raise ValueError('unexpected system component')
     return manifest
 
 
 def main():
-    archive = Path(sys.argv[1]).resolve()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--binary', type=Path)
+    parser.add_argument('archive', type=Path)
+    args = parser.parse_args()
+    archive = args.archive.resolve()
     with tempfile.TemporaryDirectory(prefix='screen helpers relocation ') as temp:
         base = Path(temp)
         first = base / 'original'
         manifest = extract_and_verify(archive, first)
+        if args.binary:
+            with args.binary.open('rb') as hand, mmap.mmap(hand.fileno(), 0, access=mmap.ACCESS_READ) as binary:
+                if binary.find(archive.read_bytes()) < 0:
+                    raise ValueError('shipped Hand does not contain the exact verified screen helper payload')
+            print(json.dumps({'binary':str(args.binary), 'embedded_payload_sha256':hashlib.sha256(archive.read_bytes()).hexdigest()}), flush=True)
+        if args.verify_only:
+            print(json.dumps({'status':'verified', 'files':len(manifest['files'])}))
+            return
         relocated = base / 'relocated payload'
         first.rename(relocated)
         empty_path = base / 'empty PATH'; empty_path.mkdir()

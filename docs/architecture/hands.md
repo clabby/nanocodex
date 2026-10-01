@@ -1,6 +1,6 @@
 # Hands
 
-`nanocodex2 hand` is the headless machine runner. Install it once under the OS service manager; the CLI and app observe it. The native `nanocodex hand` controller uses a per-user LaunchAgent on macOS, systemd on Linux, and a per-user Task Scheduler job on Windows. If installation, start permission, or the account-scoped connection is unavailable, the CLI prints an actionable warning and continues remote work. `NANOCODEX_DISABLE_HAND=1` skips the local Hand check.
+`nanocodex2 hand` is the headless machine runner. Install it once under the OS service manager; the CLI and app observe it. The installer/controller is not its lifetime owner: an installed Hand must remain independently owned after setup, an updater, or every observing CLI session exits. The native `nanocodex hand` controller uses a per-user LaunchAgent on macOS, systemd on Linux, and a per-user Task Scheduler job on Windows. If installation, start permission, or the account-scoped connection is unavailable, the CLI prints an actionable warning and continues remote work. `NANOCODEX_DISABLE_HAND=1` skips the local Hand check.
 
 ```text
 OS -> Hand daemon <--- outbound WebSocket ---> AccountHostedTools <- agent
@@ -30,8 +30,8 @@ platforms. A remote Linux host can be enrolled without interactive auth using
 
 The installed Rust updater runs hourly as a per-user LaunchAgent, systemd timer,
 or Task Scheduler job. It stages verified matching CLI/Hand bundles and never
-silently restarts a running Hand; the next explicit start or restart activates a
-staged Hand update. Windows background runs also refresh the verified upstream
+silently restarts an installed Hand. An explicit `hand restart` activates a staged
+pair; `hand start` may activate it when the owner is not already loaded. Windows background runs also refresh the verified upstream
 CUA payload.
 
 The older machine-wide helper remains available for explicitly managed macOS or
@@ -47,7 +47,49 @@ For a custom login, pass `--managed-url https://your-server` and `--account-file
 
 Use `sudo systemctl stop/start nanocodex-hand` on Linux. On macOS, use `sudo launchctl bootout system/com.nanocodex.hand` to stop and `sudo launchctl bootstrap system /Library/LaunchDaemons/com.nanocodex.hand.plist` to start. Remove/disable the OS service to prevent future boot startup. Windows service installation is not provided by this helper.
 
-The Linux SSH bootstrap installs the same single daemon with its VM recipe. Older separate factory services must be removed explicitly before installing it. There is one current wire contract: publishers must send `capabilities: ["turn_metadata"]`. This fixed field preserves the existing publisher format without capability negotiation or legacy metadata fallback. There is no new process recovery API or persistence across daemon crashes.
+The Linux SSH bootstrap installs the same single daemon with its VM recipe. Older separate factory services require an explicit installation/migration decision; an updater never removes or restarts them. There is one current wire contract: publishers must send `capabilities: ["turn_metadata"]`. This fixed field preserves the existing publisher format without capability negotiation or legacy metadata fallback. There is no new process recovery API or persistence across daemon crashes.
+
+## Coordinated updates and independent lifetime
+
+The OS owner is distinct from the user's CLI version store. Launchd owns the
+macOS Hand, Task Scheduler owns the Windows login task, and systemd owns the
+Linux Hand. A controller command can inspect or explicitly change that owner;
+it must not replace it with a foreground child. Closing the controller, CLI or
+transport connection does not shut down the installed publisher. Login/boot
+startup follows the installed native definition and permissions, not a terminal
+session; verify logout/reboot behavior separately on the target OS.
+
+Every selector uses the same verified-pair activation policy: stable/latest
+`update`, `update VERSION`, `--nightly`, `--branch`, `--pr`, and local `--path` with its
+`--hand-binary`. With an installed (even stopped) or loaded owner, these commands
+stage the coherent CLI/Hand bundle by default. `update --apply` alone still
+stages; neither it nor a background timer is permission to restart the owner.
+The old CLI stays selected until an explicitly authorized handover. Without an
+installed/loaded owner a verified pair may activate as CLI-only state, without
+installing or starting a Hand.
+
+`update --apply --restart-hand`, `hand restart`, or `hand start` for an unloaded
+owner explicitly requests activation. The transaction verifies the candidate,
+preserves rollback state, hands over the existing service, and commits the CLI
+only after the selected worker's readiness is verified. Pending state and
+recovery evidence remain on failure/ambiguity; `hand recover` reconciles an
+interrupted transaction rather than blindly starting another publisher.
+
+On Linux, the user controller does not own `/opt/nanocodex` or systemd. The
+privileged Hand updater freezes the candidate under the root-owned release tree
+and binds recovery to the transaction and candidate digest. It preserves the
+service user, account/configuration and prior service state. A separately owned
+VM factory and existing guests are not update targets: no factory restart,
+guest termination or unit migration is implied by a Hand update. An active
+factory must remain pinned to its verified running executable even if its unit
+refers to the mutable `current` alias; an ambiguous/inactive alias fails closed.
+Privilege/manager failures must be reported, not worked around with a new
+foreground Hand.
+
+See `bin/nanocodex/tests/UPDATE_E2E.md` for disposable public-CLI journeys and
+separate native-service acceptance. Version probes, preserved plist text and
+injected recovery journals do not prove independent OS-service lifetime,
+screen readiness, or successful native service rollback.
 
 ## Execution mounts
 

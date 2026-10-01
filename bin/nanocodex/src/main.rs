@@ -18,6 +18,8 @@ mod eval;
 #[path = "eval_unsupported.rs"]
 mod eval;
 mod hand_service;
+#[cfg(target_os = "linux")]
+mod linux_hand_service;
 mod hand_setup;
 mod install;
 mod launcher;

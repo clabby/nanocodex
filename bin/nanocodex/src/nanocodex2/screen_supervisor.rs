@@ -13,14 +13,27 @@ pub(super) trait Session {
 const POLL: Duration = Duration::from_secs(1);
 const MAX_RETRY: Duration = Duration::from_secs(30);
 
+#[cfg(test)]
 pub(super) async fn while_attached<S: Session, F: Future<Output = Result<S, S::Error>>>(
     start: impl FnMut() -> F,
     attachment: impl Future<Output = Result<(), S::Error>>,
 ) -> Result<(), S::Error> {
+    while_attached_observed(start, attachment, |_| {}).await
+}
+
+pub(super) async fn while_attached_observed<S: Session, F: Future<Output = Result<S, S::Error>>>(
+    start: impl FnMut() -> F,
+    attachment: impl Future<Output = Result<(), S::Error>>,
+    observe: impl FnMut(Option<&S::Error>),
+) -> Result<(), S::Error> {
     let (stop, stopped) = tokio::sync::oneshot::channel();
-    let screen = supervise(start, async {
-        let _ = stopped.await;
-    });
+    let screen = supervise_observed(
+        start,
+        async {
+            let _ = stopped.await;
+        },
+        observe,
+    );
     let hand = async {
         let result = attachment.await;
         // Shutdown, authentication failure and attachment fencing all stop capture.
@@ -31,6 +44,7 @@ pub(super) async fn while_attached<S: Session, F: Future<Output = Result<S, S::E
     result.and(stopped)
 }
 
+#[cfg(test)]
 pub(super) async fn supervise<S: Session, F: Future<Output = Result<S, S::Error>>>(
     start: impl FnMut() -> F,
     shutdown: impl Future<Output = ()>,

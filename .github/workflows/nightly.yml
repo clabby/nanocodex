@@ -101,6 +101,13 @@ jobs:
             cargo build --locked --profile nightly --timings \
               --package nanocodex2-bin --bin nanocodex2 \
               --target ${{ matrix.target }}
+      - name: Verify shipped Linux Hand screen payload
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.component == 'cli'
+        shell: bash
+        run: |
+          python3 scripts/tests/linux-screen-helpers-bundle.py \
+            --binary "target/${{ matrix.target }}/nightly/nanocodex2" \
+            "$NANOCODEX_LINUX_SCREEN_BUNDLE"
       - name: Verify embedded VM init
         if: matrix.component == 'cli'
         shell: bash
