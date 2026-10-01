@@ -19,17 +19,18 @@ their firewall. Defaults preserve all interfaces, both IP families, and OS
 ephemeral ports. Interface names, LAN routes, and firewall rules are deployment
 configuration; no machine-specific network settings are embedded in the image.
 
-`--frames` remains an explicit compatibility transport. Shared web and Apple
+`--frames` is restricted to explicitly configured `cf:` HTTPS sandbox publications. Shared web and Apple
 viewers target 30 JPEG requests per second for legacy single-frame publishers,
 counting capture/network/decode time toward that budget. Publishers advertising
-a frame window retain the bounded pipelined transport; Rust publishers allow
-six outstanding frames and pace capture at up to 30 Hz. Rust native and
-VM/Docker Hand publishers now also default to continuous 60 Hz H.264/WebRTC
-when FFmpeg is available. Linux captures X11 independently of input; macOS uses
+a frame window retain the bounded pipelined transport. Native and VM/Docker
+Hand publishers require continuous H.264/WebRTC video and a working encoder;
+they do not advertise a frame window or downgrade on encoder failure. Linux captures X11 independently of input; macOS uses
 AVFoundation screen capture and VideoToolbox. VM video uses bounded streaming
 stdout over the existing private guest channel, including offline guests.
 Agent observations still return bounded JPEGs. Older guest images and hosts
-without a working encoder retain `frames-v1`; that fallback is not 60 fps.
+without a working encoder fail visibly and must restore their video pipeline;
+there is no native JPEG fallback. Only Cloudflare's explicitly configured
+`cf:` sandbox desktops use `frames-v1` over scoped HTTPS.
 Swift macOS capture already feeds ScreenCaptureKit buffers directly to WebRTC
 at up to 60 Hz; paired-device capture retains its existing 30 Hz WDA limit.
 

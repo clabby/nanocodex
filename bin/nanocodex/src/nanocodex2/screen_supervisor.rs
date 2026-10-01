@@ -256,6 +256,34 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn replacement_after_publication_skips_capture_repair() {
+        let state = Arc::new(State::default());
+        state.failures.store(10, Ordering::SeqCst);
+        let starts = Arc::new(AtomicUsize::new(0));
+        let session = state.clone();
+        let count = starts.clone();
+        let (ready, waiting) = oneshot::channel();
+        let mut ready = Some(ready);
+        let worker = tokio::spawn(supervise_observed(
+            move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(Screen(session.clone())))
+            },
+            std::future::pending(),
+            move |error| {
+                assert!(error.is_none());
+                ready.take().unwrap().send(()).unwrap();
+            },
+        ));
+        waiting.await.unwrap();
+        state.finished.store(true, Ordering::SeqCst);
+        worker.await.unwrap().unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert!(state.attempts.lock().unwrap().is_empty());
+        assert_eq!(state.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn capture_retry_keeps_the_publisher_and_cancels_pending_recovery() {
         let state = Arc::new(State::default());
         state.failures.store(2, Ordering::SeqCst);

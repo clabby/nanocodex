@@ -341,7 +341,10 @@ The iPhone/iPad and native Mac app share the
 leases. Desktop-enabled factory VMs publish automatically; the screen list
 refreshes while open. Shell-only VM images have no graphical desktop. Cloudflare
 sandbox desktops require the managed desktop feature flag and use authenticated
-JPEG screen updates instead of WebRTC video.
+JPEG screen updates instead of WebRTC video via the explicitly advertised
+`frames-v1` transport (`cf:` desktop/VM publications only). Native Mac, Linux,
+phone, and VM publishers require WebRTC video. WebRTC failures do not switch
+to still-image polling; update legacy frame-only native publishers before use.
 
 Backgrounding releases control and pauses the viewer while retaining its selected
 screen. Returning reconnects with the current publication generation. Transport

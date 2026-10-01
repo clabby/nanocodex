@@ -15,6 +15,11 @@ public struct RemoteHand: Decodable, Identifiable, Sendable {
     public let transport: Transport?
     public private(set) var broadcast: Bool? = nil
     public private(set) var frameWindow: Int? = nil
+    // Frames are Cloudflare's explicit HTTPS-only transport, not native recovery.
+    var supportsLiveTransport: Bool {
+        transport != .frames || ([RemoteSurface.Kind.desktop, .vm].contains(kind)
+            && machineID.range(of: #"^cf:[A-Za-z0-9][A-Za-z0-9._:-]{0,120}$"#, options: .regularExpression) != nil)
+    }
     public var identity: String { machineID + ":" + id + ":" + generation }
     enum CodingKeys: String, CodingKey {
         case id, name, kind, width, height, controllable, generation, transport, broadcast
@@ -69,7 +74,8 @@ public final class RemoteService: @unchecked Sendable {
 
     public func list() async throws -> [RemoteHand] {
         struct Response: Decodable { let surfaces: [RemoteHand] }
-        return try JSONDecoder().decode(Response.self, from: await request(path: "/screens", method: "GET")).surfaces
+        let hands = try JSONDecoder().decode(Response.self, from: await request(path: "/screens", method: "GET")).surfaces
+        return hands.filter(\.supportsLiveTransport)
     }
 
     public func ice() async throws -> [RemoteICE] {
@@ -102,6 +108,7 @@ public final class RemoteService: @unchecked Sendable {
     }
 
     fileprivate func socket(hand: RemoteHand?, live: Bool = false) throws -> URLSessionWebSocketTask {
+        if let hand, !hand.supportsLiveTransport { throw RemoteError.invalidMessage }
         var path = "/host"
         if let hand {
             var components = URLComponents()

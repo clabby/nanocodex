@@ -32,6 +32,16 @@ type hostConfig struct {
 	broadcast                                        hostBroadcaster
 }
 
+// The HTTPS frame relay is an explicit restricted-sandbox capability, never
+// recovery for a failed native/server video encoder. Broker authorization also
+// validates the published machine identity; a prefix alone grants no authority.
+func (config hostConfig) validateTransport() error {
+	if config.Frames && (!strings.HasPrefix(config.MachineID, "cf:") || len(config.MachineID) <= 3) {
+		return errors.New("JPEG live-view transport is restricted to Cloudflare sandbox Hands; native/server viewing requires WebRTC (remove --frames)")
+	}
+	return nil
+}
+
 func (config hostConfig) validateNetwork() error {
 	if (config.UDPPortMin == 0) != (config.UDPPortMax == 0) || config.UDPPortMax > 65535 || config.UDPPortMin > config.UDPPortMax {
 		return errors.New("invalid WebRTC UDP port range")
@@ -84,6 +94,9 @@ type controlMessage struct {
 // Motion has a replaceable slot per viewer; reliable input cannot queue behind
 // an old stream of mouse movements.
 func serveWayland(parent context.Context, config hostConfig) error {
+	if err := config.validateTransport(); err != nil {
+		return err
+	}
 	if err := config.validateNetwork(); err != nil {
 		return err
 	}

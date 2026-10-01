@@ -43,6 +43,11 @@ func testServerDesktopLifecycle(t *testing.T, frames, replacement bool) {
 	const owner = "11111111-1111-4111-8111-111111111111"
 	const id = "22222222-2222-4222-8222-222222222222"
 	const prefix = "/v1/hand-hosts/" + owner + "/" + id + "/hands"
+	machineID := "server:" + id
+	if frames {
+		// Exercise only the explicit restricted-sandbox compatibility transport.
+		machineID = "cf:" + id
+	}
 	var token atomic.Value
 	token.Store(strings.Repeat("a", 43))
 	type publication struct {
@@ -86,7 +91,7 @@ func testServerDesktopLifecycle(t *testing.T, frames, replacement bool) {
 				return
 			}
 			if message.Type == "catalog" {
-				if message.MachineID != "server:"+id || len(message.Surfaces) != 1 || message.Surfaces[0].Kind != "desktop" {
+				if message.MachineID != machineID || len(message.Surfaces) != 1 || message.Surfaces[0].Kind != "desktop" {
 					t.Error("invalid server publication")
 					return
 				}
@@ -120,7 +125,7 @@ func testServerDesktopLifecycle(t *testing.T, frames, replacement bool) {
 	}
 	writeCredential(token.Load().(string))
 	command := exec.CommandContext(ctx, "/usr/local/bin/nanocodex-remote", "server-host", "--url", server.URL+prefix,
-		"--credential-file", credential, "--machine-id", "server:"+id, "--name", "Server lifecycle test", "--workspace", workspace)
+		"--credential-file", credential, "--machine-id", machineID, "--name", "Server lifecycle test", "--workspace", workspace)
 	if frames {
 		command.Args = append(command.Args, "--frames")
 	}

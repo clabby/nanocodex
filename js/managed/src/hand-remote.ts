@@ -1,6 +1,7 @@
 import { screenAction, screenResult, screenTool, type AgentScreenResult, type ScreenTarget } from "./hand-remote-agent";
 
-/** Human media/input use WebRTC. Bounded agent calls use the authenticated host socket. */
+/** Native human media/input use WebRTC. Cloudflare sandboxes explicitly use scoped HTTPS frames.
+ * Bounded agent screenshots are independent of the human media transport. */
 const TAG = "hand-remote";
 const MAX_CONNECTIONS = 64;
 const LEASE_MS = 30_000;
@@ -28,14 +29,15 @@ export class HandRemoteBroker {
 
   owns(socket: WebSocket): boolean { return this.attachment(socket) !== undefined; }
 
-  list(): ScreenTarget[] {
+  list(includeUnsupported = false): ScreenTarget[] {
     this.sweep();
-    return this.hosts().flatMap(({ state }) => (state.surfaces ?? []).map(surface => ({
+    return this.hosts().flatMap(({ state }) => (state.surfaces ?? []).filter(surface => includeUnsupported || surface.transport !== "frames-v1"
+      || (cloudflarePublisher(state) && cloudflareFrames(state.machineId!, surface.kind))).map(surface => ({
       ...surface, machine_id: state.machineId!, machine_name: state.machineName!, generation: state.generation,
     })));
   }
 
-  tools() { return this.list().filter(target => target.agent_tools).map(screenTool); }
+  tools() { return this.list(true).filter(target => target.agent_tools).map(screenTool); }
 
   revokePublisher(routeId: string): void {
     for (const socket of this.context.getWebSockets(TAG)) {
@@ -45,7 +47,7 @@ export class HandRemoteBroker {
 
   async invoke(name: string, route: string, input: unknown, agentId: string, signal: AbortSignal): Promise<Response | undefined> {
     if (!route.startsWith("screen:v1:")) return undefined;
-    const target = this.list().find(target => target.agent_tools && screenTool(target).definition.name === name && screenTool(target).route_token === route);
+    const target = this.list(true).find(target => target.agent_tools && screenTool(target).definition.name === name && screenTool(target).route_token === route);
     if (!target) return Response.json({ error: "stale_catalog" }, { status: 409 });
     let action;
     try { action = screenAction(input); } catch { return Response.json(screenResult({ status: "invalid" }, target)); }
@@ -109,6 +111,11 @@ export class HandRemoteBroker {
       const selected = this.hosts().find(({ state }) => state.machineId === machineId && state.generation === generation
         && state.surfaces?.some(surface => surface.id === surfaceId));
       if (!selected) return Response.json({ error: "remote_unavailable" }, { status: 409, headers: noStore });
+      const surface = selected.state.surfaces!.find(surface => surface.id === surfaceId)!;
+      // Fence legacy native frame publications retained across broker upgrades.
+      if (surface.transport === "frames-v1" && (!cloudflarePublisher(selected.state) || !cloudflareFrames(selected.state.machineId!, surface.kind))) {
+        return Response.json({ error: "native_video_required" }, { status: 409, headers: noStore });
+      }
       host = selected.socket;
       Object.assign(state, { role: "viewer", hostId: selected.state.id, generation, machineId, surfaceId,
         transport: selected.state.surfaces!.find(surface => surface.id === surfaceId)!.transport,
@@ -190,6 +197,7 @@ export class HandRemoteBroker {
         if (typeof value.machine_id !== "string" || !ID.test(value.machine_id) || typeof value.machine_name !== "string" || !value.machine_name.trim()
           || new TextEncoder().encode(value.machine_name).length > 128) throw new Error();
         const surfaces = normalizeSurfaces(value.surfaces);
+        if (surfaces.some(surface => surface.transport === "frames-v1" && (!cloudflarePublisher(state) || !cloudflareFrames(value.machine_id, surface.kind)))) throw new Error();
         if (state.vm && (value.machine_id !== state.vm.machineId
           || surfaces.some(surface => surface.kind !== (state.vm!.surfaceKind ?? "vm")))) throw new Error();
         // Publish only a complete validated catalog. Replacement fences every old viewer.
@@ -317,11 +325,13 @@ export class HandRemoteBroker {
 
   /** Pull-based frames use the same account, publication and authorization lease. */
   private relayFrameMessage(socket: WebSocket, state: Attachment, value: Record<string, any>): void {
+    // Also stop already-admitted legacy native frame viewers after an upgrade.
+    if (!(state.role === "viewer" ? cloudflareFrames(state.machineId ?? "", "desktop") : cloudflarePublisher(state))) throw new Error();
     if (state.role === "viewer") {
       if (state.transport !== "frames-v1" || !["frame_request", "control", "input"].includes(value.type)) throw new Error();
       exact(value, value.type === "frame_request" ? ["type", "count"] : ["type", "data"]);
       const host = this.hosts().find(({ state: host }) => host.id === state.hostId && host.generation === state.generation);
-      if (!host) throw new Error();
+      if (!host || !cloudflarePublisher(host.state)) throw new Error();
       if (value.type === "frame_request") {
         const count = value.count ?? 1, window = state.frameWindow ?? 1;
         if ((value.count !== undefined && window === 1) || !Number.isInteger(count) || count < 1 || count > window) throw new Error();
@@ -378,6 +388,15 @@ export class HandRemoteBroker {
   private send(socket: WebSocket, value: unknown): void { socket.send(JSON.stringify(value)); }
   private invalid(): Response { return Response.json({ error: "invalid_request" }, { status: 400, headers: noStore }); }
   private forbidden(): Response { return Response.json({ error: "forbidden" }, { status: 403, headers: noStore }); }
+}
+
+function cloudflarePublisher(state: Attachment): boolean {
+  return state.vm?.surfaceKind === "desktop" && state.vm.routeId.startsWith("hand-host:")
+    && cloudflareFrames(state.vm.machineId, "desktop");
+}
+
+function cloudflareFrames(machineId: string, kind: string): boolean {
+  return /^cf:[A-Za-z0-9][A-Za-z0-9._:-]{0,120}$/.test(machineId) && ["desktop", "vm"].includes(kind);
 }
 
 function exact(value: Record<string, unknown>, allowed: string[]): void {

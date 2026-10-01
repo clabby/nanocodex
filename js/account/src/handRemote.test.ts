@@ -281,6 +281,32 @@ function fixture(t: TestContext, hand: RemoteHand = screen, withCredentials = fa
   };
 }
 
+test("a legacy native frame surface does not hide healthy WebRTC or explicit Cloudflare screens", async t => {
+  const f = fixture(t);
+  const cloudflare = { ...screen, machine_id: "cf:desktop", transport: "frames-v1" } as RemoteHand;
+  f.setCatalog([{ ...screen, generation: "legacy", transport: "frames-v1" }, screen, cloudflare]);
+  assert.deepEqual(await listRemoteHands(), [screen, cloudflare]);
+});
+
+test("native frame-only publications fail visibly before opening any media or signaling", async t => {
+  const f = fixture(t, { ...screen, transport: "frames-v1" });
+  await f.session.connect(); await f.tick(100_000);
+  assert.equal(f.session.state.status, "Native screens require WebRTC video. Update the screen publisher.");
+  assert.equal(f.session.state.connected, false);
+  assert.equal(f.session.state.connecting, false);
+  assert.equal(f.sockets.length, 0); assert.equal(f.peers.length, 0); assert.equal(f.decoded.length, 0);
+});
+
+test("native WebRTC recovery rejects a JPEG replacement rather than silently downgrading", async t => {
+  const f = fixture(t); await f.session.connect();
+  f.setCatalog([{ ...screen, generation: "legacy", transport: "frames-v1" }]);
+  f.peers[0]!.fail(); await f.tick(1000); await f.tick(100_000);
+  assert.equal(f.session.state.status, "This screen is unavailable.");
+  assert.equal(f.session.state.connected, false); assert.equal(f.session.state.connecting, false);
+  assert.equal(f.sockets.length, 1); assert.equal(f.peers.length, 1);
+  assert.ok(f.sockets.every(socket => !socket.sent.some(message => message.type === "frame_request")));
+});
+
 test("WebRTC opens its viewer socket during ICE lookup and answers the initial offer with one credential request", async t => {
   const f = fixture(t), ice = deferred<Response>();
   f.setIceResponse(() => ice.promise);
@@ -333,9 +359,10 @@ test("TURN authorization loss aborts concurrent discovery immediately", async t 
   assert.equal(f.session.state.connecting, false);
 });
 
-test("a reconnect can switch to frames-v1 even if speculative TURN is unavailable", async t => {
-  const f = fixture(t); await f.session.connect();
-  f.setCatalog([{ ...screen, transport: "frames-v1", generation: "frames" }]);
+test("an explicit Cloudflare publication can switch to frames-v1 even if speculative TURN is unavailable", async t => {
+  const cloudflare = { ...screen, machine_id: "cf:sandbox" };
+  const f = fixture(t, cloudflare); await f.session.connect();
+  f.setCatalog([{ ...cloudflare, transport: "frames-v1", generation: "frames" }]);
   f.setIceResponse(async () => Response.json({}, { status: 503 }));
   f.session.reconnect(); await flush();
   assert.equal(f.peers.length, 1);
@@ -346,8 +373,9 @@ test("a reconnect can switch to frames-v1 even if speculative TURN is unavailabl
 });
 
 test("a frames-v1 publication switching to WebRTC starts a fresh candidate pool after discovery", async t => {
-  const f = fixture(t, { ...screen, transport: "frames-v1" }); await f.session.connect();
-  f.setCatalog([screen]); f.session.reconnect(); await flush();
+  const cloudflare = { ...screen, machine_id: "cf:sandbox" };
+  const f = fixture(t, { ...cloudflare, transport: "frames-v1" }); await f.session.connect();
+  f.setCatalog([cloudflare]); f.session.reconnect(); await flush();
   assert.equal(f.requests.filter(r => r.path.endsWith("/ice")).length, 1);
   assert.equal(f.peers[0]!.config.iceCandidatePoolSize, 1);
   assert.equal(f.sockets.length, 2);
@@ -555,7 +583,7 @@ test("signaling pongs do not extend the authorization lease", async t => {
   assert.equal(f.session.state.status, "This remote session is no longer authorized.");
 });
 
-const frameHand: RemoteHand = { ...screen, machine_id: "sandbox:desktop", transport: "frames-v1" };
+const frameHand: RemoteHand = { ...screen, machine_id: "cf:desktop", transport: "frames-v1" };
 // A SOF header for the allocation boundary tests; the mocked bitmap decoder
 // below is replaced by the real browser JPEG decoder in runtime checks.
 function frame(width = 640, height = 360) {
