@@ -10,9 +10,9 @@ const mf=new Miniflare({durableObjectsPersist:directory+'/sqlite',r2Persist:dire
 await mf.ready;
 process.send({ready:true});
 process.on('message',async message=>{try{
-  const{action,id}=message;const paths={seed:'/__seed',resume:'/__resume',receipt:'/turns/'+id,complete:'/model/__complete',stage:'/model/__stage/'+id,proof:'/__proof',forget:'/__forget-code-journal',functions:'/__functions',directProof:'/__direct-proof'};
+  const{action,id}=message;const paths={seed:'/__seed',resume:'/__resume',receipt:'/turns/'+id,complete:'/model/__complete',stage:'/model/__stage/'+id,proof:'/__proof',forget:'/__forget-code-journal',functions:'/__functions',directProof:'/__direct-proof',childProof:'/__child-proof'};
   let value;
   if(action==='inspect')value={session:await(await mf.dispatchFetch('https://fixture.internal/__inspect')).json(),model:await(await mf.dispatchFetch('https://fixture.internal/model/__inspect')).json()};
-  else{const response=await mf.dispatchFetch('https://fixture.internal'+paths[action],{method:action==='receipt'||action==='proof'||action==='directProof'?'GET':'POST',...(action==='seed'?{body:JSON.stringify({id})}:{})});if(!response.ok)throw Error('fixture HTTP '+response.status+': '+(await response.text()).slice(0,2048));value=response.status===204?null:await response.json();}
+  else{const response=await mf.dispatchFetch('https://fixture.internal'+paths[action],{method:action==='receipt'||action==='proof'||action==='directProof'||action==='childProof'?'GET':'POST',...(action==='seed'?{body:JSON.stringify({id})}:{})});if(!response.ok)throw Error('fixture HTTP '+response.status+': '+(await response.text()).slice(0,2048));value=response.status===204?null:await response.json();}
   process.send({request:message.request,value});
 }catch(error){process.send({request:message.request,error:String(error.message)});}});

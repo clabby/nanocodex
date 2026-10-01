@@ -517,7 +517,7 @@ export function createBrowserHost(options = {}) {
       }
       for (const handle of [...connections.keys()]) cleanup(() => close(handle));
       cleanup(() => closePreconnected(disposalError));
-      cleanup(() => code.reset());
+      cleanup(() => { effectIdentity.reset(); return code.reset(); });
       cleanup(() => mcpInstalled?.then(() => {}));
       cleanup(() => toolsLifecycle?.close());
       cleanup(() => options.onDispose?.());

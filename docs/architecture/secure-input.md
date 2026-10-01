@@ -260,3 +260,37 @@ A live production hand update requires actual administrator-approved installatio
 independent helper-key pinning, the correct enrolled user mapping, a compatible Hand
 binary, and verified service restart. A successful sandbox/PAM test, a staged binary,
 or a merged PR is not evidence that those live steps have happened.
+
+
+## One-time private sign-in on a phone
+
+`request_browser_login` opens a separate retained Chromium session without a
+Vault item. Supply a stable operation UUID, the public HTTPS login URL and a
+bounded list of exact origins needed for redirects and embedded authentication
+frames. The returned `/browser-login` link opens the account-authenticated web
+client, including from an older iPhone build. The link is not an access grant:
+the existing private-browser HTTP endpoint checks account ownership and CSRF.
+
+The user reviews the sites before enabling the private viewport. Keyboard input,
+passwords, codes and screenshots travel only through that authenticated private
+endpoint. The agent cannot observe or act while human control is active. Done
+sends a fixed `browser_login_receipt` to the original agent with a stable turn ID;
+receipt retries do not repeat the login. The agent must verify actual account
+content with `browser_login_snapshot` before claiming sign-in succeeded.
+`browser_login_action` continues approved account work using snapshot refs and
+stable operation IDs. Cancel or `browser_login_close` discards the session.
+
+Only request metadata and operation receipts are durable. Typed input is kept in
+bounded volatile memory for snapshot redaction. After runtime replacement, expiry,
+or redaction overflow, continuation fails closed; cancel and request fresh sign-in.
+Exact origin checks cover the top page and frames before input and observation;
+they are not a network firewall. Only approve sites trusted to receive the input.
+Browser authentication does not log in xtool or another CLI, export cookies, issue
+Apple signing certificates, or supply a provisioning profile.
+
+Run `corepack pnpm --filter nanocodex-managed-service run test:browser-login` for
+the real Chrome/private-runtime/phone-sized React journey with synthetic input.
+It covers review, iframe typing, redirects, redaction, operation replay, runtime
+loss, unapproved origins and fixed receipt delivery. Browser allocation and storage
+are local adapters; it does not prove Apple authentication or production hosting.
+Worker account/CSRF admission is exercised separately by `browser-vault-route`.

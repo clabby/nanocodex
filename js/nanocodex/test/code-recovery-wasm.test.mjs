@@ -378,3 +378,45 @@ for (const direct of [false, true]) test(`owned ${direct ? 'direct' : 'Code Mode
   { timeout: 30000 }, t => journey(t, { direct, queuedProviderIds: true, reusedProviderIds: true, lostAcknowledgement: true,
     label: direct ? 'direct-queued-identity' : 'nested-queued-identity',
     source: "text(await tools.effect({kind:'read-one'}));", expected: ['read-one'] }));
+
+for (const sdk of ['node', 'host']) test('owned ' + sdk + ': journal supports real non-durable child-style prompts with explicit null operation IDs', { timeout: 20_000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'nanocodex-ephemeral-journal-'));
+  const database = new DatabaseSync(join(directory, 'recovery.sqlite'));
+  const boundary = persistentBoundary(database, false, false, false);
+  const owner = boundary.nextGeneration();
+  const server = await startResponsesServer();
+  const trace = [];
+  const worker = new Worker(new URL('./support/code-recovery-owned.worker.mjs', import.meta.url), {
+    workerData: { sdk, journal: true, nonDurable: true, url: server.url },
+  });
+  let resolveFollow, rejectFollow;
+  const followed = new Promise((resolve, reject) => { resolveFollow = resolve; rejectFollow = reject; });
+  worker.on('error', rejectFollow);
+  worker.on('message', async message => {
+    trace.push(message);
+    if (message.type === 'failure') rejectFollow(Error(message.error.message));
+    if (message.type === 'follow-on') resolveFollow(message);
+    if (message.type !== 'rpc') return;
+    try { worker.postMessage({ id: message.id, result: await boundary.run(owner, message.method, message.args) }); }
+    catch (error) { worker.postMessage({ id: message.id, error: error.message }); }
+  });
+  t.after(async () => { await worker.terminate(); await server.close(); database.close(); await rm(directory, {recursive:true,force:true}); });
+  const socket = await server.nextConnection();
+  const reader = messageReader(socket);
+  for (const [index, kind] of ['read-one', 'read-two'].entries()) {
+    let request = await reader.next();
+    if (request.generate === false) { sendWarmup(socket, 'warmup'); request = await reader.next(); }
+    sendCompleted(socket, 'ephemeral-tool-' + index, [{type:'custom_tool_call',call_id:'reused-cell',name:'exec',input:'text(await tools.effect({kind:' + JSON.stringify(kind) + '}));'}]);
+    await reader.next();
+    sendFinal(socket, 'ephemeral-final-' + index, index === 0 ? 'FIRST_OK' : 'FOLLOW_ON_OK');
+  }
+  assert.equal((await followed).finalMessage, 'FOLLOW_ON_OK');
+  const inputs = trace.filter(x => x.type === 'event' && x.event.type === 'input.accepted');
+  assert.equal(inputs.length, 2);
+  assert.ok(inputs.every(x => x.event.payload.request_id === null));
+  const effects = database.prepare('SELECT key,receipt FROM effects').all();
+  assert.equal(effects.length, 2);
+  assert.ok(effects.every(x => JSON.parse(x.key)[1].startsWith('non-durable:') && x.receipt !== null));
+  assert.notEqual(JSON.parse(effects[0].key)[1], JSON.parse(effects[1].key)[1]);
+  assert.deepEqual(database.prepare('SELECT kind FROM dispatches').all().map(x => x.kind), ['read-one','read-two']);
+});

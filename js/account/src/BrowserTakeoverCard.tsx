@@ -5,11 +5,13 @@ import { enqueueTakeover, imagePoint, textEdits } from './browserTakeoverInput';
 import './browserTakeover.css';
 
 export function BrowserTakeoverCard({ intake, authenticated, onReceipt }: { intake: VaultIntake; authenticated: boolean; onReceipt(receipt: string): void }) {
+  const login = intake.operation === "browser_login";
+  const [reviewed, setReviewed] = useState(!login);
   const [frame, setFrame] = useState<BrowserTakeoverFrame>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(authenticated);
-  const [hint, setHint] = useState<BrowserKeyboard>({ type: 'text', multiline: false });
+  const [hint, setHint] = useState<BrowserKeyboard>({ type: login ? 'password' : 'text', multiline: false });
   const [dot, setDot] = useState<{ x: number; y: number }>();
   const input = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null), textInput = useRef<HTMLTextAreaElement>(null), passwordInput = useRef<HTMLInputElement>(null), screen = useRef<HTMLDivElement>(null), dialog = useRef<HTMLDialogElement>(null);
   const state = useRef({ alive: false, blocked: false, running: false, finishing: false, finished: false, epoch: 0, queue: [] as BrowserTakeoverAction[], controller: undefined as AbortController | undefined, text: '', composing: false, pointer: undefined as number | undefined });
@@ -29,12 +31,13 @@ export function BrowserTakeoverCard({ intake, authenticated, onReceipt }: { inta
         const action = s.queue.shift()!; s.controller = new AbortController();
         const next = await browserTakeover(intake, action, fetch, s.controller.signal);
         if (!s.alive || epoch !== s.epoch) return;
+        if (next.status === 'approved') { setReviewed(true); enqueueTakeover(s.queue, { action: 'observe', viewport: viewport.current }); continue; }
         if (next.status === 'finished' && action.action !== 'finish') throw new Error('Unexpected completion');
         setFrame(next);
         if (next.status === 'active' && next.keyboard) setHint(next.keyboard);
-        if (next.status === 'finished' && !s.finished) {
+        if ((next.status === 'finished' || next.status === 'cancelled') && !s.finished) {
           s.finished = true; s.queue.length = 0; s.text = ''; if (input.current) input.current.value = ''; setOpen(false);
-          receipt.current(JSON.stringify({ type: 'browser_vault_takeover_receipt', status: 'finished', challenge_id: intake.challenge_id }));
+          receipt.current(JSON.stringify(login ? { type: 'browser_login_receipt', status: next.status, request_id: intake.request_id } : { type: 'browser_vault_takeover_receipt', status: 'finished', challenge_id: intake.challenge_id }));
         }
       }
     } catch {
@@ -42,8 +45,9 @@ export function BrowserTakeoverCard({ intake, authenticated, onReceipt }: { inta
     } finally { if (s.alive && epoch === s.epoch) { s.running = false; setBusy(false); } }
   };
   const send = (action: BrowserTakeoverAction) => {
-    const s = state.current; if (!authenticated || s.finished || s.finishing || (s.blocked && action.action !== 'finish')) return;
-    if (action.action === 'finish') { s.blocked = false; s.finishing = true; setError(''); }
+    const s = state.current; if (!authenticated || s.finished || s.finishing || (s.blocked && !['finish', 'cancel', 'approve'].includes(action.action))) return;
+    if (action.action === 'finish' || action.action === 'cancel') { s.blocked = false; s.finishing = true; setError(''); }
+    if (action.action === 'approve') s.blocked = false;
     enqueueTakeover(s.queue, action); void pump();
   };
   const refresh = () => {
@@ -53,7 +57,8 @@ export function BrowserTakeoverCard({ intake, authenticated, onReceipt }: { inta
   useEffect(() => {
     const s = state.current; s.alive = true; s.finished = false; s.finishing = false;
     setOpen(authenticated);
-    if (authenticated) refresh();
+    setReviewed(!login);
+    if (authenticated && !login) refresh(); else s.blocked = true;
     const hide = () => { if (document.visibilityState !== 'visible') { clear(); setError('Private view paused. Refresh to continue.'); } };
     const pagehide = () => { clear(); setError('Private view paused. Refresh to continue.'); };
     document.addEventListener('visibilitychange', hide); window.addEventListener('pagehide', pagehide);
@@ -84,10 +89,18 @@ export function BrowserTakeoverCard({ intake, authenticated, onReceipt }: { inta
   };
   const point = (x: number, y: number) => imagePoint(screen.current!.getBoundingClientRect(), x, y);
   return <section className="vault-intake-card" aria-label="Private browser control">
-    <strong>{frame?.status === 'finished' ? 'Browser control finished' : 'Private browser'}</strong>
+    <strong>{frame?.status === 'cancelled' ? 'Private sign-in cancelled' : frame?.status === 'finished' ? (login ? 'Private sign-in finished; verification pending' : 'Browser control finished') : login ? 'Sign in privately on phone' : 'Private browser'}</strong>
     {!authenticated ? <p>Sign in to control this browser.</p> : !open && !state.current.finished ? <button onClick={() => { setOpen(true); }}>Open private browser</button> : null}
     {open && authenticated ? createPortal(<dialog ref={dialog} className="private-browser-dialog" aria-label="Private browser" onCancel={event => event.preventDefault()}>
-      <header className="private-browser-header"><span title={intake.origin}>🔒 {intake.origin}</span><button aria-label="Show keyboard" disabled={!frame || state.current.blocked} onClick={() => focusKeyboard()}>Keyboard</button><button disabled={busy} onClick={refresh}>Refresh</button><button disabled={state.current.finishing || state.current.finished} onClick={() => { commit(); input.current?.blur(); send({ action: 'finish' }); }}>Done</button></header>
+      {login && !reviewed ? <section className="private-browser-review">
+        <h2>Sign in privately on phone</h2><p>Starting site: <strong>{intake.origin}</strong></p>
+        <p>Review the sites allowed for this login:</p><ul>{intake.allowed_origins?.map(origin => <li key={origin}>{origin}</li>)}</ul>
+        <p>The screen, password and verification codes stay out of chat. Credentials are not saved to Vault. Finishing returns control to the agent to check this browser session.</p>
+        {error ? <p role="alert">{error}</p> : null}
+        <button disabled={busy} onClick={() => { setError(''); send({ action: 'approve' }); }}>Continue to private login</button>
+        <button disabled={state.current.finishing} onClick={() => send({ action: 'cancel' })}>Cancel</button>
+      </section> : <>
+      <header className="private-browser-header"><span title={frame?.status === "active" ? frame.origin ?? intake.origin : intake.origin}>🔒 {frame?.status === "active" ? frame.origin ?? intake.origin : intake.origin}</span><button aria-label="Show keyboard" disabled={!frame || state.current.blocked} onClick={() => focusKeyboard()}>Keyboard</button><button disabled={busy} onClick={refresh}>Refresh</button>{login ? <button disabled={state.current.finishing} onClick={() => { input.current?.blur(); send({ action: 'cancel' }); }}>Cancel</button> : null}<button disabled={state.current.finishing || state.current.finished} onClick={() => { commit(); input.current?.blur(); send({ action: 'finish' }); }}>Done</button></header>
       {error ? <p className="private-browser-status" role="alert">{error}</p> : null}
       {!frame && !error ? <p className="private-browser-status" role="status">Opening private browser…</p> : null}
       <div className="private-browser-stage">
@@ -110,6 +123,7 @@ export function BrowserTakeoverCard({ intake, authenticated, onReceipt }: { inta
       </div>
       <textarea ref={textInput} className="private-browser-keyboard" aria-label="Private browser keyboard" tabIndex={-1} autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false} inputMode={hint.type === 'password' ? 'text' : hint.type === 'number' ? 'numeric' : hint.type} {...keyboardEvents} />
       <input ref={passwordInput} type="password" className="private-browser-keyboard" aria-label="Private browser password keyboard" tabIndex={-1} autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false} {...keyboardEvents} />
+      </>}
     </dialog>, document.body) : null}
   </section>;
 }

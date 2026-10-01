@@ -486,3 +486,114 @@ test("owned host ABI keeps overlapping projected turns separate and rejects wron
     assert.equal(effects, 2, "wrong or ambiguous lookup never dispatches another effect");
   } finally { await host.dispose(); }
 });
+
+test("owned host routes multiplexed child calls by trusted accepted turn, not parent event correlation ID", async () => {
+  const { createNodeHost } = await import("../node/host.mjs");
+  const contexts = [];
+  let effects = 0;
+  const host = createNodeHost({ toolMode: "direct", tools: { probe: {
+    async handler() { effects += 1; return "JOURNAL_CHILD_OK"; },
+  } }, codeEffectJournal: {
+    async begin(context) { contexts.push(context); return { status: "execute" }; },
+    async complete() {},
+  } });
+  const parent = "synthetic-parent", child = "synthetic-child", turn = "child-projected";
+  const emit = (type, payload) => host.emitEvent(JSON.stringify({type,request_id:parent,payload}));
+  try {
+    emit("input.accepted", {session_id:child,turn_id:turn,item_id:turn+":prompt",kind:"prompt",request_id:null});
+    emit("tool.call", {turn_id:turn,call_id:"call_child",model_call_index:1});
+    const result = JSON.parse(await host.executeTool("probe", "{}", child, "call_child", "fixture", child+":1"));
+    assert.equal(result.success,true);
+    assert.equal(effects,1);
+    assert.equal(contexts[0].sessionId,child);
+    assert.equal(contexts[0].operationId,"non-durable:"+turn+":prompt");
+    assert.equal(contexts[0].modelCallIndex,1);
+  } finally { await host.dispose(); }
+});
+
+test("owned host rejects conflicting accepted owners and invalid metadata without stale call fallback", async () => {
+  const { createNodeHost } = await import("../node/host.mjs");
+  let admissions = 0, effects = 0;
+  const host = createNodeHost({ toolMode: "direct", tools: { probe: {
+    async handler() { effects += 1; return effects; },
+  } }, codeEffectJournal: {
+    async begin() { admissions += 1; return { status: "execute" }; },
+    async complete() {},
+  } });
+  const emit = (type, payload) => host.emitEvent(JSON.stringify({ type, request_id: "parent-correlation", payload }));
+  const accepted = (session, turn) => emit("input.accepted", { session_id: session, turn_id: turn, item_id: turn + ":prompt", kind: "prompt", request_id: null });
+  const call = (turn, fields = {}) => emit("tool.call", { turn_id: turn, call_id: "reused-call", model_call_index: 1, ...fields });
+  try {
+    accepted("child-a", "invalid-index"); call("invalid-index");
+    call("invalid-index", { model_call_index: 0 });
+    await assert.rejects(host.executeTool("probe", "{}", "child-a", "reused-call", "fixture", "invalid-index"), { code: "host_interrupted" });
+    accepted("child-a", "wrong-session"); call("wrong-session");
+    call("wrong-session", { session_id: "child-b" });
+    await assert.rejects(host.executeTool("probe", "{}", "child-a", "reused-call", "fixture", "wrong-session"), { code: "host_interrupted" });
+    accepted("child-a", "colliding-turn"); call("colliding-turn");
+    accepted("child-b", "colliding-turn"); call("colliding-turn");
+    for (const session of ["child-a", "child-b"])
+      await assert.rejects(host.executeTool("probe", "{}", session, "reused-call", "fixture", "colliding-turn"), { code: "host_interrupted" });
+    assert.equal(admissions, 0); assert.equal(effects, 0);
+  } finally { await host.dispose(); }
+});
+
+test("owned host waits for exact delayed call metadata and never reuses consumed metadata", async () => {
+  const { createNodeHost } = await import("../node/host.mjs");
+  const contexts = []; let effects = 0;
+  const host = createNodeHost({ toolMode: "direct", tools: { probe: {
+    async handler() { effects += 1; return "OK"; },
+  } }, codeEffectJournal: {
+    async begin(context) { contexts.push(context); return { status: "execute" }; },
+    async complete() {},
+  } });
+  const session = "delayed-child", turn = "delayed-turn";
+  const emit = (type, payload) => host.emitEvent(JSON.stringify({ type, request_id: "correlation-parent", payload }));
+  const invoke = () => host.executeTool("probe", "{}", session, "reused-call", "fixture", session + ":1");
+  try {
+    emit("input.accepted", { session_id: session, turn_id: turn, item_id: turn + ":prompt", kind: "prompt", request_id: null });
+    for (const index of [1, 2]) {
+      const pending = invoke();
+      await new Promise(resolve => setTimeout(resolve, 10));
+      assert.equal(effects, index - 1); assert.equal(contexts.length, index - 1);
+      emit("tool.call", { turn_id: turn, call_id: "reused-call", model_call_index: index });
+      assert.equal(JSON.parse(await pending).success, true);
+    }
+    assert.deepEqual(contexts.map(context => context.modelCallIndex), [1, 2]);
+    const pending = invoke();
+    const rejected = assert.rejects(pending, { code: "host_interrupted" });
+    host.releaseSession(session);
+    await rejected;
+    assert.equal(effects, 2);
+  } finally { await host.dispose(); }
+});
+
+test("owned host missing metadata has a bounded deadline and no effect admission", async () => {
+  const { createNodeHost } = await import("../node/host.mjs");
+  let admissions = 0;
+  const host = createNodeHost({ toolMode: "direct", tools: { probe: { async handler() { throw Error("must not dispatch"); } } },
+    codeEffectJournal: { async begin() { admissions += 1; return { status: "execute" }; }, async complete() {} } });
+  try {
+    host.emitEvent(JSON.stringify({ type: "input.accepted", request_id: "deadline", payload: { session_id: "deadline", turn_id: "projected-deadline", kind: "prompt", request_id: "op" } }));
+    await withDeadline(assert.rejects(host.executeTool("probe", "{}", "deadline", "missing-call", "fixture", "deadline:1"), { code: "host_interrupted" }), 2000, "identity wait must not hang");
+    assert.equal(admissions, 0);
+  } finally { await host.dispose(); }
+});
+
+test("parallel nested calls coalesce asynchronous identity admission before dispatch", async () => {
+  const ready = deferred(), release = deferred();
+  const contexts = []; let identities = 0, effects = 0;
+  const runtime = createCodeRuntime({ probe: { supportsParallelToolCalls: true,
+    async handler() { effects += 1; return effects; },
+  } }, { effectIdentity: async () => { identities += 1; ready.resolve(); await release.promise; return { operationId: "parallel-op", modelCallIndex: 7 }; },
+    effectJournal: { async begin(context) { contexts.push(context); return { status: "execute" }; }, async complete() {} } });
+  try {
+    const pending = runtime.executeCode("await Promise.all([tools.probe({}), tools.probe({})]);", "parallel-identity", "outer");
+    await withDeadline(ready.promise, 1000, "identity admission not reached");
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(identities, 1); assert.equal(effects, 0); assert.equal(contexts.length, 0);
+    release.resolve(); assert.equal(JSON.parse(await pending).success, true);
+    assert.equal(effects, 2); assert.equal(identities, 1);
+    assert.deepEqual(contexts.map(context => [context.operationId, context.modelCallIndex, context.callId]), [["parallel-op", 7, "outer/code-1"], ["parallel-op", 7, "outer/code-2"]]);
+  } finally { runtime.reset(); }
+});

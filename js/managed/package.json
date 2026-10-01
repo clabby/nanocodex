@@ -14,6 +14,7 @@
     "prebuild": "npm run prepare:code-evaluator",
     "prepare:code-evaluator": "node scripts/prepare-code-evaluator.mjs && node scripts/prepare-hand-image.mjs && node scripts/prepare-just-bash-lazy.mjs",
     "test": "vitest run && npm run test:apps && npm run test:rpc-lifecycle && npm run test:discovery-cache && npm run test:routing && npm run test:todo-mail && npm run test:done && npm run test:meetings && npm run test:recovery && npm run test:claude-managed",
+    "test:browser-login": "node --experimental-strip-types scripts/browser-login-chrome.mjs",
     "test:apps": "vitest run --config vitest.apps.config.ts",
     "test:apps:native": "node --test test/native-app-validation-journey.test.mjs",
     "test:discovery-cache": "node --test test/account-discovery-isolates.test.mjs",

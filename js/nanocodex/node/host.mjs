@@ -305,7 +305,7 @@ export function createNodeHost(options = {}) {
     http.dispose();
     disposal = Promise.resolve().then(() => settleCleanup([
       ...[...connections.keys()].map((handle) => () => close(handle)),
-      () => code.reset(),
+      () => { effectIdentity.reset(); return code.reset(); },
       () => mcpInstalled,
       () => toolsLifecycle?.close(),
       () => options.onDispose?.(),

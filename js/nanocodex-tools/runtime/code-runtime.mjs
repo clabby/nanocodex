@@ -103,7 +103,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     try { recordedInput = boundedEffectSnapshot(input, "direct effect input"); }
     catch (cause) { interrupt(cause); }
     let identity;
-    try { identity = extras.effectIdentity?.(sessionId, callId, turnId) ?? {}; }
+    try { identity = await extras.effectIdentity?.(sessionId, callId, turnId, controller.signal) ?? {}; }
     catch (cause) { interrupt(cause); }
     const effectContext = { ...identity, sessionId, parentCallId: callId, callId, name,
       source: "host-tool:" + name, input: recordedInput, ...(turnId == null ? {} : { turnId }) };
@@ -298,9 +298,14 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
           name,
           input: recordedInput,
         });
-        try { canonicalIdentity ??= journal ? extras.effectIdentity?.(sessionId, parentCallId, turnId) ?? {} : {}; }
+        let resolvedIdentity;
+        try {
+          canonicalIdentity ??= Promise.resolve(journal ? extras.effectIdentity?.(sessionId, parentCallId, turnId, controller.signal) ?? {} : {});
+          resolvedIdentity = await canonicalIdentity;
+          controller.signal.throwIfAborted();
+        }
         catch (cause) { interrupt(cause); }
-        const effectContext = { ...canonicalIdentity, sessionId, parentCallId, callId, name, source, input: recordedInput,
+        const effectContext = { ...resolvedIdentity, sessionId, parentCallId, callId, name, source, input: recordedInput,
           ...(turnId == null ? {} : { turnId }) };
         // Never resolve a guest promise before its durable outcome is acknowledged.
         async function retain(receipt, valueRef, outputJsonRef) {
