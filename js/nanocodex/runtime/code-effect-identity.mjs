@@ -25,7 +25,15 @@ export function createCodeEffectIdentity(enabled) {
             session.turns.delete(old);
             for (const [alias, projected] of session.aliases) if (projected === old) session.aliases.delete(alias);
           }
-          session.turns.set(payload.turn_id, { operationId: payload.request_id, calls: new Map() });
+          // Rust emits an explicit null request_id for execution_operation=None
+          // (including ephemeral child tasks). There is no durable operation
+          // to recover in that mode; scope to its trusted accepted input item.
+          // Missing metadata is still an error, never a latest-turn fallback.
+          const operationId = typeof payload.request_id === "string" && payload.request_id
+            ? payload.request_id
+            : payload.request_id === null && payload.item_id === payload.turn_id + ":prompt"
+              ? "non-durable:" + payload.item_id : undefined;
+          session.turns.set(payload.turn_id, { operationId, calls: new Map() });
         }
       } else if (event.type === "tool.call") {
         const turn = session.turns.get(payload.turn_id);

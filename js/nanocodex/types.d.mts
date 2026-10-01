@@ -525,7 +525,7 @@ export type CodeEffectContext = Readonly<{
   sessionId: string;
   /** Host turn metadata only; not canonical identity for effect replay. */
   turnId?: string;
-  /** Original Rust request/idempotency key, stable across cold recovery. Owned SDK journal calls require it. */
+  /** Original durable Rust operation key, or unique accepted-input scope for a deliberately non-durable invocation. */
   operationId?: string;
   /** Original model-call ordinal; provider call IDs may repeat within an operation. */
   modelCallIndex?: number;

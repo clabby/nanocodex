@@ -48,7 +48,7 @@ const shared = {
     async handler({ kind }, context) {
       const outcome = rpc('effect', kind, context.callId);
       if (workerData.queuedProviderIds && !queuedTurn && kind === 'read-one') {
-        queuedTurn = agent.turn.prompt({ id: 'follow-on', input: 'Queued while original effect is outstanding.' });
+        queuedTurn = agent.turn.prompt({ ...(workerData.nonDurable ? {} : { id: 'follow-on' }), input: 'Queued while original effect is outstanding.' });
         void queuedTurn.result().catch(() => {});
         parentPort.postMessage({ type: 'queued-operation-submitted' });
       }
@@ -75,6 +75,7 @@ const shared = {
     },
   } },
 };
+if (workerData.nonDurable) { delete shared.durability; delete shared.durabilityId; }
 const api = workerData.sdk === 'host' ? { Agent: HostAgent, Transport: HostTransport } : { Agent: NodeAgent, Transport: NodeTransport };
 let agent;
 if (workerData.sdk === 'cloudflare') {
@@ -113,10 +114,10 @@ if (workerData.sdk === 'cloudflare') {
 agent.events.watch().onEvent(event => parentPort.postMessage({ type: 'event', event }));
 parentPort.postMessage({ type: 'ready' });
 try {
-  activeTurn = agent.turn.prompt({ id: 'original', input: 'Execute the synthetic recovery journey.' });
+  activeTurn = agent.turn.prompt({ ...(workerData.nonDurable ? {} : { id: 'original' }), input: 'Execute the synthetic recovery journey.' });
   const result = await activeTurn.result();
   parentPort.postMessage({ type: 'result', finalMessage: result.finalMessage });
-  const follow = await (queuedTurn ?? agent.turn.prompt({ id: 'follow-on', input: 'Reply after recovery.' })).result();
+  const follow = await (queuedTurn ?? agent.turn.prompt({ ...(workerData.nonDurable ? {} : { id: 'follow-on' }), input: 'Reply after recovery.' })).result();
   parentPort.postMessage({ type: 'follow-on', finalMessage: follow.finalMessage });
   if (workerData.reusedProviderIds) {
     const third = await agent.turn.prompt({ id: 'third-turn', input: 'Execute a new tool call with the reused provider ID.' }).result();
@@ -126,7 +127,7 @@ try {
 } catch (error) {
   parentPort.postMessage({ type: 'failure', error: { message: error.message, code: error.code } });
   if (workerData.cancellation) {
-    const follow = await agent.turn.prompt({ id: 'follow-on', input: 'Reply after cancellation.' }).result();
+    const follow = await agent.turn.prompt({ ...(workerData.nonDurable ? {} : { id: 'follow-on' }), input: 'Reply after cancellation.' }).result();
     parentPort.postMessage({ type: 'follow-on', finalMessage: follow.finalMessage });
     await agent.session.shutdown();
   }

@@ -857,7 +857,11 @@ Owned SDK hosts synchronously observe original Rust request/idempotency identity
 and model-call ordinal before dispatch; missing canonical metadata interrupts
 rather than falling back to a projected turn/run ID. Provider call IDs may repeat
 across model responses within one operation and across operations. Use an explicit
-prompt operation `id` with an owned journal. Generic explicit runtimes without
+prompt operation `id` with a durable owned journal. Deliberately non-durable
+prompts (including ephemeral child tasks) emit an explicit null Rust operation
+ID; the host scopes those invocations to the unique trusted accepted input item.
+That scope does not promise cold replay of a non-durable task. Absent or malformed
+metadata still interrupts before effects. Generic explicit runtimes without
 an identity resolver retain their existing session/parent identity semantics.
 `turnId` is diagnostic metadata, not the effect replay key.
 This covers direct application tools (`toolMode: "direct"`) as well as tools
