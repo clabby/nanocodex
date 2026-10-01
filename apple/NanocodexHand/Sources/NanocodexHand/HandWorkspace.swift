@@ -49,6 +49,7 @@ public actor HandWorkspace {
             ])
         }
         let path: JSON = .object(["type": .string("string"), "description": .string("Path relative to this device's /workspace. Use . for its root.")])
+        let appTools = HandAppTools.catalog { tool($0, $1, properties: $2, required: $3, timeout: 60_000) }
         let contextTools = messageContext == nil ? [] : HandContextTools.catalog { tool($0, $1, properties: $2, required: $3) }
         let flipperTools = flipper == nil ? [] : FlipperZeroTools.catalog {
             tool($0, $1, properties: $2, required: $3, parallel: false, timeout: 180_000)
@@ -73,13 +74,14 @@ public actor HandWorkspace {
                 tool("view_image", "Inspect an image file in this device workspace as an oriented JPEG bounded to 2048 pixels and 512 KiB. Display with image(result.content[1]).", properties: ["path": path], required: ["path"]),
                 tool("read_file", "Read a UTF-8 file from this device's app workspace.", properties: ["path": path], required: ["path"]),
                 tool("write_file", "Write a UTF-8 file in this device's app workspace. Creates parent folders and replaces the file atomically.", properties: ["path": path, "content": .object(["type": .string("string")])], required: ["path", "content"], parallel: false)
-            ] + contextTools + flipperTools + bluetoothTools + personalTools)
+            ] + contextTools + flipperTools + bluetoothTools + personalTools + appTools)
         ])
     }
 
     public func call(name: String, input: JSON) async throws -> JSON {
         try Task.checkCancellation()
         guard case .object(let fields) = input else { throw HandFailure.invalidInput }
+        if name == "validate_app" { return try await HandAppTools.call(input) }
         if HandPersonalTools.available, name == "read_photo" {
             let request = try PersonalToolRequest(fields, allowed: ["id"])
             let id = try request.text("id", required: true)!

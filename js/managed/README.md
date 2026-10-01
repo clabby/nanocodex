@@ -9,6 +9,46 @@ followers, and following. `environment().apis` advertises the tool independently
 of connector authentication. It calls the private [X Worker](../x-api/README.md)
 through `NANOCODEX_X`; deploy it with `pnpm deploy:x` before `pnpm deploy:managed`.
 
+## Thread sharing tool
+
+`thread_sharing` exposes `list`, `create`, `revoke`, and `revoke_all`. Omit
+`session_id` to target the current thread; explicit targets must have the same
+owner, organization, team, and authorization epoch. Calls require a direct
+account root with `agents:read` and `tools:use`; mutations also require
+`agents:write`. Connect grants, shared guests, and subagents cannot use it.
+
+To disable all current sharing, call:
+
+```js
+await tools.thread_sharing({ operation: "revoke_all" });
+```
+
+`list` returns active link IDs, permissions, and creation times, never bearer
+URLs. `revoke` takes a listed `link_id`. `create` returns a one-time bearer URL
+and defaults to `permission: "read"`; `write` permits guest turn submission and
+must be explicitly requested. Creating or distributing links requires user
+authorization. Never automatically retry uncertain creation; inspect active
+links and resolve the outcome first. Listing cannot recover a lost bearer URL.
+
+The tool reuses the public owner-authenticated `/v1/agents/:id/share-links`
+router. `DELETE` on that collection atomically revokes all active links and
+returns `revoked_ids`, `revoked_count`, and `active_links: 0`. Live streams for
+those links close immediately. Repeating it returns an empty result. Individual
+`DELETE /share-links/:link_id` retains its existing 204/404 behavior. Revocation
+does not cancel guest turns already admitted to the owner thread.
+
+Guest metadata, history, and SSE redact share bearer tokens, including nested
+Code Mode output and object keys, so creating another link cannot implicitly
+redistribute write or cross-thread authority. Guest text updates use completed
+assistant messages; assistant/reasoning delta fragments are owner-only because
+tokens split across fragments could otherwise be reconstructed. Owner events
+and ordinary shared tool results remain unchanged.
+
+Run the Workerd route/tool journeys with
+`pnpm --filter nanocodex-managed-service exec vitest run test/thread-share-links.test.ts`.
+They emit sanitized journey traces for authorization, revocation, live-feed
+closure, and bearer redaction.
+
 ## Ownership and security
 
 `DurableAgentSession` exclusively owns an agent's mutable runtime: retained
@@ -399,6 +439,67 @@ protocol. `/health` is the service health endpoint.
 | `NANOCODEX_WORKSPACES`, `NANOCODEX_WORKSPACES_*`, `NANOCODEX_BRAIN` | Retained per-hand workspaces, read-only peer aliases, and the durable agent's shared writable `/brain` scratch. |
 | `BROWSER`, `LOADER` | Browser Run and the sandboxed Worker loader used by the official Agents browser runtime. |
 
+### Persistent prompt apps
+
+The `apps` agent tool generates account-private Swift source for the native
+`swift-v1` runtime. `NANOCODEX_CRM` stores source and JSON state in `prompt_apps`
+(migration `0011_prompt_apps.sql`). Source is untrusted data; the native host
+validates it against the supported Swift language subset before execution.
+There is no HTML, JavaScript, WebKit, or web runtime fallback.
+
+All routes require direct account authorization: `agents:read` for reads or
+`agents:write` for mutations, plus `tools:use`. Connect grants are rejected.
+Cookie mutations require an Origin matching the request origin. Responses are JSON
+with `Cache-Control: no-store`; Swift source is returned as JSON data and is never
+rendered as a web page.
+
+| Method and path | Input | Result |
+| --- | --- | --- |
+| `GET /v1/apps` | `limit` (1–100, default 30), `cursor` | `{apps, next_cursor}`; summaries include runtime and omit source |
+| `POST /v1/apps` | `{title, description?, runtime:"swift-v1", source}` | Full manifest, HTTP 201 |
+| `GET /v1/apps/:id` | None | Full manifest |
+| `PUT /v1/apps/:id` | `{title, description?, runtime:"swift-v1", source, revision}` | Replaced manifest |
+| `DELETE /v1/apps/:id` | `{revision}` JSON, or `?revision=N` | `{deleted:true,id}` |
+| `POST /v1/apps/:id/restore` | `{revision}` | Previous source restored, new manifest revision |
+| `GET /v1/apps/:id/data` | None | `{value,revision,updated_at}` |
+| `PUT /v1/apps/:id/data` | `{value,revision}` | Saved state receipt |
+
+Manifests contain `id,title,description,runtime,source,revision,created_at,updated_at`.
+App revision starts at 1; empty state is `{value:null,revision:0,updated_at:null}`.
+Source and data revisions are independent. Stale writes/deletes/restores return
+HTTP 409 `revision_conflict`; read the current revision before retrying. A source
+edit retains one previous title/description/source version. Restore swaps the two
+versions, increments the app revision and preserves state; a new app returns
+409 `no_previous_revision`. Deletion atomically removes source, previous source
+and state. Missing or other-account IDs return 404.
+
+Limits: 100 apps per account, 256 KiB UTF-8 Swift source, 256-byte title, 2048-byte
+description, and 256 KiB JSON state with at most 64 nesting levels. The JSON
+request envelope is limited to 2 MiB to allow escaped text. Unknown fields,
+invalid revisions, duplicate/unknown query parameters and non-JSON inputs fail.
+
+Every save requires `runtime: "swift-v1"` and `source`. Missing or unsupported
+runtimes return HTTP 400 `unsupported_runtime`; the former `html` field and
+unknown fields return HTTP 400 `invalid_input`. Runtime and source validation
+failures never change the existing document, retained source, or account data.
+The service stores source without compiling it; unsupported Swift syntax is
+reported by the native runtime when the app opens.
+
+Apps declare one Swift `struct Name: View` with a `body`, native controls and
+bounded Swift expressions and actions. `@State` is session-only;
+`@Persisted("stable-key")` loads and saves account JSON through the native host.
+Use stable keys across source revisions. In a button action,
+`Task { answer = try await Agent.run("prompt") }` calls the existing signed-in agent
+and returns text. The host owns credentials, progress, cancellation and error
+reporting. See [the Swift authoring contract](../../apple/NanocodexApps/AUTHORING.md)
+for supported syntax, controls, modifiers and runtime limits.
+
+Run `pnpm --filter nanocodex-managed-service run test:apps` for the real worker
+HTTP/D1 journey, including website proxy forwarding, ownership, origin checks,
+optimistic write races, Swift source recovery, legacy-contract rejection, and
+deletion. Synthetic authentication is the only fixture at this boundary;
+production proxy/router/storage run intact.
+
 ### Private-account CRM database
 
 `NANOCODEX_CRM` is a `D1Database` owned by this Worker. CRM records belong to
@@ -629,32 +730,54 @@ or Durable Object migration.
 
 The managed Worker exposes `browser_execute` through `env.BROWSER` and the
 Agents SDK CDP runtime, without provisioning a VM or desktop Hand. Production
-and development Wrangler configuration select `MANAGED_BROWSER_PROVIDER=kitesurf`.
+and development Wrangler configuration select `MANAGED_BROWSER_PROVIDER=chromium`.
 Local development uses a remote Browser Run binding and requires Cloudflare access.
 
 `MANAGED_BROWSER_PROVIDER` is host deployment policy, never a tool argument:
 
 - `kitesurf`: Browser Run with `browser=kitesurf` on its CDP requests.
-- `cloudflare`: Browser Run's default Chromium engine.
+- `chromium`: Browser Run's default Chromium engine through the same direct
+  upstream runtime as Kitesurf, with no browser engine override.
+- `cloudflare`: the existing retained Chromium provider with the managed CDP
+  restrictions and private browser flows.
 - `browserbase`: the existing Browserbase binding adapter; requires the
   `BROWSERBASE_API_KEY` Wrangler secret and optionally `BROWSERBASE_PROJECT_ID`.
 
-Kitesurf uses a one-shot connection: complete navigation and extraction in one
-`browser_execute` call. It cannot retain page state between calls or pause/resume.
-Chromium and Browserbase retain bounded sessions per durable agent, with separate
-storage for each provider. Credential-bearing CDP commands remain blocked.
-Kitesurf exposes ordinary browsing; private Vault and one-time secure input
-tools are unavailable with this provider. Chromium and Browserbase retain their
-existing private browser flows. Use workdir-scoped CUA when operating an
-existing computer's browser.
+`kitesurf` and `chromium` pass `env.BROWSER` directly to the upstream Agents SDK
+runtime and use one-shot sessions: complete navigation and extraction in one
+`browser_execute` call. Page state does not persist between calls. These providers
+use the upstream tools, descriptions, CDP commands, and result handling without
+Nanocodex's CDP filter or result proxy. Their default execution timeout is 90 seconds;
+`MANAGED_BROWSER_TOOL_TIMEOUT_MS` can override it. Chromium also exposes a
+separate retained private session through `browser_vault_open`, existing Vault
+login tools, and generic snapshot/actions. Authenticated browsing can navigate,
+fill ordinary forms, select choices, and activate user-authorized booking or
+checkout controls. Login and action UUID receipts prevent replay after lost
+responses; requested actions require subsequent outcome verification. Private
+phone takeover handles unsupported controls and payment iframes. Credentials
+never enter public CDP or model text arguments, and no VM is required. This is
+not a universal automatic-payment or Stripe Link integration.
+
+The older one-shot `browser_private_checkout_inspect` and
+`browser_private_waitlist` remain available with their narrower contracts.
+Kitesurf has no private Vault tools. See [Vault browser operations](../../docs/VAULT_BROWSER.md)
+for the general session contract and [the private checkout journey](scripts/private-checkout-smoke.md)
+for legacy opt-in browser validation.
+
+`cloudflare` and `browserbase` retain bounded sessions per durable agent, with
+separate storage for each provider. Their existing CDP restrictions and private
+browser flows remain in place. Use workdir-scoped CUA when operating an existing
+computer's browser. An unset `MANAGED_BROWSER_PROVIDER` selects `chromium`,
+matching the checked-in production and development Wrangler configurations.
 
 [Kitesurf is currently beta](https://developers.cloudflare.com/browser-run/kitesurf/).
 It does not support every Chromium feature or long-running authenticated state.
 Unsupported sites return their browser errors; there is no automatic VM allocation
-or silent provider fallback. Operators can select `cloudflare` when Chromium is
-needed. Neither Browser Run engine requires a Nanocodex VM.
+or silent provider fallback. Operators can explicitly select `kitesurf` for its
+beta engine or `cloudflare` for the retained private-browser integration. Neither
+Browser Run engine requires a Nanocodex VM.
 
-Run the [local Kitesurf smoke test](scripts/kitesurf-smoke.md) to verify the real
+Run the [local hosted browser smoke test](scripts/kitesurf-smoke.md) to verify the real
 remote binding through the managed runtime before rollout.
 
 ### Spotify on iPhone
@@ -878,3 +1001,7 @@ retain digest ETags and content lengths. Revoked/expired grants cannot access
 these routes. Generic `/files`, attachments and configuration stay unavailable
 to Connect. These HTTP boundaries do not change the agent's shared `/brain`
 execution model described above.
+
+## Native meeting library
+
+See [Account meeting library](MEETING_LIBRARY_API.md) for recording persistence, revision-safe synchronization, summary generation, limits and the reusable local HTTP fixture.

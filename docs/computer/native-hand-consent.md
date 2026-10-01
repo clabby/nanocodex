@@ -1,25 +1,36 @@
 # Native Hand computer access
 
-Nanocodex delegates computer use to the installed official OpenAI CUA provider.
-The native Hand and desktop app forward the provider's tool declarations, calls,
-and results. Application policy, operating-system permissions, and any approval
-UI supplied by the official provider remain upstream responsibilities.
+Nanocodex uses the official CUA MCP catalog and signed native helper, but does not
+bundle or run a Codex app server on the managed macOS path. See
+[direct MCP host](direct-mcp-host.md) for the exact dependency and permission model.
 
-Nanocodex does not add a terminal, AppKit, or WinForms approval dialog, remember
-application consent, or manufacture approval responses. Its MCP client does not
-advertise form elicitation. Unsupported provider-to-host requests, including
-`elicitation/create` and `openai/elicitation/create`, receive a JSON-RPC
-method-not-found error (`-32601`); they are never automatically accepted.
+The outer Rust MCP client remains a thin transport and advertises no elicitation
+capability itself. The direct macOS host is the provider's MCP client and supplies
+native application-access consent from the trusted host's explicit
+`NANOCODEX_CUA_APP_CONSENT=allow` setting. The managed launcher defaults to blanket app access; a trusted host can set
+`deny` to disable it. The module denies access without an explicit `allow` value.
 
-An upstream operation that requires a host approval mechanism unavailable through
-this transport can fail. Removing Nanocodex's custom handlers does not establish
-that every upstream operation supports this client. Use the official provider's
-supported permission flow when required; do not substitute a tool argument or
-synthetic response for user consent.
+Blanket application-access consent is not blanket authorization for purchases,
+messages, sensitive-data transmission, account changes, microphone/audio access,
+or arbitrary provider requests. Only empty native app-access forms during an
+active JavaScript invocation are eligible. Unknown requests and data-bearing
+forms are never automatically accepted. The signed helper's protected-target
+checks, OS permissions, and authenticated Hand boundaries remain in place.
 
-On macOS, the managed headless app server provides the provider-facing form
-capability. It applies the existing upstream permission policy, including
-noninteractive confirmation handling where that policy permits it. Nanocodex
-neither overrides that policy nor adds prompts. Unresolved interactive requests
-for the bridge's own thread are declined. The desktop ChatGPT/Codex GUI stays
-closed; the signed native helper and OS permissions remain required.
+Known local/MDM managed policy causes the direct host to fail closed until that
+policy has a proper integration. It does not claim to be a signed-in Codex account
+or invent authentication, requirements discovery, or enterprise-policy results.
+
+There is no per-app Nanocodex approval dialog. The old dedicated official
+app-server's process-local `approval_policy="never"` and
+`sandbox_mode="danger-full-access"` overrides are superseded on the managed
+macOS path by this direct host; do not restore the retired bridge or edit a
+user's ordinary Codex configuration to obtain app access. Known provider or
+organization restrictions are not overridden.
+
+Confidential sudo input remains a separate exact-command flow through
+`request_native_secure_input` and an independently enrolled protected helper.
+The authentication user is enrollment-bound, not caller-selected. Installation
+and first enrollment require trusted local administrator approval; passwords
+never belong in chat, tool arguments, or an agent-visible terminal. This is not
+a general native browser/login-password input mechanism.

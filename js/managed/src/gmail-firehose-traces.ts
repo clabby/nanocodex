@@ -1,26 +1,28 @@
 /** Account-private, bounded decision metadata. Only bounded display headers; never persist bodies or model prompts. */
 export const GMAIL_TRACE_POLICY = "gmail-reply-triage-v1";
+export const GMAIL_ACTION_TRACE_POLICY = "gmail-action-review-triage-v1";
+export const GMAIL_ACTION_TRACE_REASONS = ["security_review", "billing_review", "signature_review", "failure_review"] as const;
 export const GMAIL_TRACE_REASONS = ["explicit_reply", "no_reply", "low_confidence", "invalid_result",
-  "timeout", "rate_limited", "unavailable", "binding_error", "missing_body", "truncated", "missing_headers"] as const;
+  "timeout", "rate_limited", "unavailable", "binding_error", "missing_body", "truncated", "missing_headers", "own_sender", "sent_message", ...GMAIL_ACTION_TRACE_REASONS] as const;
 export type GmailTraceReason = typeof GMAIL_TRACE_REASONS[number];
 export type GmailDecisionTrace = Readonly<{
   sender?: string; subject?: string; source_url?: string;
-  source_key: string; policy_version: typeof GMAIL_TRACE_POLICY;
-  outcome: "reply" | "no_reply" | "unavailable" | "filtered";
+  source_key: string; policy_version: typeof GMAIL_TRACE_POLICY | typeof GMAIL_ACTION_TRACE_POLICY;
+  outcome: "reply" | "action_review" | "no_reply" | "unavailable" | "filtered";
   reason: GmailTraceReason;
   classifier_outcome: "success" | "timeout" | "rate_limited" | "unavailable" | "binding_error" | "invalid_result" | "not_requested";
   confidence: number | null; reply_probability: number | null;
   duration_ms: number; decision_id: string | null;
 }>;
-const sourceKey = /^gmail:gmail-reply-triage-v1:[a-f0-9]{64}$/;
+const sourceKey = /^gmail:(gmail-reply-triage-v1|gmail-action-review-triage-v1):[a-f0-9]{64}$/;
 const decisionId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const outcomes = new Set(["reply", "no_reply", "unavailable", "filtered"]);
+const outcomes = new Set(["reply", "action_review", "no_reply", "unavailable", "filtered"]);
 const classifierOutcomes = new Set(["success", "timeout", "rate_limited", "unavailable", "binding_error", "invalid_result", "not_requested"]);
 const boundedProbability = (value: unknown) => value === null || typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 export function validGmailDecisionTrace(input: GmailDecisionTrace): boolean {
   if (!input || typeof input !== "object" || Array.isArray(input)
     || Object.keys(input).filter(key => !["sender", "subject", "source_url"].includes(key)).sort().join(",") !== ["classifier_outcome", "confidence", "decision_id", "duration_ms", "outcome", "policy_version", "reason", "reply_probability", "source_key"].join(",")
-    || !sourceKey.test(input.source_key) || input.policy_version !== GMAIL_TRACE_POLICY
+    || !sourceKey.test(input.source_key) || sourceKey.exec(input.source_key)?.[1] !== input.policy_version
     || !outcomes.has(input.outcome) || !GMAIL_TRACE_REASONS.includes(input.reason)
     || !classifierOutcomes.has(input.classifier_outcome)
     || !boundedProbability(input.confidence) || !boundedProbability(input.reply_probability)
@@ -32,7 +34,18 @@ export function validGmailDecisionTrace(input: GmailDecisionTrace): boolean {
       || /[\u0000-\u001f\u007f]/.test(value))) return false;
   }
   if (input.source_url !== undefined && input.source_url !== "" && (typeof input.source_url !== "string" || !/^https:\/\/mail\.google\.com\/mail\/u\/0\/#all\/[A-Za-z0-9_-]{1,128}$/.test(input.source_url))) return false;
-  if ((input.outcome === "reply") !== (input.decision_id !== null)) return false;
+  const affirmative = input.outcome === "reply" || input.outcome === "action_review";
+  if (affirmative !== (input.decision_id !== null)) return false;
+  const actionReason = (GMAIL_ACTION_TRACE_REASONS as readonly string[]).includes(input.reason);
+  if (input.policy_version === GMAIL_TRACE_POLICY) {
+    if (input.outcome === "action_review" || actionReason) return false;
+  } else {
+    // Action probabilities must never masquerade as personal-reply probabilities.
+    if (input.outcome === "reply" || input.reason === "explicit_reply" || input.reply_probability !== null) return false;
+    if ((input.outcome === "action_review") !== actionReason) return false;
+    if (input.outcome === "action_review" && (input.classifier_outcome !== "success"
+      || input.confidence === null || input.confidence < 0.95)) return false;
+  }
   return true;
 }
 export function initializeGmailDecisionTraces(storage: DurableObjectStorage): void {
@@ -90,7 +103,7 @@ export function recentGmailTodoTraces(storage: DurableObjectStorage) {
   return storage.sql.exec(`SELECT id,sender,subject,source_url,outcome,reason,classifier_outcome,
     confidence,reply_probability,duration_ms,first_at,observed_at,seen_count
     FROM gmail_decision_traces AS trace
-    WHERE outcome != 'reply' AND decision_id IS NULL AND observed_at >= ?
+    WHERE outcome NOT IN ('reply', 'action_review') AND decision_id IS NULL AND observed_at >= ?
       AND NOT EXISTS (SELECT 1 FROM todo_decisions AS decision WHERE decision.source_key = trace.source_key)
     ORDER BY observed_at DESC, id DESC LIMIT 100`, Date.now() - 90 * 86_400_000).toArray();
 }

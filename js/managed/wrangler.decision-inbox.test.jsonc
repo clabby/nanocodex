@@ -1,0 +1,57 @@
+{
+  "name": "decision-inbox-persistence-test",
+  "main": "test/decision-inbox-worker.ts",
+  "compatibility_date": "2026-07-29",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public",
+    "enable_request_signal"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "NANOCODEX_USERS",
+        "class_name": "UserAccount"
+      },
+      {
+        "name": "NANOCODEX_ORGANIZATIONS",
+        "class_name": "Organization"
+      },
+      {
+        "name": "NANOCODEX_API_KEYS",
+        "class_name": "ApiKeyRecord"
+      },
+      {
+        "name": "NANOCODEX_AUTH",
+        "class_name": "NonceStorage"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "decision-inbox-v1",
+      "new_sqlite_classes": [
+        "UserAccount",
+        "Organization",
+        "ApiKeyRecord",
+        "NonceStorage"
+      ]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "NANOCODEX_CRM",
+      "database_name": "decision-inbox-crm-test",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations",
+      "remote": false
+    }
+  ],
+  "alias": {
+    "nanocodex-tools/hosted": "../nanocodex-tools/src/hosted/index.ts",
+    "nanocodex/cloudflare/rpc": "../nanocodex/cloudflare/rpc.mjs",
+    "nanocodex/cloudflare/managed-auth": "../nanocodex/cloudflare/managed-auth.mjs",
+    "nanocodex/cloudflare/durable-placement": "../nanocodex/cloudflare/durable-placement.mjs",
+    "nanocodex/cloudflare/managed-access": "../nanocodex/cloudflare/managed-access.mjs"
+  }
+}

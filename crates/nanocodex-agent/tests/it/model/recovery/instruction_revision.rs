@@ -337,10 +337,7 @@ async fn consumed_instruction_revision_survives_execution_recovery() -> Result<(
             let saved = saved.as_ref().unwrap();
             let state: Value = serde_json::from_str(&saved.state_json)?;
             assert_eq!(state["instruction_revision"], 2);
-            assert!(
-                serde_json::to_string(&saved.history.iter().collect::<Vec<_>>())?
-                    .contains("consumed steering")
-            );
+            assert!(serde_json::to_string(&saved.history)?.contains("consumed steering"));
         }
         assert_eq!(generations.load(Ordering::SeqCst), 1);
         drop(agent);

@@ -1,0 +1,705 @@
+[
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppEntity"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppValue"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.DisplayRepresentable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Identifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.TypeDisplayRepresentable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._IntentValue"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.InstanceDisplayRepresentable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Foundation.CustomLocalizedStringResourceConvertible"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "substitutedMangledTypeName": "14NanocodexInbox14HandAgentQueryV",
+        "substitutedTypeName": "NanocodexInbox.HandAgentQuery",
+        "typeAliasName": "DefaultQuery"
+      },
+      {
+        "substitutedMangledTypeName": "SS",
+        "substitutedTypeName": "Swift.String",
+        "typeAliasName": "ID"
+      },
+      {
+        "substitutedMangledTypeName": "14NanocodexInbox15HandAgentEntityV",
+        "substitutedTypeName": "NanocodexInbox.HandAgentEntity",
+        "typeAliasName": "ValueType"
+      },
+      {
+        "substitutedMangledTypeName": "14NanocodexInbox15HandAgentEntityV",
+        "substitutedTypeName": "NanocodexInbox.HandAgentEntity",
+        "typeAliasName": "UnwrappedType"
+      },
+      {
+        "substitutedMangledTypeName": "10AppIntents26EmptyResolverSpecificationVy14NanocodexInbox15HandAgentEntityVG",
+        "substitutedTypeName": "AppIntents.EmptyResolverSpecification<NanocodexInbox.HandAgentEntity>",
+        "typeAliasName": "Specification"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AppEntity",
+      "AppIntents.AppValue",
+      "AppIntents.DisplayRepresentable",
+      "Swift.Identifiable",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents.TypeDisplayRepresentable",
+      "AppIntents._IntentValue",
+      "Swift.Sendable",
+      "AppIntents.InstanceDisplayRepresentable",
+      "Swift.SendableMetatype",
+      "Foundation.CustomLocalizedStringResourceConvertible"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox15HandAgentEntityV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "agentID",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.String",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "account",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.String",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.String",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "typeDisplayRepresentation",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.TypeDisplayRepresentation",
+        "value": {
+          "arguments": [
+            {
+              "label": "name",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Agent",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "numericFormat",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            }
+          ],
+          "type": "AppIntents.TypeDisplayRepresentation"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "defaultQuery",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "NanocodexInbox.HandAgentQuery",
+        "value": {
+          "arguments": [],
+          "type": "NanocodexInbox.HandAgentQuery"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "id",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.String",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "displayRepresentation",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.DisplayRepresentation",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": {
+                "segments": [
+                  {
+                    "value": "",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "valueKind": "Runtime"
+                  },
+                  {
+                    "value": "",
+                    "valueKind": "RawLiteral"
+                  }
+                ]
+              },
+              "valueKind": "InterpolatedStringLiteral"
+            },
+            {
+              "label": "subtitle",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "image",
+              "type": "Swift.Optional<AppIntents.DisplayRepresentation.Image>",
+              "valueKind": "NilLiteral"
+            }
+          ],
+          "type": "AppIntents.DisplayRepresentation"
+        },
+        "valueKind": "InitCall"
+      }
+    ],
+    "typeName": "NanocodexInbox.HandAgentEntity"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.EntityStringQuery"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.EntityQuery"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.DynamicOptionsProvider"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.BitwiseCopyable"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "substitutedMangledTypeName": "14NanocodexInbox15HandAgentEntityV",
+        "substitutedTypeName": "NanocodexInbox.HandAgentEntity",
+        "typeAliasName": "Entity"
+      },
+      {
+        "substitutedMangledTypeName": "Say14NanocodexInbox15HandAgentEntityVG",
+        "substitutedTypeName": "Swift.Array<NanocodexInbox.HandAgentEntity>",
+        "typeAliasName": "Result"
+      },
+      {
+        "substitutedMangledTypeName": "Say14NanocodexInbox15HandAgentEntityVG",
+        "substitutedTypeName": "Swift.Array<NanocodexInbox.HandAgentEntity>",
+        "typeAliasName": "Result"
+      },
+      {
+        "substitutedMangledTypeName": "14NanocodexInbox15HandAgentEntityV",
+        "substitutedTypeName": "NanocodexInbox.HandAgentEntity",
+        "typeAliasName": "DefaultValue"
+      }
+    ],
+    "conformances": [
+      "AppIntents.EntityStringQuery",
+      "AppIntents.EntityQuery",
+      "AppIntents.DynamicOptionsProvider",
+      "AppIntents.PersistentlyIdentifiable",
+      "Swift.Sendable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox14HandAgentQueryV",
+    "properties": [],
+    "typeName": "NanocodexInbox.HandAgentQuery"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.ForegroundContinuableIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "substitutedMangledTypeName": "SS",
+            "substitutedTypeName": "Swift.String",
+            "typeAliasName": "AppIntents.IntentResult.Value"
+          }
+        ],
+        "substitutedMangledTypeName": "14NanocodexInbox18RunAgentTaskIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.String>",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox18RunAgentTaskIntentV16parameterSummaryQrvpZQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.ForegroundContinuableIntent",
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox18RunAgentTaskIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_agent",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<NanocodexInbox.HandAgentEntity>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Agent",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<NanocodexInbox.HandAgentEntity>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestDisambiguationDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<NanocodexInbox.HandAgentEntity>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_request",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Request",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Run Agent Task",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "description",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentDescription",
+        "value": "Send a request to an agent using this device's Hand. On iOS 27, work can finish in the background with progress and a Stop control. Earlier iOS versions open Nanocodex to start the task.",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "availabilityAttributes": [
+          {
+            "introducedVersion": "26.0",
+            "isDeprecated": false,
+            "isUnavailable": false,
+            "platform": "macOS"
+          },
+          {
+            "introducedVersion": "26.0",
+            "isDeprecated": false,
+            "isUnavailable": false,
+            "platform": "iOS"
+          }
+        ],
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "supportedModes",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentModes",
+        "value": [
+          {
+            "value": {
+              "baseType": "AppIntents.IntentModes",
+              "memberLabel": "background"
+            },
+            "valueKind": "MemberReference"
+          },
+          {
+            "value": {
+              "arguments": [
+                {
+                  "label": "",
+                  "type": "AppIntents.IntentModes.ForegroundMode",
+                  "value": {
+                    "baseType": "AppIntents.IntentModes.ForegroundMode",
+                    "memberLabel": "dynamic"
+                  },
+                  "valueKind": "MemberReference"
+                }
+              ],
+              "memberLabel": "foreground",
+              "type": "AppIntents.IntentModes"
+            },
+            "valueKind": "StaticFunctionCall"
+          }
+        ],
+        "valueKind": "Array"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "agent",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Agent",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "NanocodexInbox.HandAgentEntity",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Agent",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<NanocodexInbox.HandAgentEntity>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestDisambiguationDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<NanocodexInbox.HandAgentEntity>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$agent",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<NanocodexInbox.HandAgentEntity>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "request",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Request",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Request",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$request",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "parameterSummary",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "some AppIntents.ParameterSummary",
+        "value": {
+          "arguments": [
+            {
+              "label": "",
+              "type": "AppIntents.ParameterSummaryString<NanocodexInbox.RunAgentTaskIntent>",
+              "value": {
+                "segments": [
+                  {
+                    "value": "Ask ",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "value": {
+                      "components": [
+                        {
+                          "label": "$agent",
+                          "type": "AppIntents.IntentParameter<NanocodexInbox.HandAgentEntity>"
+                        }
+                      ],
+                      "path": "$agent",
+                      "rootType": "NanocodexInbox.RunAgentTaskIntent"
+                    },
+                    "valueKind": "KeyPath"
+                  },
+                  {
+                    "value": " to ",
+                    "valueKind": "RawLiteral"
+                  },
+                  {
+                    "value": {
+                      "components": [
+                        {
+                          "label": "$request",
+                          "type": "AppIntents.IntentParameter<Swift.String>"
+                        }
+                      ],
+                      "path": "$request",
+                      "rootType": "NanocodexInbox.RunAgentTaskIntent"
+                    },
+                    "valueKind": "KeyPath"
+                  },
+                  {
+                    "value": "",
+                    "valueKind": "RawLiteral"
+                  }
+                ]
+              },
+              "valueKind": "InterpolatedStringLiteral"
+            },
+            {
+              "label": "table",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            }
+          ],
+          "type": "AppIntents.IntentParameterSummary<NanocodexInbox.RunAgentTaskIntent>"
+        },
+        "valueKind": "InitCall"
+      }
+    ],
+    "typeName": "NanocodexInbox.RunAgentTaskIntent"
+  }
+]

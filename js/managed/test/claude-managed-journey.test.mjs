@@ -197,7 +197,14 @@ test('Claude-only public native tools/tasks/compaction/cancel across four DO reo
     await call(`/v1/agents/${agent}/settings`,'PATCH',{model:'claude-sonnet-4-6',thinking:'low',reasoning_mode:'standard',fast_mode:false});
     await turn(agent,'Write durable proof','journey-write');
     await call(`/v1/agents/${agent}/settings`,'PATCH',{model:'claude-opus-4-6'},409);
+    const done=await call(`/v1/agents/${agent}/done`,'PUT',{done:true});
+    assert.equal(done.done,true);assert.ok(done.done_at>0);
+    assert.equal((await call('/v1/agents')).summaries[agent].presentation.done,true);
     await mf.dispose(); mf=new Miniflare(options);
+    const doneAfterReopen=(await call('/v1/agents')).summaries[agent].presentation;
+    assert.equal(doneAfterReopen.done,true);assert.equal(doneAfterReopen.doneAt,done.done_at);
+    await call(`/v1/agents/${agent}/done`,'PUT',{done:false});
+    assert.equal((await call('/v1/agents')).summaries[agent].presentation.done,false);
     await turn(agent,'Read durable proof','journey-read');
     await mf.dispose(); mf=new Miniflare(options);
     await turn(agent,'Run Bash durable proof','journey-bash');

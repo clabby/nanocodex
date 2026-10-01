@@ -71,7 +71,7 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
 /// A download task writes into URLSession's temporary file, not memory. Stop it
 /// during transfer rather than waiting for the entire response to reach disk.
-private final class BoundedOutputDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+final class BoundedOutputDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     let maximumBytes: Int64
     private let lock = NSLock()
     private var exceeded = false
@@ -122,7 +122,7 @@ enum ManagedResponseCache {
 public final class ManagedClient: @unchecked Sendable {
     static let maximumOutputDownloadSize: Int64 = 256 * 1024 * 1024
     let credential: AccountCredential
-    private let session: URLSession
+    let session: URLSession
     private let modelConnectionSession: URLSession
     private let responseCache: URLCache?
     private let snapshots: PersistentReadCache
@@ -180,6 +180,15 @@ public final class ManagedClient: @unchecked Sendable {
         // Spotify's shared registration may ask the broker to wait for quota
         // before its identity read. Tokens remain inside that broker exchange.
         if path == "/v1/connectors/spotify/loopback/callback" || path == "/v1/connectors/soundcloud/loopback/callback" { request.timeoutInterval = 90 }
+        // Presentation snapshots are separate. Approval/status reads must reach
+        // the server even when URLCache has a previously ready draft or decision.
+        if method == "GET", path.hasPrefix("/v1/todo/decisions/") || path.hasPrefix("/v1/todo/mail/drafts/") {
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+        }
+        // Full-source meeting summaries may make bounded rolling inference
+        // requests for up to 90 seconds. Do not time out midway and misreport
+        // a safely persisted document as lost.
+        if path.hasPrefix("/v1/meetings/"), path.hasSuffix("/summarize"), method == "POST" { request.timeoutInterval = 120 }
         request.httpMethod = method
         if path == "/v1/models" || path == "/v1/credentials" || path.hasPrefix("/v1/credentials/claude") {
             request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -214,7 +223,7 @@ public final class ManagedClient: @unchecked Sendable {
               let data = snapshots.read(path: path) else { return nil }
         return try? JSONDecoder().decode(JSON.self, from: data)
     }
-    public func json(path: String, method: String = "GET", body: JSON? = nil, idempotencyKey: String? = nil) async throws -> JSON {
+    public func json(path: String, method: String = "GET", body: JSON? = nil, idempotencyKey: String? = nil, ifMatch: Int? = nil) async throws -> JSON {
         let snapshotTicket = snapshotTicket()
         let isAdmission = method == "POST" && (path == "/v1/agents" || (path.hasPrefix("/v1/agents/") && path.hasSuffix("/turns")))
         let location = isAdmission ? await locationContext?() : nil
@@ -226,7 +235,12 @@ public final class ManagedClient: @unchecked Sendable {
         do {
             if isHistory { os_signpost(.begin, log: historyPerformanceLog, name: "HistoryTransport", signpostID: signpostID) }
             defer { if isHistory { os_signpost(.end, log: historyPerformanceLog, name: "HistoryTransport", signpostID: signpostID) } }
-            (data, response) = try await ManagedAccess.data(for: request(path: path, method: method, body: body, idempotencyKey: idempotencyKey, location: location), using: path == "/v1/models" || path == "/v1/credentials" || path.hasPrefix("/v1/credentials/claude") ? modelConnectionSession : session)
+            var outgoing = try request(path: path, method: method, body: body, idempotencyKey: idempotencyKey, location: location)
+            if let ifMatch {
+                guard ifMatch >= 0 else { throw APIError.invalidResponse }
+                outgoing.setValue("\"\(ifMatch)\"", forHTTPHeaderField: "If-Match")
+            }
+            (data, response) = try await ManagedAccess.data(for: outgoing, using: path == "/v1/models" || path == "/v1/credentials" || path.hasPrefix("/v1/credentials/claude") ? modelConnectionSession : session)
         }
         guard let response = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard (200..<300).contains(response.statusCode) else {
@@ -248,6 +262,8 @@ public final class ManagedClient: @unchecked Sendable {
         if method != "GET", method != "HEAD" {
             let store = snapshots
             await Task.detached(priority: .utility) {
+                if let snapshotTicket,
+                   store.applySessionDoneMutation(path: path, method: method, response: decoded, ticket: snapshotTicket, expectedDone: body?["done"].bool) { return }
                 if let snapshotTicket,
                    store.applyTodoMutation(path: path, method: method, response: decoded, ticket: snapshotTicket) { return }
                 // A retired client must not recreate a Todo projection.
@@ -325,6 +341,26 @@ public final class ManagedClient: @unchecked Sendable {
     public static func agentPath(_ id: String) throws -> String {
         guard !id.isEmpty, id.count <= 128, id.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || [45, 95].contains($0) }) else { throw APIError.invalidResponse }
         return "/v1/agents/" + id
+    }
+    /// One explicit write, with no automatic retry on an uncertain result.
+    public func setDone(_ id: String, done: Bool) async throws -> (done: Bool, doneAt: Double?, presentationRevision: Double?) {
+        let result = try await json(path: Self.agentPath(id) + "/done", method: "PUT",
+                                    body: .object(["done": .bool(done)]))
+        guard case .bool(let confirmed) = result["done"], confirmed == done else { throw APIError.invalidResponse }
+        let timestamp: Double?
+        switch result["done_at"] {
+        case .null: timestamp = nil
+        case .number(let value) where value.isFinite && value >= 0: timestamp = value
+        default: throw APIError.invalidResponse
+        }
+        guard confirmed ? timestamp != nil : timestamp == nil else { throw APIError.invalidResponse }
+        let revision: Double?
+        switch result["presentation_revision"] {
+        case .null: revision = nil // Older services did not return ordering metadata.
+        case .number(let value) where value.isFinite && value >= 0 && value.rounded(.down) == value: revision = value
+        default: throw APIError.invalidResponse
+        }
+        return (confirmed, timestamp, revision)
     }
     public func state(_ id: String) async throws -> JSON { try await json(path: Self.agentPath(id)) }
     /// Starts server-owned preparation without waiting for model readiness.

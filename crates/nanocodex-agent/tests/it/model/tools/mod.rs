@@ -536,7 +536,7 @@ async fn mcp_tool_search_exposes_and_dispatches_a_native_namespace() -> Result<(
     });
 
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../nanocodex-tools/tests/fixtures/mcp-stdio-server.mjs");
+        .join("../nanocodex-oai-tools/tests/fixtures/mcp-stdio-server.mjs");
     let mcp = nanocodex_oai_tools::mcp::Mcp::builder()
         .server(
             "fixture",

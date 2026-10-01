@@ -1,7 +1,7 @@
 import AppIntents
 import Foundation
 
-/// Start, then explicitly finish and send without opening the scene. System policy
+/// Start, then explicitly finish and save without opening the scene. System policy
 /// ultimately decides whether an AudioRecordingIntent can launch while locked.
 struct StartMeetingLockedIntent: AudioRecordingIntent, LiveActivityIntent {
     static var title: LocalizedStringResource = "Listen to a meeting"
@@ -25,7 +25,7 @@ struct StartMeetingLockedIntent: AudioRecordingIntent, LiveActivityIntent {
 }
 
 struct FinishMeetingLockedIntent: AudioRecordingIntent, LiveActivityIntent {
-    static var title: LocalizedStringResource = "Stop recording and start agent"
+    static var title: LocalizedStringResource = "Stop recording and save meeting"
     static var openAppWhenRun = false
     static var authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
     @available(iOS 26.0, *)
@@ -38,16 +38,16 @@ struct FinishMeetingLockedIntent: AudioRecordingIntent, LiveActivityIntent {
         throw MeetingIntentError.appProcessRequired
         #else
         VoiceDiagnostic.note("meeting.intent.stop.enter")
-        do { try await MeetingLockedCoordinator.shared.finishAndSend(captureID: captureID) }
+        do { try await MeetingLockedCoordinator.shared.finishAndSave(captureID: captureID) }
         catch { VoiceDiagnostic.note("meeting.intent.stop.failed", error: error); throw error }
-        VoiceDiagnostic.note("meeting.intent.stop.sent")
+        VoiceDiagnostic.note("meeting.intent.stop.saved")
         #endif
         return .result()
     }
 }
 
 struct SendMeetingLockedIntent: LiveActivityIntent {
-    static var title: LocalizedStringResource = "Retry sending meeting transcript"
+    static var title: LocalizedStringResource = "Retry syncing saved meeting"
     static var openAppWhenRun = false
     static var authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
     @available(iOS 26.0, *)
@@ -59,7 +59,7 @@ struct SendMeetingLockedIntent: LiveActivityIntent {
         #if NANOCODEX_WIDGET_EXTENSION
         throw MeetingIntentError.appProcessRequired
         #else
-        try await MeetingLockedCoordinator.shared.send(captureID: captureID)
+        try await MeetingLockedCoordinator.shared.save(captureID: captureID)
         #endif
         return .result()
     }

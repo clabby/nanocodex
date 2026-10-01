@@ -1,0 +1,85 @@
+{
+  "NLUSidecarsIncluded": false,
+  "authority": "Pre-existing app extraction from Apple appintentsmetadataprocessor, not Linux-generated metadata. Compiler inputs copied from same existing DerivedData intermediates.",
+  "buildReference": "output/mobile-reflash-20260930-0109",
+  "envelopeFileCount": 15,
+  "envelopeSHA256": "b4e61c7e0fbf3fb8094532ae0f100da18de9df63ecabb952871b0b12d4fbb6ee",
+  "files": {
+    "mac-compiler-inputs/app/CaptureContextIntent.swiftconstvalues": {
+      "originalCaptureSHA256": "d3364a412dc7bd8e3af47e8ce13b48c5648991b2f9f7028fe081da257538b8c9",
+      "removedFields": [
+        "file",
+        "line"
+      ],
+      "sanitized": true,
+      "sha256": "6ccbf1a4d7ddc10b5a59c1dcf76cdff1061cee7f36c858a74f2f8a0e8cec537a"
+    },
+    "mac-compiler-inputs/app/LockedVoiceIntents.swiftconstvalues": {
+      "originalCaptureSHA256": "14be3203366ab4d04fccca80bf9f8000a82ba79cfbcb26c837b9de00cd879898",
+      "removedFields": [
+        "file",
+        "line"
+      ],
+      "sanitized": true,
+      "sha256": "2b0cb37afc85bb05661171f0d80c3f846d1dd95a0255a26d1322dc977b7686d3"
+    },
+    "mac-compiler-inputs/app/MeetingLockedIntents.swiftconstvalues": {
+      "originalCaptureSHA256": "c07130ead82be61053855ee0b15a1c89c978fe9689a4a8e670aa7987f48487a8",
+      "removedFields": [
+        "file",
+        "line"
+      ],
+      "sanitized": true,
+      "sha256": "62f2be5118409f0f93a0b1c34757d6c673a77e5be05cab980653bb0539f29acf"
+    },
+    "mac-compiler-inputs/app/RunAgentTaskIntent.swiftconstvalues": {
+      "originalCaptureSHA256": "f2a0b1df14916792ff463409f379e79245e3e2542be48de635cc937a5b5436ee",
+      "removedFields": [
+        "file",
+        "line"
+      ],
+      "sanitized": true,
+      "sha256": "ebfafc70eeb069ec0eaed8dda47ad91ebf39693f87fb44f11257131c99a286e7"
+    },
+    "mac-compiler-inputs/widgets/LockedVoiceIntents.swiftconstvalues": {
+      "originalCaptureSHA256": "3de08c17dcba17d14a7d9aa3f806c3b942c76b9a0f9f30d34b6cced44aefefde",
+      "removedFields": [
+        "file",
+        "line"
+      ],
+      "sanitized": true,
+      "sha256": "19bc31742235239c53f61f2f60d634a9ccfe76dad7de8389f75a3b2c89ac2bcb"
+    },
+    "mac-compiler-inputs/widgets/MeetingLockedIntents.swiftconstvalues": {
+      "originalCaptureSHA256": "538159bd3414cdfeffb21568d9ea6a365dda01d649749065b3fc7ed0706317d0",
+      "removedFields": [
+        "file",
+        "line"
+      ],
+      "sanitized": true,
+      "sha256": "1379d44e939101365af857d8f8ab641fc8ac7ad75b1486fd7c49832d36cfdaae"
+    },
+    "mac-metadata/app/extract.actionsdata": {
+      "originalCaptureSHA256": "3cfc9df661d8d093a49bb3d82a8df22eed222b915862ee8c5c59f2d2ae9ae3f2",
+      "sanitized": false,
+      "sha256": "3cfc9df661d8d093a49bb3d82a8df22eed222b915862ee8c5c59f2d2ae9ae3f2"
+    },
+    "mac-metadata/app/version.json": {
+      "originalCaptureSHA256": "6c610c2d346f595bd7c5a8513a62e02f76557fa5d8b046a63ef82ac801f34f93",
+      "sanitized": false,
+      "sha256": "6c610c2d346f595bd7c5a8513a62e02f76557fa5d8b046a63ef82ac801f34f93"
+    },
+    "mac-metadata/widgets/extract.actionsdata": {
+      "originalCaptureSHA256": "1453a8529c83c1682f9fca5d6847ac2165d47f77737039c0f9692f2b4426373d",
+      "sanitized": false,
+      "sha256": "1453a8529c83c1682f9fca5d6847ac2165d47f77737039c0f9692f2b4426373d"
+    },
+    "mac-metadata/widgets/version.json": {
+      "originalCaptureSHA256": "3fbb1d7e80265e2010710177b0fc9598db06fa016bcf112736407ca76ceddb21",
+      "sanitized": false,
+      "sha256": "3fbb1d7e80265e2010710177b0fc9598db06fa016bcf112736407ca76ceddb21"
+    }
+  },
+  "format": "sanitized-paired-mac-reference-fixtures-v1",
+  "sourceSDKContextBound": false
+}

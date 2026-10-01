@@ -187,6 +187,9 @@ impl ManagedClient {
         headers.insert(AUTHORIZATION, authorization);
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            // Private native approvals must never be transparently replayed.
+            // Ordinary lifecycle retries are explicit at their call sites.
+            .retry(reqwest::retry::never())
             .redirect(reqwest::redirect::Policy::none())
             // Only our explicit operation policy may replay a request. In
             // particular private OAuth writes must never retry protocol NACKs.
@@ -633,6 +636,43 @@ impl ManagedClient {
             ));
         }
         Ok(response.settings)
+    }
+
+    /// Sets an account-owned session's manual done flag without changing its turns.
+    /// Repeating the same value preserves the transition timestamp.
+    ///
+    /// # Errors
+    /// Returns an identifier, transport, HTTP, or response-schema failure.
+    pub async fn set_done(
+        &self,
+        agent_id: &str,
+        done: bool,
+    ) -> Result<crate::SessionDoneState, ManagedError> {
+        validate_id("agent", agent_id)?;
+        let body = serde_json::to_vec(&serde_json::json!({ "done": done }))
+            .map_err(|_| ManagedError::InvalidResponse("failed to encode session disposition"))?;
+        let receipt: crate::SessionDoneState = self
+            .json(
+                Method::PUT,
+                &format!("{}/done", agent_path(agent_id)),
+                Some(&body),
+                None,
+            )
+            .await?;
+        if receipt.done != done
+            || (if done {
+                !receipt
+                    .done_at
+                    .is_some_and(|at| at.is_finite() && at >= 0.0)
+            } else {
+                receipt.done_at.is_some()
+            })
+        {
+            return Err(ManagedError::InvalidResponse(
+                "session disposition could not be confirmed",
+            ));
+        }
+        Ok(receipt)
     }
 
     /// Deletes one account-owned managed agent.

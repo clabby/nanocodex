@@ -24,8 +24,10 @@ in PATH, Cargo directories, source builds, or adjacent installations. Unsupporte
 platforms return no provider unless an explicit MCP executable is configured.
 The managed receipt supplies its exact arguments and environment on both platforms.
 Mac setup selects immutable host assets separately from the signed bundle. CUA
-then starts the official app server without launching the desktop GUI; see the
-[managed Mac host](../../docs/computer/official-app-server-bridge.md).
+then starts the direct MCP host, bundled Node/node_repl, and signed Sky helper,
+with no official Codex CLI or app server. Its default surface is native computer
+UI only; dedicated browser Tab/DOM APIs are unsupported. See the
+[managed Mac host](../../docs/computer/direct-mcp-host.md).
 
 `connectComputerTools` discovers the full paginated MCP catalog before exposing
 an attachment. `definitions` and each tool's `providerDefinition` preserve the
@@ -69,7 +71,10 @@ CUA calls carry `session_id`, `thread_id`, `call_id`, and `model` in
 `x-codex-turn-metadata`, plus `turn_id` when supplied by the agent runtime. The
 adapter never derives a turn ID from a tool call ID.
 
-Permissions and consent belong to the official OpenAI provider. The attachment
+Native protected-target checks and OS permissions remain upstream/OS-owned.
+The managed Mac host supplies blanket application-access consent from trusted
+host policy; this is not authorization for external actions or audio/data forms.
+Windows/opt-in Linux retain their existing Codex dependencies. The attachment
 advertises no MCP client capabilities and responds to incoming provider RPC
 requests with standard method-not-found (`-32601`) errors. Provider notifications
 receive no response.

@@ -130,7 +130,8 @@ func run(_ broker: Broker, bytes: Data, uid: UInt32) throws -> Data {
 }
 // No shell-controlled environment chooses key, executable, socket or configuration paths.
 signal(SIGPIPE, SIG_IGN)
-guard getuid() == 0, geteuid() == 0 else { exit(78) }
+// Fail closed before configuration keys or decrypted values enter this process.
+guard nc_secure_disable_core_dumps() == 0, getuid() == 0, geteuid() == 0 else { exit(78) }
 do {
     try checkInstallation()
     if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--enroll" {

@@ -1,0 +1,589 @@
+[
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AudioRecordingIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.LiveActivityIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.SystemIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.BitwiseCopyable"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox24StartMeetingLockedIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy14NanocodexInbox018StartMeetingLockedC0V_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AudioRecordingIntent",
+      "AppIntents.LiveActivityIntent",
+      "AppIntents.SystemIntent",
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox24StartMeetingLockedIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Listen to a meeting",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "description",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentDescription",
+        "value": "Record a meeting until you tap Stop Recording. Grant permissions in the app first.",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "authenticationPolicy",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentAuthenticationPolicy",
+        "value": {
+          "name": "alwaysAllowed"
+        },
+        "valueKind": "Enum"
+      },
+      {
+        "availabilityAttributes": [
+          {
+            "introducedVersion": "26.0",
+            "isDeprecated": false,
+            "isUnavailable": false,
+            "platform": "iOS"
+          }
+        ],
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "supportedModes",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentModes",
+        "value": {
+          "baseType": "AppIntents.IntentModes",
+          "memberLabel": "background"
+        },
+        "valueKind": "MemberReference"
+      }
+    ],
+    "typeName": "NanocodexInbox.StartMeetingLockedIntent"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AudioRecordingIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.LiveActivityIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.SystemIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox25FinishMeetingLockedIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy14NanocodexInbox019FinishMeetingLockedC0V_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.AudioRecordingIntent",
+      "AppIntents.LiveActivityIntent",
+      "AppIntents.SystemIntent",
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox25FinishMeetingLockedIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_captureID",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Recording",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Stop recording and start agent",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "authenticationPolicy",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentAuthenticationPolicy",
+        "value": {
+          "name": "alwaysAllowed"
+        },
+        "valueKind": "Enum"
+      },
+      {
+        "availabilityAttributes": [
+          {
+            "introducedVersion": "26.0",
+            "isDeprecated": false,
+            "isUnavailable": false,
+            "platform": "iOS"
+          }
+        ],
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "supportedModes",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentModes",
+        "value": {
+          "baseType": "AppIntents.IntentModes",
+          "memberLabel": "background"
+        },
+        "valueKind": "MemberReference"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "captureID",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Recording",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Recording",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$captureID",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      }
+    ],
+    "typeName": "NanocodexInbox.FinishMeetingLockedIntent"
+  },
+  {
+    "allConformances": [
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.LiveActivityIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.SystemIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.AppIntent"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents.PersistentlyIdentifiable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "AppIntents._SupportsAppDependencies"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.Sendable"
+      },
+      {
+        "conformanceDefiningModule": "NanocodexInbox",
+        "protocolName": "Swift.SendableMetatype"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.IntentResult"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "14NanocodexInbox23SendMeetingLockedIntentV7performQryYaKFQOy_Qo_",
+        "substitutedTypeName": "some AppIntents.IntentResult",
+        "typeAliasName": "PerformResult"
+      },
+      {
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": [],
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy14NanocodexInbox017SendMeetingLockedC0V_Qo_",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "typeAliasName": "SummaryContent"
+      }
+    ],
+    "conformances": [
+      "AppIntents.LiveActivityIntent",
+      "AppIntents.SystemIntent",
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype"
+    ],
+    "kind": "struct",
+    "mangledTypeName": "14NanocodexInbox23SendMeetingLockedIntentV",
+    "properties": [
+      {
+        "isComputed": "false",
+        "isStatic": "false",
+        "label": "_captureID",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Recording",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "title",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Foundation.LocalizedStringResource",
+        "value": "Retry sending meeting transcript",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "openAppWhenRun",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "Swift.Bool",
+        "value": "false",
+        "valueKind": "RawLiteral"
+      },
+      {
+        "isComputed": "false",
+        "isStatic": "true",
+        "label": "authenticationPolicy",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentAuthenticationPolicy",
+        "value": {
+          "name": "alwaysAllowed"
+        },
+        "valueKind": "Enum"
+      },
+      {
+        "availabilityAttributes": [
+          {
+            "introducedVersion": "26.0",
+            "isDeprecated": false,
+            "isUnavailable": false,
+            "platform": "iOS"
+          }
+        ],
+        "isComputed": "true",
+        "isStatic": "true",
+        "label": "supportedModes",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentModes",
+        "value": {
+          "baseType": "AppIntents.IntentModes",
+          "memberLabel": "background"
+        },
+        "valueKind": "MemberReference"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "captureID",
+        "mangledTypeName": "n/a - deprecated",
+        "propertyWrappers": [
+          {
+            "arguments": [
+              {
+                "label": "title",
+                "type": "Foundation.LocalizedStringResource",
+                "value": "Recording",
+                "valueKind": "RawLiteral"
+              }
+            ],
+            "type": "AppIntents.IntentParameter"
+          }
+        ],
+        "type": "Swift.String",
+        "value": {
+          "arguments": [
+            {
+              "label": "title",
+              "type": "Foundation.LocalizedStringResource",
+              "value": "Recording",
+              "valueKind": "RawLiteral"
+            },
+            {
+              "label": "description",
+              "type": "Swift.Optional<Foundation.LocalizedStringResource>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "default",
+              "type": "Swift.Optional<Swift.String>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputOptions",
+              "type": "Swift.Optional<Swift.String.IntentInputOptions>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "requestValueDialog",
+              "type": "Swift.Optional<AppIntents.IntentDialog>",
+              "valueKind": "NilLiteral"
+            },
+            {
+              "label": "inputConnectionBehavior",
+              "type": "AppIntents.InputConnectionBehavior",
+              "valueKind": "Runtime"
+            }
+          ],
+          "type": "AppIntents.IntentParameter<Swift.String>"
+        },
+        "valueKind": "InitCall"
+      },
+      {
+        "isComputed": "true",
+        "isStatic": "false",
+        "label": "$captureID",
+        "mangledTypeName": "n/a - deprecated",
+        "type": "AppIntents.IntentParameter<Swift.String>",
+        "valueKind": "Runtime"
+      }
+    ],
+    "typeName": "NanocodexInbox.SendMeetingLockedIntent"
+  }
+]

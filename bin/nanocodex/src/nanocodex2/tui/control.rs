@@ -22,6 +22,7 @@ pub(super) fn snapshot(bridge: &Bridge, app: &AppNode, runtime: &DriverRuntime, 
     });
     state["ui_blocked"] = json!(
         pending
+            || runtime.secure_input.is_some()
             || state["ui_blocked"] == true
             || !runtime.settings_updates.is_empty()
             || !runtime.settings_queue.is_empty()
@@ -67,6 +68,10 @@ pub(super) fn dispatch(
     runtime: &DriverRuntime,
     tasks: &mut JoinSet<Completion>,
 ) {
+    if runtime.secure_input.is_some() {
+        command.reject("private_approval_active");
+        return;
+    }
     if command.request.method == "models.list" {
         let client = runtime.client.clone();
         let agent_id = runtime.agent_id.clone();

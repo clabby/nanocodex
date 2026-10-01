@@ -17,6 +17,8 @@ final class TodoWorkspace: ObservableObject {
     private var pages: [String: String] = [:]
     private var revision = 0
     private var lifetime = 0
+    private var scheduleLoading = false
+    private var scheduleLoaded = false
     private var selection = ""
     var hasMore: Bool { !pages.isEmpty }
     func canLoadMore(account: String, query: String) -> Bool {
@@ -26,7 +28,7 @@ final class TodoWorkspace: ObservableObject {
     func reset() {
         revision &+= 1; lifetime &+= 1
         accounts = []; threads = []; events = []; drafts = []; pages = [:]
-        loading = false; loaded = false; error = nil; scheduleError = nil; busy = []
+        loading = false; loaded = false; scheduleLoading = false; scheduleLoaded = false; error = nil; scheduleError = nil; busy = []
         selection = ""; lastLoadedSelection = ""
     }
 
@@ -84,16 +86,30 @@ final class TodoWorkspace: ObservableObject {
     }
     private var lastLoadedSelection = ""
 
-    func refreshSchedule(client: ManagedClient?, demo: Bool) async {
-        guard !demo, let client else { return }
-        let ticket = revision
+    func refreshSchedule(client: ManagedClient?, demo: Bool, liveRefresh: Bool = false) async {
+        if demo {
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--todo-mail-fixture"), !loaded { loadFixture(); loaded = true }
+            #endif
+            return
+        }
+        guard let client, !scheduleLoading else { return }
+        let ticket = lifetime
+        scheduleLoading = true
+        defer { if lifetime == ticket { scheduleLoading = false } }
+        let path = "/v1/todo/schedule" + (liveRefresh ? "" : "?briefings_only=true")
+        if !scheduleLoaded, let saved = await client.cachedJSON(path: path) {
+            let restored = await Task.detached { try? TodoSchedule(saved) }.value
+            guard lifetime == ticket, !Task.isCancelled else { return }
+            if let restored { events = restored.events; scheduleLoaded = true }
+        }
         do {
-            let result = try await client.todoSchedule()
-            guard revision == ticket, !Task.isCancelled else { return }
-            events = result.events
-            scheduleError = result.partial ? "Some calendars could not be loaded." : nil
+            let result = try await client.todoSchedule(briefingsOnly: !liveRefresh)
+            guard lifetime == ticket, !Task.isCancelled else { return }
+            events = result.events; scheduleLoaded = true
+            scheduleError = liveRefresh ? (result.partial ? "Calendar coverage is partial." : nil) : "Imported calendar context only · pull to refresh live calendars."
         } catch {
-            guard revision == ticket, !Task.isCancelled else { return }
+            guard lifetime == ticket, !Task.isCancelled else { return }
             scheduleError = "Calendar: " + error.localizedDescription
         }
     }
@@ -151,6 +167,7 @@ final class TodoWorkspace: ObservableObject {
             "id": .string("fixture-planning"), "connection_id": .string("fixture-mail"), "calendar_id": .string("primary"),
             "title": .string("Launch planning"), "start": .string(Date.now.addingTimeInterval(2400).ISO8601Format()),
             "end": .string(Date.now.addingTimeInterval(4200).ISO8601Format()), "all_day": .bool(false),
+            "briefing_status": .string("ready"), "briefing": .string("Discuss launch date and owners. Invitees are expected, not confirmed attendees."),
             "location": .string("Studio · Room 2"), "description": .string("Review the launch date, owners, and first round of invitations."),
         ]))]
     }

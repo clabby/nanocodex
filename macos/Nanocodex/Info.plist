@@ -16,6 +16,7 @@
 <key>NSHighResolutionCapable</key><true/>
 <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Nanocodex</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>Re-transcribe your saved meeting recordings into editable text using speech recognition.</string>
 <key>NSMicrophoneUsageDescription</key><string>Use live voice conversations or optionally send microphone audio to a remote computer you control.</string>
 <key>NSLocalNetworkUsageDescription</key><string>Connect to your nearby Hands to view their screens and send keyboard, pointer, and touch input.</string>
 <key>NSSupportsAutomaticTermination</key><false/>

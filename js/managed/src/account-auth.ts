@@ -1,3 +1,6 @@
+import { readTodoSourceHealth } from "./todo-source-health";
+import { readTodoCalendarBriefings } from "./todo-calendar-briefings";
+import { backfillTodoPreparation, nextTodoPreparationAlarm, runTodoPreparation, scheduleTodoPreparation } from "./todo-preparation";
 import { initializeTodoMail, handleTodoMail } from "./todo-mail";
 import { consumeRpcData } from "nanocodex/cloudflare/rpc";
 import { API_KEY, apiKeyDigest, apiKeyPrincipal, isOrganizationCapabilities, isApiKeyBase, isStoredApiKey, forwardPrincipalAssertions } from "nanocodex/cloudflare/managed-auth";
@@ -87,6 +90,7 @@ export interface AccountAuthEnv extends IngressPlacement {
   NANOCODEX_OTP_HMAC_KEY?: string;
   NANOCODEX?: Fetcher;
   AI?: import("./todo-mail-suggest").TodoMailSuggestionAI;
+  NANOCODEX_CRM?: D1Database;
   TWILIO_ACCOUNT_SID?: string;
   TWILIO_API_KEY_SECRET?: string;
   TWILIO_API_KEY_SID?: string;
@@ -1771,6 +1775,8 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
     retireAccountProjects(ctx.storage);
     initializeTodoInbox(ctx.storage);
     initializeTodoMail(ctx.storage);
+    backfillTodoPreparation(ctx.storage);
+    ctx.blockConcurrencyWhile(() => scheduleTodoPreparation(ctx.storage));
     // Existing agents stay candidates until their first schedule read. New
     // registrations supply their actual presence; omitted legacy values stay unknown.
     const columns = new Set(ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(agent_registry)").toArray().map(({ name }) => name));
@@ -1782,15 +1788,22 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
 
   async alarm(): Promise<void> {
     this.ctx.storage.sql.exec("DELETE FROM agent_registry_pending WHERE expires_at <= ?", Date.now());
-    const next = this.ctx.storage.sql.exec<{ expires_at: number }>(
-      "SELECT MIN(expires_at) AS expires_at FROM agent_registry_pending",
-    ).toArray()[0]?.expires_at;
-    if (next !== null && next !== undefined) await this.ctx.storage.setAlarm(next);
+    const account = await this.ctx.storage.get<UserRecord>("account");
+    try {
+    if (account) await runTodoPreparation(this.ctx.storage, { ownerID: account.id, binding: this.env.NANOCODEX, ai: this.env.AI, crm: this.env.NANOCODEX_CRM });
+    } finally {
+    const registry = this.ctx.storage.sql.exec<{ expires_at: number | null }>("SELECT MIN(expires_at) AS expires_at FROM agent_registry_pending").toArray()[0]?.expires_at;
+    const preparation = nextTodoPreparationAlarm(this.ctx.storage);
+    const times = [registry, preparation].filter((value): value is number => typeof value === "number");
+    if (times.length) await this.ctx.storage.setAlarm(Math.max(Date.now() + 25, Math.min(...times)));
+    }
   }
 
   /** Accepts proposals only from trusted Worker code with this account's DO stub. */
   async proposeTodoDecision(input: TodoDecisionProposal): Promise<{ id: string; status: string; version: number }> {
-    return proposeTodoDecision(this.ctx.storage, input);
+    const result = proposeTodoDecision(this.ctx.storage, input);
+    await scheduleTodoPreparation(this.ctx.storage);
+    return result;
   }
 
   /** Internal, privacy-safe audit; never accepts mail text or model output. */
@@ -1805,9 +1818,37 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/todo/source-health") {
+      const account = await this.ctx.storage.get<UserRecord>("account");
+      if (!account) return json({ error: "not_found" }, { status: 404 });
+      return readTodoSourceHealth(request, this.env.NANOCODEX, account.id);
+    }
     if (url.pathname.startsWith("/todo/mail/") || url.pathname === "/todo/schedule") {
       const account = await this.ctx.storage.get<UserRecord>("account");
       if (!account) return json({ error: "not_found" }, { status: 404 });
+      if (url.pathname === "/todo/schedule") {
+        const prepared = await readTodoCalendarBriefings(this.env.NANOCODEX_CRM, account.id);
+        if (request.method === "GET" && url.searchParams.get("briefings_only") === "true") {
+          const briefings = prepared.briefings.filter(briefing => !url.searchParams.has("connection_id") || briefing.source.connection_id === url.searchParams.get("connection_id"));
+          return Response.json({events: briefings.map(briefing => ({id:briefing.source.event_id,
+            connection_id:briefing.source.connection_id, calendar_id:briefing.source.calendar_id, calendar_name:briefing.source.calendar_id,
+            title:briefing.title, start:briefing.start, end:briefing.end, all_day:briefing.all_day, location:briefing.location ?? "",
+            description:briefing.description?.text ?? "", html_url:briefing.source.url ?? "", response_status:null,
+            briefing_status:"ready", briefing:[briefing.description?.text, ...briefing.notes.map(note => note.text)].filter(Boolean).join("\n"),
+            briefing_scope:"Imported account evidence; limited coverage, invitations do not prove attendance."})), ...prepared, briefings, partial:true, source:"imported_account_evidence"}, {headers:{"cache-control":"no-store"}});
+        }
+        const response = await handleTodoMail(request, this.ctx.storage, this.env.NANOCODEX, account.id, this.env.AI);
+        if (!response.ok) return response;
+        const result = await response.json() as {events:Record<string,any>[];partial:boolean};
+        const bySource = new Map(prepared.briefings.map(briefing => [JSON.stringify([briefing.source.connection_id,briefing.source.calendar_id,briefing.source.event_id]), briefing]));
+        for (const event of result.events) {
+          const briefing = bySource.get(JSON.stringify([event.connection_id,event.calendar_id,event.id]));
+          event.briefing_status = briefing ? "ready" : "unprepared";
+          event.briefing = briefing ? [briefing.description?.text, ...briefing.notes.map(note => note.text)].filter(Boolean).join("\n") : "";
+          event.briefing_scope = "Imported account evidence; limited coverage, invitations do not prove attendance.";
+        }
+        return Response.json({...result, briefings:prepared.briefings, briefing_errors:prepared.errors, partial:result.partial || prepared.partial}, {headers:{"cache-control":"no-store"}});
+      }
       return handleTodoMail(request, this.ctx.storage, this.env.NANOCODEX, account.id, this.env.AI);
     }
     if (url.pathname === "/todo" || url.pathname.startsWith("/todo/")) {
@@ -2012,6 +2053,8 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
         || !["running", "stopping", "completed", "cancelled", "failed", "idle"].includes(value.status)
         || !Array.isArray(value.activeTurnIds) || !value.activeTurnIds.every(id => typeof id === "string")
         || !Number.isFinite(value.updatedAt)
+        || (value.done !== undefined && typeof value.done !== "boolean")
+        || (value.doneAt !== undefined && value.doneAt !== null && (!Number.isFinite(value.doneAt) || value.doneAt < 0))
         || (value.lastUserMessageAt !== undefined && (!Number.isFinite(value.lastUserMessageAt) || value.lastUserMessageAt < 0))
         || (value.lastUserPrompt !== undefined && (typeof value.lastUserPrompt !== "string" || value.lastUserPrompt.length > LAST_USER_PROMPT_LIMIT))
         || (value.title !== undefined && (typeof value.title !== "string" || value.title.length > 56))
@@ -2020,11 +2063,17 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
       }
       this.ctx.storage.sql.exec(`UPDATE agent_registry SET presentation = json_set(?, '$.lastUserMessageAt',
         COALESCE(?, json_extract(presentation, '$.lastUserMessageAt'), CASE WHEN turn_count > 0 THEN updated_at ELSE 0 END),
-        '$.lastUserPrompt', COALESCE(?, json_extract(presentation, '$.lastUserPrompt'), '')),
+        '$.lastUserPrompt', COALESCE(?, json_extract(presentation, '$.lastUserPrompt'), ''),
+        '$.done', json(COALESCE(?, CASE WHEN json_extract(presentation, '$.done') THEN 'true' ELSE 'false' END)),
+        '$.doneAt', CASE WHEN ? IS NULL THEN json_extract(presentation, '$.doneAt') ELSE ? END),
         title = COALESCE(?, title)
         WHERE id = ? AND deleted_at IS NULL
           AND COALESCE(json_extract(presentation, '$.revision'), 0) < ?`,
-        JSON.stringify(value), value.lastUserMessageAt ?? null, value.lastUserPrompt ?? null, value.title ?? null, presentationMatch[1]!, value.revision);
+        JSON.stringify(value), value.lastUserMessageAt ?? null, value.lastUserPrompt ?? null,
+        value.done === undefined ? null : JSON.stringify(value.done), value.doneAt === undefined ? null : 1, value.doneAt ?? null,
+        value.title ?? null, presentationMatch[1]!, value.revision);
+      if (!this.ctx.storage.sql.exec("SELECT id FROM agent_registry WHERE id = ? AND deleted_at IS NULL", presentationMatch[1]!).toArray().length)
+        return json({ error: "not_found" }, { status: 404 });
       return new Response(null, { status: 204 });
     }
     const activityMatch = url.pathname.match(/^\/agents\/([0-9a-f-]{36})\/activity$/);
@@ -2079,7 +2128,7 @@ function agentSummary(row: AgentRegistryRow): AgentSummary {
     updatedAt: row.updated_at,
     turnCount: row.turn_count,
     mayHaveScheduledJobs: row.cron_candidate !== 0,
-    ...(row.presentation ? { presentation: JSON.parse(row.presentation) as AgentPresentation } : {}),
+    ...(row.presentation ? { presentation: { done: false, doneAt: null, ...JSON.parse(row.presentation) } as AgentPresentation } : {}),
 
   };
 }

@@ -231,7 +231,7 @@ final class InboxUITests: XCTestCase {
             if typing { input.tap(); input.typeText("Keep the controls below this draft") }
             let dock = app.descendants(matching: .any)["main-selection-bar"].firstMatch
             XCTAssertTrue(dock.waitForExistence(timeout: 5))
-            let controls = [app.buttons["model-picker"], app.buttons["effort-dial"], app.buttons["auto-route"]]
+            let controls = [app.buttons["model-picker"]]
             for control in controls {
                 XCTAssertTrue(control.exists)
                 XCTAssertGreaterThanOrEqual(control.frame.minY, input.frame.maxY)
@@ -270,7 +270,7 @@ final class InboxUITests: XCTestCase {
                 XCTAssertEqual(XCTWaiter.wait(for: [rotated], timeout: 5), .completed)
                 let sizeName = orientation == .portrait ? "portrait" : (orientation == .landscapeLeft ? "landscape-left" : "landscape-right")
                 let dock = app.descendants(matching: .any)["main-selection-bar"].firstMatch
-                let controls = ["main-tab-todo", "main-tab-chat", "model-picker", "effort-dial", "auto-route"].map { app.buttons[$0] }
+                let controls = ["main-tab-todo", "main-tab-chat", "model-picker"].map { app.buttons[$0] }
                 XCTAssertTrue(dock.waitForExistence(timeout: 5))
                 for control in controls {
                     XCTAssertTrue(control.isHittable, control.identifier)
@@ -299,7 +299,7 @@ final class InboxUITests: XCTestCase {
                     let edge = app.coordinate(withNormalizedOffset: .zero)
                         .withOffset(CGVector(dx: header.minX + 2, dy: header.midY))
                     edge.press(forDuration: 0.01, thenDragTo: edge.withOffset(CGVector(dx: app.frame.width * 0.65, dy: 0)))
-                    XCTAssertTrue(app.scrollViews["conversation-list"].waitForExistence(timeout: 5))
+                    XCTAssertTrue(app.descendants(matching: .any)["conversation-list"].firstMatch.waitForExistence(timeout: 5))
                 } else { app.buttons["conversation-drawer-open"].tap() }
                 for id in ["conversation-drawer-close", "drawer-new-conversation"] {
                     XCTAssertTrue(app.buttons[id].isHittable)
@@ -316,45 +316,71 @@ final class InboxUITests: XCTestCase {
         }
     }
 
+    func testDecisionWarmNavigationAndPreparationStates() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        let decision = app.buttons["decision-card:fixture-email"]
+        XCTAssertTrue(decision.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["capture-preparation:fixture-working"].exists)
+        XCTAssertTrue(app.buttons["capture-preparation:fixture-blocked"].exists)
+        var timings: [Double] = []
+        for index in 0..<8 {
+            let start = ProcessInfo.processInfo.systemUptime
+            decision.tap()
+            XCTAssertTrue(app.staticTexts["decision-complete-draft"].waitForExistence(timeout: 5))
+            if index > 0 { timings.append((ProcessInfo.processInfo.systemUptime - start) * 1000) }
+            XCTAssertTrue(app.buttons["decision-approve-send"].isEnabled)
+            app.buttons["decision-detail-close"].tap()
+            XCTAssertTrue(decision.waitForExistence(timeout: 5))
+        }
+        timings.sort()
+        print("DECISION_SIMULATOR_XCTEST_NAVIGATION n=7 p50_ms=\(timings[3]) p95_ms=\(timings[6]) includes_XCTest_tap_wait=true not_phone=true")
+        app.buttons["capture-preparation:fixture-blocked"].tap()
+        XCTAssertTrue(app.buttons["capture-retry"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["decision-approve-send"].exists)
+    }
+
     func testTodoUnifiedQueueThreadDraftAndExplicitSend() {
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
         XCTAssertTrue(app.buttons["main-tab-todo"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["todo-row:event:fixture-mail:primary:fixture-planning"].waitForExistence(timeout: 5))
+        let meeting = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "meeting-briefing:")).firstMatch
+        XCTAssertTrue(meeting.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["decision-card:fixture-email"].exists)
-        XCTAssertTrue(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists)
-        capture(app, "todo-unified-queue")
-        app.buttons["todo-row:event:fixture-mail:primary:fixture-planning"].tap()
-        XCTAssertTrue(app.staticTexts["Review the launch date, owners, and first round of invitations."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists, "The main queue is decisions, not all mail")
+        capture(app, "decision-first-queue")
+        meeting.tap()
+        XCTAssertTrue(app.staticTexts["Prepared briefing"].waitForExistence(timeout: 5))
         app.buttons["Done"].tap()
-        app.buttons["todo-row:mail:fixture-mail:fixture-thread"].tap()
+        app.buttons["todo-split:Mail"].tap()
+        let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.tap()
         XCTAssertTrue(app.buttons["mail-expand-all"].waitForExistence(timeout: 5))
         app.buttons["mail-expand-all"].tap()
         XCTAssertTrue(app.staticTexts["mail-body:fixture-message-1"].exists)
-        capture(app, "todo-full-thread")
         app.buttons["mail-reply_all"].tap()
-        XCTAssertTrue(app.textViews["mail-draft-body"].waitForExistence(timeout: 5))
         let body = app.textViews["mail-draft-body"]
-        body.tap(); body.typeText("Thursday at 10 works. I will review the launch plan before then.")
-        XCTAssertTrue(app.buttons["mail-send"].isEnabled)
-        capture(app, "todo-editable-draft")
+        XCTAssertTrue(body.waitForExistence(timeout: 5)); body.tap()
+        body.typeText("Thursday at 10 works. I will review the launch plan before then.")
         app.buttons["mail-draft-done"].tap()
         let continued = app.buttons["mail-continue-draft"]
         if !continued.isHittable { app.swipeUp() }
         XCTAssertTrue(continued.waitForExistence(timeout: 5)); continued.tap()
-        XCTAssertTrue((app.textViews["mail-draft-body"].value as? String ?? "").contains("Thursday at 10 works"))
+        XCTAssertTrue((body.value as? String ?? "").contains("Thursday at 10 works"))
         XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
         app.buttons["mail-send"].tap()
         XCTAssertTrue(app.staticTexts["Fixture send complete · no email sent"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["mail-send"].isEnabled)
-        capture(app, "todo-explicit-send-receipt")
+        capture(app, "todo-explicit-fixture-send-receipt")
     }
 
     func testTodoCaptureCompleteUndoAndMailArchiveUndo() {
         let app = XCUIApplication()
-        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture"]
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
         XCTAssertTrue(app.buttons["todo-compose"].waitForExistence(timeout: 10))
@@ -362,54 +388,109 @@ final class InboxUITests: XCTestCase {
         input.tap(); input.typeText("Review the launch agenda")
         app.buttons["todo-capture-save"].tap()
         XCTAssertTrue(app.staticTexts["Review the launch agenda"].waitForExistence(timeout: 5))
-        app.staticTexts["Review the launch agenda"].tap()
-        app.buttons["Mark done"].tap()
-        XCTAssertTrue(app.buttons["Undo"].waitForExistence(timeout: 5))
-        app.buttons["Undo"].tap()
-        XCTAssertTrue(app.staticTexts["Review the launch agenda"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Pending"].exists, "Capture delegates preparation rather than claiming completion")
+        let ready = app.buttons["todo-row:capture:fixture-ready-capture"]
+        if !ready.isHittable { app.swipeUp() }
+        XCTAssertTrue(ready.waitForExistence(timeout: 5)); ready.swipeRight()
+        app.buttons["todo-complete:fixture-ready-capture"].tap()
+        XCTAssertTrue(app.buttons["Undo"].waitForExistence(timeout: 5)); app.buttons["Undo"].tap()
+        XCTAssertTrue(ready.waitForExistence(timeout: 5))
         app.buttons["todo-split:Mail"].tap()
         let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
-        XCTAssertTrue(thread.waitForExistence(timeout: 5))
-        thread.swipeLeft()
+        XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.swipeLeft()
         app.buttons["todo-archive:fixture-thread"].tap()
         XCTAssertFalse(thread.exists)
-        app.buttons["Undo"].tap()
-        XCTAssertTrue(thread.waitForExistence(timeout: 5))
-        capture(app, "todo-archive-undo")
-        app.buttons["main-tab-chat"].tap()
-        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 5))
-        app.buttons["main-tab-todo"].tap()
-        XCTAssertTrue(app.buttons["todo-split:Mail"].exists)
+        app.buttons["Undo"].tap(); XCTAssertTrue(thread.waitForExistence(timeout: 5))
+        capture(app, "todo-capture-prepares-and-archive-undo")
+    }
+
+    func testEmptyDecisionQueueDoesNotClaimCaughtUpOrHealthyWatch() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-mail-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        let tab = app.buttons["main-tab-todo"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 15)); tab.tap()
+        XCTAssertTrue(app.buttons["todo-compose"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["todo-compose"].isEnabled, "Connected fixture mail accounts do not establish watch coverage")
+        let coverage = app.staticTexts["todo-source-coverage"]
+        XCTAssertTrue(coverage.waitForExistence(timeout: 5))
+        XCTAssertTrue(coverage.label.contains("Inbox-scoped"))
+        XCTAssertTrue(coverage.label.contains("archived mail is excluded"))
+        XCTAssertTrue(coverage.label.contains("Watch coverage is unknown"))
+        let empty = app.staticTexts["Nothing ready to review"]
+        for _ in 0..<4 where !empty.isHittable { app.swipeUp() }
+        XCTAssertTrue(empty.exists)
+        XCTAssertFalse(app.staticTexts["Caught up"].exists)
+        capture(app, "decision-empty-watch-coverage-unknown")
+    }
+
+    func testDecisionCachedPreviewIsReadOnlyWithoutCurrentAuthority() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-cached-readonly-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        let card = app.buttons["decision-card:fixture-email"]
+        XCTAssertTrue(card.waitForExistence(timeout: 15)); card.tap()
+        let preview = app.staticTexts["decision-complete-draft"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 5))
+        XCTAssertEqual(preview.label, "Thursday at 10 works. I will review the launch plan before then.")
+        XCTAssertTrue(app.staticTexts["decision-mail-error"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["decision-approve-send"].isEnabled)
+        XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+        capture(app, "decision-cached-preview-no-authority")
+    }
+
+    func testDecisionExactDraftChangeInstructionsAndWarmReopen() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        let card = app.buttons["decision-card:fixture-email"]
+        XCTAssertTrue(card.waitForExistence(timeout: 15))
+        var samples: [Double] = []
+        for _ in 0..<3 {
+            let start = ProcessInfo.processInfo.systemUptime
+            card.tap()
+            let preview = app.staticTexts["decision-complete-draft"]
+            XCTAssertTrue(preview.waitForExistence(timeout: 5))
+            samples.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
+            XCTAssertEqual(preview.label, "Thursday at 10 works. I will review the launch plan before then.")
+            XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+            app.buttons["decision-detail-close"].tap()
+        }
+        print("DECISION_SIM_UI fixture_n=3 tap_to_preview_ms=\(samples) XCTest_automation_included=true not_production=true")
+        card.tap()
+        let instructions = app.textFields["decision-instructions"]
+        for _ in 0..<4 where !instructions.isHittable { app.swipeUp() }
+        XCTAssertTrue(instructions.exists)
+        XCTAssertFalse(app.buttons["decision-change"].isEnabled)
+        instructions.tap(); instructions.typeText("Make it warmer and mention the launch review")
+        XCTAssertTrue(app.buttons["decision-change"].isEnabled)
+        XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+        capture(app, "decision-change-instructions-unsent")
+        // Demo Change acknowledges locally; backend generation fencing is
+        // verified separately by HTTP/XCTest, not claimed by this UI fixture.
+        app.buttons["decision-change"].tap()
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
     }
 
     func testTodoSuggestedDraftFromLinkedDecisionStaysEditable() {
         let app = XCUIApplication()
-        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--todo-linked-mail-fixture"]
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
         let decision = app.buttons["decision-card:fixture-email"]
-        XCTAssertTrue(decision.waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists, "A linked decision must not duplicate its mail row")
-        decision.tap()
-        XCTAssertTrue(app.buttons["mail-reply"].waitForExistence(timeout: 5)); app.buttons["mail-reply"].tap()
-        let suggest = app.buttons["mail-draft-suggest"]
-        XCTAssertTrue(suggest.waitForExistence(timeout: 5)); suggest.tap()
-        let body = app.textViews["mail-draft-body"]
-        let populated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            !(body.value as? String ?? "").isEmpty
-        }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [populated], timeout: 5), .completed)
-        body.tap(); body.typeText(" I will send the final notes on Friday.")
-        XCTAssertTrue((body.value as? String ?? "").contains("final notes on Friday"))
-        app.buttons["mail-draft-done"].tap()
-        let continued = app.buttons["mail-continue-draft"]
-        if !continued.isHittable { app.swipeUp() }
-        continued.tap()
-        XCTAssertTrue((body.value as? String ?? "").contains("final notes on Friday"))
+        XCTAssertTrue(decision.waitForExistence(timeout: 10)); decision.tap()
+        XCTAssertTrue(app.staticTexts["decision-complete-draft"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["decision-complete-draft"].label.contains("Thursday at 10 works"))
         XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
-        capture(app, "todo-suggested-draft-reviewed")
-        app.buttons["mail-send"].tap()
+        let approve = app.buttons["decision-approve-send"]
+        XCTAssertTrue(approve.isEnabled)
+        capture(app, "decision-ready-for-exact-approval")
+        approve.tap()
         XCTAssertTrue(app.staticTexts["Fixture send complete · no email sent"].waitForExistence(timeout: 5))
+        XCTAssertFalse(approve.isEnabled)
     }
 
     func testTodoSnoozedMailReturnsFromLater() {
@@ -417,6 +498,7 @@ final class InboxUITests: XCTestCase {
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
+        XCTAssertTrue(app.buttons["todo-split:Mail"].waitForExistence(timeout: 10)); app.buttons["todo-split:Mail"].tap()
         let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
         XCTAssertTrue(thread.waitForExistence(timeout: 10)); thread.swipeLeft()
         app.buttons["Snooze"].tap(); app.buttons["Tomorrow at 9 AM"].tap()
@@ -425,7 +507,7 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.swipeRight()
         app.buttons["Bring back"].tap()
         XCTAssertTrue(thread.waitForNonExistence(timeout: 5))
-        app.buttons["todo-split:For you"].tap()
+        app.buttons["todo-split:Mail"].tap()
         XCTAssertTrue(thread.waitForExistence(timeout: 5))
         capture(app, "todo-snooze-return")
     }
@@ -455,20 +537,21 @@ final class InboxUITests: XCTestCase {
 
     func testTodoDistinctDecisionsInOneThreadRemainActionable() {
         let app = XCUIApplication()
-        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--todo-linked-mail-fixture", "--todo-multi-message-fixture"]
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--todo-multi-message-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
         let latest = app.buttons["decision-card:fixture-email"]
         let earlier = app.buttons["decision-card:fixture-earlier-email"]
         XCTAssertTrue(latest.waitForExistence(timeout: 10)); XCTAssertTrue(earlier.exists)
-        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists)
         earlier.tap()
-        XCTAssertTrue(app.staticTexts["mail-body:fixture-message-1"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.staticTexts["mail-body:fixture-message-2"].exists)
-        app.buttons["mail-thread-done"].tap()
-        earlier.swipeLeft()
-        app.buttons["decision-swipe-secondary:fixture-earlier-email"].tap()
-        XCTAssertTrue(earlier.waitForNonExistence(timeout: 5)); XCTAssertTrue(latest.exists)
+        XCTAssertTrue(app.staticTexts["decision-complete-draft"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["decision-complete-draft"].label, "I will review the launch plan before Thursday.")
+        app.buttons["decision-detail-close"].tap()
+        latest.tap()
+        XCTAssertTrue(app.staticTexts["decision-complete-draft"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["decision-complete-draft"].label.contains("Thursday at 10 works"))
+        app.buttons["decision-detail-close"].tap()
+        XCTAssertTrue(earlier.exists); XCTAssertTrue(latest.exists)
     }
 
     func testTodoComposeShowsSenderAndCanStartAgainAfterSend() {
@@ -500,6 +583,7 @@ final class InboxUITests: XCTestCase {
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--todo-mail-unknown-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
+        XCTAssertTrue(app.buttons["todo-split:Mail"].waitForExistence(timeout: 10)); app.buttons["todo-split:Mail"].tap()
         let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
         XCTAssertTrue(thread.waitForExistence(timeout: 10)); thread.tap()
         app.buttons["mail-reply"].tap()
@@ -612,7 +696,7 @@ final class InboxUITests: XCTestCase {
     private func openDrawerFromEdge(_ app: XCUIApplication) {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.015, dy: 0.45))
             .press(forDuration: 0.01, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.45)))
-        XCTAssertTrue(app.scrollViews["conversation-list"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["conversation-list"].firstMatch.waitForExistence(timeout: 5))
     }
 
     func testScreenEdgeOpensDrawerAndPreservesDraft() {
@@ -644,8 +728,8 @@ final class InboxUITests: XCTestCase {
             XCTAssertEqual(Double(above), Double(below), accuracy: 3,
                            "The drawer background must continue through the home area")
         }
-        app.scrollViews["conversation-list"].swipeLeft()
-        gone(app.scrollViews["conversation-list"])
+        app.buttons["conversation-drawer-close"].tap()
+        gone(app.descendants(matching: .any)["conversation-list"].firstMatch)
         XCTAssertTrue(app.buttons["conversation-title:inbox"].isSelected)
         XCTAssertEqual(composer(app).value as? String, "Keep my edge swipe draft")
         let dock = app.descendants(matching: .any)["main-selection-bar"].firstMatch
@@ -656,7 +740,7 @@ final class InboxUITests: XCTestCase {
         let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.015, dy: 0.45))
         edge.press(forDuration: 0.01, thenDragTo: edge.withOffset(CGVector(dx: 35, dy: 0)),
                    withVelocity: .slow, thenHoldForDuration: 0.5)
-        gone(app.scrollViews["conversation-list"])
+        gone(app.descendants(matching: .any)["conversation-list"].firstMatch)
         XCTAssertTrue(app.buttons["conversation-title:inbox"].isSelected)
         XCTAssertEqual(composer(app).value as? String, "Keep my edge swipe draft")
         XCTAssertEqual(dock.frame.minY, dockFrame.minY, accuracy: 2)
@@ -677,7 +761,7 @@ final class InboxUITests: XCTestCase {
         selectInbox(app)
         composer(app).tap(); composer(app).typeText("Keep this draft through navigation")
         app.buttons["conversation-drawer-open"].tap()
-        XCTAssertTrue(app.scrollViews["conversation-list"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["conversation-list"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["send"].isHittable, "The covered conversation must not receive taps")
         capture(app, "muse-session-drawer")
         let search = app.textFields["conversation-search"]
@@ -717,6 +801,130 @@ final class InboxUITests: XCTestCase {
         app.launch()
         return app
     }
+    func testSessionDoneSwipePersistsAndReopensWithoutLosingHistory() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["NANOCODEX_STARTUP_FIXTURE": "1", "NANOCODEX_STARTUP_PROFILE": UUID().uuidString,
+                                 "NANOCODEX_SESSION_DONE_FIXTURE": "1"]
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-chat"].waitForExistence(timeout: 20))
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(app.staticTexts["Loaded saved conversation."].waitForExistence(timeout: 20))
+        app.buttons["conversation-drawer-open"].tap()
+        let row = app.buttons["conversation-row:saved"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.swipeLeft()
+        let mark = app.buttons["Mark Done"]
+        XCTAssertTrue(mark.waitForExistence(timeout: 5))
+        XCTAssertEqual(mark.label, "Mark Done")
+        capture(app, "session-done-swipe")
+        mark.tap()
+        XCTAssertTrue(row.waitForNonExistence(timeout: 10))
+        app.buttons["conversation-done-filter"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        capture(app, "session-done-filter")
+        row.tap()
+        XCTAssertTrue(app.staticTexts["Loaded saved conversation."].waitForExistence(timeout: 10))
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.buttons["main-tab-chat"].waitForExistence(timeout: 20))
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 20))
+        app.buttons["conversation-drawer-open"].tap()
+        XCTAssertTrue(app.buttons["conversation-row:other"].waitForExistence(timeout: 10))
+        XCTAssertFalse(row.exists)
+        app.buttons["conversation-done-filter"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.swipeLeft()
+        let reopen = app.buttons["Reopen"]
+        XCTAssertTrue(reopen.waitForExistence(timeout: 5))
+        XCTAssertEqual(reopen.label, "Reopen")
+        reopen.tap()
+        XCTAssertTrue(row.waitForNonExistence(timeout: 10))
+        app.buttons["conversation-done-filter"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        XCTAssertTrue(app.staticTexts["Loaded saved conversation."].waitForExistence(timeout: 10))
+        capture(app, "session-done-reopened-history")
+    }
+
+    func testSessionDoneRowsAndBlankDrawerSwipesStayIndependent() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["NANOCODEX_STARTUP_FIXTURE": "1", "NANOCODEX_STARTUP_PROFILE": UUID().uuidString,
+                                 "NANOCODEX_SESSION_DONE_FIXTURE": "1"]
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-chat"].waitForExistence(timeout: 20))
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(app.staticTexts["Loaded saved conversation."].waitForExistence(timeout: 20))
+        app.buttons["conversation-drawer-open"].tap()
+        let saved = app.buttons["conversation-row:saved"]
+        let other = app.buttons["conversation-row:other"]
+        XCTAssertTrue(saved.waitForExistence(timeout: 10))
+        XCTAssertTrue(other.waitForExistence(timeout: 10))
+        let list = app.descendants(matching: .any)["conversation-list"].firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        let y = list.frame.maxY - 20
+        XCTAssertGreaterThan(y, max(saved.frame.maxY, other.frame.maxY) + 8,
+                             "Use actual blank list space, not a native row's swipe region")
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let start = origin.withOffset(CGVector(dx: list.frame.minX + list.frame.width * 0.8, dy: y))
+        let end = origin.withOffset(CGVector(dx: list.frame.minX + 8, dy: y))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        let history = app.staticTexts["Loaded saved conversation."]
+        let visible = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"), object: history)
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 10), .completed,
+                       "Blank-space dismissal must restore the retained conversation")
+        app.buttons["conversation-drawer-open"].tap()
+        XCTAssertTrue(saved.waitForExistence(timeout: 10))
+        saved.swipeLeft()
+        XCTAssertTrue(app.buttons["Mark Done"].waitForExistence(timeout: 5),
+                      "A native row swipe must reveal Done instead of dismissing the drawer")
+        XCTAssertTrue(app.buttons["conversation-drawer-close"].isHittable)
+        capture(app, "session-done-row-and-blank-swipes")
+    }
+
+    func testSessionDoneRejectedWriteLeavesSessionVisible() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["NANOCODEX_STARTUP_FIXTURE": "1", "NANOCODEX_STARTUP_PROFILE": UUID().uuidString,
+                                 "NANOCODEX_SESSION_DONE_FIXTURE": "1", "NANOCODEX_SESSION_DONE_FAILURE": "before"]
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-chat"].waitForExistence(timeout: 20))
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 20))
+        app.buttons["conversation-drawer-open"].tap()
+        let row = app.buttons["conversation-row:saved"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.swipeLeft()
+        let mark = app.buttons["Mark Done"]
+        XCTAssertTrue(mark.waitForExistence(timeout: 5)); mark.tap()
+        let error = app.staticTexts["conversation-done-error"]
+        let reconciled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "no automatic retry"), object: error)
+        XCTAssertEqual(XCTWaiter.wait(for: [reconciled], timeout: 10), .completed)
+        XCTAssertTrue(row.exists)
+        app.buttons["conversation-done-filter"].tap()
+        XCTAssertFalse(row.exists)
+        capture(app, "session-done-rejected-main-list-preserved")
+    }
+
+    func testSessionDoneUncertainWriteRefreshesWithoutRetry() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["NANOCODEX_STARTUP_FIXTURE": "1", "NANOCODEX_STARTUP_PROFILE": UUID().uuidString,
+                                 "NANOCODEX_SESSION_DONE_FIXTURE": "1", "NANOCODEX_SESSION_DONE_FAILURE": "after"]
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-chat"].waitForExistence(timeout: 20))
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 20))
+        app.buttons["conversation-drawer-open"].tap()
+        let row = app.buttons["conversation-row:saved"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.swipeLeft()
+        let mark = app.buttons["Mark Done"]
+        XCTAssertTrue(mark.waitForExistence(timeout: 5)); mark.tap()
+        XCTAssertTrue(app.staticTexts["conversation-done-error"].waitForExistence(timeout: 10))
+        XCTAssertTrue(row.waitForNonExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["conversation-done-error"].label.contains("no automatic retry"))
+        app.buttons["conversation-done-filter"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        capture(app, "session-done-uncertain-refreshed")
+    }
+
     // A process restart must recover persisted roster, transcript, directory,
     // and visited profile even when every network request fails immediately.
     func testOfflineColdRelaunchRestoresConversationsAndCRM() {
@@ -855,8 +1063,8 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.buttons["conversation-title:saved"].waitForExistence(timeout: 20))
         app.buttons["conversation-drawer-open"].tap()
         XCTAssertTrue(app.buttons["conversation-row:saved"].waitForExistence(timeout: 5))
-        app.scrollViews["conversation-list"].swipeLeft()
-        gone(app.scrollViews["conversation-list"])
+        app.buttons["conversation-drawer-close"].tap()
+        gone(app.descendants(matching: .any)["conversation-list"].firstMatch)
         XCTAssertTrue(app.buttons["conversation-title:saved"].isSelected)
         app.terminate(); app.launch()
         XCTAssertTrue(app.buttons["conversation-title:saved"].waitForExistence(timeout: 20))
@@ -872,7 +1080,7 @@ final class InboxUITests: XCTestCase {
                           "NANOCODEX_DEMO_SIDEBAR": "1"])
         selectInbox(app)
         app.buttons["conversation-drawer-open"].tap()
-        let list = app.scrollViews["conversation-list"]
+        let list = app.descendants(matching: .any)["conversation-list"].firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5))
         for _ in 0..<3 { list.swipeUp(); list.swipeDown() }
         XCTAssertTrue(list.exists, "Vertical browsing must keep the drawer open")
@@ -882,7 +1090,7 @@ final class InboxUITests: XCTestCase {
         XCTAssertFalse(app.buttons["conversation-row:hands"].exists)
         app.buttons["Clear search"].tap()
         XCTAssertTrue(app.buttons["conversation-row:hands"].waitForExistence(timeout: 5))
-        list.swipeLeft()
+        app.buttons["conversation-drawer-close"].tap()
         gone(list)
         XCTAssertTrue(app.buttons["conversation-title:inbox"].isSelected)
     }
@@ -1376,6 +1584,68 @@ final class InboxUITests: XCTestCase {
             app.terminate()
         }
     }
+    func testAppStoreOpensNativeAppsAndReturnsToChat() {
+        let app = launch(arguments: ["--generated-apps-ui-fixture"])
+        let conversation = selectedConversationTab(app).identifier
+        let store = app.buttons["main-tab-apps"]
+        XCTAssertTrue(store.waitForExistence(timeout: 25))
+        XCTAssertFalse(app.scrollViews["saved-apps-bar"].exists)
+        XCTAssertFalse(app.buttons["main-app-water"].exists)
+        capture(app, "app-store-compact-dock")
+
+        func openApp(_ id: String) {
+            store.tap()
+            let item = app.buttons["app-store-app-" + id]
+            XCTAssertTrue(item.waitForExistence(timeout: 5))
+            item.tap()
+        }
+        openApp("water")
+        XCTAssertTrue(app.staticTexts["Glasses: 0"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.webViews.firstMatch.exists)
+        app.buttons["Add glass"].tap()
+        XCTAssertTrue(app.staticTexts["Glasses: 1"].waitForExistence(timeout: 5))
+        capture(app, "app-store-water-native")
+
+        openApp("reading")
+        XCTAssertTrue(app.staticTexts["Pages: 0"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Glasses: 1"].exists)
+        app.buttons["Read page"].tap()
+        XCTAssertTrue(app.staticTexts["Pages: 1"].waitForExistence(timeout: 5))
+
+        openApp("travel")
+        XCTAssertTrue(app.staticTexts["Packed items: 0"].waitForExistence(timeout: 5))
+        capture(app, "app-store-travel")
+
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(selectedConversationTab(app).waitForExistence(timeout: 5))
+        XCTAssertEqual(selectedConversationTab(app).identifier, conversation)
+        XCTAssertFalse(app.staticTexts["Packed items: 0"].exists)
+        capture(app, "app-store-return-to-chat")
+
+        openApp("water")
+        XCTAssertTrue(app.staticTexts["Glasses: 1"].waitForExistence(timeout: 5), "Switching apps must reopen their saved native state.")
+        capture(app, "app-store-water-reopened")
+        store.tap()
+        app.buttons["Your apps"].tap()
+        XCTAssertTrue(app.buttons["create-generated-app"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Synthetic water tracker"].exists)
+    }
+
+    func testOneModelButtonOpensAllConversationSettings() {
+        let app = launch()
+        let picker = app.buttons["model-picker"]
+        XCTAssertTrue(picker.isHittable)
+        XCTAssertFalse(app.buttons["effort-dial"].exists)
+        XCTAssertFalse(app.buttons["auto-route"].exists)
+        picker.tap()
+        XCTAssertTrue(app.buttons["Astra"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Sol"].exists)
+        XCTAssertTrue(app.buttons["Automatic routing"].exists)
+        let thinking = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Thinking:")).firstMatch
+        XCTAssertTrue(thinking.exists)
+        capture(app, "single-model-menu")
+    }
+
     private func launch(_ environment: [String: String] = [:], arguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--demo"] + arguments
@@ -3530,7 +3800,7 @@ final class InboxUITests: XCTestCase {
         let selected = title.label
         let selectedID = title.identifier
         app.buttons["conversation-drawer-open"].tap()
-        let list = app.scrollViews["conversation-list"]
+        let list = app.descendants(matching: .any)["conversation-list"].firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5))
         for _ in 0..<3 { list.swipeUp(velocity: .fast) }
         for _ in 0..<3 { list.swipeDown(velocity: .fast) }
@@ -3539,7 +3809,7 @@ final class InboxUITests: XCTestCase {
         XCTAssertEqual(app.descendants(matching: .any)["conversation"].firstMatch.label, selected, "Browsing conversations must preserve selection")
         app.buttons["conversation-drawer-open"].tap()
         XCTAssertTrue(list.waitForExistence(timeout: 5))
-        list.swipeLeft()
+        app.buttons["conversation-drawer-close"].tap()
         gone(list)
         XCTAssertEqual(self.selectedConversationTab(app).identifier, selectedID)
     }
@@ -3912,10 +4182,10 @@ final class InboxUITests: XCTestCase {
         let draft = composer(app).value as? String
         for _ in 0..<3 {
             openDrawerFromEdge(app)
-            XCTAssertTrue(app.scrollViews["conversation-list"].isHittable)
+            XCTAssertTrue(app.descendants(matching: .any)["conversation-list"].firstMatch.isHittable)
             capture(app, "phone-edge-swipe-open")
-            app.scrollViews["conversation-list"].swipeLeft()
-            gone(app.scrollViews["conversation-list"])
+            app.buttons["conversation-drawer-close"].tap()
+            gone(app.descendants(matching: .any)["conversation-list"].firstMatch)
             XCTAssertEqual(selectedConversationTab(app).identifier, original)
             XCTAssertEqual(composer(app).value as? String, draft)
         }
@@ -3944,9 +4214,9 @@ final class InboxUITests: XCTestCase {
         if #available(iOS 26.0, *) { metrics.append(XCTHitchMetric(application: app)) }
         measure(metrics: metrics, options: options) {
             openDrawerFromEdge(app)
-            XCTAssertTrue(app.scrollViews["conversation-list"].waitForExistence(timeout: 5))
-            app.scrollViews["conversation-list"].swipeLeft()
-            gone(app.scrollViews["conversation-list"])
+            XCTAssertTrue(app.descendants(matching: .any)["conversation-list"].firstMatch.waitForExistence(timeout: 5))
+            app.buttons["conversation-drawer-close"].tap()
+            gone(app.descendants(matching: .any)["conversation-list"].firstMatch)
             XCTAssertEqual(selectedConversationTab(app).identifier, original)
             app.buttons["add-attachments"].tap()
             XCTAssertTrue(app.buttons["choose-photos"].waitForExistence(timeout: 5))
@@ -4194,7 +4464,7 @@ final class InboxUITests: XCTestCase {
         }
         func inspectOverview() {
             app.buttons["conversation-drawer-open"].tap()
-            let overview = app.scrollViews["conversation-list"]
+            let overview = app.descendants(matching: .any)["conversation-list"].firstMatch
             XCTAssertTrue(overview.waitForExistence(timeout: 5))
             app.buttons["conversation-drawer-close"].tap()
             gone(overview)
@@ -4261,6 +4531,80 @@ final class InboxUITests: XCTestCase {
             if draftText() != originalDraft { replaceDraft(originalDraft) }
             XCTAssertEqual(draftText(), originalDraft)
         }
+    }
+
+    /// Run via apple/scripts/test-meetings.sh: meetings travel over real HTTP
+    /// into the production Worker router and persistent D1, not URLProtocol JSON.
+    func testMeetingsPersistAndSyncNativeNotes() throws {
+        let app = XCUIApplication()
+        let profile = "meetings-" + UUID().uuidString.lowercased()
+        app.launchEnvironment["NANOCODEX_STARTUP_FIXTURE"] = "1"
+        app.launchEnvironment["NANOCODEX_STARTUP_PROFILE"] = profile
+        app.launchEnvironment["NANOCODEX_MEETING_JOURNEY_ORIGIN"] = ProcessInfo.processInfo.environment["NANOCODEX_MEETING_JOURNEY_ORIGIN"] ?? "http://127.0.0.1:8797"
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-meetings"].waitForExistence(timeout: 30))
+        app.buttons["main-tab-meetings"].tap()
+        XCTAssertTrue(app.buttons["meeting-new"].waitForExistence(timeout: 10))
+        app.buttons["meeting-new"].tap()
+        let title = "Native planning " + String(UUID().uuidString.prefix(8))
+        let titleField = app.textFields["meeting-title"].exists ? app.textFields["meeting-title"] : app.textViews["meeting-title"]
+        XCTAssertTrue(titleField.waitForExistence(timeout: 5))
+        // A vertical SwiftUI TextField can place the caret before its default
+        // title on a center tap. Explicitly tap the trailing edge before deleting.
+        titleField.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        let prior = titleField.value as? String ?? ""
+        titleField.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: prior.count) + title)
+        XCTAssertEqual(titleField.value as? String, title)
+        // Dismiss the title keyboard before tapping the note editor, which may
+        // extend underneath it on a compact phone.
+        app.buttons["meeting-keyboard-done"].tap()
+        let notes = app.textViews["meeting-notes"]
+        notes.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.1)).tap()
+        notes.typeText("Decision: ship the native meeting library first. Morgan sends the draft on Friday.")
+        app.buttons["meeting-keyboard-done"].tap()
+        let save = app.buttons["meeting-save"]
+        for _ in 0..<5 where !save.isHittable { app.swipeUp() }
+        XCTAssertTrue(save.isHittable)
+        capture(app, "meetings-native-capture-draft")
+        save.tap()
+        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'meeting-row-' AND label BEGINSWITH %@", title + ",")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        capture(app, "meetings-native-library")
+        row.tap()
+        XCTAssertTrue(app.textViews["meeting-document-notes"].waitForExistence(timeout: 10))
+        XCTAssertTrue((app.textViews["meeting-document-notes"].value as? String ?? "").contains("Morgan sends"))
+        app.segmentedControls["meeting-document-tabs"].buttons["Transcript"].tap()
+        let transcript = app.textViews["meeting-document-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        transcript.tap(); transcript.typeText("Morgan: I will send the draft Friday. Taylor: We agreed to ship the native meeting library first.")
+        app.buttons["meeting-keyboard-done"].tap()
+        let saveChanges = app.buttons["meeting-document-save"]
+        for _ in 0..<5 where !saveChanges.isHittable { app.swipeUp() }
+        XCTAssertTrue(saveChanges.isHittable); saveChanges.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: saveChanges)], timeout: 15), .completed)
+        for _ in 0..<5 where !app.segmentedControls["meeting-document-tabs"].isHittable { app.swipeDown() }
+        app.segmentedControls["meeting-document-tabs"].buttons["Notes"].tap()
+        let enhance = app.buttons["meeting-enhance"]
+        XCTAssertTrue(enhance.waitForExistence(timeout: 5))
+        enhance.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["meeting-enhanced-notes"].firstMatch.waitForExistence(timeout: 30))
+        capture(app, "meetings-native-enhanced-notes")
+        // A new app process reopens the protected SQLite journal and re-fetches
+        // the same cloud document. A UI sheet is never the data's lifetime.
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.buttons["main-tab-meetings"].waitForExistence(timeout: 30))
+        app.buttons["main-tab-meetings"].tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
+        XCTAssertTrue(app.textViews["meeting-document-notes"].waitForExistence(timeout: 10))
+        app.segmentedControls["meeting-document-tabs"].buttons["Transcript"].tap()
+        XCTAssertTrue((app.textViews["meeting-document-transcript"].value as? String ?? "").contains("Morgan: I will send"))
+        capture(app, "meetings-native-restored-transcript")
+        app.buttons["meeting-document-menu"].tap()
+        app.buttons["Delete meeting"].firstMatch.tap()
+        app.buttons["Delete meeting"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["meeting-new"].waitForExistence(timeout: 10))
+        XCTAssertFalse(row.exists)
+        capture(app, "meetings-native-deleted")
     }
 
     private func capture(_ app: XCUIApplication, _ name: String) {

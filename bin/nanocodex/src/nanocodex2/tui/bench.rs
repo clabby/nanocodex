@@ -24,6 +24,7 @@ mod prompt;
 mod screen;
 #[path = "../screen_ice.rs"]
 mod screen_ice;
+mod secure_input;
 mod session;
 mod share;
 #[path = "../skill.rs"]
@@ -41,7 +42,8 @@ mod voice_state;
 // Keep production components on their normal module paths in this private target.
 mod tui {
     pub(crate) use crate::{
-        context, format, pane, prompt, screen, session, share, spinner, theme, transcript, vault,
+        context, format, pane, prompt, screen, secure_input, session, share, spinner, theme,
+        transcript, vault,
     };
 }
 

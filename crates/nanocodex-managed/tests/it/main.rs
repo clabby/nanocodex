@@ -4,3 +4,4 @@ mod public_lifecycle;
 mod voice;
 
 mod claude;
+mod session_done;

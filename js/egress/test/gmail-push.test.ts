@@ -17,7 +17,7 @@ function fixture() {
   };
   const calls: Request[] = [], wakes: Record<string, unknown>[] = [];
   let history: (url: URL) => Response = () => Response.json({ historyId: "12", history: [{ id: "12", messagesAdded: [{ message: { id: "m1", threadId: "t1", labelIds: ["INBOX"] } }] }] });
-  let message: (url: URL) => Response = url => Response.json({ id: url.pathname.split("/").pop(), payload: { mimeType: "text/plain", headers: [], body: { data: btoa("Full message body") } } });
+  let message: (url: URL) => Response = url => Response.json({ id: url.pathname.split("/").pop(), labelIds: ["INBOX"], payload: { mimeType: "text/plain", headers: [], body: { data: btoa("Full message body") } } });
   let watchStatus = 200;
   let wakeStatus = 202;
   let wakeBody: unknown;
@@ -41,7 +41,7 @@ function fixture() {
   const state = { storage } as unknown as DurableObjectState;
   let object = new GmailPushMailbox(state, env);
   return {
-    calls, wakes, env, get alarm() { return alarm; },
+    calls, wakes, env, storage, get alarm() { return alarm; },
     message: (fn: typeof message) => { message = fn; },
     history: (fn: typeof history) => { history = fn; },
     watchStatus: (status: number) => { watchStatus = status; },
@@ -240,10 +240,12 @@ it("treats a self-addressed delivery in INBOX as incoming even when also SENT", 
   const f = fixture();
   await f.request("/configure", "POST", config);
   f.history(() => Response.json({ historyId: "12", history: [{ id: "12", messagesAdded: [{ message: { id: "selftest", threadId: "selfthread", labelIds: ["SENT", "INBOX"] } }] }] }));
+  f.message(() => Response.json({id:"selftest",labelIds:["SENT","INBOX"],payload:{mimeType:"text/plain",body:{data:btoa("Self delivery")}}}));
   await f.request("/notify", "POST", notify);
   await f.alarmRun();
   expect(f.wakes).toHaveLength(1);
   expect(JSON.parse(f.wakes[0]!.input as string).messageIds).toEqual(["selftest"]);
+  expect(JSON.parse(f.wakes[0]!.input as string).messages[0]).toMatchObject({status:"ok",label_ids:["SENT","INBOX"],body:"Self delivery"});
 });
 it("persists only explicit CRM opt-in and forwards it identically across busy retries", async () => {
   const f = fixture();
@@ -289,7 +291,7 @@ it("hydrates MIME alternatives before wake and persists the snapshot across busy
   const f = fixture(); await f.request("/configure", "POST", config);
   f.message(url => {
     expect(url.searchParams.get("format")).toBe("full");
-    return Response.json({id:"m1", threadId:"thread-1", payload:{mimeType:"multipart/mixed",headers:[{name:"Subject",value:"Synthetic subject"},{name:"In-Reply-To",value:"<prior@example.test>"},{name:"References",value:"<first@example.test> <prior@example.test>"}],parts:[
+    return Response.json({id:"m1", labelIds:["INBOX"], threadId:"thread-1", payload:{mimeType:"multipart/mixed",headers:[{name:"Subject",value:"Synthetic subject"},{name:"In-Reply-To",value:"<prior@example.test>"},{name:"References",value:"<first@example.test> <prior@example.test>"}],parts:[
       {mimeType:"multipart/alternative",parts:[{mimeType:"text/html",body:{data:btoa("<p>Duplicate HTML</p>")}},{mimeType:"text/plain",body:{data:btoa("Complete plain body")}}]},
       {mimeType:"text/plain",filename:"attachment.txt",body:{attachmentId:"secret",size:123,data:btoa("Attachment content")}}
     ]}});
@@ -314,11 +316,11 @@ it("reports unavailable bodies explicitly and bounds Unicode/HTML content withou
     const id=url.pathname.split("/").pop();
     if(id==="missing") return new Response(null,{status:404});
     if(id==="denied") return new Response("private provider error",{status:403});
-    if(id==="bad") return Response.json({id,payload:{mimeType:"text/plain",body:{data:"%%%"}}});
-    if(id==="external") return Response.json({id,payload:{mimeType:"text/plain",body:{attachmentId:"not-downloaded",size:123}}});
+    if(id==="bad") return Response.json({id,labelIds:["INBOX"],payload:{mimeType:"text/plain",body:{data:"%%%"}}});
+    if(id==="external") return Response.json({id,labelIds:["INBOX"],payload:{mimeType:"text/plain",body:{attachmentId:"not-downloaded",size:123}}});
     if(id==="not-downloaded") return Response.json({data:btoa("External body")});
     const body=id==="html"?"<style>hidden</style><script>bad()</script><p>Hello &amp; goodbye</p>":"😀".repeat(40000);
-    return Response.json({id,payload:{mimeType:id==="html"?"text/html":"text/plain",headers:[],body:{data:Buffer.from(body).toString("base64url")}}});
+    return Response.json({id,labelIds:["INBOX"],payload:{mimeType:id==="html"?"text/html":"text/plain",headers:[],body:{data:Buffer.from(body).toString("base64url")}}});
   });
   await f.request("/notify","POST",notify); await f.alarmRun();
   const input=JSON.parse(f.wakes[0]!.input as string);
@@ -333,7 +335,7 @@ it("reports unavailable bodies explicitly and bounds Unicode/HTML content withou
 });
 it("decodes declared charsets and falls back from an empty plain alternative without related-resource duplication", async () => {
   const f=fixture(); await f.request("/configure","POST",config);
-  f.message(()=>Response.json({id:"m1",payload:{mimeType:"multipart/mixed",parts:[
+  f.message(()=>Response.json({id:"m1",labelIds:["INBOX"],payload:{mimeType:"multipart/mixed",parts:[
     {mimeType:"text/plain",headers:[{name:"Content-Type",value:"text/plain; charset=windows-1252"}],body:{data:btoa("caf\xe9 \x80")}},
     {mimeType:"multipart/alternative",parts:[{mimeType:"text/plain",body:{data:""}},{mimeType:"multipart/related",parts:[
       {mimeType:"text/html",body:{data:Buffer.from("<p>日本語</p>").toString("base64url")}},
@@ -355,7 +357,7 @@ it("preserves successful hydration while retrying another message's transient fa
   const f=fixture();await f.request("/configure","POST",config);
   f.history(()=>Response.json({historyId:"12",history:[{messagesAdded:[{message:{id:"good"}},{message:{id:"retry"}}]}]}));
   let first=true;
-  f.message(url=>{const id=url.pathname.split("/").pop();return id==="retry" && first ? new Response(null,{status:503}) : Response.json({id,payload:{mimeType:"text/plain",body:{data:btoa(first?"original":"later")}}});});
+  f.message(url=>{const id=url.pathname.split("/").pop();return id==="retry" && first ? new Response(null,{status:503}) : Response.json({id,labelIds:["INBOX"],payload:{mimeType:"text/plain",body:{data:btoa(first?"original":"later")}}});});
   await f.request("/notify","POST",notify);await f.alarmRun();expect(f.wakes).toHaveLength(0);
   first=false;f.restart();await f.alarmRun();
   expect(JSON.parse(f.wakes[0]!.input as string).messages.map((m:any)=>m.body)).toEqual(["original","later"]);
@@ -363,7 +365,7 @@ it("preserves successful hydration while retrying another message's transient fa
 });
 it("uses a declared related root and recovers a malformed plain alternative", async () => {
   const f=fixture();await f.request("/configure","POST",config);
-  f.message(()=>Response.json({id:"m1",payload:{mimeType:"multipart/alternative",parts:[
+  f.message(()=>Response.json({id:"m1",labelIds:["INBOX"],payload:{mimeType:"multipart/alternative",parts:[
     {mimeType:"text/plain",body:{data:"%%%"}},
     {mimeType:"multipart/related",headers:[{name:"Content-Type",value:'multipart/related; start="<root>"'}],parts:[
       {mimeType:"text/plain",headers:[{name:"Content-ID",value:"<resource>"}],body:{data:btoa("resource")}},
@@ -375,10 +377,63 @@ it("uses a declared related root and recovers a malformed plain alternative", as
 });
 it("preserves safe HTML anchor destinations without loading remote resources", async () => {
   const f=fixture();await f.request("/configure","POST",config);
-  f.message(()=>Response.json({id:"m1",payload:{mimeType:"text/html",body:{data:btoa('<p><a href="https://example.test/doc?a=1&amp;b=2">Review document</a> <a href="mailto:team@example.test">Email</a><a href="javascript:alert(1)">unsafe</a><img src="https://example.test/tracker"></p>')}}}));
+  f.message(()=>Response.json({id:"m1",labelIds:["INBOX"],payload:{mimeType:"text/html",body:{data:btoa('<p><a href="https://example.test/doc?a=1&amp;b=2">Review document</a> <a href="mailto:team@example.test">Email</a><a href="javascript:alert(1)">unsafe</a><img src="https://example.test/tracker"></p>')}}}));
   await f.request("/notify","POST",notify);await f.alarmRun();
   const body=JSON.parse(f.wakes[0]!.input as string).messages[0].body;
   expect(body).toContain("Review document (https://example.test/doc?a=1&b=2)");
   expect(body).toContain("Email (mailto:team@example.test)");expect(body).not.toContain("javascript:");expect(body).not.toContain("tracker");
   expect(f.calls.every(r=>new URL(r.url).hostname==="gmail.googleapis.com")).toBe(true);
+});
+
+it.each([
+  [["INBOX", "SPAM"], "spam"], [["INBOX", "TRASH"], "trash"],
+  [["INBOX", "DRAFT"], "draft"], [["SENT"], "outside_inbox"],
+  [["Label_31", "UNREAD"], "outside_inbox"], [[], "outside_inbox"],
+])("gates a history-to-hydration label race %j and durably advances without excluded content", async (labelIds, exclusion_reason) => {
+  const f = fixture(); await f.request("/configure", "POST", config);
+  f.message(() => Response.json({ id: "m1", labelIds, payload: { mimeType: "text/plain", body: { attachmentId: "must-not-fetch" }, headers: [{ name: "Subject", value: "excluded private subject" }] } }));
+  f.wakeStatus(200); await f.request("/notify", "POST", notify); await f.alarmRun();
+  const input = JSON.parse(f.wakes[0]!.input as string);
+  expect(input.messageIds).toEqual(["m1"]); // Audit ID remains; no classifier content is admitted.
+  expect(input.messages).toEqual([{ id: "m1", status: "excluded", label_ids: labelIds, exclusion_reason }]);
+  expect(f.calls.filter(r => r.url.includes("/attachments/"))).toHaveLength(0);
+  f.restart(); f.wakeStatus(202); await f.alarmRun();
+  expect(f.wakes[1]).toEqual(f.wakes[0]);
+  expect(await (await f.request("/status")).json()).toMatchObject({ cursor: "12", pending: false });
+});
+
+it("rejects all excluded/invalid history label snapshots before hydration, preserving minimal history compatibility", async () => {
+  const f = fixture(); await f.request("/configure", "POST", config);
+  f.history(() => Response.json({ historyId: "12", history: [{ messagesAdded: [
+    ...[["INBOX", "SPAM"], ["INBOX", "TRASH"], ["INBOX", "DRAFT"], ["SENT"], [], null, ["INBOX", 5], Array(65).fill("INBOX")].map((labelIds, i) => ({ message: { id: `excluded${i}`, labelIds } })),
+    { message: { id: "minimal", threadId: "thread" } },
+  ] }] }));
+  await f.request("/notify", "POST", notify); await f.alarmRun();
+  expect(JSON.parse(f.wakes[0]!.input as string).messageIds).toEqual(["minimal"]);
+  expect(f.calls.filter(r => r.url.includes("/messages/"))).toHaveLength(1);
+});
+
+it("fails closed when full hydration lacks current labels, not falling back to old history INBOX", async () => {
+  const f = fixture(); await f.request("/configure", "POST", config);
+  f.message(() => Response.json({ id: "m1", payload: { mimeType: "text/plain", body: { data: btoa("must not classify") } } }));
+  await f.request("/notify", "POST", notify); await f.alarmRun();
+  expect(JSON.parse(f.wakes[0]!.input as string).messages).toEqual([{ id: "m1", status: "error" }]);
+  expect(await (await f.request("/status")).json()).toMatchObject({ cursor: "12", pending: false });
+});
+
+
+it.each([false, true])("preserves a legacy durable outbox without relabeling or changing its stable input (frozen=%s)", async frozen => {
+  const f = fixture(); await f.request("/configure", "POST", config);
+  const event = { type: "gmail.history", startHistoryId: "10", historyId: "12", messageIds: ["legacy"], truncated: false };
+  const legacy = { connectionId: config.connectionId, email: config.email, ...event };
+  const input = JSON.stringify(frozen ? { ...legacy, messages: [{ id: "legacy", status: "ok", body: "Previously admitted body", headers: {} }] } : legacy);
+  const box = await f.storage.get("mailbox") as any;
+  box.page = { type: "gmail.history", historyId: "12", chunks: 1, index: 0, commitCursor: "12" };
+  box.pending = { eventId: "gmail-legacy", event, ...(frozen ? { input } : {}) };
+  await f.storage.put("mailbox", box);
+  f.message(() => { throw new Error("legacy admission must not be rehydrated"); });
+  f.restart(); await f.alarmRun();
+  expect(f.wakes[0]).toMatchObject({ eventId: "gmail-legacy", input });
+  expect(f.calls.filter(r => r.url.includes("/messages/"))).toHaveLength(0);
+  expect(await (await f.request("/status")).json()).toMatchObject({ cursor: "12", pending: false });
 });

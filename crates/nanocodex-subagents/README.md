@@ -20,6 +20,15 @@ parent runtime drops the task tree, child history, messages, and results. A fres
 registry starts empty. Historical agent IDs do not identify recovered children;
 use `list_agents` to discover the current live registry before addressing agents.
 
+`send_agent_message` keeps message intent (`purpose`) separate from thread
+correlation (`in_reply_to`). Referencing a message continues its existing two-party
+thread: coordination, findings, questions, and authorized delegation may flow in
+either direction, including follow-ups to the sender's own messages. An explicit
+`purpose: "reply"` requires `in_reply_to` and must reverse the referenced message's
+direction. Unknown references and references from a different participant pair
+are rejected. Thread correlation never grants delegation authority or changes the
+message's purpose.
+
 `spawn_agent` accepts `model` (`astra`, `sol`, `luna`, `glm-5.3`, `kimi`,
 `mimo`) and `thinking` (`none` through `max`) overrides. Set either to `null`
 to inherit the invoking agent's current settings; an override configures

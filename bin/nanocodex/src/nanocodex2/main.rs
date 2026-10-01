@@ -10,6 +10,8 @@
 mod computer;
 #[allow(dead_code)]
 mod config;
+mod continue_auth;
+mod continue_sessions;
 mod control;
 mod device_hand;
 mod hand_observability;
@@ -27,7 +29,7 @@ mod launcher;
 mod linux_hand_install;
 mod managed2;
 mod native_hand;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod native_secure_input;
 mod observation_providers;
 mod reload;
@@ -169,6 +171,14 @@ enum Command {
     Settings(control::Settings),
     /// Manage durable scheduled prompts.
     Cron(control::Cron),
+    /// Continue running and recently used sessions in named tmux windows.
+    Continue(continue_sessions::Options),
+    #[command(name = "__continue-attach", hide = true)]
+    ContinueAttach(continue_auth::Args),
+    /// Mark a session done (hide it from continue; retain history and running work).
+    Done(AgentId),
+    /// Restore a session to continue.
+    Undone(AgentId),
     /// List account-owned managed agents as JSON.
     List,
     /// Read owner-only rolling 24-hour Hand tool statistics as JSON.
@@ -665,6 +675,7 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
                 "standalone host must initialize before runtime startup".into(),
             ));
         }
+        Some(Command::ContinueAttach(command)) => return continue_auth::attach(command).await,
         Some(Command::Computer(command)) => {
             return command.run().await.map_err(ManagedError::Configuration);
         }
@@ -754,6 +765,7 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::Attach(command)) => {
             attach_tui(&client, command.agent.map(|agent| agent.agent_id)).await
         }
+        Some(Command::ContinueAttach(_)) => unreachable!("handled before managed client setup"),
         Some(Command::Computer(_)) => unreachable!("handled before managed client setup"),
         Some(Command::DeviceHand(_)) => unreachable!("handled before managed client setup"),
         Some(Command::Hand(_)) => unreachable!("handled before managed client setup"),
@@ -778,6 +790,13 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         }
         Some(Command::Settings(command)) => command.run(&client).await,
         Some(Command::Cron(command)) => command.run(&client).await,
+        Some(Command::Continue(command)) => continue_sessions::run(&client, command).await,
+        Some(Command::Done(command)) => {
+            write_json(&client.set_done(&command.agent_id, true).await?)
+        }
+        Some(Command::Undone(command)) => {
+            write_json(&client.set_done(&command.agent_id, false).await?)
+        }
         Some(Command::List) => write_json(&client.list().await?),
         Some(Command::HandStats) => write_json(&client.hosted_tool_stats().await?),
         Some(Command::State(command)) => write_json(&client.state(&command.agent_id).await?),

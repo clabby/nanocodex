@@ -272,7 +272,7 @@ pub(super) async fn run_observed(
     let mut tools = Tools::builder()
         .without_defaults()
         .add(WorkspaceTools::new(state.machine.workspace()));
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if super::native_secure_input::NativeSecureInput::installed() {
         tools = tools.add(super::native_secure_input::NativeSecureInput);
     }

@@ -146,6 +146,10 @@ pub(crate) enum RootEvent {
     ShowAgentId(String),
     VaultReview(crate::tui::vault::Review),
     VaultReceipt(String),
+    SecureInputReceipt {
+        request_id: String,
+        status: crate::tui::secure_input::Status,
+    },
     Terminal(Event),
     PasteImage(String),
     #[cfg(test)]
@@ -299,12 +303,14 @@ pub(crate) enum SessionListKind {
 pub(crate) enum RootEffect {
     AutoRoute,
     Reload,
+    SetDone(bool),
     Bug(String),
     Screen,
     Zoom,
     Voice(crate::voice::Command),
     ShowAgentId,
     Vault(crate::tui::vault::Command),
+    SecureInput(Option<nanocodex_managed::NativeSecureInputRequest>),
     Share(crate::tui::share::Command),
     ApproveVault(crate::tui::vault::Review),
     Submit(Submission),
@@ -610,7 +616,17 @@ impl RootNode {
                         render: RenderRequest::None,
                     };
                 }
-                if (draft.starts_with('/') && draft != "/id") || draft.starts_with('!') {
+                // Route private-command intent to the explicit Managed2 denial,
+                // never to a model prompt or a password-capable legacy panel.
+                let private_command =
+                    draft
+                        .strip_prefix("/secure-input")
+                        .is_some_and(|remaining| {
+                            remaining.is_empty() || remaining.starts_with(char::is_whitespace)
+                        });
+                if (draft.starts_with('/') && draft != "/id" && !private_command)
+                    || draft.starts_with('!')
+                {
                     self.notification = Some(Notification::plain(
                         "Managed2 accepts text, /id, and /exit only.".to_owned(),
                         Color::Yellow,
@@ -1336,7 +1352,15 @@ impl RootNode {
                     && !self.composer.component().has_images()
                     && matches!(
                         self.composer.component().draft().split_whitespace().next(),
-                        Some("/share" | "/voice" | "/screen" | "/zoom" | "/reload")
+                        Some(
+                            "/share"
+                                | "/voice"
+                                | "/screen"
+                                | "/zoom"
+                                | "/reload"
+                                | "/done"
+                                | "/undone"
+                        )
                     )
                 {
                     let mut update = self
@@ -3096,6 +3120,19 @@ impl RootNode {
                     Vec::new()
                 }
             },
+            Some(ComposerEffect::SecureInput(command)) => {
+                let request = match &command {
+                    crate::tui::secure_input::Command::Select { agent, request } => {
+                        nanocodex_managed::NativeSecureInputRequest::selector(
+                            request.clone(),
+                            agent.clone(),
+                        )
+                        .ok()
+                    }
+                    _ => self.transcript.component().secure_input_request(&command),
+                };
+                vec![RootEffect::SecureInput(request)]
+            }
             Some(ComposerEffect::Vault(command)) => {
                 let command = if command == crate::tui::vault::Command::Latest {
                     self.transcript
@@ -3297,6 +3334,10 @@ impl RootNode {
                 )));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
+            SettingsCommand::SetDone(done) => ComponentUpdate {
+                effects: vec![RootEffect::SetDone(done)],
+                render: RenderRequest::Immediate,
+            },
             SettingsCommand::Reload => ComponentUpdate {
                 effects: vec![RootEffect::Reload],
                 render: RenderRequest::Immediate,
@@ -4301,6 +4342,14 @@ impl Component for RootNode {
             RootEvent::HistoryReplayed { projection } => {
                 self.replay_history(*projection);
                 ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::SecureInputReceipt { request_id, status } => {
+                // Only validated UUID and a closed fixed status enum enter the
+                // model. No remote error text, command output or password.
+                let receipt = serde_json::json!({"type":"secure_input_receipt", "request_id":request_id, "status":status.wire()}).to_string();
+                self.thread = ThreadState::Started;
+                self.queue.component_mut().push(Submission::text(receipt));
+                self.submit_next_queued()
             }
             RootEvent::VaultReceipt(receipt) => {
                 self.thread = ThreadState::Started;

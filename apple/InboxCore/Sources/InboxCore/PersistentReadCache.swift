@@ -27,7 +27,7 @@ final class PersistentReadCache: @unchecked Sendable {
     }
     static func allows(_ path: String) -> Bool {
         let endpoint = String(path.split(separator: "?", maxSplits: 1).first ?? "")
-        if ["/v1/agents", "/v1/todo", "/v1/crm", "/v1/connectors", "/v1/connectors/catalog", "/v1/connectors/mcp-connections"].contains(endpoint) { return true }
+        if ["/v1/agents", "/v1/todo", "/v1/todo/schedule", "/v1/crm", "/v1/connectors", "/v1/connectors/catalog", "/v1/connectors/mcp-connections"].contains(endpoint) { return true }
         if endpoint.hasPrefix("/v1/crm/") { return true }
         let parts = endpoint.split(separator: "/")
         return parts.count >= 4 && parts[0] == "v1" && parts[1] == "agents"
@@ -80,6 +80,41 @@ final class PersistentReadCache: @unchecked Sendable {
             where prefixes.contains(where: { file.lastPathComponent.hasPrefix($0) }) {
             try? FileManager.default.removeItem(at: file)
         }
+    }
+    /// Preserve transcript/history while updating only acknowledged manual organization.
+    @discardableResult
+    func applySessionDoneMutation(path: String, method: String, response: JSON, ticket: UInt64, expectedDone: Bool? = nil) -> Bool {
+        let parts = path.split(separator: "/")
+        guard method == "PUT", parts.count == 4, parts[0] == "v1", parts[1] == "agents", parts[3] == "done" else { return false }
+        guard case .bool(let done) = response["done"], expectedDone == nil || done == expectedDone else { return true }
+        switch response["presentation_revision"] {
+        case .null: break // Compatibility with services without revision metadata.
+        case .number(let revision) where revision.isFinite && revision >= 0 && revision.rounded(.down) == revision: break
+        default: return true
+        }
+        if done {
+            guard case .number(let at) = response["done_at"], at.isFinite, at >= 0 else { return true }
+        } else { guard response["done_at"] == .null else { return true } }
+        lock.lock(); defer { lock.unlock() }
+        guard ticket >= lastClearGeneration else { return true }
+        generation &+= 1 // Older roster requests must not restore pre-write state.
+        guard let data = try? Data(contentsOf: file("/v1/agents")),
+              let value = try? JSONDecoder().decode(JSON.self, from: data),
+              case .object(var roster) = value, case .object(var summaries) = value["summaries"],
+              case .object(var summary) = summaries[String(parts[2])] else { return true }
+        var presentation: [String: JSON] = [:]
+        if case .object(let saved) = summary["presentation"] { presentation = saved }
+        if case .number(let revision) = response["presentation_revision"], revision.isFinite, revision >= 0 {
+            guard revision >= (presentation["revision"]?.number ?? 0) else { return true }
+            presentation["revision"] = .number(revision)
+        }
+        presentation["done"] = .bool(done); presentation["doneAt"] = response["done_at"]
+        summary["presentation"] = .object(presentation); summaries[String(parts[2])] = .object(summary)
+        roster["summaries"] = .object(summaries)
+        if let revised = try? JSONEncoder().encode(JSON.object(roster)) {
+            try? revised.write(to: file("/v1/agents"), options: .atomic)
+        }
+        return true
     }
     /// Apply acknowledged Todo writes to the saved projection before returning
     /// to the UI. The lock also excludes stale GET admission during the update.

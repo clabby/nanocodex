@@ -5,8 +5,8 @@ import UserNotifications
 import CryptoKit
 import os
 
-/// Native, independently dismissible outcome notifications. Running progress
-/// stays in the app; each terminal revision can notify only once.
+/// Quiet response receipts; only unconfirmed message delivery can interrupt.
+/// Running progress and generic task failures stay in the conversation.
 @MainActor
 final class AgentNotificationController: NSObject, UNUserNotificationCenterDelegate {
     private struct Desired: Equatable {
@@ -16,6 +16,7 @@ final class AgentNotificationController: NSObject, UNUserNotificationCenterDeleg
         var foreground: Bool
     }
     private static let category = "nanocodex.agent-thread"
+    private static let policyVersion = 2
     private let center = UNUserNotificationCenter.current()
     private let open: (URL) -> Void
     private var desired: Desired?
@@ -62,6 +63,16 @@ final class AgentNotificationController: NSObject, UNUserNotificationCenterDeleg
         for activity in Activity<AgentActivityAttributes>.activities {
             await activity.end(nil, dismissalPolicy: .immediate)
         }
+        // Run even before account restoration, so the previous noisy policy
+        // does not leave failed/progress cards on the Lock Screen after update.
+        let delivered = await center.deliveredNotifications()
+        let pending = await center.pendingNotificationRequests()
+        let obsolete = (delivered.map(\.request) + pending).filter {
+            $0.content.categoryIdentifier == Self.category
+                && $0.content.userInfo["policy"] as? Int != Self.policyVersion
+        }.map(\.identifier)
+        center.removeDeliveredNotifications(withIdentifiers: obsolete)
+        center.removePendingNotificationRequests(withIdentifiers: obsolete)
     }
 
     private func apply(_ next: Desired, version: Int) async {
@@ -70,15 +81,21 @@ final class AgentNotificationController: NSObject, UNUserNotificationCenterDeleg
         let pending = await center.pendingNotificationRequests()
         guard version == revision, !Task.isCancelled else { return }
         let own = delivered.map(\.request).filter { $0.content.categoryIdentifier == Self.category }
+        let silent = Set(next.threads.filter { $0.kind == .status && !$0.isRunning }.map(\.id))
+        let resolvedDelivery = Set(next.threads.filter {
+            $0.kind != .delivery && !next.unchecked.contains($0.id)
+        }.map(\.id))
         let old = (own + pending.filter { $0.content.categoryIdentifier == Self.category }).filter {
             next.account.isEmpty || $0.content.userInfo["account"] as? String != next.account
-                || ($0.content.userInfo["revision"] as? String)?.hasPrefix("running:") == true
+                || ($0.content.userInfo["agent"] as? String).map { silent.contains($0) } == true
+                || (($0.content.userInfo["revision"] as? String)?.hasPrefix("delivery:") == true
+                    && ($0.content.userInfo["agent"] as? String).map { resolvedDelivery.contains($0) } == true)
         }.map(\.identifier)
         center.removeDeliveredNotifications(withIdentifiers: old)
         center.removePendingNotificationRequests(withIdentifiers: old)
         if account != next.account { account = next.account; ledger = Self.load(account) }
         guard !next.account.isEmpty else { return }
-        let removed = ledger.reconcile(next.threads, retaining: next.unchecked)
+        let removed = ledger.reconcile(next.threads, retaining: next.unchecked, foreground: next.foreground)
             .map { Self.identifier(account: next.account, agentID: $0) }
         center.removeDeliveredNotifications(withIdentifiers: removed)
         center.removePendingNotificationRequests(withIdentifiers: removed)
@@ -103,9 +120,9 @@ final class AgentNotificationController: NSObject, UNUserNotificationCenterDeleg
             content.title = thread.title; content.subtitle = thread.subtitle; content.body = thread.body
             content.categoryIdentifier = Self.category
             content.threadIdentifier = Self.identifier(account: account, agentID: thread.id)
-            content.userInfo = ["account": account, "agent": thread.id, "revision": thread.revision]
+            content.userInfo = ["account": account, "agent": thread.id, "revision": thread.revision, "policy": Self.policyVersion]
             content.sound = nil
-            content.interruptionLevel = .active
+            content.interruptionLevel = thread.kind == .delivery ? .active : .passive
             let request = UNNotificationRequest(identifier: content.threadIdentifier, content: content, trigger: nil)
             do {
                 try await center.add(request)
@@ -116,21 +133,21 @@ final class AgentNotificationController: NSObject, UNUserNotificationCenterDeleg
 
     private static func identifier(account: String, agentID: String) -> String {
         let data = (try? JSONEncoder().encode([account, agentID])) ?? Data()
-        return category + "." + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return category + ".v2." + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
     private static func load(_ account: String) -> AgentNotificationLedger {
-        guard !account.isEmpty, let data = UserDefaults.standard.data(forKey: "inbox.notifications." + account),
+        guard !account.isEmpty, let data = UserDefaults.standard.data(forKey: "inbox.notifications.v2." + account),
               let ledger = try? JSONDecoder().decode(AgentNotificationLedger.self, from: data) else { return .init() }
         return ledger
     }
     private func persist() {
         guard !account.isEmpty, let data = try? JSONEncoder().encode(ledger) else { return }
-        UserDefaults.standard.set(data, forKey: "inbox.notifications." + account)
+        UserDefaults.standard.set(data, forKey: "inbox.notifications.v2." + account)
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                             withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.list])
+        completionHandler([])
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
@@ -147,7 +164,7 @@ final class AgentNotificationController: NSObject, UNUserNotificationCenterDeleg
                 self.ledger.dismiss(id: agent, revision: revision); self.persist()
             } else {
                 var ledger = Self.load(account); ledger.dismiss(id: agent, revision: revision)
-                if let data = try? JSONEncoder().encode(ledger) { UserDefaults.standard.set(data, forKey: "inbox.notifications." + account) }
+                if let data = try? JSONEncoder().encode(ledger) { UserDefaults.standard.set(data, forKey: "inbox.notifications.v2." + account) }
             }
             if action == UNNotificationDefaultActionIdentifier { self.open(AgentActivityLink.url(account: account, agentID: agent)) }
         }
