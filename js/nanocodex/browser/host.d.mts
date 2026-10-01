@@ -1,5 +1,6 @@
 import type {
   CodeEvaluator,
+  CodeEffectJournal,
   McpServers,
   MppSession,
   SubagentToolContext,
@@ -74,6 +75,8 @@ export function createBrowserHost(options?: {
   /** Remote MCP servers exposed through native and Code Mode tool_search plus deferred tools. */
   mcp?: McpServers;
   codeEvaluator?: CodeEvaluator;
+  /** @internal Trusted durable effect receipts, not available inside guest code. */
+  codeEffectJournal?: CodeEffectJournal;
   toolMode?: "code" | "direct";
   /** @internal Live host lifecycle for ephemeral Rust-owned subagents. */
   subagentRouting?: Pick<import('../runtime/subagent-routing.mjs').SubagentRouting, 'resolve' | 'bind'>;

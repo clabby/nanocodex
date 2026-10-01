@@ -1,3 +1,4 @@
+import { createCodeEffectIdentity } from "../runtime/code-effect-identity.mjs";
 import { createBeforeCompaction } from "../runtime/before-compaction.mjs";
 import { createResponsesHttp, responsesHttpHeaders } from "../runtime/responses-http.mjs";
 import { Console } from "node:console";
@@ -51,10 +52,13 @@ export function createNodeHost(options = {}) {
       body, signal, redirect: "error" });
   });
   const connections = new Map();
+  const effectIdentity = createCodeEffectIdentity(options.codeEffectJournal);
   const code = createCodeRuntime(options.tools, {
     require: createRequire(resolve(options.workspace ?? process.cwd(), ".nanocodex-code-mode.cjs")),
     console: new Console({ stdout: process.stderr, stderr: process.stderr }),
     evaluate: options.codeEvaluator,
+    effectJournal: options.codeEffectJournal,
+    effectIdentity: options.codeEffectJournal ? effectIdentity.resolve : undefined,
   });
   const filesystem = options.filesystem
     ? import("../runtime/workspace.mjs")
@@ -341,9 +345,9 @@ export function createNodeHost(options = {}) {
     cancelCode: code.cancel,
     toolMode: () => toolMode,
     toolDefinitions: code.toolDefinitions,
-    releaseSession: code.releaseSession,
-    emitEvent: onEvent,
-    reset: code.reset,
+    releaseSession: (sessionId) => { effectIdentity.release(sessionId); return code.releaseSession(sessionId); },
+    emitEvent: (event, ...args) => { effectIdentity.observe(event); return onEvent(event, ...args); },
+    reset: () => { effectIdentity.reset(); return code.reset(); },
     dispose,
   });
 }

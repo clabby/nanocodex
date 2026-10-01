@@ -1,3 +1,4 @@
+import { ManagedRecoverySafety, MANAGED_RECOVERY_UNKNOWN, createManagedCodeEffectJournal } from "./managed-recovery-safety";
 import { nativeAppValidator } from "./prompt-apps-native";
 import { gmailDecisionReceipts } from "./gmail-firehose-receipts";
 import { parsePrivateSecureInput } from "./browser-vault";
@@ -3658,6 +3659,8 @@ export class DurableAgentSession extends DurableComputerObject {
   #deletionTask?: Promise<void>;
   #deletionGeneration = 0;
   #runtimeOwnershipGeneration = 0;
+  readonly #recoverySafety: ManagedRecoverySafety;
+  readonly #codeEffectJournal: ReturnType<typeof createManagedCodeEffectJournal>;
   readonly #commandReceipts: CommandReceipts;
   readonly #shareLinks: ThreadShareLinks;
   readonly #constructorEnteredAtMs: number;
@@ -3677,6 +3680,7 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#constructorEnteredAtMs = enteredAt;
     this.#constructorBaseMs = roundMilliseconds(performance.now() - constructorStartedAt);
     ctx = this.ctx;
+    this.#recoverySafety = new ManagedRecoverySafety(ctx.storage);
     this.#commandReceipts = new CommandReceipts(ctx.storage);
     this.#shareLinks = new ThreadShareLinks(ctx.storage);
     initializeTurnInputs(ctx.storage, "managed_history_projection_chunks");
@@ -3867,6 +3871,7 @@ export class DurableAgentSession extends DurableComputerObject {
       this.ctx.storage.sql.exec("ALTER TABLE history_projection_outbox ADD COLUMN source_cursor TEXT NOT NULL DEFAULT '0'");
     }
     this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage, event => this.#operations.record(event, this.#sessionId()));
+    this.#codeEffectJournal = createManagedCodeEffectJournal(this.ctx.storage);
     this.#eventArchive = new ManagedEventArchive<StreamMessage>(
       this.ctx.storage,
       this.env.NANOCODEX_HISTORY,
@@ -8028,6 +8033,18 @@ export class DurableAgentSession extends DurableComputerObject {
       return latest;
     }
     row = latest;
+    // Arm before asynchronous construction/admission. Abrupt loss skips catch.
+    // Live admissions coalesce above; only a fresh owner consumes this lease.
+    if (row.state !== "cancelling" && this.#recoverySafety.begin(row.id)) {
+      if (row.may_have_inner_operation === 0) {
+        return this.#commitManagedMessage(row.id, { type: "turn_failed", id: row.id,
+          error: MANAGED_RECOVERY_UNKNOWN });
+      }
+      // Cancel-only admission settles the exact Rust operation. Failing only
+      // its JS projection would strand it and resurrect it on operation_pending.
+      row = this.#markCancelling(row.id);
+    }
+    await this.ctx.storage.sync();
     if (row.state !== "cancelling" && this.#goalRuntime.retainedCommand(row.id)) return this.#completeGoalCommand(row);
     let turn: Turn | undefined;
     const input = JSON.parse(row.input_json) as PromptInput;
@@ -8508,7 +8525,7 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#assertDeletionGeneration(generation);
     CloudflareAgent.destroy(this);
     this.ctx.storage.transactionSync(() => {
-      for (const table of ["managed_configuration", "managed_environment_setup", "managed_webhook", "managed_webhook_deliveries", "managed_turn_usage", "managed_model_usage", "managed_artifacts", "managed_artifact_publications", "managed_output_checkpoints", "managed_output_checkpoint_chunks", "managed_turn_file_owners", "managed_connect_inputs"]) this.ctx.storage.sql.exec(`DELETE FROM ${table}`);
+      for (const table of ["managed_recovery_safety", "managed_recovery_progress", "managed_recovery_call_indices", "managed_code_effect_legacy_parents", "managed_code_effect_legacy_sessions", "managed_code_effect_migration", "managed_code_effect_runtime", "managed_code_effects", "managed_code_effect_receipt_chunks", "managed_configuration", "managed_environment_setup", "managed_webhook", "managed_webhook_deliveries", "managed_turn_usage", "managed_model_usage", "managed_artifacts", "managed_artifact_publications", "managed_output_checkpoints", "managed_output_checkpoint_chunks", "managed_turn_file_owners", "managed_connect_inputs"]) this.ctx.storage.sql.exec(`DELETE FROM ${table}`);
       this.ctx.storage.sql.exec("DROP TABLE IF EXISTS managed_fork_seed");
       this.ctx.storage.sql.exec("DELETE FROM managed_turn_dispatch_chunks");
       this.ctx.storage.sql.exec("DELETE FROM managed_turn_input_chunks");
@@ -9819,6 +9836,7 @@ export class DurableAgentSession extends DurableComputerObject {
       };
       Object.defineProperty(agentOptions, internalRuntime, { value: {
         ...hostedRuntime,
+        codeEffectJournal: this.#codeEffectJournal,
         // Bounded connection summaries are always on; per-statement SQL auditing stays opt-in.
         onSocketTiming: (timing: unknown) => performanceSocketTiming(session.session_id, timing),
         onRequestShape: (shape: unknown) => performanceRequestShape(session.session_id, shape),
@@ -10969,6 +10987,11 @@ export class DurableAgentSession extends DurableComputerObject {
     let reopenAgent = false;
     try {
       let materialized = await materializeTurnResolution(id, turn);
+      if (materialized.kind === "terminal" && materialized.terminal.type === "turn_cancelled"
+        && this.#recoverySafety.stopped(id)) {
+        materialized = { kind: "terminal", reopenAgent: false,
+          terminal: { type: "turn_failed", id, error: MANAGED_RECOVERY_UNKNOWN } };
+      }
       if (this.#deleting) return;
       if (this.#reopenInterruptedTurnIds.has(id)
         && materialized.kind === "terminal"
@@ -11060,7 +11083,7 @@ export class DurableAgentSession extends DurableComputerObject {
       const row = this.#managedTurn(id);
       if (!row || !isTerminalState(row.state) || row.may_have_inner_operation !== 1
         || this.#managedDispatchInput(row) === undefined) return;
-      const cancelling = row.state === "cancelled" || isRetiredProjectCompletion(this.ctx.storage, id);
+      const cancelling = this.#recoverySafety.stopped(id) || row.state === "cancelled" || isRetiredProjectCompletion(this.ctx.storage, id);
       const message: ManagedTurnTransition = cancelling
         ? { type: "turn_cancelling", id }
         : { type: "turn_retryable", id, error: "recovering an unsettled durable operation" };
@@ -11089,8 +11112,14 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   #commitManagedMessage(id: string, requested: ManagedTurnTransition, terminalEvent?: AgentEvent): ManagedTurnRow {
+    // Control admission can settle before the turn completion observer. Make
+    // the exhausted/unknown outcome authoritative on both paths atomically.
+    if (requested.type === "turn_cancelled" && this.#recoverySafety.stopped(id)) {
+      requested = { type: "turn_failed", id, error: MANAGED_RECOVERY_UNKNOWN };
+    }
     let nested: DurableEvent<StreamMessage> | undefined;
     const { committed, event } = this.ctx.storage.transactionSync(() => {
+      this.#recoverySafety.settle(id);
       // Control commands have no model run to emit the backend terminal event.
       // Retain it atomically before the outer receipt, including on recovery.
       if (terminalEvent && !isTerminalState(this.#managedTurn(id)!.state)) {
@@ -11346,9 +11375,10 @@ export class DurableAgentSession extends DurableComputerObject {
   ): void {
     if (this.#deleting || this.#streamError) return;
     try {
-      const event = this.ctx.storage.transactionSync(() =>
-        this.#eventLog.append(message, turnId),
-      );
+      const event = this.ctx.storage.transactionSync(() => {
+        if (turnId && message.type === "event") this.#recoverySafety.progress(turnId, message.event);
+        return this.#eventLog.append(message, turnId);
+      });
       this.#publish(event);
       if (turnId && message.type === "event" && ["model.call.completed", "model.compaction.completed"].includes(message.event.type)) {
         const goal = this.#goalRuntime.flush(turnId);

@@ -454,3 +454,35 @@ test("global host bridge forwards turn identity to direct and Code Mode hosts", 
     runtime.reset();
   }
 });
+
+// A wrong/ambiguous host ABI turn cannot be emitted by a conforming Rust owner.
+// Cover that fail-closed boundary narrowly through the actual SDK host and tool
+// router, not private identity helper calls. Events match the real owned trace.
+test("owned host ABI keeps overlapping projected turns separate and rejects wrong or ambiguous turn lookup", async () => {
+  const { createNodeHost } = await import("../node/host.mjs");
+  const contexts = [];
+  let effects = 0;
+  const host = createNodeHost({ toolMode: "direct", tools: { probe: {
+    async handler() { effects += 1; return { effect: effects }; },
+  } }, codeEffectJournal: {
+    async begin(context) { contexts.push(context); return { status: "execute" }; },
+    async complete() {},
+  } });
+  const sessionId = "synthetic-overlap";
+  function event(type, payload) { host.emitEvent(JSON.stringify({ type, request_id: sessionId, payload })); }
+  function accepted(turn, operation) { event("input.accepted", { session_id: sessionId, turn_id: turn, kind: "prompt", request_id: operation }); }
+  function call(turn, callId) { event("tool.call", { turn_id: turn, call_id: callId, model_call_index: 1 }); }
+  try {
+    accepted("projected-original", "original"); call("projected-original", "call_0");
+    accepted("projected-queued", "queued"); call("projected-queued", "call_0");
+    assert.equal(JSON.parse(await host.executeTool("probe", "{}", sessionId, "call_0", "fixture", "projected-original")).success, true);
+    assert.equal(JSON.parse(await host.executeTool("probe", "{}", sessionId, "call_0", "fixture", "projected-queued")).success, true);
+    assert.deepEqual(contexts.map(context => context.operationId), ["original", "queued"]);
+    await assert.rejects(host.executeTool("probe", "{}", sessionId, "call_0", "fixture", "wrong-turn"), { code: "host_interrupted" });
+    accepted("projected-a", "a"); call("projected-a", "ambiguous");
+    accepted("projected-b", "b"); call("projected-b", "ambiguous");
+    await assert.rejects(host.executeTool("probe", "{}", sessionId, "ambiguous", "fixture", sessionId + ":9"), { code: "host_interrupted" });
+    assert.equal(contexts.length, 2, "wrong or ambiguous lookup never reaches journal admission");
+    assert.equal(effects, 2, "wrong or ambiguous lookup never dispatches another effect");
+  } finally { await host.dispose(); }
+});
