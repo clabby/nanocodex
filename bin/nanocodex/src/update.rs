@@ -938,7 +938,8 @@ async fn install_source(
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| store.root().join("source-build/target"));
-    let build = source::build(selection, &target).await?;
+    let checkout = store.root().join("source-build/checkout");
+    let build = source::build(selection, &checkout, &target).await?;
     let key = format!("{}-{}", selection.key_prefix(), build.sha);
     store.install_bundle(&key, &build.cli, &build.hand, None, None)?;
     if !activate_coordinated(store, &key, false, restart_hand).await? {

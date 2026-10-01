@@ -13,17 +13,19 @@ mkdirSync(output, { recursive: true });
 const transcript = [];
 
 function run(program, args, options = {}) {
+  const started = performance.now();
   const result = spawnSync(program, args, {
     cwd: options.cwd ?? fixture,
     env: { ...process.env, ...options.env },
     encoding: 'utf8',
     timeout: 300_000,
   });
-  transcript.push(`$ ${program} ${args.join(' ')}\nexit: ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}\n`);
+  const elapsedMs = Math.round(performance.now() - started);
+  transcript.push(`$ ${program} ${args.join(' ')}\nexit: ${result.status}\nelapsed: ${elapsedMs} ms\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}\n`);
   if (options.success !== false) {
     assert.equal(result.status, 0, `${program} ${args.join(' ')}: ${result.stderr}`);
   }
-  return result;
+  return { ...result, elapsedMs };
 }
 
 try {
@@ -32,6 +34,7 @@ try {
   const store = join(fixture, 'install');
   const home = join(fixture, 'home');
   const tools = join(fixture, 'tools');
+  const buildLog = join(fixture, 'builds.log');
   mkdirSync(source);
   mkdirSync(store);
   mkdirSync(home);
@@ -39,18 +42,38 @@ try {
   writeFileSync(join(store, 'automatic-updates-disabled'), '');
   run('git', ['init', '--bare', remote]);
   run('git', ['init', '-b', 'topic'], { cwd: source });
-  writeFileSync(join(source, 'Cargo.toml'), '[workspace]\nresolver = "2"\nmembers = ["cli", "hand"]\n');
+  writeFileSync(join(source, 'Cargo.toml'), '[workspace]\nresolver = "2"\nmembers = ["cli", "hand", "shared"]\n[profile.nightly]\ninherits = "release"\nlto = false\n');
+  // Use the shipped identity helper, including its real Git reference watches.
+  const identityHelper = readFileSync(resolve('bin/nanocodex/build_version.rs'), 'utf8');
+  const buildScript = (binary = false) => `${binary ? 'mod build_version;' : ''}
+fn main() {
+    use std::io::Write;
+    ${binary ? 'build_version::emit().unwrap();\n    println!("cargo:rerun-if-changed=build_version.rs");' : ''}
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=STABLE_GIT_COMMIT");
+    let mut log = std::fs::OpenOptions::new().create(true).append(true)
+        .open(std::env::var("FIXTURE_BUILD_LOG").unwrap()).unwrap();
+    writeln!(log, "{} {}", std::env::var("CARGO_PKG_NAME").unwrap(), std::env::var("STABLE_GIT_COMMIT").unwrap()).unwrap();
+}
+`;
+  mkdirSync(join(source, 'shared/src'), { recursive: true });
+  writeFileSync(join(source, 'shared/Cargo.toml'), '[package]\nname = "shared"\nversion = "0.1.0"\nedition = "2024"\n[features]\ncli = []\nhand = []\n');
+  writeFileSync(join(source, 'shared/build.rs'), buildScript());
+  writeFileSync(join(source, 'shared/src/lib.rs'), 'pub fn features() -> (bool, bool) { (cfg!(feature = "cli"), cfg!(feature = "hand")) }\n');
   for (const [dir, packageName, binaryName] of [
     ['cli', 'nanocodex-bin', 'nanocodex'],
     ['hand', 'nanocodex2-bin', 'nanocodex2'],
   ]) {
     const path = join(source, dir);
     mkdirSync(join(path, 'src'), { recursive: true });
-    writeFileSync(join(path, 'Cargo.toml'), `[package]\nname = "${packageName}"\nversion = "0.1.0"\nedition = "2024"\n[[bin]]\nname = "${binaryName}"\npath = "src/main.rs"\n[features]\ntempo = []\n`);
+    writeFileSync(join(path, 'Cargo.toml'), `[package]\nname = "${packageName}"\nversion = "0.1.0"\nedition = "2024"\n[[bin]]\nname = "${binaryName}"\npath = "src/main.rs"\n[features]\ntempo = []\n[dependencies]\nshared = { path = "../shared", features = ["${dir}"] }\n[build-dependencies]\nchrono = "0.4"\nvergen = { version = "8", default-features = false, features = ["build", "git", "gitcl"] }\n`);
+    writeFileSync(join(path, 'build.rs'), buildScript(true));
+    writeFileSync(join(path, 'build_version.rs'), identityHelper);
     writeFileSync(join(path, 'src/main.rs'), `fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--version") {
-        println!("${binaryName} Version: 0.1.0-dev\\nCommit SHA: {}", env!("STABLE_GIT_COMMIT"));
+        println!("${binaryName} Version: 0.1.0-dev\\n{}", env!("NANOCODEX_LONG_VERSION_1"));
+        println!("Shared features: {:?}", shared::features());
     } else if args.get(1).map(String::as_str) == Some("__device-hand") {
         println!("{{\\"serviceProtocol\\":1}}");
     }
@@ -77,18 +100,30 @@ try {
     GIT_CONFIG_VALUE_0: 'https://github.com/gakonst/nanocodex.git',
     FIXTURE_PR_SHA: sha,
     FIXTURE_PR_STATE: 'OPEN',
+    FIXTURE_BUILD_LOG: buildLog,
   };
   const update = (args, changes = {}) => run(binary, ['update', ...args], { env: { ...env, ...changes }, success: false });
 
   let result = update(['--branch', 'topic']);
   assert.equal(result.status, 0, result.stderr);
+  const firstBuildMs = result.elapsedMs;
   assert.ok(existsSync(join(store, 'versions', `branch-${sha}`, 'nanocodex2')));
-  assert.match(run(join(store, 'versions', `branch-${sha}`, 'nanocodex'), ['--version']).stdout, new RegExp(sha));
+  const installedVersion = run(join(store, 'versions', `branch-${sha}`, 'nanocodex'), ['--version']).stdout;
+  assert.match(installedVersion, new RegExp(sha));
+  assert.match(installedVersion, /Shared features: \(true, true\)/);
+  const firstBuild = readFileSync(buildLog, 'utf8');
+  assert.equal(firstBuild.trim().split('\n').length, 3, firstBuild);
+
+  result = update(['--branch', 'topic']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(buildLog, 'utf8'), firstBuild, 'unchanged branch must reuse both binaries and shared dependencies');
+  transcript.push(`expected: one shared dependency build, two binary builds; repeated update compiles nothing\nobserved: first update ${firstBuildMs} ms; repeated update ${result.elapsedMs} ms\nobserved build log:\n${firstBuild}`);
 
   result = update(['--pr', '42']);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(existsSync(join(store, 'versions', `pr-42-${sha}`, 'nanocodex2')));
   assert.match(run(join(store, 'versions', `pr-42-${sha}`, 'nanocodex2'), ['--version']).stdout, new RegExp(sha));
+  assert.equal(readFileSync(buildLog, 'utf8'), firstBuild, 'PR at the same revision must reuse the branch build');
 
   result = update(['--pr', '42'], { FIXTURE_PR_STATE: 'CLOSED' });
   assert.notEqual(result.status, 0);
@@ -99,6 +134,25 @@ try {
   result = update(['--branch', 'missing']);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /failed to fetch Nanocodex source/);
+
+  // A newer upstream revision must replace cached executables and identity.
+  writeFileSync(join(source, 'shared/src/lib.rs'), 'pub fn features() -> (bool, bool) { (cfg!(feature = "cli"), cfg!(feature = "hand")) }\npub fn revision() -> u8 { 2 }\n');
+  run('git', ['add', '.'], { cwd: source });
+  run('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'next revision'], { cwd: source });
+  const nextSha = run('git', ['rev-parse', 'HEAD'], { cwd: source }).stdout.trim();
+  run('git', ['push', remote, 'HEAD:refs/heads/topic'], { cwd: source });
+  result = update(['--branch', 'topic']);
+  assert.equal(result.status, 0, result.stderr);
+  for (const executable of ['nanocodex', 'nanocodex2']) {
+    assert.match(run(join(store, 'versions', `branch-${nextSha}`, executable), ['--version']).stdout, new RegExp(nextSha));
+  }
+  assert.equal(readFileSync(buildLog, 'utf8').trim().split('\n').length, 6);
+
+  // Recover a modified cached checkout instead of activating altered sources.
+  writeFileSync(join(store, 'source-build/checkout/cli/src/main.rs'), 'invalid cached Rust\n');
+  result = update(['--branch', 'topic']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(run(join(store, 'versions', `branch-${nextSha}`, 'nanocodex'), ['--version']).stdout, new RegExp(nextSha));
 
   writeFileSync(join(source, 'cli/src/main.rs'), 'this is invalid Rust\n');
   run('git', ['add', '.'], { cwd: source });
@@ -111,8 +165,8 @@ try {
   const active = existsSync(join(store, 'pending-update'))
     ? readFileSync(join(store, 'pending-update'), 'utf8').trim()
     : readlinkSync(join(store, 'current')).split('/').at(-1);
-  assert.equal(active, `pr-42-${sha}`);
-  transcript.push(`expected: branch and PR binaries built at ${sha}; closed, changed, missing and broken heads rejected; previous bundle preserved\nobserved: ${active}\n`);
+  assert.equal(active, `branch-${nextSha}`);
+  transcript.push(`expected: branch and PR binaries built at ${sha}, new revision ${nextSha} installed, modified cache recovered; closed, changed, missing and broken heads rejected; previous bundle preserved\nobserved: ${active}\n`);
   process.stdout.write(`source update journeys passed; transcript: ${join(output, 'transcript.log')}\n`);
 } finally {
   writeFileSync(join(output, 'transcript.log'), transcript.join('\n'));

@@ -52,7 +52,11 @@ struct PullRequest {
     state: String,
 }
 
-pub(super) async fn build(selection: Selection<'_>, target: &Path) -> Result<Build> {
+pub(super) async fn build(
+    selection: Selection<'_>,
+    checkout: &Path,
+    target: &Path,
+) -> Result<Build> {
     let expected_sha = match selection {
         Selection::Branch(name) => {
             if name.is_empty() || name.starts_with('-') {
@@ -88,19 +92,22 @@ pub(super) async fn build(selection: Selection<'_>, target: &Path) -> Result<Bui
         }
     };
 
-    let checkout = tempfile::tempdir().wrap_err("failed to create source checkout")?;
-    let root = checkout.path();
-    git(Some(root), &["init", "--quiet"]).await?;
-    git(Some(root), &["remote", "add", "origin", SOURCE_URL]).await?;
+    // Cargo fingerprints include source paths. Keep this updater-owned checkout
+    // stable across revisions, under the same update lock as installation.
+    std::fs::create_dir_all(checkout).wrap_err("failed to create source checkout")?;
+    let checkout = checkout.canonicalize()?;
+    let root = checkout.as_path();
+    if !root.join(".git").exists() {
+        git(Some(root), &["init", "--quiet"]).await?;
+    }
     eprintln!("fetching nanocodex {}...", selection.description());
     let reference = selection.reference();
-    git(Some(root), &["fetch", "--depth", "1", "origin", &reference]).await?;
     git(
         Some(root),
-        &["checkout", "--quiet", "--detach", "FETCH_HEAD"],
+        &["fetch", "--depth", "1", SOURCE_URL, &reference],
     )
     .await?;
-    let sha = String::from_utf8(git(Some(root), &["rev-parse", "HEAD"]).await?)
+    let sha = String::from_utf8(git(Some(root), &["rev-parse", "FETCH_HEAD"]).await?)
         .wrap_err("git returned an invalid source revision")?
         .trim()
         .to_owned();
@@ -112,46 +119,65 @@ pub(super) async fn build(selection: Selection<'_>, target: &Path) -> Result<Bui
         );
     }
 
+    // Do not rewrite HEAD on an unchanged revision: build scripts track it.
+    // A newly initialized checkout has no HEAD yet.
+    let head = git(Some(root), &["rev-parse", "--verify", "HEAD"])
+        .await
+        .unwrap_or_default();
+    let dirty = git(
+        Some(root),
+        &["status", "--porcelain", "--untracked-files=no"],
+    )
+    .await?;
+    if head != format!("{sha}\n").as_bytes() || !dirty.is_empty() {
+        git(
+            Some(root),
+            &["checkout", "--quiet", "--force", "--detach", "FETCH_HEAD"],
+        )
+        .await?;
+    }
+    git(Some(root), &["clean", "--quiet", "-ffdx"]).await?;
+
     let target = if target.is_absolute() {
         target.to_path_buf()
     } else {
         std::env::current_dir()?.join(target)
     };
-    for (package, binary, features) in [
-        ("nanocodex-bin", "nanocodex", true),
-        ("nanocodex2-bin", "nanocodex2", false),
-    ] {
-        eprintln!("compiling {binary} at {sha}...");
-        let mut command = Command::new("cargo");
-        command
-            .current_dir(root)
-            .env("CARGO_TARGET_DIR", &target)
-            .env("VERGEN_GIT_SHA", &sha)
-            .env("STABLE_GIT_COMMIT", &sha)
-            .args([
-                "build",
-                "--locked",
-                "--release",
-                "--package",
-                package,
-                "--bin",
-                binary,
-            ]);
-        if features {
-            command.args(["--features", "tempo"]);
-        }
-        let status = command
-            .status()
-            .await
-            .wrap_err_with(|| format!("failed to start cargo while compiling {binary}"))?;
-        if !status.success() {
-            bail!("cargo failed while compiling {binary}: {status}");
-        }
+    // Resolve shared dependency features once and use the optimized profile
+    // without release LTO, matching the nightly build's faster feedback.
+    eprintln!("compiling nanocodex and nanocodex2 at {sha}...");
+    let status = Command::new("cargo")
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", &target)
+        .env("VERGEN_GIT_SHA", &sha)
+        .env("STABLE_GIT_COMMIT", &sha)
+        .args([
+            "build",
+            "--locked",
+            "--profile",
+            "nightly",
+            "--timings",
+            "--package",
+            "nanocodex-bin",
+            "--bin",
+            "nanocodex",
+            "--package",
+            "nanocodex2-bin",
+            "--bin",
+            "nanocodex2",
+            "--features",
+            "nanocodex-bin/tempo",
+        ])
+        .status()
+        .await
+        .wrap_err("failed to start cargo while compiling nanocodex and nanocodex2")?;
+    if !status.success() {
+        bail!("cargo failed while compiling nanocodex and nanocodex2: {status}");
     }
     let extension = if cfg!(windows) { ".exe" } else { "" };
-    let cli_path = target.join("release").join(format!("nanocodex{extension}"));
+    let cli_path = target.join("nightly").join(format!("nanocodex{extension}"));
     let hand_path = target
-        .join("release")
+        .join("nightly")
         .join(format!("nanocodex2{extension}"));
     if cfg!(target_os = "macos") {
         let status = Command::new("codesign")
