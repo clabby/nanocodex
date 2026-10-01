@@ -66,6 +66,10 @@
       "bucket_name": "nanocodex-managed-history"
     },
     {
+      "binding": "NANOCODEX_USER_DATA_OBJECTS",
+      "bucket_name": "nanocodex-user-data"
+    },
+    {
       "binding": "NANOCODEX_WORKSPACES",
       "bucket_name": "nanocodex-sandbox-workspaces"
     },
@@ -142,6 +146,10 @@
         "class_name": "MemoryScope"
       },
       {
+        "name": "NANOCODEX_USER_DATA",
+        "class_name": "UserDataScope"
+      },
+      {
         "name": "NANOCODEX_SANDBOXES",
         "class_name": "Sandbox"
       },
@@ -190,7 +198,8 @@
     { "tag": "v10", "new_sqlite_classes": ["ProviderProbeCoordinator"] },
     { "tag": "v11", "new_sqlite_classes": ["InferenceKey", "InferenceAccount", "InferenceSession"] },
     { "tag": "v12", "new_sqlite_classes": ["MeetingPreview"] },
-    { "tag": "v13", "new_sqlite_classes": ["CalendarPushDelivery"] }
+    { "tag": "v13", "new_sqlite_classes": ["CalendarPushDelivery"] },
+    { "tag": "v14", "new_sqlite_classes": ["UserDataScope"] }
   ],
   "vars": {
     "NANOCODEX_THREAD_ROUTING": "true",
@@ -233,6 +242,7 @@
       ],
       "r2_buckets": [
         { "binding": "NANOCODEX_HISTORY", "bucket_name": "nanocodex-managed-history" },
+        { "binding": "NANOCODEX_USER_DATA_OBJECTS", "bucket_name": "nanocodex-user-data" },
         { "binding": "NANOCODEX_WORKSPACES", "bucket_name": "nanocodex-sandbox-workspaces" },
         { "binding": "NANOCODEX_BRAIN", "bucket_name": "nanocodex-sandbox-workspaces" },
         { "binding": "NANOCODEX_WORKSPACES_0", "bucket_name": "nanocodex-sandbox-workspaces" },
@@ -265,6 +275,7 @@
           { "name": "NANOCODEX_USERS", "class_name": "UserAccount" },
           { "name": "NANOCODEX_API_KEYS", "class_name": "ApiKeyRecord" },
           { "name": "NANOCODEX_MEMORY", "class_name": "MemoryScope" },
+          { "name": "NANOCODEX_USER_DATA", "class_name": "UserDataScope" },
           { "name": "NANOCODEX_SANDBOXES", "class_name": "Sandbox" },
           { "name": "NANOCODEX_ORGANIZATIONS", "class_name": "Organization" }
         ]

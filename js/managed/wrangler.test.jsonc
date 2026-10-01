@@ -16,6 +16,10 @@
       "bucket_name": "nanocodex-managed-history-test"
     },
     {
+      "binding": "NANOCODEX_USER_DATA_OBJECTS",
+      "bucket_name": "nanocodex-user-data-test"
+    },
+    {
       "binding": "NANOCODEX_WORKSPACES",
       "bucket_name": "nanocodex-sandbox-workspaces-test"
     }
@@ -31,6 +35,10 @@
       {
         "name": "NANOCODEX_MEMORY",
         "class_name": "MemoryScope"
+      },
+      {
+        "name": "NANOCODEX_USER_DATA",
+        "class_name": "UserDataScope"
       },
       {
         "name": "NANOCODEX_ACCOUNT_TOOLS",
@@ -82,6 +90,10 @@
     {
       "tag": "organization-test-v1",
       "new_sqlite_classes": ["Organization"]
+    },
+    {
+      "tag": "user-data-test-v1",
+      "new_sqlite_classes": ["UserDataScope"]
     }
   ]
 }

@@ -116,7 +116,7 @@ test("direct broker failure and stale generation never replay through the manage
 
 test("inference credentials cannot reach account, connector, agent or hand proxy paths", async () => {
   for (const path of ["/v1/todo", "/v1/todo/decisions/11111111-1111-4111-8111-111111111111/respond", "/v1/me", "/v1/agents", "/v1/api-keys", "/v1/connectors/github", "/v1/credentials",
-    "/v1/account/hands", "/v1/account/hands/screens", "/v1/account/hosted-tool-stats", "/v1/account/tool-host", "/v1/history", "/v1/memories/list", "/v1/memories/write", "/v1/memories/status", "/v1/markdown-memory/get", "/v1/egress", "/v1/wallet"]) {
+    "/v1/account/hands", "/v1/account/hands/screens", "/v1/account/hosted-tool-stats", "/v1/account/tool-host", "/v1/data", "/v1/history", "/v1/memories/list", "/v1/memories/write", "/v1/memories/status", "/v1/markdown-memory/get", "/v1/egress", "/v1/wallet"]) {
     const request = new Request("https://nanocodex.example" + path, {
       headers: { authorization: "Bearer nci_live_synthetic", cookie: "synthetic=account", upgrade: "websocket", "x-nanocodex-managed-access": "synthetic" },
     });
@@ -480,4 +480,21 @@ test("shared thread streams and real turn submissions forward bearer to managed"
   assert.deepEqual(requests, [request]);
   assert.equal((await routeManaged(new Request(url, { method: "POST", headers: { authorization: "Bearer nci_test" } }), env, url))?.status, 403);
   assert.equal(requests.length, 1);
+});
+
+
+test("the exact user data route preserves account authorization and body", async () => {
+  const request = new Request("https://account.test/v1/data", {
+    method: "POST", headers: { authorization: "Bearer fixture", "content-type": "application/json" },
+    body: JSON.stringify({ operation: "document_get", key: "notes/example" }),
+  });
+  const upstream = Response.json({ value: { text: "example" } });
+  const env = { NANOCODEX_BACKEND: {
+    async fetch(forwarded: Request) { assert.equal(forwarded, request); return upstream; },
+    connect() { throw Error("unused"); },
+  } };
+  assert.equal(await routeManaged(request, env, new URL(request.url)), upstream);
+  for (const path of ["/v1/data/", "/v1/data/other", "/v1/database"]) {
+    assert.equal(await routeManaged(new Request(`https://account.test${path}`), env, new URL(`https://account.test${path}`)), undefined);
+  }
 });
