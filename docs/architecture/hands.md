@@ -77,17 +77,40 @@ and normal X server PID lock, and repairs a lost owned socket in place. It never
 unlinks another display or weakens display authentication. Native desktop live
 media requires WebRTC H.264; agent-requested screenshots are separate.
 
-The supported Debian/Ubuntu remote installer provisions FFmpeg with Xvfb,
-Openbox, XTerm and fonts. Setup waits for the connected Hand and its controllable
-positive-size video desktop, rejecting JPEG-frame catalogs as readiness. This is
-installation/provisioning, not a runtime download or privilege escalation.
-Runtime recovery runs as the existing non-root Hand owner.
+The Linux installer supports Debian/Ubuntu (`apt-get`) and Arch/Omarchy
+(`pacman`). It provisions FFmpeg, Xvfb, Openbox, XTerm and fonts, validates
+`libx264`/`x11grab` and actually encodes a synthetic H.264 frame before service
+startup. Arch installation uses the existing sync database: it never silently
+refreshes it or performs a host-wide upgrade. A stale database or dependency
+conflict requires an administrator-approved upgrade rather than an automatic
+retry. Setup waits for the connected Hand and its controllable positive-size
+video desktop, rejecting JPEG-frame catalogs as readiness. Catalog readiness is
+not a substitute for decoding the published stream.
 
-This is not yet a dependency-free Linux binary: an existing Wayland desktop
-still requires an accessible compositor session, Waymote and Grim, and native
-OS capture/input permissions must be granted normally. The Debian/Ubuntu remote
-installer does not provision those Wayland helpers or support Arch/Omarchy
-package installation. Native Wayland capture does not depend on an `X0 -> X0_`
-alias; an optional upstream X11 CUA integration may have separate requirements.
-These packaging/session boundaries must not be described as fixed merely because
-a configured machine's screen passed a live check.
+Published x86_64 Linux-GNU Hands embed pinned Waymote and Grim plus their ELF
+loader/runtime-library closure. `scripts/build-linux-screen-helpers.sh` builds
+that payload before the Hand binary; release/nightly Linux-GNU jobs set
+`NANOCODEX_LINUX_SCREEN_BUNDLE`. Only the single Hand executable is distributed.
+Runtime extracts into an owner-private hash-addressed cache, rejects links and
+special entries, checks the embedded manifest and all file digests before use,
+and invokes the bundled loader without global loader-path configuration. A
+developer build without this payload reports a Wayland packaging error; it does
+not silently switch to a different desktop or JPEG live media.
+
+Linux session discovery checks a private same-owner runtime directory, a live
+same-owner compositor Unix socket and its peer credentials. With no valid
+explicit hint it scans only that owner's standard `/run/user/<uid>` (and a
+validated inherited runtime), never another user's session or `/proc` environment.
+A sole live Wayland display is selected automatically; ambiguous displays require
+an explicit choice. Child environments are configured without process-global
+mutation. An explicit Wayland backend fails visibly if no usable session exists.
+With no Wayland session, the Hand owns a private Xvfb desktop. The normal remote
+installer's dedicated non-root service account intentionally does not acquire an
+interactive user's compositor: run the Hand as that desktop owner when physical
+capture is intended. OS permissions and compositor capture/input protocols remain
+required; packaging does not bypass them. Native Wayland capture does not depend
+on an `X0 -> X0_` alias; an optional upstream X11 CUA integration may have separate
+requirements. Managed desktop/server images retain their explicitly provisioned,
+architecture-specific helper executables via `NANOCODEX_WAYMOTE`/`NANOCODEX_GRIM`.
+Those build-owned overrides are not a missing-bundle or capture-failure fallback.
+Runtime performs no downloads, package installation or sudo.

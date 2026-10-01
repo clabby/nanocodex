@@ -130,11 +130,12 @@ impl NativeScreen {
         }
         #[cfg(target_os = "linux")]
         {
-            if std::env::var("NANOCODEX_SCREEN_BACKEND").as_deref() == Ok("wayland")
-                || (std::env::var("NANOCODEX_SCREEN_BACKEND").is_err()
-                    && std::env::var_os("WAYLAND_DISPLAY").is_some())
+            if let super::screen_linux_session::Selection::Wayland(session) =
+                super::screen_linux_session::select()?
             {
-                let wayland = super::screen_wayland::Platform::start().await?;
+                // Once selected, Wayland startup/recovery errors remain errors;
+                // never silently substitute an unrelated private desktop.
+                let wayland = super::screen_wayland::Platform::start(session).await?;
                 let publisher = match ScreenPublisher::start(
                     target,
                     machine,
