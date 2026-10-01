@@ -336,15 +336,41 @@ final class InboxUITests: XCTestCase {
         }
     }
 
+    private func assertUnifiedInbox(_ app: XCUIApplication) {
+        XCTAssertTrue(app.buttons["main-tab-todo"].waitForExistence(timeout: 15))
+        for legacy in ["For you", "Mail", "Later"] {
+            XCTAssertFalse(app.buttons["todo-split:" + legacy].exists, "Inbox must not have legacy split tabs")
+        }
+    }
+
+    private func revealInboxElement(_ element: XCUIElement, in app: XCUIApplication) {
+        XCTAssertTrue(element.waitForExistence(timeout: 5), element.identifier)
+        for _ in 0..<8 where !element.isHittable {
+            if element.frame.maxY < app.frame.midY && element.frame != .zero { app.swipeDown() }
+            else { app.swipeUp() }
+        }
+        XCTAssertTrue(element.isHittable, element.identifier)
+    }
+
+    private func selectInboxScope(_ app: XCUIApplication, _ scope: String) {
+        let menu = app.buttons["todo-filter-menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5))
+        for _ in 0..<8 where !menu.isHittable { app.swipeDown() }
+        XCTAssertTrue(menu.isHittable); menu.tap()
+        let option = app.buttons["todo-filter:" + scope]
+        XCTAssertTrue(option.waitForExistence(timeout: 5)); option.tap()
+    }
+
     func testDecisionWarmNavigationAndPreparationStates() {
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
         let decision = app.buttons["decision-card:fixture-email"]
+        assertUnifiedInbox(app)
         XCTAssertTrue(decision.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["capture-preparation:fixture-working"].exists)
-        XCTAssertTrue(app.buttons["capture-preparation:fixture-blocked"].exists)
+        XCTAssertTrue(app.buttons["todo-row:capture:fixture-working"].exists)
+        XCTAssertTrue(app.buttons["todo-row:capture:fixture-blocked"].exists)
         var timings: [Double] = []
         for index in 0..<8 {
             let start = ProcessInfo.processInfo.systemUptime
@@ -357,7 +383,10 @@ final class InboxUITests: XCTestCase {
         }
         timings.sort()
         print("DECISION_SIMULATOR_XCTEST_NAVIGATION n=7 p50_ms=\(timings[3]) p95_ms=\(timings[6]) includes_XCTest_tap_wait=true not_phone=true")
-        app.buttons["capture-preparation:fixture-blocked"].tap()
+        let blocked = app.buttons["todo-row:capture:fixture-blocked"]
+        revealInboxElement(blocked, in: app)
+        capture(app, "unified-inbox-blocked-and-preparing")
+        blocked.tap()
         XCTAssertTrue(app.buttons["capture-retry"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["decision-approve-send"].exists)
     }
@@ -371,14 +400,19 @@ final class InboxUITests: XCTestCase {
         let meeting = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "meeting-briefing:")).firstMatch
         XCTAssertTrue(meeting.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["decision-card:fixture-email"].exists)
-        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists, "The main queue is decisions, not all mail")
-        capture(app, "decision-first-queue")
+        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists, "Linked decisions replace only their duplicate raw thread in Inbox")
+        assertUnifiedInbox(app)
+        let raw = app.buttons["todo-row:mail:fixture-mail:fixture-budget"]
+        XCTAssertTrue(raw.exists, "Unlinked raw mail belongs beside prepared decisions in the default Inbox")
+        capture(app, "unified-inbox-calendar-decision-and-raw-mail")
         meeting.tap()
         XCTAssertTrue(app.staticTexts["Prepared briefing"].waitForExistence(timeout: 5))
         app.buttons["Done"].tap()
-        app.buttons["todo-split:Mail"].tap()
-        let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
-        XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.tap()
+        let decision = app.buttons["decision-card:fixture-email"]
+        revealInboxElement(decision, in: app); decision.tap()
+        let conversation = app.buttons["decision-open-conversation"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 5))
+        revealInboxElement(conversation, in: app); conversation.tap()
         XCTAssertTrue(app.buttons["mail-expand-all"].waitForExistence(timeout: 5))
         app.buttons["mail-expand-all"].tap()
         XCTAssertTrue(app.staticTexts["mail-body:fixture-message-1"].exists)
@@ -398,6 +432,155 @@ final class InboxUITests: XCTestCase {
         capture(app, "todo-explicit-fixture-send-receipt")
     }
 
+    func testTodoFilterMenuChangesScopeWithoutSplitTabs() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        assertUnifiedInbox(app)
+        let decision = app.buttons["decision-card:fixture-email"]
+        XCTAssertTrue(decision.waitForExistence(timeout: 10))
+        let menu = app.buttons["todo-filter-menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5)); menu.tap()
+        for scope in ["Inbox", "Mail", "Snoozed", "Drafts", "Sent", "All mail"] {
+            XCTAssertTrue(app.buttons["todo-filter:" + scope].exists, "Missing optional scope: " + scope)
+        }
+        capture(app, "unified-inbox-optional-scope-menu")
+        app.buttons["todo-filter:Mail"].tap()
+        XCTAssertTrue(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].waitForExistence(timeout: 5))
+        XCTAssertFalse(decision.exists, "Mail scope is raw mail, not another decision tab")
+        XCTAssertFalse(app.buttons["todo-row:capture:fixture-blocked"].exists)
+        assertUnifiedInbox(app)
+        selectInboxScope(app, "Inbox")
+        XCTAssertTrue(decision.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["todo-row:capture:fixture-blocked"].exists)
+        XCTAssertTrue(app.buttons["todo-row:mail:fixture-mail:fixture-budget"].exists)
+        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists)
+        capture(app, "unified-inbox-default-restored-after-mail-scope")
+    }
+
+    func testTodoAIQuickActionsKeepContextEditableAndDoNotSend() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        assertUnifiedInbox(app)
+        let decisionAI = app.buttons["inbox-ai:decision:fixture-email"]
+        // A request is reviewable before agent work. None of these commands is a send approval.
+        for action in ["Brief me", "Prepare next steps", "Draft reply", "Ask something else"] {
+            revealInboxElement(decisionAI, in: app); decisionAI.tap()
+            XCTAssertTrue(app.buttons[action].waitForExistence(timeout: 5)); app.buttons[action].tap()
+            let context = app.descendants(matching: .any)["inbox-ai-context"].firstMatch
+            XCTAssertTrue(context.waitForExistence(timeout: 5))
+            XCTAssertTrue(context.label.contains("Maya"), context.label)
+            let instructions = app.descendants(matching: .any)["inbox-ai-instructions"].firstMatch
+            XCTAssertTrue(instructions.waitForExistence(timeout: 5))
+            instructions.tap(); instructions.typeText(" Mention the launch review; prepare only, do not send.")
+            XCTAssertTrue((instructions.value as? String ?? "").contains("prepare only, do not send"))
+            XCTAssertTrue(app.buttons["inbox-ai-prepare"].isEnabled)
+            XCTAssertFalse(app.buttons["mail-send"].exists)
+            XCTAssertFalse(app.buttons["decision-approve-send"].exists)
+            capture(app, "unified-inbox-ai-decision-" + action.lowercased().replacingOccurrences(of: " ", with: "-"))
+            app.buttons["Cancel"].tap()
+            XCTAssertTrue(instructions.waitForNonExistence(timeout: 5))
+            XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+        }
+        let blockedAI = app.buttons["inbox-ai:capture:fixture-blocked"]
+        revealInboxElement(blockedAI, in: app); blockedAI.tap()
+        XCTAssertFalse(app.buttons["Draft reply"].exists, "A capture is not a mail reply target")
+        app.buttons["Prepare next steps"].tap()
+        let context = app.descendants(matching: .any)["inbox-ai-context"].firstMatch
+        XCTAssertTrue(context.waitForExistence(timeout: 5))
+        XCTAssertTrue(context.label.contains("Book a trip"), context.label)
+        let instructions = app.descendants(matching: .any)["inbox-ai-instructions"].firstMatch
+        instructions.tap(); instructions.typeText(" Destination is Oslo, budget is 800. Prepare options only.")
+        capture(app, "unified-inbox-ai-blocked-capture-context")
+        app.buttons["inbox-ai-prepare"].tap()
+        XCTAssertTrue(instructions.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+        XCTAssertTrue(app.buttons["todo-row:capture:fixture-blocked"].exists)
+        // Raw mail uses its own source, not the linked decision's context.
+        let rawAI = app.buttons["inbox-ai:mail:fixture-mail:fixture-budget"]
+        revealInboxElement(rawAI, in: app); rawAI.tap(); app.buttons["Draft reply"].tap()
+        XCTAssertTrue(context.waitForExistence(timeout: 5))
+        XCTAssertTrue(context.label.contains("September notes"), context.label)
+        XCTAssertFalse(context.label.contains("How should we reply to Maya?"))
+        XCTAssertTrue(instructions.waitForExistence(timeout: 5))
+        instructions.tap(); instructions.typeText(" Thank Jordan for the notes. Save a draft only.")
+        XCTAssertTrue(app.buttons["inbox-ai-prepare"].isEnabled)
+        XCTAssertFalse(app.buttons["mail-send"].exists)
+        capture(app, "unified-inbox-ai-raw-mail-context")
+        app.buttons["Cancel"].tap()
+        XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+    }
+
+    func testTodoVerifiedCRMProfileNavigationAndUnverifiedBlockedContext() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        assertUnifiedInbox(app)
+        let decision = app.buttons["decision-card:fixture-email"]
+        revealInboxElement(decision, in: app); decision.tap()
+        let person = app.buttons["inbox-crm:f015eb65-ea12-4bc9-9a80-aa937ac6ffea"]
+        revealInboxElement(person, in: app)
+        XCTAssertTrue(person.label.contains("Maya Chen"), person.label)
+        XCTAssertTrue(person.label.contains("Product lead"), person.label)
+        XCTAssertTrue(person.label.contains("Example Studio"), person.label)
+        XCTAssertTrue(app.staticTexts["Launch collaborator"].exists)
+        capture(app, "unified-inbox-verified-person-in-decision-context")
+        person.tap()
+        XCTAssertTrue(app.navigationBars["Profile"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Maya Chen"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Product lead"].exists)
+        XCTAssertTrue(app.staticTexts["Launch collaborator"].exists)
+        XCTAssertFalse(app.staticTexts["Example University"].exists, "The link must not open an unrelated cached profile")
+        capture(app, "unified-inbox-linked-maya-crm-profile")
+        let back = app.navigationBars["Profile"].buttons.element(boundBy: 0)
+        XCTAssertTrue(back.isHittable); back.tap()
+        XCTAssertTrue(person.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.navigationBars["Profile"].exists)
+        XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+        app.buttons["decision-detail-close"].tap()
+        let blocked = app.buttons["todo-row:capture:fixture-blocked"]
+        revealInboxElement(blocked, in: app); blocked.tap()
+        XCTAssertTrue(app.staticTexts["Destination and budget are needed"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["No verified CRM profile is linked yet."].exists)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "inbox-crm:")).firstMatch.exists,
+                       "Missing source identity must not manufacture a person/profile link")
+        XCTAssertTrue(app.buttons["capture-retry"].exists)
+        XCTAssertFalse(app.buttons["decision-approve-send"].exists)
+        XCTAssertFalse(app.buttons["mail-send"].exists)
+        capture(app, "unified-inbox-blocked-without-guessed-crm-person")
+    }
+
+    func testTodoRawMailWarmReopenKeepsReadableThread() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        assertUnifiedInbox(app); selectInboxScope(app, "Mail")
+        let thread = app.buttons["todo-row:mail:fixture-mail:fixture-budget"]
+        var samples: [Double] = []
+        for index in 0..<3 {
+            revealInboxElement(thread, in: app)
+            let start = ProcessInfo.processInfo.systemUptime
+            thread.tap()
+            let body = app.staticTexts["mail-body:fixture-budget-message"]
+            XCTAssertTrue(body.waitForExistence(timeout: 5))
+            XCTAssertEqual(app.staticTexts["mail-thread-subject"].label, "September notes")
+            XCTAssertEqual(body.label, "The updated September notes are ready for your review.")
+            XCTAssertFalse(app.staticTexts["mail-body:fixture-message-2"].exists,
+                           "Opening September notes must not reuse the linked launch conversation")
+            samples.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
+            XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+            capture(app, "unified-inbox-raw-thread-open-" + String(index))
+            app.buttons["mail-thread-done"].tap()
+            XCTAssertTrue(thread.waitForExistence(timeout: 5))
+        }
+        print("RAW_MAIL_SIM_UI fixture_n=3 tap_to_body_ms=\(samples) XCTest_automation_included=true not_production=true")
+    }
+
     func testTodoCaptureCompleteUndoAndMailArchiveUndo() {
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
@@ -410,21 +593,20 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Review the launch agenda"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Pending"].exists, "Capture delegates preparation rather than claiming completion")
         let ready = app.buttons["todo-row:capture:fixture-ready-capture"]
-        if !ready.isHittable { app.swipeUp() }
-        XCTAssertTrue(ready.waitForExistence(timeout: 5)); ready.swipeRight()
+        revealInboxElement(ready, in: app); ready.swipeRight()
         app.buttons["todo-complete:fixture-ready-capture"].tap()
         XCTAssertTrue(app.buttons["Undo"].waitForExistence(timeout: 5)); app.buttons["Undo"].tap()
         XCTAssertTrue(ready.waitForExistence(timeout: 5))
-        app.buttons["todo-split:Mail"].tap()
+        selectInboxScope(app, "Mail")
         let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
-        XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.swipeLeft()
+        XCTAssertTrue(thread.waitForExistence(timeout: 5)); revealInboxElement(thread, in: app); thread.swipeLeft()
         app.buttons["todo-archive:fixture-thread"].tap()
         XCTAssertFalse(thread.exists)
         app.buttons["Undo"].tap(); XCTAssertTrue(thread.waitForExistence(timeout: 5))
         capture(app, "todo-capture-prepares-and-archive-undo")
     }
 
-    func testEmptyDecisionQueueDoesNotClaimCaughtUpOrHealthyWatch() {
+    func testRawInboxWithoutPreparedDecisionsDoesNotClaimCaughtUpOrHealthyWatch() {
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--todo-mail-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
@@ -433,14 +615,16 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(tab.waitForExistence(timeout: 15)); tab.tap()
         XCTAssertTrue(app.buttons["todo-compose"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["todo-compose"].isEnabled, "Connected fixture mail accounts do not establish watch coverage")
+        let disclosure = app.descendants(matching: .any)["inbox-coverage"].firstMatch
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 5)); disclosure.tap()
         let coverage = app.staticTexts["todo-source-coverage"]
         XCTAssertTrue(coverage.waitForExistence(timeout: 5))
         XCTAssertTrue(coverage.label.contains("Inbox-scoped"))
         XCTAssertTrue(coverage.label.contains("archived mail is excluded"))
         XCTAssertTrue(coverage.label.contains("Watch coverage is unknown"))
-        let empty = app.staticTexts["Nothing ready to review"]
-        for _ in 0..<4 where !empty.isHittable { app.swipeUp() }
-        XCTAssertTrue(empty.exists)
+        assertUnifiedInbox(app)
+        XCTAssertTrue(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists)
+        XCTAssertFalse(app.buttons["decision-card:fixture-email"].exists)
         XCTAssertFalse(app.staticTexts["Caught up"].exists)
         capture(app, "decision-empty-watch-coverage-unknown")
     }
@@ -503,31 +687,35 @@ final class InboxUITests: XCTestCase {
         let decision = app.buttons["decision-card:fixture-email"]
         XCTAssertTrue(decision.waitForExistence(timeout: 10)); decision.tap()
         XCTAssertTrue(app.staticTexts["decision-complete-draft"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["decision-complete-draft"].label.contains("Thursday at 10 works"))
+        XCTAssertEqual(app.staticTexts["decision-complete-draft"].label, "Thursday at 10 works. I will review the launch plan before then.")
+        XCTAssertTrue(app.staticTexts["From: alex@example.com"].exists)
+        XCTAssertTrue(app.staticTexts["To: maya@example.com"].exists)
+        XCTAssertTrue(app.staticTexts["Re: A quick look at the launch plan"].exists)
+        XCTAssertTrue(app.staticTexts["Account draft · version 1"].exists)
         XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
         let approve = app.buttons["decision-approve-send"]
         XCTAssertTrue(approve.isEnabled)
         capture(app, "decision-ready-for-exact-approval")
-        approve.tap()
+        revealInboxElement(approve, in: app); approve.tap()
         XCTAssertTrue(app.staticTexts["Fixture send complete · no email sent"].waitForExistence(timeout: 5))
         XCTAssertFalse(approve.isEnabled)
     }
 
-    func testTodoSnoozedMailReturnsFromLater() {
+    func testTodoSnoozedMailReturnsThroughScopeMenu() {
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
-        XCTAssertTrue(app.buttons["todo-split:Mail"].waitForExistence(timeout: 10)); app.buttons["todo-split:Mail"].tap()
-        let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
-        XCTAssertTrue(thread.waitForExistence(timeout: 10)); thread.swipeLeft()
+        assertUnifiedInbox(app); selectInboxScope(app, "Mail")
+        let thread = app.buttons["todo-row:mail:fixture-mail:fixture-budget"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 10)); revealInboxElement(thread, in: app); thread.swipeLeft()
         app.buttons["Snooze"].tap(); app.buttons["Tomorrow at 9 AM"].tap()
         XCTAssertTrue(thread.waitForNonExistence(timeout: 5))
-        app.buttons["todo-split:Later"].tap()
-        XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.swipeRight()
+        selectInboxScope(app, "Snoozed")
+        XCTAssertTrue(thread.waitForExistence(timeout: 5)); revealInboxElement(thread, in: app); thread.swipeRight()
         app.buttons["Bring back"].tap()
         XCTAssertTrue(thread.waitForNonExistence(timeout: 5))
-        app.buttons["todo-split:Mail"].tap()
+        selectInboxScope(app, "Mail")
         XCTAssertTrue(thread.waitForExistence(timeout: 5))
         capture(app, "todo-snooze-return")
     }
@@ -539,20 +727,27 @@ final class InboxUITests: XCTestCase {
         app.launch()
         let decision = app.buttons["decision-card:fixture-email"]
         XCTAssertTrue(decision.waitForExistence(timeout: 10))
-        app.buttons["todo-split:Mail"].tap()
+        selectInboxScope(app, "Mail")
         let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
-        XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.swipeLeft()
+        XCTAssertTrue(thread.waitForExistence(timeout: 5)); revealInboxElement(thread, in: app); thread.swipeLeft()
         app.buttons["Snooze"].tap(); app.buttons["Tomorrow at 9 AM"].tap()
         XCTAssertTrue(thread.waitForNonExistence(timeout: 5))
-        app.buttons["todo-split:For you"].tap()
+        selectInboxScope(app, "Inbox")
         XCTAssertFalse(decision.exists)
-        app.buttons["todo-split:Later"].tap()
+        XCTAssertFalse(thread.exists)
+        capture(app, "unified-inbox-linked-thread-snoozed")
+        app.terminate(); app.launch()
+        assertUnifiedInbox(app)
+        XCTAssertFalse(decision.exists, "A linked snooze must survive app relaunch")
+        selectInboxScope(app, "Snoozed")
         XCTAssertTrue(decision.waitForExistence(timeout: 5))
         XCTAssertFalse(thread.exists)
-        decision.swipeRight(); app.buttons["Bring back"].tap()
+        revealInboxElement(decision, in: app); decision.swipeRight(); app.buttons["Bring back"].tap()
         XCTAssertTrue(decision.waitForNonExistence(timeout: 5))
-        app.buttons["todo-split:For you"].tap()
+        selectInboxScope(app, "Inbox")
         XCTAssertTrue(decision.waitForExistence(timeout: 5))
+        XCTAssertFalse(thread.exists)
+        capture(app, "unified-inbox-linked-snooze-restored-once")
     }
 
     func testTodoDistinctDecisionsInOneThreadRemainActionable() {
@@ -562,8 +757,10 @@ final class InboxUITests: XCTestCase {
         app.launch()
         let latest = app.buttons["decision-card:fixture-email"]
         let earlier = app.buttons["decision-card:fixture-earlier-email"]
+        assertUnifiedInbox(app)
         XCTAssertTrue(latest.waitForExistence(timeout: 10)); XCTAssertTrue(earlier.exists)
-        earlier.tap()
+        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists)
+        revealInboxElement(earlier, in: app); earlier.tap()
         XCTAssertTrue(app.staticTexts["decision-complete-draft"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.staticTexts["decision-complete-draft"].label, "I will review the launch plan before Thursday.")
         app.buttons["decision-detail-close"].tap()
@@ -572,6 +769,7 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["decision-complete-draft"].label.contains("Thursday at 10 works"))
         app.buttons["decision-detail-close"].tap()
         XCTAssertTrue(earlier.exists); XCTAssertTrue(latest.exists)
+        capture(app, "unified-inbox-two-decisions-one-thread")
     }
 
     func testTodoComposeShowsSenderAndCanStartAgainAfterSend() {
@@ -603,7 +801,7 @@ final class InboxUITests: XCTestCase {
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--todo-mail-unknown-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
-        XCTAssertTrue(app.buttons["todo-split:Mail"].waitForExistence(timeout: 10)); app.buttons["todo-split:Mail"].tap()
+        assertUnifiedInbox(app); selectInboxScope(app, "Mail")
         let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
         XCTAssertTrue(thread.waitForExistence(timeout: 10)); thread.tap()
         app.buttons["mail-reply"].tap()
@@ -613,6 +811,7 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Send outcome unknown · retry blocked"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["mail-send"].isEnabled)
         app.terminate(); app.launch()
+        assertUnifiedInbox(app); selectInboxScope(app, "Mail")
         XCTAssertTrue(thread.waitForExistence(timeout: 10)); thread.tap()
         let continued = app.buttons["mail-continue-draft"]
         if !continued.isHittable { app.swipeUp() }

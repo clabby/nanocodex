@@ -182,9 +182,46 @@ device-local resource identities show an unavailable message, and tool details h
 embedded binary data. Result parsing and image decoding stay outside view bodies,
 and repeated inner/outer tool outputs share a stable content identity.
 
+## Inbox
+
+The bottom-left **Inbox** is one default mixed actionable queue for loaded Gmail
+conversations, prepared decisions, captured tasks, review drafts, upcoming events,
+and recent agent work. **Mail**, **Snoozed**, **Drafts**, **Sent**, and **All mail**
+are optional filters in a menu, not permanent For you/Mail/Later tabs. Account
+selection, search, explicit Load more, and **Sync & coverage** expose the bounded
+source view. An empty queue does not prove caught up or healthy background import.
+
+Retained account/list/body reads and next-three conversation lookahead can keep
+mail readable before refresh and through relaunch/outages. Saved content is
+read-only until live account/conversation/draft checks succeed for mail actions;
+the read cache excludes mail drafts, delivery status, individual approval reads,
+and attachment bytes. Separate protected draft recovery is not send authority.
+Owner-private CRM profile links require unique exact saved email/alias matches;
+context is bounded and may be stale, not sender authentication or name/domain
+inference. Each item's editable **AI actions** request attaches available source
+and CRM context and prepares proposals for review in a linked conversation. It
+does not authorize sending, booking, spending, Vault use, or external changes.
+
+Snooze/Bring back persists exact versioned operations in a protected device
+journal and syncs acknowledged account-private presentation state across devices
+on refresh. Pending sync, restoration/storage failures, conflicts, and capacity
+errors are visible. Linked mail decisions share one thread reminder. Source-qualified
+mail reminders from other devices, including due items outside the first page,
+materialize through a rotating maximum of five metadata reads per refresh, not
+a complete mailbox sync. Snooze does
+not change Gmail labels or task completion or deliver a push reminder. Limits
+include 1,000 pending commands, a 2 MiB journal, and 1,000 distinct service keys.
+Mail still sends only through explicit **Send** of a saved exact draft version;
+uncertain delivery stays locked without an automatic resend.
+
+This is not full Superhuman parity, universal automatic generative raw-mail
+briefing, or a true offline-send queue. These docs describe source behavior, not
+a deployment or phone-install receipt. See the [Inbox API and validation
+boundaries](../docs/integrations/todo-inbox.md) and [local-first behavior](LOCAL_FIRST.md).
+
 ## Personal apps
 
-The App Store button beside TODO, Chat, CRM and Meetings opens a menu of saved
+The App Store button beside Inbox, Chat, CRM and Meetings opens a menu of saved
 apps, **Your apps**, and **Create an app**. Saved apps stay inside this menu.
 The single Chat model button opens model choices, thinking effort, and automatic
 routing for the selected conversation.

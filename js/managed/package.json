@@ -29,7 +29,7 @@
     "preview": "node ../../scripts/cloudflare/managed-crm.mjs preview",
     "db:migrate:local": "wrangler d1 migrations apply NANOCODEX_CRM --local --env development --config wrangler.jsonc --persist-to ../account/.wrangler/state",
     "test:done": "node --test test/session-done-journey.test.mjs",
-    "test:todo-mail": "node --test test/todo-mail-journey.test.mjs",
+    "test:todo-mail": "node --test test/todo-mail-journey.test.mjs test/todo-snooze-journey.test.mjs",
     "test:meetings": "node --test test/meeting-library-journey.test.mjs",
     "fixture:meetings": "node scripts/meeting-library-fixture.mjs",
     "test:recovery": "node --test test/managed-crash-recovery-journey.test.mjs"
