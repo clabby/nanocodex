@@ -337,23 +337,21 @@ impl NativeScreen {
     }
     #[cfg(target_os = "linux")]
     async fn stop_owned_desktop(&mut self) -> Result<(), ManagedError> {
-        if let Some(mut desktop) = self.desktop.take() {
-            if desktop.0.try_wait().map_err(configuration)?.is_none() {
-                let _ = desktop_request(
-                    self.runtime.clone(),
-                    serde_json::json!({"action":"shutdown"}),
-                )
-                .await;
-                desktop.terminate();
-                match tokio::time::timeout(std::time::Duration::from_secs(10), desktop.0.wait())
-                    .await
-                {
-                    Ok(result) => {
-                        result.map_err(configuration)?;
-                    }
-                    Err(_) => {
-                        desktop.0.kill().await.map_err(configuration)?;
-                    }
+        if let Some(mut desktop) = self.desktop.take()
+            && desktop.0.try_wait().map_err(configuration)?.is_none()
+        {
+            let _ = desktop_request(
+                self.runtime.clone(),
+                serde_json::json!({"action":"shutdown"}),
+            )
+            .await;
+            desktop.terminate();
+            match tokio::time::timeout(std::time::Duration::from_secs(10), desktop.0.wait()).await {
+                Ok(result) => {
+                    result.map_err(configuration)?;
+                }
+                Err(_) => {
+                    desktop.0.kill().await.map_err(configuration)?;
                 }
             }
         }
