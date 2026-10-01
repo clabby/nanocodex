@@ -51,6 +51,7 @@ export function create(options = {}) {
     toolMode,
     mcp,
     codeEvaluator,
+    codeEffectJournal,
   } = options;
   const stableSessionId = sessionId ?? createSessionId();
   const {
@@ -80,6 +81,7 @@ export function create(options = {}) {
     toolMode,
     workspace: workspace ?? filesystem?.root ?? resume?.workspace,
     codeEvaluator,
+    codeEffectJournal,
     onDispose: () => releaseDefinitionHost(hostDefinitionId),
   });
   let durabilityOwner;

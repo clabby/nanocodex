@@ -15,7 +15,7 @@ test("ordinary sequence commands work with host-managed interpreter limits", asy
     Array.from({ length: 12 }, (_, index) => `tick${index + 1}\n`).join(""));
 });
 
-test("buffer compatibility preserves finite host limits and explicit unlimited policy", async () => {
+test("buffer compatibility preserves host overrides without disabling other resource ceilings", async () => {
   for (const executionLimits of [
     { maxOutputSize: 8 },
     { maxStringLength: 8 },
@@ -35,11 +35,14 @@ test("buffer compatibility preserves finite host limits and explicit unlimited p
     if (Object.values(executionLimits).includes(8)) {
       assert.notEqual(larger.exit_code, 0);
       assert.match(larger.output, /output size limit exceeded/);
-      assert.deepEqual(runtime.descriptor.limits, executionLimits);
+      for (const [key, value] of Object.entries(executionLimits)) assert.equal(runtime.descriptor.limits[key], value);
+      assert.ok(runtime.descriptor.limits.maxInputBytes < Number.MAX_SAFE_INTEGER);
     } else {
       assert.equal(larger.exit_code, 0, larger.output);
       assert.equal(larger.output, Array.from({ length: 12 }, (_, index) => `${index + 1}\n`).join(""));
-      assert.deepEqual(runtime.descriptor.limits, {});
+      assert.equal(runtime.descriptor.limits.maxOutputSize, undefined);
+      assert.equal(runtime.descriptor.limits.maxStringLength, undefined);
+      assert.ok(runtime.descriptor.limits.maxInputBytes < Number.MAX_SAFE_INTEGER);
     }
   }
 });

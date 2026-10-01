@@ -856,6 +856,44 @@ session and are invalidated when the host shuts down; a persisted `wait` never
 restarts missing work. Embedded cells retain ownership of all nested tool calls
 until they finish or are cancelled.
 
+Owned `nanocodex/node` and `nanocodex/host` agents may opt into
+`codeEffectJournal` alongside their durability store. This trusted host adapter
+must durably acknowledge `begin(context)` before dispatch, validate the original
+session/call identity plus source/tool/input fingerprint, and fence stale owners.
+Journal keys must include
+`[sessionId, operationId ?? "", modelCallIndex ?? 0, parentCallId, callId]`.
+Owned SDK hosts synchronously observe original Rust request/idempotency identity
+and model-call ordinal before dispatch; missing canonical metadata interrupts
+rather than falling back to a projected turn/run ID. Provider call IDs may repeat
+across model responses within one operation and across operations. Use an explicit
+prompt operation `id` with an owned journal. Generic explicit runtimes without
+an identity resolver retain their existing session/parent identity semantics.
+`turnId` is diagnostic metadata, not the effect replay key.
+This covers direct application tools (`toolMode: "direct"`) as well as tools
+invoked by Code Mode. Direct contexts use `parentCallId = callId` and
+`source = "host-tool:" + name`; nested contexts use the exact guest source
+and a stable cell/ordinal.
+Return `execute` for a new retained intent, `replay` with its exact completed
+receipt, or `unknown` for an intent without a durable outcome. `complete` must
+acknowledge storage before either direct tool output or a nested guest result is
+returned. Direct receipts use `value: null` and `thrown: false` (handler failures
+remain failed encoded tool outputs, not guest throws). Unknown direct intents
+return an explicit failed tool result with `outcome: "unknown"` without dispatch.
+Unknown nested effects fail the recovered cell even if guest code catches the error; they are never silently
+rerun. Reconcile external state using the original operation identity.
+
+Receipts must contain plain JSON data and are bounded to an aggregate 8 MiB
+and 32,768 entries before output/value copies. Undefined results and raw undefined
+rejections have explicit markers. Identical output/structured/value payloads use
+receipt-local references (or derived JSON text), so ordinary inline media does
+not consume three copies. An oversized or unretainable post-effect receipt interrupts the host and
+leaves its original intent unknown, rather than granting permission to redispatch. Route larger media through a bounded
+artifact/reference tool instead of embedding it in the replay receipt.
+The journal is opt-in for generic SDK hosts; durability alone does not make
+direct or nested application effects safe to rerun after abrupt owner loss.
+It does not journal arbitrary native JavaScript/evaluator effects, built-in
+provider-native tools, or external operations outside the application-tool router.
+
 Custom evaluators receive `audio`, `notify`, `yield_control`, `setTimeout`, and
 `clearTimeout` alongside the existing globals in `CodeEvaluatorEnvironment`.
 Forward those helpers into the guest environment to preserve the model-visible

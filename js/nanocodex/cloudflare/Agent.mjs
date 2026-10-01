@@ -666,6 +666,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
       toolMode: internalRuntime?.toolMode ?? "direct",
       codeEvaluator: internalRuntime?.codeEvaluator,
       [Symbol.for("nanocodex.browser.internalRuntime")]: {
+        codeEffectJournal: internalRuntime?.codeEffectJournal,
         toolProviders: internalRuntime?.toolProviders,
         subagentsEnabled: internalRuntime?.subagentsEnabled,
         subagentMaxConcurrency: internalRuntime?.subagentMaxConcurrency,

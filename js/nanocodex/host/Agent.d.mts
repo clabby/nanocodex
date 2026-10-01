@@ -2,6 +2,7 @@ import type {
   AgentLifecycle,
   AgentOptions,
   CodeEvaluator,
+  CodeEffectJournal,
   DefaultAgent,
   DurabilityStore,
   ExecutionEnvironment,
@@ -36,6 +37,8 @@ export declare namespace create {
     executionEnvironment?: ExecutionEnvironment | undefined;
     /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
     codeEvaluator?: CodeEvaluator | undefined;
+    /** Opt-in durable direct-tool and nested Code Mode receipts for safe cold recovery. */
+    codeEffectJournal?: CodeEffectJournal | undefined;
     /** Defaults to the same-origin Nanocodex `/api/responses` proxy. */
     transport?: ResponsesTransport | undefined;
   } & (
