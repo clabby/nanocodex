@@ -1418,3 +1418,150 @@ async fn response_usage_arrives_before_tool_completion_and_excludes_summary() {
     agent.shutdown().await.unwrap();
     server.abort();
 }
+
+#[tokio::test]
+async fn steering_acknowledges_consumption_at_tool_and_terminal_boundaries() {
+    use nanocodex_agent::events::{AgentEventData, RunEvent};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    for held_tool in [true, false] {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let app = Router::new().route(
+            "/v1/messages",
+            post({
+                let started = started.clone();
+                let release = release.clone();
+                let requests = requests.clone();
+                move |Json(body): Json<Value>| {
+                    let started = started.clone();
+                    let release = release.clone();
+                    let requests = requests.clone();
+                    async move {
+                        let index = {
+                            let mut log = requests.lock().unwrap();
+                            log.push(body);
+                            log.len()
+                        };
+                        if index == 1 && !held_tool {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        let (blocks, stop) = if index == 1 && held_tool {
+                            (
+                                vec![
+                                    json!({"type":"tool_use","id":"held","name":"hold","input":{}}),
+                                ],
+                                "tool_use",
+                            )
+                        } else {
+                            (vec![json!({"type":"text","text":"done"})], "end_turn")
+                        };
+                        (
+                            [("content-type", "text/event-stream")],
+                            stream(blocks, stop),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ClaudeClient::new(
+            reqwest::Client::new(),
+            format!("http://{address}/v1/messages"),
+            "synthetic",
+        );
+        let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+            .tool(
+                ToolDefinition {
+                    name: "hold".into(),
+                    description: "Held tool".into(),
+                    input_schema: json!({"type":"object"}),
+                    strict: None,
+                    defer_loading: false,
+                },
+                {
+                    let started = started.clone();
+                    let release = release.clone();
+                    move |_| {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            Ok("released".into())
+                        }
+                    }
+                },
+            )
+            .build()
+            .unwrap();
+        let turn = agent.prompt("begin").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        turn.steer("first steer").await.unwrap();
+        turn.steer("second é").await.unwrap();
+        while let Some(event) = events.try_recv_timed() {
+            assert_ne!(
+                event.event.kind,
+                AgentEventKind::RunSteered,
+                "admission must not acknowledge consumption"
+            );
+        }
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), turn.result())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut acknowledged = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+                .await
+                .unwrap()
+                .unwrap();
+            if event.kind == AgentEventKind::RunSteered
+                && let AgentEventData::Run(RunEvent::Steered(steer)) = event.data().unwrap()
+            {
+                acknowledged.push((steer.steer_index, steer.instruction_bytes));
+            }
+            if event.kind == AgentEventKind::ModelCallCompleted {
+                let payload: Value = serde_json::from_str(event.payload.get()).unwrap();
+                if payload["call_index"] == 2 {
+                    assert_eq!(
+                        acknowledged.len(),
+                        2,
+                        "both steers must be acknowledged before their response completes"
+                    );
+                }
+            }
+            if event.kind == AgentEventKind::RunCompleted {
+                break;
+            }
+        }
+        assert_eq!(
+            acknowledged,
+            vec![(1, "first steer".len()), (2, "second é".len())]
+        );
+        {
+            let log = requests.lock().unwrap();
+            assert_eq!(log.len(), 2);
+            let messages = log[1]["messages"].as_array().unwrap();
+            assert_eq!(
+                messages[messages.len() - 2]["content"][0]["text"],
+                "first steer"
+            );
+            assert_eq!(
+                messages[messages.len() - 1]["content"][0]["text"],
+                "second é"
+            );
+        }
+        agent.shutdown().await.unwrap();
+        server.abort();
+    }
+}
