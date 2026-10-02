@@ -339,6 +339,7 @@ async fn terminal_control_keeps_local_root_discoverable_and_stops_it_after_runti
         lines: &mut Lines<BufReader<OwnedReadHalf>>,
         cursor: u64,
     ) -> Value {
+        let expected_cursor = cursor.to_string();
         tokio::time::timeout(TIMEOUT, async {
             loop {
                 write
@@ -348,7 +349,7 @@ async fn terminal_control_keeps_local_root_discoverable_and_stops_it_after_runti
                 let response: Value =
                     serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
                 let snapshot = response["result"].clone();
-                if snapshot["state"]["managed_cursor"] == cursor.to_string() {
+                if snapshot["state"]["managed_cursor"].as_str() == Some(expected_cursor.as_str()) {
                     return snapshot;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
