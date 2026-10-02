@@ -49,6 +49,8 @@ pub(super) struct Cursor {
     pub(super) pending: Vec<Message>,
     pub(super) usage: Usage,
     pub(super) index: u32,
+    #[serde(default)]
+    pub(super) steers: u32,
 }
 impl Cursor {
     pub(super) fn effect<'a>(&'a self, state: &'a State, step: &str) -> Option<Effect<'a>> {
@@ -139,6 +141,7 @@ impl State {
         &self,
         conversation: &mut Conversation,
         operation: Option<&str>,
+        speed: Option<crate::Speed>,
     ) -> Result<Cursor> {
         if let (Some(policy), Some(operation)) = (&self.policy, operation)
             && let Some(value) = policy.continuation(operation.to_owned()).await?
@@ -158,7 +161,7 @@ impl State {
         let mut cursor = Cursor {
             instruction_revision: None,
             snapshot: self.snapshot(conversation).await?,
-            template: self.request_template(),
+            template: self.request_template(speed),
             wire_profile: Some(self.client.freeze_wire_profile()),
             threshold: self.compaction_threshold(),
             parallel: self.parallel_tools,
@@ -168,6 +171,7 @@ impl State {
             pending: Vec::new(),
             usage: Usage::default(),
             index: 0,
+            steers: 0,
         };
         // Task state snapshots and receipts must advance in the same order.
         #[cfg(all(feature = "tools", not(target_family = "wasm")))]
