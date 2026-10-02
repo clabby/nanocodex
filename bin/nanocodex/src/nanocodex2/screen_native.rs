@@ -472,9 +472,12 @@ fn native_command() -> super::screen_broadcast::Source {
     std::sync::Arc::new(|| {
         Box::pin(async {
             use std::process::Stdio;
+            // Native Hands may start without Homebrew in PATH, just like the
+            // recorder. Use its packaged/PATH/standard-install discovery.
+            let ffmpeg = super::voice_recording::audio_program("ffmpeg");
             // Resolve AVFoundation's screen device explicitly; camera indices vary
             // with attached cameras. Never fall back to a camera or microphone.
-            let devices = tokio::process::Command::new("ffmpeg")
+            let devices = tokio::process::Command::new(&ffmpeg)
                 .args([
                     "-hide_banner",
                     "-f",
@@ -510,7 +513,7 @@ fn native_command() -> super::screen_broadcast::Source {
             let scale = format!("scale={}:{}", settings.width, settings.height);
             let bitrate = format!("{}k", settings.bitrate_kbps);
             let buffer = format!("{}k", settings.bitrate_kbps / 30);
-            let mut command = std::process::Command::new("ffmpeg");
+            let mut command = std::process::Command::new(ffmpeg);
             command.args([
                 "-hide_banner",
                 "-loglevel",
