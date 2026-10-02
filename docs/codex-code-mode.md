@@ -40,6 +40,31 @@ and review the oracle rather than silently updating expected outputs.
 - Names exposed by `ALL_TOOLS` reflect the admitted catalog. A standalone host
   tool need not be a callable nested tool. No missing name can expand authority.
 
+## Warm discovery and admission
+
+Every Code Mode cell pins its tool catalog and handlers at admission. Dynamic
+providers are enumerated and resolved again for each new admission; a newly
+published catalog or replaced handler is visible to the next cell, not to an
+already-running cell.
+
+Factory-owned `toolMapSource` entries can reuse contract normalization within
+one router when the complete definition-array JSON is unchanged. The public
+array is still read and serialized every time, so array edits and contract
+collisions are not hidden. This cache contains schema/handler-map preparation,
+not Hand authorization, grants, leases, effect decisions or receipts. Provider
+sources are never eligible, including providers that return identical schema
+bytes while replacing their handlers.
+
+`js/managed/test/code-mode-warm-latency-journey.test.mjs` measures a running
+managed thread after `tool_search`, through actual WASM/QuickJS, SQLite, public
+HTTP, reverse Hand WebSocket and native shell calls. It separates first capture,
+subsequent-cell capture and already-admitted warm nested awaits. The external
+model and authentication seed are synthetic; timings are local rather than WAN.
+`js/nanocodex/test/tool-discovery-warm-journey.test.mjs` covers catalog/handler
+replacement, mutable factory arrays, pinned cells and collision rollback through
+actual QuickJS cells and application-defined disk effects. Catalog CPU gains
+must not be presented as established end-to-end or steady nested-call gains.
+
 ## Explicit Nanocodex extensions
 
 Codex installs known functions on a plain tools object. Nanocodex adds a guarded

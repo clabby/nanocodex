@@ -1,4 +1,7 @@
 const TOOL_RESULT = Symbol.for("nanocodex.toolResult");
+// Only factory-owned maps have immutable resolver entries. A provider may change
+// definitions OR handlers without changing object identity, so it is never cached.
+const toolMapSources = new WeakSet();
 export const toolRouterBrand = Symbol.for("nanocodex.toolRouter");
 export const toolRouterRuntime = Symbol("nanocodex.toolRouterRuntime");
 export const toolRuntimeLifecycle = Symbol("nanocodex.toolRuntimeLifecycle");
@@ -23,6 +26,7 @@ const TOOL_SEARCH_DEFINITION = deepFreeze({
 export class ToolRouter {
   #sources = new Map();
   #reset;
+  #mapEntries = new WeakMap();
 
   constructor(sources = []) {
     for (const source of sources) this.addSource(source);
@@ -161,8 +165,21 @@ export class ToolRouter {
     const searches = [];
     const sources = [...this.#sources.values()].sort((a, b) => a.id.localeCompare(b.id));
     for (const source of sources) {
-      const definitions = jsonSnapshot(source.definitions(), `tool source ${source.id} definitions`);
+      // Keep reading and serializing the public array: callers can mutate it.
+      // Reuse only factory-owned contract work when its exact JSON is unchanged.
+      let encoded;
+      try { encoded = JSON.stringify(source.definitions()); }
+      catch (error) { throw new TypeError(`tool source ${source.id} definitions must be JSON-serializable`, { cause: error }); }
+      const cached = toolMapSources.has(source) ? this.#mapEntries.get(source) : undefined;
+      if (cached && cached.encoded === encoded) {
+        entries.push(...cached.entries);
+        continue;
+      }
+      let definitions;
+      try { definitions = JSON.parse(encoded); }
+      catch (error) { throw new TypeError(`tool source ${source.id} definitions must be JSON-serializable`, { cause: error }); }
       if (!Array.isArray(definitions)) throw new TypeError(`tool source ${source.id} definitions() must return an array`);
+      const sourceEntries = [];
       for (const [sourceIndex, raw] of definitions.entries()) {
         if (raw?.type === "tool_search") {
           if (typeof source.search === "function") searches.push({ source, search: source.search });
@@ -176,7 +193,7 @@ export class ToolRouter {
         const tool = source.resolve(definition.name);
         if (!tool) throw new Error(`tool source ${source.id} cannot resolve ${definition.name}`);
         const resolved = normalizeResolvedTool(definition.name, tool, candidate);
-        entries.push({
+        sourceEntries.push({
           definition,
           fingerprint: callableContractFingerprint(exactDefinition),
           normalizedName: normalizeToolName(definition.name),
@@ -185,6 +202,8 @@ export class ToolRouter {
           tool: resolved,
         });
       }
+      entries.push(...sourceEntries);
+      if (toolMapSources.has(source)) this.#mapEntries.set(source, { encoded, entries: sourceEntries });
     }
     entries.sort(compareEntries);
     const selected = new Map();
@@ -294,13 +313,15 @@ export function toolMapSource(id, configuration = {}, options = {}) {
       releaseSession: typeof value.releaseSession === "function" ? value.releaseSession : undefined,
     }));
   }
-  return Object.freeze({
+  const source = Object.freeze({
     id,
     kind: options.kind ?? "cloud",
     mode: options.mode ?? "union",
     definitions: () => definitions,
     resolve: (name) => tools.get(name),
   });
+  toolMapSources.add(source);
+  return source;
 }
 
 export function providerSource(id, provider, options = {}) {
@@ -529,7 +550,9 @@ function normalizeSource(source) {
   }
   const mode = source.mode ?? "union";
   if (mode !== "union" && mode !== "attached-over-cloud") throw new TypeError(`unknown tool source mode: ${mode}`);
-  return Object.freeze({ ...source, id: source.id.trim(), kind: source.kind ?? "union", mode });
+  const normalized = Object.freeze({ ...source, id: source.id.trim(), kind: source.kind ?? "union", mode });
+  if (toolMapSources.has(source)) toolMapSources.add(normalized);
+  return normalized;
 }
 
 function normalizeDefinition(definition, source) {
