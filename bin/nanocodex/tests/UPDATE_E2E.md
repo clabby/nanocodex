@@ -65,6 +65,14 @@ The journeys select a branch and an open PR, then reject closed/changing PR head
 a missing branch and an actual Rust compile failure while preserving the prior
 bundle. Its transcript is `output/update-source-e2e/transcript.log`.
 
+On Apple Silicon, the source fixture also uses the shipped cross-tool wrappers
+in a nested Cargo build, compiling and archiving C and linking a static AArch64
+musl guest init. Install the Rust target with
+`rustup target add aarch64-unknown-linux-musl` and provide `ld.lld` and `llvm-ar`
+on PATH or in their standard Homebrew locations. A failing `brew` fixture checks
+that installed tools work without Homebrew. The runner retains the ELF artifact
+and verifies it with `scripts/check-vm-init.py`.
+
 Do not run that historical minimal fixture as Linux success acceptance: current
 Linux source updates correctly reject it before Cargo. A successful Linux source
 journey must fetch a source revision containing the helper builder, pinned

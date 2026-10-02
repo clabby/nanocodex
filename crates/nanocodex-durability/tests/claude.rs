@@ -533,12 +533,25 @@ impl nanocodex_durability::StateStore for FaultStore {
     }
 }
 
-async fn transaction_recovery(fail_at: Option<usize>, after_commit: bool) -> usize {
+#[derive(Clone, Copy)]
+enum CompactionJourney {
+    Automatic,
+    ContextRecovery,
+    ExhaustionAfterRecovery,
+}
+
+async fn transaction_recovery(
+    fail_at: Option<usize>,
+    after_commit: bool,
+    journey: CompactionJourney,
+) -> usize {
+    let context_exhaustion = !matches!(journey, CompactionJourney::Automatic);
+    let repeated_exhaustion = matches!(journey, CompactionJourney::ExhaustionAfterRecovery);
     use nanocodex_claude_tools::ClaudeTasks;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
-    let (client, requests, server) = server(|_, request| {
+    let (client, requests, server) = server(move |_, request| {
         if request["tool_choice"]["type"] == "none" {
             return sse(
                 text("Retain the synthetic task and committed receipt."),
@@ -552,10 +565,28 @@ async fn transaction_recovery(fail_at: Option<usize>, after_commit: bool) -> usi
             .iter()
             .flat_map(|message| message["content"].as_array().unwrap())
             .any(|block| block["type"] == "tool_result");
-        if has_receipt {
-            sse(text("completed exactly once"), "end_turn", 10)
+        if context_exhaustion
+            && has_receipt
+            && !request["messages"].to_string().contains("signed-exhaustion")
+        {
+            sse(
+                vec![
+                    json!({"type":"thinking","thinking":"partial reasoning","signature":"signed-exhaustion"}),
+                    json!({"type":"server_tool_use","id":"completed-fetch","name":"web_fetch","input":{"url":"https://example.org"}}),
+                    json!({"type":"web_fetch_tool_result","tool_use_id":"completed-fetch","content":{"type":"web_fetch_result","url":"https://example.org","content":"page"}}),
+                    json!({"type":"text","text":"partial answer"}),
+                ],
+                "model_context_window_exceeded",
+                10,
+            )
+        } else if has_receipt {
+            sse(
+                text("completed exactly once"),
+                if repeated_exhaustion { "model_context_window_exceeded" } else { "end_turn" },
+                10,
+            )
         } else {
-            sse(signed_round(), "tool_use", 70_000)
+            sse(signed_round(), "tool_use", if context_exhaustion { 10 } else { 70_000 })
         }
     })
     .await;
@@ -580,6 +611,7 @@ async fn transaction_recovery(fail_at: Option<usize>, after_commit: bool) -> usi
         || PromptRequest::new("complete one synthetic effect").request_id("transaction-request");
     let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
         .auto_compact_window_tokens(100_000)
+        .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
         .tasks(board.clone())
         .tool(tool(), move |_| {
             counter.fetch_add(1, Ordering::SeqCst);
@@ -607,6 +639,13 @@ async fn transaction_recovery(fail_at: Option<usize>, after_commit: bool) -> usi
             first.is_err(),
             "injected write {fail_at:?}/{after_commit} must interrupt the first driver"
         );
+    } else if repeated_exhaustion {
+        assert!(
+            first
+                .unwrap_err()
+                .to_string()
+                .contains("context window exhausted after recovery")
+        );
     } else {
         first.unwrap();
     }
@@ -623,6 +662,7 @@ async fn transaction_recovery(fail_at: Option<usize>, after_commit: bool) -> usi
         .automatic_cache(true)
         .adaptive_thinking()
         .auto_compact_window_tokens(50_000)
+        .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
         .tasks(board.clone());
     if !after_commit || effects.load(Ordering::SeqCst) == 0 {
         builder = builder.tool(tool(), move |_| {
@@ -644,14 +684,26 @@ async fn transaction_recovery(fail_at: Option<usize>, after_commit: bool) -> usi
         .unwrap()
         .build()
         .unwrap();
-    let result = agent
-        .prompt(request())
-        .await
-        .unwrap()
-        .result()
-        .await
-        .unwrap_or_else(|error| panic!("recovery at {fail_at:?}/{after_commit}: {error}"));
-    assert_eq!(result.final_message(), "completed exactly once");
+    let result = match agent.prompt(request()).await {
+        Ok(turn) => turn.result().await,
+        Err(error) => Err(error),
+    };
+    if repeated_exhaustion {
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("context window exhausted after recovery"),
+            "recovery at {fail_at:?}/{after_commit}: {error}"
+        );
+    } else {
+        assert_eq!(
+            result
+                .unwrap_or_else(|error| panic!("recovery at {fail_at:?}/{after_commit}: {error}"))
+                .final_message(),
+            "completed exactly once"
+        );
+    }
     if after_commit || fail_at.is_none() {
         assert_eq!(
             effects.load(Ordering::SeqCst),
@@ -681,18 +733,29 @@ async fn transaction_recovery(fail_at: Option<usize>, after_commit: bool) -> usi
             );
             assert_eq!(request["max_tokens"], 4096);
             assert!(request.get("system").is_none());
-            assert!(request.get("thinking").is_none());
+            if context_exhaustion && request["tool_choice"]["type"] == "none" {
+                assert_eq!(request["thinking"], json!({"type":"disabled"}));
+            } else {
+                assert!(request.get("thinking").is_none());
+            }
             assert!(request.get("cache_control").is_none());
         }
     }
     let provider_calls = requests.lock().unwrap().len();
-    agent
-        .prompt(request())
-        .await
-        .unwrap()
-        .result()
-        .await
-        .unwrap();
+    if context_exhaustion {
+        let log = requests.lock().unwrap();
+        let continuation = log.last().unwrap()["messages"].to_string();
+        assert!(continuation.contains("signed-exhaustion"));
+        assert!(continuation.contains("completed-fetch"));
+        if after_commit || fail_at.is_none() {
+            assert_eq!(log.len(), 4, "committed model responses must not repeat");
+        }
+    }
+    let replay = match agent.prompt(request()).await {
+        Ok(turn) => turn.result().await,
+        Err(error) => Err(error),
+    };
+    assert_eq!(replay.is_err(), repeated_exhaustion);
     assert_eq!(
         requests.lock().unwrap().len(),
         provider_calls,
@@ -708,10 +771,25 @@ async fn transaction_recovery(fail_at: Option<usize>, after_commit: bool) -> usi
 async fn every_sqlite_write_recovers_before_commit_and_after_lost_acknowledgement() {
     // Learn the write boundaries by running the public journey, without coupling
     // fault positions to private state layouts or hard-coded revision numbers.
-    let count = transaction_recovery(None, false).await;
+    let count = transaction_recovery(None, false, CompactionJourney::Automatic).await;
     for after_commit in [false, true] {
         for ordinal in 0..count {
-            transaction_recovery(Some(ordinal), after_commit).await;
+            transaction_recovery(Some(ordinal), after_commit, CompactionJourney::Automatic).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn context_exhaustion_recovers_across_every_sqlite_write() {
+    for journey in [
+        CompactionJourney::ContextRecovery,
+        CompactionJourney::ExhaustionAfterRecovery,
+    ] {
+        let count = transaction_recovery(None, false, journey).await;
+        for after_commit in [false, true] {
+            for ordinal in 0..count {
+                transaction_recovery(Some(ordinal), after_commit, journey).await;
+            }
         }
     }
 }
@@ -1415,8 +1493,7 @@ async fn aborted_compaction_future_does_not_strand_claim_or_context_swap() {
 
 // P2 lifecycle regressions: summary streams are cancellable owned work; manual
 // compaction interrupts an active turn before taking its safe context boundary.
-#[tokio::test]
-async fn stalled_manual_summary_is_cancelled_by_shutdown_and_reopens_safely() {
+async fn cancelled_summary_reopens_safely(context_exhaustion: bool) {
     use axum::body::Body;
     use futures_util::{StreamExt, stream};
     use std::{convert::Infallible, time::Duration};
@@ -1445,7 +1522,12 @@ async fn stalled_manual_summary_is_cancelled_by_shutdown_and_reopens_safely() {
                     }).chain(stream::pending());
                     return ([("content-type", "text/event-stream")], Body::from_stream(chunks)).into_response();
                 }
-                ([("content-type", "text/event-stream")], sse(text("original retained answer"), "end_turn", 10)).into_response()
+                let stop = if context_exhaustion && requests.lock().unwrap().len() == 1 {
+                    "model_context_window_exceeded"
+                } else {
+                    "end_turn"
+                };
+                ([("content-type", "text/event-stream")], sse(text("original retained answer"), stop, 10)).into_response()
             }
         }
     }));
@@ -1459,15 +1541,17 @@ async fn stalled_manual_summary_is_cancelled_by_shutdown_and_reopens_safely() {
         .unwrap()
         .build()
         .unwrap();
-    agent
+    let turn = agent
         .prompt(PromptRequest::new("retain the seed constraint").request_id("summary-seed"))
         .await
-        .unwrap()
-        .result()
-        .await
         .unwrap();
-    let compacting = agent.clone();
-    let summary = tokio::spawn(async move { compacting.compact().await });
+    let summary = if context_exhaustion {
+        tokio::spawn(async move { turn.result().await.map(|_| ()) })
+    } else {
+        turn.result().await.unwrap();
+        let compacting = agent.clone();
+        tokio::spawn(async move { compacting.compact().await.map(|_| ()) })
+    };
     tokio::time::timeout(Duration::from_secs(3), summary_started.notified())
         .await
         .unwrap();
@@ -1525,6 +1609,16 @@ async fn stalled_manual_summary_is_cancelled_by_shutdown_and_reopens_safely() {
     agent.shutdown().await.unwrap();
     drop((agent, events));
     server.abort();
+}
+
+#[tokio::test]
+async fn stalled_manual_summary_is_cancelled_by_shutdown_and_reopens_safely() {
+    cancelled_summary_reopens_safely(false).await;
+}
+
+#[tokio::test]
+async fn context_exhaustion_summary_cancellation_retains_output_across_reopen() {
+    cancelled_summary_reopens_safely(true).await;
 }
 
 #[tokio::test]

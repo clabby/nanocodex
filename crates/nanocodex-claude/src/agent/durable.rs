@@ -51,6 +51,9 @@ pub(super) struct Cursor {
     pub(super) index: u32,
     #[serde(default)]
     pub(super) steers: u32,
+    // The retry budget belongs to the admitted turn, including durable replay.
+    #[serde(default)]
+    pub(super) context_recovery_attempted: bool,
 }
 impl Cursor {
     pub(super) fn effect<'a>(&'a self, state: &'a State, step: &str) -> Option<Effect<'a>> {
@@ -141,6 +144,7 @@ impl State {
         &self,
         conversation: &mut Conversation,
         operation: Option<&str>,
+        speed: Option<crate::Speed>,
     ) -> Result<Cursor> {
         if let (Some(policy), Some(operation)) = (&self.policy, operation)
             && let Some(value) = policy.continuation(operation.to_owned()).await?
@@ -160,7 +164,7 @@ impl State {
         let mut cursor = Cursor {
             instruction_revision: None,
             snapshot: self.snapshot(conversation).await?,
-            template: self.request_template(),
+            template: self.request_template(speed),
             wire_profile: Some(self.client.freeze_wire_profile()),
             threshold: self.compaction_threshold(),
             parallel: self.parallel_tools,
@@ -171,6 +175,7 @@ impl State {
             usage: Usage::default(),
             index: 0,
             steers: 0,
+            context_recovery_attempted: false,
         };
         // Task state snapshots and receipts must advance in the same order.
         #[cfg(all(feature = "tools", not(target_family = "wasm")))]

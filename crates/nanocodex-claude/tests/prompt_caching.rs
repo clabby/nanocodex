@@ -15,6 +15,7 @@ fn request() -> MessagesRequest {
         max_tokens: 128,
         cache_control: Some(CacheControl::ephemeral()),
         output_config: None,
+        speed: None,
         tool_choice: None,
         thinking: None,
         context_management: None,
