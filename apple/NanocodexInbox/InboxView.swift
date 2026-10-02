@@ -34,6 +34,10 @@ private struct ConversationComposerHeightKey: EnvironmentKey {
     static let defaultValue: CGFloat = 0
 }
 
+private struct ConversationHeaderHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
 private struct ConversationNavigationActiveKey: EnvironmentKey {
     static let defaultValue = false
 }
@@ -42,6 +46,11 @@ private extension EnvironmentValues {
     var conversationComposerHeight: CGFloat {
         get { self[ConversationComposerHeightKey.self] }
         set { self[ConversationComposerHeightKey.self] = newValue }
+    }
+
+    var conversationHeaderHeight: CGFloat {
+        get { self[ConversationHeaderHeightKey.self] }
+        set { self[ConversationHeaderHeightKey.self] = newValue }
     }
 
     var conversationNavigationActive: Bool {
@@ -211,6 +220,7 @@ struct InboxView: View {
     @State private var screenViewerRevision = UUID()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var composerFocused = false
+    @State private var conversationTopControlsHeight: CGFloat = 0
     @State private var bottomDockHeight: CGFloat = 0
     @State private var navigationChromeHeight: CGFloat = 0
     @State private var bottomSafeInset: CGFloat = 0
@@ -231,7 +241,7 @@ struct InboxView: View {
                         GeneratedAppsView(model: model, selection: $selectedGeneratedApp, create: { showCreateApp = true }, openChat: { selectMainSurface(.chat); model.openThread() })
                     } else { inbox }
                 }
-                    .environment(\.conversationComposerHeight, bottomDockHeight + navigationChromeHeight)
+                    .environment(\.conversationComposerHeight, bottomDockHeight)
                     #if os(iOS)
                     .navigationTitle("Conversations")
                     .navigationBarTitleDisplayMode(.inline)
@@ -261,17 +271,14 @@ struct InboxView: View {
             // Chat renders behind both glass surfaces and reserves its tail using
             // the native transcript's content inset.
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if model.connected && (showsNewThreadComposer || showScreens) {
+                if model.connected && !hasConversationPanelChrome {
                     Color.clear.frame(height: navigationChromeHeight)
                 }
             }
-            if model.connected {
+            if model.connected && !hasConversationPanelChrome {
                 VStack(spacing: 0) {
                     if showsNewThreadComposer {
-                        NewThreadComposer(model: model, focused: $newThreadInputFocused) {
-                            if model.startNewThreadFromDraft() { selectMainSurface(.chat) }
-                        }
-                        .frame(maxWidth: InboxChrome.maximumWidth).frame(maxWidth: .infinity)
+                        newThreadComposer
                     }
                     mainNavigation
                 }
@@ -385,13 +392,29 @@ struct InboxView: View {
 
     @ViewBuilder
     private var bottomDock: some View {
-        if !showScreens && !showsNewThreadComposer {
-            conversationBottomControls
+        if hasConversationPanelChrome {
+            // Keep both pieces of chat chrome in the moving conversation panel
+            // so the drawer's interactive offset and spring apply to them together.
+            VStack(spacing: 0) {
+                if showsNewThreadComposer { newThreadComposer }
+                else { conversationBottomControls }
+                mainNavigation
+            }
             .frame(maxWidth: InboxChrome.maximumWidth)
             .frame(maxWidth: .infinity)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomDockHeight = $0 }
-            .padding(.bottom, navigationChromeHeight)
         }
+    }
+
+    private var hasConversationPanelChrome: Bool {
+        mainSurface == .chat && !showScheduledJobs && !showConnectors && !showScreens
+    }
+
+    private var newThreadComposer: some View {
+        NewThreadComposer(model: model, focused: $newThreadInputFocused) {
+            if model.startNewThreadFromDraft() { selectMainSurface(.chat) }
+        }
+        .frame(maxWidth: InboxChrome.maximumWidth).frame(maxWidth: .infinity)
     }
 
     private var showsNewThreadComposer: Bool {
@@ -515,6 +538,7 @@ struct InboxView: View {
                             setConversationsVisible(false)
                         }, close: { setConversationsVisible(false) }, create: createAgent,
                         settings: { showSettings = true })
+                        .padding(.top, safeGeometry.safeAreaInsets.top)
                         .frame(width: width - safeGeometry.safeAreaInsets.leading, height: geometry.size.height)
                         .padding(.leading, safeGeometry.safeAreaInsets.leading)
                         .padding(.bottom, safeGeometry.safeAreaInsets.bottom)
@@ -528,7 +552,7 @@ struct InboxView: View {
                     }
                     // Keep the transcript and editor mounted. Opening navigation must
                     // not rebuild history, lose a draft, or start preview streams.
-                    inboxContent
+                    inboxContent(topInset: safeGeometry.safeAreaInsets.top)
                         .environment(\.conversationNavigationActive, showConversations || drawerTranslation != 0)
                         // Animate the outer drawer translation only. Inherited spring
                         // transactions must not animate transcript layout or restoration.
@@ -598,7 +622,7 @@ struct InboxView: View {
                         if drawerTranslation != 0 { setConversationsVisible(showConversations) }
                     }
             }
-            .ignoresSafeArea(.container, edges: .horizontal)
+            .ignoresSafeArea(.container, edges: [.horizontal, .top])
         }
     }
     private func setConversationsVisible(_ visible: Bool) {
@@ -608,11 +632,28 @@ struct InboxView: View {
             showConversations = visible
         }
     }
-    private var inboxContent: some View {
-        VStack(spacing: 0) {
-            // Scrolled content can retain offscreen hit regions at large text
-            // sizes. Keep navigation above those regions as well as visually.
-            conversationHeader.zIndex(1)
+    private func inboxContent(topInset: CGFloat) -> some View {
+        ZStack(alignment: .top) {
+            Group {
+                    if let identity = model.focusedConversationIdentity {
+                        ConversationView(model: model, identity: identity, readingPositions: readingPositions).id(identity)
+                    } else { emptyState.frame(maxWidth: .infinity, maxHeight: .infinity) }
+            }
+            .environment(\.conversationHeaderHeight, conversationTopControlsHeight)
+            .frame(minHeight: 0, maxHeight: screenExpanded && screenThreads.contains(model.focusedConversationIdentity ?? "") ? 0 : .infinity)
+            .clipped()
+            .accessibilityHidden(screenExpanded && screenThreads.contains(model.focusedConversationIdentity ?? ""))
+            .allowsHitTesting(!(screenExpanded && screenThreads.contains(model.focusedConversationIdentity ?? "")))
+            .overlay(alignment: .topTrailing) {
+                // A delayed reconnect must not push the transcript down while
+                // the reader is moving through history.
+                ConnectionStatusView(status: model.threadLoading ? "" : model.connection, retry: { model.retryConnection() }, signIn: { showSettings = true })
+                    .padding(.horizontal, 16).padding(.top, conversationTopControlsHeight)
+            }
+            // The transcript extends behind the status area and floating header.
+            // Its native content inset leaves the first row below these controls.
+            VStack(spacing: 0) {
+                conversationHeader
                 if let screen = model.latestScreenOutput,
                    !screenThreads.contains(model.focusedConversationIdentity ?? "") {
                     ChatLatestScreen(output: screen, onWatchLive: model.remoteService == nil ? nil : {
@@ -623,38 +664,25 @@ struct InboxView: View {
                         .frame(maxWidth: 620)
                         .padding(.horizontal, 12).padding(.bottom, 6)
                 }
-            if let card = model.focused, let identity = model.focusedConversationIdentity,
-               screenThreads.contains(identity), let service = model.remoteService {
-                RemoteThreadScreen(service: service,
-                    selection: Binding(get: { model.screenSelection(agentID: card.id) },
-                                       set: { model.selectScreen($0, agentID: card.id) }),
-                    expanded: $screenExpanded,
-                    onClose: { screenThreads.remove(identity); screenExpanded = false },
-                    onControls: { controlsScreen = $0; composerFocused = false; showScreens = true })
-                    .id(model.screenScope + identity + screenViewerRevision.uuidString)
-                    .frame(height: screenExpanded ? nil : 220)
-                    .frame(maxHeight: screenExpanded ? .infinity : nil)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, screenExpanded ? bottomDockHeight + 8 : 8)
-                    .zIndex(1)
+                if let card = model.focused, let identity = model.focusedConversationIdentity,
+                   screenThreads.contains(identity), let service = model.remoteService {
+                    RemoteThreadScreen(service: service,
+                        selection: Binding(get: { model.screenSelection(agentID: card.id) },
+                                           set: { model.selectScreen($0, agentID: card.id) }),
+                        expanded: $screenExpanded,
+                        onClose: { screenThreads.remove(identity); screenExpanded = false },
+                        onControls: { controlsScreen = $0; composerFocused = false; showScreens = true })
+                        .id(model.screenScope + identity + screenViewerRevision.uuidString)
+                        .frame(height: screenExpanded ? nil : 220)
+                        .frame(maxHeight: screenExpanded ? .infinity : nil)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, screenExpanded ? bottomDockHeight + 8 : 8)
+                        .zIndex(1)
+                }
             }
-            Group {
-                    if let identity = model.focusedConversationIdentity {
-                        ConversationView(model: model, identity: identity, readingPositions: readingPositions).id(identity)
-                    } else { emptyState.frame(maxWidth: .infinity, maxHeight: .infinity) }
-            }
-            // Floating transcript controls must not push the header above the
-            // viewport when the landscape keyboard leaves very little height.
-            .frame(minHeight: 0, maxHeight: screenExpanded && screenThreads.contains(model.focusedConversationIdentity ?? "") ? 0 : .infinity)
-            .clipped()
-            .accessibilityHidden(screenExpanded && screenThreads.contains(model.focusedConversationIdentity ?? ""))
-            .allowsHitTesting(!(screenExpanded && screenThreads.contains(model.focusedConversationIdentity ?? "")))
-            .overlay(alignment: .topTrailing) {
-                // A delayed reconnect must not push the transcript down while
-                // the reader is moving through history.
-                ConnectionStatusView(status: model.threadLoading ? "" : model.connection, retry: { model.retryConnection() }, signIn: { showSettings = true })
-                    .padding(.horizontal, 16)
-            }
+            .padding(.top, topInset)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { conversationTopControlsHeight = $0 }
+            .zIndex(1)
         }
     }
 
@@ -698,9 +726,11 @@ struct InboxView: View {
                             .font(.subheadline.weight(.semibold)).lineLimit(1)
                     }
                 }
+                .padding(.horizontal, 12)
                 .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .contentShape(Rectangle())
             }
+            .modifier(InboxHeaderGlass())
             .accessibilityLabel(card?.title ?? "New conversation")
             .accessibilityValue(card?.status ?? "")
             .accessibilityAddTraits(.isSelected)
@@ -873,7 +903,7 @@ private struct InboxHeaderGlass: ViewModifier {
         if reduceTransparency {
             content.background(Ink.card, in: RoundedRectangle(cornerRadius: 24))
         } else if #available(iOS 26.0, *) {
-            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24))
+            content.glassEffect(.clear, in: RoundedRectangle(cornerRadius: 24))
         } else {
             content.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
         }
@@ -2508,6 +2538,7 @@ private struct ConversationContentView: View {
         var previous: String?
         var next: String?
     }
+    @Environment(\.conversationHeaderHeight) private var headerHeight
     @Environment(\.conversationComposerHeight) private var composerHeight
     @State private var userNavigationTargets = UserNavigationTargets()
     @State private var selectedUserMessage: String?
@@ -2938,6 +2969,7 @@ private struct ConversationContentView: View {
             NativeConversationTranscript(
                 rows: nativeRows(in: viewport), proxy: scroll,
                 followsLatest: followsLatest && pendingReadingRestore == nil && !model.needsLatestHistory && !navigationActive,
+                topInset: headerHeight,
                 bottomInset: composerHeight + 52,
                 onFrames: { frames in
                     // Native frames contain only realized cells in viewport coordinates.
