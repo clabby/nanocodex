@@ -38,8 +38,10 @@ export type SpawnOptions = Readonly<{
   task: string;
   thinking?: Thinking | undefined;
   outputSchema: JsonSchema;
-} & ({ harness?: "codex" | undefined; model?: CodexModel | undefined }
+} & ({ harness?: undefined; model?: CodexModel | ClaudeModel | undefined }
+  | { harness: "codex"; model?: CodexModel | undefined }
   | { harness: "claude"; model?: ClaudeModel | undefined })>;
+/** Batch children inherit their parent's family, model and thinking. */
 export type BatchSpawnOptions = Readonly<{
   role: string;
   task: string;
