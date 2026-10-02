@@ -1,16 +1,19 @@
 // Run with: node bin/nanocodex/tests/update_source_e2e.mjs target/debug/nanocodex
-// Git and Cargo are real; only the GitHub URL and PR metadata point at a local fixture.
+// Git, Cargo and native build tools are real; GitHub/PR metadata are local and brew is unavailable.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const binary = resolve(process.argv[2] ?? 'target/debug/nanocodex');
 const fixture = mkdtempSync(join(tmpdir(), 'nanocodex-source-e2e-'));
 const output = resolve('output/update-source-e2e');
 mkdirSync(output, { recursive: true });
 const transcript = [];
+const crossInit = process.platform === 'darwin' && process.arch === 'arm64';
+const init = join(output, 'krun-init-blob-fixture/out/init');
 
 function run(program, args, options = {}) {
   const started = performance.now();
@@ -54,12 +57,48 @@ fn main() {
     let mut log = std::fs::OpenOptions::new().create(true).append(true)
         .open(std::env::var("FIXTURE_BUILD_LOG").unwrap()).unwrap();
     writeln!(log, "{} {}", std::env::var("CARGO_PKG_NAME").unwrap(), std::env::var("STABLE_GIT_COMMIT").unwrap()).unwrap();
+    ${!binary && crossInit ? `
+    // Match libkrun's nested Cargo build of a static guest init.
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let target = out.join("init-target");
+    let status = std::process::Command::new(std::env::var_os("CARGO").unwrap())
+        .args(["build", "--locked", "--offline", "--release", "--target", "aarch64-unknown-linux-musl",
+            "--manifest-path", "../guest/Cargo.toml", "--target-dir"])
+        .arg(&target).env_remove("CARGO_ENCODED_RUSTFLAGS").status().unwrap();
+    assert!(status.success(), "static guest build failed");
+    std::fs::copy(target.join("aarch64-unknown-linux-musl/release/guest-init"),
+        std::env::var_os("FIXTURE_INIT_PATH").unwrap()).unwrap();
+    ` : ''}
 }
 `;
   mkdirSync(join(source, 'shared/src'), { recursive: true });
   writeFileSync(join(source, 'shared/Cargo.toml'), '[package]\nname = "shared"\nversion = "0.1.0"\nedition = "2024"\n[features]\ncli = []\nhand = []\n');
   writeFileSync(join(source, 'shared/build.rs'), buildScript());
   writeFileSync(join(source, 'shared/src/lib.rs'), 'pub fn features() -> (bool, bool) { (cfg!(feature = "cli"), cfg!(feature = "hand")) }\n');
+  if (crossInit) {
+    for (const file of ['.cargo/config.toml', 'scripts/aarch64-unknown-linux-musl-linker', 'scripts/aarch64-unknown-linux-musl-ar']) {
+      mkdirSync(join(source, file, '..'), { recursive: true });
+      copyFileSync(new URL(`../../../${file}`, import.meta.url), join(source, file));
+    }
+    mkdirSync(join(source, 'guest/src'), { recursive: true });
+    mkdirSync(join(init, '..'), { recursive: true });
+    writeFileSync(join(source, 'guest/Cargo.toml'), '[workspace]\n[package]\nname = "guest-init"\nversion = "0.1.0"\nedition = "2024"\n');
+    writeFileSync(join(source, 'guest/build.rs'), `fn main() {
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let object = out.join("guest.o");
+    let archive = out.join("libguest.a");
+    assert!(std::process::Command::new(std::env::var_os("CC_aarch64_unknown_linux_musl").unwrap())
+        .args(["-c", "guest.c", "-o"]).arg(&object).status().unwrap().success());
+    assert!(std::process::Command::new(std::env::var_os("AR_aarch64_unknown_linux_musl").unwrap())
+        .arg("crs").arg(&archive).arg(&object).status().unwrap().success());
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=guest");
+}
+`);
+    writeFileSync(join(source, 'guest/guest.c'), 'int guest_value(void) { return 42; }\n');
+    writeFileSync(join(source, 'guest/src/main.rs'), 'unsafe extern "C" { fn guest_value() -> i32; }\nfn main() { println!("{}", unsafe { guest_value() }); }\n');
+    run('cargo', ['generate-lockfile', '--offline', '--manifest-path', 'guest/Cargo.toml'], { cwd: source });
+  }
   for (const [dir, packageName, binaryName] of [
     ['cli', 'nanocodex-bin', 'nanocodex'],
     ['hand', 'nanocodex2-bin', 'nanocodex2'],
@@ -89,6 +128,10 @@ fn main() {
 
   const gh = join(tools, 'gh');
   writeFileSync(gh, '#!/bin/sh\nprintf \'{"headRefOid":"%s","state":"%s"}\\n\' "$FIXTURE_PR_SHA" "$FIXTURE_PR_STATE"\n', { mode: 0o755 });
+  if (crossInit) {
+    // Fail even on hosts with brew installed: the build must use installed tools directly.
+    writeFileSync(join(tools, 'brew'), '#!/bin/sh\necho "brew is unavailable in this fixture" >&2\nexit 1\n', { mode: 0o755 });
+  }
   const env = {
     HOME: home,
     CARGO_HOME: process.env.CARGO_HOME ?? join(process.env.HOME, '.cargo'),
@@ -101,6 +144,7 @@ fn main() {
     FIXTURE_PR_SHA: sha,
     FIXTURE_PR_STATE: 'OPEN',
     FIXTURE_BUILD_LOG: buildLog,
+    FIXTURE_INIT_PATH: init,
   };
   const update = (args, changes = {}) => run(binary, ['update', ...args], { env: { ...env, ...changes }, success: false });
 
@@ -111,6 +155,11 @@ fn main() {
   const installedVersion = run(join(store, 'versions', `branch-${sha}`, 'nanocodex'), ['--version']).stdout;
   assert.match(installedVersion, new RegExp(sha));
   assert.match(installedVersion, /Shared features: \(true, true\)/);
+  if (crossInit) {
+    assert.equal(readFileSync(init).readUInt16LE(18), 183, 'guest init must be AArch64');
+    run('python3', [fileURLToPath(new URL('../../../scripts/check-vm-init.py', import.meta.url)), output]);
+    transcript.push('expected: with brew unavailable, nested Cargo builds C, archives it and links a static AArch64 musl init using shipped wrappers; observed: static ELF verified');
+  }
   const firstBuild = readFileSync(buildLog, 'utf8');
   assert.equal(firstBuild.trim().split('\n').length, 3, firstBuild);
 
