@@ -40,10 +40,10 @@ mod screen_broadcast;
 #[cfg(target_os = "linux")]
 mod screen_gamepad;
 #[cfg(target_os = "linux")]
+mod screen_helpers;
+#[cfg(target_os = "linux")]
 mod screen_host;
 mod screen_ice;
-#[cfg(target_os = "linux")]
-mod screen_helpers;
 #[cfg(target_os = "linux")]
 mod screen_linux_session;
 #[cfg(target_os = "macos")]

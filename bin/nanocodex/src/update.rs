@@ -796,6 +796,9 @@ async fn activate_coordinated(
             false
         }
     };
+    if installed && !store.is_cached_bundle(key, false)? {
+        bail!("update Hand binary failed checksum verification");
+    }
     #[cfg(target_os = "linux")]
     if installed {
         crate::linux_hand_service::validate_candidate(&companion).await?;
