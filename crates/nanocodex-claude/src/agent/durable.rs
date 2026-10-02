@@ -49,6 +49,8 @@ pub(super) struct Cursor {
     pub(super) pending: Vec<Message>,
     pub(super) usage: Usage,
     pub(super) index: u32,
+    #[serde(default)]
+    pub(super) steers: u32,
 }
 impl Cursor {
     pub(super) fn effect<'a>(&'a self, state: &'a State, step: &str) -> Option<Effect<'a>> {
@@ -168,6 +170,7 @@ impl State {
             pending: Vec::new(),
             usage: Usage::default(),
             index: 0,
+            steers: 0,
         };
         // Task state snapshots and receipts must advance in the same order.
         #[cfg(all(feature = "tools", not(target_family = "wasm")))]

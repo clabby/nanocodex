@@ -2146,13 +2146,13 @@ impl State {
 
     async fn consume_steering(
         &self,
-        key: BackendTurnKey,
+        request: &BackendPrompt,
         cursor: &mut Cursor,
         pending: &mut Vec<Message>,
     ) -> Result<bool> {
         let prompts = {
             let mut turns = self.steering.lock().await;
-            let Some(turn) = turns.get_mut(&key) else {
+            let Some(turn) = turns.get_mut(&request.key) else {
                 return Ok(false);
             };
             let prompts = turn.pending.drain(..).collect::<Vec<_>>();
@@ -2169,6 +2169,12 @@ impl State {
         let consumed = !prompts.is_empty();
         for prompt in prompts {
             pending.extend(prompt_messages(&prompt)?);
+            cursor.steers = cursor.steers.saturating_add(1);
+            self.emit(
+                &request.events,
+                AgentEventKind::RunSteered,
+                json!({"steer_index": cursor.steers, "instruction_bytes": prompt.text_bytes()}),
+            );
         }
         Ok(consumed)
     }
@@ -2304,7 +2310,7 @@ impl State {
         let mut previous_message_id = conversation.previous_message_id.clone();
         for index in cursor.index..u32::MAX {
             if self
-                .consume_steering(request.key, &mut cursor, &mut pending)
+                .consume_steering(request, &mut cursor, &mut pending)
                 .await?
             {
                 cursor.pending = pending.clone();
@@ -2781,7 +2787,7 @@ impl State {
                 }
             };
             if more_instructions {
-                self.consume_steering(request.key, &mut cursor, &mut pending)
+                self.consume_steering(request, &mut cursor, &mut pending)
                     .await?;
                 conversation.messages = pending.clone();
                 conversation.previous_message_id = previous_message_id.clone();
