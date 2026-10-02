@@ -1186,6 +1186,96 @@ async fn queued_ephemeral_cancellation_retires_without_aborting_active_model_or_
 }
 
 #[tokio::test]
+async fn fast_mode_applies_per_accepted_turn_on_supported_models() {
+    use tokio::sync::Semaphore;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    // Records each request's speed field and whether the fast-mode beta was sent.
+    let received = Arc::new(Mutex::new(Vec::<(Option<String>, bool)>::new()));
+    let first_response = Arc::new(Semaphore::new(0));
+    let (requests, gate) = (received.clone(), first_response.clone());
+    let app = Router::new().route(
+        "/v1/messages",
+        post(
+            move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                let (requests, gate) = (requests.clone(), gate.clone());
+                async move {
+                    let beta = headers
+                        .get("anthropic-beta")
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| {
+                            value.split(',').any(|beta| beta == "fast-mode-2026-02-01")
+                        });
+                    let speed = body["speed"].as_str().map(str::to_owned);
+                    let index = {
+                        let mut requests = requests.lock().unwrap();
+                        requests.push((speed, beta));
+                        requests.len()
+                    };
+                    if index == 1 {
+                        drop(gate.acquire().await.unwrap());
+                    }
+                    let text = json!({"type":"text","text":"ok"});
+                    (
+                        [("content-type", "text/event-stream")],
+                        stream(vec![text], "end_turn"),
+                    )
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let agent = |model: &str| {
+        let client = ClaudeClient::new(
+            reqwest::Client::new(),
+            format!("http://{address}/v1/messages"),
+            "synthetic",
+        );
+        Nanocodex::builder(Claude::new(client, model))
+            .fast_mode(true)
+            .build()
+            .unwrap()
+            .0
+    };
+
+    let opus = agent("claude-opus-5-5");
+    let active = opus.prompt("first").await.unwrap();
+    while received.lock().unwrap().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    // Accepted behind the active turn, so it keeps fast mode after the toggle.
+    let queued = opus.prompt("queued").await.unwrap();
+    opus.set_fast_mode(false).await.unwrap();
+    first_response.add_permits(1);
+    active.result().await.unwrap();
+    queued.result().await.unwrap();
+    opus.prompt("standard")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+
+    let sonnet = agent("claude-sonnet-4-6");
+    sonnet
+        .prompt("unsupported")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+
+    let fast = (Some("fast".to_owned()), true);
+    let standard = (None, false);
+    assert_eq!(
+        *received.lock().unwrap(),
+        [fast.clone(), fast, standard.clone(), standard]
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn response_usage_arrives_before_tool_completion_and_excludes_summary() {
     use nanocodex_agent::events::{AgentEventData, ModelEvent};
     use std::time::Duration;
