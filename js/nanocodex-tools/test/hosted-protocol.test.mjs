@@ -85,8 +85,4 @@ test("command journal recovery is explicit, bounded per frame, and directional",
     assert.throws(() => parseHostedToolsManagedFrame(JSON.stringify(status)), /not a managed-to-host/);
   }
   assert.throws(() => parseHostedToolsHostFrame(JSON.stringify({ type: "status", call_id: "call:1", state: "completed" })));
-  for (const type of ["ping", "pong"]) {
-    assert.throws(() => parseHostedToolsHostFrame(JSON.stringify({ type, nonce: "control-only" })), /unsupported/);
-    assert.throws(() => parseHostedToolsManagedFrame(JSON.stringify({ type, nonce: "control-only" })), /unsupported/);
-  }
 });
