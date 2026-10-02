@@ -593,6 +593,9 @@ async fn accept(listener: &TcpListener) -> WebSocketStream<TcpStream> {
                 "x-nanocodex-request-id",
                 "private-response-marker".parse().unwrap(),
             );
+            response
+                .headers_mut()
+                .insert("x-nanocodex-tools-diagnostics", "v1".parse().unwrap());
             Ok(response)
         },
     )

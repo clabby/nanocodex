@@ -56,7 +56,12 @@ export class HostedToolsBroker extends HostedToolsBrokerCore {
       connectGrantId,
       leasedAttachment,
     );
-    return new Response(null, { status: 101, webSocket: client });
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      // Rust attachments select diagnostic wire extensions before their catalog.
+      headers: { "x-nanocodex-tools-diagnostics": "v1" },
+    });
   }
 }
 

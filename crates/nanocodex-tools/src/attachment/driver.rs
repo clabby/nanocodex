@@ -38,6 +38,8 @@ const STABLE_CONNECTION: Duration = Duration::from_secs(30);
 const STABLE_CONNECTION: Duration = Duration::from_millis(250);
 
 const HEARTBEAT_TIMEOUT_REASON: &str = "attachment heartbeat timed out";
+const DIAGNOSTICS_HEADER: &str = "x-nanocodex-tools-diagnostics";
+const DIAGNOSTICS_VERSION: &str = "v1";
 
 pub(crate) struct Config {
     pub(crate) endpoint: Url,
@@ -118,15 +120,22 @@ pub(crate) async fn run(
                 upgraded
             }.instrument(connection_span.clone())) => connected,
         };
-        let socket = match connected {
+        let (socket, diagnostics) = match connected {
             Ok(Ok((socket, response))) => {
+                // Negotiate before sending the immutable catalog. Older strict
+                // brokers reject all diagnostic extensions, including receipts.
+                let diagnostics = response
+                    .headers()
+                    .get(DIAGNOSTICS_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    == Some(DIAGNOSTICS_VERSION);
                 tracing::info!(target: "nanocodex_tools::attachment",
                     stage = "attachment.websocket_connected",
                     duration_ms = connect_started.elapsed().as_secs_f64() * 1000.0,
-                    runtime_id = runtime_id.as_str(), client_connection_id = connection_id.as_str(), attempt,
+                    runtime_id = runtime_id.as_str(), client_connection_id = connection_id.as_str(), attempt, diagnostics,
                     request_id = response.headers().get("x-nanocodex-request-id").and_then(|v| v.to_str().ok()).and_then(safe_uuid).unwrap_or_default(),
                     "attachment WebSocket connected");
-                socket
+                (socket, diagnostics)
             }
             Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
                 if matches!(response.status().as_u16(), 401 | 403) =>
@@ -154,6 +163,7 @@ pub(crate) async fn run(
                 config: &config,
                 runtime_id: &runtime_id,
                 connection_id: &connection_id,
+                diagnostics,
                 runtime: &runtime,
                 events: &events,
                 status: &status,
@@ -645,6 +655,7 @@ struct ConnectionContext<'a> {
     config: &'a Config,
     runtime_id: &'a str,
     connection_id: &'a str,
+    diagnostics: bool,
     runtime: &'a Arc<PreparedToolRuntime>,
     events: &'a mpsc::Sender<AttachmentEvent>,
     status: &'a watch::Sender<AttachmentStatus>,
@@ -663,6 +674,7 @@ where
         config,
         runtime_id,
         connection_id,
+        diagnostics,
         runtime,
         events,
         status,
@@ -674,8 +686,8 @@ where
         &ExecutorFrame::Catalog {
             capabilities: ["turn_metadata"],
             runtime_id,
-            diagnostics: Some(true),
-            connection_id: Some(connection_id),
+            diagnostics: diagnostics.then_some(true),
+            connection_id: diagnostics.then_some(connection_id),
             tools: &config.tools,
             machines: config
                 .metadata
@@ -748,7 +760,7 @@ where
                 shutdown_calls(active).await;
                 for (call_id, call) in in_flight.drain() {
                     let outcome = ambiguous("attachment shut down during execution");
-                    if let Err(error) = send_result(&mut socket, &call_id, &outcome, &call.timing).await {
+                    if let Err(error) = send_result(&mut socket, &call_id, &outcome, &call.timing, diagnostics).await {
                         return ConnectionEnd::DetachFailed(error);
                     }
                     receipts.insert(call_id);
@@ -772,12 +784,12 @@ where
                 let sent = match completion {
                     Completion::Diagnostic { call_id, timing } => {
                         if !in_flight.contains_key(&call_id) { continue; }
-                        send_diagnostics(&mut socket, &call_id, &timing, false).await
+                        send_diagnostics(&mut socket, &call_id, &timing, false, diagnostics).await
                     }
                     Completion::Result { call_id, outcome, timing } => {
                         if in_flight.remove(&call_id).is_none() { continue; }
                         receipts.insert(call_id.clone());
-                        send_result(&mut socket, &call_id, &outcome, &timing).await
+                        send_result(&mut socket, &call_id, &outcome, &timing, diagnostics).await
                     }
                 };
                 if let Err(error) = sent {
@@ -802,7 +814,7 @@ where
                             transport_call_id = call_id.as_str(), session_id = session_id.as_str(),
                             host_turn_id = turn_id.as_deref().filter(|id| id.len() <= 256 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))).unwrap_or(""));
                         timing.lock().unwrap().span = phase_span;
-                        if let Err(error) = send_diagnostics(&mut socket, &call_id, &timing, false).await { break ConnectionEnd::Failed(error); }
+                        if let Err(error) = send_diagnostics(&mut socket, &call_id, &timing, false, diagnostics).await { break ConnectionEnd::Failed(error); }
                         let call_events = begin_call_events(
                             events,
                             call_id.clone().into(),
@@ -818,7 +830,7 @@ where
                         } else { None };
                         if let Some(reason) = reason {
                             call_events.complete(events, AttachmentCallOutcome::Unavailable);
-                            if let Err(error) = send_result(&mut socket, &call_id, &unavailable(reason), &timing).await { break ConnectionEnd::Failed(error); }
+                            if let Err(error) = send_result(&mut socket, &call_id, &unavailable(reason), &timing, diagnostics).await { break ConnectionEnd::Failed(error); }
                             receipts.insert(call_id.into());
                             continue;
                         }
@@ -838,7 +850,7 @@ where
                             let call = in_flight.remove(call_id.as_str()).unwrap();
                             receipts.insert(call_id.clone().into());
                             let outcome = ambiguous("tool execution was cancelled after dispatch");
-                            if let Err(error) = send_result(&mut socket, &call_id, &outcome, &call.timing).await { break ConnectionEnd::Failed(error); }
+                            if let Err(error) = send_result(&mut socket, &call_id, &outcome, &call.timing, diagnostics).await { break ConnectionEnd::Failed(error); }
                         }
                     }
                     RemoteFrame::Ack { call_id } => {
@@ -1022,6 +1034,7 @@ async fn send_diagnostics<S>(
     call_id: &str,
     clock: &Arc<Mutex<CallClock>>,
     prepared: bool,
+    diagnostics: bool,
 ) -> Result<(), AttachmentError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1056,15 +1069,17 @@ where
         ) {
             span.in_scope(|| tracing::info!(target: "nanocodex_tools::attachment", stage = stage.name(), elapsed_ms, "attachment execution phase"));
         }
-        send(
-            socket,
-            &ExecutorFrame::Diagnostic {
-                call_id,
-                stage,
-                elapsed_ms,
-            },
-        )
-        .await?;
+        if diagnostics {
+            send(
+                socket,
+                &ExecutorFrame::Diagnostic {
+                    call_id,
+                    stage,
+                    elapsed_ms,
+                },
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -1074,11 +1089,23 @@ async fn send_result<S>(
     call_id: &str,
     outcome: &Value,
     clock: &Arc<Mutex<CallClock>>,
+    diagnostics: bool,
 ) -> Result<(), AttachmentError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    send_diagnostics(socket, call_id, clock, true).await?;
+    send_diagnostics(socket, call_id, clock, true, diagnostics).await?;
+    if !diagnostics {
+        return send(
+            socket,
+            &ExecutorFrame::Result {
+                call_id,
+                outcome,
+                timing: None,
+            },
+        )
+        .await;
+    }
     let encode_started = Instant::now();
     let mut timing = clock.lock().unwrap().snapshot(encode_started);
     // Encode the business receipt once, then append small timing metadata. Its

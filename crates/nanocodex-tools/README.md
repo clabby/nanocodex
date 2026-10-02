@@ -194,6 +194,12 @@ longer processes return retained session IDs for later polling. A deadline
 after execution starts reports an uncertain outcome rather than resending the
 command.
 
+Rust attachments enable catalog diagnostics, execution progress and receipt
+timing only when the WebSocket upgrade response advertises
+`x-nanocodex-tools-diagnostics: v1`. Missing or unknown versions preserve the
+original strict wire contract and local tracing. This negotiation occurs before
+each connection's catalog; protocol rejection never downgrades or replays a call.
+
 `AttachmentStatus::Ready` means the remote acknowledged the catalog. Tool
 responsiveness is established by call results. Transport failures reconnect
 with backoff while the same runtime retains its processes; old connection
