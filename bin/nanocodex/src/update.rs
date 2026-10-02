@@ -199,7 +199,7 @@ pub(crate) struct Update {
     #[arg(long, hide = true, conflicts_with_all = ["version", "branch", "pr", "path", "force"])]
     background: bool,
 
-    /// Restart the running Hand and its VM host to activate this update now.
+    /// Restart the independently OS-owned Hand to activate this update now.
     #[arg(long, conflicts_with = "background")]
     restart_hand: bool,
 }
