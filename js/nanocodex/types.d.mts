@@ -1,3 +1,4 @@
+import type { Options as ClaudeOptions } from './runtime/claude.mjs';
 export type Thinking = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ReasoningMode = "standard" | "pro";
 export type Model = "gpt-6.1-sol" | "gpt-6-luna" | "gpt-6-astra" | "@cf/zai-org/glm-5.3" | "kimi-k3" | "mimo-v2.6-pro";
@@ -36,6 +37,9 @@ export type CompactionReceipt = Readonly<{
 }>;
 
 export type AgentOptions = {
+  harness?: "codex" | undefined;
+  /** Explicit alternate-family credentials and native tools; children remain in the shared task tree. */
+  harnesses?: Readonly<{ claude?: ClaudeOptions }> | undefined;
   /** Optional host barrier. Rejection/timeout stops compaction and retains context.
    * Durable execution replays completed receipts; hosts must deduplicate by boundaryId
    * for interruption between host commit and receipt persistence. Disabled by default.

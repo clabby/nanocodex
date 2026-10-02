@@ -6,10 +6,13 @@
 #[cfg_attr(docsrs, doc(cfg(feature = "openai")))]
 pub use nanocodex_agent::NanocodexBuilder;
 pub use nanocodex_agent::{
-    AgentEvents, AgentSessionContext, CostStatus, EstimatedUsdCost, ExecutionPolicyDisposition,
-    Nanocodex, NanocodexError, PromptRequest, PromptRoute, ReportedTurnUsage, ServiceTier, Turn,
-    TurnControl, TurnResult, TurnUsage, UsdAmount,
+    AgentEvents, AgentSessionContext, ClaudeModel, CostStatus, EstimatedUsdCost,
+    ExecutionPolicyDisposition, HarnessFamily, HarnessModel, Nanocodex, NanocodexError,
+    PromptRequest, PromptRoute, ReportedTurnUsage, ServiceTier, Turn, TurnControl, TurnResult,
+    TurnUsage, UsdAmount,
 };
+mod harness;
+pub use harness::{Harness, HarnessBuilder, HarnessRequest};
 #[cfg(feature = "claude")]
 #[cfg_attr(docsrs, doc(cfg(feature = "claude")))]
 pub use nanocodex_claude::Claude;
@@ -65,9 +68,10 @@ pub mod agent {
         ReportedTurnUsage, Result, ServiceTier, SpawnOptions, Turn, TurnControl, TurnResult,
         TurnUsage, UsdAmount, events, input, session, usage,
     };
+    pub use nanocodex_agent::{AgentHandle, ChildSnapshot};
     #[cfg(feature = "openai")]
     #[cfg_attr(docsrs, doc(cfg(feature = "openai")))]
-    pub use nanocodex_agent::{AgentHandle, ExecutionEnvironment, NanocodexBuilder, execution};
+    pub use nanocodex_agent::{ExecutionEnvironment, NanocodexBuilder, execution};
 }
 
 /// Anthropic Messages client, provider-native builder, protocol, and authentication.

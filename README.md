@@ -288,6 +288,28 @@ install/status/start/stop/restart` commands work from a new terminal.
 See [`windows/hand`](windows/hand) for behavior, security boundaries, build
 instructions, and the real Notepad control smoke test.
 
+## Native CLI harnesses
+
+`nanocodex --claude` starts the native Claude Messages agent. Use
+`ANTHROPIC_API_KEY` for Claude authentication and select a model within that
+family:
+
+```sh
+nanocodex --claude --model sonnet
+nanocodex run "inspect the repository" --harness claude --model opus
+nanocodex run "inspect the repository" --harness codex --model sol
+```
+
+`spawn_agent` accepts `harness: "codex" | "claude"` and a model within that
+family. Null values inherit the parent family and its current settings; switching
+families uses the selected family's defaults. Mixed children share the same task
+tree, result contracts and lifecycle tools. Each family uses its own credentials,
+native tools and transcript format. A model from the wrong family fails before
+provider dispatch. Claude aliases are `opus`, `sonnet`, `fable` and `haiku`.
+
+Libraries compose the same routing through [`Harness`](crates/nanocodex/README.md)
+with concrete provider builders and host-owned construction recipes.
+
 ## Rust: start here
 
 Build one agent, submit ordered prompts through its cheap handle, and await a

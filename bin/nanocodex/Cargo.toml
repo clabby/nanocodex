@@ -48,7 +48,7 @@ image.workspace = true
 indicatif.workspace = true
 percent-encoding.workspace = true
 jsonschema.workspace = true
-nanocodex.workspace = true
+nanocodex = { workspace = true, features = ["claude-tools", "workspace-tools"] }
 nanocodex-cli-auth.workspace = true
 nanocodex-durability = { workspace = true, features = ["sqlite"] }
 nanocodex-browser.workspace = true
@@ -128,6 +128,10 @@ path = "tests/account_auth.rs"
 [[test]]
 name = "durable_run"
 path = "tests/durable_run.rs"
+
+[[test]]
+name = "harness_routing"
+path = "tests/harness_routing.rs"
 
 [[test]]
 name = "local_managed_server"

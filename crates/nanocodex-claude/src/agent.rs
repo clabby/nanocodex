@@ -6,11 +6,12 @@ use crate::{
 };
 use futures_util::StreamExt;
 use nanocodex_agent::{
-    AgentEvents, AgentSessionContext, CostStatus, Model, Nanocodex, NanocodexError,
-    ReportedTurnUsage, Result, SpawnOptions, Thinking, TurnResult, TurnUsage,
+    AgentEvents, AgentHandle, AgentSessionContext, ChildSnapshot, CostStatus, HarnessFamily,
+    HarnessModel, Model, Nanocodex, NanocodexError, ReportedTurnUsage, Result, SpawnOptions,
+    Thinking, TurnResult, TurnUsage,
     backend::{
-        BackendFuture, BackendPrompt, BackendPromptRoute, BackendRuntime, BackendTurn,
-        BackendTurnKey, BuilderBackend, LifecycleBackend,
+        AgentFactory, BackendFuture, BackendPrompt, BackendPromptRoute, BackendRuntime,
+        BackendTurn, BackendTurnKey, BuilderBackend, LifecycleBackend,
     },
     events::{AgentEvent, AgentEventKind, AgentEventPublisher},
     input::{Prompt, PromptInput, PromptMessageRole},
@@ -25,7 +26,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -61,6 +62,10 @@ pub struct ClaudeToolInvocation {
     pub session_id: String,
     pub turn_id: String,
     pub call_id: String,
+    /// Immutable revision captured for the originating model response.
+    pub instruction_revision: Option<u64>,
+    /// Embedding-private inherited tool context; never serialized to the model.
+    pub host_context: Option<Arc<str>>,
 }
 /// Native Claude tool result, including the host's success status.
 pub struct ClaudeToolReply {
@@ -82,6 +87,31 @@ impl ClaudeToolReply {
         }
     }
 }
+
+/// Named native Claude callbacks constructed independently for each agent.
+#[derive(Clone, Default)]
+pub struct ClaudeTools {
+    tools: Vec<(ToolDefinition, Handler)>,
+}
+impl ClaudeTools {
+    /// Creates an empty native function collection.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Registers a callback retaining stable invocation identities and revision.
+    pub fn tool_with_context<F, Fut>(mut self, definition: ToolDefinition, function: F) -> Self
+    where
+        F: Fn(Value, ClaudeToolInvocation) -> Fut + Send + Sync + 'static,
+        Fut: crate::ToolFuture<Output = std::result::Result<ClaudeToolReply, String>> + 'static,
+    {
+        self.tools.push((
+            definition,
+            Arc::new(move |input, context| Box::pin(function(input, context))),
+        ));
+        self
+    }
+}
+type ClaudeToolsFactory = Arc<dyn Fn(AgentHandle) -> Result<ClaudeTools> + Send + Sync>;
 
 /// Explicit Claude Messages configuration with caller-owned authentication.
 /// Latest documented coding model as of September 2026; callers can pin any model via `new`.
@@ -113,6 +143,7 @@ impl BuilderBackend for Claude {
 }
 
 /// Provider-specific session builder. Custom functions are opt-in, not automatically discovered.
+#[derive(Clone)]
 pub struct ClaudeBuilder {
     claude: Claude,
     session_id: Option<String>,
@@ -129,6 +160,9 @@ pub struct ClaudeBuilder {
     system_blocks: Option<Vec<Value>>,
     workspace: String,
     tools: Vec<(ToolDefinition, Handler)>,
+    tools_factory: Option<ClaudeToolsFactory>,
+    spawn_factory: Option<Arc<dyn AgentFactory>>,
+    host_context: Option<Arc<str>>,
     server_tools: Vec<ServerToolDefinition>,
     parallel_tools: bool,
     client_tool_search: bool,
@@ -159,6 +193,9 @@ impl ClaudeBuilder {
             system_blocks: None,
             workspace: String::new(),
             tools: Vec::new(),
+            tools_factory: None,
+            spawn_factory: None,
+            host_context: None,
             server_tools: Vec::new(),
             parallel_tools: false,
             client_tool_search: false,
@@ -179,6 +216,88 @@ impl ClaudeBuilder {
         self.policy = Some(policy);
         Ok(self)
     }
+    /// Builds an independent native callback collection for each root and child.
+    pub fn tools_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn(AgentHandle) -> Result<ClaudeTools> + Send + Sync + 'static,
+    {
+        self.tools_factory = Some(Arc::new(factory));
+        self
+    }
+    /// Installs embedding-owned mixed-family child construction.
+    pub fn spawn_factory(mut self, factory: Arc<dyn AgentFactory>) -> Self {
+        self.spawn_factory = Some(factory);
+        self
+    }
+    /// Retains embedding-private context on all tool calls in this lifecycle.
+    pub fn host_context(mut self, context: Option<Arc<str>>) -> Self {
+        self.host_context = context;
+        self
+    }
+    /// Applies the shared catalog's validated effort to native Claude policy.
+    pub fn thinking(mut self, thinking: Thinking) -> Result<Self> {
+        let model: HarnessModel = self.claude.model.parse().map_err(unsupported)?;
+        if model.family() != HarnessFamily::Claude || !model.supports_thinking(thinking) {
+            return Err(unsupported(
+                "Claude model does not support selected thinking",
+            ));
+        }
+        self.adaptive_thinking = thinking != Thinking::None;
+        self.effort = match thinking {
+            Thinking::None => None,
+            Thinking::Low => Some(crate::Effort::Low),
+            Thinking::Medium => Some(crate::Effort::Medium),
+            Thinking::High => Some(crate::Effort::High),
+            Thinking::Xhigh => Some(crate::Effort::Xhigh),
+            Thinking::Max => Some(crate::Effort::Max),
+        };
+        Ok(self)
+    }
+    /// Restores a native residency checkpoint using newly approved host capabilities.
+    pub fn restore_runtime(mut self, snapshot: ChildSnapshot) -> Result<Self> {
+        let ChildSnapshot::Native {
+            model,
+            session_id,
+            thinking,
+            payload,
+            ..
+        } = snapshot
+        else {
+            return Err(unsupported(
+                "Claude builder requires a native Claude checkpoint",
+            ));
+        };
+        if model.family() != HarnessFamily::Claude || session_id.trim().is_empty() {
+            return Err(unsupported(
+                "invalid Claude child checkpoint identity/family",
+            ));
+        }
+        let stored: NativeChildState = serde_json::from_str(&payload).map_err(provider_error)?;
+        if stored.version != 1
+            || stored.model.parse::<HarnessModel>().ok() != Some(model)
+            || !model.supports_thinking(thinking)
+            || stored.max_tokens == 0
+            || stored.context_window_tokens == 0
+        {
+            return Err(unsupported("invalid Claude native checkpoint policy"));
+        }
+        self.claude.model = stored.model;
+        self.session_id = Some(session_id);
+        self.max_tokens = stored.max_tokens;
+        self.effort = stored.effort;
+        self.adaptive_thinking = stored.adaptive_thinking;
+        self.automatic_cache = stored.automatic_cache;
+        self.cache_one_hour = stored.cache_one_hour;
+        self.keep_thinking = stored.keep_thinking;
+        self.message_diagnostics = stored.message_diagnostics;
+        self.context_window_tokens = stored.context_window_tokens;
+        self.auto_compact_window_tokens = stored.auto_compact_window_tokens;
+        self.restored = Some(Snapshot::decode(
+            serde_json::to_value(stored.snapshot).map_err(provider_error)?,
+        )?);
+        Ok(self)
+    }
+
     /// Sets an embedding-owned stable session identity. For durable sessions it
     /// must equal the policy state ID; reopened tool identities cannot drift.
     pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
@@ -516,7 +635,39 @@ impl ClaudeBuilder {
         self
     }
     /// Builds the common lifecycle handle and independent session event stream.
-    pub fn build(self) -> Result<(Nanocodex, AgentEvents)> {
+    pub fn build(mut self) -> Result<(Nanocodex, AgentEvents)> {
+        let session_id = self
+            .policy
+            .as_ref()
+            .map(|policy| policy.state_id().to_owned())
+            .or_else(|| self.session_id.clone())
+            .unwrap_or_else(|| format!("claude-{}", uuid::Uuid::new_v4()));
+        let mut recipe = self.clone();
+        recipe.session_id = None;
+        recipe.restored = None;
+        recipe.policy = None;
+        let native_factory = Arc::new(ClaudeNativeFactory {
+            recipe,
+            state: std::sync::Mutex::new(Weak::new()),
+        });
+        let selected_model = self
+            .claude
+            .model
+            .parse()
+            .unwrap_or_else(|_| HarnessFamily::Claude.default_model());
+        let mut handle = AgentHandle::new(
+            Arc::<str>::from(session_id.as_str()),
+            selected_model,
+            native_factory.clone(),
+        )
+        .with_native_model_id(self.claude.model.as_str());
+        if let Some(factory) = &self.spawn_factory {
+            handle = handle.with_spawn_factory(factory.clone());
+        }
+        if let Some(factory) = &self.tools_factory {
+            self.tools.extend(factory(handle.clone())?.tools);
+        }
+
         if self.claude.model.trim().is_empty()
             || self.max_tokens == 0
             || self.context_window_tokens == 0
@@ -683,14 +834,16 @@ impl ClaudeBuilder {
                 "durable Claude session ID must equal the policy state ID",
             ));
         }
-        let session_id = self
-            .session_id
-            .unwrap_or_else(|| format!("claude-{}", uuid::Uuid::new_v4()));
-        let session_id = self
-            .policy
-            .as_ref()
-            .map_or(session_id, |policy| policy.state_id().to_owned());
         let restored = self.restored.unwrap_or_default();
+        // Rehydration continues the same thread. Retained history, including
+        // compacted context and effect identities, keeps its model policy fixed.
+        let accepted_turns = u64::from(
+            !restored.conversation.messages.is_empty()
+                || !restored.conversation.summary.is_empty()
+                || !restored.conversation.admitted_tool_ids.is_empty()
+                || !restored.conversation.recovery_notices.is_empty()
+                || restored.conversation.previous_message_id.is_some(),
+        );
         #[cfg(all(feature = "tools", not(target_family = "wasm")))]
         if let Some(tasks) = &restored.tasks {
             self.task_board
@@ -707,41 +860,47 @@ impl ClaudeBuilder {
         }
         *discovered.try_lock().expect("new discovery lock") = restored.discovered;
         let (runtime, events) = BackendRuntime::new(session_id.clone());
-        let driver = Driver {
-            state: Arc::new(State {
-                client: self.claude.client.bind_subscription_session(&session_id),
-                model: self.claude.model,
-                max_tokens: self.max_tokens,
-                effort: self.effort,
-                automatic_cache: self.automatic_cache,
-                cache_one_hour: self.cache_one_hour,
-                adaptive_thinking: self.adaptive_thinking,
-                keep_thinking: self.keep_thinking,
-                message_diagnostics: self.message_diagnostics,
-                context_window_tokens: self.context_window_tokens,
-                auto_compact_window_tokens: self.auto_compact_window_tokens,
-                session_id,
-                workspace: self.workspace,
-                system: self.system,
-                system_blocks: self.system_blocks,
-                tools: definitions,
-                server_tools: self.server_tools,
-                handlers,
-                discovered,
-                client_tool_search: self.client_tool_search,
-                parallel_tools: self.parallel_tools,
-                conversation: Mutex::new(restored.conversation),
-                policy: self.policy,
-                admission: Mutex::new(()),
-                idle: Notify::new(),
-                compaction_cancel: Mutex::new(None),
-                #[cfg(all(feature = "tools", not(target_family = "wasm")))]
-                task_board: self.task_board,
-                cancellations: Mutex::new(HashMap::new()),
-                stopped: AtomicBool::new(false),
-                sequence: AtomicU64::new(1),
-            }),
-        };
+        let state = Arc::new(State {
+            client: self.claude.client.bind_subscription_session(&session_id),
+            model: std::sync::RwLock::new(self.claude.model),
+            max_tokens: self.max_tokens,
+            effort: std::sync::RwLock::new(self.effort),
+            automatic_cache: self.automatic_cache,
+            cache_one_hour: self.cache_one_hour,
+            adaptive_thinking: AtomicBool::new(self.adaptive_thinking),
+            keep_thinking: self.keep_thinking,
+            message_diagnostics: self.message_diagnostics,
+            context_window_tokens: self.context_window_tokens,
+            auto_compact_window_tokens: self.auto_compact_window_tokens,
+            session_id,
+            workspace: self.workspace,
+            host_context: self.host_context,
+            system: self.system,
+            system_blocks: self.system_blocks,
+            tools: definitions,
+            server_tools: self.server_tools,
+            handlers,
+            discovered,
+            client_tool_search: self.client_tool_search,
+            parallel_tools: self.parallel_tools,
+            conversation: Mutex::new(restored.conversation),
+            policy: self.policy,
+            admission: Mutex::new(()),
+            idle: Notify::new(),
+            compaction_cancel: Mutex::new(None),
+            #[cfg(all(feature = "tools", not(target_family = "wasm")))]
+            task_board: self.task_board,
+            cancellations: Mutex::new(HashMap::new()),
+            stopped: AtomicBool::new(false),
+            sequence: AtomicU64::new(1),
+            accepted_turns: AtomicU64::new(accepted_turns),
+            steering: Mutex::new(HashMap::new()),
+        });
+        *native_factory
+            .state
+            .lock()
+            .expect("new native capability lock") = Arc::downgrade(&state);
+        let driver = Driver { state, handle };
         Ok((runtime.bind(driver), events))
     }
 }
@@ -1257,20 +1416,173 @@ fn client_discovered_tools(messages: &[Message]) -> HashSet<&str> {
         .collect()
 }
 
-struct State {
-    session_id: String,
-    client: ClaudeClient,
+fn thinking_effort(thinking: Thinking) -> Option<crate::Effort> {
+    match thinking {
+        Thinking::None => None,
+        Thinking::Low => Some(crate::Effort::Low),
+        Thinking::Medium => Some(crate::Effort::Medium),
+        Thinking::High => Some(crate::Effort::High),
+        Thinking::Xhigh => Some(crate::Effort::Xhigh),
+        Thinking::Max => Some(crate::Effort::Max),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeChildState {
+    version: u32,
     model: String,
     max_tokens: u32,
     effort: Option<crate::Effort>,
+    adaptive_thinking: bool,
     automatic_cache: bool,
     cache_one_hour: bool,
-    adaptive_thinking: bool,
+    keep_thinking: bool,
+    message_diagnostics: bool,
+    context_window_tokens: u64,
+    auto_compact_window_tokens: Option<u64>,
+    snapshot: Snapshot,
+}
+
+struct ClaudeNativeFactory {
+    recipe: ClaudeBuilder,
+    state: std::sync::Mutex<Weak<State>>,
+}
+impl ClaudeNativeFactory {
+    fn owner(&self) -> Result<Arc<State>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| unsupported("Claude capability lock poisoned"))?
+            .upgrade()
+            .ok_or(NanocodexError::AgentStopped)?;
+        if state.stopped.load(Ordering::SeqCst) {
+            return Err(NanocodexError::AgentStopped);
+        }
+        Ok(state)
+    }
+    fn recipe(&self) -> ClaudeBuilder {
+        let recipe = self.recipe.clone();
+        #[cfg(all(feature = "tools", not(target_family = "wasm")))]
+        let mut recipe = recipe;
+        #[cfg(all(feature = "tools", not(target_family = "wasm")))]
+        if recipe.task_board.is_some() {
+            let names = nanocodex_claude_tools::tasks::ClaudeTasks::definitions()
+                .into_iter()
+                .filter_map(|value| value.get("name").and_then(Value::as_str).map(str::to_owned))
+                .collect::<HashSet<_>>();
+            recipe
+                .tools
+                .retain(|(definition, _)| !names.contains(&definition.name));
+            recipe = recipe.tasks(Arc::new(nanocodex_claude_tools::tasks::ClaudeTasks::new()));
+        }
+        recipe
+    }
+}
+impl AgentFactory for ClaudeNativeFactory {
+    fn ensure_available(&self, _parent: AgentHandle) -> BackendFuture<Result<()>> {
+        let available = self.owner().map(|_| ());
+        Box::pin(async move { available })
+    }
+    fn settings(&self, _parent: AgentHandle) -> BackendFuture<Result<(HarnessModel, Thinking)>> {
+        let state = self.owner();
+        Box::pin(async move {
+            let state = state?;
+            let model: HarnessModel = state.model().parse().map_err(unsupported)?;
+            let thinking = if state.effort().is_none() {
+                model.default_thinking()
+            } else {
+                state.thinking()
+            };
+            Ok((model, thinking))
+        })
+    }
+    fn spawn(
+        &self,
+        _parent: AgentHandle,
+        options: SpawnOptions,
+        host_context: Option<Arc<str>>,
+    ) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+        let state = self.owner();
+        let recipe = self.recipe();
+        Box::pin(async move {
+            let state = state?;
+            let native_model = state.model();
+            let host_context = host_context.or_else(|| state.host_context.clone());
+            if options.selected_harness_model().is_none()
+                && options
+                    .selected_harness()
+                    .is_none_or(|family| family == HarnessFamily::Claude)
+            {
+                let mut recipe = recipe;
+                recipe.claude.model = native_model;
+                recipe.effort = state.effort();
+                recipe.adaptive_thinking = state.adaptive_thinking.load(Ordering::SeqCst);
+                if let Some(thinking) = options.selected_thinking() {
+                    recipe = recipe.thinking(thinking)?;
+                }
+                return recipe.host_context(host_context).build();
+            }
+            let model: HarnessModel = state.model().parse().map_err(unsupported)?;
+            let thinking = if state.effort().is_none() {
+                model.default_thinking()
+            } else {
+                state.thinking()
+            };
+            let options = options.resolve(model, thinking)?;
+            let selected = options.selected_harness_model().expect("resolved model");
+            if selected.family() != HarnessFamily::Claude {
+                return Err(unsupported(
+                    "Codex harness requires a configured child factory",
+                ));
+            }
+            let mut recipe = recipe;
+            recipe.claude.model = selected.as_str().into();
+            recipe
+                .thinking(options.selected_thinking().expect("resolved thinking"))?
+                .host_context(host_context)
+                .build()
+        })
+    }
+    fn restore(
+        &self,
+        _parent: AgentHandle,
+        snapshot: ChildSnapshot,
+        host_context: Option<Arc<str>>,
+    ) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+        let available = self.owner();
+        let recipe = self.recipe();
+        Box::pin(async move {
+            available?;
+            recipe
+                .restore_runtime(snapshot)?
+                .host_context(host_context)
+                .build()
+        })
+    }
+}
+
+struct TurnSteering {
+    pending: std::collections::VecDeque<Prompt>,
+    revision: Option<u64>,
+    accepting: bool,
+}
+
+struct State {
+    session_id: String,
+    client: ClaudeClient,
+    model: std::sync::RwLock<String>,
+    max_tokens: u32,
+    effort: std::sync::RwLock<Option<crate::Effort>>,
+    automatic_cache: bool,
+    cache_one_hour: bool,
+    adaptive_thinking: AtomicBool,
     keep_thinking: bool,
     message_diagnostics: bool,
     context_window_tokens: u64,
     auto_compact_window_tokens: Option<u64>,
     workspace: String,
+    host_context: Option<Arc<str>>,
     system: String,
     system_blocks: Option<Vec<Value>>,
     tools: Vec<ToolDefinition>,
@@ -1289,6 +1601,8 @@ struct State {
     cancellations: Mutex<HashMap<BackendTurnKey, Arc<Cancellation>>>,
     stopped: AtomicBool,
     sequence: AtomicU64,
+    accepted_turns: AtomicU64,
+    steering: Mutex<HashMap<BackendTurnKey, TurnSteering>>,
 }
 #[derive(Default)]
 struct Cancellation {
@@ -1315,6 +1629,7 @@ impl Cancellation {
 #[derive(Clone)]
 struct Driver {
     state: Arc<State>,
+    handle: AgentHandle,
 }
 fn unsupported(message: &str) -> NanocodexError {
     NanocodexError::InvalidRequest(message.into())
@@ -1402,17 +1717,77 @@ impl State {
             payload: Arc::from(payload),
         });
     }
+    fn model(&self) -> String {
+        self.model
+            .read()
+            .expect("Claude model lock poisoned")
+            .clone()
+    }
+    fn effort(&self) -> Option<crate::Effort> {
+        *self.effort.read().expect("Claude effort lock poisoned")
+    }
+    fn emit_run_started(&self, request: &BackendPrompt) -> (&'static str, String) {
+        let reasoning_mode = if matches!(
+            self.model().as_str(),
+            "claude-opus-5-5" | "claude-fable-5-1"
+        ) {
+            "adaptive"
+        } else {
+            "model_default"
+        };
+        let effort = self
+            .effort()
+            .map(|effort| format!("{effort:?}").to_lowercase())
+            .unwrap_or_else(|| "model_default".into());
+        self.emit(&request.events,AgentEventKind::RunStarted,json!({"mode":"claude","model":self.model(),"reasoning_mode":reasoning_mode,"effort":effort,"transport":"messages_sse","orchestration":"claude","websocket_url":"","workspace":self.workspace,"instruction_bytes":request.prompt.text_bytes()}));
+        (reasoning_mode, effort)
+    }
+    fn emit_run_finished(
+        &self,
+        events: &AgentEventPublisher,
+        result: &Result<TurnResult>,
+        reasoning_mode: &str,
+        effort: &str,
+        ns: u64,
+    ) {
+        if let Err(error) = result {
+            self.emit(
+                events,
+                AgentEventKind::RunError,
+                json!({"message":error.to_string()}),
+            );
+        }
+        let (status, kind) = match result {
+            Ok(_) => ("completed", AgentEventKind::RunCompleted),
+            Err(NanocodexError::TurnCancelled) => ("cancelled", AgentEventKind::RunFailed),
+            Err(_) => ("failed", AgentEventKind::RunFailed),
+        };
+        self.emit(events,kind,json!({"status":status,"model":self.model(),"reasoning_mode":reasoning_mode,"effort":effort,"transport":"messages_sse","orchestration":"claude","duration_ms":ns/1_000_000,"duration_ns":ns,"estimated_cost":null,"cost_usd":null,"cost_status":"other"}));
+    }
+    fn thinking(&self) -> Thinking {
+        match self.effort() {
+            None => Thinking::None,
+            Some(crate::Effort::Low) => Thinking::Low,
+            Some(crate::Effort::Medium) => Thinking::Medium,
+            Some(crate::Effort::High) => Thinking::High,
+            Some(crate::Effort::Xhigh) => Thinking::Xhigh,
+            Some(crate::Effort::Max) => Thinking::Max,
+        }
+    }
     fn request_template(&self) -> MessagesRequest {
         MessagesRequest {
-            model: self.model.clone(),
+            model: self.model(),
             max_tokens: self.max_tokens,
             cache_control: self.automatic_cache.then(|| crate::CacheControl {
                 kind: crate::CacheType::Ephemeral,
                 ttl: self.cache_one_hour.then_some(crate::CacheTtl::OneHour),
             }),
-            output_config: self.effort.map(|effort| crate::OutputConfig { effort }),
+            output_config: self.effort().map(|effort| crate::OutputConfig { effort }),
             tool_choice: None,
-            thinking: self.adaptive_thinking.then(|| json!({"type":"adaptive"})),
+            thinking: self
+                .adaptive_thinking
+                .load(Ordering::SeqCst)
+                .then(|| json!({"type":"adaptive"})),
             context_management: self
                 .keep_thinking
                 .then(|| json!({"edits":[{"type":"clear_thinking_20251015","keep":"all"}]})),
@@ -1572,17 +1947,7 @@ impl State {
             self.conversation.lock().await
         };
         let events = &request.events;
-        let reasoning_mode =
-            if matches!(self.model.as_str(), "claude-opus-5-5" | "claude-fable-5-1") {
-                "adaptive"
-            } else {
-                "model_default"
-            };
-        let effort = self
-            .effort
-            .map(|effort| format!("{effort:?}").to_lowercase())
-            .unwrap_or_else(|| "model_default".into());
-        self.emit(events,AgentEventKind::RunStarted,json!({"mode":"claude","model":self.model,"reasoning_mode":reasoning_mode,"effort":effort,"transport":"messages_sse","orchestration":"claude","websocket_url":"","workspace":self.workspace,"instruction_bytes":request.prompt.text_bytes()}));
+        let (reasoning_mode, effort) = self.emit_run_started(&request);
         let mut result = self.run_locked(&mut conversation, &request, &cancel).await;
         if result
             .as_ref()
@@ -1611,20 +1976,8 @@ impl State {
                 _ => error,
             });
         }
-        if let Err(error) = &result {
-            self.emit(
-                events,
-                AgentEventKind::RunError,
-                json!({"message":error.to_string()}),
-            );
-        }
-        let (status, kind) = match &result {
-            Ok(_) => ("completed", AgentEventKind::RunCompleted),
-            Err(NanocodexError::TurnCancelled) => ("cancelled", AgentEventKind::RunFailed),
-            Err(_) => ("failed", AgentEventKind::RunFailed),
-        };
         let ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-        self.emit(events,kind,json!({"status":status,"model":self.model,"reasoning_mode":reasoning_mode,"effort":effort,"transport":"messages_sse","orchestration":"claude","duration_ms":ns/1_000_000,"duration_ns":ns,"estimated_cost":null,"cost_usd":null,"cost_status":"other"}));
+        self.emit_run_finished(events, &result, reasoning_mode, &effort, ns);
         result
     }
     fn available_tools(&self) -> Vec<ClaudeToolSpec> {
@@ -1791,6 +2144,35 @@ impl State {
         }
     }
 
+    async fn consume_steering(
+        &self,
+        key: BackendTurnKey,
+        cursor: &mut Cursor,
+        pending: &mut Vec<Message>,
+    ) -> Result<bool> {
+        let prompts = {
+            let mut turns = self.steering.lock().await;
+            let Some(turn) = turns.get_mut(&key) else {
+                return Ok(false);
+            };
+            let prompts = turn.pending.drain(..).collect::<Vec<_>>();
+            for prompt in &prompts {
+                if let Some(revision) = prompt.instruction_revision() {
+                    turn.revision = Some(revision);
+                }
+            }
+            if !prompts.is_empty() {
+                cursor.instruction_revision = turn.revision;
+            }
+            prompts
+        };
+        let consumed = !prompts.is_empty();
+        for prompt in prompts {
+            pending.extend(prompt_messages(&prompt)?);
+        }
+        Ok(consumed)
+    }
+
     async fn call_tool(
         &self,
         id: &str,
@@ -1815,6 +2197,8 @@ impl State {
                 .clone()
                 .unwrap_or_else(|| events.turn_id().unwrap_or(events.request_id()).to_owned()),
             call_id: id.to_owned(),
+            instruction_revision: cursor.instruction_revision,
+            host_context: self.host_context.clone(),
         };
         let (content, is_error, metadata, structured_result) =
             match handler(input.clone(), invocation).await {
@@ -1852,6 +2236,7 @@ impl State {
         let mut usage = cursor.usage.clone();
         let mut pending = cursor.pending.clone();
         if !cursor.prepared {
+            cursor.instruction_revision = request.prompt.instruction_revision();
             // Normalize old failed snapshots before appending new user input.
             // A prepared cursor belongs to an unfinished durable operation and
             // must replay its original native request/receipts unchanged.
@@ -1918,6 +2303,13 @@ impl State {
         }
         let mut previous_message_id = conversation.previous_message_id.clone();
         for index in cursor.index..u32::MAX {
+            if self
+                .consume_steering(request.key, &mut cursor, &mut pending)
+                .await?
+            {
+                cursor.pending = pending.clone();
+                self.advance_cursor(&mut cursor, conversation).await?;
+            }
             if cancel.flag.load(Ordering::SeqCst) && self.policy.is_none() {
                 return Err(NanocodexError::TurnCancelled);
             }
@@ -2373,6 +2765,34 @@ impl State {
             if cancel.flag.load(Ordering::SeqCst) {
                 return Err(NanocodexError::TurnCancelled);
             }
+            // Fence terminal publication against new steering admission. An
+            // accepted urgent prompt must reach another model boundary in this turn.
+            let more_instructions = {
+                let mut turns = self.steering.lock().await;
+                if let Some(turn) = turns.get_mut(&request.key) {
+                    if turn.pending.is_empty() {
+                        turn.accepting = false;
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                }
+            };
+            if more_instructions {
+                self.consume_steering(request.key, &mut cursor, &mut pending)
+                    .await?;
+                conversation.messages = pending.clone();
+                conversation.previous_message_id = previous_message_id.clone();
+                conversation.summary.clear();
+                conversation.advance_boundary();
+                cursor.index = index + 1;
+                cursor.pending = pending.clone();
+                cursor.usage = usage.clone();
+                self.advance_cursor(&mut cursor, conversation).await?;
+                continue;
+            }
             conversation.messages = pending;
             conversation.previous_message_id = previous_message_id;
             conversation.summary.clear();
@@ -2474,82 +2894,189 @@ fn prompt_messages(prompt: &Prompt) -> Result<Vec<Message>> {
     Ok(messages)
 }
 impl LifecycleBackend for Driver {
-    fn submit(&self, mut request: BackendPrompt) -> BackendFuture<Result<BackendTurn>> {
+    fn harness_family(&self) -> HarnessFamily {
+        HarnessFamily::Claude
+    }
+    fn runtime_snapshot(&self) -> BackendFuture<Result<ChildSnapshot>> {
         let state = self.state.clone();
         Box::pin(async move {
-            let (accepted, receipt) = oneshot::channel();
-            let task =
-                async move {
-                    let result = async move {
+            let conversation = state.conversation.lock().await;
+            if state.stopped.load(Ordering::SeqCst) {
+                return Err(NanocodexError::AgentStopped);
+            }
+            let snapshot = state.snapshot(&conversation).await?;
+            let model = state.model().parse().map_err(unsupported)?;
+            let thinking = if state.effort().is_none() {
+                HarnessModel::default_thinking(model)
+            } else {
+                state.thinking()
+            };
+            let has_conversation =
+                !conversation.messages.is_empty() || !conversation.summary.is_empty();
+            Ok(ChildSnapshot::Native {
+                model,
+                session_id: state.session_id.clone(),
+                thinking,
+                payload: serde_json::to_string(&NativeChildState {
+                    version: 1,
+                    model: state.model(),
+                    max_tokens: state.max_tokens,
+                    effort: state.effort(),
+                    adaptive_thinking: state.adaptive_thinking.load(Ordering::SeqCst),
+                    automatic_cache: state.automatic_cache,
+                    cache_one_hour: state.cache_one_hour,
+                    keep_thinking: state.keep_thinking,
+                    message_diagnostics: state.message_diagnostics,
+                    context_window_tokens: state.context_window_tokens,
+                    auto_compact_window_tokens: state.auto_compact_window_tokens,
+                    snapshot,
+                })
+                .map_err(provider_error)?,
+                has_conversation,
+            })
+        })
+    }
+    fn set_harness_model(&self, model: HarnessModel) -> BackendFuture<Result<()>> {
+        let state = self.state.clone();
+        Box::pin(async move {
             let _admission = state.admission.lock().await;
             if state.stopped.load(Ordering::SeqCst) {
                 return Err(NanocodexError::AgentStopped);
             }
-            prompt_messages(&request.prompt)?;
-            if let Some(policy) = &state.policy {
-                let automatic = request.request_id.is_none();
-                let candidate = request
-                    .request_id
-                    .clone()
-                    .unwrap_or_else(|| durable::candidate_id("turn"));
-                let input = json!({"provider":"claude","kind":"prompt","prompt":request.prompt});
-                let (id, admission) = policy.admit(candidate, input, automatic).await?;
-                request.request_id = Some(id.clone());
-                request.events = request.events.with_turn_id(id.clone());
-                let terminal = match admission {
-                    Admission::Completed { output, .. } => {
-                        Some(durable::replay(id.clone(), output))
-                    }
-                    Admission::Failed { error, .. } => {
-                        Some(Err(NanocodexError::ReplayedExecutionFailed(error)))
-                    }
-                    Admission::Cancelled => Some(Err(NanocodexError::TurnCancelled)),
-                    Admission::Execute | Admission::Resume => None,
-                };
-                if let Some(result) = terminal {
-                    return Ok(BackendTurn {
-                        request_id: Some(id),
-                        result: Box::pin(async move { result }),
-                    });
-                }
-                if let Err(error) = policy.begin_attempt(id.clone()).await {
-                    let _ = policy.release(id).await;
-                    return Err(error);
-                }
-            } else if request.request_id.is_some() {
-                return Err(unsupported(
-                    "Claude request_id requires an attached durability policy",
-                ));
+            if model.family() != HarnessFamily::Claude {
+                return Err(unsupported("model belongs to another harness"));
             }
-            let request_id = request.request_id.clone();
-            let key = request.key;
-            let cancellation = Arc::new(Cancellation::default());
-            state
-                .cancellations
-                .lock()
-                .await
-                .insert(key, cancellation.clone());
-            let (sender, receiver) = oneshot::channel();
-            let running = state.clone();
+            if state.accepted_turns.load(Ordering::SeqCst) != 0 {
+                return Err(unsupported("Claude model is fixed after the first prompt"));
+            }
+            *state
+                .model
+                .write()
+                .map_err(|_| unsupported("Claude model lock poisoned"))? = model.as_str().into();
+            if !model.supports_thinking(state.thinking()) {
+                let thinking = model.default_thinking();
+                *state
+                    .effort
+                    .write()
+                    .map_err(|_| unsupported("Claude effort lock poisoned"))? =
+                    thinking_effort(thinking);
+                state
+                    .adaptive_thinking
+                    .store(thinking != Thinking::None, Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    }
+    fn submit(&self, mut request: BackendPrompt) -> BackendFuture<Result<BackendTurn>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let (accepted, receipt) = oneshot::channel();
             let task = async move {
-                let result = running.run(request, cancellation).await;
-                running.cancellations.lock().await.remove(&key);
-                running.idle.notify_waiters();
-                let _ = sender.send(result);
+                let result = async move {
+                    let _admission = state.admission.lock().await;
+                    if state.stopped.load(Ordering::SeqCst) {
+                        return Err(NanocodexError::AgentStopped);
+                    }
+                    prompt_messages(&request.prompt)?;
+                    if let Some(policy) = &state.policy {
+                        let automatic = request.request_id.is_none();
+                        let candidate = request
+                            .request_id
+                            .clone()
+                            .unwrap_or_else(|| durable::candidate_id("turn"));
+                        let input =
+                            json!({"provider":"claude","kind":"prompt","prompt":request.prompt});
+                        let (id, admission) = policy.admit(candidate, input, automatic).await?;
+                        request.request_id = Some(id.clone());
+                        request.events = request.events.with_turn_id(id.clone());
+                        let terminal = match admission {
+                            Admission::Completed { output, .. } => {
+                                Some(durable::replay(id.clone(), output))
+                            }
+                            Admission::Failed { error, .. } => {
+                                Some(Err(NanocodexError::ReplayedExecutionFailed(error)))
+                            }
+                            Admission::Cancelled => Some(Err(NanocodexError::TurnCancelled)),
+                            Admission::Execute | Admission::Resume => None,
+                        };
+                        if let Some(result) = terminal {
+                            state.accepted_turns.fetch_add(1, Ordering::SeqCst);
+                            let (status, kind) = match &result {
+                                Ok(_) => ("completed", AgentEventKind::RunCompleted),
+                                Err(NanocodexError::TurnCancelled) => ("cancelled", AgentEventKind::RunFailed),
+                                Err(_) => ("failed", AgentEventKind::RunFailed),
+                            };
+                            // Cached terminals settle both public event streams
+                            // without claiming a fresh generation or tool effect.
+                            state.emit(
+                                &request.events,
+                                kind,
+                                json!({
+                                    "status":status,"model":state.model(),
+                                    "effort":state.thinking().as_str(),
+                                    "transport":"messages_sse","orchestration":"claude",
+                                    "replayed":true,"model_calls":0,"tool_calls":0,
+                                    "duration_ms":0,"duration_ns":0,
+                                    "final_message":result.as_ref().ok().map(TurnResult::final_message),
+                                    "usage":result.as_ref().ok().and_then(TurnResult::usage),
+                                    "error":result.as_ref().err().map(ToString::to_string),
+                                    "estimated_cost":null,"cost_usd":null,"cost_status":"other"
+                                }),
+                            );
+                            return Ok(BackendTurn {
+                                request_id: Some(id),
+                                result: Box::pin(async move { result }),
+                            });
+                        }
+                        if let Err(error) = policy.begin_attempt(id.clone()).await {
+                            let _ = policy.release(id).await;
+                            return Err(error);
+                        }
+                    } else if request.request_id.is_some() {
+                        return Err(unsupported(
+                            "Claude request_id requires an attached durability policy",
+                        ));
+                    }
+                    state.accepted_turns.fetch_add(1, Ordering::SeqCst);
+                    let request_id = request.request_id.clone();
+                    let key = request.key;
+                    state.steering.lock().await.insert(
+                        key,
+                        TurnSteering {
+                            pending: std::collections::VecDeque::new(),
+                            revision: request.prompt.instruction_revision(),
+                            accepting: true,
+                        },
+                    );
+                    let cancellation = Arc::new(Cancellation::default());
+                    state
+                        .cancellations
+                        .lock()
+                        .await
+                        .insert(key, cancellation.clone());
+                    let (sender, receiver) = oneshot::channel();
+                    let running = state.clone();
+                    let task = async move {
+                        let result = running.run(request, cancellation).await;
+                        running.steering.lock().await.remove(&key);
+                        running.cancellations.lock().await.remove(&key);
+                        running.idle.notify_waiters();
+                        let _ = sender.send(result);
+                    };
+                    #[cfg(not(target_family = "wasm"))]
+                    tokio::spawn(task);
+                    #[cfg(target_family = "wasm")]
+                    wasm_bindgen_futures::spawn_local(task);
+                    Ok(BackendTurn {
+                        request_id,
+                        result: Box::pin(async move {
+                            receiver.await.unwrap_or(Err(NanocodexError::TurnStopped))
+                        }),
+                    })
+                }
+                .await;
+                let _ = accepted.send(result);
             };
-            #[cfg(not(target_family = "wasm"))]
-            tokio::spawn(task);
-            #[cfg(target_family = "wasm")]
-            wasm_bindgen_futures::spawn_local(task);
-            Ok(BackendTurn {
-                request_id,
-                result: Box::pin(async move {
-                    receiver.await.unwrap_or(Err(NanocodexError::TurnStopped))
-                }),
-            })
-                }.await;
-                    let _ = accepted.send(result);
-                };
             #[cfg(not(target_family = "wasm"))]
             tokio::spawn(task);
             #[cfg(target_family = "wasm")]
@@ -2560,8 +3087,24 @@ impl LifecycleBackend for Driver {
     fn route(&self, _request: BackendPrompt) -> BackendFuture<Result<BackendPromptRoute>> {
         Box::pin(async { Err(unsupported("Claude live route/steering is unsupported")) })
     }
-    fn steer(&self, _key: BackendTurnKey, _prompt: Prompt) -> BackendFuture<Result<()>> {
-        Box::pin(async { Err(unsupported("Claude steering is unsupported")) })
+    fn steer(&self, key: BackendTurnKey, prompt: Prompt) -> BackendFuture<Result<()>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            prompt_messages(&prompt)?;
+            if state.stopped.load(Ordering::SeqCst) {
+                return Err(NanocodexError::AgentStopped);
+            }
+            let mut turns = state.steering.lock().await;
+            let turn = turns.get_mut(&key).ok_or(NanocodexError::TurnStopped)?;
+            if !turn.accepting {
+                return Err(NanocodexError::TurnNotSteerable);
+            }
+            if turn.pending.len() >= 8 {
+                return Err(unsupported("Claude steering queue is full"));
+            }
+            turn.pending.push_back(prompt);
+            Ok(())
+        })
     }
     fn cancel(&self, key: BackendTurnKey) -> BackendFuture<Result<()>> {
         let state = self.state.clone();
@@ -2597,8 +3140,32 @@ impl LifecycleBackend for Driver {
             ))
         })
     }
-    fn set_thinking(&self, _thinking: Thinking) -> BackendFuture<Result<()>> {
-        Box::pin(async { Err(unsupported("Claude thinking policy is unsupported")) })
+    fn set_thinking(&self, thinking: Thinking) -> BackendFuture<Result<()>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let _admission = state.admission.lock().await;
+            if state.stopped.load(Ordering::SeqCst) {
+                return Err(NanocodexError::AgentStopped);
+            }
+            if state.accepted_turns.load(Ordering::SeqCst) != 0 {
+                return Err(unsupported("Claude effort is fixed after the first prompt"));
+            }
+            let model: HarnessModel = state.model().parse().map_err(unsupported)?;
+            if !model.supports_thinking(thinking) {
+                return Err(unsupported(
+                    "Claude model does not support selected thinking",
+                ));
+            }
+            *state
+                .effort
+                .write()
+                .map_err(|_| unsupported("Claude effort lock poisoned"))? =
+                thinking_effort(thinking);
+            state
+                .adaptive_thinking
+                .store(thinking != Thinking::None, Ordering::SeqCst);
+            Ok(())
+        })
     }
     fn set_fast_mode(&self, _enabled: bool) -> BackendFuture<Result<()>> {
         Box::pin(async { Err(unsupported("Claude fast mode is unsupported")) })
@@ -2742,8 +3309,9 @@ impl LifecycleBackend for Driver {
             ))
         })
     }
-    fn spawn(&self, _options: SpawnOptions) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
-        Box::pin(async { Err(unsupported("Claude spawn is unsupported")) })
+    fn spawn(&self, options: SpawnOptions) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+        let handle = self.handle.clone();
+        Box::pin(async move { handle.spawn_with(options).await })
     }
     fn fork(
         &self,

@@ -26,6 +26,7 @@ type WorkerToolExposureOptions =
   | { mcp: WorkerMcpServers; toolMode?: "code" | undefined };
 
 /** Creates a Rust/WASM Agent in a package-owned browser module Worker. */
+export function create(options: import('../runtime/claude.mjs').Options & { harness: 'claude' }): Promise<import('../runtime/claude.mjs').Agent>;
 export function create(options: create.ManagedOptions): Promise<AgentLifecycle>;
 export function create(options?: create.Options): Promise<create.ReturnType>;
 export declare namespace create {
@@ -33,7 +34,7 @@ export declare namespace create {
     transport: ManagedTransport;
     tools?: Tools | undefined;
   }>;
-  type Options = Omit<AgentOptions, "beforeCompaction"> & WorkerToolExposureOptions & {
+  type Options = Omit<AgentOptions, "beforeCompaction" | "harness"> & WorkerToolExposureOptions & {
     /** Precompiled browser module; WebAssembly modules are structured-clone-safe. */
     module?: WebAssembly.Module | undefined;
     /** Fixed browser workspace facts, including its AGENTS.md snapshot. */
@@ -47,7 +48,7 @@ export declare namespace create {
     /** Set false to keep this browser session out of the IndexedDB durability store. */
     durability?: false | undefined;
     /** Set false to omit the default OPFS, shell, web, image, plan, and artifact tools. */
-    harness?: false | undefined;
+    harness?: false | 'codex' | undefined;
   };
   type ReturnType = Agent;
 }

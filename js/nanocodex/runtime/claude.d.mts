@@ -34,7 +34,23 @@ export type Tool = Readonly<{
   defer_loading?: boolean;
   handler(input: unknown, context: ToolContext): unknown | Promise<unknown>;
 }>;
+export type CodexHarnessOptions = Readonly<{
+  transport: import('../browser/Transport.mjs').ResponsesTransport | import('../node/Transport.mjs').ResponsesTransport;
+  model?: import('../types.mjs').Model;
+  thinking?: import('../types.mjs').Thinking;
+  instructions?: string;
+  workspace?: string;
+  toolMode?: 'code' | 'direct';
+  /** Overrides Node's native evaluator; required for Code Mode in non-Worker Web API hosts. */
+  codeEvaluator?: import('../types.mjs').CodeEvaluator;
+  tools?: import('../types.mjs').ToolConfiguration;
+}>;
 export type Options = Readonly<{
+  harness?: 'claude';
+  /** Opt in to the canonical shared subagent task tree. */
+  subagents?: Readonly<{ maxConcurrency?: number }>;
+  /** Explicit alternate-family capability; no credentials are inferred. */
+  harnesses?: Readonly<{ codex?: CodexHarnessOptions }>;
   auth: Auth;
   model: string;
   endpoint?: string;
@@ -53,7 +69,7 @@ export type Options = Readonly<{
   /** Explicit provider-owned tool definitions, not host capabilities. */
   serverTools?: readonly Record<string, unknown>[];
   maxTokens?: number;
-  thinking?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  thinking?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   adaptiveThinking?: boolean;
   keepThinking?: boolean;
   cache?: 'off' | '5m' | '1h';
@@ -70,7 +86,7 @@ export type Options = Readonly<{
   | { durability?: never; durabilityId?: never }
   | { durability: DurabilityStore; durabilityId: string }
 );
-/** Shared output/event contract, deliberately excluding unsupported Codex/subagent/voice methods. */
+/** Shared output/event contract, with canonical subagents available through Subagents when enabled. */
 export type Agent = BaseAgent<{
   events: { watch(options?: WatchEventsOptions): EventWatcher };
   session: { compact(): Promise<void>; cancel(): Promise<void>; shutdown(): Promise<void> };

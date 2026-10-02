@@ -16,15 +16,16 @@
 //! metadata?: value, structuredResult?: value}>. Host errors are redacted.
 
 use super::{
-    Cell, DurableAgentExt, JavaScriptDurabilityStore, JsFuture, JsValue, Prompt, Rc, RefCell,
-    RustNanocodex, TurnState, WasmTurn, forward_events, js_error, validate_operation_id,
+    AgentEvents, Cell, DurableAgentExt, HashMap, JavaScriptDurabilityStore, JavaScriptSpawnRouter,
+    JsFuture, JsValue, Mutex, Prompt, Rc, RefCell, RustNanocodex, TurnState, WasmHarnessFactory,
+    WasmSubagents, WasmSubagentsConfig, WasmTurn, forward_events, host_cancel_code_turn, js_error,
+    validate_operation_id,
 };
 use nanocodex_claude::{
     Claude, ClaudeAuthFuture, ClaudeAuthProvider, ClaudeAuthUnavailable, ClaudeClient,
-    ClaudeToolInvocation, ClaudeToolReply, Effort, ServerToolDefinition, ToolDefinition,
-    ToolResultContent,
+    ClaudeToolInvocation, ClaudeToolReply, ServerToolDefinition, ToolDefinition, ToolResultContent,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, rc::Weak, sync::Arc};
 use wasm_bindgen::prelude::*;
@@ -46,9 +47,9 @@ extern "C" {
     ) -> Result<js_sys::Promise, JsValue>;
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct ClaudeConfig {
+pub(super) struct ClaudeConfig {
     model: String,
     session_id: Option<String>,
     api_key: Option<String>,
@@ -63,7 +64,7 @@ struct ClaudeConfig {
     #[serde(default)]
     server_tools: Vec<ServerToolDefinition>,
     max_tokens: Option<u32>,
-    thinking: Option<Effort>,
+    thinking: Option<super::Thinking>,
     #[serde(default)]
     adaptive_thinking: bool,
     #[serde(default)]
@@ -83,9 +84,13 @@ struct ClaudeConfig {
     durability_host_id: Option<String>,
     durability_id: Option<String>,
     terminal_receipt_retention: Option<usize>,
+    subagents: Option<WasmSubagentsConfig>,
+    #[serde(default)]
+    subagent_routing: bool,
+    codex_harness: Option<Value>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 enum CachePolicy {
     #[default]
     #[serde(rename = "off")]
@@ -218,6 +223,26 @@ async fn execute_tool(
     input: Value,
     invocation: ClaudeToolInvocation,
 ) -> Result<ClaudeToolReply, String> {
+    // Dropping a JsFuture only stops Rust observation. Abort the host's active
+    // handlers when native cancellation drops this invocation, preserving the
+    // session registration so an interrupted child can be reused.
+    struct PendingTool<'a> {
+        session_id: &'a str,
+        cancel: Option<js_sys::Function>,
+        settled: bool,
+    }
+    impl Drop for PendingTool<'_> {
+        fn drop(&mut self) {
+            if !self.settled {
+                if let Some(cancel) = &self.cancel {
+                    let _ = cancel.call0(&JsValue::UNDEFINED);
+                } else {
+                    // Compatibility with hosts that only expose session abort.
+                    host_cancel_code_turn(self.session_id);
+                }
+            }
+        }
+    }
     let promise = host_execute_claude_tool(
         host_definition_id,
         name,
@@ -228,9 +253,16 @@ async fn execute_tool(
         &invocation.turn_id,
     )
     .map_err(|_| "Claude tool host rejected invocation".to_owned())?;
-    let response = JsFuture::from(promise)
-        .await
-        .map_err(|_| "Claude tool host invocation failed".to_owned())?;
+    let mut pending = PendingTool {
+        session_id: &invocation.session_id,
+        cancel: js_sys::Reflect::get(promise.as_ref(), &JsValue::from_str("cancel"))
+            .ok()
+            .and_then(|value| value.dyn_into().ok()),
+        settled: false,
+    };
+    let response = JsFuture::from(promise).await;
+    pending.settled = true;
+    let response = response.map_err(|_| "Claude tool host invocation failed".to_owned())?;
     let response = response
         .as_string()
         .ok_or_else(|| "Claude tool host must return a JSON string".to_owned())?;
@@ -250,6 +282,7 @@ pub struct WasmNanoclaude {
     inner: RustNanocodex,
     event_forwarding: Rc<Cell<bool>>,
     turns: RefCell<Vec<Weak<RefCell<TurnState>>>>,
+    subagents: Option<WasmSubagents>,
 }
 
 #[wasm_bindgen(js_class = Nanoclaude)]
@@ -259,111 +292,57 @@ impl WasmNanoclaude {
         // Serde errors can include caller-supplied strings; do not echo config secrets.
         let config: ClaudeConfig = serde_json::from_str(config_json)
             .map_err(|_| js_error("invalid Nanoclaude configuration"))?;
-        config.validate().map_err(js_error)?;
-        let endpoint = config.endpoint.unwrap_or_else(|| {
-            if config.subscription_compatibility {
-                nanocodex_claude::ANTHROPIC_SUBSCRIPTION_MESSAGES_URL.to_owned()
-            } else {
-                nanocodex_claude::ANTHROPIC_MESSAGES_URL.to_owned()
-            }
-        });
-        let http = reqwest::Client::new();
-        let mut client = match (config.api_key, config.auth_host_id) {
-            (Some(key), None) => ClaudeClient::new(http, endpoint, key),
-            (None, Some(auth_host_id)) => ClaudeClient::with_auth_provider(
-                http,
-                endpoint,
-                Arc::new(JavaScriptClaudeAuth { auth_host_id }),
-            ),
-            _ => return Err(js_error("invalid explicit Claude authentication")),
-        };
-        if config.subscription_compatibility {
-            client = client.subscription_compatibility();
-            if let Some(identity) = config.subscription_identity {
-                identity
-                    .validate()
-                    .map_err(|_| js_error("invalid subscription identity"))?;
-                client = client.with_subscription_identity(identity);
-            }
-        } else if config.subscription_identity.is_some() {
-            return Err(js_error(
-                "subscription identity requires subscription compatibility",
-            ));
-        }
-        let mut builder = RustNanocodex::builder(Claude::new(client, config.model))
-            .parallel_tools(config.parallel_tools);
-        if let Some(session_id) = config.session_id {
-            builder = builder.session_id(session_id);
-        }
-        if let Some(tokens) = config.max_tokens {
-            builder = builder.max_tokens(tokens);
-        }
-        if let Some(effort) = config.thinking {
-            builder = builder.effort(effort);
-        }
-        if config.adaptive_thinking {
-            builder = builder.adaptive_thinking();
-        }
-        if config.keep_thinking {
-            builder = builder.keep_thinking();
-        }
-        builder = match config.cache {
-            CachePolicy::Off => builder,
-            CachePolicy::FiveMinutes => builder.automatic_cache(true),
-            CachePolicy::OneHour => builder.cache_one_hour(),
-        };
-        if let Some(tokens) = config.context_window_tokens {
-            builder = builder.context_window_tokens(tokens);
-        }
-        if let Some(tokens) = config.auto_compact_window_tokens {
-            builder = builder.auto_compact_window_tokens(tokens);
-        }
-        if let Some(instructions) = config.instructions {
-            builder = builder.system(instructions);
-        }
-        if let Some(blocks) = config.system_blocks {
-            builder = builder.system_blocks(blocks);
-        }
-        if let Some(workspace) = config.workspace {
-            builder = builder.workspace(workspace);
-        }
-        if config.client_tool_search {
-            builder = builder.client_tool_search();
-        }
-        for definition in config.tools {
-            let host_id = config
+        let (factory, subagents) = if let Some(settings) = &config.subagents {
+            let host = config
                 .host_definition_id
-                .ok_or_else(|| js_error("explicit Claude tools require hostDefinitionId"))?;
-            let name = definition.name.clone();
-            builder = builder.tool_with_context(definition, move |input, invocation| {
-                let name = name.clone();
-                async move { execute_tool(host_id, &name, input, invocation).await }
-            });
-        }
-        for definition in config.server_tools {
-            builder = builder.server_tool(definition);
-        }
-        if let (Some(route_id), Some(state_id)) = (config.durability_host_id, config.durability_id)
-        {
-            let store = JavaScriptDurabilityStore { route_id };
-            let durable = if let Some(limit) = config.terminal_receipt_retention {
-                nanocodex::agent::durability::DurableSession::open_with_terminal_receipt_limit(
-                    store, state_id, limit,
-                )
-                .await
-            } else {
-                nanocodex::agent::durability::DurableSession::open(store, state_id).await
+                .ok_or_else(|| js_error("subagents require hostDefinitionId"))?;
+            let (registry, control, updates) =
+                nanocodex_subagents::channel(settings.max_concurrency);
+            if config.subagent_routing {
+                registry.set_spawn_router(Arc::new(JavaScriptSpawnRouter {
+                    host_definition_id: host,
+                }));
             }
-            .map_err(js_error)?;
-            builder = builder.durability(durable).await.map_err(js_error)?;
-        }
-        let (inner, events) = builder.build().map_err(js_error)?;
+            let parents = Arc::new(Mutex::new(HashMap::new()));
+            let codex = config
+                .codex_harness
+                .clone()
+                .map(|recipe| {
+                    let key = recipe
+                        .get("api_key")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| js_error("Codex harness requires explicit transport"))?;
+                    let auth = nanocodex::oai::auth::OpenAiAuth::api_key(key.to_owned());
+                    Ok::<_, JsValue>((recipe, auth))
+                })
+                .transpose()?;
+            let factory = Arc::new(WasmHarnessFactory {
+                registry: registry.clone(),
+                parents: parents.clone(),
+                hosts: Arc::new(Mutex::new(HashMap::new())),
+                codex,
+                claude: Some(serde_json::to_value(&config).map_err(js_error)?),
+            });
+            let subagents = WasmSubagents::new(
+                host,
+                registry,
+                control,
+                updates,
+                parents,
+                factory.hosts.clone(),
+            );
+            (Some(factory), Some(subagents))
+        } else {
+            (None, None)
+        };
+        let (inner, events) = build_claude(config, factory, None, None).await?;
         let event_forwarding = Rc::new(Cell::new(false));
         forward_events(events, Rc::clone(&event_forwarding));
         Ok(Self {
             inner,
             event_forwarding,
             turns: RefCell::new(Vec::new()),
+            subagents,
         })
     }
 
@@ -379,7 +358,11 @@ impl WasmNanoclaude {
 
     #[wasm_bindgen(js_name = setEventForwarding)]
     pub fn set_event_forwarding(&self, enabled: bool) {
-        self.event_forwarding.set(enabled);
+        if self.event_forwarding.replace(enabled) != enabled
+            && let Some(subagents) = &self.subagents
+        {
+            subagents.set_event_forwarding(enabled);
+        }
     }
 
     /// Accepts text using the shared Turn/TurnResult and durable request-ID path.
@@ -435,9 +418,72 @@ impl WasmNanoclaude {
     }
 
     pub async fn shutdown(&self) -> Result<(), JsValue> {
+        if let Some(subagents) = &self.subagents {
+            subagents
+                .close_all(self.inner.session_id())
+                .await
+                .map_err(js_error)?;
+        }
         self.inner.shutdown().await.map_err(js_error)?;
-        self.event_forwarding.set(false);
+        self.set_event_forwarding(false);
         Ok(())
+    }
+
+    #[wasm_bindgen(js_name = spawnSubagent)]
+    pub async fn spawn_subagent(&self, task: &str) -> Result<String, JsValue> {
+        self.subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?
+            .spawn_subagent(self.inner.session_id(), task)
+            .await
+    }
+    #[wasm_bindgen(js_name = waitSubagents)]
+    pub async fn wait_subagents(&self, task: &str) -> Result<String, JsValue> {
+        self.subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?
+            .wait_subagents(self.inner.session_id(), task)
+            .await
+    }
+    #[wasm_bindgen(js_name = listSubagents)]
+    pub async fn list_subagents(&self, task: &str) -> Result<String, JsValue> {
+        self.subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?
+            .list_subagents(self.inner.session_id(), task)
+            .await
+    }
+    #[wasm_bindgen(js_name = sendSubagentMessage)]
+    pub async fn send_subagent_message(&self, task: &str) -> Result<String, JsValue> {
+        self.subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?
+            .send_subagent_message(self.inner.session_id(), task)
+            .await
+    }
+    #[wasm_bindgen(js_name = interruptSubagent)]
+    pub async fn interrupt_subagent(&self, task: &str) -> Result<String, JsValue> {
+        self.subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?
+            .interrupt_subagent(self.inner.session_id(), task)
+            .await
+    }
+    #[wasm_bindgen(js_name = closeSubagent)]
+    pub async fn close_subagent(&self, task: &str) -> Result<String, JsValue> {
+        self.subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?
+            .close_subagent(self.inner.session_id(), task)
+            .await
+    }
+    #[wasm_bindgen(js_name = spawnSubagents)]
+    pub async fn spawn_subagents(&self, tasks_json: &str) -> Result<String, JsValue> {
+        self.subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?
+            .spawn_subagents(self.inner.session_id(), tasks_json)
+            .await
     }
 
     /// Claude checkpoints are stored natively by durability, not OpenAI snapshots.
@@ -456,6 +502,165 @@ impl WasmNanoclaude {
 
 impl Drop for WasmNanoclaude {
     fn drop(&mut self) {
-        self.event_forwarding.set(false);
+        if self.event_forwarding.replace(false)
+            && let Some(subagents) = &self.subagents
+        {
+            subagents.set_event_forwarding(false);
+        }
+        if let Some(subagents) = &self.subagents
+            && subagents.remove_parent(self.inner.session_id())
+        {
+            let subagents = subagents.clone();
+            let session_id = self.inner.session_id().to_owned();
+            wasm_bindgen_futures::spawn_local(async move {
+                let _ = subagents.close_all(&session_id).await;
+            });
+        }
     }
+}
+
+pub(super) async fn build_claude(
+    config: ClaudeConfig,
+    factory: Option<Arc<WasmHarnessFactory>>,
+    snapshot: Option<nanocodex_agent::ChildSnapshot>,
+    host_context: Option<Arc<str>>,
+) -> Result<(RustNanocodex, AgentEvents), JsValue> {
+    config.validate().map_err(js_error)?;
+    let endpoint = config.endpoint.unwrap_or_else(|| {
+        if config.subscription_compatibility {
+            nanocodex_claude::ANTHROPIC_SUBSCRIPTION_MESSAGES_URL.to_owned()
+        } else {
+            nanocodex_claude::ANTHROPIC_MESSAGES_URL.to_owned()
+        }
+    });
+    let http = reqwest::Client::new();
+    let mut client = match (config.api_key, config.auth_host_id) {
+        (Some(key), None) => ClaudeClient::new(http, endpoint, key),
+        (None, Some(auth_host_id)) => ClaudeClient::with_auth_provider(
+            http,
+            endpoint,
+            Arc::new(JavaScriptClaudeAuth { auth_host_id }),
+        ),
+        _ => return Err(js_error("invalid explicit Claude authentication")),
+    };
+    if config.subscription_compatibility {
+        client = client.subscription_compatibility();
+        if let Some(identity) = config.subscription_identity {
+            identity
+                .validate()
+                .map_err(|_| js_error("invalid subscription identity"))?;
+            client = client.with_subscription_identity(identity);
+        }
+    } else if config.subscription_identity.is_some() {
+        return Err(js_error(
+            "subscription identity requires subscription compatibility",
+        ));
+    }
+    let builder_model = config.model.clone();
+    let mut builder = RustNanocodex::builder(Claude::new(client, config.model))
+        .parallel_tools(config.parallel_tools);
+    if let Some(session_id) = config.session_id {
+        builder = builder.session_id(session_id);
+    }
+    if let Some(tokens) = config.max_tokens {
+        builder = builder.max_tokens(tokens);
+    }
+    if let Some(effort) = config.thinking {
+        if builder_model
+            .parse::<nanocodex_agent::HarnessModel>()
+            .is_ok()
+        {
+            builder = builder.thinking(effort).map_err(js_error)?;
+        } else if effort != super::Thinking::None {
+            let native = serde_json::from_value(serde_json::to_value(effort).map_err(js_error)?)
+                .map_err(js_error)?;
+            builder = builder.effort(native);
+        }
+    }
+    if config.adaptive_thinking {
+        builder = builder.adaptive_thinking();
+    }
+    if config.keep_thinking {
+        builder = builder.keep_thinking();
+    }
+    builder = match config.cache {
+        CachePolicy::Off => builder,
+        CachePolicy::FiveMinutes => builder.automatic_cache(true),
+        CachePolicy::OneHour => builder.cache_one_hour(),
+    };
+    if let Some(tokens) = config.context_window_tokens {
+        builder = builder.context_window_tokens(tokens);
+    }
+    if let Some(tokens) = config.auto_compact_window_tokens {
+        builder = builder.auto_compact_window_tokens(tokens);
+    }
+    if let Some(instructions) = config.instructions {
+        builder = builder.system(instructions);
+    }
+    if let Some(blocks) = config.system_blocks {
+        builder = builder.system_blocks(blocks);
+    }
+    if let Some(workspace) = config.workspace {
+        builder = builder.workspace(workspace);
+    }
+    if config.client_tool_search {
+        builder = builder.client_tool_search();
+    }
+    for definition in config.tools {
+        let host_id = config
+            .host_definition_id
+            .ok_or_else(|| js_error("explicit Claude tools require hostDefinitionId"))?;
+        let name = definition.name.clone();
+        builder = builder.tool_with_context(definition, move |input, invocation| {
+            let name = name.clone();
+            async move { execute_tool(host_id, &name, input, invocation).await }
+        });
+    }
+    for definition in config.server_tools {
+        builder = builder.server_tool(definition);
+    }
+    if let (Some(route_id), Some(state_id)) = (config.durability_host_id, config.durability_id) {
+        let store = JavaScriptDurabilityStore { route_id };
+        let durable = if let Some(limit) = config.terminal_receipt_retention {
+            nanocodex::agent::durability::DurableSession::open_with_terminal_receipt_limit(
+                store, state_id, limit,
+            )
+            .await
+        } else {
+            nanocodex::agent::durability::DurableSession::open(store, state_id).await
+        }
+        .map_err(js_error)?;
+        builder = builder.durability(durable).await.map_err(js_error)?;
+    }
+    if let Some(factory) = factory {
+        let host = config
+            .host_definition_id
+            .ok_or_else(|| js_error("subagents require hostDefinitionId"))?;
+        let registry = factory.registry.clone();
+        let parents = factory.parents.clone();
+        builder = builder
+            .spawn_factory(factory.clone())
+            .tools_factory(move |agent| {
+                let agent = agent.with_spawn_factory(factory.clone());
+                factory
+                    .hosts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(agent.session_id().to_owned(), host);
+                parents
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(agent.session_id().to_owned(), agent.clone());
+                nanocodex_subagents::install_claude_tools(
+                    nanocodex_claude::ClaudeTools::new(),
+                    agent,
+                    registry.clone(),
+                )
+            });
+    }
+    builder = builder.host_context(host_context);
+    if let Some(snapshot) = snapshot {
+        builder = builder.restore_runtime(snapshot).map_err(js_error)?;
+    }
+    builder.build().map_err(js_error)
 }

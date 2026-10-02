@@ -51,6 +51,7 @@ nanocodex-managed = { workspace = true, optional = true }
 nanocodex-observability = { workspace = true, optional = true }
 
 [dev-dependencies]
+nanocodex-subagents.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 

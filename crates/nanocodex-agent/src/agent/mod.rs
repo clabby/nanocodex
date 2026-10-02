@@ -125,14 +125,14 @@ pub use backend::BuilderBackend;
 pub use builder::NanocodexBuilder;
 #[cfg(feature = "openai")]
 pub use context_source::ExecutionEnvironment;
-#[cfg(feature = "openai")]
 pub use handle::AgentHandle;
 pub use handle::Nanocodex;
 pub use session_context::AgentSessionContext;
 #[cfg(feature = "openai")]
 use turn::TurnCheckpoint;
 pub use turn::{
-    ChildRuntimeSnapshot, PromptRequest, PromptRoute, SpawnOptions, Turn, TurnControl, TurnResult,
+    ChildRuntimeSnapshot, ChildSnapshot, PromptRequest, PromptRoute, SpawnOptions, Turn,
+    TurnControl, TurnResult,
 };
 
 #[cfg(feature = "openai")]

@@ -5,6 +5,52 @@ The additive `Claude.create` constructor runs the Rust Messages backend with the
 terminal replay machinery. It does not route through OpenAI Responses, launch
 Claude Code, or install the Codex catalog.
 
+`Agent.create({ harness: "claude", ...options })` also selects this native
+backend in the Node, host, and browser SDKs. Browser mixed-family sessions run
+in the calling isolate so their explicit tool handlers remain callable.
+
+Enable the canonical task tree with `subagents: { maxConcurrency: 6 }` on a
+Claude root. Supply `harnesses.codex` to grant that tree an explicit Responses
+transport and tools. On a Codex root, supply `harnesses.claude` with explicit
+Claude authentication and native tools. These capability recipes are ephemeral;
+they cannot contain session IDs, durability, nested harnesses, or resume state.
+Alternate Codex capabilities accept API and host-managed transports.
+
+```js
+import { Agent, Subagents, Transport } from "nanocodex/host";
+
+const agent = await Agent.create({
+  harness: "claude",
+  model: "claude-sonnet-4-6",
+  auth: { apiKey: anthropicKey },
+  subagents: { maxConcurrency: 6 },
+  harnesses: {
+    codex: {
+      transport: Transport.openAi({ apiKey: openAiKey, stateless: true }),
+      model: "gpt-6.1-sol",
+    },
+  },
+});
+const child = await Subagents.spawn(agent, {
+  harness: "codex", model: "sol", thinking: "low",
+  role: "Reviewer", task: "Return a concise assessment.",
+  outputSchema: { type: "string" },
+});
+const report = await Subagents.wait(agent, { agentIds: [child.agent_id] });
+await agent.session.shutdown();
+```
+
+Both families use the same `spawn_agent`, `wait_agent`, messaging, result
+submission, and subtree lifecycle. Model names belong to their selected family:
+for example, `sol` selects Codex and `sonnet` selects Claude. Omitted family
+inherits the parent; selecting another family uses that family's defaults.
+Children retain their native transcripts and are reusable only while the root
+runtime lives. A durable root's reopen does not recreate a child task tree.
+
+Hosted managed threads retain their existing provider selection and Claude
+`Task` capabilities; the explicit SDK recipes above do not configure hosted
+account routing.
+
 ```js
 import { Claude } from "nanocodex/node";
 import { createMemoryDurabilityStore } from "nanocodex/durability";

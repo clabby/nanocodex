@@ -360,6 +360,7 @@ export function toWasmConfig(options = {}) {
   copy(config, "durability_host_id", options.durabilityHostId);
   copy(config, "terminal_receipt_retention", options.terminalReceiptRetention);
   copy(config, "subagents", options.subagents);
+  copy(config, "claude_harness", options.claudeHarness);
   copy(config, "host_definition_id", options.hostDefinitionId);
   copy(config, "before_compaction", options.beforeCompaction);
   return config;

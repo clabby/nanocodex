@@ -38,3 +38,14 @@ NodeClaude.create({ ...options, thinking: 'extreme' });
 
 // @ts-expect-error Unknown Claude tool flags must not be silently discarded.
 NodeClaude.create({ ...options, tools: [{ name: "Effect", description: "explicit", handler() {}, unsupported: true }] });
+
+// Canonical task-tree API accepts an explicitly enabled native Claude owner.
+import { Agent as HostAgent, Subagents, Transport } from '../host/index.mjs';
+HostAgent.create({ harness: 'claude', ...options, subagents: {}, harnesses: {
+  codex: { transport: Transport.openAi({ apiKey: 'synthetic-key', stateless: true }) },
+} }).then(async agent => {
+  await Subagents.spawn(agent, { harness: 'claude', model: 'sonnet', role: 'fixture', task: 'synthetic', outputSchema: { type: 'string' } });
+  await Subagents.spawn(agent, { harness: 'codex', model: 'sol', role: 'fixture', task: 'synthetic', outputSchema: { type: 'string' } });
+  // @ts-expect-error models are scoped to the selected harness family
+  await Subagents.spawn(agent, { harness: 'codex', model: 'sonnet', role: 'fixture', task: 'synthetic', outputSchema: { type: 'string' } });
+});

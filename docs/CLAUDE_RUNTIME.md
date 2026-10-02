@@ -2,6 +2,52 @@
 
 `nanocodex-claude` implements a separate Messages-based backend behind the common `nanocodex-agent` lifecycle. Tool registration is explicit; it never imports the OpenAI tool catalog or Claude Code credentials. Embeddings supply authentication and host-authorized capabilities.
 
+## Native harness composition
+
+The facade's `Harness::builder().register(family, recipe).build()` is a reusable
+host router. A recipe accepts `HarnessRequest` and constructs a concrete native
+builder, returning `(Nanocodex, AgentEvents)`. Concrete service and builder types
+remain generic until that lifecycle boundary; Messages transcripts and tool
+definitions stay native. See the [complete reusable example](../crates/nanocodex/README.md#reusable-native-harnesses).
+
+`HarnessModel::Codex(Model)` and `HarnessModel::Claude(ClaudeModel)` identify
+family-scoped choices. `Harness::start(model)` uses the selected model's effort
+default; `start_with(SpawnOptions)` supports an explicit family, model and effort.
+Child overrides resolve against the live parent. Omitted overrides inherit its
+current settings; an explicitly different family uses its own defaults. Family
+and model mismatches and unsupported effort fail before recipe invocation.
+Registering a family authorizes construction through that recipe; it does not
+discover credentials or grant host tools.
+
+Every concrete recipe installs `request.spawn_factory` and uses its own
+`.tools_factory(...)`. Codex's factory returns `Tools`; Claude's returns
+`ClaudeTools`, whose callbacks receive native `ClaudeToolInvocation` identities
+and private host context. A weak `AgentHandle` belongs to its invoking runtime,
+so tools can share one `nanocodex-subagents::Registry` across both families while
+retaining the correct parent and session. The host supplies any native callback
+bridge to those authorized lifecycle capabilities. Mixed-family children start
+clean conversations. `fork` remains native to the owning backend and does not
+translate history into another family.
+
+The registry can unload idle children at its residency limit. Rehydration sends
+the family's in-memory `ChildSnapshot` to the current construction recipe;
+the recipe reattaches authentication, host context and freshly authorized tools,
+restores native state and preserves session identity, model and effort. Weak
+owner handles and the routed factory refuse spawning and restoration after
+owner shutdown. These snapshots are ephemeral residency state; process-restart
+recovery requires the durability attachment below.
+
+The [public library acceptance journey](../crates/nanocodex/tests/it/harness.rs)
+uses actual localhost Responses HTTP and Messages SSE transports with synthetic
+provider output and authentication. It runs real Code Mode calls to the shared
+registry, forces idle Claude eviction at `set_max_resident(1)`, resumes the child
+with its native conversation and identity, verifies live parent defaults, and
+checks that stopped-owner routing reaches neither recipe nor provider. Reproduce
+with `cargo test -p nanocodex --all-features --test it harness:: -- --nocapture`;
+inspect the request transcript under ignored `output/library-harness/`.
+This acceptance boundary does not establish live provider admission, every
+native tool, cross-family fork, or full Claude Code parity.
+
 ## Tool crate migration
 
 The former `nanocodex-tools` monolith is split by provider. Claude integrations

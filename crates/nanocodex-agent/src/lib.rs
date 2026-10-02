@@ -12,6 +12,8 @@ extern crate self as nanocodex_agent;
 
 mod agent;
 mod error;
+mod harness;
+pub use harness::{ClaudeModel, HarnessFamily, HarnessModel};
 #[cfg(feature = "openai")]
 mod model;
 #[cfg(feature = "openai")]
@@ -37,13 +39,13 @@ pub mod backend {
     pub use crate::agent::backend::*;
 }
 
+pub use agent::{
+    AgentHandle, AgentSessionContext, BuilderBackend, ChildRuntimeSnapshot, ChildSnapshot,
+    Nanocodex, PromptRequest, PromptRoute, SpawnOptions, Turn, TurnControl, TurnResult,
+};
 #[cfg(feature = "openai")]
 #[cfg_attr(docsrs, doc(cfg(feature = "openai")))]
-pub use agent::{AgentHandle, ExecutionEnvironment, NanocodexBuilder};
-pub use agent::{
-    AgentSessionContext, BuilderBackend, ChildRuntimeSnapshot, Nanocodex, PromptRequest,
-    PromptRoute, SpawnOptions, Turn, TurnControl, TurnResult,
-};
+pub use agent::{ExecutionEnvironment, NanocodexBuilder};
 #[cfg(feature = "openai")]
 pub use error::CompactionRecovery;
 pub use error::{ExecutionPolicyDisposition, NanocodexError, Result};

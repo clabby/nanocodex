@@ -35,6 +35,8 @@ impl Snapshot {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Cursor {
+    #[serde(default)]
+    pub(super) instruction_revision: Option<u64>,
     pub(super) snapshot: Snapshot,
     pub(super) template: MessagesRequest,
     #[serde(default)]
@@ -154,6 +156,7 @@ impl State {
             return Ok(cursor);
         }
         let mut cursor = Cursor {
+            instruction_revision: None,
             snapshot: self.snapshot(conversation).await?,
             template: self.request_template(),
             wire_profile: Some(self.client.freeze_wire_profile()),

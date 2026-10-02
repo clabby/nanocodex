@@ -1,3 +1,5 @@
+import { prepareHarnesses } from '../runtime/harnesses.mjs';
+import { create as createClaude } from './Claude.mjs';
 import { createRequire } from "node:module";
 import initWeb, { Nanocodex as WebNanocodex } from "../pkg-web/nanocodex.js";
 
@@ -29,6 +31,8 @@ let initializedWeb;
 let NodeNanocodex;
 
 export function create(options = {}) {
+  if (options.harness === 'claude') return createClaude(options);
+  if (options.harness !== undefined && options.harness !== 'codex') throw new TypeError('unsupported harness family');
   if (managedTransportOptions(options?.transport)) return createManagedAgent(options);
   const {
     model,
@@ -82,8 +86,9 @@ export function create(options = {}) {
     workspace: workspace ?? filesystem?.root ?? resume?.workspace,
     codeEvaluator,
     codeEffectJournal,
-    onDispose: () => releaseDefinitionHost(hostDefinitionId),
+    onDispose: () => { releaseDefinitionHost(hostDefinitionId); void harnesses?.close(); },
   });
+  let harnesses;
   let durabilityOwner;
   let creationStarted = false;
   hostDefinitionId = registerDefinitionHost(host);
@@ -102,6 +107,7 @@ export function create(options = {}) {
             durabilityId,
           );
         }
+        harnesses = await prepareHarnesses(options.harnesses, events.emit);
         activateHost(host);
         await host.ready();
         const Nanocodex = module === undefined
@@ -118,6 +124,7 @@ export function create(options = {}) {
           apiBaseUrl,
           websocketWarmup,
           subagents: subagentConfig,
+          claudeHarness: harnesses?.claude,
           hostDefinitionId,
           beforeCompaction: beforeCompaction !== undefined,
           ...config,

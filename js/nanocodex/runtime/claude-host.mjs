@@ -78,6 +78,7 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
   let headerProvider = auth.headers;
   const { handlers, definitions } = resolveClaudeTools(tools);
   const sessions = new Map();
+  const children = new Map();
   let disposed = false;
   const controller = (sessionId, turnId) => {
     let turns = sessions.get(sessionId);
@@ -109,28 +110,35 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
     sleep(_sessionId, milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); },
     cancelCodeTurn: abort,
     cancelCode: abort,
-    releaseSession(sessionId) { abort(sessionId); sessions.delete(sessionId); },
+    bindSubagentSession(sessionId, descriptor, hostContextRef) { children.set(sessionId, { descriptor, hostContextRef }); },
+    releaseSession(sessionId) { abort(sessionId); sessions.delete(sessionId); children.delete(sessionId); },
     releaseTurn(sessionId, turnId) { sessions.get(sessionId)?.delete(turnId); },
-    async executeClaudeTool(...args) {
-      const value = await host.invokeTool(...args);
-      if (value && typeof value === 'object' && Object.hasOwn(value, 'content')) {
-        if (typeof value.content !== 'string' && !Array.isArray(value.content)) throw new TypeError('invalid Claude native tool content');
-        if (value.isError !== undefined && typeof value.isError !== 'boolean') throw new TypeError('invalid Claude tool error flag');
-        return JSON.stringify({ content: value.content, isError: value.isError ?? false, metadata: value.metadata ?? null, structuredResult: value.structuredResult ?? null });
-      }
-      const wire = wireOutput(value);
-      const content = typeof wire.output === 'string' ? wire.output : wire.output.map((item) => {
-        if (item.type === 'input_text') return { type: 'text', text: item.text };
-        if (item.type === 'input_image') {
-          const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(item.image_url);
-          if (match) return { type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } };
-          if (/^https?:\/\//.test(item.image_url)) return { type: 'image', source: { type: 'url', url: item.image_url } };
-          throw new Error('unsupported Claude image output');
+    executeClaudeTool(name, encodedInput, sessionId, callId, model, turnId) {
+      const operation = (async () => {
+        const value = await host.invokeTool(name, encodedInput, sessionId, callId, model, turnId);
+        if (value && typeof value === 'object' && Object.hasOwn(value, 'content')) {
+          if (typeof value.content !== 'string' && !Array.isArray(value.content)) throw new TypeError('invalid Claude native tool content');
+          if (value.isError !== undefined && typeof value.isError !== 'boolean') throw new TypeError('invalid Claude tool error flag');
+          return JSON.stringify({ content: value.content, isError: value.isError ?? false, metadata: value.metadata ?? null, structuredResult: value.structuredResult ?? null });
         }
-        // Messages has no shared input_audio/encrypted_content representation: fail closed.
-        throw new Error('unsupported Claude tool media output');
-      });
-      return JSON.stringify({ content, isError: !wire.success, metadata: wire.metadata, structuredResult: wire.structured_result });
+        const wire = wireOutput(value);
+        const content = typeof wire.output === 'string' ? wire.output : wire.output.map((item) => {
+          if (item.type === 'input_text') return { type: 'text', text: item.text };
+          if (item.type === 'input_image') {
+            const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(item.image_url);
+            if (match) return { type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } };
+            if (/^https?:\/\//.test(item.image_url)) return { type: 'image', source: { type: 'url', url: item.image_url } };
+            throw new Error('unsupported Claude image output');
+          }
+          // Messages has no shared input_audio/encrypted_content representation: fail closed.
+          throw new Error('unsupported Claude tool media output');
+        });
+        return JSON.stringify({ content, isError: !wire.success, metadata: wire.metadata, structuredResult: wire.structured_result });
+      })();
+      // The WASM await's drop guard owns cancellation of this exact invocation.
+      // Preserve the session and other turn controllers for queued/reusable work.
+      Object.defineProperty(operation, 'cancel', { value: () => abort(sessionId, turnId) });
+      return operation;
     },
     async executeTool(...args) { return JSON.stringify(wireOutput(await host.invokeTool(...args))); },
     async invokeTool(name, encodedInput, sessionId, callId, model, turnId) {
@@ -140,7 +148,8 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
       if (!handler) return failed('Claude tool is unavailable');
       try {
         const value = await handler(JSON.parse(encodedInput), Object.freeze({
-          sessionId, turnId, callId, parentCallId: callId, model,
+          sessionId, turnId: children.get(sessionId)?.hostContextRef ?? turnId, callId, parentCallId: callId, model,
+          ...(children.has(sessionId) ? { subagent: children.get(sessionId).descriptor } : {}),
           signal: controller(sessionId, turnId).signal,
         }));
         return value;
@@ -156,6 +165,7 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
       headerProvider = undefined;
       for (const sessionId of sessions.keys()) abort(sessionId);
       sessions.clear();
+      children.clear();
       handlers.clear();
     },
   };

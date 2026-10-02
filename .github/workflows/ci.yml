@@ -82,8 +82,19 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --locked --profile ci
+      - name: Test public library harness journeys
+        run: |
+          cargo test --locked -p nanocodex --features claude --test it harness:: -- --nocapture
       # nextest does not run doctests.
       - run: cargo test --workspace --locked --doc
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: harness-routing-journeys
+          path: |
+            output/harness-routing/**
+            output/library-harness/**
+          if-no-files-found: warn
 
   shared-hands:
     needs: changes
@@ -650,6 +661,12 @@ jobs:
         run: |
           node --test --test-timeout=15000 test/*.test.mjs
           pnpm run test:performance
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && needs.changes.outputs.tests == 'true'
+        with:
+          name: mixed-harness-wasm-journey
+          path: output/mixed-harness-wasm/trace.json
+          if-no-files-found: warn
       - name: Check JS consumers
         run: |
           pnpm --filter nanocodex run test:typecheck

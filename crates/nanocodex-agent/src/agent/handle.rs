@@ -35,151 +35,307 @@ impl Clone for Nanocodex {
     }
 }
 
-/// Weak child-agent capability for the driver that owns one tool runtime.
-///
-/// A tools factory receives a fresh handle for every agent driver. Holding the
-/// handle does not keep its agent alive.
+/// Cheap weak capability for constructing children from one owning runtime.
+/// Holding this handle never keeps its parent driver alive.
 #[derive(Clone)]
-#[cfg(feature = "openai")]
 pub struct AgentHandle {
-    pub(super) commands: mpsc::WeakSender<Command>,
-    pub(super) shutdown: DriverShutdown,
     pub(super) session_id: Arc<str>,
+    pub(super) model: crate::HarnessModel,
+    native_model_id: Arc<str>,
+    pub(super) native: Arc<dyn super::backend::AgentFactory>,
+    pub(super) factory: Option<Arc<dyn super::backend::AgentFactory>>,
 }
 
-#[cfg(feature = "openai")]
 impl AgentHandle {
-    /// Returns the session owned by this weak driver capability.
+    /// Creates a weak capability backed by a native factory. The factory must
+    /// reject operations after its owning driver stops and retain it only weakly.
+    pub fn new(
+        session_id: impl Into<Arc<str>>,
+        model: crate::HarnessModel,
+        native: Arc<dyn super::backend::AgentFactory>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            model,
+            native_model_id: Arc::from(model.as_str()),
+            native,
+            factory: None,
+        }
+    }
+
+    /// Installs embedding-owned mixed-family construction for this capability.
     #[must_use]
+    pub fn with_spawn_factory(mut self, factory: Arc<dyn super::backend::AgentFactory>) -> Self {
+        self.factory = Some(factory);
+        self
+    }
+
+    /// Returns the owning session's stable identity.
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
+    /// Retains an unrestricted native identifier for concrete backend recipes.
+    #[must_use]
+    pub fn with_native_model_id(mut self, model: impl Into<Arc<str>>) -> Self {
+        self.native_model_id = model.into();
+        self
+    }
+    /// Returns the exact provider-native identifier attached to this capability.
+    pub fn native_model_id(&self) -> &str {
+        &self.native_model_id
+    }
+    /// Returns a shared selector only when the native identifier belongs to its catalog.
+    pub fn catalog_model(&self) -> Option<crate::HarnessModel> {
+        self.native_model_id.parse().ok()
+    }
+    /// Returns the attached shared selector. For unrestricted native models this
+    /// is the family default; use `catalog_model` or `native_model_id` to inspect
+    /// the exact recipe, and `settings` for current validated catalog settings.
+    pub const fn harness_model(&self) -> crate::HarnessModel {
+        self.model
+    }
+    /// Reads current native model and reasoning defaults without extending parent ownership.
+    pub async fn settings(&self) -> Result<(crate::HarnessModel, Thinking)> {
+        self.native.settings(self.clone()).await
+    }
+    /// Returns the owning agent-loop family.
+    pub const fn harness_family(&self) -> crate::HarnessFamily {
+        self.model.family()
+    }
 
-    /// Starts a clean agent with the containing driver's private configuration,
-    /// service factory, workspace policy, and per-agent tools factory.
-    ///
-    /// The child receives a new session, cache lineage, conversation, driver,
-    /// WebSocket, and tool runtime. It does not inherit conversation history.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error after the containing driver has stopped.
+    /// Checks the weak owning runtime independently of its model catalog.
+    pub async fn ensure_available(&self) -> Result<()> {
+        self.native.ensure_available(self.clone()).await
+    }
+
+    /// Starts a clean child using inherited family settings.
     pub async fn spawn(&self) -> Result<(Nanocodex, AgentEvents)> {
         self.spawn_with(SpawnOptions::new()).await
     }
-
-    /// Starts a clean agent with optional model and reasoning overrides.
-    ///
-    /// Unspecified values inherit this agent's settings when the driver handles
-    /// the spawn command. Overrides affect only the new child.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error after the containing driver has stopped.
+    /// Starts a clean child with family-scoped overrides.
     pub async fn spawn_with(&self, options: SpawnOptions) -> Result<(Nanocodex, AgentEvents)> {
-        let commands = self.commands()?;
-        request_spawn_with_host_context(&commands, &self.shutdown, options, None).await
+        self.spawn_with_host_context(options, None).await
     }
-
-    /// Starts a clean child with embedding-owned context inherited by its tool invocations.
-    #[doc(hidden)]
+    /// Starts a child while retaining embedding-private invocation context.
     pub async fn spawn_with_host_context(
         &self,
         options: SpawnOptions,
         host_context: Option<Arc<str>>,
     ) -> Result<(Nanocodex, AgentEvents)> {
-        let commands = self.commands()?;
-        request_spawn_with_host_context(&commands, &self.shutdown, options, host_context).await
+        options.validate_harness()?;
+        self.native.ensure_available(self.clone()).await?;
+        self.factory
+            .as_ref()
+            .unwrap_or(&self.native)
+            .spawn(self.clone(), options, host_context)
+            .await
     }
-
-    /// Rehydrates an idle child from this runtime's in-memory history and host capabilities.
-    #[doc(hidden)]
+    /// Invokes the parent's native factory directly, bypassing mixed routing.
+    pub async fn spawn_native_with_host_context(
+        &self,
+        options: SpawnOptions,
+        host_context: Option<Arc<str>>,
+    ) -> Result<(Nanocodex, AgentEvents)> {
+        options.validate_harness()?;
+        self.native.spawn(self.clone(), options, host_context).await
+    }
+    /// Restores an existing Responses child without changing its identity.
     pub async fn restore_child(
         &self,
         snapshot: ChildRuntimeSnapshot,
         host_context: Option<Arc<str>>,
     ) -> Result<(Nanocodex, AgentEvents)> {
-        let commands = self.commands()?;
-        request_command(&commands, &self.shutdown, |result| Command::Spawn {
-            options: SpawnOptions::new()
-                .model(snapshot.model)
-                .thinking(snapshot.thinking),
-            restore: Some(snapshot),
-            host_context,
-            result,
-        })
-        .await
+        self.restore_runtime(ChildSnapshot::Codex(snapshot), host_context)
+            .await
     }
-
-    /// Starts several clean agents in the order requested.
-    ///
-    /// Every child receives the containing driver's private configuration,
-    /// service factory, workspace policy, and per-agent tools factory. The
-    /// children do not inherit conversation history.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error after the containing driver has stopped.
+    /// Restores an evicted child through its selected native factory.
+    pub async fn restore_runtime(
+        &self,
+        snapshot: ChildSnapshot,
+        host_context: Option<Arc<str>>,
+    ) -> Result<(Nanocodex, AgentEvents)> {
+        self.native.ensure_available(self.clone()).await?;
+        if snapshot.model().family() == self.harness_family() {
+            self.native
+                .restore(self.clone(), snapshot, host_context)
+                .await
+        } else {
+            self.factory
+                .as_ref()
+                .ok_or_else(|| {
+                    NanocodexError::InvalidRequest(
+                        "checkpoint family requires a configured child factory".into(),
+                    )
+                })?
+                .restore(self.clone(), snapshot, host_context)
+                .await
+        }
+    }
+    /// Restores through the native factory, bypassing mixed routing.
+    pub async fn restore_native_runtime(
+        &self,
+        snapshot: ChildSnapshot,
+        host_context: Option<Arc<str>>,
+    ) -> Result<(Nanocodex, AgentEvents)> {
+        self.native
+            .restore(self.clone(), snapshot, host_context)
+            .await
+    }
+    /// Starts an ordered batch, closing created children if construction fails.
     pub async fn spawn_many(&self, count: usize) -> Result<Vec<(Nanocodex, AgentEvents)>> {
-        let commands = self.commands()?;
-        request_spawn_many(&commands, &self.shutdown, count, None, None).await
+        self.spawn_many_observed_with_host_context(count, |_| {}, None)
+            .await
     }
-
-    /// Starts several clean agents and synchronously observes each child as it
-    /// is materialized by the parent driver.
-    ///
-    /// This low-level seam lets embeddings pair tool-runtime registration with
-    /// rollback even when the batch request is cancelled before its result is
-    /// delivered.
-    #[doc(hidden)]
+    /// Starts an ordered batch and observes materialized session identities.
     pub async fn spawn_many_observed(
         &self,
         count: usize,
         observer: impl Fn(&str) + Send + Sync + 'static,
     ) -> Result<Vec<(Nanocodex, AgentEvents)>> {
-        let commands = self.commands()?;
-        request_spawn_many(
-            &commands,
-            &self.shutdown,
-            count,
-            Some(Arc::new(observer)),
-            None,
-        )
-        .await
+        self.spawn_many_observed_with_host_context(count, observer, None)
+            .await
     }
-
-    /// Observes a clean batch while privately inheriting embedding-owned context.
-    #[doc(hidden)]
+    /// Starts an observed ordered batch retaining private host context.
     pub async fn spawn_many_observed_with_host_context(
         &self,
         count: usize,
         observer: impl Fn(&str) + Send + Sync + 'static,
         host_context: Option<Arc<str>>,
     ) -> Result<Vec<(Nanocodex, AgentEvents)>> {
-        let commands = self.commands()?;
-        request_spawn_many(
-            &commands,
-            &self.shutdown,
-            count,
-            Some(Arc::new(observer)),
-            host_context,
-        )
-        .await
+        self.native.ensure_available(self.clone()).await?;
+        // No family override exists on this batch API: use the native batch
+        // boundary, preserving Responses atomic admission and cancellation cleanup.
+        self.native
+            .spawn_many(self.clone(), count, Arc::new(observer), host_context)
+            .await
     }
-
-    /// Forks the containing agent's latest safe model boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error before the first prompt reaches a safe boundary, or
-    /// after the containing agent driver has stopped.
+    /// Forking is deliberately a native lifecycle operation rather than mixed routing.
     pub async fn fork(&self) -> Result<(Nanocodex, AgentEvents)> {
-        let commands = self.commands()?;
-        request_fork(&commands, &self.shutdown, None, false).await
+        self.native.ensure_available(self.clone()).await?;
+        self.native.fork(self.clone()).await
     }
+}
 
-    fn commands(&self) -> Result<mpsc::Sender<Command>> {
-        self.commands.upgrade().ok_or(NanocodexError::AgentStopped)
+#[cfg(feature = "openai")]
+pub(super) struct OpenAiAgentFactory {
+    pub(super) commands: mpsc::WeakSender<Command>,
+    pub(super) shutdown: DriverShutdown,
+}
+
+#[cfg(feature = "openai")]
+impl super::backend::AgentFactory for OpenAiAgentFactory {
+    fn ensure_available(&self, _parent: AgentHandle) -> super::backend::BackendFuture<Result<()>> {
+        let available = self.shutdown.is_running()
+            && self
+                .commands
+                .upgrade()
+                .is_some_and(|commands| !commands.is_closed());
+        Box::pin(async move {
+            if available {
+                Ok(())
+            } else {
+                Err(NanocodexError::AgentStopped)
+            }
+        })
+    }
+    fn spawn(
+        &self,
+        _parent: AgentHandle,
+        options: SpawnOptions,
+        host_context: Option<Arc<str>>,
+    ) -> super::backend::BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+        let commands = self.commands.upgrade();
+        let shutdown = self.shutdown.clone();
+        Box::pin(async move {
+            options.validate_harness()?;
+            if options
+                .selected_harness()
+                .is_some_and(|family| family != crate::HarnessFamily::Codex)
+                || options
+                    .selected_harness_model()
+                    .is_some_and(|model| model.family() != crate::HarnessFamily::Codex)
+            {
+                return Err(NanocodexError::InvalidRequest(
+                    "Claude harness requires a configured child factory".into(),
+                ));
+            }
+            let commands = commands.ok_or(NanocodexError::AgentStopped)?;
+            request_spawn_with_host_context(&commands, &shutdown, options, host_context).await
+        })
+    }
+    fn spawn_many(
+        &self,
+        _parent: AgentHandle,
+        count: usize,
+        observer: Arc<dyn Fn(&str) + Send + Sync>,
+        host_context: Option<Arc<str>>,
+    ) -> super::backend::BackendFuture<Result<Vec<(Nanocodex, AgentEvents)>>> {
+        let commands = self.commands.upgrade();
+        let shutdown = self.shutdown.clone();
+        Box::pin(async move {
+            let commands = commands.ok_or(NanocodexError::AgentStopped)?;
+            request_spawn_many(&commands, &shutdown, count, Some(observer), host_context).await
+        })
+    }
+    fn settings(
+        &self,
+        _parent: AgentHandle,
+    ) -> super::backend::BackendFuture<Result<(crate::HarnessModel, Thinking)>> {
+        let commands = self.commands.upgrade();
+        let shutdown = self.shutdown.clone();
+        Box::pin(async move {
+            let commands = commands.ok_or(NanocodexError::AgentStopped)?;
+            let snapshot = request_command(&commands, &shutdown, |result| Command::ChildSnapshot {
+                result,
+            })
+            .await?;
+            Ok((
+                crate::HarnessModel::Codex(snapshot.model),
+                snapshot.thinking,
+            ))
+        })
+    }
+    fn restore(
+        &self,
+        _parent: AgentHandle,
+        snapshot: ChildSnapshot,
+        host_context: Option<Arc<str>>,
+    ) -> super::backend::BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+        let commands = self.commands.upgrade();
+        let shutdown = self.shutdown.clone();
+        Box::pin(async move {
+            let ChildSnapshot::Codex(snapshot) = snapshot else {
+                return Err(NanocodexError::InvalidRequest(
+                    "native Codex factory cannot restore Claude checkpoint".into(),
+                ));
+            };
+            let commands = commands.ok_or(NanocodexError::AgentStopped)?;
+            request_command(&commands, &shutdown, |result| Command::Spawn {
+                options: SpawnOptions::new()
+                    .model(snapshot.model)
+                    .thinking(snapshot.thinking),
+                restore: Some(snapshot),
+                host_context,
+                result,
+            })
+            .await
+        })
+    }
+    fn fork(
+        &self,
+        _parent: AgentHandle,
+    ) -> super::backend::BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+        let commands = self.commands.upgrade();
+        let shutdown = self.shutdown.clone();
+        Box::pin(async move {
+            request_fork(
+                &commands.ok_or(NanocodexError::AgentStopped)?,
+                &shutdown,
+                None,
+                false,
+            )
+            .await
+        })
     }
 }
 
@@ -191,6 +347,26 @@ impl Nanocodex {
         B: BuilderBackend,
     {
         backend.into_builder()
+    }
+
+    /// Returns the immutable native agent-loop family.
+    pub fn harness_family(&self) -> crate::HarnessFamily {
+        self.backend.harness_family()
+    }
+
+    /// Changes the selected model within this backend's family before first use.
+    pub async fn set_harness_model(&self, model: crate::HarnessModel) -> Result<()> {
+        if model.family() != self.harness_family() {
+            return Err(NanocodexError::InvalidRequest(
+                "model belongs to another harness family".into(),
+            ));
+        }
+        self.backend.set_harness_model(model).await
+    }
+
+    /// Captures a provider-native in-memory residency checkpoint.
+    pub async fn runtime_snapshot(&self) -> Result<ChildSnapshot> {
+        self.backend.runtime_snapshot().await
     }
 
     /// Returns the stable agent identity used to reopen durable backends.
@@ -590,15 +766,6 @@ pub(super) async fn request_fork(
         result,
     })
     .await
-}
-
-#[cfg(feature = "openai")]
-pub(super) async fn request_spawn(
-    commands: &mpsc::Sender<Command>,
-    shutdown: &DriverShutdown,
-    options: SpawnOptions,
-) -> Result<(Nanocodex, AgentEvents)> {
-    request_spawn_with_host_context(commands, shutdown, options, None).await
 }
 
 #[cfg(feature = "openai")]

@@ -4,11 +4,12 @@ import {
   releaseHostSession, prompt, compact, shutdown, getTurnHostId,
 } from '../internal.mjs';
 import { watch } from '../actions/events.mjs';
+import { prepareHarnesses } from './harnesses.mjs';
 import { createClaudeHost } from './claude-host.mjs';
 
 const OPTION_KEYS = new Set([
   'auth', 'fetch', 'endpoint', 'compatibilityProfile', 'subscriptionIdentity', 'model', 'instructions', 'sessionId', 'tools',
-  'serverTools', 'durability', 'durabilityId', 'module', 'maxTokens', 'workspace',
+  'harness', 'harnesses', 'subagents', 'serverTools', 'durability', 'durabilityId', 'module', 'maxTokens', 'workspace',
   'cache', 'adaptiveThinking', 'keepThinking', 'thinking', 'parallelTools', 'clientToolSearch',
   'contextWindowTokens', 'autoCompactWindowTokens', 'autoCompact', 'systemBlocks', 'terminalReceiptRetention',
 ]);
@@ -16,6 +17,8 @@ const OPTION_KEYS = new Set([
 export function toClaudeConfig(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Claude options must be an object');
   for (const key of Object.keys(options)) if (!OPTION_KEYS.has(key)) throw new TypeError('unsupported Claude option');
+  if (options.harness !== undefined && options.harness !== 'claude') throw new TypeError('Claude requires harness claude');
+  if (options.subagents !== undefined && (!options.subagents || typeof options.subagents !== 'object' || Array.isArray(options.subagents) || Object.keys(options.subagents).some(key => key !== 'maxConcurrency') || (options.subagents.maxConcurrency !== undefined && (!Number.isSafeInteger(options.subagents.maxConcurrency) || options.subagents.maxConcurrency < 1)))) throw new TypeError('subagents maxConcurrency must be positive');
   if (typeof options.model !== 'string' || !options.model.trim()) throw new TypeError('Claude model must be non-empty');
   if (options.fetch !== undefined && typeof options.fetch !== 'function') throw new TypeError('Claude fetch must be a function');
   if (options.compatibilityProfile !== undefined && options.compatibilityProfile !== 'subscription') throw new TypeError('unsupported Claude compatibilityProfile');
@@ -32,7 +35,7 @@ export function toClaudeConfig(options = {}) {
   for (const key of ['adaptiveThinking', 'keepThinking', 'parallelTools', 'clientToolSearch', 'autoCompact']) if (options[key] !== undefined && typeof options[key] !== 'boolean') throw new TypeError(`Claude ${key} must be boolean`);
   if (options.autoCompact === false) throw new TypeError('disabling Claude autoCompact is unsupported');
   for (const key of ['instructions', 'workspace']) if (options[key] !== undefined && typeof options[key] !== 'string') throw new TypeError(`Claude ${key} must be a string`);
-  if (options.thinking !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(options.thinking)) throw new TypeError('unsupported Claude thinking');
+  if (options.thinking !== undefined && !['none', 'low', 'medium', 'high', 'xhigh', 'max'].includes(options.thinking)) throw new TypeError('unsupported Claude thinking');
   if (options.cache !== undefined && !['off', '5m', '1h'].includes(options.cache)) throw new TypeError('unsupported Claude cache');
   if (options.instructions !== undefined && options.systemBlocks !== undefined) throw new TypeError('instructions and systemBlocks are mutually exclusive');
   for (const key of ['systemBlocks', 'serverTools']) if (options[key] !== undefined && !Array.isArray(options[key])) throw new TypeError(`Claude ${key} must be an array`);
@@ -46,7 +49,7 @@ export function toClaudeConfig(options = {}) {
     }
   }
   const config = {};
-  for (const key of OPTION_KEYS) if (!['auth', 'fetch', 'tools', 'module', 'durability', 'compatibilityProfile'].includes(key) && options[key] !== undefined) config[key] = options[key];
+  for (const key of OPTION_KEYS) if (!['auth', 'fetch', 'tools', 'module', 'durability', 'compatibilityProfile', 'harness', 'harnesses', 'subagents'].includes(key) && options[key] !== undefined) config[key] = options[key];
   if (options.compatibilityProfile !== undefined) {
     config.subscriptionCompatibility = true;
     config.subscriptionIdentity = { ...config.subscriptionIdentity };
@@ -60,13 +63,18 @@ export function toClaudeConfig(options = {}) {
 }
 
 /** Shared host lifecycle; loader selects the actual Nanoclaude WASM class. */
-export async function createClaude(options, load, type) {
+export async function createClaude(options, load, type, harnessDefaults) {
   const reservation = options?.[CLOUDFLARE_SESSION_RESERVATION];
   const config = toClaudeConfig(options);
   config.sessionId ??= options.durabilityId ?? createSessionId();
   const { durability, durabilityId, module } = options;
   const events = createEventChannel();
   const host = createClaudeHost({ auth: options.auth, tools: options.tools, onEvent: events.emit, fetch: options.fetch, endpoint: options.endpoint });
+  let harnesses;
+  try { harnesses = await prepareHarnesses(options.harnesses, events.emit, harnessDefaults); }
+  catch (error) { host.dispose(); throw error; }
+  config.codexHarness = harnesses.codex;
+  if (options.subagents !== undefined) config.subagents = options.subagents.maxConcurrency === undefined ? {} : { max_concurrency: options.subagents.maxConcurrency };
   options = undefined; // Do not retain caller credentials in runtime lifecycle closures.
   const hostDefinitionId = registerDefinitionHost(host);
   config.hostDefinitionId = hostDefinitionId;
@@ -104,6 +112,7 @@ export async function createClaude(options, load, type) {
     owner?.abandon();
     releaseDefinitionHost(hostDefinitionId);
     host.dispose();
+    void harnesses.close();
   };
   const runtime = defineRuntime({
     key: `claude-${type}-wasm`, name: 'Nanoclaude WASM', type,
