@@ -46,9 +46,16 @@ private final class NativeTranscriptCell: UICollectionViewCell {
         result.size = CGSize(width: width, height: max(1, ceil(size.height)))
         return result
     }
+    // Keep the hosted content rendered for glass sampling, but do not expose
+    // a cell entirely behind the dock to touch or accessibility navigation.
+    func setUnobscured(_ unobscured: Bool) {
+        accessibilityElementsHidden = !unobscured
+        isUserInteractionEnabled = unobscured
+    }
     override func prepareForReuse() {
         super.prepareForReuse()
         visibility.visible = false
+        setUnobscured(false)
     }
 }
 
@@ -384,7 +391,19 @@ struct NativeConversationTranscript: UIViewRepresentable {
         }
         #endif
 
+        private func isUnobscured(_ frame: CGRect, in view: UICollectionView) -> Bool {
+            let height = max(0, view.bounds.height - max(0, parent.bottomInset))
+            return height > 0 && frame.maxY > view.bounds.minY && frame.minY < view.bounds.minY + height
+        }
+
         private func reportSoon() {
+            // Update synchronously during layout/scrolling so a newly covered
+            // cell cannot remain interactive until the deferred frame report.
+            if let view {
+                for case let cell as NativeTranscriptCell in view.visibleCells {
+                    cell.setUnobscured(isUnobscured(cell.frame, in: view))
+                }
+            }
             #if DEBUG
             updateMountedCounter()
             #endif
@@ -396,7 +415,8 @@ struct NativeConversationTranscript: UIViewRepresentable {
                 var frames: [String: CGRect] = [:]
                 for path in view.indexPathsForVisibleItems {
                     guard let id = self.dataSource.itemIdentifier(for: path),
-                          let frame = view.layoutAttributesForItem(at: path)?.frame else { continue }
+                          let frame = view.layoutAttributesForItem(at: path)?.frame,
+                          self.isUnobscured(frame, in: view) else { continue }
                     frames[id] = frame.offsetBy(dx: -view.contentOffset.x, dy: -view.contentOffset.y)
                 }
                 if self.reportedFrames != frames {
@@ -420,10 +440,14 @@ struct NativeConversationTranscript: UIViewRepresentable {
         }
 
         func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-            (cell as? NativeTranscriptCell)?.visibility.visible = true
+            guard let cell = cell as? NativeTranscriptCell else { return }
+            cell.visibility.visible = true
+            cell.setUnobscured(isUnobscured(cell.frame, in: collectionView))
         }
         func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-            (cell as? NativeTranscriptCell)?.visibility.visible = false
+            guard let cell = cell as? NativeTranscriptCell else { return }
+            cell.visibility.visible = false
+            cell.setUnobscured(false)
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {

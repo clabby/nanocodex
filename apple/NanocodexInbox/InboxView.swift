@@ -99,9 +99,24 @@ private struct InboxNavigationSurface: ViewModifier {
         if reduceTransparency {
             content.background(Ink.card, in: shape)
         } else if #available(iOS 26.0, *) {
-            content.glassEffect(.regular, in: shape)
+            content.glassEffect(.clear, in: shape)
         } else {
-            content.background(.regularMaterial, in: shape)
+            content.background(.ultraThinMaterial, in: shape)
+        }
+    }
+}
+
+/// Floating transcript controls share the composer's transparent chrome.
+private struct InboxThreadControlSurface: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    func body(content: Content) -> some View {
+        if reduceTransparency {
+            content.background(Ink.card, in: Circle())
+        } else if #available(iOS 26.0, *) {
+            content.glassEffect(.clear.interactive(), in: Circle())
+        } else {
+            content.background(.ultraThinMaterial, in: Circle())
         }
     }
 }
@@ -136,8 +151,8 @@ struct InboxComposerShell: ViewModifier {
                 .background(ChatPalette.composer, in: shape)
                 .overlay(shape.strokeBorder(Color.primary.opacity(focused ? 0.18 : 0.1)))
         } else if #available(iOS 26.0, *) {
-            // Keep the editor and controls opaque; only the surface is translucent.
-            content.glassEffect(.regular, in: shape)
+            // Keep text and controls legible over the clear glass surface.
+            content.glassEffect(.clear, in: shape)
         } else {
             content.background(.ultraThinMaterial, in: shape)
                 .overlay(shape.strokeBorder(Color.primary.opacity(focused ? 0.12 : 0.06)))
@@ -197,9 +212,10 @@ struct InboxView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var composerFocused = false
     @State private var bottomDockHeight: CGFloat = 0
+    @State private var navigationChromeHeight: CGFloat = 0
 
     var body: some View {
-        VStack(spacing: 0) {
+        ZStack(alignment: .bottom) {
             NavigationStack {
                 Group {
                     if model.connected && mainSurface == .todo {
@@ -213,7 +229,7 @@ struct InboxView: View {
                         GeneratedAppsView(model: model, selection: $selectedGeneratedApp, create: { showCreateApp = true }, openChat: { selectMainSurface(.chat); model.openThread() })
                     } else { inbox }
                 }
-                    .environment(\.conversationComposerHeight, bottomDockHeight)
+                    .environment(\.conversationComposerHeight, bottomDockHeight + navigationChromeHeight)
                     #if os(iOS)
                     .navigationTitle("Conversations")
                     .navigationBarTitleDisplayMode(.inline)
@@ -239,9 +255,14 @@ struct InboxView: View {
             }
             // A tab switch must leave implicit pushed destinations such as CRM profiles.
             .id(mainSurface)
-            // Shell-owned controls remain available through pushed destinations.
-            // Reserve actual viewport space, not a safe-area inset that the Chat
-            // panel deliberately extends through.
+            // Other pages reserve room for the shared composer and navigation.
+            // Chat renders behind both glass surfaces and reserves its tail using
+            // the native transcript's content inset.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if model.connected && (showsNewThreadComposer || showScreens) {
+                    Color.clear.frame(height: navigationChromeHeight)
+                }
+            }
             if model.connected {
                 VStack(spacing: 0) {
                     if showsNewThreadComposer {
@@ -252,7 +273,7 @@ struct InboxView: View {
                     }
                     mainNavigation
                 }
-                .background(Ink.background.ignoresSafeArea(edges: .bottom))
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { navigationChromeHeight = $0 }
             }
         }
         .sheet(isPresented: $showCreateApp) {
@@ -363,12 +384,8 @@ struct InboxView: View {
             conversationBottomControls
             .frame(maxWidth: InboxChrome.maximumWidth)
             .frame(maxWidth: .infinity)
-            .background(Ink.background.ignoresSafeArea(edges: .bottom))
-            .overlay(alignment: .top) {
-                LinearGradient(colors: [Ink.background.opacity(0), Ink.background], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 16).offset(y: -16).allowsHitTesting(false)
-            }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomDockHeight = $0 }
+            .padding(.bottom, navigationChromeHeight)
         }
     }
 
@@ -2710,22 +2727,19 @@ private struct ConversationContentView: View {
                 }
                 tools.setAllExpanded(!hasExpandedTools)
             } label: { Image(systemName: hasExpandedTools ? "rectangle.compress.vertical" : "rectangle.expand.vertical").frame(width: 44, height: 44)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(Circle().strokeBorder(Ink.border, lineWidth: 0.5))
+                    .modifier(InboxThreadControlSurface())
                     .contentShape(Rectangle()) }
                 .accessibilityLabel(hasExpandedTools ? "Collapse all tool calls" : "Expand all tool calls")
                 .accessibilityIdentifier("toggle-all-tools")
             Button { navigateUser(.older, using: scroll) } label: {
                 Image(systemName: "arrow.up").frame(width: 44, height: 44)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(Circle().strokeBorder(Ink.border, lineWidth: 0.5))
+                    .modifier(InboxThreadControlSurface())
                     .contentShape(Rectangle())
             }.accessibilityLabel("Previous user message").accessibilityIdentifier("previous-user-message")
                 .disabled(userTarget(.older) == nil && (!model.hasOlder || revision.preparing || model.loadingOlder || model.loadingNewer || pendingUserDirection != nil))
             Button { navigateUser(.newer, using: scroll) } label: {
                 Image(systemName: "arrow.down").frame(width: 44, height: 44)
-                    .background(.regularMaterial, in: Circle())
-                    .overlay(Circle().strokeBorder(Ink.border, lineWidth: 0.5))
+                    .modifier(InboxThreadControlSurface())
                     .contentShape(Rectangle())
             }.accessibilityLabel("Next user message").accessibilityIdentifier("next-user-message")
                 .disabled(userTarget(.newer) == nil && (!model.hasNewer || revision.preparing || model.loadingOlder || model.loadingNewer || pendingUserDirection != nil))
@@ -2908,15 +2922,15 @@ private struct ConversationContentView: View {
     var body: some View {
         Group {
             ZStack(alignment: .bottom) {
-            // Bound the native viewport above the dock. Occluded rows must not
-            // remain tappable or exposed as visible accessibility elements.
+            // Let history scroll behind the floating glass. The native content
+            // inset keeps the newest row above the composer when at rest.
             GeometryReader { viewport in
             let boundaryItemID = historyBoundaryItemID
             ZStack(alignment: .top) {
             NativeConversationTranscript(
                 rows: nativeRows(in: viewport), proxy: scroll,
                 followsLatest: followsLatest && pendingReadingRestore == nil && !model.needsLatestHistory && !navigationActive,
-                bottomInset: 0,
+                bottomInset: composerHeight + 52,
                 onFrames: { frames in
                     // Native frames contain only realized cells in viewport coordinates.
                     var visible = frames
@@ -2964,7 +2978,6 @@ private struct ConversationContentView: View {
                     followLatest(using: scroll)
                 }
                 })
-            .padding(.bottom, composerHeight + 52)
             .contentShape(Rectangle())
             .onChange(of: revision.projectionRevision) { _, _ in
                 continueUserNavigation(using: scroll)
@@ -3036,8 +3049,7 @@ private struct ConversationContentView: View {
                         Label("Latest messages", systemImage: "arrow.down")
                             .labelStyle(.iconOnly)
                             .frame(width: 42, height: 42)
-                            .background(.regularMaterial, in: Circle())
-                            .overlay(Circle().strokeBorder(Ink.border, lineWidth: 0.5))
+                            .modifier(InboxThreadControlSurface())
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
