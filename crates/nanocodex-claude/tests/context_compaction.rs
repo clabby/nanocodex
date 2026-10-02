@@ -861,3 +861,222 @@ async fn end_turn_without_prior_server_result_fails_and_recovers_as_data() {
     );
     task.abort();
 }
+
+#[tokio::test]
+async fn context_exhaustion_retains_signed_output_and_completed_effects() {
+    let exhausted = vec![
+        json!({"type":"thinking","thinking":"partial reasoning","signature":"signed-exhaustion"}),
+        json!({"type":"server_tool_use","id":"completed-fetch","name":"web_fetch","input":{"url":"https://example.org"}}),
+        json!({"type":"web_fetch_tool_result","tool_use_id":"completed-fetch","content":{"type":"web_fetch_result","url":"https://example.org","content":"page"}}),
+        json!({"type":"text","text":"partial answer ".repeat(3000)}),
+    ];
+    let source = exhausted.clone();
+    let (client, requests, task) = server(
+        move |index, body| {
+            // Synthetic byte capacity models a provider that accepts input but
+            // stops generation when input plus output fills its context window.
+            const CAPACITY: usize = 145_000;
+            let input = body["messages"].to_string().len();
+            assert!(input < CAPACITY, "recovery must reduce the request input");
+            match index {
+                1 => (text("background received"), "end_turn", 10),
+                2 => (pending_round(), "tool_use", 10),
+                3 => {
+                    assert!(input + json!(source).to_string().len() > CAPACITY);
+                    (source.clone(), "model_context_window_exceeded", 10)
+                }
+                4 => {
+                    assert!(
+                        input + body["max_tokens"].as_u64().unwrap() as usize * 4 < CAPACITY,
+                        "summary must leave room for its own output"
+                    );
+                    (text("Perform the requested task."), "end_turn", 10)
+                }
+                _ => (text("completed after recovery"), "end_turn", 10),
+            }
+        },
+        None,
+    )
+    .await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counter = effects.clone();
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .max_tokens(128_000)
+        .adaptive_thinking()
+        .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
+        .tool(tool(), move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Ok("committed receipt".into()) }
+        })
+        .build()
+        .unwrap();
+    agent
+        .prompt("background ".repeat(10_000))
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let result = agent
+        .prompt("perform effects once")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    assert_eq!(result.final_message(), "completed after recovery");
+    assert_eq!(effects.load(Ordering::SeqCst), 2);
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 5);
+    assert_eq!(log[3]["tool_choice"], json!({"type":"none"}));
+    assert_eq!(log[3]["thinking"], json!({"type":"disabled"}));
+    assert_eq!(log[3]["max_tokens"], 4096);
+    assert!(!log[3]["messages"].to_string().contains("completed-fetch"));
+    assert_eq!(log[4]["messages"][1]["content"], json!(pending_round()));
+    assert_eq!(
+        log[4]["messages"][2]["content"][0]["content"],
+        "committed receipt"
+    );
+    assert_eq!(log[4]["messages"][3]["content"], json!(exhausted));
+    assert_eq!(log[4]["messages"][4]["role"], "user");
+    assert_eq!(log[4]["max_tokens"], 128_000);
+    assert_eq!(log[4]["thinking"], log[0]["thinking"]);
+    assert_eq!(log[4]["tools"], log[0]["tools"]);
+    task.abort();
+}
+
+#[tokio::test]
+async fn context_exhaustion_retries_once_and_retains_partial_text_on_failure() {
+    let (client, requests, task) = server(
+        |index, _| match index {
+            1 | 3 => (text("partial answer"), "model_context_window_exceeded", 10),
+            2 => (text("Task summary"), "end_turn", 10),
+            _ => (text("manually continued"), "end_turn", 10),
+        },
+        None,
+    )
+    .await;
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .build()
+        .unwrap();
+    let error = agent
+        .prompt("finish task")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("context window exhausted after recovery"),
+        "{error}"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    agent
+        .prompt("continue manually")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 4);
+    assert!(log[3]["messages"].to_string().contains("partial answer"));
+    task.abort();
+}
+
+#[tokio::test]
+async fn context_exhaustion_summary_failure_preserves_received_output() {
+    let (client, requests, task) = server(
+        |index, _| match index {
+            1 => (text("partial answer"), "model_context_window_exceeded", 10),
+            2 => (
+                text("incomplete summary"),
+                "model_context_window_exceeded",
+                10,
+            ),
+            _ => (text("manual recovery"), "end_turn", 10),
+        },
+        None,
+    )
+    .await;
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .build()
+        .unwrap();
+    let error = agent
+        .prompt("finish task")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("compaction summary did not end normally"),
+        "{error}"
+    );
+    agent
+        .prompt("continue manually")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 3);
+    assert!(log[2]["messages"].to_string().contains("partial answer"));
+    assert!(
+        !log[2]["messages"]
+            .to_string()
+            .contains("incomplete summary")
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn context_exhaustion_rejects_partial_client_calls_and_unresolved_server_effects() {
+    for block in [
+        json!({"type":"tool_use","id":"partial-client","name":"effect","input":{}}),
+        json!({"type":"server_tool_use","id":"unresolved-server","name":"web_fetch","input":{"url":"https://example.org"}}),
+    ] {
+        let (client, requests, task) = server(
+            move |index, _| match index {
+                1 => (vec![block.clone()], "model_context_window_exceeded", 10),
+                _ => (text("manual reconciliation"), "end_turn", 10),
+            },
+            None,
+        )
+        .await;
+        let effects = Arc::new(AtomicUsize::new(0));
+        let counter = effects.clone();
+        let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+            .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
+            .tool(tool(), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("must not run".into()) }
+            })
+            .build()
+            .unwrap();
+        assert!(
+            agent
+                .prompt("perform effect")
+                .await
+                .unwrap()
+                .result()
+                .await
+                .is_err()
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        agent
+            .prompt("reconcile manually")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        task.abort();
+    }
+}
