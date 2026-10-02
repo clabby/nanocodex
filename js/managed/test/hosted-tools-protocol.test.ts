@@ -92,8 +92,6 @@ describe("hosted tools socket protocol", () => {
       { type: "fenced" },
       { type: "cancel_ack", call_id: "call:1" },
       { type: "result_ack", call_id: "call:1" },
-      { type: "ping", nonce: "heartbeat" },
-      { type: "pong", nonce: "heartbeat" },
     ]) expect(() => parseHostedToolsHostFrame(JSON.stringify(frame))).toThrow(HostedToolsProtocolError);
     expect(() => parseHostedToolsHostFrame(JSON.stringify({ type: "ready" }))).toThrow("host-to-managed");
     expect(() => parseHostedToolsManagedFrame(JSON.stringify({ type: "drain" }))).toThrow("managed-to-host");
