@@ -24,7 +24,7 @@ pub(super) struct ClaudeConnection {
     auth: crate::auth::ClaudeAuthArgs,
     api_key: Option<String>,
     endpoint: Option<String>,
-    client: Arc<tokio::sync::OnceCell<std::result::Result<ClaudeClient, String>>>,
+    client: Arc<tokio::sync::OnceCell<ClaudeClient>>,
 }
 
 impl ClaudeConnection {
@@ -43,7 +43,7 @@ impl ClaudeConnection {
 
     async fn client(&self) -> std::result::Result<ClaudeClient, String> {
         self.client
-            .get_or_init(|| async {
+            .get_or_try_init(|| async {
                 self.auth
                     .clone()
                     .client(self.api_key.clone(), self.endpoint.clone())
@@ -51,7 +51,7 @@ impl ClaudeConnection {
                     .map_err(|error| error.to_string())
             })
             .await
-            .clone()
+            .cloned()
     }
 }
 

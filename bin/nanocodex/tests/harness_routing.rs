@@ -43,6 +43,7 @@ enum Journey {
     Mixed,
     MissingChildAuth,
     Subscription,
+    SubscriptionRecovery,
 }
 
 struct Provider {
@@ -86,7 +87,38 @@ impl Provider {
     }
 
     fn script(&self, label: &str, stage: usize) -> Reply {
-        if self.journey == Journey::Subscription {
+        if self.journey == Journey::SubscriptionRecovery && label == "root" {
+            return match stage {
+                0 => Reply::Code(format!(
+                    r#"
+let denied=false;
+try {{ await tools.spawn_agent({{harness:'claude',model:'{CLAUDE_MODEL}',role:'MIXED_CHILD',task:'MIXED_CHILD',thinking:null,output_contract:{}}}); }}
+catch(e) {{ denied=true; text(String(e)); if(!String(e).includes('nanocodex --claude auth login')) throw Error('missing login hint'); }}
+if(!denied) throw Error('signed-out child admitted');
+const d=await tools.list_agents({{include_completed:true}}); text(d);
+if(d.agents.length) throw Error('failed spawn retained child');
+text('subscription-login-required-ok');
+"#,
+                    contract()
+                )),
+                1 => Reply::Code(format!(
+                    r#"
+const c=await tools.spawn_agent({{harness:'claude',model:'{CLAUDE_MODEL}',role:'MIXED_CHILD',task:'MIXED_CHILD',thinking:null,output_contract:{}}});
+const w=await tools.wait_agent({{agent_ids:[c.agent_id],timeout_ms:20000}}); text(w);
+if(w.timed_out || w.agents[0].status.state!=='completed' || w.agents[0].status.output.answer!=='subscription-child-answer') throw Error('child failed after login');
+const d=await tools.list_agents({{include_completed:true}}); text(d);
+if(d.agents.length!==1) throw Error('recovery retained an extra child');
+text('subscription-same-process-recovered-ok');
+"#,
+                    contract()
+                )),
+                _ => Reply::Text("subscription-recovery-answer".into()),
+            };
+        }
+        if matches!(
+            self.journey,
+            Journey::Subscription | Journey::SubscriptionRecovery
+        ) {
             return match (self.root, label, stage) {
                 ("claude", "root", 0) => Reply::Write {
                     path: "grandchild.txt",
@@ -520,6 +552,20 @@ async fn subscription_servers(
     provider: Arc<Mutex<Provider>>,
     subscription: Option<Arc<Mutex<SubscriptionFixture>>>,
 ) -> Result<Servers> {
+    subscription_servers_with_recovery(provider, subscription, None).await
+}
+
+#[derive(Default)]
+struct SubscriptionRecoveryGate {
+    denied: tokio::sync::Notify,
+    logged_in: tokio::sync::Notify,
+}
+
+async fn subscription_servers_with_recovery(
+    provider: Arc<Mutex<Provider>>,
+    subscription: Option<Arc<Mutex<SubscriptionFixture>>>,
+    recovery: Option<Arc<SubscriptionRecoveryGate>>,
+) -> Result<Servers> {
     let http = TcpListener::bind("127.0.0.1:0").await?;
     let claude = format!("http://{}/v1/messages", http.local_addr()?);
     let state = Arc::clone(&provider);
@@ -531,10 +577,10 @@ async fn subscription_servers(
             let auth = messages_auth.clone();
             async move {
                 let request: Value = serde_json::from_slice(&body).unwrap();
-                if let Some(auth) = auth {
-                    if !auth.lock().unwrap().messages(&headers, &body, &request) {
-                        return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"type":"error","error":{"type":"authentication_error","message":"synthetic access expired"}}))).into_response();
-                    }
+                if let Some(auth) = auth
+                    && !auth.lock().unwrap().messages(&headers, &body, &request)
+                {
+                    return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"type":"error","error":{"type":"authentication_error","message":"synthetic access expired"}}))).into_response();
                 }
                 let label = label(&request);
                 let reply = state.lock().unwrap().respond("claude", &label, request.clone());
@@ -590,6 +636,7 @@ async fn subscription_servers(
             let (stream, _) = ws.accept().await.unwrap();
             provider.lock().unwrap().connected("codex");
             let state = Arc::clone(&provider);
+            let recovery = recovery.clone();
             connections.spawn(async move {
                 let Ok(mut socket) = accept_async(stream).await else {
                     return;
@@ -603,6 +650,28 @@ async fn subscription_servers(
                     let current = label(&request);
                     if session_label.is_none() || current == "followup" {
                         session_label = Some(current);
+                    }
+                    // Pause only the external provider response, after observing
+                    // the real CLI's failed-spawn tool result. The owning Codex
+                    // runtime remains alive while a second CLI process logs in.
+                    if let Some(recovery) = &recovery {
+                        let denied = {
+                            let state = state.lock().unwrap();
+                            state.counts.get("root") == Some(&1)
+                                && session_label.as_deref() == Some("root")
+                        };
+                        if denied {
+                            let artifact = state.lock().unwrap().artifact.clone();
+                            std::fs::write(
+                                artifact.join("signed-out-boundary.json"),
+                                serde_json::to_vec_pretty(&json!({
+                                    "observed_tool_result":last_tool_result(&request),
+                                    "next_step":"second-process shipped CLI OAuth login, then retry from this live Codex runtime"
+                                })).unwrap(),
+                            ).unwrap();
+                            recovery.denied.notify_one();
+                            recovery.logged_in.notified().await;
+                        }
                     }
                     let reply = state.lock().unwrap().respond(
                         "codex",
@@ -938,6 +1007,7 @@ async fn journey(family: &'static str, kind: Journey) -> Result<()> {
         Journey::Mixed => "mixed-routing-answer",
         Journey::MissingChildAuth => "auth-denied-answer",
         Journey::Subscription => "subscription-native-answer",
+        Journey::SubscriptionRecovery => "subscription-recovery-answer",
     };
     if kind == Journey::Smoke {
         run_tui(command, &artifact, answer).await?;
@@ -1383,6 +1453,141 @@ fn encrypted_subscription_store(path: &Path) -> Result<()> {
             "credential directory must be owner-only"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn claude_subscription_login_recovers_the_same_codex_process() -> Result<()> {
+    let artifact = artifact("claude-subscription-recovery")?;
+    let workspace = artifact.join("workspace");
+    let config = workspace.join("claude-oauth.json");
+    let provider = Arc::new(Mutex::new(Provider {
+        root: "codex",
+        journey: Journey::SubscriptionRecovery,
+        counts: HashMap::new(),
+        log: vec![],
+        artifact: artifact.clone(),
+        pauses: 0,
+        cancellations: 0,
+        connections: vec![],
+    }));
+    let fixture = Arc::new(Mutex::new(SubscriptionFixture {
+        artifact: artifact.clone(),
+        oauth: vec![],
+        messages: vec![],
+        bodies: vec![],
+        login_query: HashMap::new(),
+        tokens: 0,
+        reject_next: false,
+    }));
+    let gate = Arc::new(SubscriptionRecoveryGate::default());
+    let servers = subscription_servers_with_recovery(
+        Arc::clone(&provider),
+        Some(Arc::clone(&fixture)),
+        Some(Arc::clone(&gate)),
+    )
+    .await?;
+    let base = servers.claude.strip_suffix("/v1/messages").unwrap();
+    std::fs::write(
+        &config,
+        serde_json::to_vec_pretty(&json!({
+            "authorize_url":format!("{base}/oauth/authorize"),"token_url":format!("{base}/oauth/token"),"profile_url":format!("{base}/oauth/profile"),"manual_redirect_uri":format!("{base}/oauth/callback"),"client_id":"synthetic-cli-client","scopes":["user:profile","user:inference","user:sessions:claude_code"],"allow_loopback_http":true
+        }))?,
+    )?;
+    let root_evidence = artifact.join("live-codex-root");
+    std::fs::create_dir_all(&root_evidence)?;
+    let mut invocation = command(&workspace, &servers, "codex", true, false, false);
+    invocation.arg("--claude-oauth-config").arg(&config).args([
+        "--model",
+        CODEX_MODEL,
+        "SUBSCRIPTION_RECOVERY_ROOT",
+    ]);
+    let mut root = Box::pin(subscription_step(
+        invocation,
+        &root_evidence,
+        "same-process",
+        "first Claude spawn rejected without effects; second-process OAuth login; same live Codex process retries successfully with one Claude child and native Write effect",
+        &fixture,
+        &provider,
+    ));
+    tokio::select! {
+        output = &mut root => {
+            let output = output?;
+            return Err(eyre!("Codex exited before the signed-out boundary ({:?}); evidence {}", output.status, artifact.display()));
+        }
+        denied = timeout(LIMIT, gate.denied.notified()) => {
+            denied.map_err(|_| eyre!("signed-out child boundary timed out; evidence {}", artifact.display()))?;
+        }
+    }
+    let boundary: Value =
+        serde_json::from_slice(&std::fs::read(artifact.join("signed-out-boundary.json"))?)?;
+    let denied_result = boundary["observed_tool_result"].to_string();
+    assert!(
+        denied_result.contains("subscription-login-required-ok")
+            && denied_result.contains("nanocodex --claude auth login")
+            && !denied_result.contains("Script failed"),
+        "first spawn must fail with a login hint and no registry child: {denied_result}; evidence {}",
+        artifact.display()
+    );
+    assert!(fixture.lock().unwrap().oauth.is_empty());
+    assert!(fixture.lock().unwrap().messages.is_empty());
+    assert!(
+        provider
+            .lock()
+            .unwrap()
+            .connections
+            .iter()
+            .all(|connection| connection["family"] != "claude"),
+        "signed-out child opened a Claude connection; evidence {}",
+        artifact.display()
+    );
+    subscription_login(&workspace, &config, &artifact, &fixture).await?;
+    encrypted_subscription_store(&workspace.join("codex-home/claude/private/auth"))?;
+    gate.logged_in.notify_one();
+    let output = root.await?;
+    success(
+        &output,
+        &root_evidence.join("same-process"),
+        "subscription-recovery-answer",
+    )?;
+    let retry = provider
+        .lock()
+        .unwrap()
+        .log
+        .iter()
+        .find(|call| call["family"] == "codex" && call["label"] == "root" && call["stage"] == 2)
+        .map(|call| call["tool_result"].clone())
+        .ok_or_else(|| {
+            eyre!(
+                "missing same-process retry result; evidence {}",
+                artifact.display()
+            )
+        })?;
+    let effect = std::fs::read_to_string(workspace.join("subscription-child.txt")).ok();
+    let retry_text = retry.to_string();
+    let recovered = retry_text.contains("subscription-same-process-recovered-ok")
+        && !retry_text.contains("Script failed");
+    let (tokens, messages) = {
+        let state = fixture.lock().unwrap();
+        (state.tokens, state.messages.len())
+    };
+    std::fs::write(
+        artifact.join("recovery-contract.json"),
+        serde_json::to_vec_pretty(&json!({
+            "reproduce":"cargo test --locked -p nanocodex-bin --test harness_routing claude_subscription_login_recovers_the_same_codex_process -- --nocapture",
+            "expected":{"signed_out":"login hint, no retained child, no OAuth or Claude connection","login":"real second-process CLI PKCE exchange and profile validation to same encrypted store","retry":"same running Codex process admits exactly one Claude child, native Write effect and structured result"},
+            "observed":{"same_process_recovered":recovered,"retry_tool_result":retry,"native_effect":effect,"token_exchanges":tokens,"messages_requests":messages},
+            "signed_out_boundary":"signed-out-boundary.json","login":"login/outcome.json","root":"live-codex-root/same-process/outcome.json","provider_trace":"provider.json","oauth_trace":"oauth-http.json","messages_trace":"messages-http.json"
+        }))?,
+    )?;
+    assert!(
+        recovered,
+        "same live Codex process could not spawn Claude after successful login: {retry}; evidence {}",
+        artifact.display()
+    );
+    assert_eq!(effect.as_deref(), Some("subscription-child-effect"));
+    assert_eq!(tokens, 1);
+    assert!(messages > 0);
     Ok(())
 }
 
