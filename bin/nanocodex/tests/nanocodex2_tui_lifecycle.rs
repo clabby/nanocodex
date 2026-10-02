@@ -167,7 +167,7 @@ async fn terminal_control_keeps_local_root_discoverable_and_stops_it_after_runti
                 let response: Value =
                     serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
                 let snapshot = response["result"].clone();
-                if snapshot["state"]["managed_cursor"] == cursor.to_string() {
+                if snapshot["state"]["managed_cursor"] == cursor {
                     return snapshot;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
