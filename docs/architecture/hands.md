@@ -8,13 +8,16 @@ OS -> Hand daemon <--- outbound WebSocket ---> AccountHostedTools <- agent
        `-- VM factory helper -> VMs published as separate mountable Hands
 ```
 
-The broker durably claims each call before sending it once. The daemon owns execution; a socket only carries requests and replies. A disconnected socket loses its replies, not its admitted work. Reconnecting never replays commands or transfers old replies.
+The broker durably claims each call before sending it once. The daemon owns execution; a socket carries requests and replies. Each admitted source call has one durable transport command ID. The living Hand keeps its running task or immutable terminal receipt until the broker records the result and acknowledges it.
 
 - Offline before dispatch: not started.
 - Result recorded: return that result.
-- Connection lost after dispatch: outcome unknown, reported as a local tool failure.
+- Connection lost after dispatch: reconnecting to the same runtime queries the original command ID and recovers running work or its retained result within the original deadline.
+- Runtime replaced, journal proof missing, or deadline reached: outcome unknown, reported as a local tool failure; the command is never automatically rerun.
 
-The publisher lock protects the host identity. Closing the last client leaves the daemon running. The OS service manager owns startup, restart, and shutdown. Active calls are bounded across reconnects. Lease expiry reconnects, and the daemon leaves a live VM factory running through connection outages. Rejected credentials stop the daemon; log in again and restart the service.
+The publisher lock protects the host identity. Closing the last client leaves the daemon running. The OS service manager owns startup, restart, and shutdown. Native and compatible Node transports use WebSocket control ping/pong to detect a broken peer; there are no JSON heartbeats or ordinary Hand liveness leases. Standard browser/Node WebSocket APIs without control ping support use platform close/error events and command deadlines. Provisioned VM authorization has its own expiry and validation. The daemon leaves a live VM factory running through connection outages. Rejected credentials stop the daemon; log in again and restart the service.
+
+Reattaching the same authenticated runtime and immutable catalog retains its ownership epoch (`lease_id`, `runtime_generation`) while physical connection IDs change. Recovery queries never execute commands. Lost acknowledgements replay the same receipt. The broker's SQLite ledger survives owner restarts; the Hand journal survives socket reconnects within one living daemon process. A daemon crash loses that execution proof and does not permit automatic shell replay.
 
 On macOS, the standalone daemon prevents idle system sleep by default using `/usr/bin/caffeinate -i -w <daemon PID>`. The assertion starts after exclusive publisher ownership and state opening, survives reconnects and client disconnects, and ends when the daemon shuts down. It does not keep the display awake or bypass lid-close sleep. If the helper cannot start, the daemon logs a warning and continues without sleep inhibition. Linux and Windows do not acquire this assertion.
 
@@ -47,7 +50,7 @@ For a custom login, pass `--managed-url https://your-server` and `--account-file
 
 Use `sudo systemctl stop/start nanocodex-hand` on Linux. On macOS, use `sudo launchctl bootout system/com.nanocodex.hand` to stop and `sudo launchctl bootstrap system /Library/LaunchDaemons/com.nanocodex.hand.plist` to start. Remove/disable the OS service to prevent future boot startup. Windows service installation is not provided by this helper.
 
-The Linux SSH bootstrap installs the same single daemon with its VM recipe. Older separate factory services require an explicit installation/migration decision; an updater never removes or restarts them. There is one current wire contract: publishers must send `capabilities: ["turn_metadata"]`. This fixed field preserves the existing publisher format without capability negotiation or legacy metadata fallback. There is no new process recovery API or persistence across daemon crashes.
+The Linux SSH bootstrap installs the same single daemon with its VM recipe. Older separate factory services require an explicit installation/migration decision; an updater never removes or restarts them. Publishers send `capabilities: ["turn_metadata"]`; a retained command journal is advertised with `command_recovery: true` and a stable `runtime_id`. Recovery exchanges command status or retained receipts, and does not provide process persistence across daemon crashes.
 
 ## Coordinated updates and independent lifetime
 

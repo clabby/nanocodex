@@ -46,6 +46,7 @@ pub(crate) enum ExecutorFrame<'a> {
     Catalog {
         capabilities: [&'static str; 1],
         runtime_id: &'a str,
+        command_recovery: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         diagnostics: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,8 +68,9 @@ pub(crate) enum ExecutorFrame<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         timing: Option<&'a ReceiptTiming>,
     },
-    Ping {
-        nonce: &'a str,
+    Status {
+        call_id: &'a str,
+        state: &'static str,
     },
     Drain {},
 }
@@ -95,8 +97,8 @@ pub(crate) enum RemoteFrame {
     Ack {
         call_id: String,
     },
-    Pong {
-        nonce: String,
+    Recover {
+        call_ids: Vec<String>,
     },
     Draining {},
 }
@@ -108,7 +110,7 @@ impl RemoteFrame {
             Self::Call { .. } => "call",
             Self::Cancel { .. } => "cancel",
             Self::Ack { .. } => "ack",
-            Self::Pong { .. } => "pong",
+            Self::Recover { .. } => "recover",
             Self::Draining {} => "draining",
         }
     }
@@ -155,9 +157,12 @@ impl RemoteFrame {
                     Err("invalid call identity")
                 }
             }
-            Self::Pong { nonce } => {
-                if nonce.is_empty() || nonce.len() > 128 {
-                    Err("invalid pong")
+            Self::Recover { call_ids } => {
+                if call_ids.is_empty()
+                    || call_ids.len() > 100
+                    || !call_ids.iter().all(|id| valid_identifier(id))
+                {
+                    Err("invalid recovery batch")
                 } else {
                     Ok(())
                 }

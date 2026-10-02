@@ -217,7 +217,7 @@ and add the listed fields as columns:
 | Broker and relay | `egress_request_id` Equals the ID from the socket record | `type`, `relay_id`, `outcome`, `duration_ms` |
 | Every tool in a thread | `thread_id` Equals the managed agent ID; `type` Equals `managed.agent.tool` | `tool`, `message_type`, `tool_call_id`, `parent_call_id`, `agent_id`, `runtime_session_id`, `managed_turn_id`, `runtime_turn_id`, `duration_ms`, `started_after_ms` |
 | Brain-to-Hand call | `source_call_id` Equals the runtime `tool_call_id` | `type`, `stage`, `thread_id`, `transport_call_id`, `outcome`, `admission_ms`, `roundtrip_ms`, `settlement_ms`, `host_timing`, `transit_return_overhead_ms` |
-| Hand disconnect/reconnect | `hand_id` Equals the target ID; `type` Equals `hand.connection` | `stage`, `reason_code`, `connection_id`, `host_connection_id`, `host_runtime_id`, `lease_id`, `connection_generation`, `last_heartbeat_at`, `heartbeat_age_ms`, `lease_expires_at`, `pending_call_count` |
+| Hand disconnect/reconnect | `hand_id` Equals the target ID; `type` Equals `hand.connection` | `stage`, `reason_code`, `connection_id`, `host_connection_id`, `host_runtime_id`, `lease_id`, `runtime_generation`, `connected`, `active`, `pending_call_count` |
 | A missing Hand result | `transport_call_id` Equals the broker call ID | `stage`, `host_stage`, `host_elapsed_ms`, `reason_code`, `outcome`, `connection_id`, `connection_generation` |
 | Screen input/result | `thread_id` Equals the managed agent ID; `type` Equals `hand.remote` | `stage`, `source_call_id`, `request_id`, `hand_id`, `connection_id`, `remote_generation`, `reason_code`, `close_code` |
 
@@ -257,6 +257,7 @@ logical IDs for retained sockets and external processes.
 | Runtime to handler | `managed.agent.tool`, `managed.tool.invocation` | Every delivered root, nested and child call/result; awaited handler duration |
 | Namespace to account | `hand.tool.stage`, `hand.call.provider`, `hand.provider.invoke` | Routing/preparation and complete account fetch/decode wait |
 | Account authorization/resolution | `hand.tool.stage`, `hand.account.invoke` | Ownership/catalog resolution and complete admitted handler wait |
+| Account request decoding | `account.decode_input`, `input_decode_ms` | Awaited request-body decoding, measured separately from ownership authorization |
 | Durable broker admission | `received`, `admitted`, `dispatched` | The broker retained an intent and dispatch decision; these do not prove a socket write |
 | Broker socket write | `send_started`, `sent`, `send_failed` | `sent` means the transport accepted the frame, with no execution claim |
 | Hand receipt | `host_progress` / `received` | The selected Hand parsed the call |
@@ -270,32 +271,62 @@ logical IDs for retained sockets and external processes.
 
 Call observations pin `hand_id` (canonical target), `host_runtime_id` (Hand
 process), `host_connection_id` (client connection attempt), `connection_id`
-(broker socket), and `lease_id` + `connection_generation` (dispatch ownership).
-Reconnects have new client/socket IDs and a higher broker generation. The same
-runtime ID indicates the publisher process survived; a different runtime ID
-identifies a new publisher. These identities are diagnostic and never authorize
-a retry. Screen sockets use their own `connection_id` and `remote_generation`.
+(broker socket), and `lease_id` + `runtime_generation` (dispatch ownership).
+`connection_generation` remains a compatibility alias for that ownership epoch.
+Reconnects have new client/socket IDs. A recovery-capable publisher with the
+same authenticated route, runtime ID and catalog retains its ownership
+generation; a new runtime starts a new generation. Recovery requests refer to
+durably admitted command IDs and never instruct the Hand to execute again.
+Screen sockets use their own `connection_id` and `remote_generation`.
+
+Account ownership is immutable after its durable claim. Each broker instance
+loads the owner once and compares it synchronously for subsequent calls;
+reconstruction reloads it from SQLite. `ownership_ms` begins after input decoding,
+so body scheduling does not appear as authorization work.
 
 Connection records distinguish accepted/ready/resumed, transport error/close,
-replacement, draining, lease expiry and fencing. A broker restart records
-`transport_lost` with `reason_code: owner_restarted` for retained dispatched
-calls. The terminal outcome remains ambiguous; replay does not rerun an
-uncertain command. A Hand that reported `execution_finished` and
+replacement, draining, authority expiry and fencing. Broker restart and
+transport loss preserve dispatched recovery-capable commands until their
+admitted deadlines. The same Hand can prove that a command is running or return
+its retained receipt. Missing journal entries, changed runtimes and expired
+deadlines retain an uncertain outcome without rerunning the command. A Hand
+that reported `execution_finished` and
 `result_prepared` without a broker `receipt` identifies a lost return path,
 rather than proving execution never occurred.
 
 The Node Hand emits content-free `hand.attachment` records for **every** local
 connection attempt, including attempts that never reach Cloudflare, errors,
-reconnect scheduling, successful readiness and discarded old-generation
+reconnect scheduling, successful readiness and retained or replayed command
 results. Native Hand lifecycle tracing carries the same runtime/attempt IDs;
 its connector reports combined TLS + HTTP-upgrade duration. Cloudflare cannot
 observe DNS/TCP failures that never reach it; correlate local Hand logs when
 there is no server acceptance record. Neither an unexpired lease nor an open
-socket proves the remote process is alive. Read heartbeat age and lease expiry,
-then the last acknowledged call phase. Silence observations begin at one
-second; connection fencing and control timeouts keep their existing policy.
-Steady heartbeat/renewal logs are summarized, while diagnostic snapshots expose
-the latest retained heartbeat/lease state without renewing it.
+socket proves a provider is responsive. Use local control-pong evidence,
+connection lifecycle records and the last acknowledged call phase. Control
+frames do not enter the broker's application logs. Silence observations begin
+at one second; authority expiry and command deadlines remain independent of
+transport liveness.
+
+The broker persists a command ID once for each source session/call identity.
+The Hand retains the command's immutable input and running task or completed
+receipt in its living executor runtime until acknowledgment. A reconnect's
+`recover` frame contains only command IDs; the Hand returns `status` (`running`
+or `missing`) or the original `result`. Lost acknowledgments cause receipt
+replay, which the durable broker accepts idempotently. The Hand journal is not
+disk persistence: a daemon restart loses running execution proof, while the
+broker's admitted identities and terminal receipts remain durable.
+
+[Cloudflare handles WebSocket control ping/pong automatically](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#automatic-pingpong-handling),
+including during Durable Object hibernation. Native and Node transports with
+control-frame APIs detect missed pongs locally. Standard browser WebSockets
+rely on platform close/error signals and admitted command deadlines; they do
+not send an application heartbeat. Provisioned VM authorization renewal and
+revocation continue separately from transport liveness.
+
+While a VM command is admitted, cached authorization expiry triggers a fresh
+authority check. An independently renewed VM lease preserves the runtime epoch;
+revocation fences it. Authority lookups have a finite timeout, and cannot delay
+or extend the command's original deadline.
 
 ### Durable per-thread diagnostics
 
@@ -348,17 +379,11 @@ nonnegative value combines outbound/return transit, socket handoff and
 unmeasured metadata work; it cannot separate one-way latency. Negative values
 indicate inconsistent timing or host reporting, and must not be read as network
 latency. Workers clocks can report zero for synchronous work between I/O events.
-Old Hands omit timing/progress and remain supported. Rust Hands negotiate the
-diagnostic wire extensions from the WebSocket upgrade response header
-`x-nanocodex-tools-diagnostics: v1`. Only that recognized version enables
-`diagnostics: true` and the client `connection_id` in the catalog, progress frames,
-and receipt timing. An absent or unknown version selects the original wire
-contract while preserving local tracing, execution and fencing. Each connection
-negotiates independently; a protocol rejection never triggers a downgrade or
-replays work. JavaScript Hands still advertise diagnostics unconditionally:
-deploy the compatible broker before updating them, because old strict brokers
-reject their advertisement before dispatching calls. Proxies must preserve the
-upgrade capability header for Rust Hands to publish remote execution telemetry.
+Rust and JavaScript Hands publish `diagnostics: true`, their client
+`connection_id`, and `command_recovery: true` in the catalog. The current wire
+contract carries progress, receipt timing, and retained command recovery
+without compatibility negotiation or a legacy fallback. Deploy the broker
+before updating Hands.
 
 ### Native distributed traces
 
@@ -433,10 +458,32 @@ receipts are retained in ignored `output/thread-tool-timing-journey/`.
 `pnpm --filter nanocodex-managed-service run test:hand-owner-restart` kills the
 actual account broker runtime process group while a shell command is executing,
 then restarts on the same HTTP port and SQLite storage. The surviving publisher
-reconnects. Diagnostics must retain `owner_restarted` with the original pinned
-call identities; replay stays ambiguous, the original effect occurs once, and
-a fresh command succeeds. Evidence is retained in ignored
+reconnects. The original command ID and ownership epoch recover from SQLite,
+the completed output and exit code return, the original effect occurs once,
+and a fresh command succeeds. Evidence is retained in ignored
 `output/hand-owner-restart-journey/`.
+
+`pnpm --filter nanocodex-managed-service run test:hand-communication` measures
+warm calls, shell calls while CUA waits, and a 50-command burst over the real
+namespace/provider/account/Hand transports. It reuses fresh discovery, retains
+every correlated diagnostic phase, and verifies account ownership before and
+after broker reconstruction. `NANOCODEX_BENCHMARK_SOURCE_ROOT` selects archived
+implementation sources for comparisons; `NANOCODEX_BENCHMARK_LABEL` names the
+run. Commands, source hashes, timings, diagnostic pages and wire transcripts
+are retained in ignored `output/hand-communication-journey/`.
+
+`pnpm --filter nanocodex-managed-service run test:hand-leased-recovery` exercises
+a quiet shell poll across VM authorization expiry, a real broker process kill
+and SQLite restart after cached expiry, a stalled authority lookup with an
+independent command deadline, and authoritative revocation. The external VM
+authority is synthetic; HTTP, WebSockets, the broker, SQLite, the Hand journal
+and shell execution are real. Evidence is retained in ignored
+`output/hand-leased-recovery-journey/`.
+
+`pnpm --filter nanocodex-managed-service run test:hosted-tools` runs account,
+broker and wire contracts with a focused real Hand worker. It remains part of
+the package's default test command. WebSocket clients acknowledge server close
+and cleanup waits for a bounded close handshake, including replaced sockets.
 
 The resolver reads retained ownership without constructing the agent runtime.
 Deleted, exported, or pending-import sessions deny resolution; egress never
@@ -668,11 +715,12 @@ without rewriting baseline instructions, cache keys, or the conversation prefix.
   transport failures with unknown admission retain the existing call identity.
   `online` reports connection presence, not provider responsiveness. Discovery
   may use a cached snapshot; `environment()` explicitly refreshes it. Hand
-  connections renew a 60-second lease with heartbeats (every 20 seconds for the
-  native client and 30 seconds for JavaScript by default). Expiry requests a
-  reconnect with WebSocket code 1012. A replaced connection, revoked authority,
-  or protocol violation uses terminal code 1008. Calls already dispatched across
-  transport loss retain an uncertain outcome and are not automatically resent.
+  transports use WebSocket control ping/pong when their API supports it.
+  Ordinary Hand ownership has no heartbeat lease expiry. Transport failures
+  reconnect and reconcile retained command IDs, running work and receipts;
+  admitted command deadlines still apply. A changed runtime, revoked authority
+  or protocol violation uses terminal code 1008. Missing execution proof
+  remains uncertain, and commands are not automatically executed again.
   Subsequent turns use the `memories__*` tools for scoped recall and Markdown
   updates. Writes require root-agent `memory:write` authority. Markdown writes
   default to private memory for direct accounts and shared memory for Connect;

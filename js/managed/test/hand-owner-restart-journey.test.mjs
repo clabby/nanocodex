@@ -49,13 +49,13 @@ try {
 } catch(error) { process.send({error:error.stack}); process.exitCode=1; }
 `;
 
-test("a killed account broker owner retains ambiguity and reconnects the surviving Hand", { timeout: 45_000 }, async () => {
+test("a killed account broker owner recovers the surviving Hand journal without reexecution", { timeout: 45_000 }, async () => {
   const output = join(root, "../../output/hand-owner-restart-journey", `${Date.now()}-${process.pid}`);
   const workspace = join(output, "hand");
   await mkdir(workspace, { recursive: true });
   const trace = [], wire = [], clients = [], localHost = [], runtime = [], sockets = [];
   const result = { command, inputs: {owner, thread, machine, shell:"/bin/sh", loss:"SIGKILL process group", persistent_sqlite:true},
-    expected: {interrupted_status:"ambiguous", reason_code:"owner_restarted", original_effect:"R", fresh_output:"RECONNECTED_OK", dispatches:2}, observed:{} };
+    expected: {recovered_output:"ORIGINAL_FINISHED", original_effect:"R", fresh_output:"RECONNECTED_OK", dispatches:2, same_route:true}, observed:{} };
   let child, base, port = 0, connector, tools, native, failure, pending;
   const phase = (name, value = {}) => trace.push({phase:name, at:Date.now(), ...value});
   const bounded = async (promise, description, ms = 8_000) => {
@@ -127,7 +127,11 @@ test("a killed account broker owner retains ambiguity and reconnects the survivi
       format:"esm", platform:"node", target:"es2022", conditions:["workerd"],
       banner:{js:'import { createRequire } from "node:module"; const require=createRequire("/worker.mjs");'},
       alias:{"node-rsa":root + "/node_modules/nanocodex/tools/browser/unsupportedNodeRsa.mjs"},
-      external:["cloudflare:*", "node:*"], logLevel:"warning"});
+      external:["cloudflare:*", "node:*"], metafile:true, logLevel:"warning"});
+    const candidateRoot=fileURLToPath(new URL("../../../",import.meta.url));
+    const resolutions=Object.fromEntries(["nanocodex/tools","nanocodex-tools/attachment","nanocodex-tools/node"].map(name=>[name,fileURLToPath(import.meta.resolve(name))]));
+    for(const path of Object.values(resolutions))assert.ok(path.startsWith(candidateRoot),`dependency escaped candidate: ${path}`);
+    await writeFile(join(output,"source-resolution.json"),JSON.stringify({resolutions,bundleInputs:Object.keys(bundle.metafile.inputs)},null,2));
     await writeFile(join(output, "fixture-source.mjs"), source);
     await writeFile(join(output, "worker.mjs"), bundle.outputFiles[0].text);
     await writeFile(join(output, "runtime-process.mjs"), childSource);
@@ -161,7 +165,7 @@ test("a killed account broker owner retains ambiguity and reconnects the survivi
 
     const invocation = {owner_id:owner, name:"exec_command", machine_id:machine, session_id:thread, thread_id:thread,
       call_id:"owner-lost-call", model:"synthetic-model", route_token:oldRoute.route_token,
-      input:{cmd:"printf R >> original.log; sleep 0.7; printf ORIGINAL_FINISHED > original-finished.log", shell:"/bin/sh", login:false, yield_time_ms:30000}};
+      input:{cmd:"printf R >> original.log; sleep 0.7; printf ORIGINAL_FINISHED > original-finished.log; printf ORIGINAL_FINISHED", shell:"/bin/sh", login:false, yield_time_ms:30000}};
     // Attach a rejection handler immediately: killing the real HTTP server is
     // expected to reject this request, even before the restart has begun.
     pending = api("/invoke", invocation).then(value => ({value}), error => ({error:error.message}));
@@ -187,18 +191,10 @@ test("a killed account broker owner retains ambiguity and reconnects the survivi
     const recovered = await waitFor(async () => {
       const state = await snapshot();
       if (!client.connected || !state.machines.find(entry => entry.machine.id === machine)?.online) return;
-      const page = await diagnostics();
-      const lost = page.events.find(event => event.source_call_id === invocation.call_id
-        && event.stage === "transport_lost" && event.reason_code === "owner_restarted");
-      return lost ? {state, page, lost} : undefined;
-    }, "surviving publisher ready and persisted owner-restart diagnostics");
-    const lost = recovered.lost;
-    assert.equal(lost.outcome, "ambiguous");
-    for (const key of ["thread_id", "source_call_id", "transport_call_id", "hand_id", "lease_id", "connection_id", "host_connection_id", "host_runtime_id", "connection_generation"]) {
-      assert.ok(sent[key], `dispatch records ${key}`);
-      assert.equal(lost[key], sent[key], `interrupted call retains ${key}`);
-    }
-    assert.equal(lost.hand_id, machine);
+      const recovery = wire.find(row => row.direction === "broker" && row.frame.type === "recover"
+        && row.frame.call_ids.includes(sent.transport_call_id));
+      return recovery ? {state, recovery, page:await diagnostics()} : undefined;
+    }, "surviving publisher ready and persisted call recovery request");
     const catalogs = wire.filter(row => row.direction === "host" && row.frame.type === "catalog");
     assert.ok(catalogs.length >= 2);
     assert.equal(catalogs.at(-1).frame.runtime_id, catalogs[0].frame.runtime_id);
@@ -207,16 +203,16 @@ test("a killed account broker owner retains ambiguity and reconnects the survivi
 
     const freshRoute = route(recovered.state);
     assert.ok(freshRoute?.route_token);
-    // The HTTP account validates the current route first. Preserve the exact
-    // original invocation for the stale-route check, then reconcile ONLY its
-    // route token; the same immutable source ID/input recovers the old receipt.
+    assert.equal(freshRoute.route_token, oldRoute.route_token, "living runtime resumes retained ownership epoch");
     const dispatches = callFrames().length;
     const exactOld = await request("/invoke", invocation);
-    if (oldRoute.route_token !== freshRoute.route_token) assert.equal(exactOld.status, 409);
-    else { assert.equal(exactOld.status, 200); assert.equal(exactOld.value.structured_result.status, "ambiguous"); }
-    const replay = await api("/invoke", {...invocation, route_token:freshRoute.route_token});
-    assert.equal(replay.success, false); assert.equal(replay.structured_result.status, "ambiguous");
-    assert.equal(callFrames().length, dispatches, "ambiguous original work must never be resent");
+    assert.equal(exactOld.status, 200);
+    assert.equal(exactOld.value.success, true);
+    assert.equal(exactOld.value.structured_result.output, "ORIGINAL_FINISHED");
+    assert.equal(exactOld.value.structured_result.exit_code, 0);
+    const replay = await api("/invoke", invocation);
+    assert.equal(replay.success, true); assert.equal(replay.structured_result.output, "ORIGINAL_FINISHED");
+    assert.equal(callFrames().length, dispatches, "recover must never resend original command");
     const fresh = await api("/invoke", {...invocation, call_id:"fresh-after-owner-restart", route_token:freshRoute.route_token,
       input:{cmd:"printf F >> fresh.log; printf RECONNECTED_OK", shell:"/bin/sh", login:false, yield_time_ms:1000}});
     assert.equal(fresh.success, true); assert.equal(fresh.structured_result.output, "RECONNECTED_OK");
@@ -231,10 +227,10 @@ test("a killed account broker owner retains ambiguity and reconnects the survivi
     const final = await diagnostics();
     assert.equal(final.available, true); assert.equal(final.write_failed, false);
     phase("replay_and_fresh_result", {exactOld, replay, fresh, final});
-    result.observed = {interrupted_status:replay.structured_result.status, reason_code:lost.reason_code,
+    result.observed = {recovered_output:replay.structured_result.output,
       original_http_error:originalHttp.error, original_effect:"R", original_completed:true,
       fresh_effect:"F", fresh_output:fresh.structured_result.output, dispatches:callFrames().length,
-      same_runtime:true, new_connection:true, retained_call_ids:true, stale_route_status:exactOld.status};
+      same_runtime:true, new_connection:true, retained_call_ids:true, same_route:true, stale_route_status:exactOld.status};
     console.log(JSON.stringify({evidence:output, ...result.observed}));
   } catch (error) { failure = error; result.error = error.stack; throw error; }
   finally {

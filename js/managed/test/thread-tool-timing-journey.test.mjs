@@ -277,6 +277,7 @@ test("one thread exposes every nested tool and separates Hand execution from rou
     const progress = handPage.events.filter(event => event.source_call_id === timing.source_call_id && event.stage === "host_progress");
     assert.deepEqual(progress.map(event => event.host_stage), ["received", "execution_started", "execution_finished", "result_prepared"]);
     assert.ok(progress.every(event => event.connection_id && event.lease_id && event.host_runtime_id && event.host_connection_id));
+    assert.ok(progress.every(event => event.runtime_generation === event.connection_generation));
     assert.ok(handPage.events.some(event => event.type === "hand.connection" && event.stage === "resumed"));
     assert.equal((await api("/diagnostics?limit=1025")).status, 400);
     assert.equal((await api("/diagnostics", { headers: { "x-nanocodex-capabilities": "[]" } })).status, 403);
@@ -310,7 +311,7 @@ test("one thread exposes every nested tool and separates Hand execution from rou
     }
 
     // A transport error that never delivers a close event used to be ignored
-    // after ready. Lose a live command, fail two reconnect attempts, recover.
+    // after ready. Recover a live command after two failed reconnect attempts.
     fault = "error_only";
     await runTurn("FIXTURE_ERROR_ONLY");
     await waitForReady(2);
@@ -320,8 +321,10 @@ test("one thread exposes every nested tool and separates Hand execution from rou
     const errorEvents = afterError.services.find(service => service.service === "hand.broker").events;
     const lost = errorEvents.find(event => event.stage === "transport_lost" && event.source_call_id?.includes("FIXTURE_ERROR_ONLY"));
     assert.ok(lost?.reason_code && lost.connection_id && lost.lease_id, JSON.stringify(errorEvents));
-    assert.ok(errorEvents.some(event => event.source_call_id === lost.source_call_id && event.stage === "terminal" && event.outcome === "ambiguous"));
-    assert.ok(errorEvents.some(event => event.source_call_id?.includes("FIXTURE_RECONNECTED") && event.stage === "receipt" && event.connection_generation > lost.connection_generation));
+    assert.ok(errorEvents.some(event => event.source_call_id === lost.source_call_id && event.stage === "receipt"
+      && event.outcome === "completed" && event.transport_call_id === lost.transport_call_id));
+    assert.ok(errorEvents.some(event => event.source_call_id?.includes("FIXTURE_RECONNECTED") && event.stage === "receipt"
+      && event.runtime_generation === lost.runtime_generation && event.connection_id !== lost.connection_id));
 
     // Now let the Hand finish its effect and prepare a receipt, then lose that
     // receipt before the broker sees it. The gap must be distinguishable from
@@ -336,15 +339,16 @@ test("one thread exposes every nested tool and separates Hand execution from rou
     assert.ok(lostResult, JSON.stringify(completeHand));
     const lostBoundary = completeHand.events.filter(event => event.source_call_id === lostResult.source_call_id);
     assert.deepEqual(lostBoundary.filter(event => event.stage === "host_progress").map(event => event.host_stage), ["received", "execution_started", "execution_finished", "result_prepared"]);
-    assert.ok(!lostBoundary.some(event => event.stage === "receipt"));
-    assert.ok(lostBoundary.some(event => event.stage === "terminal" && event.outcome === "ambiguous"));
+    assert.ok(lostBoundary.some(event => event.stage === "receipt" && event.outcome === "completed"
+      && event.transport_call_id === lostResult.transport_call_id));
+    assert.ok(lostBoundary.some(event => event.stage === "terminal" && event.outcome === "completed"));
     assert.ok(completeHand.events.some(event => event.source_call_id?.includes("FIXTURE_RECONNECTED") && event.stage === "receipt"
-      && event.connection_generation > lostResult.connection_generation));
+      && event.runtime_generation === lostResult.runtime_generation && event.connection_id !== lostResult.connection_id));
     assert.equal(frames.length, 6, "each fresh recovery command must actually reach the Hand");
     assert.equal(new Set(completeHand.events.filter(event => event.host_runtime_id).map(event => event.host_runtime_id)).size, 1);
     assert.ok(completeHand.connections.some(connection => connection.hand_id === "fixture-hand" && connection.active && connection.connected
-      && connection.connection_generation > lostResult.connection_generation));
-    assert.equal(await readFile(join(output, "hand/hand-effects.log"), "utf8"), "EL", "neither uncertain effect may execute twice");
+      && connection.runtime_generation === lostResult.runtime_generation && connection.connection_id !== lostResult.connection_id));
+    assert.equal(await readFile(join(output, "hand/hand-effects.log"), "utf8"), "EL", "neither recovered effect may execute twice");
     assert.equal(frames.filter(frame => frame.input.cmd?.includes("hand-effects.log")).length, 2);
 
     // A screen host uses a separate authenticated socket protocol. A send is
@@ -416,7 +420,7 @@ test("one thread exposes every nested tool and separates Hand execution from rou
       initial_tool_calls: 8, tool_calls: records.filter(record => record.type === "managed.agent.tool" && record.message_type === "tool.call").length,
       child_tools: 2, replay_without_redispatch: true,
       hand_calls: wire.filter(row => row.direction === "call").length, reconnect_attempts: connectAttempts,
-      error_without_close_recovered: true, lost_receipt_not_replayed: true, remote_click_not_replayed: true, timing }));
+      error_without_close_recovered: true, lost_receipt_recovered: true, remote_click_not_replayed: true, timing }));
   } finally {
     if (attachment) await attachment.close();
     await tools.close(); await native.close(); await mf.dispose();

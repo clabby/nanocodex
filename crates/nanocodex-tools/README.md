@@ -194,16 +194,15 @@ longer processes return retained session IDs for later polling. A deadline
 after execution starts reports an uncertain outcome rather than resending the
 command.
 
-Rust attachments enable catalog diagnostics, execution progress and receipt
-timing only when the WebSocket upgrade response advertises
-`x-nanocodex-tools-diagnostics: v1`. Missing or unknown versions preserve the
-original strict wire contract and local tracing. This negotiation occurs before
-each connection's catalog; protocol rejection never downgrades or replays a call.
-
 `AttachmentStatus::Ready` means the remote acknowledged the catalog. Tool
 responsiveness is established by call results. Transport failures reconnect
-with backoff while the same runtime retains its processes; old connection
-results stay on their original connection. Terminal cleanup publishes
+with backoff while the same runtime retains its processes and command journal.
+WebSocket control ping/pong detects a lost transport without application
+heartbeat messages. Completed results remain in the journal until the broker
+acknowledges them; reconnecting resends receipts and reconciles running command
+IDs without executing commands again. The admitted deadline still bounds each
+call. A different executor runtime cannot recover an old command's execution
+proof, so that outcome remains uncertain. Terminal cleanup publishes
 `Disconnected`, or `Fenced` for authentication and policy rejection, before
 `closed()` resolves.
 

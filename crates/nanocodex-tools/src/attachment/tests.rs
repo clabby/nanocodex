@@ -219,7 +219,7 @@ async fn catalog_call_result_and_drain_use_exact_frames() {
         let mut socket = accept(&listener).await;
         let catalog = recv_json(&mut socket).await;
         assert_eq!(catalog["type"], "catalog");
-        assert_eq!(catalog.as_object().unwrap().len(), 8);
+        assert_eq!(catalog.as_object().unwrap().len(), 9);
         assert_catalog_diagnostics(&catalog);
         assert!(
             catalog["runtime_id"]
@@ -308,6 +308,14 @@ async fn websocket_pongs_preserve_readiness_and_tool_execution() {
         socket.send(Message::Pong(vec![1].into())).await.unwrap();
         send_json(&mut socket, json!({"type":"ready"})).await;
         socket.send(Message::Pong(vec![2].into())).await.unwrap();
+        for index in 0..3 {
+            let Message::Ping(nonce) = socket.next().await.unwrap().unwrap() else {
+                panic!("expected native control ping without JSON heartbeat");
+            };
+            assert_eq!(nonce.len(), 16);
+            eprintln!("native control ping {index}: nonce_bytes={}", nonce.len());
+            socket.send(Message::Pong(nonce)).await.unwrap();
+        }
         send_json(&mut socket, call("call-pong", "echo")).await;
         let result = recv_json(&mut socket).await;
         assert_eq!(result["call_id"], "call-pong");
@@ -406,7 +414,7 @@ async fn cancellation_is_only_an_ordinary_result() {
 }
 
 #[tokio::test]
-async fn disconnect_after_dispatch_does_not_replay_receipts_into_a_new_socket() {
+async fn disconnect_after_dispatch_replays_identical_receipt_until_ack() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("ws://{}/tools", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -417,6 +425,23 @@ async fn disconnect_after_dispatch_does_not_replay_receipts_into_a_new_socket() 
         first.close(None).await.unwrap();
 
         let mut second = ready(&listener).await;
+        assert_eq!(recv_json(&mut second).await, result);
+        send_json(
+            &mut second,
+            json!({"type":"recover","call_ids":["lost-ack"]}),
+        )
+        .await;
+        assert_eq!(recv_json(&mut second).await, result);
+        send_json(&mut second, json!({"type":"ack","call_id":"lost-ack"})).await;
+        send_json(
+            &mut second,
+            json!({"type":"recover","call_ids":["lost-ack"]}),
+        )
+        .await;
+        assert_eq!(
+            recv_json(&mut second).await,
+            json!({"type":"status","call_id":"lost-ack","state":"missing"})
+        );
         assert_eq!(recv_json(&mut second).await, json!({"type":"drain"}));
         send_json(&mut second, json!({"type":"draining"})).await;
     });
@@ -593,9 +618,6 @@ async fn accept(listener: &TcpListener) -> WebSocketStream<TcpStream> {
                 "x-nanocodex-request-id",
                 "private-response-marker".parse().unwrap(),
             );
-            response
-                .headers_mut()
-                .insert("x-nanocodex-tools-diagnostics", "v1".parse().unwrap());
             Ok(response)
         },
     )
@@ -654,6 +676,7 @@ async fn recv_json(socket: &mut WebSocketStream<TcpStream>) -> Value {
 
 fn assert_catalog_diagnostics(catalog: &Value) {
     assert_eq!(catalog["diagnostics"], true);
+    assert_eq!(catalog["command_recovery"], true);
     let id = uuid::Uuid::parse_str(catalog["connection_id"].as_str().unwrap()).unwrap();
     assert_eq!(id.get_version_num(), 4);
     assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
@@ -854,12 +877,15 @@ impl Tool for GatedTool {
     async fn execute(&self, _input: ToolInput, context: ToolContext<'_>) -> ToolResult {
         self.started.send(context.call_id().to_owned()).unwrap();
         self.release.acquire().await.unwrap().forget();
+        self.started
+            .send(format!("finished:{}", context.call_id()))
+            .unwrap();
         Ok(ToolOutput::json(&json!({"finished":true})))
     }
 }
 
 #[tokio::test]
-async fn reconnect_dispatches_calls_without_serialization_or_replaying_results() {
+async fn reconnect_retains_running_calls_without_serialization_or_reexecution() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut prior_runtime = Value::Null;
         for (parallel, count) in [(false, 65), (true, 65)] {
@@ -919,20 +945,15 @@ async fn reconnect_dispatches_calls_without_serialization_or_replaying_results()
                     finished += 1;
                 }
             }
-            // Old completions do not wake the replacement socket.
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            // Reusing an ID belongs to this socket; no old result may precede it.
-            send_json(&mut second, call("old-0", "echo")).await;
-            let result = recv_json(&mut second).await;
-            assert_eq!(result["call_id"], "old-0");
-            assert_eq!(result["outcome"]["status"], "completed");
-            assert!(
-                result["outcome"]["output"]["output"]
-                    .as_str()
-                    .unwrap()
-                    .contains("hello")
-            );
-            send_json(&mut second, json!({"type":"ack","call_id":"old-0"})).await;
+            let mut received = std::collections::HashSet::new();
+            while received.len() < count {
+                let result = recv_json(&mut second).await;
+                assert_eq!(result["outcome"]["status"], "completed");
+                let id = result["call_id"].as_str().unwrap();
+                assert!(id.starts_with("old-"));
+                assert!(received.insert(id.to_owned()));
+                send_json(&mut second, json!({"type":"ack","call_id":id})).await;
+            }
             let detach = tokio::spawn(async move { attachment.detach().await });
             assert_eq!(recv_json(&mut second).await, json!({"type":"drain"}));
             send_json(&mut second, json!({"type":"draining"})).await;
@@ -962,7 +983,7 @@ async fn process_poll_survives_transport_reconnect_without_restarting_the_comman
         let mut command = call("command", "exec_command");
         command["input"] = json!({"cmd":"sleep 0.5; printf recovered", "yield_time_ms":250});
         send_json(&mut first, command).await;
-        let initial = next_result(&mut first).await;
+        let initial = recv_json(&mut first).await;
         let process = initial["outcome"]["output"]["structured_result"]["session_id"]
             .as_i64()
             .unwrap();
@@ -974,7 +995,7 @@ async fn process_poll_survives_transport_reconnect_without_restarting_the_comman
         let mut poll = call("poll", "write_stdin");
         poll["input"] = json!({"session_id":process, "yield_time_ms":5000});
         send_json(&mut second, poll).await;
-        let completed = next_result(&mut second).await;
+        let completed = recv_json(&mut second).await;
         assert_eq!(
             completed["outcome"]["output"]["structured_result"]["exit_code"],
             0
@@ -993,15 +1014,189 @@ async fn process_poll_survives_transport_reconnect_without_restarting_the_comman
     .unwrap();
 }
 
-#[cfg(feature = "workspace-runtime")]
-async fn next_result(socket: &mut WebSocketStream<TcpStream>) -> Value {
-    loop {
-        let frame = recv_json(socket).await;
-        if frame["type"] == "ping" {
-            send_json(socket, json!({"type":"pong", "nonce":frame["nonce"]})).await;
-        } else {
-            assert_eq!(frame["type"], "result");
-            return frame;
+#[tokio::test]
+async fn unmatched_control_pong_does_not_mask_failure_and_reconnects() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = AttachmentTarget::new(
+        format!("ws://{}/tools", listener.local_addr().unwrap()),
+        "synthetic-bearer",
+    )
+    .unwrap();
+    let (attachment, _) = Tools::builder()
+        .without_defaults()
+        .tool(EchoTool)
+        .build()
+        .unwrap()
+        .attach(target)
+        .start()
+        .unwrap();
+    let (mut first, catalog) = ready_with_catalog(&listener).await;
+    let Message::Ping(nonce) = first.next().await.unwrap().unwrap() else {
+        panic!("missing control ping");
+    };
+    assert_eq!(nonce.len(), 16);
+    // An explicit different pong overrides tungstenite's queued automatic reply.
+    first.send(Message::Pong(vec![0].into())).await.unwrap();
+    let Message::Close(Some(close)) = tokio::time::timeout(Duration::from_secs(1), first.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("unmatched pong masked missing peer response");
+    };
+    assert_eq!(close.code, CloseCode::Restart);
+    eprintln!("native unmatched pong: close_code=1012; reconnect bound=1s");
+    let (mut second, resumed) =
+        tokio::time::timeout(Duration::from_secs(1), ready_with_catalog(&listener))
+            .await
+            .unwrap();
+    assert_eq!(catalog["runtime_id"], resumed["runtime_id"]);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while attachment.status() != AttachmentStatus::Ready {
+            tokio::task::yield_now().await;
         }
-    }
+    })
+    .await
+    .unwrap();
+    let detach = tokio::spawn(async move { attachment.detach().await });
+    assert_eq!(recv_json(&mut second).await, json!({"type":"drain"}));
+    send_json(&mut second, json!({"type":"draining"})).await;
+    detach.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn immutable_duplicate_running_call_reuses_task_and_conflict_fences() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+    let tools = Tools::builder()
+        .without_defaults()
+        .tool(GatedTool {
+            started,
+            release: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+            parallel: true,
+        })
+        .build()
+        .unwrap();
+    let (attachment, _) = tools
+        .attach(
+            AttachmentTarget::new(
+                format!("ws://{}/tools", listener.local_addr().unwrap()),
+                "synthetic-bearer",
+            )
+            .unwrap(),
+        )
+        .start()
+        .unwrap();
+    let mut socket = ready(&listener).await;
+    let frame = call("duplicate-running", "gated");
+    send_json(&mut socket, frame.clone()).await;
+    assert_eq!(starts.recv().await.unwrap(), "duplicate-running");
+    send_json(&mut socket, frame.clone()).await;
+    assert_eq!(
+        recv_json(&mut socket).await,
+        json!({"type":"status","call_id":"duplicate-running","state":"running"})
+    );
+    assert!(
+        starts.try_recv().is_err(),
+        "duplicate call dispatched a second task"
+    );
+    let mut conflict = frame;
+    conflict["deadline_at"] = json!(now_ms() + 50_000);
+    send_json(&mut socket, conflict).await;
+    let close = loop {
+        match socket.next().await.unwrap().unwrap() {
+            Message::Close(Some(close)) => break close,
+            Message::Text(_) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert_eq!(close.code, CloseCode::Policy);
+    assert!(matches!(
+        attachment.closed().await,
+        Err(AttachmentError::Fenced(_))
+    ));
+    eprintln!("native duplicate identity: starts=1, status=running, conflict_close=1008");
+}
+
+#[tokio::test]
+async fn offline_completion_queue_does_not_block_160_running_commands() {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let tools = Tools::builder().without_defaults().tool(GatedTool {
+            started, release: release.clone(), parallel: true,
+        }).build().unwrap();
+        let (attachment, _events) = tools.attach(AttachmentTarget::new(
+            format!("ws://{}/tools", listener.local_addr().unwrap()), "synthetic-bearer",
+        ).unwrap()).start().unwrap();
+        let (mut first, catalog) = ready_with_catalog(&listener).await;
+        for id in 0..160 {
+            send_json(&mut first, call(&format!("offline-{id}"), "gated")).await;
+            assert_eq!(starts.recv().await.unwrap(), format!("offline-{id}"));
+        }
+        first.close(None).await.unwrap();
+        release.add_permits(160);
+        for _ in 0..160 {
+            assert!(starts.recv().await.unwrap().starts_with("finished:offline-"));
+        }
+        eprintln!("native offline backpressure: completed=160 before replacement readiness; original_call_frames=160");
+        let (mut second, resumed) = ready_with_catalog(&listener).await;
+        assert_eq!(catalog["runtime_id"], resumed["runtime_id"]);
+        let mut receipts = std::collections::HashSet::new();
+        while receipts.len() < 160 {
+            let receipt = recv_json(&mut second).await;
+            assert_eq!(receipt["outcome"]["status"], "completed");
+            let id = receipt["call_id"].as_str().unwrap();
+            assert!(receipts.insert(id.to_owned()), "duplicate unsolicited receipt");
+            send_json(&mut second, json!({"type":"ack","call_id":id})).await;
+        }
+        let detach = tokio::spawn(async move { attachment.detach().await });
+        assert_eq!(recv_json(&mut second).await, json!({"type":"drain"}));
+        send_json(&mut second, json!({"type":"draining"})).await;
+        detach.await.unwrap().unwrap();
+        eprintln!("native offline backpressure: recovered_receipts=160; replay_call_frames=0");
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn silent_peer_without_control_pong_reconnects_within_finite_bound() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tools = Tools::builder()
+        .without_defaults()
+        .tool(EchoTool)
+        .build()
+        .unwrap();
+    let (attachment, _) = tools
+        .attach(
+            AttachmentTarget::new(
+                format!("ws://{}/tools", listener.local_addr().unwrap()),
+                "synthetic-bearer",
+            )
+            .unwrap(),
+        )
+        .start()
+        .unwrap();
+    let (first, catalog) = ready_with_catalog(&listener).await;
+    // Keep the TCP connection open without polling it: no automatic peer pong.
+    let (mut second, resumed) =
+        tokio::time::timeout(Duration::from_secs(1), ready_with_catalog(&listener))
+            .await
+            .unwrap();
+    assert_eq!(catalog["runtime_id"], resumed["runtime_id"]);
+    assert_ne!(catalog["connection_id"], resumed["connection_id"]);
+    drop(first);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while attachment.status() != AttachmentStatus::Ready {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let detach = tokio::spawn(async move { attachment.detach().await });
+    assert_eq!(recv_json(&mut second).await, json!({"type":"drain"}));
+    send_json(&mut second, json!({"type":"draining"})).await;
+    detach.await.unwrap().unwrap();
+    eprintln!("native silent peer: finite reconnect within 1s; same runtime ownership");
 }

@@ -6,7 +6,7 @@ import { recordDiagnostic } from "./diagnostic-journal";
  */
 export type HandCallOutcome = "ok" | "failed" | "unavailable" | "ambiguous" | "cancelled";
 export type HandCallStage = "namespace.prepare" | "namespace.route" | "namespace.invoke" | "namespace.cua.queue"
-  | "account.ownership" | "account.resolve" | "account.handler" | "account.fetch"
+  | "account.decode_input" | "account.ownership" | "account.resolve" | "account.handler" | "account.fetch"
   | "account.decode" | "sandbox.preflight" | "sandbox.invoke";
 
 export function handToolKind(name: string): string {
@@ -25,9 +25,10 @@ export function observeHandCall(
   stage: HandCallStage, name: string, started: number, outcome: HandCallOutcome,
   callId?: string,
   correlation?: Readonly<{ session_id?: string; thread_id?: string; turn_id?: string; parent_call_id?: string }>,
+  endedAt = performance.now(),
 ): void {
   try {
-    const duration = performance.now() - started;
+    const duration = endedAt - started;
     const ids = handCallCorrelation({ ...correlation, ...(correlation ? { source_call_id: callId } : {}) });
     const record = { type: "hand.tool.stage", stage, tool: handToolKind(name), outcome,
       duration_ms: Number.isFinite(duration) ? Math.max(0, duration) : 0,
@@ -43,7 +44,7 @@ export function observeHandCall(
 export function observeHandSummary(
   type: "hand.call.account" | "hand.call.provider", name: string,
   correlation: Parameters<typeof handCallCorrelation>[0],
-  durations: Readonly<{ ownership_ms?: number; resolve_ms?: number; handler_ms?: number; fetch_ms?: number; decode_ms?: number; total_ms: number }>,
+  durations: Readonly<{ input_decode_ms?: number; ownership_ms?: number; resolve_ms?: number; handler_ms?: number; fetch_ms?: number; decode_ms?: number; total_ms: number }>,
   outcome: HandCallOutcome,
 ): void {
   try {

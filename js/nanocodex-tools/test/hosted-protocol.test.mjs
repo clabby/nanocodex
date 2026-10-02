@@ -65,3 +65,28 @@ test("diagnostics require strict advertised fields while legacy catalogs remain 
     assert.throws(() => parseHostedToolsHostFrame(JSON.stringify(missing)));
   }
 });
+
+
+test("command journal recovery is explicit, bounded per frame, and directional", () => {
+  const catalog = { type: "catalog", capabilities: ["turn_metadata"], tools: [], runtime_id: "runtime:1", command_recovery: true };
+  assert.deepEqual(parseHostedToolsHostFrame(JSON.stringify(catalog)), catalog);
+  for (const fields of [{ runtime_id: undefined }, { command_recovery: false }, { command_recovery: null }]) {
+    assert.throws(() => parseHostedToolsHostFrame(JSON.stringify({ ...catalog, ...fields })));
+  }
+  const recover = { type: "recover", call_ids: Array.from({ length: 100 }, (_, index) => `call:${index}`) };
+  assert.deepEqual(parseHostedToolsManagedFrame(JSON.stringify(recover)), recover);
+  for (const call_ids of [[], [...recover.call_ids, "extra"], ["duplicate", "duplicate"], ["private/path"], null]) {
+    assert.throws(() => parseHostedToolsManagedFrame(JSON.stringify({ ...recover, call_ids })));
+  }
+  assert.throws(() => parseHostedToolsHostFrame(JSON.stringify(recover)), /not a host-to-managed/);
+  for (const state of ["running", "missing"]) {
+    const status = { type: "status", call_id: "call:1", state };
+    assert.deepEqual(parseHostedToolsHostFrame(JSON.stringify(status)), status);
+    assert.throws(() => parseHostedToolsManagedFrame(JSON.stringify(status)), /not a managed-to-host/);
+  }
+  assert.throws(() => parseHostedToolsHostFrame(JSON.stringify({ type: "status", call_id: "call:1", state: "completed" })));
+  for (const type of ["ping", "pong"]) {
+    assert.throws(() => parseHostedToolsHostFrame(JSON.stringify({ type, nonce: "control-only" })), /unsupported/);
+    assert.throws(() => parseHostedToolsManagedFrame(JSON.stringify({ type, nonce: "control-only" })), /unsupported/);
+  }
+});
