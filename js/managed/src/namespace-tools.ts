@@ -126,7 +126,10 @@ export function createNamespaceExecutionRuntime(
   resolveScreenTool: ScreenToolResolver = () => undefined,
   authorizationKey: (context: ToolContext) => string = () => "account",
   processStorage?: NamespaceProcessStorage,
+  threadId?: string,
 ): NamespaceExecutionRuntime {
+  const correlation = (context: ToolContext) => ({ thread_id: threadId, session_id: context.sessionId,
+    turn_id: context.turnId, parent_call_id: context.parentCallId });
   const brain = Object.freeze({
     mountId: "mount:brain",
     root: "/brain",
@@ -187,14 +190,14 @@ export function createNamespaceExecutionRuntime(
     try {
       binding = cell(context);
       route = routeNamespaceCwd(binding.scope, canonicalCwd(binding, workdir), "namespace.discover");
-      observeHandCall("namespace.route", name, routeStarted, "ok", context.callId);
+      observeHandCall("namespace.route", name, routeStarted, "ok", context.callId, correlation(context));
     } catch (error) {
-      observeHandCall("namespace.route", name, routeStarted, "unavailable", context.callId);
+      observeHandCall("namespace.route", name, routeStarted, "unavailable", context.callId, correlation(context));
       throw error;
     }
     const hand = binding.hands.get(route.mount.mountId);
     if (!hand?.cua || !hand.cuaReset) {
-      observeHandCall("namespace.invoke", name, routeStarted, "unavailable", context.callId);
+      observeHandCall("namespace.invoke", name, routeStarted, "unavailable", context.callId, correlation(context));
       throw new Error(`namespace mount ${route.mount.root} has no CUA runtime or controllable native screen. Use environment to find a CUA-capable Hand.`);
     }
     const providerInput = without(value, "workdir");
@@ -223,15 +226,15 @@ export function createNamespaceExecutionRuntime(
     const previous = computerQueues.get(key) ?? Promise.resolve();
     const queuedAt = performance.now();
     const pending = previous.catch(() => {}).then(async () => {
-      observeHandCall("namespace.cua.queue", name, queuedAt, "ok", context.callId);
+      observeHandCall("namespace.cua.queue", name, queuedAt, "ok", context.callId, correlation(context));
       context.signal.throwIfAborted();
       const invokedAt = performance.now();
       try {
         const result = await tool.handler(providerInput, context);
-        observeHandCall("namespace.invoke", name, invokedAt, toolOutcome(result), context.callId);
+        observeHandCall("namespace.invoke", name, invokedAt, toolOutcome(result), context.callId, correlation(context));
         return result;
       } catch (error) {
-        observeHandCall("namespace.invoke", name, invokedAt, context.signal.aborted ? "cancelled" : "failed", context.callId);
+        observeHandCall("namespace.invoke", name, invokedAt, context.signal.aborted ? "cancelled" : "failed", context.callId, correlation(context));
         throw error;
       }
     });
@@ -285,14 +288,14 @@ export function createNamespaceExecutionRuntime(
         try {
           binding = cell(context);
           route = routeNamespaceCwd(binding.scope, canonicalCwd(binding, workdir));
-          observeHandCall("namespace.route", "exec_command", routedAt, "ok", context.callId);
+          observeHandCall("namespace.route", "exec_command", routedAt, "ok", context.callId, correlation(context));
         } catch (error) {
-          observeHandCall("namespace.route", "exec_command", routedAt, "unavailable", context.callId);
+          observeHandCall("namespace.route", "exec_command", routedAt, "unavailable", context.callId, correlation(context));
           throw error;
         }
         const hand = binding.hands.get(route.mount.mountId);
         if (hand?.exec === undefined) {
-          observeHandCall("namespace.invoke", "exec_command", routedAt, "unavailable", context.callId);
+          observeHandCall("namespace.invoke", "exec_command", routedAt, "unavailable", context.callId, correlation(context));
           throw new Error(`namespace mount ${route.mount.root} is not executable`);
         }
         const invokedAt = performance.now();
@@ -302,9 +305,9 @@ export function createNamespaceExecutionRuntime(
             ...without(value, "workdir"),
             workdir: nativeWorkdir(hand.workspace, route.relativePath),
           }, context);
-          observeHandCall("namespace.invoke", "exec_command", invokedAt, toolOutcome(result), context.callId);
+          observeHandCall("namespace.invoke", "exec_command", invokedAt, toolOutcome(result), context.callId, correlation(context));
         } catch (error) {
-          observeHandCall("namespace.invoke", "exec_command", invokedAt, context.signal.aborted ? "cancelled" : "failed", context.callId);
+          observeHandCall("namespace.invoke", "exec_command", invokedAt, context.signal.aborted ? "cancelled" : "failed", context.callId, correlation(context));
           throw error;
         }
         const structured = executionResult(result);

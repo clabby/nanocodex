@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{
-    WebSocketStream, accept_async,
+    WebSocketStream, accept_hdr_async,
     tungstenite::{Message, protocol::frame::coding::CloseCode},
 };
 
@@ -134,7 +134,16 @@ async fn fast_ready_disconnects_keep_exponential_reconnect_backoff() {
         .unwrap();
     assert!(accepted[2].0.duration_since(accepted[1].0) >= Duration::from_millis(170));
     assert!(accepted[3].0.duration_since(accepted[2].0) >= Duration::from_millis(350));
-    assert!(accepted.windows(2).all(|pair| pair[0].1 == pair[1].1));
+    for pair in accepted.windows(2) {
+        assert_catalog_diagnostics(&pair[0].1);
+        assert_catalog_diagnostics(&pair[1].1);
+        assert_ne!(pair[0].1["connection_id"], pair[1].1["connection_id"]);
+        let mut previous = pair[0].1.clone();
+        let mut next = pair[1].1.clone();
+        previous.as_object_mut().unwrap().remove("connection_id");
+        next.as_object_mut().unwrap().remove("connection_id");
+        assert_eq!(previous, next, "catalog remains pinned across attempts");
+    }
     tokio::time::timeout(Duration::from_secs(1), async {
         while attachment.status() != AttachmentStatus::Disconnected {
             tokio::task::yield_now().await;
@@ -170,6 +179,20 @@ async fn stalled_websocket_handshake_retries_before_provision_deadline() {
 
 #[tokio::test]
 async fn catalog_call_result_and_drain_use_exact_frames() {
+    let evidence_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../output/hand-boundaries-20261001");
+    std::fs::create_dir_all(&evidence_dir).unwrap();
+    let evidence_path = evidence_dir.join("rust-native-lifecycle.log");
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("nanocodex_tools::attachment=info")
+        .with_ansi(false)
+        .with_span_events(
+            tracing_subscriber::fmt::format::FmtSpan::NEW
+                | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+        )
+        .with_writer(std::fs::File::create(&evidence_path).unwrap())
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("ws://{}/tools", listener.local_addr().unwrap());
     let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
@@ -177,7 +200,8 @@ async fn catalog_call_result_and_drain_use_exact_frames() {
         let mut socket = accept(&listener).await;
         let catalog = recv_json(&mut socket).await;
         assert_eq!(catalog["type"], "catalog");
-        assert_eq!(catalog.as_object().unwrap().len(), 6);
+        assert_eq!(catalog.as_object().unwrap().len(), 8);
+        assert_catalog_diagnostics(&catalog);
         assert!(
             catalog["runtime_id"]
                 .as_str()
@@ -198,10 +222,21 @@ async fn catalog_call_result_and_drain_use_exact_frames() {
         send_json(&mut socket, json!({"type":"ready"})).await;
 
         send_json(&mut socket, call("call-1", "echo")).await;
-        let result = recv_json(&mut socket).await;
+        let result = recv_result_phases(
+            &mut socket,
+            "call-1",
+            &[
+                "received",
+                "execution_started",
+                "execution_finished",
+                "result_prepared",
+            ],
+        )
+        .await;
         assert_eq!(result["type"], "result");
         assert_eq!(result["call_id"], "call-1");
         assert_eq!(result["outcome"]["status"], "completed");
+        eprintln!("native completed receipt timing: {}", result["timing"]);
         send_json(&mut socket, json!({"type":"ack","call_id":"call-1"})).await;
         let _ = completed_tx.send(());
 
@@ -215,7 +250,7 @@ async fn catalog_call_result_and_drain_use_exact_frames() {
         .build()
         .unwrap();
     let (attachment, _) = tools
-        .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
+        .attach(AttachmentTarget::new(endpoint.clone(), "bearer").unwrap())
         .metadata(machine_metadata("machine-1", "/workspace/project"))
         .connect()
         .await
@@ -224,6 +259,23 @@ async fn catalog_call_result_and_drain_use_exact_frames() {
     completed_rx.await.unwrap();
     attachment.detach().await.unwrap();
     server.await.unwrap();
+    let trace = std::fs::read_to_string(&evidence_path).unwrap();
+    assert!(!trace.contains("private-response-marker"));
+    assert!(!trace.contains(&endpoint));
+    for stage in [
+        "received",
+        "execution_started",
+        "execution_finished",
+        "result_prepared",
+    ] {
+        assert!(
+            trace
+                .lines()
+                .any(|line| line.contains("transport_call_id=\"call-1\"")
+                    && line.contains(&format!("stage=\"{stage}\""))),
+            "trace records actual stage {stage}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -300,7 +352,17 @@ async fn cancellation_is_only_an_ordinary_result() {
             json!({"type":"cancel","call_id":"call-cancel"}),
         )
         .await;
-        let result = recv_json(&mut socket).await;
+        let result = recv_result_phases(
+            &mut socket,
+            "call-cancel",
+            &[
+                "received",
+                "execution_started",
+                "execution_finished",
+                "result_prepared",
+            ],
+        )
+        .await;
         assert_eq!(result["type"], "result");
         assert_eq!(result["call_id"], "call-cancel");
         assert_eq!(result["outcome"]["status"], "ambiguous");
@@ -450,7 +512,28 @@ async fn legacy_fields_are_protocol_rejections_carried_by_close() {
 
 async fn accept(listener: &TcpListener) -> WebSocketStream<TcpStream> {
     let (stream, _) = listener.accept().await.unwrap();
-    accept_async(stream).await.unwrap()
+    accept_hdr_async(
+        stream,
+        |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+         mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            let id = uuid::Uuid::parse_str(
+                request.headers()["x-nanocodex-request-id"]
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(id.get_version_num(), 4);
+            assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
+            // An endpoint's arbitrary response correlation is never trusted for logging.
+            response.headers_mut().insert(
+                "x-nanocodex-request-id",
+                "private-response-marker".parse().unwrap(),
+            );
+            Ok(response)
+        },
+    )
+    .await
+    .unwrap()
 }
 
 async fn ready(listener: &TcpListener) -> WebSocketStream<TcpStream> {
@@ -461,6 +544,7 @@ async fn ready_with_catalog(listener: &TcpListener) -> (WebSocketStream<TcpStrea
     let mut socket = accept(listener).await;
     let catalog = recv_json(&mut socket).await;
     assert_eq!(catalog["type"], "catalog");
+    assert_catalog_diagnostics(&catalog);
     assert!(
         catalog["runtime_id"]
             .as_str()
@@ -494,8 +578,101 @@ async fn send_json(socket: &mut WebSocketStream<TcpStream>, value: Value) {
 
 async fn recv_json(socket: &mut WebSocketStream<TcpStream>) -> Value {
     loop {
+        let frame = recv_wire_json(socket).await;
+        if frame["type"] != "diagnostic" {
+            return frame;
+        }
+    }
+}
+
+fn assert_catalog_diagnostics(catalog: &Value) {
+    assert_eq!(catalog["diagnostics"], true);
+    let id = uuid::Uuid::parse_str(catalog["connection_id"].as_str().unwrap()).unwrap();
+    assert_eq!(id.get_version_num(), 4);
+    assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
+}
+
+async fn recv_result_phases(
+    socket: &mut WebSocketStream<TcpStream>,
+    call_id: &str,
+    expected: &[&str],
+) -> Value {
+    let mut stages = Vec::new();
+    let mut last = 0.0;
+    loop {
+        let frame = recv_wire_json(socket).await;
+        if frame["type"] == "diagnostic" {
+            if frame["call_id"] == call_id {
+                let elapsed = frame["elapsed_ms"].as_f64().unwrap();
+                assert!(elapsed >= last, "phase elapsed must be monotonic: {frame}");
+                last = elapsed;
+                stages.push(frame["stage"].as_str().unwrap().to_owned());
+            }
+        } else {
+            assert_eq!(frame["type"], "result");
+            assert_eq!(frame["call_id"], call_id);
+            assert_eq!(
+                stages, expected,
+                "actual socket phases before result for {call_id}"
+            );
+            eprintln!(
+                "native diagnostic journey {call_id}: {stages:?}; elapsed_ms={last}; status={}",
+                frame["outcome"]["status"]
+            );
+            return frame;
+        }
+    }
+}
+
+async fn recv_wire_json(socket: &mut WebSocketStream<TcpStream>) -> Value {
+    loop {
         match socket.next().await.unwrap().unwrap() {
-            Message::Text(text) => return serde_json::from_str(&text).unwrap(),
+            Message::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).unwrap();
+                if frame["type"] == "diagnostic" {
+                    assert_eq!(
+                        frame.as_object().unwrap().len(),
+                        4,
+                        "diagnostics contain only phase metadata"
+                    );
+                    assert!(frame["call_id"].is_string());
+                    assert!(matches!(
+                        frame["stage"].as_str().unwrap(),
+                        "received" | "execution_started" | "execution_finished" | "result_prepared"
+                    ));
+                    let elapsed = frame["elapsed_ms"].as_f64().unwrap();
+                    assert!(
+                        elapsed.is_finite() && (0.0..=9_007_199_254_740_991.0).contains(&elapsed)
+                    );
+                    eprintln!("native socket diagnostic: {frame}");
+                }
+                if frame["type"] == "result" {
+                    let timing = frame["timing"]
+                        .as_object()
+                        .expect("native receipts carry local timing");
+                    let phases = [
+                        "scheduler_ms",
+                        "execution_gate_ms",
+                        "execution_ms",
+                        "result_encode_ms",
+                        "result_queue_ms",
+                    ];
+                    assert_eq!(timing.len(), phases.len() + 1);
+                    let elapsed = timing["host_elapsed_ms"].as_f64().unwrap();
+                    assert!(elapsed.is_finite() && elapsed >= 0.0);
+                    let mut sum = 0.0;
+                    for phase in phases {
+                        let duration = timing[phase].as_f64().unwrap();
+                        assert!(duration.is_finite() && duration >= 0.0);
+                        sum += duration;
+                    }
+                    assert!(
+                        sum <= elapsed + 0.01,
+                        "receipt phases exceed local elapsed: {timing:?}"
+                    );
+                }
+                return frame;
+            }
             Message::Ping(payload) => socket.send(Message::Pong(payload)).await.unwrap(),
             frame => panic!("unexpected websocket frame: {frame:?}"),
         }
@@ -644,19 +821,33 @@ async fn reconnect_queues_serial_work_without_rejecting_parallel_work_or_replayi
                 send_json(&mut first, call(&format!("old-{id}"), "gated")).await;
                 assert_eq!(starts.recv().await.unwrap(), format!("old-{id}"));
             }
+            let first_connection_id = catalog["connection_id"].clone();
             first.close(None).await.unwrap();
             let (mut second, catalog) = ready_with_catalog(&listener).await;
+            assert_ne!(catalog["connection_id"], first_connection_id);
             assert_eq!(catalog["runtime_id"], prior_runtime);
             send_json(&mut second, call("busy", "echo")).await;
+            let received = recv_wire_json(&mut second).await;
+            assert_eq!(received["type"], "diagnostic");
+            assert_eq!(received["call_id"], "busy");
+            assert_eq!(received["stage"], "received");
             if !parallel {
                 assert!(
-                    tokio::time::timeout(Duration::from_millis(25), recv_json(&mut second))
+                    tokio::time::timeout(Duration::from_millis(25), recv_wire_json(&mut second))
                         .await
                         .is_err()
                 );
                 release.add_permits(count);
             }
-            let busy = recv_json(&mut second).await;
+            let busy = recv_result_phases(
+                &mut second,
+                "busy",
+                &["execution_started", "execution_finished", "result_prepared"],
+            )
+            .await;
+            if !parallel {
+                assert!(busy["timing"]["execution_gate_ms"].as_f64().unwrap() >= 20.0);
+            }
             assert_eq!(busy["call_id"], "busy");
             assert_eq!(busy["outcome"]["status"], "completed");
             send_json(&mut second, json!({"type":"ack","call_id":"busy"})).await;
@@ -723,13 +914,17 @@ async fn queued_calls_expire_or_cancel_without_executing_and_release_the_gate() 
         let mut expired = call("expired", "gated");
         expired["deadline_at"] = json!(now_ms() + 30);
         send_json(&mut socket, expired).await;
-        let result = recv_json(&mut socket).await;
+        let result =
+            recv_result_phases(&mut socket, "expired", &["received", "result_prepared"]).await;
         assert_eq!(result["call_id"], "expired");
         assert_eq!(result["outcome"]["status"], "unavailable");
         send_json(&mut socket, json!({"type":"ack", "call_id":"expired"})).await;
         send_json(&mut socket, call("cancelled", "gated")).await;
         send_json(&mut socket, json!({"type":"cancel", "call_id":"cancelled"})).await;
-        assert_eq!(recv_json(&mut socket).await["call_id"], "cancelled");
+        let cancelled =
+            recv_result_phases(&mut socket, "cancelled", &["received", "result_prepared"]).await;
+        assert_eq!(cancelled["call_id"], "cancelled");
+        assert_eq!(cancelled["outcome"]["status"], "ambiguous");
         send_json(&mut socket, json!({"type":"ack", "call_id":"cancelled"})).await;
         release.add_permits(1);
         assert_eq!(recv_json(&mut socket).await["call_id"], "running");
@@ -776,6 +971,7 @@ async fn process_poll_survives_transport_reconnect_without_restarting_the_comman
         first.close(None).await.unwrap();
         let (mut second, reconnected) = ready_with_catalog(&listener).await;
         assert_eq!(catalog["runtime_id"], reconnected["runtime_id"]);
+        assert_ne!(catalog["connection_id"], reconnected["connection_id"]);
         let mut poll = call("poll", "write_stdin");
         poll["input"] = json!({"session_id":process, "yield_time_ms":5000});
         send_json(&mut second, poll).await;

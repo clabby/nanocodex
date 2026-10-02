@@ -68,6 +68,19 @@ export type HostedToolCallOutcome =
   | { status: "ambiguous"; message: string }
   | { status: "cancelled"; message: string };
 
+/** Host-local monotonic durations, measured through result encoding before socket
+ * handoff. No host wall clock or claim about one-way network latency. */
+export type HostedToolReceiptTiming = Readonly<{
+  scheduler_ms: number;
+  execution_gate_ms: number;
+  execution_ms: number;
+  result_encode_ms: number;
+  result_queue_ms: number;
+  host_elapsed_ms: number;
+}>;
+
+export type HostedToolDiagnosticStage = "received" | "execution_started" | "execution_finished" | "result_prepared";
+
 export type HostedToolsHostFrame =
   | {
       type: "catalog";
@@ -77,11 +90,17 @@ export type HostedToolsHostFrame =
       attachment_id?: string;
       /** Identity of the retained executor runtime, stable only across reconnects. */
       runtime_id?: string;
+      /** Opt-in is rejected by older strict brokers before any call executes. */
+      diagnostics?: true;
+      /** Opaque client-generated identity for this connection attempt. */
+      connection_id?: string;
     }
+  | { type: "diagnostic"; call_id: string; stage: HostedToolDiagnosticStage; elapsed_ms: number }
   | {
       type: "result";
       call_id: string;
       outcome: HostedToolCallOutcome;
+      timing?: HostedToolReceiptTiming;
     }
   | {
       type: "ping";
@@ -119,7 +138,7 @@ export type HostedToolsManagedFrame =
 
 export type HostedToolsFrame = HostedToolsHostFrame | HostedToolsManagedFrame;
 
-const HOST_FRAME_TYPES = new Set(["catalog", "result", "ping", "drain"]);
+const HOST_FRAME_TYPES = new Set(["catalog", "result", "ping", "drain", "diagnostic"]);
 const MANAGED_FRAME_TYPES = new Set(["ready", "call", "cancel", "ack", "pong", "draining"]);
 
 export function parseHostedToolsHostFrame(encoded: string): HostedToolsHostFrame {
@@ -157,6 +176,8 @@ export function parseHostedToolsFrame(encoded: string): HostedToolsFrame {
       return parseCatalog(frame);
     case "result":
       return parseResult(frame);
+    case "diagnostic":
+      return parseDiagnostic(frame);
     case "ping":
       return parsePing(frame);
     case "drain":
@@ -184,7 +205,14 @@ export function parseHostedToolsFrame(encoded: string): HostedToolsFrame {
 function parseCatalog(
   frame: Record<string, unknown>,
 ): Extract<HostedToolsHostFrame, { type: "catalog" }> {
-  exactKeys(frame, ["type", "tools", "machines", "attachment_id", "capabilities", "runtime_id"]);
+  exactKeys(frame, ["type", "tools", "machines", "attachment_id", "capabilities", "runtime_id", "diagnostics", "connection_id"]);
+  if (Object.hasOwn(frame, "diagnostics") && frame.diagnostics !== true) {
+    throw new HostedToolsProtocolError("invalid_catalog", "diagnostics must be true when advertised");
+  }
+  if (Object.hasOwn(frame, "connection_id") && (typeof frame.connection_id !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(frame.connection_id))) {
+    throw new HostedToolsProtocolError("invalid_catalog", "connection_id must be an opaque UUIDv4");
+  }
   if (!Array.isArray(frame.capabilities) || frame.capabilities.length !== 1
     || frame.capabilities[0] !== "turn_metadata") {
     throw new HostedToolsProtocolError("invalid_catalog", 'capabilities must be ["turn_metadata"]');
@@ -233,6 +261,8 @@ function parseCatalog(
     ...(machines === undefined ? {} : { machines }),
     ...(attachmentId === undefined ? {} : { attachment_id: attachmentId }),
     ...(runtimeId === undefined ? {} : { runtime_id: runtimeId }),
+    ...(frame.diagnostics === true ? { diagnostics: true as const } : {}),
+    ...(typeof frame.connection_id === "string" ? { connection_id: frame.connection_id } : {}),
   };
 }
 
@@ -248,13 +278,44 @@ function machineCatalog(value: unknown): HostedMachine[] | undefined {
   }
 }
 
+function parseDiagnostic(frame: Record<string, unknown>): Extract<HostedToolsHostFrame, { type: "diagnostic" }> {
+  exactKeys(frame, ["type", "call_id", "stage", "elapsed_ms"]);
+  if (frame.stage !== "received" && frame.stage !== "execution_started"
+    && frame.stage !== "execution_finished" && frame.stage !== "result_prepared") {
+    throw new HostedToolsProtocolError("invalid_message", "unsupported host diagnostic stage");
+  }
+  if (typeof frame.elapsed_ms !== "number" || !Number.isFinite(frame.elapsed_ms)
+    || frame.elapsed_ms < 0 || frame.elapsed_ms > Number.MAX_SAFE_INTEGER) {
+    throw new HostedToolsProtocolError("invalid_message", "diagnostic elapsed_ms must be a bounded monotonic duration");
+  }
+  return { type: "diagnostic", call_id: identifier(frame.call_id, "call_id"), stage: frame.stage, elapsed_ms: frame.elapsed_ms };
+}
+
 function parseResult(frame: Record<string, unknown>): Extract<HostedToolsHostFrame, { type: "result" }> {
-  exactKeys(frame, ["type", "call_id", "outcome"]);
+  exactKeys(frame, ["type", "call_id", "outcome", "timing"]);
   return {
     type: "result",
     call_id: identifier(frame.call_id, "call_id"),
     outcome: callOutcome(frame.outcome),
+    ...(Object.hasOwn(frame, "timing") ? { timing: receiptTiming(frame.timing) } : {}),
   };
+}
+
+function receiptTiming(value: unknown): HostedToolReceiptTiming {
+  const timing = objectValue(value, "result timing");
+  const phases = ["scheduler_ms", "execution_gate_ms", "execution_ms", "result_encode_ms", "result_queue_ms"] as const;
+  const keys = [...phases, "host_elapsed_ms"] as const;
+  exactKeys(timing, keys);
+  for (const key of keys) {
+    if (typeof timing[key] !== "number" || !Number.isFinite(timing[key])
+      || (timing[key] as number) < 0 || (timing[key] as number) > Number.MAX_SAFE_INTEGER) {
+      throw new HostedToolsProtocolError("invalid_message", "result timing must contain bounded monotonic durations");
+    }
+  }
+  if (phases.reduce((sum, key) => sum + (timing[key] as number), 0) > (timing.host_elapsed_ms as number) + 0.01) {
+    throw new HostedToolsProtocolError("invalid_message", "result timing phases exceed host elapsed duration");
+  }
+  return Object.freeze(Object.fromEntries(keys.map(key => [key, timing[key]]))) as HostedToolReceiptTiming;
 }
 
 function parsePing(frame: Record<string, unknown>): Extract<HostedToolsHostFrame, { type: "ping" }> {

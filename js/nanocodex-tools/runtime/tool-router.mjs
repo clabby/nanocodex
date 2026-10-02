@@ -94,7 +94,7 @@ export class ToolRouter {
         definitions: built.definitions,
         tools: built.tools,
         catalog: (provider = "javascript") => catalogSnapshot(built, provider),
-        invoke: (name, input, context) => this.#invoke(built, name, input, context),
+        invoke: (name, input, context, observe) => this.#invoke(built, name, input, context, observe),
         release: () => {
           if (closed) return;
           closed = true;
@@ -113,7 +113,7 @@ export class ToolRouter {
       definitions: built.definitions,
       tools: built.tools,
       catalog: (provider = "javascript") => catalogSnapshot(built, provider),
-      invoke: (name, input, context) => this.#invoke(built, name, input, context),
+      invoke: (name, input, context, observe) => this.#invoke(built, name, input, context, observe),
       release() {},
     });
   }
@@ -260,7 +260,7 @@ export class ToolRouter {
     });
   }
 
-  async #invoke(snapshot, name, input, context = {}) {
+  async #invoke(snapshot, name, input, context = {}, observe) {
     const tool = snapshot.tools.get(name);
     if (!tool) throw new Error(`unknown application tool: ${name}`);
     const signal = context.signal ?? new AbortController().signal;
@@ -269,7 +269,11 @@ export class ToolRouter {
     let releaseExecution;
     try {
       releaseExecution = await this.#execution.acquire(tool.parallelSafe, signal);
-      return await tool.handler(input, context);
+      // Trusted attachment diagnostics are separate from the tool context. A
+      // callback receives only fixed local boundaries and cannot change execution.
+      try { observe?.("execution_started"); } catch {}
+      try { return await tool.handler(input, context); }
+      finally { try { observe?.("execution_finished"); } catch {} }
     } finally {
       releaseExecution?.();
       releasePermit();

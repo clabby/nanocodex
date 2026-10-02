@@ -176,8 +176,260 @@ bypass. Egress must expose `/users/:user/catalog` for this startup path.
 
 `managed.agent.transport` observations include the managed turn and runtime
 request IDs, failure class/phase, retry delay, connection generation and whether
-a retry opens a new socket. Raw provider frames and error strings remain
-excluded from logs and replay storage.
+a retry opens a new socket. Completed model calls also log `model_call_index`,
+`duration_ms`, `time_to_first_event_ms`, `time_to_first_output_ms`, and the
+provider `response_id`. These separate connection setup from a provider that
+acknowledges a request promptly but produces output much later.
+
+Hosted WebSocket diagnostics are always enabled in Workers Logs. The
+`managed.performance` stages `transport.socket.connecting`,
+`transport.socket.opened`, `transport.request.sent`,
+`transport.request.first_message`, `transport.request.first_output`, and
+`transport.request.finished` describe each socket/request lifecycle.
+`transport.socket.connect_waiting`, `transport.request.send_waiting`, and
+`transport.request.waiting` first emit after one second of silence, then at
+2/4/5-second intervals. Each incoming frame resets the silence interval.
+They never cancel a valid quiet model request. Waiting records include elapsed
+time, received frame count, time since the last frame, queued frame count,
+maximum queue residence, delivered frame count, and buffered send bytes.
+Delivery and maximum residence are cumulative for the socket. A rising inbound
+age with an empty queue means the host has no unread frames; queued frames and
+large residence times instead point to consumption in our runtime.
+
+`transport.provider.timing` emits the allowlisted provider timing metadata when
+it arrives, including `pre_inference_ms`, `engine_queue_max_ms`, and
+`engine_service_ttft_total_ms`. These are overlapping provider spans; do not add
+them together. `transport.socket.closed` includes the close code, clean-close
+flag, intentional-close flag, and final queue counters. Diagnostic hooks cannot
+fail a model request. Raw frames, prompts, credentials, close reasons, and
+provider error strings are excluded from these records.
+
+In [Cloudflare Observability's Query Builder](https://developers.cloudflare.com/workers/observability/query-builder/),
+select the incident time range and the Events view. Use the following filters
+and add the listed fields as columns:
+
+| Investigation | Filters | Useful columns |
+| --- | --- | --- |
+| One thread's timeline | `thread_id` Equals the managed agent ID | `type`, `stage`, `message_type`, `turn_id`, `request_id`, `model_call_index`, `tool_call_id`, `source_call_id` |
+| Slow output | `type` Equals `managed.agent.transport`; `message_type` Equals `model.call.completed`; `time_to_first_output_ms` Greater than `1000` | `duration_ms`, `time_to_first_event_ms`, `time_to_first_output_ms`, `response_id`, `attempt_count` |
+| A request still waiting | `stage` Equals `transport.request.waiting` | `elapsed_ms`, `last_message_age_ms`, `received_message_count`, `queued_message_count`, `socket_queue_residence_max_ms` |
+| Socket/provider timing | `socket_id` Equals the socket ID | `socket_request_index`, `stage`, `provider_request_id`, `response_id`, `egress_request_id` |
+| Broker and relay | `egress_request_id` Equals the ID from the socket record | `type`, `relay_id`, `outcome`, `duration_ms` |
+| Every tool in a thread | `thread_id` Equals the managed agent ID; `type` Equals `managed.agent.tool` | `tool`, `message_type`, `tool_call_id`, `parent_call_id`, `agent_id`, `runtime_session_id`, `managed_turn_id`, `runtime_turn_id`, `duration_ms`, `started_after_ms` |
+| Brain-to-Hand call | `source_call_id` Equals the runtime `tool_call_id` | `type`, `stage`, `thread_id`, `transport_call_id`, `outcome`, `admission_ms`, `roundtrip_ms`, `settlement_ms`, `host_timing`, `transit_return_overhead_ms` |
+| Hand disconnect/reconnect | `hand_id` Equals the target ID; `type` Equals `hand.connection` | `stage`, `reason_code`, `connection_id`, `host_connection_id`, `host_runtime_id`, `lease_id`, `connection_generation`, `last_heartbeat_at`, `heartbeat_age_ms`, `lease_expires_at`, `pending_call_count` |
+| A missing Hand result | `transport_call_id` Equals the broker call ID | `stage`, `host_stage`, `host_elapsed_ms`, `reason_code`, `outcome`, `connection_id`, `connection_generation` |
+| Screen input/result | `thread_id` Equals the managed agent ID; `type` Equals `hand.remote` | `stage`, `source_call_id`, `request_id`, `hand_id`, `connection_id`, `remote_generation`, `reason_code`, `close_code` |
+
+`managed.agent.tool` records every delivered call and result, including nested
+Code Mode and child agents. Names retain the canonical tool identifier. Rust
+owns result `duration_ms` and nested `started_after_ms`; the original managed
+turn and runtime turn remain separate. `tool.waiting` begins at one second,
+backs off to five-second intervals, and never expires or cancels a tool. Replay
+records retain `event_seq` and `replayed`; a result after recovery can have
+`start_observed: false`. Missing completion after a reset means unknown outcome.
+
+`managed.tool.invocation` records the actual awaited handler boundary with its
+thread, runtime session, host turn and call IDs. `host_turn_id` is the runtime's
+execution/gate token (for example `session:1`), distinct from the event's
+`runtime_turn_id` and the API's `managed_turn_id`. Hand protocol/stage `turn_id`
+also carries that host token; join these boundaries by runtime session and call
+ID. `hand.tool.stage` separates namespace
+preparation/routing, account ownership/resolution/fetch/decode, and sandbox SDK
+invocation. Provider/account summaries include their complete local wait.
+`hand.call.broker` records admission, actual socket send, host progress, receipt,
+ACK delivery, terminal outcome, cancellation, durable replay and late/duplicate
+receipts. The SQLite ledger retains thread and connection identities across
+hibernation and restart.
+
+### Service boundaries and connection evidence
+
+The model path is account proxy → managed Session → egress → account relay →
+relay container → provider. The tool path is managed runtime → namespace/tool
+handler → account tool broker → authenticated Hand socket → Hand executor, then
+the return path. Sandbox SDK and remote-screen calls have separate handler and
+transport observations. Use native spans for the real Worker/DO subrequests and
+logical IDs for retained sockets and external processes.
+
+| Boundary | Evidence | What it establishes |
+| --- | --- | --- |
+| API to managed Session | `managed.proxy`, native fetch/DO spans, managed admission/stages | The request reached this service and its local wait |
+| Runtime to handler | `managed.agent.tool`, `managed.tool.invocation` | Every delivered root, nested and child call/result; awaited handler duration |
+| Namespace to account | `hand.tool.stage`, `hand.call.provider`, `hand.provider.invoke` | Routing/preparation and complete account fetch/decode wait |
+| Account authorization/resolution | `hand.tool.stage`, `hand.account.invoke` | Ownership/catalog resolution and complete admitted handler wait |
+| Durable broker admission | `received`, `admitted`, `dispatched` | The broker retained an intent and dispatch decision; these do not prove a socket write |
+| Broker socket write | `send_started`, `sent`, `send_failed` | `sent` means the transport accepted the frame, with no execution claim |
+| Hand receipt | `host_progress` / `received` | The selected Hand parsed the call |
+| Hand execution | `host_progress` / `execution_started`, `execution_finished` | The local executor started/finished, with monotonic elapsed time |
+| Hand result preparation | `host_progress` / `result_prepared` | A result was prepared; it may still be lost in transit |
+| Broker result/ACK | `receipt`, `ack_attempt`, `ack_sent`, `ack_failed`, `terminal` | Receipt settlement and ACK write are separate boundaries |
+| Connection loss/recovery | `transport_lost`; `hand.connection` lifecycle | Fixed failure cause, pinned generation, lease/liveness evidence and whether a new connection became ready |
+| Managed model socket | `transport.request.*`, queue/delivery counters | Send, first event/output and whether frames are absent or awaiting consumption |
+| Egress/relay/provider | `egress.*`, `responses.relay.*`, `transport.provider.timing` | Routing/upgrade, relay first bytes/close and allowlisted provider timing |
+| Screen host | `hand.remote` call and connection stages | Input send, result, cancellation, timeout or transport loss; this protocol has no execution acknowledgment |
+
+Call observations pin `hand_id` (canonical target), `host_runtime_id` (Hand
+process), `host_connection_id` (client connection attempt), `connection_id`
+(broker socket), and `lease_id` + `connection_generation` (dispatch ownership).
+Reconnects have new client/socket IDs and a higher broker generation. The same
+runtime ID indicates the publisher process survived; a different runtime ID
+identifies a new publisher. These identities are diagnostic and never authorize
+a retry. Screen sockets use their own `connection_id` and `remote_generation`.
+
+Connection records distinguish accepted/ready/resumed, transport error/close,
+replacement, draining, lease expiry and fencing. A broker restart records
+`transport_lost` with `reason_code: owner_restarted` for retained dispatched
+calls. The terminal outcome remains ambiguous; replay does not rerun an
+uncertain command. A Hand that reported `execution_finished` and
+`result_prepared` without a broker `receipt` identifies a lost return path,
+rather than proving execution never occurred.
+
+The Node Hand emits content-free `hand.attachment` records for **every** local
+connection attempt, including attempts that never reach Cloudflare, errors,
+reconnect scheduling, successful readiness and discarded old-generation
+results. Native Hand lifecycle tracing carries the same runtime/attempt IDs;
+its connector reports combined TLS + HTTP-upgrade duration. Cloudflare cannot
+observe DNS/TCP failures that never reach it; correlate local Hand logs when
+there is no server acceptance record. Neither an unexpired lease nor an open
+socket proves the remote process is alive. Read heartbeat age and lease expiry,
+then the last acknowledged call phase. Silence observations begin at one
+second; connection fencing and control timeouts keep their existing policy.
+Steady heartbeat/renewal logs are summarized, while diagnostic snapshots expose
+the latest retained heartbeat/lease state without renewing it.
+
+### Durable per-thread diagnostics
+
+`GET /v1/agents/:id/diagnostics` returns content-free stored boundary evidence
+from the managed Session and account Hand broker, independently of Cloudflare
+log ingestion or a live tail. It requires the owning authority with
+`agents:read`; Connect grants cannot read it. Existing ownership, organization,
+team and authorization-epoch checks apply. Deleted/exported sessions are not
+readable. Responses use `Cache-Control: no-store`.
+
+```sh
+curl --fail-with-body "$NANOCODEX_ORIGIN/v1/agents/$THREAD_ID/diagnostics?limit=256" \
+  -H "Authorization: Bearer $NANOCODEX_TOKEN"
+```
+
+The response has `thread_id` and a `services` array. Each service includes
+`events`, `available`, `next_after`, `history_truncated`, retention/bounds and,
+when readable, `write_failed`. Events contain local `seq` and server
+`created_at`; order each service by `seq`. IDs and monotonic durations join
+machines; do not subtract different hosts' clocks to infer one-way latency.
+The Hand page additionally exposes `connections` and `remote_connections`:
+current account-owned socket, lease and pending-call snapshots. `connected`
+means the retained socket's local state is open; `active` also requires its
+valid ownership/lease. Neither field is a physical liveness acknowledgment.
+
+Paginate independently with `after_managed` and `after_hand` set to the
+corresponding service's `next_after`. `limit` is per service, from 1 to 1024
+(default 256). Relevant connection lifecycle records may precede the first call;
+calls from another thread sharing that connection are excluded. Events are
+retained for seven days, bounded to 20,063 rows per journal. A service read
+failure returns `available: false` while the other service remains readable.
+Retention gaps and detected journal write failures set `history_truncated`;
+write failures are marked durably when storage permits. Total process/storage
+loss can also lose the final observation. Missing phases/completions are
+unknown evidence, never proof that a side effect did not execute. These records
+cannot reconstruct phases missing from an incident before their rollout.
+
+Arguments, results, prompts, screenshots, machine names, paths, credentials and
+raw transport error/close text are excluded by an explicit projection. Inspect
+the thread/call, then its pinned connection and last acknowledged phase. Follow
+`egress_request_id`/`relay_id` into Workers/container logs for the model return
+path; those external-service records are not copied into this SQLite journal.
+
+Hand receipts report monotonic `scheduler_ms`, `execution_gate_ms`,
+`execution_ms`, `result_encode_ms`, `result_queue_ms` and `host_elapsed_ms` in
+`host_timing`, separately from the business outcome. `roundtrip_ms` starts at
+the broker's dispatch and ends at receipt. `transit_return_overhead_ms` is the
+signed difference between that duration and reported Hand elapsed time. A
+nonnegative value combines outbound/return transit, socket handoff and
+unmeasured metadata work; it cannot separate one-way latency. Negative values
+indicate inconsistent timing or host reporting, and must not be read as network
+latency. Workers clocks can report zero for synchronous work between I/O events.
+Old Hands omit timing/progress and remain supported. New Hands advertise
+`diagnostics: true` and their client `connection_id` in the catalog. Deploy the
+compatible broker before updating Rust or JavaScript Hands; old strict brokers
+reject this advertisement before dispatching calls.
+
+### Native distributed traces
+
+All three Workers already enable tracing with head sampling set to one.
+[Cloudflare propagates native context](https://developers.cloudflare.com/changelog/post/2026-05-07-automatic-tracing-across-do-and-worker-subrequests/)
+through Service Binding and Durable Object subrequests; [RPC sessions and method
+calls](https://developers.cloudflare.com/changelog/post/2026-09-17-javascript-rpc-session-spans/)
+are also instrumented automatically. Keep calls on these bindings so the
+platform records their real caller/callee relationship.
+
+Custom spans wrap `managed.proxy`, managed operations/stages, `nanocodex.tool`,
+`hand.provider.invoke`, `hand.account.invoke`, `egress.request`, and
+`responses.relay.request`. They await the actual operation and retain bounded
+`nanocodex.thread_id`, `nanocodex.tool_call_id`, host/managed turn IDs, and
+egress/relay IDs where available. Account Hand spans also retain pinned Hand,
+client/socket, runtime, lease and generation attributes. Logs inside a span
+inherit its native context.
+Search span attributes for the thread/call, then open the native trace waterfall
+and follow automatic fetch, Durable Object and RPC spans between custom spans.
+The existing `managed.performance.trace_id` is an application operation ID;
+it is **not** Cloudflare's native trace ID.
+
+A durable turn can outlive its HTTP 202 admission and use a retained WebSocket,
+later messages, alarms or recovery invocations. Use logical thread/call IDs to
+join those invocations and inspect `managed.agent.tool` and
+`managed.tool.invocation` for the complete tool timeline.
+The pinned local runtime can finalize an admission tracer when a later request
+takes over the DO's background work, leaving truncated custom spans or missing
+attributes. The journey verifies the full awaited account `/invoke` span and
+native ancestry, and uses lifecycle records for complete background-tool timing.
+[The custom-span API](https://developers.cloudflare.com/workers/observability/traces/custom-spans/)
+does not expose native trace/span IDs or manual parent/link injection, and
+[external W3C propagation](https://developers.cloudflare.com/workers/observability/traces/known-limitations/)
+is not supported yet. Hand and Node relay records join through the private
+call/egress/relay IDs, rather than a fabricated `traceparent`.
+
+The broker creates `egress_request_id` on each upgrade; it is returned privately
+to the managed host and passed to the relay. Account Worker `responses.relay`
+records join it to `relay_id`. Relay container `responses.relay.upstream` records
+handshake timing, and `responses.relay.stream` records first bytes in each
+direction and one terminal close/error with byte/chunk counts and last-byte
+ages. Container byte arrivals are transport activity, not model output.
+Use the response ID and request index to distinguish calls on a reused socket.
+Missing terminal records after a process reset do not prove an upstream timeout.
+
+These records are emitted during the wait; Cloudflare ingestion and WebSocket
+invocation buffering determine when they appear in the dashboard. Prefer stored
+Workers Logs for incident investigation. Adding/removing live tails can reset
+the relay Durable Object and disturb active requests.
+
+Reproduce the quiet-provider journey locally with
+`pnpm --filter nanocodex-managed-service run test:model-pause`. It runs the public
+Cloudflare SDK and real WASM/SQLite runtime over service-binding WebSockets,
+holds the synthetic provider silent for 3.2 seconds, checks the first observation
+at one second before completion, and checks continuous output and a follow-up
+on the same socket. Its runtime transcript
+and extracted records are retained in ignored `output/model-pause-journey/`.
+
+`pnpm --filter nanocodex-managed-service run test:tool-timing` exercises the
+shipped account proxy, managed Session, WASM/Code Mode, child agent and account
+tool broker against a real Node shell Hand. It inserts 250 ms outbound and
+150 ms return delay, verifies every call/result and handler rejection, and
+reconstructs the account DO to verify replay without executing the command
+twice. It also tests a socket error without a close event, two failed reconnect
+attempts followed by recovery, an execution whose receipt is lost, and a screen
+click whose return socket closes. The real public diagnostics API must preserve
+the distinct boundaries, isolate thread calls, paginate and enforce ownership/
+capabilities; uncertain inputs must not repeat. Native Cloudflare spans,
+ancestry, span-attributed logs, runtime history, diagnostic pages and Hand
+receipts are retained in ignored `output/thread-tool-timing-journey/`.
+
+`pnpm --filter nanocodex-managed-service run test:hand-owner-restart` kills the
+actual account broker runtime process group while a shell command is executing,
+then restarts on the same HTTP port and SQLite storage. The surviving publisher
+reconnects. Diagnostics must retain `owner_restarted` with the original pinned
+call identities; replay stays ambiguous, the original effect occurs once, and
+a fresh command succeeds. Evidence is retained in ignored
+`output/hand-owner-restart-journey/`.
 
 The resolver reads retained ownership without constructing the agent runtime.
 Deleted, exported, or pending-import sessions deny resolution; egress never

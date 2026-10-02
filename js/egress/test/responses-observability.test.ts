@@ -95,7 +95,7 @@ describe("Container Worker upgrade observation", () => {
     const forwarded = container.fetch.mock.calls[0]![0] as Request;
     const relayId = forwarded.headers.get("x-nanocodex-relay-id");
     expect(relayId).toMatch(UUID);
-    expect(forwarded.headers.has("x-nanocodex-egress-request-id")).toBe(false);
+    expect(forwarded.headers.get("x-nanocodex-egress-request-id")).toBe(parentId === callerId ? callerId : null);
     expect(input.headers.get("x-nanocodex-egress-request-id")).toBe(parentId);
     expect(logs[0]).toHaveBeenCalledWith(expect.objectContaining({ type: "responses.relay", relay_id: relayId,
       was_running: false, status: 101, outcome: "response" }));

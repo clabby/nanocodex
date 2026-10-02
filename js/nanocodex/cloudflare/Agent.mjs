@@ -410,6 +410,13 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
     && typeof internalRuntime.onSocketTiming !== "function") {
     throw new TypeError("Cloudflare Agent socket timing hook must be a function");
   }
+  if (internalRuntime?.traceTool !== undefined && typeof internalRuntime.traceTool !== "function") {
+    throw new TypeError("Cloudflare Agent tool tracing hook must be a function");
+  }
+  if (internalRuntime?.onSocketEvent !== undefined
+    && typeof internalRuntime.onSocketEvent !== "function") {
+    throw new TypeError("Cloudflare Agent socket event hook must be a function");
+  }
   if (internalRuntime?.onResponseCreateSent !== undefined
     && typeof internalRuntime.onResponseCreateSent !== "function") {
     throw new TypeError("Cloudflare Agent response.create sent hook must be a function");
@@ -623,6 +630,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
       toolMode: internalRuntime?.toolMode ?? "direct",
       codeEvaluator: internalRuntime?.codeEvaluator,
       [Symbol.for("nanocodex.browser.internalRuntime")]: {
+        traceTool: internalRuntime?.traceTool,
         codeEffectJournal: internalRuntime?.codeEffectJournal,
         toolProviders: internalRuntime?.toolProviders,
         subagentsEnabled: internalRuntime?.subagentsEnabled,
@@ -630,6 +638,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
         subagentSessions,
         subagentRouting: internalRuntime?.subagentRouting,
         onSocketTiming: internalRuntime?.onSocketTiming,
+        onSocketEvent: internalRuntime?.onSocketEvent,
         promptCacheKey: internalRuntime?.promptCacheKey,
         [CLOUDFLARE_SESSION_RESERVATION]: sessionReservation,
       },

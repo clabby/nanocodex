@@ -8,21 +8,64 @@ pub(crate) const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::
 #[cfg(test)]
 pub(crate) const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// Monotonic host-local phases. The final frame serialization and socket write
+/// remain in the broker's combined transit/return overhead, never one-way latency.
+#[derive(Debug, Default, Clone, Serialize)]
+pub(crate) struct ReceiptTiming {
+    pub(crate) scheduler_ms: f64,
+    pub(crate) execution_gate_ms: f64,
+    pub(crate) execution_ms: f64,
+    pub(crate) result_encode_ms: f64,
+    pub(crate) result_queue_ms: f64,
+    pub(crate) host_elapsed_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DiagnosticStage {
+    Received,
+    ExecutionStarted,
+    ExecutionFinished,
+    ResultPrepared,
+}
+
+impl DiagnosticStage {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::ExecutionStarted => "execution_started",
+            Self::ExecutionFinished => "execution_finished",
+            Self::ResultPrepared => "result_prepared",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ExecutorFrame<'a> {
     Catalog {
         capabilities: [&'static str; 1],
         runtime_id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diagnostics: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        connection_id: Option<&'a str>,
         tools: &'a Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         machines: Option<&'a [AttachmentMachine]>,
         #[serde(skip_serializing_if = "Option::is_none")]
         attachment_id: Option<&'a str>,
     },
+    Diagnostic {
+        call_id: &'a str,
+        stage: DiagnosticStage,
+        elapsed_ms: f64,
+    },
     Result {
         call_id: &'a str,
         outcome: &'a Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timing: Option<&'a ReceiptTiming>,
     },
     Ping {
         nonce: &'a str,

@@ -20,14 +20,64 @@ type Attachment = {
   framePending?: boolean | number;
   frameWindow?: number;
   broadcastRequest?: string;
+  renewalCount?: number;
 };
 type Context = Pick<DurableObjectState, "acceptWebSocket" | "getWebSockets">;
 
+export type HandRemoteCallContext = Readonly<{ threadId?: string; callId?: string; turnId?: string }>;
+export type HandRemoteReasonCode = "connection_closed" | "websocket_closed" | "websocket_error"
+  | "publisher_revoked" | "host_replaced" | "host_disconnected" | "viewer_closed" | "lease_expired"
+  | "invalid_signaling" | "send_failed" | "stale_catalog" | "invalid_input" | "invalid_agent"
+  | "host_unavailable" | "busy" | "not_controllable" | "aborted" | "timeout"
+  | "result_ok" | "result_busy" | "result_invalid" | "result_unavailable" | "result_cancelled"
+  | "retained_socket";
+export type HandRemoteObservation = Readonly<{
+  stage: "snapshot" | "connection.accepted" | "connection.ready" | "connection.published" | "connection.replaced"
+    | "connection.renewed" | "connection.closed" | "connection.lease_expired" | "connection.fenced"
+    | "connection.resumed" | "connection.transport_loss" | "call.received" | "call.admitted" | "call.send_started" | "call.sent"
+    | "call.receipt" | "call.terminal" | "call.cancel" | "call.timeout" | "call.transport_loss";
+  connection_id?: string; host_connection_id?: string; remote_generation?: string; role?: "host" | "viewer";
+  hand_id?: string; connected?: boolean; active?: boolean;
+  lease_expires_at?: number; pending_calls: number; reason_code?: HandRemoteReasonCode;
+  close_code?: number; renewal_count?: number; request_id?: string;
+  runtime_session_id?: string; source_call_id?: string; parent_call_id?: string; thread_id?: string; turn_id?: string;
+}>;
+type CallObservation = Pick<HandRemoteObservation, "request_id" | "runtime_session_id" | "source_call_id" | "parent_call_id" | "thread_id" | "turn_id">;
+type ObservationFields = Omit<Partial<HandRemoteObservation>, "stage" | "connection_id" | "host_connection_id"
+  | "remote_generation" | "role" | "hand_id" | "connected" | "active" | "lease_expires_at" | "pending_calls">;
+const REASON_CODES: ReadonlySet<string> = new Set<HandRemoteReasonCode>([
+  "connection_closed", "websocket_closed", "websocket_error", "publisher_revoked", "host_replaced",
+  "host_disconnected", "viewer_closed", "lease_expired", "invalid_signaling", "send_failed", "stale_catalog",
+  "invalid_input", "invalid_agent", "host_unavailable", "busy", "not_controllable", "aborted", "timeout",
+  "result_ok", "result_busy", "result_invalid", "result_unavailable", "result_cancelled", "retained_socket",
+]);
+
 export class HandRemoteBroker {
-  private readonly pending = new Map<string, { socket: WebSocket; expectsImage: boolean; finish(result: AgentScreenResult): void }>();
-  constructor(private readonly context: Context) {}
+  private readonly sendFailures = new WeakSet<object>();
+  private readonly pending = new Map<string, { socket: WebSocket; expectsImage: boolean; observation: CallObservation;
+    finish(result: AgentScreenResult, reasonCode?: HandRemoteReasonCode): void }>();
+  constructor(private readonly context: Context, private readonly onObservation?: (observation: HandRemoteObservation) => void) {
+    // Socket attachments survive hibernation; pending calls do not. Resumption
+    // provides no evidence of whether an earlier call executed or completed.
+    for (const socket of context.getWebSockets(TAG)) {
+      const state = this.attachment(socket);
+      if (state && state.expiresAt > 0) this.observe("connection.resumed", state, { reason_code: "retained_socket" });
+    }
+  }
 
   owns(socket: WebSocket): boolean { return this.attachment(socket) !== undefined; }
+
+  /** Retained socket state, leases and local pending calls, without mutating either.
+   * A valid lease is not evidence of host execution or network liveness. */
+  connectionDiagnostics(): readonly HandRemoteObservation[] {
+    return this.context.getWebSockets(TAG).flatMap(socket => {
+      const state = this.attachment(socket);
+      if (!state) return [];
+      const snapshot = this.projectObservation("snapshot", state);
+      const connected = socket.readyState === WebSocket.OPEN;
+      return [{ ...snapshot, connected, active: connected && snapshot.active === true }];
+    });
+  }
 
   list(includeUnsupported = false): ScreenTarget[] {
     this.sweep();
@@ -41,44 +91,77 @@ export class HandRemoteBroker {
 
   revokePublisher(routeId: string): void {
     for (const socket of this.context.getWebSockets(TAG)) {
-      if (this.attachment(socket)?.vm?.routeId === routeId) this.close(socket, "Hand revoked");
+      if (this.attachment(socket)?.vm?.routeId === routeId) this.close(socket, "Hand revoked", "publisher_revoked");
     }
   }
 
-  async invoke(name: string, route: string, input: unknown, agentId: string, signal: AbortSignal): Promise<Response | undefined> {
+  async invoke(name: string, route: string, input: unknown, agentId: string, signal: AbortSignal, context?: HandRemoteCallContext): Promise<Response | undefined> {
     if (!route.startsWith("screen:v1:")) return undefined;
+    const id = crypto.randomUUID();
+    const observation: CallObservation = { request_id: id,
+      ...(safeIdentity(agentId) ? { runtime_session_id: agentId } : {}),
+      ...(safeIdentity(context?.callId) ? { source_call_id: context!.callId, parent_call_id: context!.callId } : {}),
+      ...(safeIdentity(context?.threadId) ? { thread_id: context!.threadId } : {}),
+      ...(safeIdentity(context?.turnId) ? { turn_id: context!.turnId } : {}),
+    };
+    this.observe("call.received", undefined, observation);
     const target = this.list(true).find(target => target.agent_tools && screenTool(target).definition.name === name && screenTool(target).route_token === route);
-    if (!target) return Response.json({ error: "stale_catalog" }, { status: 409 });
+    if (!target) {
+      this.observe("call.terminal", undefined, { ...observation, reason_code: "stale_catalog" });
+      return Response.json({ error: "stale_catalog" }, { status: 409 });
+    }
     let action;
-    try { action = screenAction(input); } catch { return Response.json(screenResult({ status: "invalid" }, target)); }
-    if (!ID.test(agentId)) return Response.json({ error: "invalid_agent" }, { status: 400 });
+    try { action = screenAction(input); } catch {
+      this.observe("call.terminal", undefined, { ...observation, reason_code: "invalid_input" });
+      return Response.json(screenResult({ status: "invalid" }, target));
+    }
+    if (!ID.test(agentId)) {
+      this.observe("call.terminal", undefined, { ...observation, reason_code: "invalid_agent" });
+      return Response.json({ error: "invalid_agent" }, { status: 400 });
+    }
     const host = this.hosts().find(({ state }) => state.machineId === target.machine_id && state.generation === target.generation);
-    if (!host) return Response.json({ error: "unavailable" }, { status: 404 });
+    if (!host) {
+      this.observe("call.terminal", undefined, { ...observation, reason_code: "host_unavailable" });
+      return Response.json({ error: "unavailable" }, { status: 404 });
+    }
     if (this.pending.size >= 32 || [...this.pending.values()].some(pending => pending.socket === host.socket)) {
+      this.observe("call.terminal", host.state, { ...observation, reason_code: "busy" });
       return Response.json(screenResult({ status: "busy" }, target));
     }
     if (action.action !== "observe" && action.action !== "release" && !target.controllable) {
+      this.observe("call.terminal", host.state, { ...observation, reason_code: "not_controllable" });
       return Response.json(screenResult({ status: "unavailable" }, target));
     }
     // Never retry after admission: a lost response must not replay a click.
-    const id = crypto.randomUUID();
     const result = await new Promise<AgentScreenResult>(resolve => {
-      const finish = (result: AgentScreenResult) => {
+      const finish = (result: AgentScreenResult, reasonCode: HandRemoteReasonCode = resultReason(result.status)) => {
         if (!this.pending.delete(id)) return;
+        this.observe("call.terminal", host.state, { ...observation, reason_code: reasonCode });
         clearTimeout(timer); signal.removeEventListener("abort", abort); resolve(result);
       };
-      const abort = () => {
-        try { this.send(host.socket, { type: "agent_cancel", request_id: id }); } catch { /* Already disconnected. */ }
-        finish({ status: "cancelled" });
+      const cancel = (reasonCode: "aborted" | "timeout") => {
+        this.observe(reasonCode === "timeout" ? "call.timeout" : "call.cancel", host.state, { ...observation, reason_code: reasonCode });
+        try { this.send(host.socket, { type: "agent_cancel", request_id: id }); } catch {
+          this.observe("call.transport_loss", host.state, { ...observation, reason_code: "send_failed" });
+        }
+        finish({ status: "cancelled" }, reasonCode);
       };
-      const timer = setTimeout(abort, 9000);
-      this.pending.set(id, { socket: host.socket, expectsImage: action.action !== "release", finish });
+      const abort = () => cancel("aborted");
+      const timer = setTimeout(() => cancel("timeout"), 9000);
+      this.pending.set(id, { socket: host.socket, expectsImage: action.action !== "release", observation, finish });
+      this.observe("call.admitted", host.state, observation);
       signal.addEventListener("abort", abort, { once: true });
       if (signal.aborted) { abort(); return; }
       try {
+        this.observe("call.send_started", host.state, observation);
         this.send(host.socket, { type: "agent_call", request_id: id, agent_id: agentId, surface_id: target.id,
           generation: target.generation, deadline_at: Date.now() + 8000, input: action });
-      } catch { finish({ status: "unavailable" }); }
+        // send() acceptance is not an execution acknowledgment from the host.
+        this.observe("call.sent", host.state, observation);
+      } catch {
+        this.observe("call.transport_loss", host.state, { ...observation, reason_code: "send_failed" });
+        finish({ status: "unavailable" }, "send_failed");
+      }
     });
     return Response.json(screenResult(result, target), { headers: noStore });
   }
@@ -128,7 +211,9 @@ export class HandRemoteBroker {
     const [client, server] = Object.values(new WebSocketPair());
     this.context.acceptWebSocket(server, [TAG]);
     server.serializeAttachment(state);
+    this.observe("connection.accepted", state);
     this.send(server, { type: "ready", connection_id: state.id, generation: state.generation, expires_at: state.expiresAt });
+    this.observe("connection.ready", state);
     if (host) {
       this.send(host, { type: "viewer", viewer_id: state.id, surface_id: state.surfaceId, generation: state.generation });
       if (state.framePending) this.send(host, { type: "frame_request", viewer_id: state.id, count: state.framePending });
@@ -156,8 +241,13 @@ export class HandRemoteBroker {
       state.expiresAt = Math.min(state.expiresAt, vm.expiresAt);
       if (vm.machineName) state.machineName = vm.machineName;
     }
+    state.renewalCount = (state.renewalCount ?? 0) + 1;
     socket.serializeAttachment(state);
     this.send(socket, { type: "renewed", expires_at: state.expiresAt });
+    // Summarize steady renewal traffic rather than journaling every heartbeat.
+    if (state.renewalCount === 1 || state.renewalCount % 16 === 0) {
+      this.observe("connection.renewed", state, { renewal_count: state.renewalCount });
+    }
     return Response.json({ expires_at: state.expiresAt }, { headers: noStore });
   }
 
@@ -178,6 +268,7 @@ export class HandRemoteBroker {
         const pending = this.pending.get(value.request_id);
         if (pending?.socket === socket) {
           if (pending.expectsImage && value.status === "ok" && value.jpeg === undefined) throw new Error();
+          this.observe("call.receipt", state, { ...pending.observation, reason_code: resultReason(value.status) });
           pending.finish(value as AgentScreenResult);
         }
         return;
@@ -202,11 +293,13 @@ export class HandRemoteBroker {
           || surfaces.some(surface => surface.kind !== (state.vm!.surfaceKind ?? "vm")))) throw new Error();
         // Publish only a complete validated catalog. Replacement fences every old viewer.
         for (const old of this.hosts().filter(({ state: old }) => old.machineId === value.machine_id)) {
-          this.close(old.socket, "Host replaced");
+          this.observe("connection.replaced", old.state, { reason_code: "host_replaced" });
+          this.close(old.socket, "Host replaced", "host_replaced");
         }
         Object.assign(state, { machineId: value.machine_id, machineName: state.vm?.machineName ?? value.machine_name, surfaces });
         socket.serializeAttachment(state);
         this.send(socket, { type: "published", generation: state.generation });
+        this.observe("connection.published", state);
         return;
       }
       if (value.type === "ping") {
@@ -220,7 +313,7 @@ export class HandRemoteBroker {
           return candidate?.role === "viewer" && candidate.id === value.viewer_id && candidate.hostId === state.id
             && candidate.generation === state.generation && candidate.expiresAt > Date.now();
         });
-        if (viewer) this.close(viewer, "Screen connection unavailable");
+        if (viewer) this.close(viewer, "Screen connection unavailable", "viewer_closed");
         return;
       }
       if (value.type !== "signal" || state.transport === "frames-v1") throw new Error();
@@ -243,20 +336,38 @@ export class HandRemoteBroker {
           this.send(viewer, { type: "signal", signal });
         }
       }
-    } catch { this.close(socket, "Invalid remote signaling"); }
+    } catch (error) {
+      const reasonCode = error !== null && typeof error === "object" && this.sendFailures.has(error) ? "send_failed" : "invalid_signaling";
+      this.close(socket, "Invalid remote signaling", reasonCode);
+    }
   }
 
-  close(socket: WebSocket, reason = "Remote connection closed"): void {
+  close(socket: WebSocket, reason = "Remote connection closed", reasonCode: HandRemoteReasonCode = "connection_closed", code?: number): void {
     const state = this.attachment(socket);
     if (!state || state.expiresAt === 0) return;
+    const safeReason: HandRemoteReasonCode = REASON_CODES.has(reasonCode) ? reasonCode : "connection_closed";
+    const closure = { reason_code: safeReason,
+      close_code: typeof code === "number" && Number.isInteger(code) && code >= 1000 && code <= 4999 ? code : 1008 };
+    if (safeReason === "lease_expired") this.observe("connection.lease_expired", state, closure);
+    if (["host_replaced", "publisher_revoked", "lease_expired"].includes(safeReason)) this.observe("connection.fenced", state, closure);
+    this.observe("connection.closed", state, closure);
     state.expiresAt = 0; socket.serializeAttachment(state);
     for (const pending of this.pending.values()) {
-      if (pending.socket === socket) pending.finish({ status: "unavailable" });
+      if (pending.socket === socket) {
+        this.observe("call.transport_loss", state, { ...pending.observation, ...closure });
+        pending.finish({ status: "unavailable" }, safeReason);
+      }
     }
     if (state.role === "host") {
       for (const peer of this.context.getWebSockets(TAG)) {
         const viewer = this.attachment(peer);
         if (viewer?.hostId === state.id) {
+          const viewerReason = safeReason === "connection_closed" || safeReason === "websocket_closed" || safeReason === "websocket_error"
+            ? "host_disconnected" : safeReason;
+          if (viewer.expiresAt !== 0) {
+            this.observe("connection.fenced", viewer, { reason_code: viewerReason });
+            this.observe("connection.closed", viewer, { reason_code: viewerReason, close_code: 1008 });
+          }
           viewer.expiresAt = 0; peer.serializeAttachment(viewer);
           try { peer.close(1008, reason); } catch { /* Already closed. */ }
         }
@@ -372,7 +483,7 @@ export class HandRemoteBroker {
   private sweep(): void {
     for (const socket of this.context.getWebSockets(TAG)) {
       const state = this.attachment(socket);
-      if (state && state.expiresAt > 0 && state.expiresAt <= Date.now()) this.close(socket, "Authorization expired");
+      if (state && state.expiresAt > 0 && state.expiresAt <= Date.now()) this.close(socket, "Authorization expired", "lease_expired");
     }
   }
   private hosts(): { socket: WebSocket; state: Attachment }[] {
@@ -385,7 +496,32 @@ export class HandRemoteBroker {
     const state = socket.deserializeAttachment();
     return state?.kind === TAG ? state : undefined;
   }
-  private send(socket: WebSocket, value: unknown): void { socket.send(JSON.stringify(value)); }
+  private projectObservation(stage: HandRemoteObservation["stage"], state?: Attachment,
+    fields: ObservationFields = {}): HandRemoteObservation {
+    const pendingCalls = state ? [...this.pending.values()].filter(pending => this.attachment(pending.socket)?.id === state.id).length : this.pending.size;
+    const handId = state?.machineId ?? state?.vm?.machineId;
+    const active = state !== undefined && state.expiresAt > Date.now();
+    return { stage, ...fields, pending_calls: pendingCalls,
+      ...(state ? { connection_id: state.id, remote_generation: state.generation, role: state.role, lease_expires_at: state.expiresAt } : {}),
+      ...(state?.hostId ? { host_connection_id: state.hostId } : {}),
+      ...(typeof handId === "string" && ID.test(handId) ? { hand_id: handId } : {}),
+      ...(stage === "snapshot" && state ? { active } : {}),
+    };
+  }
+  private observe(stage: HandRemoteObservation["stage"], state?: Attachment, fields: ObservationFields = {}): void {
+    if (!this.onObservation) return;
+    try {
+      this.onObservation(this.projectObservation(stage, state, fields));
+    } catch { /* Passive diagnostics never fail, retry, or cancel a real call. */ }
+  }
+  private send(socket: WebSocket, value: unknown): void {
+    const message = JSON.stringify(value);
+    try { socket.send(message); } catch (error) {
+      if (error !== null && typeof error === "object") this.sendFailures.add(error);
+      try { this.observe("connection.transport_loss", this.attachment(socket), { reason_code: "send_failed" }); } catch { /* Preserve the send failure. */ }
+      throw error;
+    }
+  }
   private invalid(): Response { return Response.json({ error: "invalid_request" }, { status: 400, headers: noStore }); }
   private forbidden(): Response { return Response.json({ error: "forbidden" }, { status: 403, headers: noStore }); }
 }
@@ -397,6 +533,19 @@ function cloudflarePublisher(state: Attachment): boolean {
 
 function cloudflareFrames(machineId: string, kind: string): boolean {
   return /^cf:[A-Za-z0-9][A-Za-z0-9._:-]{0,120}$/.test(machineId) && ["desktop", "vm"].includes(kind);
+}
+
+function safeIdentity(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_./:-]{1,128}$/.test(value);
+}
+function resultReason(status: AgentScreenResult["status"]): HandRemoteReasonCode {
+  switch (status) {
+    case "ok": return "result_ok";
+    case "busy": return "result_busy";
+    case "invalid": return "result_invalid";
+    case "cancelled": return "result_cancelled";
+    default: return "result_unavailable";
+  }
 }
 
 function exact(value: Record<string, unknown>, allowed: string[]): void {

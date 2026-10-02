@@ -44,6 +44,7 @@ import { projectEnvironment } from "nanocodex/tools/environment";
 import { transportObservation } from "./transport-observation";
 import { handRequestFailure, handBrokerRequest } from "nanocodex/cloudflare/managed-access";
 import { beginHandTiming, finishHandTiming, timeHandStage } from "./hand-timing";
+import { observeHandCall } from "./hand-call-observation";
 import { PreparedPersonalizationCache, personalizedVoiceContext, sameScope, type PersonalizationScope, type PersonalizationSnapshot } from "./personalization";
 import { CommandReceipts } from "./command-receipts";
 import { prepareEnvironment } from "./environment-setup";
@@ -197,6 +198,9 @@ import {
 } from "./durable-events";
 import { persistEventStreamFailure } from "./event-stream-failure";
 import { watchManagedAgentFamilyEvents } from "./agent-event-watcher";
+import { createToolLifecycleObserver } from "./tool-observation";
+import { traceToolInvocation } from "./tool-tracing";
+import { DiagnosticJournal, diagnosticQuery, diagnosticScope } from "./diagnostic-journal";
 import {
   ManagedEventArchive,
   type ManagedEventArchiveState,
@@ -355,7 +359,7 @@ import { memorySessionTools } from "./memory-session-tools";
 import { managedExtensionTools } from "./extension-tools";
 import { markdownMemoryTools, markdownMemoryEnabled, configuredMemoryToolNames, markdownMemoryRequest, MARKDOWN_MEMORY_INSTRUCTIONS } from "./markdown-memory-tools";
 import { ManagedStartupContext } from "./startup-context";
-import { performanceScope, performanceSyncScope, performanceStage, performanceRead, performanceState, performanceSocketTiming, performanceRequestShape, performanceCommit } from "./performance";
+import { performanceScope, performanceSyncScope, performanceStage, performanceRead, performanceState, performanceSocketTiming, performanceSocketEvent, performanceRequestShape, performanceCommit } from "./performance";
 import { managedPromptCacheKey } from "./prompt-cache-key";
 import { MemoryScope, MEMORY_INITIALIZE_ASSERTION } from "./memory-scope";
 export { MemoryScope } from "./memory-scope";
@@ -1445,6 +1449,7 @@ function isUniqueStringArray(value: unknown): value is string[] {
 const SAFE_OBSERVATION_FIELDS = new Set([
   "request_id", "turn_id", "failure_phase", "replay_mode", "next_attempt", "max_attempts",
   "connection_generation", "model_call_index", "status_code", "retry_delay_ms", "duration_ms",
+  "time_to_first_event_ms", "time_to_first_output_ms", "response_id",
   "opens_new_socket", "server_requested_delay",
   "runtime_ready_ms",
   "bootstrap_ready_ms",
@@ -2669,11 +2674,12 @@ async function managedFetchRoute(
         recordManagedSessionTiming(request, performance.now() - sessionStarted);
       }
     }
-    if (resource === "events" || resource === "events/history" || resource === "capacity") {
+    if (resource === "events" || resource === "events/history" || resource === "capacity" || resource === "diagnostics") {
       if (request.method !== "GET") return json({ error: "method_not_allowed" }, { status: 405 });
       if (!principal.capabilities.includes("agents:read")) {
         return json({ error: "forbidden" }, { status: 403 });
       }
+      if (resource === "diagnostics" && principal.connectGrant) return json({ error: "forbidden" }, { status: 403 });
       const query = new URLSearchParams(url.searchParams);
       query.set("public_origin", url.origin);
       return stub.fetch(`https://session.internal/${resource}?${query}`, {
@@ -3267,6 +3273,7 @@ function createManagedNamespaceRuntime(
   resolveScreenTool?: ScreenToolResolver,
   authorizationKey: (context: ToolContext) => string = () => "account",
   processStorage?: NamespaceProcessStorage,
+  threadId?: string,
 ): Readonly<{ tools: NamedTool[]; capture(context: ToolContext): Promise<void> }> {
   const runtime = createNamespaceExecutionRuntime(
     machines,
@@ -3275,6 +3282,7 @@ function createManagedNamespaceRuntime(
     resolveScreenTool,
     authorizationKey,
     processStorage,
+    threadId,
   );
   const captured = new Set<string>();
   const preparations = new Map<string, Promise<void>>();
@@ -3287,6 +3295,7 @@ function createManagedNamespaceRuntime(
     const pending = preparations.get(key);
     if (pending !== undefined) return pending;
     const authority = authorizationKey(context);
+    const prepareAt = performance.now();
     const preparation = (async () => {
       const filter = await prepareNamespace(context, toolName);
       if (!canUseExecutionNamespace(context) || authorizationKey(context) !== authority) {
@@ -3299,6 +3308,12 @@ function createManagedNamespaceRuntime(
     preparations.set(key, preparation);
     try {
       await preparation;
+      observeHandCall("namespace.prepare", toolName ?? "other", prepareAt, "ok", context.callId,
+        { thread_id: threadId, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
+    } catch (error) {
+      observeHandCall("namespace.prepare", toolName ?? "other", prepareAt, context.signal.aborted ? "cancelled" : "failed", context.callId,
+        { thread_id: threadId, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
+      throw error;
     } finally {
       if (preparations.get(key) === preparation) preparations.delete(key);
     }
@@ -3620,6 +3635,7 @@ export class DurableAgentSession extends DurableComputerObject {
   };
   readonly #cancellationTasks = new Map<string, Promise<void>>();
   readonly #hostedTools: HostedToolsBroker;
+  readonly #diagnostics: DiagnosticJournal;
   #accountHostedTools?: AccountHostedToolsProvider;
   readonly #fileReadAuthorizations = new Map<string, TurnAuthorization>();
   readonly #pendingDeviceToolCalls = new Map<string, PendingDeviceToolCall>();
@@ -3680,6 +3696,7 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#constructorEnteredAtMs = enteredAt;
     this.#constructorBaseMs = roundMilliseconds(performance.now() - constructorStartedAt);
     ctx = this.ctx;
+    this.#diagnostics = new DiagnosticJournal(ctx.storage, "managed");
     this.#recoverySafety = new ManagedRecoverySafety(ctx.storage);
     this.#commandReceipts = new CommandReceipts(ctx.storage);
     this.#shareLinks = new ThreadShareLinks(ctx.storage);
@@ -3860,6 +3877,8 @@ export class DurableAgentSession extends DurableComputerObject {
       Date.now(),
     );
     this.#hostedTools = new HostedToolsBroker(this.ctx, {
+      onCallObservation: observation => this.#observeHandBoundary("hand.call.broker", observation),
+      onConnectionObservation: observation => this.#observeHandBoundary("hand.connection", observation),
       entryAllowed: (entry, connectGrantId, appToolCatalogDigest, context) => (
         this.#hostedToolAllowed(entry, connectGrantId, appToolCatalogDigest, context)
       ),
@@ -4794,7 +4813,7 @@ export class DurableAgentSession extends DurableComputerObject {
           const context = {sessionId:`native-input-${crypto.randomUUID()}`,callId:crypto.randomUUID(),signal:request.signal};
           this.#fileReadAuthorizations.set(context.sessionId, turnAuthorization);
           try {
-            const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true);
+            const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id);
             await provider.refresh();
             return json(await this.#nativeSecureInput(session.session_id).submit(payload, context,
               (machine, ctx) => this.#hostedTools.machineTool(machine, "native_secure_input", ctx)
@@ -4824,7 +4843,7 @@ export class DurableAgentSession extends DurableComputerObject {
         if (path.startsWith("/brain/")) return await downloadBrainFile(this.#brainBucket(), session.session_id, path);
         // This provider is scoped to the authenticated HTTP read, independent of
         // whichever model turn may currently be running (or absent).
-        const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true);
+        const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id);
         await provider.refresh();
         const mounts = this.#managedMounts().filter(mount => executionMountOwner(mount) === undefined);
         const discovered = [...this.#hostedTools.machines(), ...provider.machines()];
@@ -4981,6 +5000,28 @@ export class DurableAgentSession extends DurableComputerObject {
         request,
         turnAuthorization,
       );
+    }
+    if (url.pathname === "/diagnostics") {
+      if (request.method !== "GET") return json({ error: "method_not_allowed" }, { status: 405 });
+      const session = this.#session();
+      if (!ownerAssertion || !session || this.#deleting || this.#deleted || this.#durabilityExported)
+        return json({ error: "not_found" }, { status: 404 });
+      if (!turnAuthorization.capabilities.includes("agents:read") || turnAuthorization.connectGrant)
+        return json({ error: "forbidden" }, { status: 403 });
+      const query = diagnosticQuery(url);
+      if (!query) return json({ error: "invalid_diagnostics_page" }, { status: 400 });
+      const managed = this.#diagnostics.page(session.session_id, query.managedAfter, query.limit, true);
+      let hand: unknown = { service: "hand.broker", available: false, events: [], next_after: query.handAfter, history_truncated: true };
+      try {
+        const target = new URL("https://account-tools.internal/diagnostics");
+        target.searchParams.set("thread_id", session.session_id);
+        target.searchParams.set("after", String(query.handAfter));
+        target.searchParams.set("limit", String(query.limit));
+        hand = await fetchResponseWithDeadline(this.env.NANOCODEX_ACCOUNT_TOOLS.getByName(session.owner_id), target.toString(), {
+          headers: { "x-nanocodex-owner-id": session.owner_id }, signal: request.signal,
+        }, 2_000, "Hand diagnostics", response => response.ok ? response.json() : hand);
+      } catch { /* An unavailable service is explicit; local evidence remains readable. */ }
+      return json({ thread_id: session.session_id, services: [managed, hand] }, { headers: { "cache-control": "no-store" } });
     }
     if (request.method === "GET" && url.pathname === "/events") {
       if (this.#deleting)
@@ -8590,6 +8631,7 @@ export class DurableAgentSession extends DurableComputerObject {
     const turns = [...this.#turns.values()];
     const inFlight = [...this.#inFlight];
     const browserRuntime = this.#managedBrowserRuntimePromise;
+    const events = this.#events;
     if (this.#durabilityImportTask) inFlight.push(this.#durabilityImportTask.promise);
 
     this.#runtimeOwnershipGeneration += 1;
@@ -8598,7 +8640,6 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#agentConstruction = undefined;
     this.#agentShutdownPromise = undefined;
     this.#managedBrowserRuntimePromise = undefined;
-    this.#events?.off();
     this.#events = undefined;
     this.#turns.clear();
     this.#deliveredCancellationTurnIds.clear();
@@ -8625,7 +8666,7 @@ export class DurableAgentSession extends DurableComputerObject {
       turns,
       async () => {
         await Promise.all([
-          shutdown ?? agent?.session.shutdown(),
+          shutdown ?? agent?.session.shutdown().finally(() => events?.off()),
           constructionShutdown,
           browserRuntime?.then((runtime) => runtime.close()),
         ]);
@@ -8865,23 +8906,37 @@ export class DurableAgentSession extends DurableComputerObject {
         }
         throw retryableError("agent construction was superseded");
       }
+      const observedSession = this.#session();
+      const tools = createToolLifecycleObserver((detail) => {
+        if (!observedSession) return;
+        const record = { type: "managed.agent.tool", ...detail, runtime_session_id: detail.session_id,
+          session_id: observedSession.session_id, thread_id: observedSession.session_id };
+        this.#diagnostics.record(record);
+        console.info(record);
+      }, observedSession?.session_id);
       const events = watchManagedAgentFamilyEvents(
         resolvedAgent,
         {
-          replay: (event, agentId) => this.#recordAgentEvent(
-            event,
-            resolvedAgent.sessionId,
-            agentId,
-          ),
-          observe: (event) => this.#observeTransportEvent(event),
+          replay: (event, agentId) => {
+            // Retired runtimes may still drain actual cancellation results.
+            // Keep their telemetry, while fencing their durable replay writes.
+            if (this.#runtimeOwnershipGeneration === construction.runtimeGeneration) {
+              this.#recordAgentEvent(event, resolvedAgent.sessionId, agentId);
+            }
+          },
+          observe: (event, agentId) => {
+            if (!tools.observe(event, this.#eventTurnId ?? this.#eventTurnQueue[0], agentId)
+              && this.#runtimeOwnershipGeneration === construction.runtimeGeneration) this.#observeTransportEvent(event);
+          },
+          dispose: () => tools.dispose(),
         },
       );
       if (!this.#ownsAgentConstruction(construction)) {
-        events.off();
         try { await this.#retireAgentConstruction(construction, resolvedAgent); }
         catch (error) {
           throw retryableError(`superseded agent shutdown failed: ${errorMessage(error)}`);
         }
+        finally { events.off(); }
         throw retryableError("agent construction was superseded");
       }
       this.#events = events;
@@ -9002,6 +9057,7 @@ export class DurableAgentSession extends DurableComputerObject {
           ? this.#activeTurnAuthorization()
           : this.#authorizationForToolContext(context),
       ),
+      session.session_id,
     );
     this.ctx.waitUntil(performanceStage("account.hosted_tools", () => this.#accountHostedTools!.refreshOptional(MANAGED_ACCESS_TTL_MS))
       .catch((error) => {
@@ -9525,6 +9581,7 @@ export class DurableAgentSession extends DurableComputerObject {
         this.#authorizationForToolContext(context)?.connectGrant?.grantId ?? "account",
       ]),
       this.#processSessions,
+      session.session_id,
     );
     const cloudTools: NamedTool[] = [
       ...(browserRuntime?.tools.map(tool => ({
@@ -9838,8 +9895,11 @@ export class DurableAgentSession extends DurableComputerObject {
       Object.defineProperty(agentOptions, internalRuntime, { value: {
         ...hostedRuntime,
         codeEffectJournal: this.#codeEffectJournal,
-        // Bounded connection summaries are always on; per-statement SQL auditing stays opt-in.
+        // Passive live transport observations and summaries are always on.
         onSocketTiming: (timing: unknown) => performanceSocketTiming(session.session_id, timing),
+        onSocketEvent: (event: unknown) => performanceSocketEvent(session.session_id, event, this.#eventTurnId ?? this.#eventTurnQueue[0], record => this.#diagnostics.record(record)),
+        traceTool: <T>(name: string, context: { sessionId: string; callId: string; parentCallId?: string; turnId?: string }, run: () => Promise<T>) =>
+          diagnosticScope(this.#diagnostics, () => traceToolInvocation("nanocodex.tool", session.session_id, name, context, run, this.#eventTurnId ?? this.#eventTurnQueue[0])),
         onRequestShape: (shape: unknown) => performanceRequestShape(session.session_id, shape),
         subagentRouting,
         inferenceForSession,
@@ -11219,6 +11279,13 @@ export class DurableAgentSession extends DurableComputerObject {
     }
   }
 
+  #observeHandBoundary(type: "hand.call.broker" | "hand.connection", observation: Record<string, unknown>): void {
+    const thread = this.#sessionId();
+    const record = { type, ...observation, ...(thread ? { thread_id: thread } : {}) };
+    this.#diagnostics.record(record);
+    try { console.info(record); } catch { /* Boundary diagnostics cannot fail execution. */ }
+  }
+
   #observe(
     type: string,
     detail: Record<string, unknown> = {},
@@ -11227,13 +11294,17 @@ export class DurableAgentSession extends DurableComputerObject {
     try {
       const session = this.#session();
       if (!session) return;
-      console[level]({
+      const record = {
         type,
+        session_id: session.session_id,
+        thread_id: session.session_id,
         ...(this.env.DEPLOYMENT_SHA === undefined
           ? {}
           : { deployment_sha: this.env.DEPLOYMENT_SHA }),
         ...safeObservationDetail(detail),
-      });
+      };
+      this.#diagnostics.record(record);
+      console[level](record);
     } catch {
       // Observability must never change durable-agent behavior.
     }
@@ -11804,11 +11875,11 @@ export class DurableAgentSession extends DurableComputerObject {
       const agent = this.#agent;
       const construction = this.#agentConstruction;
       const constructions = [...this.#agentConstructions];
+      const events = this.#events;
       this.#runtimeOwnershipGeneration += 1;
       this.#agent = undefined;
       this.#agentPromise = undefined;
       this.#agentConstruction = undefined;
-      this.#events?.off();
       this.#events = undefined;
       if (!agent && !construction && constructions.length === 0) return;
       shutdown = (async () => {
@@ -11816,7 +11887,7 @@ export class DurableAgentSession extends DurableComputerObject {
         const pending = new Set(constructions);
         if (construction !== undefined) pending.add(construction);
         await Promise.all([...pending].map((entry) => this.#retireAgentConstruction(entry)));
-      })();
+      })().finally(() => events?.off());
       this.#agentShutdownPromise = shutdown;
       void shutdown.finally(() => {
         if (this.#agentShutdownPromise === shutdown) this.#agentShutdownPromise = undefined;
@@ -11828,8 +11899,6 @@ export class DurableAgentSession extends DurableComputerObject {
       if (strict) throw error;
       console.warn({ type: "managed.agent_shutdown_failed", error_kind: errorKind(error) });
     }
-    this.#events?.off();
-    this.#events = undefined;
   }
 
   async #reopenAgent(failedId: string): Promise<void> {
