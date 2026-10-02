@@ -547,7 +547,7 @@ async fn attachment_negotiates_diagnostics_before_native_shell_and_process_poll(
         file: Arc::new(Mutex::new(File::create(output.join("wire.jsonl")).unwrap())),
         started: Instant::now(),
     };
-    let command = "cargo test --locked -p nanocodex-tools --features attachment --test it attachment::attachment_negotiates_diagnostics_before_native_shell_and_process_poll -- --exact --nocapture";
+    let command = "cargo test --locked -p nanocodex-oai-tools --features attachment --test it attachment::attachment_negotiates_diagnostics_before_native_shell_and_process_poll -- --exact --nocapture";
     std::fs::write(
         output.join("README.md"),
         format!("Command: `{command}`\n\nInputs: real loopback WebSocket upgrade with absent, unknown v2, or recognized v1 capability; synthetic native /bin/sh commands and retained process polling.\n\nExpected: all modes execute printf and poll one native process to exit 0. Absent/unknown modes pass the frozen 755b23cc4 strict host-frame envelope with no diagnostics or timing. v1 retains four progress phases and six monotonic timing fields per call. Routing metadata and runtime identity remain present in every mode.\n\nObserved: see wire.jsonl, including upgrade, raw socket frames and outcome records.\n\nScope: shipped Rust attachment/native executor over its actual transport; the peer freezes the old broker's envelope validation, not hosted authentication, persistence or deployment/proxy behavior.\n"),
