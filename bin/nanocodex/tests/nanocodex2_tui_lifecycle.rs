@@ -149,6 +149,187 @@ async fn terminal_empty_idle_stops_redrawing_and_still_accepts_input_and_live_up
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_discovery_omits_sigkill_orphans_even_with_a_recycled_pid() {
+    use std::{os::unix::fs::FileTypeExt, process::Stdio};
+    use tokio::io::AsyncWriteExt;
+
+    async fn cli(home: &Path, args: &[&str], input: &[u8]) -> std::process::Output {
+        let started = std::time::Instant::now();
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+            .args(args)
+            .env("CODEX_HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let output = tokio::time::timeout(TIMEOUT, async {
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(input).await.unwrap();
+            drop(stdin);
+            child.wait_with_output().await.unwrap()
+        })
+        .await
+        .expect("TUI discovery/control CLI did not finish within its deadline");
+        eprintln!(
+            "CODEX_HOME={} nanocodex2 {} ({:?}): status={}\ninput={}\nstdout={}\nstderr={}",
+            home.display(),
+            args.join(" "),
+            started.elapsed(),
+            output.status,
+            String::from_utf8_lossy(input),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        output
+    }
+
+    async fn list(home: &Path) -> Vec<Value> {
+        let output = cli(home, &["tui", "list", "--json"], b"").await;
+        assert!(output.status.success());
+        let registrations: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            registrations
+                .iter()
+                .all(|registration| registration.get("auth_token").is_none()),
+            "discovery must never expose authentication tokens"
+        );
+        registrations
+    }
+
+    async fn only_survivor(home: &Path, survivor: &Value) {
+        let registrations = list(home).await;
+        assert_eq!(
+            registrations.len(),
+            1,
+            "only the healthy TUI must be listed"
+        );
+        assert_eq!(registrations[0]["instance_id"], survivor["instance_id"]);
+        assert_eq!(registrations[0]["pid"], survivor["pid"]);
+    }
+
+    let mut fixture = Fixture::start().await;
+    let home = fixture.terminal._workspace.path().join(".codex");
+    let registry = home.join("nanocodex/tui/instances");
+    let before = list(&home).await;
+    assert_eq!(before.len(), 1, "the healthy TUI must be discoverable");
+    let survivor = &before[0];
+    fixture.terminal.input("DISCOVERY_SURVIVOR_DRAFT");
+    fixture.terminal.wait_text("DISCOVERY_SURVIVOR_DRAFT").await;
+
+    let mut orphan = Terminal::start_with_command(&fixture.origin, false, None, |command| {
+        command.env("CODEX_HOME", &home);
+        command.env("NANOCODEX_TUI_CONTROL", "on");
+    });
+    orphan.wait_text("actions").await;
+    let both = list(&home).await;
+    assert_eq!(both.len(), 2, "both running TUIs must be discoverable");
+    let mut registration = both
+        .into_iter()
+        .find(|value| value["instance_id"] != survivor["instance_id"])
+        .unwrap();
+    let instance = registration["instance_id"].as_str().unwrap().to_owned();
+    let socket = std::path::PathBuf::from(registration["socket_path"].as_str().unwrap());
+    let path = registry.join(format!("{instance}.json"));
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(registration["pid"].as_u64().unwrap() as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if orphan.child.try_wait().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("SIGKILL fixture TUI did not exit");
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket()
+    );
+    assert!(
+        path.is_file(),
+        "SIGKILL must leave a real orphan registration"
+    );
+    eprintln!(
+        "SIGKILL left registration={} and socket={}",
+        path.display(),
+        socket.display()
+    );
+
+    let refused = cli(&home, &["tui", "connect", &instance, "--stdio"], b"").await;
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("Connection refused"));
+    only_survivor(&home, survivor).await;
+
+    // Simulate PID recycling only in this fixture's registry, without waiting
+    // for OS PID churn. Preserve the server-generated private token and mode.
+    registration = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    registration["pid"] = survivor["pid"].clone();
+    let recycled = serde_json::to_vec(&registration).unwrap();
+    std::fs::write(&path, &recycled).unwrap();
+    eprintln!(
+        "simulated recycled PID={} for orphan instance={instance}",
+        survivor["pid"]
+    );
+    only_survivor(&home, survivor).await;
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        recycled,
+        "discovery must not delete or rewrite the orphan"
+    );
+
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::remove_dir(socket.parent().unwrap()).unwrap();
+    eprintln!("removed orphan socket; discovery must still preserve the healthy TUI");
+    only_survivor(&home, survivor).await;
+    assert_eq!(std::fs::read(&path).unwrap(), recycled);
+
+    let controlled = cli(
+        &home,
+        &[
+            "tui",
+            "connect",
+            survivor["instance_id"].as_str().unwrap(),
+            "--stdio",
+        ],
+        b"{\"id\":\"survivor\",\"method\":\"state.get\"}\n",
+    )
+    .await;
+    assert!(
+        controlled.status.success(),
+        "the surviving TUI must remain controllable"
+    );
+    let state = String::from_utf8(controlled.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|response| response["id"] == "survivor")
+        .expect("public connect did not return the survivor state");
+    assert_eq!(state["result"]["instance_id"], survivor["instance_id"]);
+    assert_eq!(
+        state["result"]["state"]["composer"]["text"],
+        "DISCOVERY_SURVIVOR_DRAFT"
+    );
+
+    fixture.terminal.input("\x03");
+    fixture
+        .terminal
+        .wait_no_text("DISCOVERY_SURVIVOR_DRAFT")
+        .await;
+    fixture.terminal.input("\x03\x03");
+    fixture.terminal.wait_output("\x1b[?1049l").await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminal_control_keeps_local_root_discoverable_and_stops_it_after_runtime_restart() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};

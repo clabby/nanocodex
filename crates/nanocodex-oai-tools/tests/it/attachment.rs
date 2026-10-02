@@ -13,14 +13,21 @@ use eyre::{Result, WrapErr, ensure};
 use futures_util::{SinkExt, StreamExt};
 use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolResult, Tools, WorkspaceTools,
-    attachment::AttachmentTarget, contract::async_trait,
+    attachment::{AttachmentMachine, AttachmentMetadata, AttachmentTarget},
+    contract::async_trait,
 };
 use serde_json::{Value, json};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::Notify,
 };
-use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
+use tokio_tungstenite::{
+    WebSocketStream, accept_hdr_async,
+    tungstenite::{
+        Message,
+        handshake::server::{Request, Response},
+    },
+};
 
 // Only the external CUA provider is substituted. Workspace commands, process
 // retention and attachment transport run their shipped code.
@@ -91,6 +98,8 @@ struct Wire {
     connection: &'static str,
     pending: HashSet<String>,
     catalog: Value,
+    diagnostics: bool,
+    progress: Vec<Value>,
 }
 
 impl Wire {
@@ -99,13 +108,38 @@ impl Wire {
         evidence: Evidence,
         connection: &'static str,
     ) -> Result<Self> {
+        Self::ready_with_version(listener, evidence, connection, Some("v1")).await
+    }
+
+    async fn ready_with_version(
+        listener: &TcpListener,
+        evidence: Evidence,
+        connection: &'static str,
+        version: Option<&str>,
+    ) -> Result<Self> {
         let (stream, _) = listener.accept().await?;
+        let socket = accept_hdr_async(stream, |_request: &Request, mut response: Response| {
+            if let Some(version) = version {
+                response
+                    .headers_mut()
+                    .insert("x-nanocodex-tools-diagnostics", version.parse().unwrap());
+            }
+            Ok(response)
+        })
+        .await?;
+        evidence.record(
+            connection,
+            "upgrade",
+            &json!({"diagnostics_version":version}),
+        );
         let mut wire = Self {
-            socket: accept_async(stream).await?,
+            socket,
             evidence,
             connection,
             pending: HashSet::new(),
             catalog: Value::Null,
+            diagnostics: version == Some("v1"),
+            progress: Vec::new(),
         };
         wire.catalog = wire.recv(Duration::from_secs(5)).await?;
         ensure!(wire.catalog["type"] == "catalog", "missing catalog");
@@ -156,12 +190,16 @@ impl Wire {
                         let frame: Value = serde_json::from_str(&text)?;
                         self.evidence
                             .record(self.connection, "executor_to_remote", &frame);
+                        if !self.diagnostics {
+                            legacy_host_frame(&frame)?;
+                        }
                         if frame["type"] == "ping" {
                             self.send(json!({"type":"pong", "nonce":frame["nonce"]}))
                                 .await?;
                             continue;
                         }
                         if frame["type"] == "diagnostic" {
+                            self.progress.push(frame);
                             continue;
                         }
                         return Ok(frame);
@@ -219,6 +257,33 @@ impl Wire {
         );
         self.send(json!({"type":"draining"})).await
     }
+}
+
+// Freeze the pre-observability broker's exact host-frame envelope from
+// 755b23cc4 (hosted/protocol.ts). This real socket peer rejects extensions
+// before acknowledging catalogs or receipts, as that strict broker does.
+fn legacy_host_frame(frame: &Value) -> Result<()> {
+    let allowed: &[&str] = match frame["type"].as_str() {
+        Some("catalog") => &[
+            "type",
+            "tools",
+            "machines",
+            "attachment_id",
+            "capabilities",
+            "runtime_id",
+        ],
+        Some("result") => &["type", "call_id", "outcome"],
+        Some("ping") => &["type", "nonce"],
+        Some("drain") => &["type"],
+        _ => eyre::bail!("old strict broker rejects host frame: {frame}"),
+    };
+    ensure!(
+        frame
+            .as_object()
+            .is_some_and(|object| object.keys().all(|key| allowed.contains(&key.as_str()))),
+        "old strict broker rejects unsupported fields: {frame}"
+    );
+    Ok(())
 }
 
 fn now_ms() -> u64 {
@@ -469,6 +534,184 @@ async fn journey(
         &json!({"cua_active":false, "journey":"passed"}),
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn attachment_negotiates_diagnostics_before_native_shell_and_process_poll() {
+    let _runtime_lock = crate::TOOL_RUNTIME_TEST_LOCK.lock().await;
+    let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../output/attachment-compatibility")
+        .join(now_ms().to_string());
+    std::fs::create_dir_all(&output).unwrap();
+    let evidence = Evidence {
+        file: Arc::new(Mutex::new(File::create(output.join("wire.jsonl")).unwrap())),
+        started: Instant::now(),
+    };
+    let command = "cargo test --locked -p nanocodex-tools --features attachment --test it attachment::attachment_negotiates_diagnostics_before_native_shell_and_process_poll -- --exact --nocapture";
+    std::fs::write(
+        output.join("README.md"),
+        format!("Command: `{command}`\n\nInputs: real loopback WebSocket upgrade with absent, unknown v2, or recognized v1 capability; synthetic native /bin/sh commands and retained process polling.\n\nExpected: all modes execute printf and poll one native process to exit 0. Absent/unknown modes pass the frozen 755b23cc4 strict host-frame envelope with no diagnostics or timing. v1 retains four progress phases and six monotonic timing fields per call. Routing metadata and runtime identity remain present in every mode.\n\nObserved: see wire.jsonl, including upgrade, raw socket frames and outcome records.\n\nScope: shipped Rust attachment/native executor over its actual transport; the peer freezes the old broker's envelope validation, not hosted authentication, persistence or deployment/proxy behavior.\n"),
+    )
+    .unwrap();
+    eprintln!("Attachment compatibility evidence: {}", output.display());
+
+    for (label, version) in [
+        ("absent", None),
+        ("unknown", Some("v2")),
+        ("modern", Some("v1")),
+    ] {
+        let workspace = tempfile::tempdir().unwrap();
+        let tools = Tools::builder()
+            .without_defaults()
+            .add(WorkspaceTools::new(workspace.path()))
+            .build()
+            .unwrap();
+        let machine = AttachmentMachine::new(
+            "compatibility-machine",
+            "Synthetic compatibility Hand",
+            workspace.path().to_str().unwrap(),
+            ["process"],
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = AttachmentTarget::new(
+            format!("ws://{}/tools", listener.local_addr().unwrap()),
+            "synthetic-bearer",
+        )
+        .unwrap();
+        let (wire, attachment) = tokio::join!(
+            Wire::ready_with_version(&listener, evidence.clone(), label, version),
+            tools
+                .attach(target)
+                .metadata(AttachmentMetadata::machine(machine))
+                .connect(),
+        );
+        let mut wire = wire.unwrap();
+        let (attachment, _events) = attachment.unwrap();
+        let outcome: Result<()> = async {
+            ensure!(wire.catalog["capabilities"] == json!(["turn_metadata"]));
+            ensure!(wire.catalog["runtime_id"].is_string());
+            ensure!(wire.catalog["attachment_id"] == "compatibility-machine");
+            ensure!(wire.catalog["machines"][0]["id"] == "compatibility-machine");
+            ensure!(wire.catalog["machines"][0]["workspace"] == workspace.path().to_str().unwrap());
+            if wire.diagnostics {
+                ensure!(wire.catalog["diagnostics"] == true);
+                let id = uuid::Uuid::parse_str(wire.catalog["connection_id"].as_str().unwrap())?;
+                ensure!(id.get_version_num() == 4);
+            }
+
+            wire.call("printf", "exec_command", shell("printf COMPATIBLE"))
+                .await?;
+            let printf = wire.result("printf", Duration::from_secs(3)).await?;
+            ensure!(successful_process(&printf)?["output"] == "COMPATIBLE");
+            ensure!(successful_process(&printf)?["exit_code"] == 0);
+
+            // A second real command releases the process through this same
+            // transport, avoiding wall-clock races and fixture-only execution.
+            wire.call(
+                "session",
+                "exec_command",
+                shell(
+                    "printf STARTED; while [ ! -f release ]; do sleep 0.02; done; printf FINISHED",
+                ),
+            )
+            .await?;
+            let session = wire.result("session", Duration::from_secs(3)).await?;
+            let process = successful_process(&session)?;
+            ensure!(process["output"] == "STARTED");
+            let session_id = process["session_id"]
+                .as_i64()
+                .ok_or_else(|| eyre::eyre!("native process was not retained: {session}"))?;
+            wire.call("release", "exec_command", shell("touch release"))
+                .await?;
+            let released = wire.result("release", Duration::from_secs(3)).await?;
+            ensure!(successful_process(&released)?["exit_code"] == 0);
+            wire.call(
+                "poll",
+                "write_stdin",
+                json!({"session_id":session_id,"chars":"","yield_time_ms":1000}),
+            )
+            .await?;
+            let poll = wire.result("poll", Duration::from_secs(3)).await?;
+            let process = successful_process(&poll)?;
+            ensure!(
+                process["output"] == "FINISHED"
+                    && process["exit_code"] == 0
+                    && process["session_id"].is_null()
+            );
+
+            if wire.diagnostics {
+                for (id, result) in [
+                    ("printf", &printf),
+                    ("session", &session),
+                    ("release", &released),
+                    ("poll", &poll),
+                ] {
+                    let phases: Vec<_> = wire
+                        .progress
+                        .iter()
+                        .filter(|frame| frame["call_id"] == id)
+                        .map(|frame| frame["stage"].as_str().unwrap())
+                        .collect();
+                    ensure!(
+                        phases
+                            == [
+                                "received",
+                                "execution_started",
+                                "execution_finished",
+                                "result_prepared"
+                            ],
+                        "missing modern progress for {id}: {phases:?}"
+                    );
+                    let timing = result["timing"]
+                        .as_object()
+                        .ok_or_else(|| eyre::eyre!("modern receipt lost timing: {result}"))?;
+                    let keys = [
+                        "scheduler_ms",
+                        "execution_gate_ms",
+                        "execution_ms",
+                        "result_encode_ms",
+                        "result_queue_ms",
+                        "host_elapsed_ms",
+                    ];
+                    ensure!(timing.len() == keys.len());
+                    for key in keys {
+                        ensure!(
+                            timing[key]
+                                .as_f64()
+                                .is_some_and(|value| value.is_finite() && value >= 0.0)
+                        );
+                    }
+                    let phase_total: f64 = keys[..5]
+                        .iter()
+                        .map(|key| timing[*key].as_f64().unwrap())
+                        .sum();
+                    ensure!(phase_total <= timing["host_elapsed_ms"].as_f64().unwrap() + 0.01);
+                }
+            } else {
+                ensure!(wire.progress.is_empty());
+            }
+            Ok(())
+        }
+        .await;
+        evidence.record(label, "outcome", &json!({
+            "passed":outcome.is_ok(), "error":outcome.as_ref().err().map(|error|format!("{error:#}")),
+                "native_shell_and_process_poll_completed":outcome.is_ok(),
+            "diagnostics":wire.diagnostics,
+        }));
+        // Release a retained native command on assertion failure as well.
+        std::fs::write(workspace.path().join("release"), "").unwrap();
+        let cleanup = wire.cancel_pending().await;
+        let (drain, detach) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(wire.drain(), attachment.detach())
+        })
+        .await
+        .expect("compatibility cleanup exceeded its bound");
+        cleanup.unwrap();
+        drain.unwrap();
+        detach.unwrap();
+        outcome.unwrap();
+    }
 }
 
 #[tokio::test]

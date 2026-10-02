@@ -348,10 +348,17 @@ nonnegative value combines outbound/return transit, socket handoff and
 unmeasured metadata work; it cannot separate one-way latency. Negative values
 indicate inconsistent timing or host reporting, and must not be read as network
 latency. Workers clocks can report zero for synchronous work between I/O events.
-Old Hands omit timing/progress and remain supported. New Hands advertise
-`diagnostics: true` and their client `connection_id` in the catalog. Deploy the
-compatible broker before updating Rust or JavaScript Hands; old strict brokers
-reject this advertisement before dispatching calls.
+Old Hands omit timing/progress and remain supported. Rust Hands negotiate the
+diagnostic wire extensions from the WebSocket upgrade response header
+`x-nanocodex-tools-diagnostics: v1`. Only that recognized version enables
+`diagnostics: true` and the client `connection_id` in the catalog, progress frames,
+and receipt timing. An absent or unknown version selects the original wire
+contract while preserving local tracing, execution and fencing. Each connection
+negotiates independently; a protocol rejection never triggers a downgrade or
+replays work. JavaScript Hands still advertise diagnostics unconditionally:
+deploy the compatible broker before updating them, because old strict brokers
+reject their advertisement before dispatching calls. Proxies must preserve the
+upgrade capability header for Rust Hands to publish remote execution telemetry.
 
 ### Native distributed traces
 

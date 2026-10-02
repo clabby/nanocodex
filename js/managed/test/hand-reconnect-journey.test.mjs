@@ -21,6 +21,8 @@ const machineId = "synthetic-hand";
 const source = `
 import { DurableObject } from 'cloudflare:workers';
 import { HostedToolsBroker } from './src/hosted-tools-broker.ts';
+import { beginHandTiming, finishHandTiming } from './src/hand-timing.ts';
+import { routeManaged } from '../account/worker/managedProxy.ts';
 export class FixtureBroker extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env); this.now = 1000; this.bindings = new Map();
@@ -54,7 +56,20 @@ export class FixtureBroker extends DurableObject {
   webSocketClose(socket, code, reason) { this.broker.webSocketClose(socket, code, reason); }
   webSocketError(socket) { this.broker.webSocketError(socket); }
 }
-export default {fetch(request, env) { return env.BROKER.getByName('synthetic-broker').fetch(request); }};
+export default {fetch(request, env) {
+  const url = new URL(request.url);
+  if (url.pathname === '/v1/account/tool-host') {
+    // Use the shipped account forwarding and managed response wrapper around
+    // the real broker upgrade. Only authentication/routing are fixture inputs.
+    return routeManaged(request, {NANOCODEX_BACKEND: {async fetch(forwarded) {
+      beginHandTiming(forwarded);
+      const target = new URL(forwarded.url); target.pathname = '/attach';
+      const response = await env.BROKER.getByName('synthetic-broker').fetch(new Request(target, forwarded));
+      return finishHandTiming(forwarded, response);
+    }}}, url);
+  }
+  return env.BROKER.getByName('synthetic-broker').fetch(request);
+}};
 `;
 
 test("an expired Hand lease reconnects, fences old work, and keeps replacement terminal", { timeout: 45_000 }, async t => {
@@ -68,7 +83,8 @@ test("an expired Hand lease reconnects, fences old work, and keeps replacement t
       heartbeat_ms: 100, reconnect_delay_ms: 1, machine_id: machineId, shell: "/bin/sh" },
     expected: { expiry_close: 1012, reconnected_generation: 2, same_runtime: true,
       fresh_shell_output: "RECONNECTED_OK", uncertain_effect_count: 1, stale_binding_dispatches: 0,
-      replacement_close: 1008, replaced_publisher_reconnects: 0, old_receipt_close: 1008, old_receipt_accepted: false }, observed: {} };
+      replacement_close: 1008, replaced_publisher_reconnects: 0, old_receipt_close: 1008, old_receipt_accepted: false,
+      diagnostics_upgrade_version: "v1", managed_upgrade_timing: true }, observed: {} };
   const capture = line => runtime.push(line);
   const bundle = await build({ stdin: { contents: source, resolveDir: root }, bundle: true, write: false,
     metafile: true, format: "esm", platform: "node", target: "es2022", external: ["cloudflare:*", "node:*"], logLevel: "warning" });
@@ -87,7 +103,7 @@ test("an expired Hand lease reconnects, fences old work, and keeps replacement t
       createInterface({ input: stderr }).on("line", capture);
     } });
   const base = await mf.ready;
-  const endpoint = new URL("/attach", base); endpoint.protocol = "ws:";
+  const endpoint = new URL("/v1/account/tool-host", base); endpoint.protocol = "ws:";
   let clock = 1000;
   // Keep executor deadlines in the broker's synthetic epoch. Timers, workerd,
   // process execution and performance.now() continue to run on real time.
@@ -126,6 +142,9 @@ test("an expired Hand lease reconnects, fences old work, and keeps replacement t
       wire.push({publisher: label, attempt, event: "connect", clock});
       const socket = new WebSocket(endpoint, { headers: { authorization: credential } });
       sockets.set(`${label}:${attempt}`, socket);
+      socket.on("upgrade", response => wire.push({publisher: label, attempt, event: "upgrade", clock,
+        status: response.statusCode, diagnostics_version: response.headers["x-nanocodex-tools-diagnostics"],
+        server_timing: response.headers["server-timing"]}));
       const send = socket.send.bind(socket);
       socket.send = (data, ...args) => { wire.push({publisher: label, attempt, direction: "host", clock,
         frame: JSON.parse(String(data))}); return send(data, ...args); };
@@ -144,6 +163,10 @@ test("an expired Hand lease reconnects, fences old work, and keeps replacement t
   try {
     const first = publish("first"); const firstClient = await first.connect();
     assert.equal(firstClient.connected, true);
+    const firstUpgrade = wire.find(row => row.publisher === "first" && row.event === "upgrade");
+    assert.equal(firstUpgrade.status, 101);
+    assert.equal(firstUpgrade.diagnostics_version, "v1", "diagnostics capability was lost through account/managed forwarding");
+    assert.match(firstUpgrade.server_timing, /hand_total;/, "managed upgrade response wrapper did not run");
     const initial = await inspect();
     const firstCatalog = wire.find(row => row.publisher === "first" && row.direction === "host" && row.frame.type === "catalog").frame;
     assert.match(firstCatalog.runtime_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
@@ -251,11 +274,19 @@ test("an expired Hand lease reconnects, fences old work, and keeps replacement t
     assert.equal(wire.some(row => row.publisher === "replacement" && row.direction === "broker" && row.frame.type === "ack" && row.frame.call_id === oldTransportCall.call_id), false);
     trace.push({oldReceipt, afterOldReceipt});
     assert.equal(callFrames().length, 4, "recovery must dispatch only the four original/fresh shell calls");
+    const upgrades = wire.filter(row => row.event === "upgrade");
+    for (const upgrade of upgrades) {
+      assert.equal(upgrade.status, 101);
+      assert.equal(upgrade.diagnostics_version, "v1");
+      assert.match(upgrade.server_timing, /hand_total;/);
+    }
     result.observed = {expiry_close: 1012, reconnected_generation: reconnected.routes[0].generation,
       same_runtime: secondCatalog.runtime_id === firstCatalog.runtime_id, fresh_shell_output: fresh.structuredResult.output,
       uncertain_effect_count: 1, stale_binding_dispatches: 0, replacement_close: 1008,
       replaced_publisher_reconnects: 0, old_receipt_close: 1008, old_receipt_accepted: false,
-      real_shell_dispatches: callFrames().length, final_generation: final.routes[0].generation};
+      real_shell_dispatches: callFrames().length, final_generation: final.routes[0].generation,
+      diagnostics_upgrade_version: firstUpgrade.diagnostics_version, managed_upgrade_timing: true,
+      verified_upgrades: upgrades.length};
     console.log(JSON.stringify({evidence: output, ...result.observed}));
   } catch (error) {
     failure = error; result.error = error.stack; throw error;
