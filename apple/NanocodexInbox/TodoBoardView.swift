@@ -667,72 +667,21 @@ private struct DecisionDetailView: View {
     @State private var assistant: InboxAIRequest?
     let onChat: () -> Void
 
+    private var decisionMailFixture: TodoMailThread? {
+        #if DEBUG
+        return model.isDemo ? .fixture : nil
+        #else
+        return nil
+        #endif
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Label(decision.sourceLabel.isEmpty ? "Prepared decision" : decision.sourceLabel, systemImage: "sparkle")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                    Text(decision.title).font(.title2.weight(.semibold))
-                    Text("Context").font(.headline)
-                    Text(decision.preparationContext.isEmpty ? decision.context : decision.preparationContext).textSelection(.enabled)
-                    if !decision.preparationScope.isEmpty { Text(decision.preparationScope).font(.caption).foregroundStyle(.secondary) }
-                    ForEach(Array(decision.preparationSources.enumerated()), id: \.offset) { _, source in
-                        Text(source.detail + " · " + source.reference).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    }
-                    if let url = decision.sourceURL { Link("Open source", destination: url).accessibilityIdentifier("decision-source") }
-                    InboxPeopleView(model: model, context: decision.peopleContext)
-                    if decision.sourceConnectionID != nil && decision.sourceThreadID != nil {
-                        Button("Read conversation") { showConversation = true }.buttonStyle(.bordered).accessibilityIdentifier("decision-open-conversation")
-                    }
-                    Text("Recommendation").font(.headline)
-                    Text(decision.recommendation).textSelection(.enabled)
-                    Label(decision.preparationState.title, systemImage: "sparkles")
-                    if !decision.preparationError.isEmpty { Text(decision.preparationError).font(.caption).foregroundStyle(.orange) }
-                    if decision.isPreparedForReview, let draft = decision.preparedDraft {
-                        PreparedDecisionMailView(client: model.todoMailClient, decision: decision, draft: draft, fixture: model.isDemo, approvalBlocked: changing, busy: $mailBusy)
-                            .id(draft.id + ":" + String(draft.version))
-                        ForEach(decision.choices.filter { $0.id == "dismiss" || $0.id == "defer" }) { choice in
-                            Button(choice.title) {
-                                Task { if await model.respondTodo(to: decision, choiceID: choice.id, text: nil) { dismiss() } }
-                            }.disabled(mailBusy || changing || model.todoResponding)
-                        }
-                    } else if decision.isPreparedForReview {
-                        Text("Prepared proposal").font(.headline)
-                        Text(decision.proposal).textSelection(.enabled)
-                        Text("This proposal does not send email or execute external actions.").font(.caption).foregroundStyle(.secondary)
-                        ForEach(decision.choices.filter { $0.id != "send" && $0.id != "approve" }) { choice in
-                            Button(choice.title) { Task { if await model.respondTodo(to: decision, choiceID: choice.id, text: nil) { dismiss() } } }
-                                .disabled(model.todoResponding || changing)
-                        }
-                    }
-                    if [.failed, .blocked, .unprepared].contains(decision.preparationState) {
-                        Button("Retry preparation") {
-                            changing = true
-                            Task {
-                                if await model.prepareTodoChanges(kind: "decisions", id: decision.id, version: decision.version, text: "Retry preparation using the available source context.") { dismiss() }
-                                else { changing = false }
-                            }
-                        }.disabled(changing || mailBusy || model.todoResponding).accessibilityIdentifier("decision-retry")
-                    }
-                    Text("Change this…").font(.headline)
-                    TextField("Make it warmer, add context, change the plan…", text: $instructions, axis: .vertical)
-                        .lineLimit(3...6).padding(12)
-                        .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 12))
-                        .accessibilityIdentifier("decision-instructions")
-                    Button(changing ? "Working on your changes" : "Prepare changes") {
-                        changing = true
-                        Task {
-                            let success = await model.prepareTodoChanges(kind: "decisions", id: decision.id, version: decision.version, text: instructions.trimmingCharacters(in: .whitespacesAndNewlines))
-                            if success { dismiss() } else { changing = false }
-                        }
-                    }.disabled(changing || mailBusy || model.todoResponding || instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .accessibilityIdentifier("decision-change")
-                    if let error = model.todoError { Text(error).font(.caption).foregroundStyle(.orange) }
-                    Button("Continue in Chat") {
-                        assistant = InboxAIRequest(row: .decision(decision), instructions: "Help me with this prepared decision; use the attached context and original sources.")
-                    }
-                        .accessibilityIdentifier("decision-chat")
+                    decisionContext
+                    decisionRecommendation
+                    decisionChanges
                 }.padding(18).frame(maxWidth: 620, alignment: .leading).frame(maxWidth: .infinity)
             }.background(ChatPalette.background)
                 .navigationTitle("Decision").navigationBarTitleDisplayMode(.inline)
@@ -749,7 +698,7 @@ private struct DecisionDetailView: View {
                 .sheet(isPresented: $showConversation) {
                     if let account = decision.sourceConnectionID, let thread = decision.sourceThreadID {
                         NavigationStack {
-                            TodoMailThreadView(client: model.todoMailClient, inboxModel: model, onChat: onChat, inboxItemID: "decision:" + decision.id, connectionID: account, threadID: thread, replyMessageID: decision.sourceMessageID, fixture: model.isDemo ? .fixture : nil)
+                            TodoMailThreadView(client: model.todoMailClient, inboxModel: model, onChat: onChat, inboxItemID: "decision:" + decision.id, connectionID: account, threadID: thread, replyMessageID: decision.sourceMessageID, fixture: decisionMailFixture)
                                 .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Done") { showConversation = false }.accessibilityIdentifier("mail-thread-done") } }
                         }
                     }
@@ -757,6 +706,80 @@ private struct DecisionDetailView: View {
 
         }
     }
+    @ViewBuilder
+    private var decisionContext: some View {
+        Label(decision.sourceLabel.isEmpty ? "Prepared decision" : decision.sourceLabel, systemImage: "sparkle")
+            .font(.subheadline).foregroundStyle(.secondary)
+        Text(decision.title).font(.title2.weight(.semibold))
+        Text("Context").font(.headline)
+        Text(decision.preparationContext.isEmpty ? decision.context : decision.preparationContext).textSelection(.enabled)
+        if !decision.preparationScope.isEmpty { Text(decision.preparationScope).font(.caption).foregroundStyle(.secondary) }
+        ForEach(Array(decision.preparationSources.enumerated()), id: \.offset) { _, source in
+            Text(source.detail + " · " + source.reference).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        }
+        if let url = decision.sourceURL { Link("Open source", destination: url).accessibilityIdentifier("decision-source") }
+        InboxPeopleView(model: model, context: decision.peopleContext)
+        if decision.sourceConnectionID != nil && decision.sourceThreadID != nil {
+            Button("Read conversation") { showConversation = true }.buttonStyle(.bordered).accessibilityIdentifier("decision-open-conversation")
+        }
+    }
+
+    @ViewBuilder
+    private var decisionRecommendation: some View {
+        Text("Recommendation").font(.headline)
+        Text(decision.recommendation).textSelection(.enabled)
+        Label(decision.preparationState.title, systemImage: "sparkles")
+        if !decision.preparationError.isEmpty { Text(decision.preparationError).font(.caption).foregroundStyle(.orange) }
+        if decision.isPreparedForReview, let draft = decision.preparedDraft {
+            PreparedDecisionMailView(client: model.todoMailClient, decision: decision, draft: draft, fixture: model.isDemo, approvalBlocked: changing, busy: $mailBusy)
+                .id(draft.id + ":" + String(draft.version))
+            ForEach(decision.choices.filter { $0.id == "dismiss" || $0.id == "defer" }) { choice in
+                Button(choice.title) {
+                    Task { if await model.respondTodo(to: decision, choiceID: choice.id, text: nil) { dismiss() } }
+                }.disabled(mailBusy || changing || model.todoResponding)
+            }
+        } else if decision.isPreparedForReview {
+            Text("Prepared proposal").font(.headline)
+            Text(decision.proposal).textSelection(.enabled)
+            Text("This proposal does not send email or execute external actions.").font(.caption).foregroundStyle(.secondary)
+            ForEach(decision.choices.filter { $0.id != "send" && $0.id != "approve" }) { choice in
+                Button(choice.title) { Task { if await model.respondTodo(to: decision, choiceID: choice.id, text: nil) { dismiss() } } }
+                    .disabled(model.todoResponding || changing)
+            }
+        }
+        if [.failed, .blocked, .unprepared].contains(decision.preparationState) {
+            Button("Retry preparation") {
+                changing = true
+                Task {
+                    if await model.prepareTodoChanges(kind: "decisions", id: decision.id, version: decision.version, text: "Retry preparation using the available source context.") { dismiss() }
+                    else { changing = false }
+                }
+            }.disabled(changing || mailBusy || model.todoResponding).accessibilityIdentifier("decision-retry")
+        }
+    }
+
+    @ViewBuilder
+    private var decisionChanges: some View {
+        Text("Change this…").font(.headline)
+        TextField("Make it warmer, add context, change the plan…", text: $instructions, axis: .vertical)
+            .lineLimit(3...6).padding(12)
+            .background(ChatPalette.userBubble, in: RoundedRectangle(cornerRadius: 12))
+            .accessibilityIdentifier("decision-instructions")
+        Button(changing ? "Working on your changes" : "Prepare changes") {
+            changing = true
+            Task {
+                let success = await model.prepareTodoChanges(kind: "decisions", id: decision.id, version: decision.version, text: instructions.trimmingCharacters(in: .whitespacesAndNewlines))
+                if success { dismiss() } else { changing = false }
+            }
+        }.disabled(changing || mailBusy || model.todoResponding || instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityIdentifier("decision-change")
+        if let error = model.todoError { Text(error).font(.caption).foregroundStyle(.orange) }
+        Button("Continue in Chat") {
+            assistant = InboxAIRequest(row: .decision(decision), instructions: "Help me with this prepared decision; use the attached context and original sources.")
+        }
+            .accessibilityIdentifier("decision-chat")
+    }
+
 }
 
 /// Actual UI path signposts, separate from backend preparation/model latency.
