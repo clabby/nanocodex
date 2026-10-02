@@ -34,7 +34,7 @@ host = [
     "dep:tempfile",
     "dep:tracing",
     "dep:zstd",
-    "nanocodex-tools/native",
+    "nanocodex-oai-tools/native",
 ]
 desktop = ["dep:x11rb", "dep:image", "dep:nix", "dep:nanocodex-hand"]
 guest-runtime = [
@@ -45,7 +45,7 @@ guest-runtime = [
     "dep:rtnetlink",
     "dep:rustix",
     "dep:seccompiler",
-    "nanocodex-tools/workspace-runtime",
+    "nanocodex-oai-tools/workspace-runtime",
 ]
 
 [dependencies]
@@ -54,7 +54,7 @@ base64.workspace = true
 filetime.workspace = true
 futures-util = { workspace = true, optional = true }
 landlock = { workspace = true, optional = true }
-nanocodex-tools = { path = "../nanocodex-tools", version = "0.6.6", default-features = false }
+nanocodex-oai-tools = { path = "../nanocodex-oai-tools", version = "0.6.6", default-features = false }
 nix = { workspace = true, optional = true, features = ["fs", "mount", "poll"] }
 rtnetlink = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true }

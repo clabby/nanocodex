@@ -649,7 +649,7 @@ pub(crate) async fn recover_hand_update() -> Result<()> {
         } else {
             println!("No interrupted coordinated update is recorded");
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "linux"))]
     if cfg!(target_os = "windows") {
@@ -702,7 +702,7 @@ fn stage_update(store: &VersionStore, key: &str) -> Result<bool> {
 async fn platform_hand_loaded() -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
-        return Ok(crate::linux_hand_service::status().await?.loaded);
+        Ok(crate::linux_hand_service::status().await?.loaded)
     }
     #[cfg(not(target_os = "linux"))]
     if cfg!(target_os = "windows") {
@@ -715,12 +715,7 @@ async fn platform_hand_loaded() -> Result<bool> {
 async fn platform_hand_action(restart: bool) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        return crate::linux_hand_service::service_action(if restart {
-            "restart"
-        } else {
-            "start"
-        })
-        .await;
+        crate::linux_hand_service::service_action(if restart { "restart" } else { "start" }).await
     }
     #[cfg(not(target_os = "linux"))]
     if cfg!(target_os = "windows") {
@@ -914,6 +909,7 @@ trait ServiceTransaction: Send {
 enum PlatformServiceUpdate {
     #[cfg(target_os = "linux")]
     Linux(crate::linux_hand_service::ServiceUpdate),
+    #[cfg(not(target_os = "linux"))]
     Mac(crate::hand_service::ServiceUpdate),
     Windows(crate::windows_hand::ServiceUpdate),
 }
@@ -923,6 +919,7 @@ impl PlatformServiceUpdate {
         match self {
             #[cfg(target_os = "linux")]
             Self::Linux(service) => service.commit().await,
+            #[cfg(not(target_os = "linux"))]
             Self::Mac(service) => service.commit().await,
             Self::Windows(service) => service.commit().await,
         }
@@ -935,6 +932,7 @@ impl ServiceTransaction for PlatformServiceUpdate {
         match self {
             #[cfg(target_os = "linux")]
             Self::Linux(service) => service.apply().await,
+            #[cfg(not(target_os = "linux"))]
             Self::Mac(service) => service.apply().await,
             Self::Windows(service) => service.apply().await,
         }
@@ -943,6 +941,7 @@ impl ServiceTransaction for PlatformServiceUpdate {
         match self {
             #[cfg(target_os = "linux")]
             Self::Linux(service) => service.rollback().await,
+            #[cfg(not(target_os = "linux"))]
             Self::Mac(service) => service.rollback().await,
             Self::Windows(service) => service.rollback().await,
         }

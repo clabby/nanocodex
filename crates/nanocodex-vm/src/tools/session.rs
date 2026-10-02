@@ -16,7 +16,7 @@ use crate::{
     egress::EgressLease,
     process::{PrivateVmProcessConfig, VmProcessConfig, VmProcessError},
 };
-use nanocodex_tools::{ToolContext, ToolInput, ToolOutput, ToolResult, standard::StandardTool};
+use nanocodex_oai_tools::{ToolContext, ToolInput, ToolOutput, ToolResult, standard::StandardTool};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -1969,7 +1969,8 @@ fn elapsed_ns(started_at: Instant) -> u64 {
 impl VmToolClient for VmToolSessionHandle {
     async fn computer_catalog(
         &self,
-    ) -> Result<Vec<nanocodex_computer::ProviderTool>, nanocodex_tools::contract::ToolError> {
+    ) -> Result<Vec<nanocodex_computer::ProviderTool>, nanocodex_oai_tools::contract::ToolError>
+    {
         let response = self
             .control_request(|id| {
                 SessionRequest::ComputerCatalog(super::protocol::ComputerCatalogRequest { id })
@@ -2029,7 +2030,7 @@ mod tracing_tests {
         time::{Duration, Instant},
     };
 
-    use nanocodex_tools::{
+    use nanocodex_oai_tools::{
         ToolContext, ToolInput, contract::ToolOutputBody, runtime::ToolRuntime,
         standard::StandardTool,
     };
@@ -2231,7 +2232,7 @@ mod tracing_tests {
 
     #[tokio::test]
     async fn computer_proxy_discovers_then_invokes_guest_provider_tool() {
-        use nanocodex_tools::Tool as _;
+        use nanocodex_oai_tools::Tool as _;
         let catalog = r#"{"kind":"computer_catalog","payload":{"id":0,"tools":[{"name":"provider_extra","description":"Guest upstream documentation","inputSchema":{"type":"object","properties":{"custom":{"type":"string"}}}}],"error":null}}"#;
         let output = r#"{"kind":"tool","payload":{"id":1,"execution":{"output":"guest-provider-output","success":true,"structured_result":null,"metadata":null,"process_trace":null},"error":null}}"#;
         let script = format!(
@@ -2313,7 +2314,7 @@ mod tracing_tests {
 
         runtime.block_on(async {
             let session = VmToolSession::spawn(&mut command).unwrap();
-            let tools = nanocodex_tools::Tools::builder()
+            let tools = nanocodex_oai_tools::Tools::builder()
                 .workspace(false)
                 .tool(session.tools().exec_command_tool())
                 .web_search(false)

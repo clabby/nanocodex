@@ -787,6 +787,9 @@ struct InboxView: View {
                     }
                     .accessibilityIdentifier("settings-connectors")
                 }
+                ClaudeConnectionSection(read: model.claudeConnectionStatus, start: model.startClaudeLogin,
+                    complete: model.completeClaudeLogin, disconnect: model.disconnectClaude,
+                    changed: model.refreshModelCatalog).id(model.accountGeneration)
                 Section("This device") {
                     Toggle("Make this device available as a Hand", isOn: $model.deviceHandEnabled)
                         .accessibilityIdentifier("device-hand-enabled")
@@ -1307,6 +1310,11 @@ private struct AgentComposerView: View {
                 Text(error).font(.caption).foregroundStyle(Ink.muted).frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16).padding(.vertical, 8).accessibilityIdentifier("attachment-error")
             }
+            if card?.model.hasPrefix("claude-") == true {
+                Text("Claude supports text messages only. Attachments and voice are not available.")
+                    .font(.caption).foregroundStyle(Ink.muted).padding(.horizontal, 16).padding(.vertical, 8)
+                    .accessibilityIdentifier("claude-text-only")
+            }
             if !attachments.isEmpty {
                 composerText.frame(minHeight: 52, alignment: .topLeading).padding(.horizontal, 12)
             }
@@ -1314,8 +1322,9 @@ private struct AgentComposerView: View {
                 Button { focused = false; showAttachmentMenu = true } label: {
                     Image(systemName: "plus").frame(width: 44, height: 44).contentShape(Rectangle())
                 }.accessibilityLabel("Add attachments").accessibilityIdentifier("add-attachments")
+                    .disabled(!model.focusedSupportsRichInput)
                 if attachments.isEmpty { composerText } else { Spacer(minLength: 0) }
-                if let agentID = card?.id {
+                if let agentID = card?.id, model.focusedSupportsRichInput {
                     NanocodexVoiceControl(session: model.voice, onReturnToChat: onVoiceChat) {
                         focused = false
                         return try await model.voiceConfiguration(agentID: agentID)
@@ -4164,18 +4173,20 @@ private struct MobileModelControls: View {
     @ObservedObject var model: InboxModel
     var body: some View {
         if let card = model.focused {
-            let selected = ModelChoice.find(card.model.isEmpty ? "gpt-6-astra" : card.model)
+            let selected = (model.isDemo ? ModelChoice.all : model.availableModels).first(where: { $0.id == card.model })
             let waiting = model.modelSettingsBusy.contains(card.id)
             let effort = card.thinking.isEmpty ? "low" : card.thinking
             Menu {
                 Section("Model") {
-                    ForEach(ModelChoice.all) { choice in
+                    ForEach(model.isDemo ? ModelChoice.all : model.availableModels) { choice in
                         Button { model.chooseModel(choice.id) } label: {
                             if selected?.id == choice.id { Label(choice.name, systemImage: "checkmark") }
                             else { Text(choice.name) }
                         }
                         .disabled(model.modelChoiceLocked || waiting)
                     }
+                    if model.availableModels.isEmpty && !model.isDemo { Text("Connect a model subscription in account settings") }
+                    if let error = model.modelCatalogError { Text(error) }
                 }
                 Menu {
                     ForEach(selected?.efforts ?? [], id: \.self) { choice in
@@ -4188,6 +4199,8 @@ private struct MobileModelControls: View {
                     Text("Thinking: \(ModelChoice.effortName(effort))")
                 }
                 .disabled(waiting || card.effortLocked || card.routingAutomatic)
+                .accessibilityLabel("Chat thinking effort: \(card.thinking)")
+                .accessibilityHint(card.model.hasPrefix("claude-") && card.effortLocked ? "Thinking is fixed for this Claude conversation. Start a new chat to change it." : "Changes thinking effort")
                 .accessibilityIdentifier("effort-dial")
 
                 Button { model.toggleAutoRoute() } label: {
@@ -4200,7 +4213,7 @@ private struct MobileModelControls: View {
 
                 if !card.provider.isEmpty {
                     Section {
-                        Text(card.provider + " · " + (card.modelLocked ? "Pinned to this conversation" : "Ready"))
+                        Text(card.provider + " · " + (card.modelLocked ? (card.model.hasPrefix("claude-") ? "Model and thinking pinned to this conversation" : "Pinned to this conversation") : "Ready"))
                     }
                 }
                 if let error = model.modelSettingsError { Text(error) }
@@ -4218,6 +4231,7 @@ private struct MobileModelControls: View {
             .accessibilityValue(card.routingAutomatic ? "Automatic routing" : "Thinking: \(ModelChoice.effortName(effort))")
             .accessibilityHint("Choose model, thinking effort, or automatic routing for the selected Chat conversation")
             .accessibilityIdentifier("model-picker")
+            .task { await model.refreshModelCatalog() }
             .multilineTextAlignment(.center)
             .font(.caption.weight(.medium))
             .buttonStyle(.plain)

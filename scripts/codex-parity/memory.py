@@ -111,6 +111,6 @@ for entry in variants.values():
     tool=namespace['tools'][0]
     actual.append({'name': namespace['name']+'__'+tool['name'], 'description':tool['description'], 'parameters':tool['parameters'], 'outputSchema':tool['output_schema']})
 expected=json.loads((ROOT/'js/nanocodex-tools/tools/extension-specs.json').read_text())
-assert expected == json.loads((ROOT/'crates/nanocodex-tools/src/extensions/specs.json').read_text()), 'native/JS memory declaration drift'
+assert expected == json.loads((ROOT/'crates/nanocodex-oai-tools/src/extensions/specs.json').read_text()), 'native/JS memory declaration drift'
 assert sorted(actual,key=lambda s:s['name'])==sorted(expected,key=lambda s:s['name']), 'memory tool schema drift'
 print('PASS: four memory declarations equal pinned upstream constructors '+PIN)

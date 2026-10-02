@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tower::{Layer, Service, ServiceExt};
 
 #[cfg(feature = "tools")]
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tools,
     attachment::{AttachmentMetadata, AttachmentTarget},
 };
@@ -22,7 +22,7 @@ use nanocodex_tools::{
 use crate::attachment::AttachmentSupervisor;
 use crate::{
     AgentReceipt, AgentSettings, AgentState, EventCursor, ManagedClient, ManagedError,
-    ManagedEvent, ManagedEvents, PromptInput, SteerWithdrawal, TurnAction, TurnView,
+    ManagedEvent, ManagedEvents, ManagedModel, PromptInput, SteerWithdrawal, TurnAction, TurnView,
     driver::{ManagedAgent, ManagedDriver},
     websocket::ManagedSocket,
 };
@@ -31,6 +31,9 @@ use crate::{
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ManagedRequest {
+    /// Creates an agent using the authenticated account catalog's default.
+    /// Explicit settings use `Create` and are never silently normalized.
+    CreateDefault,
     /// Creates a new account-owned agent.
     Create {
         /// Initial model and reasoning policy.
@@ -102,6 +105,13 @@ pub enum ManagedRequest {
         /// New hosted model.
         model: Model,
     },
+    /// Selects a provider-neutral managed model before the first accepted turn.
+    SetManagedModel {
+        /// Stable managed agent identifier.
+        agent_id: String,
+        /// New hosted model, including Claude.
+        model: ManagedModel,
+    },
     /// Selects the reasoning mode before the first accepted turn.
     SetReasoningMode {
         /// Stable managed agent identifier.
@@ -122,6 +132,11 @@ pub enum ManagedRequest {
         agent_id: String,
         /// Whether priority processing is enabled.
         enabled: bool,
+    },
+    /// Compacts retained history and waits for server completion without retrying.
+    Compact {
+        /// Stable managed agent identifier.
+        agent_id: String,
     },
     /// Resolves the authenticated reverse-tool attachment target.
     #[cfg(feature = "tools")]
@@ -151,6 +166,8 @@ pub enum ManagedResponse {
     Cancelled(TurnAction),
     /// Complete settings after a successful mutation.
     Settings(AgentSettings),
+    /// Server confirmed retained-history compaction completed.
+    Compacted,
     /// Authenticated reverse-tool attachment target.
     #[cfg(feature = "tools")]
     AttachmentTarget(AttachmentTarget),
@@ -202,22 +219,13 @@ impl Service<ManagedRequest> for ManagedService {
         let transport = self.transport;
         Box::pin(async move {
             match request {
-                ManagedRequest::Create { settings } => match transport {
-                    ManagedTransport::Http => client
-                        .create_with_settings(settings)
-                        .await
-                        .map(ManagedResponse::Created),
-                    ManagedTransport::WebSocket => {
-                        let (receipt, live, events) =
-                            ManagedSocket::create(client.clone(), settings).await?;
-                        *socket.lock().await = Some(ManagedLiveSocket {
-                            agent_id: receipt.agent_id.clone(),
-                            socket: live,
-                            events: Some(events),
-                        });
-                        Ok(ManagedResponse::Created(receipt))
-                    }
-                },
+                ManagedRequest::CreateDefault => {
+                    let settings = client.default_settings().await?;
+                    create_managed(client, socket, transport, settings).await
+                }
+                ManagedRequest::Create { settings } => {
+                    create_managed(client, socket, transport, settings).await
+                }
                 ManagedRequest::State { agent_id } => {
                     client.state(&agent_id).await.map(ManagedResponse::State)
                 }
@@ -335,6 +343,10 @@ impl Service<ManagedRequest> for ManagedService {
                     .set_model(&agent_id, model)
                     .await
                     .map(ManagedResponse::Settings),
+                ManagedRequest::SetManagedModel { agent_id, model } => client
+                    .set_model(&agent_id, model)
+                    .await
+                    .map(ManagedResponse::Settings),
                 ManagedRequest::SetReasoningMode {
                     agent_id,
                     reasoning_mode,
@@ -346,6 +358,10 @@ impl Service<ManagedRequest> for ManagedService {
                     .set_thinking(&agent_id, thinking)
                     .await
                     .map(ManagedResponse::Settings),
+                ManagedRequest::Compact { agent_id } => client
+                    .compact(&agent_id)
+                    .await
+                    .map(|()| ManagedResponse::Compacted),
                 ManagedRequest::SetFastMode { agent_id, enabled } => client
                     .set_fast_mode(&agent_id, enabled)
                     .await
@@ -359,6 +375,30 @@ impl Service<ManagedRequest> for ManagedService {
     }
 }
 
+async fn create_managed(
+    client: ManagedClient,
+    socket: Arc<tokio::sync::Mutex<Option<ManagedLiveSocket>>>,
+    transport: ManagedTransport,
+    settings: AgentSettings,
+) -> Result<ManagedResponse, ManagedError> {
+    let settings = settings.validate()?;
+    match transport {
+        ManagedTransport::Http => client
+            .create_with_settings(settings)
+            .await
+            .map(ManagedResponse::Created),
+        ManagedTransport::WebSocket => {
+            let (receipt, live, events) = ManagedSocket::create(client.clone(), settings).await?;
+            *socket.lock().await = Some(ManagedLiveSocket {
+                agent_id: receipt.agent_id.clone(),
+                socket: live,
+                events: Some(events),
+            });
+            Ok(ManagedResponse::Created(receipt))
+        }
+    }
+}
+
 /// Account-managed lifecycle recipe accepted by [`Nanocodex::builder`].
 #[derive(Clone, Debug)]
 pub struct Managed<S = ManagedService> {
@@ -368,27 +408,29 @@ pub struct Managed<S = ManagedService> {
 
 #[derive(Clone, Debug)]
 enum ManagedOperation {
-    Create(AgentSettings),
+    Create(Option<AgentSettings>),
     Open(String),
     OpenFromState(String, AgentState),
 }
 
 impl Managed<ManagedService> {
-    /// Selects creation of a new account-owned managed agent.
+    /// Selects creation using the authenticated account catalog default.
+    /// Use `with_settings` for an explicit, unmodified model policy.
     #[must_use]
     pub fn create(client: ManagedClient) -> Self {
         Self {
             service: ManagedService::new(client, ManagedTransport::Http),
-            operation: ManagedOperation::Create(AgentSettings::default()),
+            operation: ManagedOperation::Create(None),
         }
     }
 
-    /// Selects creation over the resumable managed WebSocket transport.
+    /// Selects creation over the resumable managed WebSocket transport using
+    /// the authenticated account catalog default.
     #[must_use]
     pub fn create_live(client: ManagedClient) -> Self {
         Self {
             service: ManagedService::new(client, ManagedTransport::WebSocket),
-            operation: ManagedOperation::Create(AgentSettings::default()),
+            operation: ManagedOperation::Create(None),
         }
     }
 
@@ -449,7 +491,7 @@ impl<S> Managed<S> {
     #[must_use]
     pub fn with_settings(mut self, settings: AgentSettings) -> Self {
         if matches!(self.operation, ManagedOperation::Create(_)) {
-            self.operation = ManagedOperation::Create(settings);
+            self.operation = ManagedOperation::Create(Some(settings));
         }
         self
     }
@@ -566,13 +608,13 @@ impl<S> ManagedBuilder<S> {
     {
         let (agent_id, expected_session_id, supplied_state) = match self.managed.operation {
             ManagedOperation::Create(settings) => {
-                let settings = settings.validate().map_err(backend_error)?;
-                match call(
-                    &mut self.managed.service,
-                    ManagedRequest::Create { settings },
-                )
-                .await?
-                {
+                let request = match settings {
+                    Some(settings) => ManagedRequest::Create {
+                        settings: settings.validate().map_err(backend_error)?,
+                    },
+                    None => ManagedRequest::CreateDefault,
+                };
+                match call(&mut self.managed.service, request).await? {
                     ManagedResponse::Created(receipt) => (
                         receipt.agent_id,
                         Some(receipt.session_id),

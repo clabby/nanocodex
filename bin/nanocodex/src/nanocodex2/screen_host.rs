@@ -3,8 +3,8 @@
 use super::screen_native::NativeScreen;
 use clap::Args;
 use nanocodex_managed::ManagedError;
+use nanocodex_oai_tools::attachment::{AttachmentMachine, AttachmentTarget};
 use nanocodex_remote::target::PublisherTarget;
-use nanocodex_tools::attachment::{AttachmentMachine, AttachmentTarget};
 use std::{
     io::Write,
     path::{Path, PathBuf},

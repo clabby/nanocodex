@@ -53,6 +53,9 @@ pub(super) struct ActionAvailability {
     pub(super) new_session: bool,
     pub(super) fork: bool,
     pub(super) fast_mode: bool,
+    pub(super) fast_mode_available: bool,
+    pub(super) effort: bool,
+    pub(super) voice_input: bool,
     pub(super) model: bool,
     pub(super) auto_route: bool,
 }
@@ -292,9 +295,11 @@ impl ActionsMenu {
 
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
-            Action::Screen | Action::Zoom | Action::AgentId | Action::Voice => true,
+            Action::Screen | Action::Zoom | Action::AgentId => true,
+            Action::Voice => self.availability.voice_input,
             Action::Handoff | Action::Review | Action::Reflection => self.availability.new_session,
-            Action::Effort | Action::FastMode => true,
+            Action::Effort => self.availability.effort,
+            Action::FastMode => self.availability.fast_mode_available,
             Action::Model => self.availability.model,
             Action::AutoRoute => self.availability.auto_route,
             Action::Theme => true,
@@ -330,6 +335,15 @@ impl ActionsMenu {
             }
             Action::AutoRoute if !self.availability.auto_route => {
                 "Enable auto routing · before first prompt only"
+            }
+            Action::Voice if !self.availability.voice_input => {
+                "Voice input · unavailable for text-only model"
+            }
+            Action::Effort if !self.availability.effort => {
+                "Change effort · start a new session first"
+            }
+            Action::FastMode if !self.availability.fast_mode_available => {
+                "Fast mode · unavailable for this model"
             }
             Action::FastMode if self.availability.fast_mode => "Disable fast mode",
             Action::Model if !self.availability.model => "Select model · start a new session first",

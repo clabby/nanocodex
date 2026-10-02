@@ -806,6 +806,10 @@ impl Terminal {
             })
             .unwrap();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_nanocodex2"));
+        command.env_clear();
+        command.env("PATH", std::env::var_os("PATH").unwrap_or_default());
+        command.env("HOME", workspace.path());
+        command.env("NANOCODEX_HOME", workspace.path().join(".nanocodex"));
         if attach {
             command.args(["attach", AGENT]);
         }
@@ -1338,7 +1342,13 @@ impl Fixture {
         .await;
         fixture
             .terminal
-            .wait_text(if active { "Enter steer" } else { "actions" })
+            .wait_text(if active {
+                "Enter steer"
+            } else if attach {
+                "Enter send"
+            } else {
+                "actions"
+            })
             .await;
         fixture
     }
@@ -1407,6 +1417,16 @@ impl Fixture {
         let routing_requests = Arc::new(Mutex::new(Vec::new()));
         let model_route = Arc::new(Mutex::new(None));
         let app = Router::new()
+            .route("/v1/models", get(|headers: axum::http::HeaderMap| async move {
+                let authorization = format!("Bearer ncx_live_{}_{}", "a".repeat(12), "b".repeat(43));
+                assert_eq!(headers.get("authorization").and_then(|value| value.to_str().ok()), Some(authorization.as_str()));
+                Json(json!({
+                    "object": "list", "default_model": "gpt-6-astra",
+                    "data": [{"id": "gpt-6-astra", "name": "Astra", "provider": "openai",
+                        "thinking": ["low"],
+                        "fast_mode": false, "reasoning_modes": ["standard"]}]
+                }))
+            }))
             .route("/v1/me", get(|headers: axum::http::HeaderMap| async move {
                 assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer ncx_live_"));
                 Json(json!({"user":{"id":"aabbccdd-1122-4455-8899-aabbccddeeff","persistent":true},"organization":{"id":"fixture-org"},"team":{"id":"fixture-team"},"role":"owner","authentication":"api_key"}))

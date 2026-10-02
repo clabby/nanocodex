@@ -1,6 +1,6 @@
 //! Private owner for one background tool attachment.
 
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tools,
     attachment::{Attachment, AttachmentError, AttachmentMetadata, AttachmentTarget},
 };

@@ -15,17 +15,19 @@ public_packages='[
   "nanocodex",
   "nanocodex-agent",
   "nanocodex-browser",
+  "nanocodex-claude",
+  "nanocodex-claude-tools",
   "nanocodex-durability",
   "nanocodex-egress",
   "nanocodex-hand",
   "nanocodex-managed",
   "nanocodex-oai-api",
+  "nanocodex-oai-tools",
+  "nanocodex-oai-tools-macros",
   "nanocodex-observability",
   "nanocodex-phone",
   "nanocodex-remote",
   "nanocodex-subagents",
-  "nanocodex-tools",
-  "nanocodex-tools-macros",
   "nanocodex-vm",
   "nanocodex-voice",
   "nanocodex-voice-ffi",
@@ -52,7 +54,7 @@ assert_snapshot() {
   exit 1
 }
 
-expected_packages=$'nanocodex\nnanocodex-agent\nnanocodex-browser\nnanocodex-durability\nnanocodex-egress\nnanocodex-hand\nnanocodex-managed\nnanocodex-oai-api\nnanocodex-observability\nnanocodex-phone\nnanocodex-remote\nnanocodex-subagents\nnanocodex-tools\nnanocodex-tools-macros\nnanocodex-vm\nnanocodex-voice\nnanocodex-voice-ffi\nnanocodex-voice-native\nnanocodex-voice-protocol'
+expected_packages=$'nanocodex\nnanocodex-agent\nnanocodex-browser\nnanocodex-claude\nnanocodex-claude-tools\nnanocodex-durability\nnanocodex-egress\nnanocodex-hand\nnanocodex-managed\nnanocodex-oai-api\nnanocodex-oai-tools\nnanocodex-oai-tools-macros\nnanocodex-observability\nnanocodex-phone\nnanocodex-remote\nnanocodex-subagents\nnanocodex-vm\nnanocodex-voice\nnanocodex-voice-ffi\nnanocodex-voice-native\nnanocodex-voice-protocol'
 actual_packages="$(
   jq -r '
     .packages[]
@@ -62,7 +64,7 @@ actual_packages="$(
 )"
 assert_snapshot "public package set" "$expected_packages" "$actual_packages"
 
-expected_edges=$'nanocodex\tnanocodex-agent\tnormal\tall\nnanocodex\tnanocodex-durability\tnormal\tall\nnanocodex\tnanocodex-managed\tnormal\tcfg(not(target_family = "wasm"))\nnanocodex\tnanocodex-oai-api\tnormal\tall\nnanocodex\tnanocodex-observability\tnormal\tcfg(not(target_family = "wasm"))\nnanocodex\tnanocodex-tools\tnormal\tall\nnanocodex-agent\tnanocodex-oai-api\tnormal\tall\nnanocodex-agent\tnanocodex-tools\tnormal\tall\nnanocodex-browser\tnanocodex-oai-api\tnormal\tall\nnanocodex-browser\tnanocodex-tools\tnormal\tall\nnanocodex-browser\tnanocodex-vm\tnormal\tcfg(any(all(target_os = "linux", not(target_env = "musl")), all(target_os = "macos", target_arch = "aarch64")))\nnanocodex-durability\tnanocodex-agent\tnormal\tall\nnanocodex-managed\tnanocodex-agent\tnormal\tall\nnanocodex-managed\tnanocodex-oai-api\tnormal\tall\nnanocodex-managed\tnanocodex-tools\tnormal\tall\nnanocodex-managed\tnanocodex-voice-protocol\tnormal\tall\nnanocodex-phone\tnanocodex-managed\tnormal\tall\nnanocodex-phone\tnanocodex-oai-api\tnormal\tall\nnanocodex-phone\tnanocodex-voice-protocol\tnormal\tall\nnanocodex-subagents\tnanocodex-agent\tnormal\tall\nnanocodex-subagents\tnanocodex-tools\tnormal\tall\nnanocodex-tools\tnanocodex-oai-api\tnormal\tall\nnanocodex-tools\tnanocodex-tools-macros\tnormal\tcfg(not(target_family = "wasm"))\nnanocodex-vm\tnanocodex-computer\tnormal\tall\nnanocodex-vm\tnanocodex-hand\tnormal\tcfg(target_os = "linux")\nnanocodex-vm\tnanocodex-tools\tnormal\tall\nnanocodex-voice\tnanocodex\tnormal\tall\nnanocodex-voice\tnanocodex-voice-native\tnormal\tall\nnanocodex-voice\tnanocodex-voice-protocol\tnormal\tall\nnanocodex-voice-ffi\tnanocodex-voice-protocol\tnormal\tall'
+expected_edges=$'nanocodex\tnanocodex-agent\tnormal\tall\nnanocodex\tnanocodex-claude\tnormal\tall\nnanocodex\tnanocodex-claude-tools\tnormal\tall\nnanocodex\tnanocodex-durability\tnormal\tall\nnanocodex\tnanocodex-managed\tnormal\tcfg(not(target_family = "wasm"))\nnanocodex\tnanocodex-oai-api\tnormal\tall\nnanocodex\tnanocodex-oai-tools\tnormal\tall\nnanocodex\tnanocodex-observability\tnormal\tcfg(not(target_family = "wasm"))\nnanocodex-agent\tnanocodex-oai-api\tnormal\tall\nnanocodex-agent\tnanocodex-oai-tools\tnormal\tall\nnanocodex-browser\tnanocodex-oai-api\tnormal\tall\nnanocodex-browser\tnanocodex-oai-tools\tnormal\tall\nnanocodex-browser\tnanocodex-vm\tnormal\tcfg(any(all(target_os = "linux", not(target_env = "musl")), all(target_os = "macos", target_arch = "aarch64")))\nnanocodex-claude\tnanocodex-agent\tnormal\tall\nnanocodex-claude\tnanocodex-claude-tools\tnormal\tall\nnanocodex-durability\tnanocodex-agent\tnormal\tall\nnanocodex-durability\tnanocodex-claude\tnormal\tall\nnanocodex-managed\tnanocodex-agent\tnormal\tall\nnanocodex-managed\tnanocodex-oai-api\tnormal\tall\nnanocodex-managed\tnanocodex-oai-tools\tnormal\tall\nnanocodex-managed\tnanocodex-voice-protocol\tnormal\tall\nnanocodex-oai-tools\tnanocodex-oai-api\tnormal\tall\nnanocodex-oai-tools\tnanocodex-oai-tools-macros\tnormal\tcfg(not(target_family = "wasm"))\nnanocodex-phone\tnanocodex-managed\tnormal\tall\nnanocodex-phone\tnanocodex-oai-api\tnormal\tall\nnanocodex-phone\tnanocodex-voice-protocol\tnormal\tall\nnanocodex-subagents\tnanocodex-agent\tnormal\tall\nnanocodex-subagents\tnanocodex-claude\tnormal\tall\nnanocodex-subagents\tnanocodex-oai-tools\tnormal\tall\nnanocodex-vm\tnanocodex-computer\tnormal\tall\nnanocodex-vm\tnanocodex-hand\tnormal\tcfg(target_os = "linux")\nnanocodex-vm\tnanocodex-oai-tools\tnormal\tall\nnanocodex-voice\tnanocodex\tnormal\tall\nnanocodex-voice\tnanocodex-voice-native\tnormal\tall\nnanocodex-voice\tnanocodex-voice-protocol\tnormal\tall\nnanocodex-voice-ffi\tnanocodex-voice-protocol\tnormal\tall'
 actual_edges="$(
   jq -r --argjson public "$public_packages" '
     .packages[]
@@ -96,6 +98,17 @@ forbidden_dependencies="$(
 if [[ -n "$forbidden_dependencies" ]]; then
   echo "public crates must not depend on application-owned payment packages:" >&2
   printf '%s\n' "$forbidden_dependencies" >&2
+  exit 1
+fi
+
+# Resolve every feature and target of the independently usable Claude adapters.
+# The package graph snapshot catches direct workspace edges; this catches indirect
+# normal/build dependencies too, including registry packages and proc macros.
+claude_tree="$(cargo tree --locked --package nanocodex-claude-tools \
+  --all-features --target all --edges normal,build --prefix none --format '{p}')"
+if grep -E '^nanocodex-(oai-api|oai-tools|oai-tools-macros|agent)( |$)' <<<"$claude_tree"; then
+  echo "Claude tools must not transitively depend on OpenAI or the agent crate:" >&2
+  printf '%s\n' "$claude_tree" >&2
   exit 1
 fi
 

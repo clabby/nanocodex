@@ -1,3 +1,4 @@
+import { decodeModelCatalog } from "./modelCatalog.ts";
 import { QueryObserver, queryOptions } from "@tanstack/react-query";
 import { appQueryClient, accountQueryKey, sessionQueryKey } from "./queryClient.ts";
 import type { BrowserSession } from "./sessionQueries.ts";
@@ -16,12 +17,6 @@ const MANAGED_HISTORY_INITIAL_ATTEMPTS = 3;
 const MANAGED_HISTORY_ATTEMPT_TIMEOUT_MS = 10_000;
 const MANAGED_HISTORY_RETRY_INITIAL_MS = 1_000;
 const MANAGED_HISTORY_RETRY_MAX_MS = 30_000;
-const DEFAULT_MANAGED_CREATE_SETTINGS: ManagedCreateSettings = Object.freeze({
-  model: "gpt-6-astra",
-  thinking: "low",
-  reasoningMode: "standard",
-  fastMode: false,
-});
 export const MAX_MANAGED_RETAINED_ENVELOPES = MANAGED_HISTORY_PAGE_SIZE * 2;
 const managedCreates = new Map<string, Promise<ManagedConversation>>();
 
@@ -176,12 +171,28 @@ export function reconcileManagedCreateSelection(
 
 export function createManagedConversation(
   accountId = "default",
-  settings: ManagedCreateSettings = DEFAULT_MANAGED_CREATE_SETTINGS,
+  settings?: ManagedCreateSettings,
 ): Promise<ManagedConversation> {
   const creationKey = `${accountId}:${JSON.stringify(settings)}`;
   const retained = managedCreates.get(creationKey);
   if (retained) return retained;
-  const creating = Agent.create({ settings }).then((agent) => {
+  const creating = (async () => {
+    // Availability is account-owned. Never choose a hardcoded OpenAI model on a Claude-only account.
+    const response = await fetch(new URL("/v1/models", location.origin), { credentials: "same-origin", cache: "no-store", headers: { accept: "application/json" } });
+    if (!response.ok) { await response.body?.cancel(); throw new Error("Couldn’t check available models. Refresh your connections."); }
+    const catalog = decodeModelCatalog(await response.json());
+    const choice = catalog.models.find(model => model.id === (settings?.model ?? catalog.defaultModel));
+    if (!choice) throw new Error("Connect a model subscription in account settings before starting a chat.");
+    const selected = settings ?? { model: choice.id, thinking: choice.thinking.includes("low") ? "low" : choice.thinking[0], reasoningMode: "standard", fastMode: false };
+    if (!choice.thinking.includes(selected.thinking) || !choice.reasoningModes.includes(selected.reasoningMode) || (selected.fastMode && !choice.fastMode)) {
+      throw new Error("These model settings are unavailable. Choose settings from the current model catalog.");
+    }
+    const currentSession = appQueryClient.getQueryData<BrowserSession>(sessionQueryKey);
+    if (currentSession && currentSession.account?.id !== accountId) {
+      throw new Error("The account changed before creation. Start a new chat from the current account.");
+    }
+    return Agent.create({ settings: selected });
+  })().then((agent) => {
     const conversation = Object.freeze({
       id: agent.id,
       title: "New conversation",

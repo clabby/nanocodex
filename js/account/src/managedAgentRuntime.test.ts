@@ -142,12 +142,17 @@ test("new managed conversation has an immediate local placeholder and reconciles
   });
   let complete!: (response: Response) => void;
   let requests = 0;
+  let admitted!: () => void;
+  const admission = new Promise<void>(resolve => { admitted = resolve; });
   globalThis.fetch = async (input, init) => {
     const request = new Request(input, init);
     if (request.method === "POST" && new URL(request.url).pathname === "/v1/agents") {
       requests++;
-      return new Promise<Response>(resolve => { complete = resolve; });
+      return new Promise<Response>(resolve => { complete = resolve; admitted(); });
     }
+    if (request.method === "GET" && new URL(request.url).pathname === "/v1/models") return Response.json({ object: "list", data: [
+      { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "claude", thinking: ["low", "medium", "high"], fast_mode: false, reasoning_modes: ["standard"] },
+    ], default_model: "claude-sonnet-4-6" });
     if (request.method === "GET") return Response.json({ data: [FIRST_AGENT_ID], summaries: {} });
     throw new Error(`Unexpected ${request.method} ${request.url}`);
   };
@@ -156,7 +161,8 @@ test("new managed conversation has an immediate local placeholder and reconciles
   assert.match(provisional.id, /^pending:/);
   assert.equal(provisional.title, "New agent");
   assert.notEqual(provisional.id, FIRST_AGENT_ID);
-  assert.equal(requests, 1, "creation begins immediately, before the receipt resolves");
+  await admission;
+  assert.equal(requests, 1, "creation begins after current availability is checked, before the receipt resolves");
   assert.equal(reconcileManagedCreateSelection(provisional.id, provisional.id, FIRST_AGENT_ID), FIRST_AGENT_ID);
   assert.equal(reconcileManagedCreateSelection(SECOND_AGENT_ID, provisional.id, FIRST_AGENT_ID), SECOND_AGENT_ID,
     "a later tab selection is not stolen by a slow create receipt");
@@ -178,7 +184,7 @@ test("failed managed create rejects without publishing a provisional agent", asy
   globalThis.fetch = async () => Response.json({ error: "unavailable", message: "Creation failed" }, { status: 503 });
   const { provisional, receipt } = beginManagedConversationCreation("failure-test");
   assert.match(provisional.id, /^pending:/);
-  await assert.rejects(receipt, /Creation failed/);
+  await assert.rejects(receipt, /Couldn’t check available models/);
   assert.equal(appQueryClient.getQueryData(["account", "failure-test", "conversations"]), undefined);
 });
 

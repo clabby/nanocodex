@@ -1,6 +1,16 @@
 # syntax=docker/dockerfile:1
 # Build against the same libc family as the Sandbox runtime. The publisher is
 # the shared Rust Hand implementation; Go remains only a developer toolchain.
+FROM ubuntu:22.04 AS screen-helpers
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates curl git xz-utils python3 build-essential pkg-config binutils \
+    meson ninja-build libwayland-dev libwayland-bin libxkbcommon-dev libpixman-1-dev libpng-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /source
+COPY .generated/remote-rust/scripts/build-linux-screen-helpers.sh .generated/remote-rust/scripts/build-linux-screen-helpers.py ./scripts/
+COPY .generated/remote-rust/scripts/tests/linux-screen-helpers-bundle.py ./scripts/tests/
+RUN scripts/build-linux-screen-helpers.sh --auto /out/linux-screen-helpers.tar.gz /tmp/screen-build
+
 FROM --platform=$TARGETPLATFORM ubuntu:22.04 AS hand-chef
 # Explicit upstream refresh without disabling normal source-layer reuse.
 ARG NANOCODEX_IMAGE_CACHE_EPOCH=1
@@ -25,9 +35,15 @@ COPY --from=hand-planner /source/recipe.json recipe.json
 # Cook only the recipe in this otherwise empty directory. Keep target AND Cargo
 # sources in image layers so a fresh builder can reuse the exported dependencies.
 RUN CARGO_BUILD_JOBS=2 cargo chef cook --release --locked -p nanocodex2-bin --bin nanocodex2 --recipe-path recipe.json
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
 COPY .generated/remote-rust/ ./
-RUN CARGO_BUILD_JOBS=2 cargo build --release --locked -p nanocodex2-bin --bin nanocodex2 \
-    && mkdir -p /out && cp target/release/nanocodex2 /out/nanocodex-remote
+COPY --from=screen-helpers /out/linux-screen-helpers.tar.gz /opt/linux-screen-helpers.tar.gz
+RUN NANOCODEX_LINUX_SCREEN_BUNDLE=/opt/linux-screen-helpers.tar.gz \
+    CARGO_BUILD_JOBS=2 cargo build --release --locked -p nanocodex2-bin --bin nanocodex2 \
+    && mkdir -p /out && cp target/release/nanocodex2 /out/nanocodex-remote \
+    && python3 scripts/tests/linux-screen-helpers-bundle.py \
+       --binary /out/nanocodex-remote /opt/linux-screen-helpers.tar.gz
 
 # The SDK's Ubuntu 22.04 base has no labwc package. Bundle the VM's Debian
 # desktop stack with its own loader, preserving the SDK and shell libraries.

@@ -38,7 +38,7 @@ impl ActiveNestedToolCall {
 
 #[derive(Deserialize, Serialize)]
 pub(super) struct CompletedToolCall {
-    pub(super) cell: Option<nanocodex_tools::code_mode::CodeModeCell>,
+    pub(super) cell: Option<nanocodex_oai_tools::code_mode::CodeModeCell>,
     pub(super) call_id: String,
     pub(super) tool: String,
     pub(super) success: bool,
@@ -178,7 +178,9 @@ async fn execute_code_call(
     }
 }
 
-fn interrupted_tool_host(error: nanocodex_tools::embedded::CodeModeHostError) -> NanocodexError {
+fn interrupted_tool_host(
+    error: nanocodex_oai_tools::embedded::CodeModeHostError,
+) -> NanocodexError {
     NanocodexError::execution_policy_with_disposition(
         "tool host interrupted",
         crate::ExecutionPolicyDisposition::Reopen,
@@ -244,7 +246,7 @@ where
                         // Legacy effect receipts bypass fresh tool execution. Prepare
                         // their media before those response items enter history too.
                         prepare_output_images(&mut completed.output).await;
-                        nanocodex_tools::image::prepare_history_images(
+                        nanocodex_oai_tools::image::prepare_history_images(
                             &mut completed.response_items,
                         );
                         (Ok(completed), false)

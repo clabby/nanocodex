@@ -6,7 +6,7 @@ use std::{
 };
 
 use nanocodex::{
-    Model, Thinking,
+    HarnessFamily, HarnessModel, Model, Thinking,
     agent::{
         events::{
             AgentEvent, AgentEventData, AgentEventKind, AssistantEvent, ReasoningEvent, RunEvent,
@@ -63,10 +63,10 @@ pub(super) const STANDARD_THINKING_OPTIONS: [(Thinking, &str, &str); 4] = [
     ),
 ];
 
-pub(super) const MODEL_OPTIONS: [(Model, &str); 3] = [
-    (Model::Astra, "Astra"),
-    (Model::Sol, "Sol"),
-    (Model::Luna, "Luna"),
+pub(super) const MODEL_OPTIONS: [(HarnessModel, &str); 3] = [
+    (HarnessModel::Codex(Model::Astra), "Astra"),
+    (HarnessModel::Codex(Model::Sol), "Sol"),
+    (HarnessModel::Codex(Model::Luna), "Luna"),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,7 +83,7 @@ pub(super) enum ReasoningPickerAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ModelPickerAction {
-    Selected(Model),
+    Selected(HarnessModel),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1334,7 +1334,7 @@ pub(super) struct App {
     pending_link_destination: Option<String>,
     tool_details_expanded: bool,
     fast_mode: bool,
-    model: Model,
+    model: HarnessModel,
     thinking: Thinking,
     model_picker: Option<usize>,
     reasoning_picker: Option<ReasoningPicker>,
@@ -1417,7 +1417,7 @@ impl App {
             pending_link_destination: None,
             tool_details_expanded: true,
             fast_mode: false,
-            model: Model::default(),
+            model: HarnessModel::default(),
             thinking: Thinking::default(),
             model_picker: None,
             reasoning_picker: None,
@@ -1453,8 +1453,8 @@ impl App {
         self
     }
 
-    pub(super) const fn with_model(mut self, model: Model) -> Self {
-        self.model = model;
+    pub(super) fn with_model(mut self, model: impl Into<HarnessModel>) -> Self {
+        self.model = model.into();
         self
     }
 
@@ -2995,12 +2995,12 @@ impl App {
         self.thinking
     }
 
-    pub(super) const fn model(&self) -> Model {
+    pub(super) const fn model(&self) -> HarnessModel {
         self.model
     }
 
-    pub(super) const fn model_changed(&mut self, model: Model) {
-        self.model = model;
+    pub(super) fn model_changed(&mut self, model: impl Into<HarnessModel>) {
+        self.model = model.into();
     }
 
     pub(super) fn model_change_failed(&mut self, error: &str) {
@@ -3012,8 +3012,18 @@ impl App {
         self.model_picker
     }
 
+    pub(super) fn model_options(&self) -> Vec<(HarnessModel, &'static str)> {
+        match self.model.family() {
+            HarnessFamily::Codex => MODEL_OPTIONS.to_vec(),
+            HarnessFamily::Claude => HarnessModel::for_family(HarnessFamily::Claude)
+                .map(|model| (model, model.as_str()))
+                .collect(),
+        }
+    }
+
     pub(super) fn open_model_picker(&mut self) {
-        let selected = MODEL_OPTIONS
+        let selected = self
+            .model_options()
             .iter()
             .position(|(model, _)| *model == self.model)
             .unwrap_or(0);
@@ -3021,17 +3031,20 @@ impl App {
     }
 
     pub(super) fn move_model_picker(&mut self, direction: isize) {
+        let count = self.model_options().len();
         let Some(selected) = &mut self.model_picker else {
             return;
         };
         *selected = selected
             .saturating_add_signed(direction)
-            .min(MODEL_OPTIONS.len().saturating_sub(1));
+            .min(count.saturating_sub(1));
     }
 
     pub(super) fn confirm_model_picker(&mut self) -> Option<ModelPickerAction> {
         let selected = self.model_picker.take()?;
-        Some(ModelPickerAction::Selected(MODEL_OPTIONS[selected].0))
+        Some(ModelPickerAction::Selected(
+            self.model_options()[selected].0,
+        ))
     }
 
     pub(super) const fn close_model_picker(&mut self) {
@@ -3042,34 +3055,54 @@ impl App {
         self.reasoning_picker
     }
 
+    pub(super) fn reasoning_options(&self) -> Vec<(Thinking, &'static str, &'static str)> {
+        if self.model.supports_thinking(Thinking::None)
+            && !self.model.supports_thinking(Thinking::Low)
+        {
+            return vec![(
+                Thinking::None,
+                "None",
+                "Ordinary inference without adaptive effort",
+            )];
+        }
+        STANDARD_THINKING_OPTIONS
+            .iter()
+            .copied()
+            .filter(|(thinking, _, _)| self.model.supports_thinking(*thinking))
+            .collect()
+    }
+
     pub(super) fn open_reasoning_picker(&mut self) {
-        let selected = STANDARD_THINKING_OPTIONS
+        let selected = self
+            .reasoning_options()
             .iter()
             .position(|(thinking, _, _)| *thinking == self.thinking)
-            .unwrap_or(STANDARD_THINKING_OPTIONS.len());
+            .unwrap_or(self.reasoning_options().len());
         self.reasoning_picker = Some(ReasoningPicker::Standard { selected });
     }
 
     pub(super) fn move_reasoning_picker(&mut self, direction: isize) {
+        let count = self.reasoning_options().len()
+            + usize::from(self.model.supports_thinking(Thinking::Max));
         let Some(ReasoningPicker::Standard { selected }) = &mut self.reasoning_picker else {
             return;
         };
-        let count = STANDARD_THINKING_OPTIONS.len() + 1;
         *selected = selected
             .saturating_add_signed(direction)
             .min(count.saturating_sub(1));
     }
 
     pub(super) fn confirm_reasoning_picker(&mut self) -> Option<ReasoningPickerAction> {
+        let options = self.reasoning_options();
         match self.reasoning_picker? {
             ReasoningPicker::Standard { selected }
-                if selected == STANDARD_THINKING_OPTIONS.len() =>
+                if selected == options.len() && self.model.supports_thinking(Thinking::Max) =>
             {
                 self.reasoning_picker = Some(ReasoningPicker::Advanced);
                 Some(ReasoningPickerAction::OpenedAdvanced)
             }
             ReasoningPicker::Standard { selected } => {
-                let (thinking, _, _) = STANDARD_THINKING_OPTIONS[selected];
+                let (thinking, _, _) = options[selected];
                 self.reasoning_picker = None;
                 Some(ReasoningPickerAction::Selected(thinking))
             }
@@ -3080,10 +3113,10 @@ impl App {
         }
     }
 
-    pub(super) const fn back_reasoning_picker(&mut self) {
+    pub(super) fn back_reasoning_picker(&mut self) {
         self.reasoning_picker = match self.reasoning_picker {
             Some(ReasoningPicker::Advanced) => Some(ReasoningPicker::Standard {
-                selected: STANDARD_THINKING_OPTIONS.len(),
+                selected: self.reasoning_options().len(),
             }),
             Some(ReasoningPicker::Standard { .. }) | None => None,
         };

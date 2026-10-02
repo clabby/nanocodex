@@ -3710,8 +3710,8 @@ impl NativeBrowser {
     pub(crate) async fn execute_code(
         &self,
         source: &str,
-        context: nanocodex_tools::ToolContext<'_>,
-    ) -> Result<nanocodex_tools::ToolOutput, BrowserError> {
+        context: nanocodex_oai_tools::ToolContext<'_>,
+    ) -> Result<nanocodex_oai_tools::ToolOutput, BrowserError> {
         cdp_code::validate_code(source)?;
         let mut state = self.state.lock().await;
         if state.closed {

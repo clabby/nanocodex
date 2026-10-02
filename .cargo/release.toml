@@ -4,13 +4,15 @@
 nanocodex-hand = { path = "crates/nanocodex-hand" }
 nanocodex-oai-api = { path = "crates/nanocodex-oai-api" }
 nanocodex-observability = { path = "crates/nanocodex-observability" }
-nanocodex-tools-macros = { path = "crates/nanocodex-tools/macros" }
+nanocodex-oai-tools-macros = { path = "crates/nanocodex-oai-tools/macros" }
 nanocodex-voice-native = { path = "crates/nanocodex-voice-native" }
 nanocodex-voice-protocol = { path = "crates/nanocodex-voice-protocol" }
 nanocodex-computer = { path = "crates/experimental/nanocodex-computer" }
-nanocodex-tools = { path = "crates/nanocodex-tools" }
+nanocodex-oai-tools = { path = "crates/nanocodex-oai-tools" }
 nanocodex-voice-ffi = { path = "crates/nanocodex-voice-ffi" }
 nanocodex-agent = { path = "crates/nanocodex-agent" }
+nanocodex-claude-tools = { path = "crates/nanocodex-claude-tools" }
+nanocodex-claude = { path = "crates/nanocodex-claude" }
 nanocodex-durability = { path = "crates/nanocodex-durability" }
 nanocodex-managed = { path = "crates/nanocodex-managed" }
 nanocodex-subagents = { path = "crates/nanocodex-subagents" }

@@ -64,3 +64,9 @@ export type {
   TurnUsage,
   WatchEventsOptions,
 } from "./types.mjs";
+
+export type {
+  Options as ClaudeSubscriptionOptions,
+  Subscription as ClaudeSubscriptionHandle,
+  Status as ClaudeSubscriptionStatus,
+} from "./worker/ClaudeSubscription.mjs";

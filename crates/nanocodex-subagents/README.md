@@ -41,7 +41,7 @@ tools for every driver with `NanocodexBuilder::tools_factory`:
 use std::sync::Arc;
 use nanocodex_agent::Nanocodex;
 use nanocodex_subagents::{channel, install_tools, DEFAULT_MAX_SUBAGENTS};
-use nanocodex_tools::Tools;
+use nanocodex_oai_tools::Tools;
 
 let (registry, control, mut updates) = channel(DEFAULT_MAX_SUBAGENTS);
 let base_tools = Tools::builder().build()?;

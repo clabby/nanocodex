@@ -6,7 +6,7 @@ use std::{
 
 use fs2::FileExt as _;
 use nanocodex_managed::ManagedError;
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tools,
     attachment::{AttachmentMachine, AttachmentTarget},
 };

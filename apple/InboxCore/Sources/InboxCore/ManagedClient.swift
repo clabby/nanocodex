@@ -123,6 +123,7 @@ public final class ManagedClient: @unchecked Sendable {
     static let maximumOutputDownloadSize: Int64 = 256 * 1024 * 1024
     let credential: AccountCredential
     let session: URLSession
+    private let modelConnectionSession: URLSession
     private let responseCache: URLCache?
     private let snapshots: PersistentReadCache
     private let snapshotLifetimeLock = NSLock()
@@ -158,8 +159,15 @@ public final class ManagedClient: @unchecked Sendable {
         config.timeoutIntervalForRequest = 45
         config.timeoutIntervalForResource = 3600
         session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
+        // Model grants and private OAuth destinations must not persist in the HTTP cache.
+        let privateConfig = (configuration?.copy() as? URLSessionConfiguration) ?? URLSessionConfiguration.ephemeral
+        privateConfig.httpShouldSetCookies = false
+        privateConfig.httpCookieStorage = nil
+        privateConfig.urlCache = nil
+        privateConfig.requestCachePolicy = .reloadIgnoringLocalCacheData
+        modelConnectionSession = URLSession(configuration: privateConfig, delegate: NoRedirects(), delegateQueue: nil)
     }
-    public func close() { retireSnapshots(clear: false); session.invalidateAndCancel() }
+    public func close() { retireSnapshots(clear: false); session.invalidateAndCancel(); modelConnectionSession.invalidateAndCancel() }
     /// Call on explicit sign-out, not when suspending an observer.
     public func clearCachedResponses() { retireSnapshots(clear: true); responseCache?.removeAllCachedResponses(); ManagedAccess.clear() }
     public func request(path: String, method: String = "GET", body: JSON? = nil, idempotencyKey: String? = nil, location: JSON? = nil) throws -> URLRequest {
@@ -182,6 +190,10 @@ public final class ManagedClient: @unchecked Sendable {
         // a safely persisted document as lost.
         if path.hasPrefix("/v1/meetings/"), path.hasSuffix("/summarize"), method == "POST" { request.timeoutInterval = 120 }
         request.httpMethod = method
+        if path == "/v1/models" || path == "/v1/credentials" || path.hasPrefix("/v1/credentials/claude") {
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        }
         request.setValue("Bearer " + credential.apiKey, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if path == "/v1/agents" || path.hasPrefix("/v1/agents/") {
@@ -228,7 +240,7 @@ public final class ManagedClient: @unchecked Sendable {
                 guard ifMatch >= 0 else { throw APIError.invalidResponse }
                 outgoing.setValue("\"\(ifMatch)\"", forHTTPHeaderField: "If-Match")
             }
-            (data, response) = try await ManagedAccess.data(for: outgoing, using: session)
+            (data, response) = try await ManagedAccess.data(for: outgoing, using: path == "/v1/models" || path == "/v1/credentials" || path.hasPrefix("/v1/credentials/claude") ? modelConnectionSession : session)
         }
         guard let response = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard (200..<300).contains(response.statusCode) else {
@@ -266,6 +278,27 @@ public final class ManagedClient: @unchecked Sendable {
         }
         return decoded
     }
+    /// Private auth responses never become snapshots, arbitrary diagnostics, or access-token retries.
+    /// Only a fixed status error escapes this boundary; decoder/network details may reflect secrets.
+    func claudeConnectionJSON(path: String, method: String = "GET", body: JSON? = nil) async throws -> JSON {
+        let allowed = ["/v1/credentials", "/v1/credentials/claude/login", "/v1/credentials/claude/login/complete", "/v1/credentials/claude"]
+        guard allowed.contains(path) else { throw APIError.invalidResponse }
+        do {
+            try Task.checkCancellation()
+            let (data, response) = try await modelConnectionSession.data(for: request(path: path, method: method, body: body))
+            guard let response = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+            guard (200..<300).contains(response.statusCode) else { throw APIError.http(response.statusCode) }
+            guard !data.isEmpty, data.count <= 64 * 1024 else { throw APIError.invalidResponse }
+            return try JSONDecoder().decode(JSON.self, from: data)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let safe as APIError {
+            throw safe
+        } catch {
+            throw APIError.invalidResponse
+        }
+    }
+
     public func cachedList() async -> [AgentCard]? {
         guard let body = await cachedJSON(path: "/v1/agents") else { return nil }
         return try? Self.agentCards(body)

@@ -339,7 +339,7 @@ export class SessionModelEgress extends WorkerEntrypoint<EgressEnv> {
   fetch(request: Request): Promise<Response> {
     const owner = request.headers.get(SESSION_MODEL_OWNER_HEADER);
     const subject = request.headers.get(SUBJECT_HEADER);
-    if (request.url !== "https://nanocodex.internal/v1/responses"
+    if (!["https://nanocodex.internal/v1/responses", "https://nanocodex.internal/v1/messages"].includes(request.url)
       || (request.method !== "GET" && request.method !== "POST") || !owner || !USER_ID.test(owner)
       || !subject || !MANAGED_SESSION_SUBJECT.test(subject)) {
       return Promise.resolve(jsonError(403, "invalid_session_model_authority"));
@@ -558,6 +558,12 @@ async function handleMeasuredEgressWithOwner(
   if (url.pathname === MODEL_STATUS_PATH) return handleModelStatus(request, env);
   if (url.pathname === SPONSORED_TRIAL_RESET_PATH) {
     return handleSponsoredTrialReset(request, env);
+  }
+
+  if (url.href === "https://nanocodex.internal/v1/messages") {
+    // Only the dedicated Session model binding carries this authority. Generic
+    // egress, tools, and app clients cannot activate a Claude credential.
+    return handleClaudeMessages(request, env, upstreamFetch, sessionModelAuthority);
   }
 
   const operation = OPERATIONS.find((candidate) => (
@@ -2330,11 +2336,25 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   }
 
   const userMatch = url.pathname.match(
-    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials(?:\/(openai|chatgpt|chatgpt\/login|chatgpt\/login\/status|chatgpt\/local-claim))?$/,
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials(?:\/(openai|chatgpt|chatgpt\/login|chatgpt\/login\/status|chatgpt\/local-claim|claude|claude\/models|claude\/login|claude\/login\/status|claude\/login\/complete))?$/,
   );
   if (!userMatch) return jsonError(404, "not_found");
   const userId = userMatch[1]!;
   const operation = userMatch[2];
+
+  if (operation === "claude/models") {
+    if (request.method !== "GET" || request.body !== null) return jsonError(405, "method_not_allowed");
+    return handleClaudeModels(env, userId);
+  }
+  if (operation?.startsWith("claude")) {
+    const method = operation === "claude" ? "DELETE" : operation === "claude/login/status" ? "GET" : "POST";
+    if (request.method !== method) return jsonError(405, "method_not_allowed");
+    const path = operation === "claude/login" ? "claude/login/start" : operation;
+    return userBroker(env, userId).fetch(`https://credentials.internal/v1/${path}`, {
+      method,
+      ...(request.body ? { body: request.body, headers: { "content-type": "application/json" } } : {}),
+    });
+  }
 
   if (operation === "chatgpt/local-claim") {
     if (request.method !== "POST") return jsonError(405, "method_not_allowed");
@@ -2443,6 +2463,182 @@ async function hasRequestPayload(request: Request): Promise<boolean> {
     await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
+}
+
+/** Private account control: use the grant's live server-visible catalog, not guesses.
+ * OAuth catalog support is a separate rollout gate from Messages inference;
+ * unsupported/rejected catalog access remains unavailable, never guessed.
+ */
+async function handleClaudeModels(env: EgressEnv, userId: string): Promise<Response> {
+  try {
+    let result = consumeRpcData(await userBroker(env, userId).resolveClaudeCredential());
+    if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
+    let credential = result.credential;
+    const secrets = [credential.headers.authorization?.replace(/^Bearer /, "") ?? ""];
+    // One provider-HTTP deadline and one explicit-401 recovery, not per page.
+    const signal = AbortSignal.timeout(15000);
+    let refreshed = false;
+    let afterId: string | undefined;
+    const cursors = new Set<string>();
+    const models = new Map<string, { id: string; display_name: string }>();
+    // At most 1,000 rows / 10 pages, plus one bounded authentication retry.
+    // Never advertise an exhausted catalog if the provider says more remain.
+    for (let page = 0; page < 10; page++) {
+      if (signal.aborted) throw new Error("Claude catalog deadline");
+      const url = new URL("https://api.anthropic.com/v1/models");
+      url.searchParams.set("limit", "100");
+      if (afterId !== undefined) url.searchParams.set("after_id", afterId);
+      const dispatch = () => fetch(url.href, {
+        method: "GET", redirect: "manual", signal,
+        headers: { ...credential.headers, "anthropic-version": "2023-06-01", accept: "application/json" },
+      });
+      let response = await dispatch();
+      if (response.status === 401 && !refreshed) {
+        await cancelResponseBody(response);
+        refreshed = true;
+        result = consumeRpcData(await userBroker(env, userId).resolveClaudeCredential(true, credential.revision));
+        if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
+        credential = result.credential;
+        secrets.push(credential.headers.authorization?.replace(/^Bearer /, "") ?? "");
+        response = await dispatch();
+      }
+      if (!response.ok) { await cancelResponseBody(response); return jsonError(503, "claude_models_unavailable"); }
+      const value: unknown = JSON.parse(await readBoundedText(response, 1024 * 1024));
+      if (!isRecord(value) || !Array.isArray(value.data) || value.data.length > 100
+        || typeof value.has_more !== "boolean") throw new Error("invalid Claude catalog");
+      for (const item of value.data) {
+        if (!isRecord(item) || typeof item.id !== "string") throw new Error("invalid Claude catalog");
+        const id = item.id;
+        if (!/^claude-[A-Za-z0-9._-]{1,120}$/.test(id)) throw new Error("invalid Claude catalog");
+        const name = item.display_name;
+        if (!models.has(id)) models.set(id, { id, display_name: typeof name === "string" && name.length > 0 && name.length <= 120
+          && !/[\u0000-\u001f\u007f]/.test(name) ? name : id });
+      }
+      if (!value.has_more) {
+        // Recheck earlier pages against every credential used, including rotated ones.
+        const rows = [...models.values()];
+        for (const model of rows) {
+          if (secrets.some(secret => secret && model.id.includes(secret))) throw new Error("invalid Claude catalog");
+          if (secrets.some(secret => secret && model.display_name.includes(secret))) model.display_name = model.id;
+        }
+        return json({ models: rows, has_more: false }, 200);
+      }
+      const last = value.data[value.data.length - 1];
+      const cursor = value.last_id;
+      if (typeof cursor !== "string" || !/^claude-[A-Za-z0-9._-]{1,120}$/.test(cursor)
+        || !isRecord(last) || last.id !== cursor || cursors.has(cursor)
+        || secrets.some(secret => secret && cursor.includes(secret))) throw new Error("invalid Claude catalog cursor");
+      cursors.add(cursor);
+      afterId = cursor;
+    }
+    throw new Error("Claude catalog pagination limit");
+  } catch { return jsonError(503, "claude_models_unavailable"); }
+}
+
+/** Private Messages transport: credential resolution is per request, never session data. */
+async function handleClaudeMessages(
+  request: Request, env: EgressEnv, upstreamFetch: typeof fetch,
+  authority?: SessionModelAuthority,
+): Promise<Response> {
+  const subject = request.headers.get(SUBJECT_HEADER);
+  if (!authority || authority.subject !== subject || !MANAGED_SESSION_SUBJECT.test(subject ?? "")
+    || !USER_ID.test(authority.owner) || request.method !== "POST") return jsonError(403, "invalid_session_model_authority");
+  if (request.headers.get("authorization") !== PROVIDER_PLACEHOLDER
+    || request.headers.has("x-api-key") || request.headers.has("cookie") || request.headers.has("upgrade")
+    || request.headers.has("chatgpt-account-id") || !isJsonContentType(request.headers.get("content-type"))) {
+    return jsonError(403, "provider_header_forbidden");
+  }
+  // Reject malformed/unbounded protocol feature selectors; only this trusted
+  // Session transport may request non-secret native feature beta labels.
+  const version = request.headers.get("anthropic-version");
+  if (version !== null && version !== "2023-06-01") return jsonError(403, "provider_header_forbidden");
+  const beta = request.headers.get("anthropic-beta");
+  if (beta !== null && (beta.length > 1024 || !/^[a-z0-9,-]+$/.test(beta))) return jsonError(403, "provider_header_forbidden");
+  let body: string;
+  try { body = await readBoundedText(request, MAX_MODEL_BODY_BYTES); }
+  catch { return jsonError(413, "model_request_too_large"); }
+  try {
+    let result = consumeRpcData(await userBroker(env, authority.owner).resolveClaudeCredential());
+    if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
+    let credential = result.credential;
+    const secrets = [credential.headers.authorization?.replace(/^Bearer /, "") ?? ""];
+    const dispatch = () => {
+      // The native profile finalized body/identity before durable freezing.
+      // Forward only bounded public profile headers; never rewrite those bytes.
+      const agent = request.headers.get("user-agent");
+      if (!agent || !/^claude-cli\/[0-9]+\.[0-9]+\.[0-9]+ \(external, cli\)$/.test(agent)) throw new Error("invalid Claude wire profile");
+      const headers = new Headers({ "content-type": "application/json", "anthropic-version": "2023-06-01",
+        "x-app": "cli", "anthropic-dangerous-direct-browser-access": "true", "user-agent": agent });
+      for (const name of ["x-stainless-arch", "x-stainless-lang", "x-stainless-os", "x-stainless-package-version",
+        "x-stainless-retry-count", "x-stainless-runtime", "x-stainless-runtime-version", "x-stainless-timeout",
+        "x-claude-code-session-id", "connection", "accept-encoding"]) {
+        const value = request.headers.get(name);
+        if (value !== null) { if (value.length > 256) throw new Error("invalid Claude wire header"); headers.set(name,value); }
+      }
+      for (const [name, value] of Object.entries(credential.headers)) {
+        if (name !== "authorization" && name !== "anthropic-beta") throw new Error("invalid Claude credential");
+        headers.set(name, value);
+      }
+      if (beta) headers.set("anthropic-beta", [...new Set((beta + "," + headers.get("anthropic-beta")).split(","))].join(","));
+      headers.set("accept", request.headers.get("accept") === "text/event-stream" ? "text/event-stream" : "application/json");
+      return upstreamFetch(new Request("https://api.anthropic.com/v1/messages?beta=true", {
+        method: "POST", body, headers, redirect: "manual", signal: request.signal,
+      }));
+    };
+    let response = await dispatch();
+    // A definitive unauthorized response is the only replay permission. Never
+    // retry transport failures, redirects, overloads, or uncertain Messages POSTs.
+    if (response.status === 401) {
+      await cancelResponseBody(response);
+      result = consumeRpcData(await userBroker(env, authority.owner).resolveClaudeCredential(true, credential.revision));
+      if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
+      credential = result.credential;
+      secrets.push(credential.headers.authorization?.replace(/^Bearer /, "") ?? "");
+      response = await dispatch();
+    }
+    const headers = new Headers({ "cache-control": "no-store" });
+    for (const name of ["content-type", "request-id", "retry-after"]) {
+      const value = response.headers.get(name);
+      if (value && value.length <= 256 && !secrets.some(secret => secret && value.includes(secret))
+        && (name !== "retry-after" || /^\d{1,6}$/.test(value))) headers.set(name, value);
+    }
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      return Response.json({ error: { type: "api_error", message: `Claude request rejected (HTTP ${response.status}).` } },
+        { status: REDIRECT_STATUS.has(response.status) ? 502 : response.status, headers });
+    }
+    return new Response(privateClaudeStream(response.body, secrets), { status: response.status, headers });
+  } catch { return jsonError(request.signal.aborted ? 499 : 502, "claude_upstream_unavailable"); }
+}
+
+/** Fence accidental provider reflection, including tokens split across SSE chunks. */
+function privateClaudeStream(body: ReadableStream<Uint8Array> | null, values: readonly string[]): ReadableStream<Uint8Array> | null {
+  if (!body) return null;
+  const secrets = values.filter(Boolean);
+  const hold = Math.max(1, ...secrets.map(secret => secret.length)) - 1;
+  const reader = body.getReader(); const decoder = new TextDecoder(); const encoder = new TextEncoder();
+  let pending = "";
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          pending += chunk.done ? decoder.decode() : decoder.decode(chunk.value, { stream: true });
+          if (secrets.some(secret => pending.includes(secret))) throw new Error("private Claude response denied");
+          let count = chunk.done ? pending.length : Math.max(0, pending.length - hold);
+          // TextEncoder must never see separated UTF-16 surrogate halves.
+          // Retain the whole codepoint when the redaction tail cuts through it.
+          if (count > 0 && count < pending.length && pending.charCodeAt(count - 1) >= 0xd800
+            && pending.charCodeAt(count - 1) <= 0xdbff && pending.charCodeAt(count) >= 0xdc00
+            && pending.charCodeAt(count) <= 0xdfff) count -= 1;
+          if (count > 0) { controller.enqueue(encoder.encode(pending.slice(0, count))); pending = pending.slice(count); }
+          if (chunk.done) { controller.close(); reader.releaseLock(); return; }
+          if (count > 0) return;
+        }
+      } catch { await reader.cancel().catch(() => {}); controller.error(new Error("Claude response unavailable")); }
+    },
+    async cancel(reason) { await reader.cancel(reason); reader.releaseLock(); },
+  });
 }
 
 async function handleModelStatus(request: Request, env: EgressEnv): Promise<Response> {

@@ -80,6 +80,15 @@ Worker, Durable Object, or application proxy that owns rotating credentials.
 Authentication modes are constructors rather than a union of mutually
 exclusive fields on `Agent.create`.
 
+### Explicit Claude runtime
+
+`Claude.create` is an additive Messages backend with explicit host-owned auth
+and a Claude-only tool array, using the existing durability store contract.
+It does not silently switch managed providers, install Codex tools, or supply
+a subscription sign-in screen. Managed account connection is documented in the
+[managed Claude guide](../../docs/CLAUDE_MANAGED.md). See the [Claude JavaScript guide](../../docs/CLAUDE_JAVASCRIPT.md)
+for durable reopen, replay, and placement boundaries.
+
 ### Personal memories and caller context
 
 Managed agents can keep user preferences separate from team knowledge:
@@ -602,7 +611,7 @@ shared registry and installs fresh tools for every root, spawn, and fork:
 ```rust,ignore
 let (registry, control, updates) = nanocodex_subagents::channel(max_concurrency);
 let tools = Tools::builder().without_defaults().build()?;
-let tools = nanocodex_tools::embedded::bind_host(tools, javascript_host);
+let tools = nanocodex_oai_tools::embedded::bind_host(tools, javascript_host);
 let (agent, events) = Nanocodex::builder(openai)
     .tools_factory(move |handle| {
         nanocodex_subagents::install_tools(tools.clone(), handle, registry.clone())

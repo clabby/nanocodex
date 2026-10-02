@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, contract::async_trait,
 };
 

@@ -85,10 +85,10 @@ impl ConversationState {
 
     pub(super) fn prepare_replay_images(&mut self) -> bool {
         let mut history = self.managed.flattened_history();
-        let history_changed = nanocodex_tools::image::prepare_history_images(&mut history);
-        let context_changed = nanocodex_tools::image::prepare_history_images(std::slice::from_mut(
-            Arc::make_mut(&mut self.canonical_context),
-        ));
+        let history_changed = nanocodex_oai_tools::image::prepare_history_images(&mut history);
+        let context_changed = nanocodex_oai_tools::image::prepare_history_images(
+            std::slice::from_mut(Arc::make_mut(&mut self.canonical_context)),
+        );
         let changed = history_changed || context_changed;
         if changed {
             self.managed.replace_prepared_history(history);

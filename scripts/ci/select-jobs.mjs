@@ -37,7 +37,7 @@ const rustInput = /(?:\.rs|\/Cargo\.toml)$/;
 // Files read by a package outside its own directory.
 const crossPackageInputs = {
   "bin/nanocodex/build_version.rs": "nanocodex2-bin", // nanocodex2/build.rs
-  "js/nanocodex-tools/runtime/code-tools.mjs": "nanocodex-tools", // embedded copy
+  "js/nanocodex-tools/runtime/code-tools.mjs": "nanocodex-oai-tools", // Rust embedded copy; npm name is unchanged
 };
 // Workflow definitions and actions that ci.yml runs. Any change runs everything.
 const ciDefinitions = /^\.github\/(?:actions\/|workflows\/(?:ci|js-preview)\.yml$)/;
@@ -45,9 +45,9 @@ const ciDefinitions = /^\.github\/(?:actions\/|workflows\/(?:ci|js-preview)\.yml
 const all = value => Object.fromEntries(families.map(name => [name, value]));
 const full = () => ({ jobs: all(true), packages: "*" });
 
-/** Workspace package graph from `cargo metadata --no-deps` (no registry access). */
+/** Workspace package graph from `cargo metadata --locked --no-deps` (no registry access). */
 export function loadGraph(cwd = process.cwd()) {
-  const meta = JSON.parse(execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1", "--offline"], {
+  const meta = JSON.parse(execFileSync("cargo", ["metadata", "--locked", "--no-deps", "--format-version", "1", "--offline"], {
     cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"],
   }));
   const root = meta.workspace_root;

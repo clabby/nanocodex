@@ -94,7 +94,8 @@ impl ObservabilityBuilder {
     /// Starts a builder with the service identity attached to exported spans.
     #[must_use]
     pub fn new(service_name: impl Into<String>, service_version: impl Into<String>) -> Self {
-        let filter = "warn,nanocodex=info,nanocodex_oai_api=info,nanocodex_tools=info".to_owned();
+        let filter =
+            "warn,nanocodex=info,nanocodex_oai_api=info,nanocodex_oai_tools=info".to_owned();
         Self {
             otel_filter: filter.clone(),
             filter,

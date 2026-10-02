@@ -1,7 +1,7 @@
 import type { DefaultAgent, Thinking } from "../types.mjs";
 
 // Adapter-specific extend() signatures do not change subagent ownership.
-type SubagentOwner = Omit<DefaultAgent, "extend">;
+type SubagentOwner = Omit<DefaultAgent, "extend"> | import("./claude.mjs").Agent;
 
 declare const subagentToolBrand: unique symbol;
 
@@ -31,13 +31,17 @@ export type AgentSummary = Readonly<{
   last_output?: unknown;
 }>;
 export type JsonSchema = boolean | Readonly<Record<string, unknown>>;
+type CodexModel = "sol" | "luna" | "astra" | "glm-5.3" | "kimi" | "mimo";
+type ClaudeModel = "opus" | "sonnet" | "fable" | "haiku" | "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-fable-5-1" | "claude-opus-4-6" | "claude-sonnet-4-6" | "claude-haiku-4-5";
 export type SpawnOptions = Readonly<{
   role: string;
   task: string;
-  model?: "sol" | "luna" | "astra" | "glm-5.3" | "kimi" | "mimo" | undefined;
   thinking?: Thinking | undefined;
   outputSchema: JsonSchema;
-}>;
+} & ({ harness?: undefined; model?: CodexModel | ClaudeModel | undefined }
+  | { harness: "codex"; model?: CodexModel | undefined }
+  | { harness: "claude"; model?: ClaudeModel | undefined })>;
+/** Batch children inherit their parent's family, model and thinking. */
 export type BatchSpawnOptions = Readonly<{
   role: string;
   task: string;

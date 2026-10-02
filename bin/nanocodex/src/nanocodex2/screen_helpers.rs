@@ -33,6 +33,14 @@ struct ManifestFile {
     mode: u32,
 }
 
+fn loader_path() -> Result<&'static str, ManagedError> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok("lib/ld-linux-x86-64.so.2"),
+        "aarch64" => Ok("lib/ld-linux-aarch64.so.1"),
+        _ => Err(error("unsupported helper architecture")),
+    }
+}
+
 pub(crate) fn command(name: &str) -> Result<Command, ManagedError> {
     if !matches!(name, "waymote-streamd" | "grim") {
         return Err(error("unknown helper"));
@@ -61,7 +69,7 @@ pub(crate) fn command(name: &str) -> Result<Command, ManagedError> {
     let uid = nix::unistd::geteuid().as_raw();
     let root = PathBuf::from(format!("/tmp/nanocodex-screen-helpers-{uid}"));
     let directory = install(BUNDLE, &root, uid)?;
-    let mut command = Command::new(directory.join("lib/ld-linux-x86-64.so.2"));
+    let mut command = Command::new(directory.join(loader_path()?));
     command
         .arg("--library-path")
         .arg(directory.join("lib"))
@@ -149,11 +157,7 @@ fn manifest(bytes: &[u8]) -> Result<Manifest, ManagedError> {
             return Err(error("expanded bundle exceeds limit"));
         }
     }
-    for name in [
-        "bin/waymote-streamd",
-        "bin/grim",
-        "lib/ld-linux-x86-64.so.2",
-    ] {
+    for name in ["bin/waymote-streamd", "bin/grim", loader_path()?] {
         if !manifest
             .files
             .iter()
@@ -420,11 +424,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     fn bundle(extra: Option<(&str, tar::EntryType)>) -> Vec<u8> {
         let content = b"test helper";
-        let names = [
-            "bin/waymote-streamd",
-            "bin/grim",
-            "lib/ld-linux-x86-64.so.2",
-        ];
+        let names = ["bin/waymote-streamd", "bin/grim", loader_path().unwrap()];
         let files: Vec<_> = names.iter().map(|path| serde_json::json!({"path":path,"sha256":hex::encode(Sha256::digest(content)),"bytes":content.len(),"mode":0o755})).collect();
         let manifest = serde_json::to_vec(
             &serde_json::json!({"version":1,"architecture":std::env::consts::ARCH,"files":files}),

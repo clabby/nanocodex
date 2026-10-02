@@ -19,7 +19,7 @@ const thread = "00000000-0000-7000-8000-000000000042";
 const organization = "00000000-0000-7000-8000-000000000043";
 const team = "00000000-0000-7000-8000-000000000044";
 const machine = "synthetic-discovery-hand";
-const command = "pnpm --filter nanocodex-vite build:wasm && pnpm --filter nanocodex-tools build && pnpm --filter nanocodex-managed-service exec node scripts/prepare-code-evaluator.mjs && pnpm --filter nanocodex-managed-service test:hand-discovery";
+const command = "pnpm --filter nanocodex-vite build:wasm && pnpm --filter nanocodex-tools build && pnpm --filter nanocodex-connect-protocol build && pnpm --filter nanocodex-managed-service prepare:code-evaluator && pnpm --filter nanocodex-managed-service test:hand-discovery";
 const scripts = {
   WARM: `try { text(await tools.exec_command({cmd:"printf MUST_NOT_RUN",workdir:"/${machine}"})); } catch(error) { text({error:error.message}); }`,
   PINNED: `try { await tools.exec_command({cmd:"printf MUST_NOT_RUN",workdir:"/${machine}"}); } catch(error) { notify({phase:"PINNED_CAPTURED",error:error.message}); }

@@ -920,12 +920,12 @@ impl FromStr for NamedHeaderValue {
 mod tests {
     use super::*;
     use nanocodex::{oai::MODEL, tools::ToolContext};
-    use nanocodex_observability::{LogFormat, LogOutput, ObservabilityBuilder};
-    use nanocodex_tools::{
+    use nanocodex_oai_tools::{
         ToolExposure, ToolInput, Tools,
         contract::DEFAULT_TOOL_OUTPUT_TOKENS,
         runtime::{DynamicToolProvider, ToolRuntime},
     };
+    use nanocodex_observability::{LogFormat, LogOutput, ObservabilityBuilder};
     use serde_json::{Value, json, value::to_raw_value};
 
     fn args() -> McpArgs {
@@ -1244,12 +1244,12 @@ tool_timeout_sec = 9.5
         let trace_guard = std::env::var_os("NANOCODEX_MCP_BENCH_TRACE").map(|path| {
             let mut builder =
                 ObservabilityBuilder::new("nanocodex-mcp-bench", env!("CARGO_PKG_VERSION"))
-                    .filter("warn,nanocodex_tools=info")
+                    .filter("warn,nanocodex_oai_tools=info")
                     .format(LogFormat::Json)
                     .output(LogOutput::File(PathBuf::from(path)));
             if let Ok(endpoint) = std::env::var("NANOCODEX_MCP_BENCH_OTEL") {
                 builder = builder
-                    .otel_filter("warn,nanocodex_tools=info")
+                    .otel_filter("warn,nanocodex_oai_tools=info")
                     .otlp_endpoint(endpoint);
             }
             builder.install().unwrap()

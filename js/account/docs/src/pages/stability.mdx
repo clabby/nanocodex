@@ -1,16 +1,16 @@
 ---
 title: Stability and scope
-description: Adopt the supported OpenAI lifecycle without assuming provider portability.
+description: Adopt explicit provider runtimes without assuming interchangeable histories or tools.
 ---
 
 # Stability and scope
 
-Nanocodex deliberately commits to one OpenAI model family and the Responses
-WebSocket lifecycle. That narrow scope keeps the Codex behavior, typed history,
-tool loop, and retry ownership coherent across native Rust and WASM instead of
-introducing a provider abstraction. Stability applies to those owned component
-boundaries, not every example application or experimental runtime in the
-repository.
+Nanocodex has explicit provider runtimes rather than a universal provider
+abstraction. The OpenAI runtime owns Responses history and its Codex tool loop;
+the opt-in `Nanoclaude` runtime owns native Messages content, Claude tools,
+subscription authentication, and its durable journal. Histories, checkpoints,
+and model capabilities are not interchangeable. Stability applies to those
+owned component boundaries, not every application or experimental integration.
 
 ## Supported library surface
 
@@ -21,7 +21,7 @@ The supported foundation is:
 - optional `nanocodex-durability`, the Rust-owned journal, recovery policy,
   checkpoints, and portable store boundary;
 - `nanocodex-oai-api`, the typed OpenAI Responses and Tower boundary;
-- `nanocodex-tools` and `nanocodex-tools-macros`, including native Code Mode,
+- `nanocodex-oai-tools` and `nanocodex-oai-tools-macros`, including native Code Mode,
   workspace tools, MCP, web, and image tooling;
 - the optional `nanocodex-observability` integration; and
 - the optional `nanocodex-subagents` task-tree extension.
@@ -38,6 +38,22 @@ and remain application code. These consumers must not reshape the underlying
 session contract. See the
 [component map](https://github.com/gakonst/nanocodex/blob/master/README.md#components)
 and [executable crate-boundary check](https://github.com/gakonst/nanocodex/blob/master/scripts/check-crate-boundaries.sh).
+
+## Claude opt-in
+
+`nanocodex-claude` owns the native Messages session and subscription OAuth
+lifecycle. `nanocodex-claude-tools` owns Claude host capability contracts and
+adapters without an OpenAI dependency. Enable the facade’s `claude-tools`
+feature for those adapters; `tools` remains an OpenAI compatibility alias for
+`oai-tools`. Node, browser, and Worker SDKs expose `Claude.create` explicitly.
+
+Claude is not an OpenAI transport: use native Claude content, explicit
+authentication, and its own durable state. Supported operations and failure
+behavior are documented in the
+[Claude runtime guide](https://github.com/gakonst/nanocodex/blob/master/docs/CLAUDE_RUNTIME.md).
+Connecting a subscription in the managed application is an account capability,
+not a guarantee that every provider model is entitled or that a deployment has
+been rolled out.
 
 ## Experimental and opt-in
 
@@ -72,9 +88,9 @@ Nanocodex does not provide:
   framework, or application scheduler;
 - generic browser/computer use in the stable core.
 
-It supports a deliberate OpenAI model family and Responses lifecycle. API-key,
-ChatGPT, host-managed, and MPP transports are routing/authentication choices,
-not provider abstraction.
+Within the OpenAI runtime, API-key, ChatGPT, host-managed, and MPP transports
+are routing/authentication choices. Claude is a separate native provider
+runtime, not a Responses translation or a silent fallback.
 
 ## Security and execution
 

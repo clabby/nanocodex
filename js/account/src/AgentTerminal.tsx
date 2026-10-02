@@ -167,11 +167,12 @@ const BrowserAgentTerminal = memo(function BrowserAgentTerminal({
   }, [onConversationActivity]);
   const updateModel = useCallback(async (model: Model) => {
     if (!agent || conversationStarted) return;
+    if (model.startsWith("claude-")) throw new Error("Claude is available in managed chats, not the browser runtime.");
     const thinking = settings.thinking === "none" && ["gpt-6-astra", "gpt-6.1-sol"].includes(model)
       ? model === "gpt-6-astra" ? "high" : "low"
       : settings.thinking;
     if (thinking !== settings.thinking) await agent.session.setThinking(thinking);
-    await agent.session.setModel(model);
+    await agent.session.setModel(model as Exclude<Model, `claude-${string}`>);
     setSettings((current) => ({ ...current, model, thinking }));
   }, [agent, conversationStarted, settings.thinking]);
   const updateThinking = useCallback(async (thinking: Thinking) => {
@@ -207,7 +208,7 @@ const BrowserAgentTerminal = memo(function BrowserAgentTerminal({
       welcome={welcome}
       controls={source === "brokered" || account?.persistent ? ({ agentReady }) => (
         <>
-          {source === "brokered" && <AgentModelMenu
+          {source === "brokered" && <AgentModelMenu managed={false}
             agentReady={agentReady}
             modelLocked={conversationStarted}
             settings={settings}
@@ -259,6 +260,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
     reasoningMode: wireSettings.reasoning_mode, fastMode: wireSettings.fast_mode,
   } : terminalDefaultSettings(source);
   const settingsReady = stateQuery.isSuccess && Boolean(wireSettings);
+  const textOnly = settingsReady && settings.model.startsWith("claude-");
   const [locallyStarted, setLocallyStarted] = useState(false);
   const conversationStarted = locallyStarted || stateQuery.data?.accepted_turns !== 0;
   const settingsMutation = useMutation({
@@ -347,24 +349,20 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
       onStateChange={onStateChange}
       retryAgent={retryAgent}
       renderTool={(tool, { submit }) => <><SecureInputCard key={`secure:${tool.callId}`} tool={tool} agentId={agentId} onReceipt={submit} /><VaultIntakeCard key={tool.callId} tool={tool} onReceipt={submit} /></>}
-      voice={voiceEnabled}
+      voice={voiceEnabled && settingsReady && !textOnly}
       welcome={settingsReady && !conversationStarted ? "# What should we work on?" : undefined}
       composerPlaceholder="Ask Nanocodex"
       controls={({ agentReady }) => (
         <>
           <AgentModelMenu
-            agentReady={agentReady && settingsReady}
+            agentReady={settingsReady}
             modelLocked={conversationStarted}
             settings={settings}
             onFastMode={(fastMode) => updateManagedSettings({ fastMode })}
-            onModel={(model) => updateManagedSettings({
-              model,
-              ...(settings.thinking === "none" && ["gpt-6-astra", "gpt-6.1-sol"].includes(model)
-                ? { thinking: model === "gpt-6-astra" ? "high" : "low" }
-                : {}),
-            })}
+            onModel={(model, normalized) => updateManagedSettings({ model, ...normalized })}
             onThinking={(thinking) => updateManagedSettings({ thinking })}
           />
+          {textOnly ? <span role="status" className="managed-input-capability">Claude: text only · no attachments or voice</span> : null}
           <ManagedAgentSchedules agent={managed} />
           <RemoteScreens key={managed.id} />
         </>

@@ -8,7 +8,7 @@ use std::{
 };
 
 use nanocodex_managed::{ManagedClient, ManagedError};
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tools, WorkspaceTools,
     attachment::{
         AttachmentError, AttachmentEvent, AttachmentMachine, AttachmentMetadata, AttachmentTarget,
