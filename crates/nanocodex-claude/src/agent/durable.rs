@@ -51,6 +51,9 @@ pub(super) struct Cursor {
     pub(super) index: u32,
     #[serde(default)]
     pub(super) steers: u32,
+    // The retry budget belongs to the admitted turn, including durable replay.
+    #[serde(default)]
+    pub(super) context_recovery_attempted: bool,
 }
 impl Cursor {
     pub(super) fn effect<'a>(&'a self, state: &'a State, step: &str) -> Option<Effect<'a>> {
@@ -172,6 +175,7 @@ impl State {
             usage: Usage::default(),
             index: 0,
             steers: 0,
+            context_recovery_attempted: false,
         };
         // Task state snapshots and receipts must advance in the same order.
         #[cfg(all(feature = "tools", not(target_family = "wasm")))]
