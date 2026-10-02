@@ -93,11 +93,30 @@ async fn start_returns_before_ready_and_detach_owns_initialization_cleanup() {
         .unwrap();
     assert_eq!(attachment.status(), AttachmentStatus::Connecting);
     catalog_rx.await.unwrap();
+    let retained = attachment.clone();
     tokio::time::timeout(Duration::from_secs(1), attachment.detach())
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(retained.status(), AttachmentStatus::Disconnected);
     server.await.unwrap();
+
+    // Cancelling setup before the driver is first polled must also stop
+    // advertising Connecting on a retained handle.
+    let (attachment, _) = Tools::builder()
+        .without_defaults()
+        .tool(EchoTool)
+        .build()
+        .unwrap()
+        .attach(AttachmentTarget::new("ws://127.0.0.1:9/tools", "bearer").unwrap())
+        .start()
+        .unwrap();
+    let retained = attachment.clone();
+    tokio::time::timeout(Duration::from_secs(1), attachment.detach())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.status(), AttachmentStatus::Disconnected);
 }
 
 #[tokio::test]
@@ -451,7 +470,52 @@ async fn detach_cancels_execution_and_waits_until_results_are_acknowledged() {
     })
     .await
     .expect("call admission");
+    let retained = attachment.clone();
+    assert_eq!(retained.status(), AttachmentStatus::Ready);
     attachment.detach().await.unwrap();
+    retained.closed().await.unwrap();
+    eprintln!(
+        "native retained handle after detach: {:?}",
+        retained.status()
+    );
+    assert_eq!(retained.status(), AttachmentStatus::Disconnected);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn authentication_rejection_closes_and_marks_retained_handle_fenced() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}/tools", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let rejected = accept_hdr_async(
+            stream,
+            |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+             _response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                Err(http::Response::builder().status(401).body(None).unwrap())
+            },
+        )
+        .await;
+        assert!(rejected.is_err());
+    });
+    let tools = Tools::builder()
+        .without_defaults()
+        .tool(EchoTool)
+        .build()
+        .unwrap();
+    let (attachment, _) = tools
+        .attach(AttachmentTarget::new(endpoint, "synthetic-rejected-bearer").unwrap())
+        .start()
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), attachment.closed())
+        .await
+        .expect("authentication rejection did not close the attachment");
+    assert!(matches!(outcome, Err(AttachmentError::Authentication(_))));
+    eprintln!(
+        "native retained handle after HTTP 401: {:?}",
+        attachment.status()
+    );
+    assert_eq!(attachment.status(), AttachmentStatus::Fenced);
     server.await.unwrap();
 }
 
@@ -792,10 +856,10 @@ impl Tool for GatedTool {
 }
 
 #[tokio::test]
-async fn reconnect_queues_serial_work_without_rejecting_parallel_work_or_replaying_results() {
+async fn reconnect_dispatches_calls_without_serialization_or_replaying_results() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut prior_runtime = Value::Null;
-        for (parallel, count) in [(false, 1), (true, 65)] {
+        for (parallel, count) in [(false, 65), (true, 65)] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("ws://{}/tools", listener.local_addr().unwrap());
             let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
@@ -831,29 +895,17 @@ async fn reconnect_queues_serial_work_without_rejecting_parallel_work_or_replayi
             assert_eq!(received["type"], "diagnostic");
             assert_eq!(received["call_id"], "busy");
             assert_eq!(received["stage"], "received");
-            if !parallel {
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(25), recv_wire_json(&mut second))
-                        .await
-                        .is_err()
-                );
-                release.add_permits(count);
-            }
             let busy = recv_result_phases(
                 &mut second,
                 "busy",
                 &["execution_started", "execution_finished", "result_prepared"],
             )
             .await;
-            if !parallel {
-                assert!(busy["timing"]["execution_gate_ms"].as_f64().unwrap() >= 20.0);
-            }
             assert_eq!(busy["call_id"], "busy");
             assert_eq!(busy["outcome"]["status"], "completed");
+            assert_eq!(busy["timing"]["execution_gate_ms"], 0.0);
             send_json(&mut second, json!({"type":"ack","call_id":"busy"})).await;
-            if parallel {
-                release.add_permits(count);
-            }
+            release.add_permits(count);
             let mut finished = 0;
             while finished < count {
                 if let AttachmentEvent::CallCompleted { call_id, outcome } =
@@ -883,62 +935,6 @@ async fn reconnect_queues_serial_work_without_rejecting_parallel_work_or_replayi
             send_json(&mut second, json!({"type":"draining"})).await;
             detach.await.unwrap().unwrap();
         }
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn queued_calls_expire_or_cancel_without_executing_and_release_the_gate() {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("ws://{}/tools", listener.local_addr().unwrap());
-        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
-        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-        let tools = Tools::builder()
-            .without_defaults()
-            .tool(GatedTool {
-                started,
-                release: release.clone(),
-                parallel: false,
-            })
-            .build()
-            .unwrap();
-        let (attachment, _) = tools
-            .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
-            .start()
-            .unwrap();
-        let mut socket = ready(&listener).await;
-        send_json(&mut socket, call("running", "gated")).await;
-        assert_eq!(starts.recv().await.unwrap(), "running");
-        let mut expired = call("expired", "gated");
-        expired["deadline_at"] = json!(now_ms() + 30);
-        send_json(&mut socket, expired).await;
-        let result =
-            recv_result_phases(&mut socket, "expired", &["received", "result_prepared"]).await;
-        assert_eq!(result["call_id"], "expired");
-        assert_eq!(result["outcome"]["status"], "unavailable");
-        send_json(&mut socket, json!({"type":"ack", "call_id":"expired"})).await;
-        send_json(&mut socket, call("cancelled", "gated")).await;
-        send_json(&mut socket, json!({"type":"cancel", "call_id":"cancelled"})).await;
-        let cancelled =
-            recv_result_phases(&mut socket, "cancelled", &["received", "result_prepared"]).await;
-        assert_eq!(cancelled["call_id"], "cancelled");
-        assert_eq!(cancelled["outcome"]["status"], "ambiguous");
-        send_json(&mut socket, json!({"type":"ack", "call_id":"cancelled"})).await;
-        release.add_permits(1);
-        assert_eq!(recv_json(&mut socket).await["call_id"], "running");
-        send_json(&mut socket, json!({"type":"ack", "call_id":"running"})).await;
-        send_json(&mut socket, call("later", "gated")).await;
-        assert_eq!(starts.recv().await.unwrap(), "later");
-        release.add_permits(1);
-        assert_eq!(recv_json(&mut socket).await["call_id"], "later");
-        send_json(&mut socket, json!({"type":"ack", "call_id":"later"})).await;
-        assert!(starts.try_recv().is_err());
-        let detach = tokio::spawn(async move { attachment.detach().await });
-        assert_eq!(recv_json(&mut socket).await, json!({"type":"drain"}));
-        send_json(&mut socket, json!({"type":"draining"})).await;
-        detach.await.unwrap().unwrap();
     })
     .await
     .unwrap();

@@ -659,6 +659,13 @@ without rewriting baseline instructions, cache keys, or the conversation prefix.
   namespace so admitted calls can recover their receipts. A broker-confirmed
   unstarted call returns an unavailable-hand result for the agent to handle;
   transport failures with unknown admission retain the existing call identity.
+  `online` reports connection presence, not provider responsiveness. Discovery
+  may use a cached snapshot; `environment()` explicitly refreshes it. Hand
+  connections renew a 60-second lease with heartbeats (every 20 seconds for the
+  native client and 30 seconds for JavaScript by default). Expiry requests a
+  reconnect with WebSocket code 1012. A replaced connection, revoked authority,
+  or protocol violation uses terminal code 1008. Calls already dispatched across
+  transport loss retain an uncertain outcome and are not automatically resent.
   Subsequent turns use the `memories__*` tools for scoped recall and Markdown
   updates. Writes require root-agent `memory:write` authority. Markdown writes
   default to private memory for direct accounts and shared memory for Connect;

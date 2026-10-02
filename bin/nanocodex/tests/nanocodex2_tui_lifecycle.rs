@@ -149,6 +149,204 @@ async fn terminal_empty_idle_stops_redrawing_and_still_accepts_input_and_live_up
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_control_keeps_local_root_discoverable_and_stops_it_after_runtime_restart() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+    async fn snapshot(
+        write: &mut OwnedWriteHalf,
+        lines: &mut Lines<BufReader<OwnedReadHalf>>,
+        cursor: u64,
+    ) -> Value {
+        tokio::time::timeout(TIMEOUT, async {
+            loop {
+                write
+                    .write_all(b"{\"id\":\"observe\",\"method\":\"state.get\"}\n")
+                    .await
+                    .unwrap();
+                let response: Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let snapshot = response["result"].clone();
+                if snapshot["state"]["managed_cursor"] == cursor.to_string() {
+                    return snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("control state did not reach the durable event cursor")
+    }
+
+    for keyboard_stop in [true, false] {
+        let mut fixture = Fixture::start().await;
+        fixture.terminal.prompt("LOCAL_ROOT_RESTART_JOURNEY", "\r");
+        let turn = fixture.submission("LOCAL_ROOT_RESTART_JOURNEY").await;
+        fixture.nested(
+            &turn,
+            "run.started",
+            json!({"turn_id":"runtime-before-restart"}),
+        );
+        fixture.terminal.wait_text("Enter steer").await;
+
+        let registry = fixture
+            .terminal
+            ._workspace
+            .path()
+            .join(".codex/nanocodex/tui/instances");
+        let registration_path = std::fs::read_dir(registry)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .unwrap();
+        let registration: Value = tokio::time::timeout(TIMEOUT, async {
+            loop {
+                if let Ok(bytes) = std::fs::read(&registration_path)
+                    && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+                {
+                    break value;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("control registration did not finish writing");
+        let socket = tokio::net::UnixStream::connect(registration["socket_path"].as_str().unwrap())
+            .await
+            .unwrap();
+        let (read, mut write) = socket.into_split();
+        let mut lines = BufReader::new(read).lines();
+        write
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"protocol_version":1,
+        "instance_id":registration["instance_id"],"auth_token":registration["auth_token"]})
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let _: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let accepted = snapshot(&mut write, &mut lines, fixture.cursor).await;
+        eprintln!("local acceptance: {accepted}");
+        assert_eq!(accepted["state"]["execution"], "running");
+        assert_eq!(accepted["state"]["active_turn_ids"], json!([turn]));
+        assert_eq!(accepted["active_turns"][AGENT], json!([turn]));
+
+        let child = "019fc927-b282-79a7-8445-1b9996ad2fb0";
+        for (seq, kind, payload) in [
+            (1, "run.started", json!({"turn_id":"child-runtime"})),
+            (
+                2,
+                "run.failed",
+                json!({"turn_id":"child-runtime","status":"failed","error":"synthetic child failure"}),
+            ),
+        ] {
+            fixture.emit(
+                &turn,
+                json!({"type":"event","agent_id":1,"event":{
+            "protocol_version":1,"request_id":child,"seq":seq,"type":kind,"payload":payload}}),
+            );
+        }
+        // A service runtime reconstruction changes nested IDs and resets its sequence,
+        // but preserves the accepted durable turn and the terminal's connection.
+        fixture.emit(
+            &turn,
+            json!({"type":"event","event":{
+        "protocol_version":1,"request_id":AGENT,"seq":1,"type":"input.accepted",
+        "payload":{"session_id":AGENT,"turn_id":"runtime-after-restart",
+            "item_id":"runtime-after-restart:prompt","kind":"prompt","request_id":turn,
+            "input":"LOCAL_ROOT_RESTART_JOURNEY"}}}),
+        );
+        fixture.emit(
+            &turn,
+            json!({"type":"event","event":{
+        "protocol_version":1,"request_id":AGENT,"seq":2,"type":"run.started",
+        "payload":{"turn_id":"runtime-after-restart"}}}),
+        );
+        fixture.nested(&turn, "tool.call", json!({"turn_id":"runtime-after-restart",
+        "call_id":"held-root-command","tool":"exec_command","arguments":{"cmd":"printf synthetic"}}));
+        let restarted = snapshot(&mut write, &mut lines, fixture.cursor).await;
+        eprintln!("after child failure and root reconstruction: {restarted}");
+        assert_eq!(restarted["state"]["connection"], "ready");
+        assert_eq!(restarted["state"]["execution"], "running");
+        assert_eq!(restarted["state"]["active_turn_ids"], json!([turn]));
+        assert_eq!(restarted["active_turns"][AGENT], json!([turn]));
+        assert_eq!(restarted["active_turns"][child], json!([]));
+
+        if keyboard_stop {
+            fixture.terminal.input("\x1b");
+            fixture.terminal.wait_text("Interrupt").await;
+            fixture.terminal.input("\x1b");
+        } else {
+            let request = json!({"id":"cancel-discovered-local-root","method":"cancel","params":{
+            "expected_instance_id":restarted["instance_id"],
+            "expected_session_id":restarted["active_session_id"],
+            "expected_active_generation":restarted["active_generation"],
+            "expected_turn_id":restarted["state"]["active_turn_ids"][0]}});
+            write
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_str(
+                &tokio::time::timeout(TIMEOUT, lines.next_line())
+                    .await
+                    .expect("control cancel never returned a receipt")
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            eprintln!("control cancellation request: {request}; receipt: {response}");
+            assert_eq!(response["result"]["status"], "accepted");
+            assert_eq!(response["result"]["result"]["turn_id"], turn);
+            assert_eq!(response["result"]["result"]["state"], "cancelling");
+        }
+        let cancelled = tokio::time::timeout(TIMEOUT, fixture.cancellations.recv())
+            .await
+            .expect("confirmed Stop never reached the service")
+            .unwrap();
+        eprintln!(
+            "Stop HTTP cancellation target: {cancelled}; expected durable root: {turn}; keyboard={keyboard_stop}"
+        );
+        assert_eq!(cancelled, turn);
+        if keyboard_stop {
+            fixture.terminal.wait_text("Interrupted response").await;
+        }
+        let cancelling = snapshot(&mut write, &mut lines, fixture.cursor).await;
+        assert_eq!(cancelling["state"]["active_turn_ids"], json!([turn]));
+        fixture.nested(&turn, "tool.result", json!({"turn_id":"runtime-after-restart",
+        "call_id":"held-root-command","tool":"exec_command","status":"cancelled","duration_ns":1,"result":null}));
+        fixture.nested(
+            &turn,
+            "run.failed",
+            json!({"turn_id":"runtime-after-restart","status":"cancelled"}),
+        );
+        fixture.emit(&turn, json!({"type":"turn_cancelled","id":turn}));
+        fixture.terminal.wait_text("Enter send").await;
+        let finished = snapshot(&mut write, &mut lines, fixture.cursor).await;
+        eprintln!(
+            "durable cancellation: {finished}; history: {}",
+            json!(*fixture.history.lock().unwrap())
+        );
+        assert_eq!(finished["state"]["execution"], "idle");
+        assert_eq!(finished["state"]["active_turn_ids"], json!([]));
+        assert_eq!(finished["active_turns"][AGENT], json!([]));
+        assert!(
+            fixture.cancellations.try_recv().is_err(),
+            "Stop must cancel the root only once"
+        );
+        fixture.terminal.prompt("RECOVERY_AFTER_ROOT_STOP", "\r");
+        let next = fixture.submission("RECOVERY_AFTER_ROOT_STOP").await;
+        fixture.complete(&next);
+        fixture.terminal.wait_text("Enter send").await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminal_control_discovers_preserves_draft_and_deduplicates_prompt() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut fixture = Fixture::start().await;

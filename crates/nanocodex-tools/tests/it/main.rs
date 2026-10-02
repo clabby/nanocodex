@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 
+mod attachment;
 mod oauth;
 mod support;
 mod tool_macro;

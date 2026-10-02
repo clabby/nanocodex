@@ -26,6 +26,8 @@ use tokio::{sync::Mutex, task::JoinHandle, time::timeout};
 const DEFAULT_EXEC_YIELD_MS: u64 = 10_000;
 const DEFAULT_WRITE_YIELD_MS: u64 = 250;
 const DEFAULT_POLL_YIELD_MS: u64 = 5_000;
+pub(crate) const MAX_EXEC_YIELD_MS: u64 = 30_000;
+pub(crate) const MAX_POLL_YIELD_MS: u64 = 300_000;
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
@@ -179,7 +181,12 @@ impl ShellSessions {
             .insert(session_id, Arc::clone(&session));
         drop(lifecycle_guard);
 
-        let yield_time = duration_ms(command.yield_time_ms, DEFAULT_EXEC_YIELD_MS, 250, 30_000);
+        let yield_time = duration_ms(
+            command.yield_time_ms,
+            DEFAULT_EXEC_YIELD_MS,
+            250,
+            MAX_EXEC_YIELD_MS,
+        );
         let result = session
             .wait_for_output(yield_time, command.max_output_tokens, started_at)
             .await;
@@ -226,9 +233,9 @@ impl ShellSessions {
             }
         }
         let (default, minimum, maximum) = if request.chars.is_empty() {
-            (DEFAULT_POLL_YIELD_MS, 5_000, 300_000)
+            (DEFAULT_POLL_YIELD_MS, 5_000, MAX_POLL_YIELD_MS)
         } else {
-            (DEFAULT_WRITE_YIELD_MS, 250, 30_000)
+            (DEFAULT_WRITE_YIELD_MS, 250, MAX_EXEC_YIELD_MS)
         };
         let yield_time = duration_ms(request.yield_time_ms, default, minimum, maximum);
         let result = session
