@@ -228,17 +228,21 @@ try {
   }
   if (withSource && process.platform === 'darwin') {
     // The existing source fixture inherits only our already-clean environment.
-    // Its Rust packages have no external dependencies; isolate Cargo state and
-    // reuse the installed non-secret rustup toolchain, not saved account state.
+    // The shipped identity helper uses cached public Cargo dependencies. Share
+    // only that registry cache, keeping Cargo configuration and credentials out
+    // of the fixture, and reuse the installed non-secret rustup toolchain.
     const sourceOutput = join(output, 'mac-source');
     const cargoHome = join(home, 'source-cargo');
     mkdirSync(sourceOutput, { recursive: true });
     mkdirSync(cargoHome);
+    symlinkSync(join(process.env.CARGO_HOME ?? join(process.env.HOME, '.cargo'), 'registry'),
+      join(cargoHome, 'registry'), 'dir');
     const sourceRunner = join(dirname(fileURLToPath(import.meta.url)), 'update_source_e2e.mjs');
     run(process.execPath, [sourceRunner, runner], 0, {
       cwd: sourceOutput, timeout: 900_000,
       env: {
         CARGO_HOME: cargoHome,
+        CARGO_NET_OFFLINE: 'true',
         RUSTUP_HOME: process.env.RUSTUP_HOME ?? join(process.env.HOME, '.rustup'),
       },
     });

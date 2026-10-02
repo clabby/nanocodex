@@ -44,7 +44,7 @@ try {
   run('git', ['init', '-b', 'topic'], { cwd: source });
   writeFileSync(join(source, 'Cargo.toml'), '[workspace]\nresolver = "2"\nmembers = ["cli", "hand", "shared"]\n[profile.nightly]\ninherits = "release"\nlto = false\n');
   // Use the shipped identity helper, including its real Git reference watches.
-  const identityHelper = readFileSync(resolve('bin/nanocodex/build_version.rs'), 'utf8');
+  const identityHelper = readFileSync(new URL('../build_version.rs', import.meta.url), 'utf8');
   const buildScript = (binary = false) => `${binary ? 'mod build_version;' : ''}
 fn main() {
     use std::io::Write;
