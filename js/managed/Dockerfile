@@ -206,3 +206,6 @@ EXPOSE 3000
 EXPOSE 5173
 EXPOSE 8000
 EXPOSE 8080
+
+# These images provision both helpers; no host/manual helper setup is needed.
+ENV NANOCODEX_WAYMOTE=/usr/local/bin/waymote-streamd NANOCODEX_GRIM=/usr/local/bin/grim

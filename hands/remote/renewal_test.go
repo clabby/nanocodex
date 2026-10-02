@@ -99,7 +99,7 @@ func TestPublisherRenewal(t *testing.T) {
 			}
 			capture := &waymoteCapture{input: discardedHostInput{}, done: make(chan struct{})}
 			started := time.Now()
-			err := serveWayland(ctx, hostConfig{Origin: server.URL, CredentialFile: credential, MachineID: "renew-test", Name: "renew", Width: 640, Height: 360, Frames: true, quiet: true, capture: capture})
+			err := serveWayland(ctx, hostConfig{Origin: server.URL, CredentialFile: credential, MachineID: "cf:renew-test", Name: "renew", Width: 640, Height: 360, Frames: true, quiet: true, capture: capture})
 			elapsed := time.Since(started)
 			if overlap.Load() {
 				t.Fatal("concurrent renewal requests")

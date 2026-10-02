@@ -21,6 +21,8 @@ mod hand_service;
 mod hand_setup;
 mod install;
 mod launcher;
+#[cfg(target_os = "linux")]
+mod linux_hand_service;
 mod login;
 mod managed_memory;
 mod managed_server;

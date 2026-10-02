@@ -92,3 +92,6 @@ ENV WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_HEADLESS_OUTPUTS=1 \
 USER desktop
 WORKDIR /workspace
 ENTRYPOINT ["labwc", "--config-dir", "/etc/nanocodex-desktop"]
+
+# These images provision both helpers; no host/manual helper setup is needed.
+ENV NANOCODEX_WAYMOTE=/usr/local/bin/waymote-streamd NANOCODEX_GRIM=/usr/local/bin/grim

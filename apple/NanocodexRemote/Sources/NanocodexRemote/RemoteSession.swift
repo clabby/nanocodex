@@ -294,6 +294,7 @@ public final class RemoteViewer: ObservableObject {
             self.fail(RemoteError.unavailable)
         }
         do {
+            guard selected.supportsLiveTransport else { throw RemoteError.invalidMessage }
             if refresh {
                 let hands = try await service.list()
                 guard epoch == attempt, !Task.isCancelled else { return }

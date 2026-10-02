@@ -278,7 +278,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       }
       const provider = this.#broker.provider();
       return Response.json({
-        screens: this.#remote.list().filter(target => target.agent_tools),
+        screens: this.#remote.list(true).filter(target => target.agent_tools),
         tools: [...provider.definitions().flatMap((definition) => {
           const tool = provider.resolve(definition.name) as RoutedHostedTool | undefined;
           return tool?.routeToken === undefined ? [] : [{
