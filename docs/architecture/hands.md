@@ -135,8 +135,8 @@ not a substitute for decoding the published stream.
 Published x86_64 Linux-GNU Hands embed pinned Waymote and Grim plus their ELF
 loader/runtime-library closure. `scripts/build-linux-screen-helpers.sh` builds
 that payload before the Hand binary; release/nightly Linux-GNU jobs set
-`NANOCODEX_LINUX_SCREEN_BUNDLE`. The Linux Hand image builds the same payload
-natively for each image architecture and verifies it is embedded in the binary.
+`NANOCODEX_LINUX_SCREEN_BUNDLE`. Linux Hand and sandbox images build the same
+payload natively for their architecture and verify it is embedded in the binary.
 Only the single Hand executable is distributed.
 Runtime extracts into an owner-private hash-addressed cache, rejects links and
 special entries, checks the embedded manifest and all file digests before use,
