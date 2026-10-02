@@ -239,6 +239,18 @@ export interface HostedToolsDynamicProvider {
   setCatalogValidator(validator: HostedToolsCatalogValidator | undefined): void;
 }
 
+/** One synchronous discovery view; never retain it as an authority cache. */
+export type HostedToolsCatalogSnapshot = Readonly<{
+  machines(): readonly Readonly<{ machine: HostedMachine; online: boolean }>[];
+  definitions(): readonly HostedToolsCodeDefinition[];
+  resolve(name: string): HostedToolsCodeTool | undefined;
+  machineTool(
+    machineId: string,
+    name: HostedMachineToolName,
+    context?: HostedToolsAuthorizationContext,
+  ): HostedToolsCodeTool | undefined;
+}>;
+
 /** Injectable durable call ledger boundary; the production default is Durable Object SQLite. */
 export interface HostedToolsBrokerPersistence {
   initialize(now: number): readonly HostedToolsStateRow[];
@@ -578,6 +590,72 @@ export class HostedToolsBrokerCore {
   }
 
   provider(): HostedToolsDynamicProvider { return this.#provider; }
+
+  /**
+   * Materialize and index the admitted catalog once for a synchronous request.
+   * Admission still rechecks grants, durable ownership, renewal and generation
+   * in the prepared handler; the view is discovery, not cached authority.
+   */
+  catalogSnapshot(): HostedToolsCatalogSnapshot {
+    const bindings = this.#catalogBindings();
+    const publicBindings = new Map<string, HostedToolsCatalogBinding>();
+    const machineBindings = new Map<string, Map<string, HostedToolsCatalogBinding>>();
+    for (const binding of bindings) {
+      if (!reservedMachineBinding(binding)) {
+        publicBindings.set(binding.entry.definition.name, binding);
+      }
+      if (binding.machine !== undefined) {
+        let tools = machineBindings.get(binding.machine.id);
+        if (tools === undefined) {
+          tools = new Map();
+          machineBindings.set(binding.machine.id, tools);
+        }
+        // Match the existing sorted find-first machine lookup. Ambiguous
+        // exposed names were already removed by #catalogBindings, not hidden
+        // by a last-writer-wins index.
+        if (!tools.has(binding.wireName)) tools.set(binding.wireName, binding);
+      }
+    }
+    const resolveBinding = (
+      name: string,
+      binding: HostedToolsCatalogBinding | undefined,
+      context?: HostedToolsAuthorizationContext,
+    ): HostedToolsCodeTool | undefined => {
+      if (binding === undefined || !this.#entryAllowed(
+        binding.entry, binding.connectGrantId, binding.appToolCatalogDigest, context,
+      )) return undefined;
+      return this.#codeTool(name, this.#preparedTool(binding));
+    };
+    return Object.freeze({
+      machines: () => {
+        // Keep retained identity (including duplicate-ID fail-closed behavior)
+        // separate from live dispatch ownership. Scan routes once, not once
+        // per retained machine. Nothing escapes into a persistent cache.
+        const machines = this.machines();
+        if (machines.length === 0) return [];
+        const onlineIds = new Set<string>();
+        for (const state of this.#sortedStates()) {
+          const socket = this.#liveRoutingSocketForState(state);
+          const attachment = socket === undefined ? undefined : this.#attachment(socket);
+          if (attachment === undefined || attachment.connectGrantId !== undefined) continue;
+          for (const machine of attachment.machines ?? []) onlineIds.add(machine.id);
+        }
+        return machines.map(machine => ({ machine, online: onlineIds.has(machine.id) }));
+      },
+      definitions: () => [...publicBindings.values()]
+        .filter(binding => this.#entryAllowed(
+          binding.entry, binding.connectGrantId, binding.appToolCatalogDigest,
+        ))
+        .map(binding => Object.freeze({
+          ...binding.entry.definition, defer_loading: true as const,
+        })),
+      resolve: (name: string) => resolveBinding(name, publicBindings.get(name)),
+      machineTool: (machineId: string, name: HostedMachineToolName, context?: HostedToolsAuthorizationContext) => {
+        if (!MACHINE_TOOL_NAMES.has(name) && !name.startsWith("mcp__cua_repl__")) return undefined;
+        return resolveBinding(name, machineBindings.get(machineId)?.get(name), context);
+      },
+    });
+  }
 
   /** Resolves one canonical machine primitive against its exact admitted attachment generation. */
   machineTool(
@@ -1957,11 +2035,6 @@ export class HostedToolsBrokerCore {
       : INVALID_CONNECT_GRANT_ID;
   }
 
-  #activeAppToolCatalogDigest(state: HostedToolsStateRow): string | undefined {
-    const socket = this.#socketForState(state);
-    return socket === undefined ? undefined : this.#attachment(socket)?.appToolCatalogDigest;
-  }
-
   #sortedStates(): HostedToolsStateRow[] {
     return [...this.#persistence.states()].sort((left, right) => left.route_id.localeCompare(right.route_id));
   }
@@ -1982,8 +2055,15 @@ export class HostedToolsBrokerCore {
       const savedMachines = state.machines_json ? JSON.parse(state.machines_json) as HostedMachine[] : [];
       if (!socket && savedMachines.length === 0) continue;
       const attachment = socket ? this.#attachment(socket) : undefined;
-      const connectGrantId = this.#activeConnectGrantId(state);
-      const appToolCatalogDigest = this.#activeAppToolCatalogDigest(state);
+      // The live lookup already checked exact lease/generation ownership.
+      // A draining active socket still supplies its grant/digest, as before,
+      // even though it is no longer eligible for new dispatch.
+      const activeSocket = socket ?? this.#socketForState(state);
+      const activeAttachment = attachment
+        ?? (activeSocket === undefined ? undefined : this.#attachment(activeSocket));
+      const connectGrantId = activeAttachment?.connectGrantId === undefined ? undefined
+        : isConnectGrantId(activeAttachment.connectGrantId) ? activeAttachment.connectGrantId : INVALID_CONNECT_GRANT_ID;
+      const appToolCatalogDigest = activeAttachment?.appToolCatalogDigest;
       let entries: HostedToolCatalogEntry[];
       try {
         entries = JSON.parse(state.catalog_json) as HostedToolCatalogEntry[];

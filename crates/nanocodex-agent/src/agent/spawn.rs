@@ -109,6 +109,7 @@ where
         BranchSpawner {
             config,
             tools,
+            spawn_factory: codex.spawn_factory,
             lineage_id,
             provider_session_id,
             prompt_cache_key,
@@ -119,7 +120,7 @@ where
             depth: 0,
             execution: codex.execution,
             restored_snapshot: None,
-            host_context: None,
+            host_context: codex.host_context,
             service_factory,
         },
         session_id,
@@ -150,13 +151,20 @@ where
     let session_id_text = session_id.to_string();
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
     let shutdown = DriverShutdown::default();
-    let tools = spawner
-        .tools
-        .materialize(AgentHandle {
+    let mut child_handle = AgentHandle::new(
+        Arc::<str>::from(session_id_text.as_str()),
+        crate::HarnessModel::Codex(spawner.config.model),
+        Arc::new(super::handle::OpenAiAgentFactory {
             commands: commands.downgrade(),
             shutdown: shutdown.clone(),
-            session_id: Arc::from(session_id_text.as_str()),
-        })?
+        }),
+    );
+    if let Some(factory) = &spawner.spawn_factory {
+        child_handle = child_handle.with_spawn_factory(factory.clone());
+    }
+    let tools = spawner
+        .tools
+        .materialize(child_handle.clone())?
         .for_session(&session_id_text);
     let prompt_cache_key = spawner
         .prompt_cache_key
@@ -199,6 +207,7 @@ where
     let rollout = None;
     let agent = runtime.bind_with_rollout(
         LocalLifecycle {
+            child_handle,
             commands,
             execution: execution.clone(),
             shutdown: shutdown.clone(),

@@ -7,9 +7,11 @@ compile_error!("nanocodex-managed is a native lifecycle backend");
 
 mod auth;
 mod builder;
+mod claude;
 mod client;
 mod driver;
 mod error;
+mod model;
 mod native_secure_input;
 mod share;
 mod sse;
@@ -29,9 +31,14 @@ mod attachment;
 
 pub use auth::ManagedApiKey;
 pub use builder::{Managed, ManagedBuilder, ManagedRequest, ManagedResponse, ManagedService};
+pub use claude::{ClaudeLogin, ClaudeLoginCode, ClaudeLoginStatus};
 pub use client::{ManagedClient, ManagedClientBuilder};
 pub use driver::ManagedAgent;
 pub use error::ManagedError;
+pub use model::{
+    AvailableModel, CatalogAvailabilityError, CatalogProviderAvailability, ManagedModel,
+    ModelCatalog,
+};
 pub use nanocodex_agent::{Model, ReasoningMode, Thinking};
 pub use native_secure_input::{
     NativeSecureInputDescription, NativeSecureInputEnvelope, NativeSecureInputReceipt,

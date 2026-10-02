@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the x86_64 Wayland helper payload consumed by the Rust embedder.
+"""Build the native x86_64/aarch64 Wayland payload consumed by the Rust embedder.
 
 No FFmpeg/compositor is included. Waymote's FFmpeg bridge remains provisioned by
 Hand installation. Native builds never install packages or change host state.
@@ -27,8 +27,15 @@ GRIM_REV = 'b7a99854e46945db9f50ba8d2417ac42321173d1'
 PROTOCOLS_URL = 'https://gitlab.freedesktop.org/wayland/wayland-protocols.git'
 PROTOCOLS_REV = 'ee78491a237eaff9389a0ccf8680521d074407d3'
 ZIG_VERSION = '0.16.0'
-ZIG_SHA256 = '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'
-PACKAGES = {'ld-linux-x86-64.so.2':'libc6', 'libc.so.6':'libc6', 'libm.so.6':'libc6',
+ARCHITECTURES = {
+    'x86_64': {'triplet':'x86_64-linux-gnu', 'loader':'ld-linux-x86-64.so.2',
+               'cflags':'-O2 -march=x86-64 -mtune=generic',
+               'zig_sha256':'70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'},
+    'aarch64': {'triplet':'aarch64-linux-gnu', 'loader':'ld-linux-aarch64.so.1',
+                'cflags':'-O2 -march=armv8-a -mtune=generic',
+                'zig_sha256':'ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17'},
+}
+PACKAGES = {'ld-linux-x86-64.so.2':'libc6', 'ld-linux-aarch64.so.1':'libc6', 'libc.so.6':'libc6', 'libm.so.6':'libc6',
             'libpthread.so.0':'libc6', 'librt.so.1':'libc6', 'libdl.so.2':'libc6',
             'libwayland-client.so.0':'libwayland-client0', 'libxkbcommon.so.0':'libxkbcommon0',
             'libffi.so.8':'libffi8', 'libpixman-1.so.0':'libpixman-1-0',
@@ -57,7 +64,7 @@ def checkout(root, name, url, revision, tag=None):
     return dest
 
 
-def zig_compiler(root, provided):
+def zig_compiler(root, provided, architecture):
     if provided:
         binary = Path(provided).resolve()
     else:
@@ -65,8 +72,8 @@ def zig_compiler(root, provided):
         if not binary.exists():
             archive = root / 'zig.tar.xz'
             if not archive.exists():
-                urllib.request.urlretrieve(f'https://ziglang.org/download/{ZIG_VERSION}/zig-x86_64-linux-{ZIG_VERSION}.tar.xz', archive)
-            if hashlib.sha256(archive.read_bytes()).hexdigest() != ZIG_SHA256:
+                urllib.request.urlretrieve(f'https://ziglang.org/download/{ZIG_VERSION}/zig-{architecture}-linux-{ZIG_VERSION}.tar.xz', archive)
+            if hashlib.sha256(archive.read_bytes()).hexdigest() != ARCHITECTURES[architecture]['zig_sha256']:
                 raise RuntimeError('Zig archive SHA256 mismatch')
             with tarfile.open(archive) as tar:
                 # Python 3.10 is the Ubuntu 22.04 release-builder baseline.
@@ -90,7 +97,7 @@ def zig_compiler(root, provided):
                         target.chmod(member.mode & 0o755)
                     else:
                         raise RuntimeError('Links/special entries are forbidden in Zig archive')
-            shutil.move(str(root / 'compiler' / f'zig-x86_64-linux-{ZIG_VERSION}'), root / 'zig')
+            shutil.move(str(root / 'compiler' / f'zig-{architecture}-linux-{ZIG_VERSION}'), root / 'zig')
     if capture([binary, 'version']).strip() != ZIG_VERSION:
         raise RuntimeError('Zig 0.16.0 is required')
     return binary
@@ -101,10 +108,11 @@ def elf_needed(path):
     return re.findall(r'\(NEEDED\).*?\[(.*?)\]', text)
 
 
-def package_runtime(bundle, sysroot):
-    library_dirs = [sysroot / 'usr/lib/x86_64-linux-gnu', sysroot / 'lib/x86_64-linux-gnu',
-                    Path('/usr/lib/x86_64-linux-gnu'), Path('/lib/x86_64-linux-gnu')]
-    pending = ['ld-linux-x86-64.so.2']
+def package_runtime(bundle, sysroot, architecture):
+    triplet = ARCHITECTURES[architecture]['triplet']
+    library_dirs = [sysroot / 'usr/lib' / triplet, sysroot / 'lib' / triplet,
+                    Path('/usr/lib') / triplet, Path('/lib') / triplet]
+    pending = [ARCHITECTURES[architecture]['loader']]
     for binary in (bundle / 'bin').iterdir():
         pending.extend(elf_needed(binary))
     copied = {}
@@ -167,19 +175,21 @@ def main():
     parser.add_argument('--meson', default='meson', help='Meson command (supports multiple arguments)')
     parser.add_argument('--ninja', default='ninja')
     args = parser.parse_args()
-    if platform.system() != 'Linux' or platform.machine() != 'x86_64':
-        parser.error('This payload is x86_64 Linux only; other release matrix entries are unchanged')
+    architecture = platform.machine()
+    if platform.system() != 'Linux' or architecture not in ARCHITECTURES:
+        parser.error('This payload requires native x86_64 or aarch64 Linux')
+    target = ARCHITECTURES[architecture]
     root = args.work_dir.resolve(); root.mkdir(parents=True, exist_ok=True)
     output = args.output.resolve(); output.parent.mkdir(parents=True, exist_ok=True)
     sysroot = args.sysroot.resolve()
     env = os.environ.copy()
     env.pop('LD_LIBRARY_PATH', None)
     env['ZIG_GLOBAL_CACHE_DIR'] = str(root / 'zig-cache')
-    env['PKG_CONFIG_PATH'] = str(sysroot / 'usr/lib/x86_64-linux-gnu/pkgconfig') + ':' + str(sysroot / 'usr/share/pkgconfig')
+    env['PKG_CONFIG_PATH'] = str(sysroot / 'usr/lib' / target['triplet'] / 'pkgconfig') + ':' + str(sysroot / 'usr/share/pkgconfig')
     env['PKG_CONFIG_SYSROOT_DIR'] = str(sysroot)
     env['PKG_CONFIG_ALLOW_SYSTEM_LIBS'] = '1'
     env['PKG_CONFIG_ALLOW_SYSTEM_CFLAGS'] = '1'
-    zig = zig_compiler(root, args.zig)
+    zig = zig_compiler(root, args.zig, architecture)
     waymote = checkout(root, 'waymote', WAYMOTE_URL, WAYMOTE_REV)
     # Add only an install step for streamd; do not build or ship the Go gateway.
     run(['git', '-C', waymote, 'diff', '--exit-code', '--', '.', ':(exclude)build.zig'])
@@ -200,7 +210,7 @@ def main():
     (pcdir / 'wayland-protocols.pc').write_text(f'Name: wayland-protocols\nDescription: pinned protocol XML\nVersion: 1.49\npkgdatadir={protocols}\n')
     (pcdir / 'wayland-scanner.pc').write_text(f'Name: wayland-scanner\nDescription: native Wayland scanner\nVersion: 1.20.0\nwayland_scanner={scanner}\n')
     env['PKG_CONFIG_PATH'] = str(pcdir) + ':' + env['PKG_CONFIG_PATH']
-    env['CFLAGS'] = '-O2 -march=x86-64 -mtune=generic'
+    env['CFLAGS'] = target['cflags']
     env['NINJA'] = args.ninja
     build = root / 'grim-build'
     if build.exists():
@@ -216,13 +226,13 @@ def main():
     shutil.copyfile(build / 'grim', bundle / 'bin/grim')
     for binary in (bundle / 'bin').iterdir():
         binary.chmod(0o755)
-    libraries = package_runtime(bundle, sysroot)
+    libraries = package_runtime(bundle, sysroot, architecture)
     for name, source, license_name in [('waymote', waymote, 'LICENSE'), ('grim', grim, 'LICENSE'), ('wayland-protocols', protocols, 'COPYING')]:
         shutil.copyfile(source / license_name, bundle / 'licenses' / f'{name}.txt')
     upstream = {'waymote':{'url':WAYMOTE_URL, 'revision':WAYMOTE_REV, 'build_patch':'streamd-only install step; no runtime source modifications'},
                 'grim':{'url':GRIM_URL, 'tag':GRIM_TAG, 'revision':GRIM_REV},
                 'wayland_protocols':{'url':PROTOCOLS_URL, 'revision':PROTOCOLS_REV},
-                'zig':{'version':ZIG_VERSION, 'archive_sha256':ZIG_SHA256}, 'cpu':'x86_64 baseline',
+                'zig':{'version':ZIG_VERSION, 'archive_sha256':target['zig_sha256']}, 'cpu':architecture + ' baseline',
                 'runtime_libraries':libraries,
                 'build_tools':{'meson':capture(shlex.split(args.meson) + ['--version']).strip(),
                                'ninja':capture([args.ninja, '--version']).strip(),
@@ -236,7 +246,7 @@ def main():
             path.chmod(mode)
             files.append({'path':path.relative_to(bundle).as_posix(), 'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
                           'bytes':path.stat().st_size, 'mode':mode})
-    (bundle / 'manifest.json').write_text(json.dumps({'version':1, 'architecture':'x86_64', 'files':files}, indent=2) + '\n')
+    (bundle / 'manifest.json').write_text(json.dumps({'version':1, 'architecture':architecture, 'files':files}, indent=2) + '\n')
     (bundle / 'manifest.json').chmod(0o644)
     expanded = sum(p.stat().st_size for p in bundle.rglob('*') if p.is_file())
     if expanded > 128 * 1024 * 1024:

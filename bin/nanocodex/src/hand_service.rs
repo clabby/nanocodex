@@ -578,6 +578,7 @@ fn lock_legacy_launchers(directory: &Path) -> Result<Vec<fs::File>> {
     Ok(locks)
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn legacy_publisher(command: &str, uid: &str, install: &Path) -> bool {
     let Some((owner, command)) = command.trim().split_once(char::is_whitespace) else {
         return false;
@@ -668,6 +669,7 @@ fn legacy_helper_binary(command: &str, uid: &str, install: &Path) -> Option<Path
 
 /// Explicit recovery may retire a legacy publisher that stole the state lock
 /// during an older updater's handover. Never signal a CLI, a VM, or another user.
+#[cfg(not(target_os = "linux"))]
 async fn stop_legacy_publishers() -> Result<()> {
     let home = home()?;
     let domain = domain().await?;
@@ -854,6 +856,7 @@ impl ServiceUpdate {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) async fn recover() -> Result<()> {
     refuse_system_service().await?;
     let backup = plist_path()?.with_extension("plist.update-backup");
@@ -1019,6 +1022,7 @@ pub(crate) async fn finish_recovery() -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn restore_snapshot(mut snapshot: Value) -> Result<(Vec<u8>, bool)> {
     validate_plist(&snapshot)?;
     let was_loaded = snapshot

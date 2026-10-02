@@ -3,7 +3,7 @@
 //! publisher is owned by the OS service and survives all client disconnects.
 use clap::Args;
 use nanocodex_managed::{ManagedClient, ManagedError};
-use nanocodex_tools::attachment::AttachmentEvent;
+use nanocodex_oai_tools::attachment::AttachmentEvent;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{

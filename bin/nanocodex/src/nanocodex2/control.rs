@@ -2,22 +2,31 @@
 
 use clap::{Args, Subcommand, ValueEnum};
 use nanocodex_managed::{
-    AgentSettings, CronSessionMode, CronTriggerConfig, ManagedClient, ManagedError, Model,
-    ReasoningMode, Thinking,
+    AgentSettings, CronSessionMode, CronTriggerConfig, ManagedClient, ManagedError, ManagedModel,
+    Model, ReasoningMode, Thinking,
 };
+
+fn parse_managed_model(value: &str) -> Result<ManagedModel, &'static str> {
+    value.parse::<ManagedModel>().or_else(|_| {
+        value
+            .parse::<Model>()
+            .map(ManagedModel::from)
+            .map_err(|_| "Expected a supported managed model ID or native model alias")
+    })
+}
 
 #[derive(Args, Default)]
 pub(crate) struct InitialSettings {
-    /// Initial model (astra, sol, or luna, or its full model ID).
-    #[arg(long)]
-    model: Option<Model>,
+    /// Initial managed model ID (Claude supported; native aliases astra/sol/luna accepted).
+    #[arg(long, value_parser = parse_managed_model)]
+    model: Option<ManagedModel>,
     /// Initial reasoning effort.
     #[arg(long)]
     thinking: Option<Thinking>,
     /// Initial reasoning mode (standard or pro).
     #[arg(long)]
     reasoning_mode: Option<ReasoningMode>,
-    /// Enable fast processing for the new agent (defaults to true).
+    /// Request fast processing (default follows the selected model catalog).
     #[arg(long, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
     fast_mode: Option<bool>,
     /// Pin the new session to this connected ChatGPT account (disables failover).
@@ -35,13 +44,83 @@ impl InitialSettings {
     }
 
     pub(crate) fn resolve(self) -> AgentSettings {
-        let defaults = AgentSettings::default();
+        let model = self.model.unwrap_or_else(|| Model::Sol.into());
+        let defaults = AgentSettings::new(model);
         AgentSettings {
-            model: self.model.unwrap_or(Model::Sol),
-            thinking: self.thinking.unwrap_or(Thinking::Xhigh),
+            model,
+            thinking: self.thinking.unwrap_or(if model.oai().is_some() {
+                Thinking::Xhigh
+            } else {
+                defaults.thinking
+            }),
             reasoning_mode: self.reasoning_mode.unwrap_or(defaults.reasoning_mode),
-            fast_mode: self.fast_mode.unwrap_or(true),
+            fast_mode: self.fast_mode.unwrap_or(model.supports_fast_mode()),
         }
+    }
+
+    /// Resolves only a new conversation against the account's authoritative catalog.
+    /// Reopening an existing conversation must preserve its retained settings.
+    pub(crate) async fn resolve_for_account(
+        mut self,
+        client: &ManagedClient,
+    ) -> Result<AgentSettings, ManagedError> {
+        let catalog = client.models().await?;
+        let model = match self.model {
+            Some(model) => model,
+            None if self.chatgpt_account.is_some() => catalog
+                .data
+                .iter()
+                .find(|entry| entry.provider == "openai" && entry.id == Model::Sol)
+                .or_else(|| catalog.data.iter().find(|entry| entry.provider == "openai"))
+                .map(|entry| entry.id)
+                .ok_or_else(|| {
+                    ManagedError::Configuration(
+                        "No ChatGPT model is available for the requested account pin".to_owned(),
+                    )
+                })?,
+            None => catalog.default_model.ok_or_else(|| {
+                ManagedError::Configuration(
+                    "No managed model is available; connect a provider subscription first"
+                        .to_owned(),
+                )
+            })?,
+        };
+        let entry = catalog.data.iter().find(|entry| entry.id == model)
+            .ok_or_else(|| ManagedError::Configuration("The requested model is not available to this account; inspect the managed model catalog".to_owned()))?;
+        if self.chatgpt_account.is_some() && (entry.provider != "openai" || model.oai().is_none()) {
+            return Err(ManagedError::Configuration(
+                "The requested model cannot be pinned to a ChatGPT account".to_owned(),
+            ));
+        }
+        if self.thinking.is_none() {
+            let preferred = if model.oai().is_some() {
+                Thinking::Xhigh
+            } else {
+                model.default_thinking()
+            };
+            self.thinking = Some(if entry.thinking.contains(&preferred) {
+                preferred
+            } else if entry.thinking.contains(&model.default_thinking()) {
+                model.default_thinking()
+            } else {
+                entry.thinking[0]
+            });
+        }
+        if self.fast_mode.is_none() {
+            self.fast_mode = Some(entry.fast_mode);
+        }
+        self.model = Some(model);
+        let settings = self.resolve();
+        if !entry.thinking.contains(&settings.thinking)
+            || !entry.reasoning_modes.contains(&settings.reasoning_mode)
+            || (settings.fast_mode && !entry.fast_mode)
+        {
+            return Err(ManagedError::Configuration(
+                "The requested effort, reasoning mode, or fast mode is not offered for this model"
+                    .to_owned(),
+            ));
+        }
+        Ok(settings)
     }
 }
 
@@ -56,7 +135,10 @@ pub(crate) struct Settings {
 #[derive(Subcommand)]
 enum SettingsChange {
     /// Select the model for subsequently admitted turns.
-    Model { model: Model },
+    Model {
+        #[arg(value_parser = parse_managed_model)]
+        model: ManagedModel,
+    },
     /// Set reasoning effort for subsequently admitted turns.
     Thinking { thinking: Thinking },
     /// Set standard or pro reasoning mode.

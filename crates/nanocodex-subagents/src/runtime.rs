@@ -19,8 +19,8 @@ use super::{
 use futures_util::future::join_all;
 use jsonschema::Validator;
 use nanocodex_agent::{
-    AgentEvents, AgentHandle, ChildRuntimeSnapshot, Nanocodex, NanocodexError,
-    Result as AgentResult, TurnResult,
+    AgentEvents, AgentHandle, ChildSnapshot, Nanocodex, NanocodexError, Result as AgentResult,
+    TurnResult,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -45,7 +45,7 @@ pub(super) struct ChildSession {
     pub(super) active: bool,
     pub(super) output_validator: Validator,
     pub(super) output_schema: Value,
-    pub(super) stored_runtime: Option<ChildRuntimeSnapshot>,
+    pub(super) stored_runtime: Option<ChildSnapshot>,
     pub(super) next_instruction_revision: u64,
     pub(super) active_instruction_revision: Option<u64>,
     pub(super) steering: bool,
@@ -1443,9 +1443,9 @@ impl Registry {
                     std::io::Error::other("subagent parent runtime is unavailable for rehydration")
                 })?;
             let contract = OutputContract::compile(&schema)?;
-            let needs_assignment = snapshot.conversation.is_none();
+            let needs_assignment = !snapshot.has_conversation();
             let (agent, events) = parent
-                .restore_child(snapshot, host_context)
+                .restore_runtime(snapshot, host_context)
                 .await
                 .map_err(std::io::Error::other)?;
             let (start, ready) = oneshot::channel();
@@ -1727,7 +1727,18 @@ impl Registry {
             self.send(&root_session_id, AgentUpdate::Status { id, status });
         }
         self.changed();
-        self.stop_and_close(root_session_id, ids, harnesses).await
+        let root = root_session_id.clone();
+        let result = self.stop_and_close(root_session_id, ids, harnesses).await;
+        if result.is_ok() {
+            // Factory recipes may retain the embedding's registry. Drop the root
+            // capability at scope shutdown so those approved recipes do not form
+            // a retained registry/factory cycle after all drivers have drained.
+            self.session_handles
+                .write()
+                .expect("session handles poisoned")
+                .remove(&root);
+        }
+        result
     }
 
     async fn stop_and_close(
@@ -1764,6 +1775,32 @@ impl Registry {
                     status: AgentStatus::Closed,
                 },
             );
+        }
+        let closed_sessions = {
+            let state = self.state.lock().await;
+            state
+                .scopes
+                .get(&root_session_id)
+                .map(|scope| {
+                    ids.iter()
+                        .filter_map(|id| {
+                            scope
+                                .sessions
+                                .get(id)
+                                .map(|session| session.descriptor.session_id.clone())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        {
+            let mut handles = self
+                .session_handles
+                .write()
+                .expect("session handles poisoned");
+            for session in closed_sessions {
+                handles.remove(&session);
+            }
         }
         self.changed();
         self.wait_for_tasks(harness_tasks, deadline, "subagent harnesses")
@@ -2069,8 +2106,8 @@ pub fn channel(
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDescriptor, AgentId, AgentStatus, ChildSession, OutputContract, Registry,
-        RegistryState, complete_session, forward_events,
+        AgentDescriptor, AgentId, AgentStatus, ChildSession, ChildSnapshot, OutputContract,
+        Registry, RegistryState, complete_session, forward_events,
     };
     use crate::platform;
     use crate::{
@@ -2200,7 +2237,9 @@ mod tests {
             let (parent, _events) = Nanocodex::builder(openai)
                 .tools_factory(move |handle| {
                     handles.send(handle).unwrap();
-                    nanocodex_tools::Tools::builder().without_defaults().build()
+                    nanocodex_oai_tools::Tools::builder()
+                        .without_defaults()
+                        .build()
                 })
                 .build()
                 .unwrap();
@@ -3979,7 +4018,9 @@ mod tests {
                     .entry(handle.session_id().to_owned())
                     .or_default() += 1;
                 factory_registry.register_handle(handle);
-                nanocodex_tools::Tools::builder().without_defaults().build()
+                nanocodex_oai_tools::Tools::builder()
+                    .without_defaults()
+                    .build()
             })
             .build()
             .unwrap();
@@ -4082,7 +4123,9 @@ mod tests {
             .harness
             .clone()
             .unwrap();
-        let snapshot = harness.snapshot().await.unwrap();
+        let ChildSnapshot::Codex(snapshot) = harness.snapshot().await.unwrap() else {
+            panic!("expected native Codex checkpoint");
+        };
         assert_eq!(snapshot.model, nanocodex_agent::Model::Sol);
         assert_eq!(snapshot.thinking, nanocodex_agent::Thinking::High);
         assert_eq!(

@@ -356,10 +356,13 @@ impl From<&str> for PromptRequest {
 /// Optional model policy for a newly spawned clean agent.
 ///
 /// Omitted values inherit the invoking agent's settings at the model boundary
-/// where the spawn command is handled.
+/// where the spawn command is handled. Selecting another model or family uses
+/// the destination model's default effort unless an effort is supplied.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SpawnOptions {
     pub(super) model: Option<Model>,
+    pub(super) harness: Option<crate::HarnessFamily>,
+    pub(super) harness_model: Option<crate::HarnessModel>,
     pub(super) thinking: Option<Thinking>,
     pub(super) stateless_http: bool,
 }
@@ -370,6 +373,8 @@ impl SpawnOptions {
     pub const fn new() -> Self {
         Self {
             model: None,
+            harness: None,
+            harness_model: None,
             thinking: None,
             stateless_http: false,
         }
@@ -379,7 +384,85 @@ impl SpawnOptions {
     #[must_use]
     pub const fn model(mut self, model: Model) -> Self {
         self.model = Some(model);
+        self.harness_model = Some(crate::HarnessModel::Codex(model));
         self
+    }
+
+    /// Selects the new child's native agent-loop family.
+    #[must_use]
+    pub const fn harness(mut self, family: crate::HarnessFamily) -> Self {
+        self.harness = Some(family);
+        self
+    }
+
+    /// Selects a model scoped to its native family.
+    #[must_use]
+    pub const fn harness_model(mut self, model: crate::HarnessModel) -> Self {
+        self.harness_model = Some(model);
+        self.model = match model {
+            crate::HarnessModel::Codex(model) => Some(model),
+            _ => None,
+        };
+        self
+    }
+
+    /// Returns the requested family, before parent inheritance.
+    #[must_use]
+    pub const fn selected_harness(&self) -> Option<crate::HarnessFamily> {
+        self.harness
+    }
+
+    /// Returns the requested family-scoped model.
+    #[must_use]
+    pub const fn selected_harness_model(&self) -> Option<crate::HarnessModel> {
+        self.harness_model
+    }
+
+    /// Rejects a model that belongs to a different explicitly selected family.
+    pub fn validate_harness(&self) -> Result<()> {
+        if let (Some(family), Some(model)) = (self.harness, self.harness_model)
+            && family != model.family()
+        {
+            return Err(NanocodexError::InvalidRequest(
+                "model does not belong to selected harness".into(),
+            ));
+        }
+        if let (Some(model), Some(thinking)) = (self.harness_model, self.thinking)
+            && !model.supports_thinking(thinking)
+        {
+            return Err(NanocodexError::InvalidRequest(
+                "model does not support selected thinking".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolves defaults within one family without inheriting another family's model.
+    pub fn resolve(self, parent: crate::HarnessModel, parent_thinking: Thinking) -> Result<Self> {
+        self.validate_harness()?;
+        let family = self.harness.unwrap_or(parent.family());
+        let model = self.harness_model.unwrap_or_else(|| {
+            if family == parent.family() {
+                parent
+            } else {
+                family.default_model()
+            }
+        });
+        if model.family() != family {
+            return Err(NanocodexError::InvalidRequest(
+                "model does not belong to selected harness".into(),
+            ));
+        }
+        let thinking = self.thinking.unwrap_or_else(|| {
+            if family == parent.family() && model == parent {
+                parent_thinking
+            } else {
+                model.default_thinking()
+            }
+        });
+        let resolved = self.harness(family).harness_model(model).thinking(thinking);
+        resolved.validate_harness()?;
+        Ok(resolved)
     }
 
     /// Overrides the reasoning effort for the new agent without changing its parent.
@@ -409,6 +492,45 @@ impl SpawnOptions {
     #[must_use]
     pub const fn selected_thinking(&self) -> Option<Thinking> {
         self.thinking
+    }
+}
+
+/// Native in-memory checkpoint for residency eviction, without host credentials.
+#[derive(Clone, Debug)]
+pub enum ChildSnapshot {
+    /// Existing Responses checkpoint, preserving its public representation.
+    Codex(ChildRuntimeSnapshot),
+    /// Versioned native checkpoint decoded only by its owning backend family.
+    Native {
+        /// Backend family and pinned model.
+        model: crate::HarnessModel,
+        /// Stable child identity.
+        session_id: String,
+        /// Pinned effort.
+        thinking: Thinking,
+        /// Backend-native serialized state, never a translated Responses transcript.
+        payload: String,
+        /// Whether an assignment reached a committed conversation boundary.
+        has_conversation: bool,
+    },
+}
+
+impl ChildSnapshot {
+    /// Whether restoration can resume an already committed assignment.
+    pub fn has_conversation(&self) -> bool {
+        match self {
+            Self::Codex(snapshot) => snapshot.conversation.is_some(),
+            Self::Native {
+                has_conversation, ..
+            } => *has_conversation,
+        }
+    }
+    /// Pinned family-scoped model selected when the child was constructed.
+    pub fn model(&self) -> crate::HarnessModel {
+        match self {
+            Self::Codex(snapshot) => crate::HarnessModel::Codex(snapshot.model),
+            Self::Native { model, .. } => *model,
+        }
     }
 }
 

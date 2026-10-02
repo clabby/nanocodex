@@ -1,5 +1,6 @@
 import { AdminPanel } from "./AdminPanel";
 import { AccountCommunication } from "./AccountCommunication";
+import { ClaudeConnection } from "./ClaudeConnection";
 import { ChatGptAccounts } from "./ChatGptAccounts";
 import { decodeCredentialStatus, decodeChatGptLogin, type CredentialStatus } from "./modelCredentials";
 import { useAccountQuery } from "./useAccountQuery";
@@ -390,6 +391,8 @@ function AccountMenuContent({ inline }: { inline: boolean }) {
               />
               {credentials ? (
                 <>
+                  <ClaudeConnection status={credentials.claude} disabled={!accountPersistent || providerOperation !== null}
+                    onChanged={async () => { await loadCredentials(); notifyModelCredentialChanged(); }} />
                   <ChatGptAccounts
                     status={credentials.chatgpt}
                     disabled={providerOperation !== null}
@@ -593,7 +596,9 @@ function AccountMenuContent({ inline }: { inline: boolean }) {
                 >
                   {credentials ? (
                     <>
-                      <ChatGptAccounts
+                      <ClaudeConnection status={credentials.claude} disabled={!accountPersistent || providerOperation !== null}
+                    onChanged={async () => { await loadCredentials(); notifyModelCredentialChanged(); }} />
+                  <ChatGptAccounts
                         status={credentials.chatgpt}
                         disabled={!accountPersistent || providerOperation !== null}
                         onAdd={() => void startChatGpt()}

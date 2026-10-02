@@ -332,11 +332,11 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       if (!ownerId || !this.#owns(ownerId)) {
         return Response.json({ error: "not_found" }, { status: 404 });
       }
-      const provider = this.#broker.provider();
+      const catalog = this.#broker.catalogSnapshot();
       return Response.json({
         screens: this.#remote.list(true).filter(target => target.agent_tools),
-        tools: [...provider.definitions().flatMap((definition) => {
-          const tool = provider.resolve(definition.name) as RoutedHostedTool | undefined;
+        tools: [...catalog.definitions().flatMap((definition) => {
+          const tool = catalog.resolve(definition.name) as RoutedHostedTool | undefined;
           return tool?.routeToken === undefined ? [] : [{
             definition,
             parallel_safe: tool.parallelSafe,
@@ -347,11 +347,11 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
             route_token: tool.routeToken,
           } satisfies AccountHostedTool];
         }), ...this.#remote.tools()],
-        machines: this.#broker.machines().map((machine) => ({
+        machines: catalog.machines().map(({ machine, online }) => ({
           machine,
-          online: this.#broker.machineOnline(machine.id),
+          online,
           tools: HOSTED_MACHINE_TOOL_NAMES.flatMap((name) => {
-            const tool = this.#broker.machineTool(machine.id, name);
+            const tool = catalog.machineTool(machine.id, name);
             return tool?.routeToken === undefined ? [] : [{
               name,
               parallel_safe: tool.parallelSafe,
@@ -392,12 +392,13 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
           { threadId: invocation.thread_id, callId: invocation.call_id, turnId: invocation.turn_id }));
         if (remote) return remote;
       }
+      const catalog = this.#broker.catalogSnapshot();
       const machineName = HOSTED_MACHINE_TOOL_NAMES.find((name) => name === invocation.name);
       const tool = invocation.machine_id === undefined
-        ? this.#broker.provider().resolve(invocation.name)
+        ? catalog.resolve(invocation.name)
         : machineName === undefined
           ? undefined
-          : this.#broker.machineTool(invocation.machine_id, machineName);
+          : catalog.machineTool(invocation.machine_id, machineName);
       if (!tool) {
         observeHandCall("account.resolve", invocation.name, ownedAt, "unavailable", invocation.call_id, correlation);
         return Response.json({ error: "tool_unavailable" }, { status: 404 });
@@ -410,7 +411,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       // a replacement host publishes, and the caller may have refreshed an old
       // command route before admission. Its original snapshot is insufficient.
       const processRoute = invocation.machine_id !== undefined && invocation.name === "exec_command"
-        ? this.#broker.machineTool(invocation.machine_id, "write_stdin")?.routeToken : undefined;
+        ? catalog.machineTool(invocation.machine_id, "write_stdin")?.routeToken : undefined;
       const resolvedAt = performance.now();
       observeHandCall("account.resolve", invocation.name, ownedAt, "ok", invocation.call_id, correlation);
       let result;

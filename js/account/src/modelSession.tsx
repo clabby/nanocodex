@@ -39,13 +39,13 @@ export function inactiveTerminalMessage({
   if (authStatus.state === "signed_out") return `Verify your phone by SMS to start the ${agent}.`;
   if (authStatus.state === "error") return "Could not check your model connection. Use Retry above.";
   if (runtime === "managed" && source === "sponsored") {
-    return "The included model is limited to the ephemeral homepage demo. Connect ChatGPT or an OpenAI API key to use durable agents.";
+    return "The included model is limited to the ephemeral homepage demo. Connect Claude, ChatGPT, or an OpenAI API key to use durable agents.";
   }
   if (runtime === "browser" && source === "sponsored" && authStatus.freePromptsRemaining === 0) {
     return "Your three free prompts are used. Connect ChatGPT or an OpenAI API key to continue.";
   }
   if (!authStatus.ready) {
-    return `Connect ChatGPT or an OpenAI API key from the account menu to start the ${agent}.`;
+    return `Connect ${runtime === "managed" ? "Claude, ChatGPT," : "ChatGPT"} or an OpenAI API key from the account menu to start the ${agent}.`;
   }
   return "";
 }
@@ -113,7 +113,7 @@ export function AgentSessionBar({
       ) : null}
       {status?.state === "ready" && !status.ready ? (
         <p className="agent-session-note" role="status">
-          Connect ChatGPT or an OpenAI API key from the account menu.
+          Connect Claude, ChatGPT, or an OpenAI API key from the account menu.
         </p>
       ) : null}
       {status?.state === "signed_out" ? (

@@ -46,9 +46,16 @@ private final class NativeTranscriptCell: UICollectionViewCell {
         result.size = CGSize(width: width, height: max(1, ceil(size.height)))
         return result
     }
+    // Keep the hosted content rendered for glass sampling, but do not expose
+    // a cell entirely behind the header or dock to touch or accessibility navigation.
+    func setUnobscured(_ unobscured: Bool) {
+        accessibilityElementsHidden = !unobscured
+        isUserInteractionEnabled = unobscured
+    }
     override func prepareForReuse() {
         super.prepareForReuse()
         visibility.visible = false
+        setUnobscured(false)
     }
 }
 
@@ -57,8 +64,8 @@ final class NativeConversationScrollProxy {
     fileprivate var scroll: ((String, CGFloat) -> Void)?
     fileprivate var follow: ((Bool) -> Void)?
 
-    // Reading positions are exact viewport points, never fractions of a
-    // self-sizing row or the keyboard-dependent viewport height.
+    // Reading positions are exact points below the top chrome, never fractions
+    // of a self-sizing row or the keyboard-dependent viewport height.
     func scrollTo(_ id: String, topOffset: CGFloat = 0) { scroll?(id, topOffset) }
     func followLatest(animated: Bool = false) { follow?(animated) }
 }
@@ -82,6 +89,7 @@ struct NativeConversationTranscript: UIViewRepresentable {
     var rows: [Row]
     var proxy: NativeConversationScrollProxy
     var followsLatest: Bool
+    var topInset: CGFloat = 0
     var bottomInset: CGFloat
     var onFrames: ([String: CGRect]) -> Void
     var onMetrics: (NativeConversationScrollMetrics) -> Void
@@ -219,7 +227,7 @@ struct NativeConversationTranscript: UIViewRepresentable {
             parent.proxy.follow = { [weak self] animated in self?.requestFollowLatest(animated: animated) }
             let newIDs = next.rows.map(\.id)
             assert(Set(newIDs).count == newIDs.count, "Transcript row IDs must be unique")
-            let insetChanged = view.contentInset.bottom != next.bottomInset
+            let insetChanged = view.contentInset.top != next.topInset || view.contentInset.bottom != next.bottomInset
             let structural = ids != newIDs
             let contentChanged = next.rows.contains { hostedRows[$0.id]?.revision != $0.revision }
             if structural { retainSurvivingReadingPoint(in: Set(newIDs)) }
@@ -241,7 +249,9 @@ struct NativeConversationTranscript: UIViewRepresentable {
                     transcriptRowCount = newIDs.filter { $0 != "latest" && $0 != "transcript-header" }.count
                 }
             }
+            view.contentInset.top = next.topInset
             view.contentInset.bottom = next.bottomInset
+            view.verticalScrollIndicatorInsets.top = next.topInset
             view.verticalScrollIndicatorInsets.bottom = next.bottomInset
             if !structural {
                 commitRows()
@@ -300,6 +310,8 @@ struct NativeConversationTranscript: UIViewRepresentable {
 
         private func restore(_ id: String, offset: CGFloat) {
             guard let path = dataSource.indexPath(for: id) else { return }
+            // ChatLayout already subtracts adjustedContentInset.top when restoring
+            // a top snapshot, so offset stays relative to the usable top boundary.
             chatLayout.restoreContentOffset(with: ChatLayoutPositionSnapshot(
                 indexPath: path, edge: .top, offset: offset - chatLayout.settings.additionalInsets.top))
         }
@@ -319,7 +331,7 @@ struct NativeConversationTranscript: UIViewRepresentable {
                     chatLayout.restoreContentOffset(with: ChatLayoutPositionSnapshot(indexPath: path, edge: .bottom))
                 }
             case let .reading(id, offset):
-                // Keyboard/composer resize is outside ChatLayout's batch update.
+                // Header/keyboard/composer resize is outside ChatLayout's batch update.
                 // Restore only at that boundary; self-sizing keeps its own anchor.
                 if viewportChanged, !view.isTracking, !view.isDragging, !view.isDecelerating {
                     restore(id, offset: offset)
@@ -336,13 +348,14 @@ struct NativeConversationTranscript: UIViewRepresentable {
 
         private func visibleReadingPoint(among survivors: Set<String>? = nil) -> (id: String, offset: CGFloat)? {
             guard let view else { return nil }
+            let usableTop = view.contentOffset.y + view.adjustedContentInset.top
             return view.indexPathsForVisibleItems.compactMap { path -> (id: String, frame: CGRect)? in
                 guard let id = dataSource.itemIdentifier(for: path),
                       survivors?.contains(id) ?? true,
                       let frame = view.layoutAttributesForItem(at: path)?.frame,
-                      frame.maxY > view.contentOffset.y else { return nil }
+                      frame.maxY > usableTop else { return nil }
                 return (id, frame)
-            }.min(by: { $0.frame.minY < $1.frame.minY }).map { ($0.id, $0.frame.minY - view.contentOffset.y) }
+            }.min(by: { $0.frame.minY < $1.frame.minY }).map { ($0.id, $0.frame.minY - usableTop) }
         }
 
         private func captureReadingPoint() {
@@ -384,7 +397,20 @@ struct NativeConversationTranscript: UIViewRepresentable {
         }
         #endif
 
+        private func isUnobscured(_ frame: CGRect, in view: UICollectionView) -> Bool {
+            let top = view.bounds.minY + max(0, parent.topInset)
+            let bottom = view.bounds.maxY - max(0, parent.bottomInset)
+            return bottom > top && frame.maxY > top && frame.minY < bottom
+        }
+
         private func reportSoon() {
+            // Update synchronously during layout/scrolling so a newly covered
+            // cell cannot remain interactive until the deferred frame report.
+            if let view {
+                for case let cell as NativeTranscriptCell in view.visibleCells {
+                    cell.setUnobscured(isUnobscured(cell.frame, in: view))
+                }
+            }
             #if DEBUG
             updateMountedCounter()
             #endif
@@ -396,8 +422,12 @@ struct NativeConversationTranscript: UIViewRepresentable {
                 var frames: [String: CGRect] = [:]
                 for path in view.indexPathsForVisibleItems {
                     guard let id = self.dataSource.itemIdentifier(for: path),
-                          let frame = view.layoutAttributesForItem(at: path)?.frame else { continue }
-                    frames[id] = frame.offsetBy(dx: -view.contentOffset.x, dy: -view.contentOffset.y)
+                          let frame = view.layoutAttributesForItem(at: path)?.frame,
+                          self.isUnobscured(frame, in: view) else { continue }
+                    // Match scrollTo(topOffset:) and reading anchors so callers
+                    // can save and restore these frames without adding chrome twice.
+                    frames[id] = frame.offsetBy(dx: -view.contentOffset.x,
+                                                dy: -view.contentOffset.y - view.adjustedContentInset.top)
                 }
                 if self.reportedFrames != frames {
                     self.reportedFrames = frames
@@ -420,10 +450,14 @@ struct NativeConversationTranscript: UIViewRepresentable {
         }
 
         func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-            (cell as? NativeTranscriptCell)?.visibility.visible = true
+            guard let cell = cell as? NativeTranscriptCell else { return }
+            cell.visibility.visible = true
+            cell.setUnobscured(isUnobscured(cell.frame, in: collectionView))
         }
         func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-            (cell as? NativeTranscriptCell)?.visibility.visible = false
+            guard let cell = cell as? NativeTranscriptCell else { return }
+            cell.visibility.visible = false
+            cell.setUnobscured(false)
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {

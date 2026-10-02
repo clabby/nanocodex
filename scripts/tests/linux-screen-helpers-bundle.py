@@ -4,6 +4,7 @@
 Usage: python3 scripts/tests/linux-screen-helpers-bundle.py [--verify-only] BUNDLE.tar.gz
        python3 scripts/tests/linux-screen-helpers-bundle.py --binary HAND BUNDLE.tar.gz
 --verify-only checks archive integrity without running helpers (build-time).
+--architecture requires the bundle and ELF machine to match the Cargo target.
 --binary additionally requires the exact verified payload in the shipped Hand.
 Checks the public manifest contract, DT_NEEDED resolution via the bundled
 loader, real upstream help, and rejection of a tampered payload. Does not
@@ -20,6 +21,11 @@ import subprocess
 import tarfile
 import tempfile
 from contextlib import contextmanager
+
+ARCHITECTURES = {
+    'x86_64': ('ld-linux-x86-64.so.2', b'\x3e\x00'),
+    'aarch64': ('ld-linux-aarch64.so.1', b'\xb7\x00'),
+}
 
 
 @contextmanager
@@ -74,7 +80,7 @@ def extract_and_verify(archive, root):
         if not paths:
             raise ValueError('empty archive')
     manifest = json.loads((root / 'manifest.json').read_text())
-    if type(manifest['version']) is not int or manifest['version'] != 1 or manifest['architecture'] != 'x86_64':
+    if type(manifest['version']) is not int or manifest['version'] != 1 or manifest['architecture'] not in ARCHITECTURES:
         raise ValueError('manifest version/architecture')
     if not isinstance(manifest['files'], list) or len(manifest['files']) > 512:
         raise ValueError('manifest file count limit')
@@ -94,15 +100,17 @@ def extract_and_verify(archive, root):
             raise ValueError('file hash/size/mode mismatch: ' + path)
     if declared != paths - {'manifest.json'}:
         raise ValueError('undeclared file')
-    required = {'bin/waymote-streamd', 'bin/grim', 'lib/ld-linux-x86-64.so.2', 'upstream.json'}
+    loader, elf_machine = ARCHITECTURES[manifest['architecture']]
+    executables = {'bin/waymote-streamd', 'bin/grim', 'lib/' + loader}
+    required = executables | {'upstream.json'}
     if not required <= declared or not any(p.startswith('licenses/') for p in declared):
         raise ValueError('missing required helper/provenance')
     for file in manifest['files']:
-        if file['path'] in {'bin/waymote-streamd', 'bin/grim', 'lib/ld-linux-x86-64.so.2'}:
+        if file['path'] in executables:
             with (root / file['path']).open('rb') as binary:
                 header = binary.read(20)
-            if file['mode'] != 0o755 or not header.startswith(b'\x7fELF\x02\x01') or header[18:20] != b'\x3e\x00':
-                raise ValueError('required helper is not an executable x86_64 ELF file')
+            if file['mode'] != 0o755 or not header.startswith(b'\x7fELF\x02\x01') or header[18:20] != elf_machine:
+                raise ValueError('required helper is not an executable ' + manifest['architecture'] + ' ELF file')
     if any(re.search(r'(^|/)(ffmpeg|labwc|weston)(\.|$)', p) for p in paths):
         raise ValueError('unexpected system component')
     return manifest
@@ -111,6 +119,7 @@ def extract_and_verify(archive, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--architecture', choices=ARCHITECTURES, help='Require this target architecture')
     parser.add_argument('--binary', type=Path)
     parser.add_argument('archive', type=Path)
     args = parser.parse_args()
@@ -119,6 +128,8 @@ def main():
         base = Path(temp)
         first = base / 'original'
         manifest = extract_and_verify(archive, first)
+        if args.architecture and manifest['architecture'] != args.architecture:
+            raise ValueError('bundle does not match target architecture: ' + args.architecture)
         if args.binary:
             with args.binary.open('rb') as hand, mmap.mmap(hand.fileno(), 0, access=mmap.ACCESS_READ) as binary:
                 if binary.find(archive.read_bytes()) < 0:
@@ -131,7 +142,7 @@ def main():
         first.rename(relocated)
         empty_path = base / 'empty PATH'; empty_path.mkdir()
         env = {'PATH':str(empty_path), 'LC_ALL':'C', 'HOME':str(base)}
-        loader = relocated / 'lib/ld-linux-x86-64.so.2'
+        loader = relocated / 'lib' / ARCHITECTURES[manifest['architecture']][0]
         for helper, option, marker in [('waymote-streamd', '--help', 'waymote'), ('grim', '-h', 'grim')]:
             command = [str(loader), '--inhibit-cache', '--library-path', str(relocated / 'lib')]
             resolved = subprocess.run(command + ['--list', str(relocated / 'bin' / helper)],

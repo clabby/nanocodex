@@ -7,13 +7,15 @@ crates=(
   "nanocodex-hand:crates/nanocodex-hand"
   "nanocodex-oai-api:crates/nanocodex-oai-api"
   "nanocodex-observability:crates/nanocodex-observability"
-  "nanocodex-tools-macros:crates/nanocodex-tools/macros"
+  "nanocodex-oai-tools-macros:crates/nanocodex-oai-tools/macros"
   "nanocodex-voice-native:crates/nanocodex-voice-native"
   "nanocodex-voice-protocol:crates/nanocodex-voice-protocol"
   "nanocodex-computer:crates/experimental/nanocodex-computer"
-  "nanocodex-tools:crates/nanocodex-tools"
+  "nanocodex-oai-tools:crates/nanocodex-oai-tools"
   "nanocodex-voice-ffi:crates/nanocodex-voice-ffi"
   "nanocodex-agent:crates/nanocodex-agent"
+  "nanocodex-claude-tools:crates/nanocodex-claude-tools"
+  "nanocodex-claude:crates/nanocodex-claude"
   "nanocodex-durability:crates/nanocodex-durability"
   "nanocodex-managed:crates/nanocodex-managed"
   "nanocodex-subagents:crates/nanocodex-subagents"
@@ -34,12 +36,12 @@ case "${1:-}" in
     ;;
   check)
     diff -u \
-      <(for crate in "${crates[@]}"; do printf '%s\n' "${crate%%:*}"; done | sort) \
+      <(for crate in "${crates[@]}"; do printf '%s\n' "${crate%%:*}"; done | LC_ALL=C sort) \
       <(
         cargo metadata --manifest-path "$repository_root/Cargo.toml" \
-          --no-deps --format-version 1 |
+          --locked --no-deps --format-version 1 |
           jq -r '.packages[] | select(.name | startswith("nanocodex")) | select(.publish != []) | .name' |
-          sort
+          LC_ALL=C sort
       )
     ;;
   *)

@@ -26,9 +26,9 @@ use nanocodex_oai_api::{
     events::{AgentEvent, AgentEvents},
 };
 #[cfg(feature = "openai")]
-use nanocodex_tools::Tools;
+use nanocodex_oai_tools::Tools;
 #[cfg(feature = "openai")]
-use nanocodex_tools::ToolsBuildError;
+use nanocodex_oai_tools::ToolsBuildError;
 #[cfg(feature = "openai")]
 use tokio::sync::oneshot;
 #[cfg(feature = "openai")]
@@ -125,14 +125,14 @@ pub use backend::BuilderBackend;
 pub use builder::NanocodexBuilder;
 #[cfg(feature = "openai")]
 pub use context_source::ExecutionEnvironment;
-#[cfg(feature = "openai")]
 pub use handle::AgentHandle;
 pub use handle::Nanocodex;
 pub use session_context::AgentSessionContext;
 #[cfg(feature = "openai")]
 use turn::TurnCheckpoint;
 pub use turn::{
-    ChildRuntimeSnapshot, PromptRequest, PromptRoute, SpawnOptions, Turn, TurnControl, TurnResult,
+    ChildRuntimeSnapshot, ChildSnapshot, PromptRequest, PromptRoute, SpawnOptions, Turn,
+    TurnControl, TurnResult,
 };
 
 #[cfg(feature = "openai")]

@@ -1,3 +1,5 @@
+import { prepareHarnesses } from '../runtime/harnesses.mjs';
+import { create as createClaude } from './Claude.mjs';
 import { applyBrowserPatch, Nanocodex } from "../pkg-web/nanocodex.js";
 
 import { agentActions } from "../actions/index.mjs";
@@ -33,6 +35,8 @@ import {
 
 /** Creates the Rust/WASM Agent in the current Web API host isolate. */
 export async function create(options = {}) {
+  if (options.harness === 'claude') return createClaude(options);
+  if (options.harness !== undefined && options.harness !== 'codex') throw new TypeError('unsupported harness family');
   if (managedTransportOptions(options?.transport)) return createManagedAgent(options);
   const internalRuntime = options[Symbol.for("nanocodex.browser.internalRuntime")];
   if (internalRuntime !== undefined
@@ -140,8 +144,9 @@ export async function create(options = {}) {
     applyPatch: applyBrowserPatch,
     websocketPreconnect,
     websocketUrl,
-    onDispose: () => releaseDefinitionHost(hostDefinitionId),
+    onDispose: () => { releaseDefinitionHost(hostDefinitionId); void harnesses?.close(); },
   });
+  let harnesses;
   let durabilityOwner;
   let creationStarted = false;
   hostDefinitionId = registerDefinitionHost(host, cloudflareReservation);
@@ -161,6 +166,7 @@ export async function create(options = {}) {
             durabilityId,
           );
         }
+        harnesses = await prepareHarnesses(options.harnesses, events.emit);
         activateHost(host);
         await host.ready();
         await initializeBrowserEngine({ module });
@@ -176,6 +182,7 @@ export async function create(options = {}) {
           websocketWarmup,
           stateless,
           subagents: subagentConfig,
+          claudeHarness: harnesses?.claude,
           subagentRouting: internalRuntime?.subagentRouting !== undefined,
           hostDefinitionId,
           beforeCompaction: beforeCompaction !== undefined,

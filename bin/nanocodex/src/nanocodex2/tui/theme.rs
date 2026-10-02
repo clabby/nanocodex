@@ -4,7 +4,7 @@
 //! Configurable terminal colors and light/dark mode selection.
 
 use crate::config::ReasoningEffort;
-use nanocodex::Model;
+use nanocodex_managed::ManagedModel as Model;
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, str::FromStr};
@@ -175,9 +175,9 @@ impl Theme {
 
     pub(crate) const fn model(&self, model: Model) -> Color {
         match model {
-            Model::Luna => Color::White,
-            Model::Sol => Color::Yellow,
-            Model::Astra => Color::LightMagenta,
+            Model::Oai(nanocodex::Model::Luna) => Color::White,
+            Model::Oai(nanocodex::Model::Sol) => Color::Yellow,
+            Model::Oai(nanocodex::Model::Astra) => Color::LightMagenta,
             _ => Color::White,
         }
     }

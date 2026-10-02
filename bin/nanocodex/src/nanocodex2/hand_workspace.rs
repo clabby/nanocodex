@@ -1,6 +1,6 @@
 //! Shared Hand operations over explicitly selected execution backends.
 
-use nanocodex_tools::ToolsBuilder;
+use nanocodex_oai_tools::ToolsBuilder;
 use nanocodex_vm::{
     VmWorkspace, VmWorkspaceError,
     docker::{DockerWorkspace, DockerWorkspaceError},
@@ -50,7 +50,7 @@ impl HandWorkspace {
 
     pub(crate) async fn attachment_tools_builder(
         &self,
-    ) -> Result<ToolsBuilder, nanocodex_tools::contract::ToolError> {
+    ) -> Result<ToolsBuilder, nanocodex_oai_tools::contract::ToolError> {
         match self {
             Self::Vm(workspace) => workspace.attachment_tools_builder().await,
             Self::Docker(workspace) => workspace.attachment_tools_builder().await,

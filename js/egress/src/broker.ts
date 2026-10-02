@@ -1,3 +1,5 @@
+import { ClaudeSubscription } from "nanocodex/worker";
+import claudeModule from "nanocodex/wasm";
 import { createMercatorMcpCredential, MercatorPaymentInputError } from "./mercator-payment";
 import type { CloudflareAccountVaultResult } from "nanocodex/cloudflare/egress";
 import { createSshKeyPair, sshPublicKey } from "nanocodex/tools/ssh";
@@ -38,6 +40,9 @@ import {
 } from "./ssh";
 
 const STATE_KEY = "credential-state";
+const CLAUDE_STATE_KEY = "claude-subscription-v1";
+type ClaudeRow = { revision: string; envelope: EncryptedEnvelope };
+type ClaudeCredential = ClaudeSubscription.PrivateCredential;
 const TOKEN_ENDPOINT_PATH = "/oauth/token";
 const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const LOGIN_TTL_MS = 15 * 60_000;
@@ -336,6 +341,8 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   #pendingOperations = 0;
   #activeOperation: CredentialOperation | undefined;
   #credentials: CredentialState = { version: 1, active: null };
+  #claude: Promise<ClaudeSubscription.Subscription> | undefined;
+  #claudeCredential: ClaudeCredential | undefined;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(state: DurableObjectState, env: BrokerEnv) {
@@ -419,6 +426,98 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       activation_ms: this.#activationMs,
       activation_age_ms: Date.now() - this.#activatedAt,
     };
+  }
+
+  /** Private service-binding RPC only: never expose this credential to account clients. */
+  resolveClaudeCredential(recover = false, rejectedRevision?: string): Promise<{
+    status: number; credential: ClaudeCredential | null;
+  }> {
+    return this.#exclusive(async () => {
+      await this.#ready;
+      try {
+        const subscription = await this.#claudeSubscription();
+        // A cached rejected generation is only a hint. Rust compares its exact
+        // bearer against durable state before invalidation, fencing rotations.
+        let rejected = this.#claudeCredential;
+        if (recover && !rejected) rejected = await subscription.credential();
+        if (recover && rejected && rejected.revision === rejectedRevision) {
+          await subscription.recover(rejected.headers);
+        }
+        const credential = await subscription.credential();
+        this.#claudeCredential = credential;
+        return { status: 200, credential };
+      } catch {
+        this.#claudeCredential = undefined;
+        return { status: 401, credential: null };
+      }
+    }, { operation: "credential_rpc" });
+  }
+
+  #claudeSubscription(): Promise<ClaudeSubscription.Subscription> {
+    return this.#claude ??= this.#openClaudeSubscription().catch(() => {
+      this.#claude = undefined;
+      throw new BrokerFailure(503, "claude_broker_unavailable");
+    });
+  }
+
+  async #openClaudeSubscription(): Promise<ClaudeSubscription.Subscription> {
+    const id = `claude:${this.#state.id.toString()}`;
+    const vault = new CredentialVault(this.#env, `user/${this.#state.id.toString()}/claude-subscription`);
+    return ClaudeSubscription.open({ id, module: claudeModule, store: {
+      load: async (key) => {
+        if (key !== id) throw new Error("Claude scope denied");
+        const row = await this.#state.storage.get<ClaudeRow>(CLAUDE_STATE_KEY);
+        if (!row) return { revision: "0" };
+        const opened = await vault.open<string>(row.envelope);
+        if (opened.reseal) {
+          const envelope = await vault.seal(opened.value);
+          await this.#state.storage.transaction(async (tx) => {
+            const current = await tx.get<ClaudeRow>(CLAUDE_STATE_KEY);
+            if (current?.revision === row.revision) await tx.put(CLAUDE_STATE_KEY, { revision: row.revision, envelope });
+          });
+        }
+        return { revision: row.revision, payload: opened.value };
+      },
+      compareAndSwap: async (key, input) => {
+        if (key !== id) throw new Error("Claude scope denied");
+        if (!/^(0|[1-9][0-9]*)$/.test(input.expectedRevision)
+          || BigInt(input.expectedRevision) >= 18446744073709551615n) throw new Error("Claude revision exhausted");
+        const next = (BigInt(input.expectedRevision) + 1n).toString();
+        const envelope = await vault.seal(input.payload);
+        return this.#state.storage.transaction(async (tx) => {
+          const row = await tx.get<ClaudeRow>(CLAUDE_STATE_KEY);
+          const actualRevision = row?.revision ?? "0";
+          if (actualRevision !== input.expectedRevision) return { status: "conflict" as const, actualRevision };
+          await tx.put(CLAUDE_STATE_KEY, { revision: next, envelope });
+          return { status: "committed" as const, revision: next };
+        });
+      },
+    } });
+  }
+
+  async #claudeLoginStatus(): Promise<ClaudeSubscription.Status> {
+    const subscription = await this.#claudeSubscription();
+    const status = await subscription.status();
+    if (status.state !== "validating") return status;
+    // A token exchange already committed its staged token. Public polling must
+    // be able to finish the replayable profile GET after transient failure or
+    // DO restart, without asking the browser to repeat its one-time code. Only
+    // Rust owns recovery/refresh: never retry an ambiguous exchange, synthesize
+    // a token request here, or return the private credential to this caller.
+    try { this.#claudeCredential = await subscription.credential(); }
+    catch { this.#claudeCredential = undefined; }
+    return subscription.status();
+  }
+
+  async #claudePublicStatus(): Promise<{ connected: boolean; state: string }> {
+    // An untouched account is cheap and does not initialize the WASM module.
+    if (!this.#claude && !await this.#state.storage.get(CLAUDE_STATE_KEY)) {
+      return { connected: false, state: "signed_out" };
+    }
+    const status = await this.#claudeLoginStatus();
+    // Connection denotes a validated stored grant, not access-token lifetime.
+    // Private catalog/egress resolves and refreshes through Rust before use.
+    return { connected: status.state === "authenticated", state: status.state };
   }
 
   /** Private metadata RPC. Entry secrets remain in their separate vault records. */
@@ -547,6 +646,32 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     try {
       if (request.method === "GET" && url.pathname === "/v1/health") {
         return json({ ready: true }, 200);
+      }
+      if (url.pathname === "/v1/claude/login/start" && request.method === "POST") {
+        if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
+        this.#claudeCredential = undefined;
+        return json({ state: "pending", ...await (await this.#claudeSubscription()).startLogin() }, 200);
+      }
+      if (url.pathname === "/v1/claude/login/status" && request.method === "GET") {
+        return json(await this.#claudeLoginStatus(), 200);
+      }
+      if (url.pathname === "/v1/claude/login/complete" && request.method === "POST") {
+        const body = await readJson(request, 10 * 1024);
+        if (!body || Object.keys(body).length !== 1 || typeof body.code !== "string"
+          || body.code.length === 0 || body.code.length > 8192) return jsonError(400, "invalid_claude_code");
+        try {
+          this.#claudeCredential = undefined;
+          return json(await (await this.#claudeSubscription()).completeLogin(body.code), 200);
+        } catch {
+          // Never reflect a provider response or private completion material.
+          const status = await (await this.#claudeSubscription()).status();
+          return json({ error: "claude_login_failed", ...status }, status.state === "exchange_uncertain" ? 409 : 400);
+        }
+      }
+      if (url.pathname === "/v1/claude" && request.method === "DELETE") {
+        this.#claudeCredential = undefined;
+        await (await this.#claudeSubscription()).logout();
+        return json(await this.#claudePublicStatus(), 200);
       }
       if (request.method === "GET" && url.pathname === "/v1/status") {
         return json(await this.#publicStatus(), 200);
@@ -1143,8 +1268,10 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
 
   async #publicStatus(): Promise<Record<string, unknown>> {
     const login = this.#credentials.login;
+    const claude = await this.#claudePublicStatus();
     return {
-      ready: this.#credentials.active !== null,
+      ready: this.#credentials.active !== null || claude.connected,
+      claude,
       active: this.#credentials.active,
       openai: { connected: Boolean(this.#credentials.openai) },
       chatgpt: {

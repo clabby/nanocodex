@@ -14,7 +14,7 @@ use nanocodex_oai_api::{
         ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
     },
 };
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, contract::async_trait,
 };
 use tower::Service;

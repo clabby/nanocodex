@@ -6,7 +6,7 @@ use chromiumoxide::{
     types::{CallId, EventMessage, Message, MethodId},
 };
 use futures_util::StreamExt as _;
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, Tools,
     runtime::ToolRuntime,
 };
@@ -530,14 +530,14 @@ fn return_last_expression(source: &str) -> String {
     }
 }
 
-fn execution_value(output: &nanocodex_tools::contract::ToolOutputBody) -> Option<Value> {
+fn execution_value(output: &nanocodex_oai_tools::contract::ToolOutputBody) -> Option<Value> {
     match output {
-        nanocodex_tools::contract::ToolOutputBody::Text(text) => parse_output_text(text),
-        nanocodex_tools::contract::ToolOutputBody::Content(content) => {
+        nanocodex_oai_tools::contract::ToolOutputBody::Text(text) => parse_output_text(text),
+        nanocodex_oai_tools::contract::ToolOutputBody::Content(content) => {
             let values = content
                 .iter()
                 .filter_map(|item| match item {
-                    nanocodex_tools::contract::ToolOutputContent::InputText { text } => {
+                    nanocodex_oai_tools::contract::ToolOutputContent::InputText { text } => {
                         parse_output_text(text)
                     }
                     _ => None,

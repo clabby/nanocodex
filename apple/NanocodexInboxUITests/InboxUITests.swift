@@ -437,37 +437,108 @@ final class InboxUITests: XCTestCase {
         }
     }
 
-    func testSelectionBarStaysBelowComposerWhileTyping() {
-        let app = launch()
-        let input = composer(app)
-        for typing in [false, true] {
-            if typing { input.tap(); input.typeText("Keep the controls below this draft") }
-            let dock = app.descendants(matching: .any)["main-selection-bar"].firstMatch
-            XCTAssertTrue(dock.waitForExistence(timeout: 5))
-            let controls = [app.buttons["model-picker"]]
-            for control in controls {
-                XCTAssertTrue(control.exists)
-                XCTAssertGreaterThanOrEqual(control.frame.minY, input.frame.maxY)
-                XCTAssertEqual(control.frame.midY, controls[0].frame.midY, accuracy: 1)
+    // A real native typing/dismissal journey: the idle selector must not drift
+    // away from either composer, and keyboard avoidance must remain intact.
+    func testSelectionBarStaysBelowComposerWhileTyping() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["NANOCODEX_STARTUP_FIXTURE"] = "1"
+        app.launchEnvironment["NANOCODEX_STARTUP_PROFILE"] = UUID().uuidString
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-chat"].waitForExistence(timeout: 25))
+        var layouts: [[String: Any]] = []
+        defer {
+            let data = try? JSONSerialization.data(withJSONObject: layouts, options: [.prettyPrinted, .sortedKeys])
+            if let data {
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "composer-selector-layout"; attachment.lifetime = .keepAlways; add(attachment)
             }
-            XCTAssertEqual(dock.frame.midX, app.frame.midX, accuracy: 1)
-            if !typing {
-                XCTAssertLessThanOrEqual(dock.frame.width, 380 + 0.01,
-                                         "The floating app/model selector should stay compact")
-                XCTAssertGreaterThanOrEqual(app.frame.maxY - dock.frame.maxY, 0,
-                                            "The complete dock must remain on screen")
-                XCTAssertLessThan(app.frame.maxY - dock.frame.maxY, 60,
-                                  "Leave the native home-indicator safe area and footer insets, not an arbitrary downward transform")
-                let composerShell = app.descendants(matching: .any)["composer-input"].firstMatch
-                XCTAssertTrue(composerShell.exists); XCTAssertTrue(composerShell.isHittable)
-                XCTAssertLessThanOrEqual(composerShell.frame.maxY, dock.frame.minY,
-                                         "Reserve the complete composer shell above the selector")
+            app.terminate()
+        }
+
+        for surface in ["chat", "crm"] {
+            let tab = app.buttons["main-tab-" + surface]
+            tab.tap()
+            let input = surface == "chat" ? composer(app) : app.textViews["new-thread-composer"]
+            XCTAssertTrue(input.waitForExistence(timeout: 10))
+            let composerBoundary = surface == "chat"
+                ? app.descendants(matching: .any)["composer-input"].firstMatch : input
+            let selector = app.descendants(matching: .any)["main-selection-bar"].firstMatch
+
+            func waitForVisibleKeyboard() {
+                let keyboard = app.keyboards.firstMatch
+                let visible = NSPredicate { _, _ in
+                    keyboard.exists && app.frame.intersects(keyboard.frame)
+                        && keyboard.frame.minY < app.frame.maxY
+                }
+                let expectation = XCTNSPredicateExpectation(predicate: visible, object: keyboard)
+                XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 5), .completed,
+                               "Wait for the keyboard to enter the screen, not an offscreen transitioning AX node")
             }
-            if typing {
-                XCTAssertTrue(app.keyboards.firstMatch.exists)
-                XCTAssertLessThanOrEqual(dock.frame.maxY, app.keyboards.firstMatch.frame.minY)
+
+            func captureLayout(_ state: String) -> CGFloat {
+                // The visible-keyboard gate above waits for real geometry, not
+                // merely an accessibility node surviving the transition.
+                capture(app, "composer-selector-" + surface + "-" + state)
+                XCTAssertTrue(composerBoundary.exists); XCTAssertTrue(composerBoundary.isHittable)
+                XCTAssertTrue(selector.exists); XCTAssertTrue(app.frame.contains(selector.frame))
+                let gap = selector.frame.minY - composerBoundary.frame.maxY
+                XCTAssertGreaterThanOrEqual(gap, 0, "Composer and selector must not overlap")
+                // Chat's model controls fill the selector. On CRM, native
+                // accessibility reports only the left-aligned tabs, not the
+                // full-width glass background. Keep Chat's centering contract
+                // and separately verify that both layouts stay horizontally
+                // stable through keyboard transitions below.
+                if surface == "chat" {
+                    XCTAssertEqual(selector.frame.midX, app.frame.midX, accuracy: 1)
+                }
+                XCTAssertLessThanOrEqual(selector.frame.width, 380 + 0.01)
+                for id in ["main-tab-todo", "main-tab-chat", "main-tab-crm", "main-tab-meetings", "main-tab-apps"] {
+                    let control = app.buttons[id]
+                    XCTAssertEqual(app.buttons.matching(identifier: id).count, 1, id)
+                    XCTAssertTrue(control.isHittable, id)
+                    XCTAssertTrue(selector.frame.insetBy(dx: -1, dy: -1).contains(control.frame), id)
+                    XCTAssertGreaterThanOrEqual(control.frame.width, 44 - 0.01, id)
+                    XCTAssertGreaterThanOrEqual(control.frame.height, 44 - 0.01, id)
+                }
+                let keyboard = app.keyboards.firstMatch
+                if keyboard.exists { XCTAssertLessThanOrEqual(selector.frame.maxY, keyboard.frame.minY + 1) }
+                layouts.append(["surface": surface, "state": state, "gap": Double(gap),
+                                "composer": NSCoder.string(for: composerBoundary.frame),
+                                "selector": NSCoder.string(for: selector.frame),
+                                "keyboardVisible": keyboard.exists,
+                                "keyboard": keyboard.exists ? NSCoder.string(for: keyboard.frame) : "absent"])
+                return gap
             }
-            capture(app, typing ? "selection-bar-keyboard" : "selection-bar-idle")
+
+            XCTAssertFalse(app.keyboards.firstMatch.exists)
+            let idleGap = captureLayout("idle")
+            let idleCenter = selector.frame.midX
+            let draft = "Keep this spacing draft"
+            input.tap(); input.typeText(draft)
+            waitForVisibleKeyboard()
+            let typingGap = captureLayout("keyboard")
+            XCTAssertEqual(idleGap, typingGap, accuracy: 1, "Closing the keyboard must retain the typing gap")
+            XCTAssertEqual(selector.frame.midX, idleCenter, accuracy: 1)
+            let multilineDraft = draft + "\nSecond line\nThird line"
+            input.typeText("\nSecond line\nThird line")
+            XCTAssertEqual(captureLayout("multiline-keyboard"), typingGap, accuracy: 1)
+            tab.tap()
+            gone(app.keyboards.firstMatch)
+            XCTAssertEqual(input.value as? String, multilineDraft, "Dismissing the keyboard keeps the draft")
+            XCTAssertEqual(captureLayout("dismissed"), typingGap, accuracy: 1, "No idle-only space after dismissal")
+            XCTAssertEqual(selector.frame.midX, idleCenter, accuracy: 1)
+            input.tap()
+            XCTAssertEqual(input.value as? String, multilineDraft)
+            // XCTest's simulator hardware keyboard may leave the software
+            // keyboard offscreen after focus alone. Resume actual typing and
+            // require onscreen geometry, rather than accepting that stale node.
+            let resumedText = "xyz"
+            input.typeText(resumedText)
+            waitForVisibleKeyboard()
+            XCTAssertEqual((input.value as? String)?.replacingOccurrences(of: resumedText, with: ""), multilineDraft)
+            XCTAssertEqual(captureLayout("reopened"), typingGap, accuracy: 1)
+            XCTAssertEqual(selector.frame.midX, idleCenter, accuracy: 1)
+            tab.tap(); gone(app.keyboards.firstMatch)
         }
     }
 

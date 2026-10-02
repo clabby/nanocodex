@@ -86,6 +86,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-no-stdlib"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
+
+[[package]]
+name = "alloc-stdlib"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
+dependencies = [
+ "alloc-no-stdlib",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1330,6 +1345,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-compression"
+version = "0.4.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3976abdc8fe7d1133d43d304afd42abdf5bc3e1319d263d223bde07b5efc4be8"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "async-executor"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1863,6 +1890,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "brotli"
+version = "8.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2376,6 +2424,26 @@ dependencies = [
  "ryu",
  "static_assertions",
 ]
+
+[[package]]
+name = "compression-codecs"
+version = "0.4.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce2548391e9c1929c21bf6aa2680af86fe4c1b33e6cea9ac1cfeec0bd11218cf"
+dependencies = [
+ "brotli",
+ "compression-core",
+ "flate2",
+ "memchr",
+ "zstd",
+ "zstd-safe",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "concurrent-queue"
@@ -4038,9 +4106,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -5698,12 +5768,18 @@ dependencies = [
 name = "nanocodex"
 version = "0.6.6"
 dependencies = [
+ "axum",
  "nanocodex-agent",
+ "nanocodex-claude",
+ "nanocodex-claude-tools",
  "nanocodex-durability",
  "nanocodex-managed",
  "nanocodex-oai-api",
+ "nanocodex-oai-tools",
  "nanocodex-observability",
- "nanocodex-tools",
+ "nanocodex-subagents",
+ "reqwest",
+ "rustls",
  "serde_json",
  "tokio",
 ]
@@ -5719,7 +5795,7 @@ dependencies = [
  "futures-util",
  "iana-time-zone",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "reqwest",
  "serde",
  "serde_json",
@@ -5740,6 +5816,7 @@ dependencies = [
 name = "nanocodex-bin"
 version = "0.6.6"
 dependencies = [
+ "aes-gcm",
  "alloy-primitives",
  "alloy-rlp",
  "alloy-signer",
@@ -5772,9 +5849,9 @@ dependencies = [
  "nanocodex-egress",
  "nanocodex-eval",
  "nanocodex-eval-adapters",
+ "nanocodex-oai-tools",
  "nanocodex-observability",
  "nanocodex-subagents",
- "nanocodex-tools",
  "nanocodex-tui-control",
  "nanocodex-vm",
  "nanocodex-voice",
@@ -5827,7 +5904,7 @@ dependencies = [
  "futures-util",
  "image",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "nanocodex-vm",
  "percent-encoding",
  "reflink-copy",
@@ -5845,6 +5922,44 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "v8-heap-parser",
+]
+
+[[package]]
+name = "nanocodex-claude"
+version = "0.6.6"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "futures-util",
+ "getrandom 0.4.3",
+ "nanocodex-agent",
+ "nanocodex-claude-tools",
+ "regex",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "uuid",
+ "wasm-bindgen-futures",
+ "web-time",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "nanocodex-claude-tools"
+version = "0.6.6"
+dependencies = [
+ "regex",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -5887,11 +6002,17 @@ dependencies = [
 name = "nanocodex-durability"
 version = "0.6.6"
 dependencies = [
+ "axum",
  "eyre",
+ "futures-util",
  "nanocodex-agent",
+ "nanocodex-claude",
+ "nanocodex-claude-tools",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
+ "reqwest",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -5943,7 +6064,7 @@ dependencies = [
  "jiff",
  "nanocodex-agent",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "nanocodex-vm",
  "nix 0.31.3",
  "reqwest",
@@ -6071,7 +6192,7 @@ dependencies = [
  "hkdf",
  "nanocodex-agent",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "nanocodex-voice-protocol",
  "p256",
  "polyval",
@@ -6126,6 +6247,55 @@ dependencies = [
  "uuid",
  "web-time",
  "webrtc",
+]
+
+[[package]]
+name = "nanocodex-oai-tools"
+version = "0.6.6"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bm25",
+ "criterion",
+ "eyre",
+ "futures-util",
+ "getrandom 0.4.3",
+ "http",
+ "image",
+ "nanocodex-oai-api",
+ "nanocodex-oai-tools-macros",
+ "nix 0.31.3",
+ "oauth2",
+ "portable-pty",
+ "regex",
+ "reqwest",
+ "rmcp",
+ "rquickjs",
+ "rustix 1.1.4",
+ "rustls",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "nanocodex-oai-tools-macros"
+version = "0.6.6"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -6203,8 +6373,9 @@ dependencies = [
  "js-sys",
  "jsonschema",
  "nanocodex-agent",
+ "nanocodex-claude",
  "nanocodex-oai-api",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "serde",
  "serde_json",
  "tokio",
@@ -6213,54 +6384,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
-]
-
-[[package]]
-name = "nanocodex-tools"
-version = "0.6.6"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bm25",
- "criterion",
- "eyre",
- "futures-util",
- "getrandom 0.4.3",
- "http",
- "image",
- "nanocodex-oai-api",
- "nanocodex-tools-macros",
- "nix 0.31.3",
- "oauth2",
- "portable-pty",
- "reqwest",
- "rmcp",
- "rquickjs",
- "rustix 1.1.4",
- "rustls",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "sha1 0.11.0",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "nanocodex-tools-macros"
-version = "0.6.6"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -6295,7 +6418,7 @@ dependencies = [
  "libkrun",
  "nanocodex-computer",
  "nanocodex-hand",
- "nanocodex-tools",
+ "nanocodex-oai-tools",
  "nix 0.31.3",
  "oci-client",
  "reflink-copy",
@@ -6372,8 +6495,11 @@ dependencies = [
  "futures-util",
  "js-sys",
  "nanocodex",
+ "nanocodex-agent",
+ "nanocodex-claude",
  "nanocodex-subagents",
  "nanocodex-voice-protocol",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -6410,10 +6536,10 @@ dependencies = [
  "nanocodex-computer",
  "nanocodex-hand",
  "nanocodex-managed",
+ "nanocodex-oai-tools",
  "nanocodex-observability",
  "nanocodex-remote",
  "nanocodex-subagents",
- "nanocodex-tools",
  "nanocodex-tui-control",
  "nanocodex-vm",
  "nanocodex-voice-native",
@@ -11244,12 +11370,17 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
+ "async-compression",
  "bitflags 2.13.1",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
@@ -12944,6 +13075,12 @@ dependencies = [
  "libc",
  "rustix 1.1.4",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "yansi"

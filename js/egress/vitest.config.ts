@@ -1,3 +1,4 @@
+import { claudeProvider } from "./test/claude-provider.fixture.mjs";
 import { SPOTIFY_SCOPES, SPOTIFY_LOOPBACK_CLIENT_ID } from "./src/connectors/music";
 import { gitProvider } from "../test-fixtures/git-provider.mjs";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
@@ -112,6 +113,8 @@ export default defineConfig({
             ...Object.fromEntries(REGIONAL_RELAY_CLASSES.map(name => [name, name])) },
         }],
         outboundService: async (request) => {
+          const claude = await claudeProvider(request);
+          if (claude) return claude;
           const gitResponse = await gitProvider(request);
           if (gitResponse) return gitResponse;
           const url = new URL(request.url);

@@ -1,0 +1,29 @@
+[package]
+name = "nanocodex-claude-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Independent Claude-native host-authorized tool adapters"
+
+[features]
+default = []
+# Compatibility switch; the portable caller-owned MCP contract is always available.
+mcp = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+regex.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[lints]
+workspace = true

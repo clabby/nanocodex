@@ -18,10 +18,12 @@
         "$TURBO_ROOT$/js/nanocodex-vite/scripts/**",
         "$TURBO_ROOT$/crates/nanocodex/**",
         "$TURBO_ROOT$/crates/nanocodex-agent/**",
+        "$TURBO_ROOT$/crates/nanocodex-claude/**",
+        "$TURBO_ROOT$/crates/nanocodex-claude-tools/**",
         "$TURBO_ROOT$/crates/nanocodex-durability/**",
         "$TURBO_ROOT$/crates/nanocodex-oai-api/**",
         "$TURBO_ROOT$/crates/nanocodex-subagents/**",
-        "$TURBO_ROOT$/crates/nanocodex-tools/**",
+        "$TURBO_ROOT$/crates/nanocodex-oai-tools/**",
         "$TURBO_ROOT$/crates/nanocodex-voice-protocol/**"
       ],
       "env": [

@@ -61,7 +61,7 @@ use crate::{
     prompt_cache::ModelPromptCache,
     usage::TurnUsage,
 };
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     __private::model_contract as model_tool_contract,
     ToolContext, Tools,
     code_mode::{CodeModeExecution, CodeModeObserver, CodeModeUpdate},

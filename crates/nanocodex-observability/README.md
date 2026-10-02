@@ -31,7 +31,7 @@ use nanocodex_observability::{LogFormat, ObservabilityBuilder};
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 let _observability = ObservabilityBuilder::new("checkout-agent", "1.4.0")
     .environment("production")
-    .filter("warn,nanocodex=info,nanocodex_oai_api=info,nanocodex_tools=info")
+    .filter("warn,nanocodex=info,nanocodex_oai_api=info,nanocodex_oai_tools=info")
     .format(LogFormat::Json)
     .install()?;
 # Ok(())

@@ -136,7 +136,7 @@ use std::sync::Arc;
         all(target_os = "macos", target_arch = "aarch64")
     )
 ))]
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolResult, Tools, ToolsBuilder,
     standard::{StandardTool, UpdatePlanTool},
 };
@@ -181,7 +181,8 @@ pub trait VmToolClient: Send + Sync {
     /// Discover the guest provider's complete upstream MCP tool catalog.
     async fn computer_catalog(
         &self,
-    ) -> Result<Vec<nanocodex_computer::ProviderTool>, nanocodex_tools::contract::ToolError> {
+    ) -> Result<Vec<nanocodex_computer::ProviderTool>, nanocodex_oai_tools::contract::ToolError>
+    {
         Err("This VM transport does not support upstream Sky tool discovery".into())
     }
     /// Execute CUA in the guest owning this capability, never on the VMM host.
@@ -226,7 +227,7 @@ impl VmTools {
     /// Computer tools backed by this exact guest attachment.
     pub async fn computer_tools(
         &self,
-    ) -> Result<nanocodex_computer::ComputerTools, nanocodex_tools::contract::ToolError> {
+    ) -> Result<nanocodex_computer::ComputerTools, nanocodex_oai_tools::contract::ToolError> {
         let catalog = self.client.computer_catalog().await?;
         Ok(nanocodex_computer::ComputerTools::new(
             ComputerProxy(self.client.clone()),
@@ -274,7 +275,7 @@ impl VmTools {
     /// including setting the guest-visible working directory and shell.
     pub async fn tools_builder(
         &self,
-    ) -> Result<ToolsBuilder, nanocodex_tools::contract::ToolError> {
+    ) -> Result<ToolsBuilder, nanocodex_oai_tools::contract::ToolError> {
         Ok(self
             .workspace_tools(Tools::builder().workspace(false))
             .await?
@@ -289,7 +290,7 @@ impl VmTools {
     /// being advertised by a remote VM hand.
     pub async fn attachment_tools_builder(
         &self,
-    ) -> Result<ToolsBuilder, nanocodex_tools::contract::ToolError> {
+    ) -> Result<ToolsBuilder, nanocodex_oai_tools::contract::ToolError> {
         self.add_computer_tools(
             Tools::builder()
                 .without_defaults()
@@ -302,7 +303,7 @@ impl VmTools {
     async fn workspace_tools(
         &self,
         builder: ToolsBuilder,
-    ) -> Result<ToolsBuilder, nanocodex_tools::contract::ToolError> {
+    ) -> Result<ToolsBuilder, nanocodex_oai_tools::contract::ToolError> {
         self.add_computer_tools(
             builder
                 .tool(self.exec_command_tool())
@@ -316,7 +317,7 @@ impl VmTools {
     async fn add_computer_tools(
         &self,
         mut builder: ToolsBuilder,
-    ) -> Result<ToolsBuilder, nanocodex_tools::contract::ToolError> {
+    ) -> Result<ToolsBuilder, nanocodex_oai_tools::contract::ToolError> {
         for tool in self.computer_tools().await?.tools() {
             builder = builder.tool(tool);
         }
@@ -427,7 +428,7 @@ pub async fn serve_overlay_guest(
     )
 ))]
 mod tests {
-    use nanocodex_tools::{Tool, ToolContext, ToolInput, standard::StandardTool};
+    use nanocodex_oai_tools::{Tool, ToolContext, ToolInput, standard::StandardTool};
 
     use super::{VmToolClient, VmTools};
 
@@ -437,7 +438,7 @@ mod tests {
     impl VmToolClient for CatalogClient {
         async fn computer_catalog(
             &self,
-        ) -> Result<Vec<nanocodex_computer::ProviderTool>, nanocodex_tools::contract::ToolError>
+        ) -> Result<Vec<nanocodex_computer::ProviderTool>, nanocodex_oai_tools::contract::ToolError>
         {
             Ok(serde_json::from_value(serde_json::json!([
                 {"name":"provider_specific_tool", "description":"Discovered provider documentation", "inputSchema":{"type":"object","properties":{"custom":{"type":"string"}}}},
@@ -449,7 +450,7 @@ mod tests {
             _tool: StandardTool,
             _input: ToolInput,
             _context: ToolContext<'_>,
-        ) -> nanocodex_tools::ToolResult {
+        ) -> nanocodex_oai_tools::ToolResult {
             unreachable!("catalog tests do not execute tools")
         }
     }
@@ -517,7 +518,7 @@ mod tests {
                 _tool: StandardTool,
                 _input: ToolInput,
                 _context: ToolContext<'_>,
-            ) -> nanocodex_tools::ToolResult {
+            ) -> nanocodex_oai_tools::ToolResult {
                 unreachable!()
             }
         }
