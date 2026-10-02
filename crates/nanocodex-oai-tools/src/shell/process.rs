@@ -65,9 +65,31 @@ impl ProcessChild {
     fn new(
         mut try_wait: impl FnMut() -> io::Result<Option<i32>> + Send + 'static,
         process_group: SharedProcessGroup,
+        io_driver_available: bool,
     ) -> Self {
+        #[cfg(not(unix))]
+        let _ = io_driver_available;
         let group = process_group.clone();
         let wait = tokio::spawn(async move {
+            // Subscribe before observing exit so an exit between the check and
+            // recv is retained by the signal stream. SIGCHLD is broadcast: each
+            // waiter still checks only its own child under the identity guard.
+            #[cfg(unix)]
+            let mut exited = if io_driver_available {
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()) {
+                    Ok(signal) => Some(signal),
+                    Err(error) => {
+                        tracing::warn!(%error, "shell exit notifications unavailable; using polling");
+                        None
+                    }
+                }
+            } else {
+                // Portable PTYs also work on time-only Tokio runtimes. There
+                // is no public reactor-capability probe, so do not call signal
+                // (which would panic) without a successfully spawned Tokio pipe
+                // child proving this runtime has the required I/O driver.
+                None
+            };
             loop {
                 // Serialize reaping and guard retirement with signals/drop.
                 // Never leave an exited child's guard armed until a later poll.
@@ -83,7 +105,9 @@ impl ProcessChild {
                             guard.disarm();
                             return Ok(status);
                         }
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        // Exit may already have been observed. Do not wait for
+                        // another signal after an interrupted reap attempt.
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                         Err(error) => {
                             // ECHILD can mean another waiter already reaped
                             // this PID. Do not signal an unverified identity.
@@ -92,6 +116,15 @@ impl ProcessChild {
                         }
                     }
                 }
+                #[cfg(unix)]
+                if let Some(signal) = exited.as_mut() {
+                    if signal.recv().await.is_none() {
+                        exited = None;
+                    }
+                    continue;
+                }
+                // Unsupported platforms or failed notification registration
+                // retain the existing autonomous reaping fallback.
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         });
@@ -231,6 +264,8 @@ fn spawn_pipes(
         child: ProcessChild::new(
             move || child.try_wait().map(|status| status.map(exit_code)),
             process_group.clone(),
+            // Tokio pipe spawning has already required a working I/O reactor.
+            true,
         ),
         process_group,
     })
@@ -278,6 +313,7 @@ fn spawn_pty(
             })
         },
         process_group.clone(),
+        false,
     );
 
     Ok(SpawnedProcess {
@@ -586,6 +622,7 @@ mod tests {
                 child.try_wait().map(|status| status.map(super::exit_code))
             },
             group,
+            false,
         );
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())

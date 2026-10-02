@@ -9614,15 +9614,40 @@ export class DurableAgentSession extends DurableComputerObject {
       namespaceMachines,
       resolveNamespaceMachineTool,
       async (context, toolName) => {
-        const filter = await this.#refreshMountedHostMounts(this.#authorizationForToolContext(context));
-        // Publishers reconnect independently of the agent runtime. Refresh
-        // before capturing a cell so its shell and screen mounts include Hands
-        // that have come online since the optional startup inventory loaded.
-        if ((toolName === "exec_command" || toolName === "mcp__cua_repl__js" || toolName === "mcp__cua_repl__js_reset")
-          && this.#hasFullAccountAuthority(this.#authorizationForToolContext(context))) {
-          await this.#accountHostedTools?.refresh();
-        }
-        return filter;
+        const authorization = this.#authorizationForToolContext(context);
+        const observePreparation = async <T>(
+          stage: "namespace.host_readiness" | "namespace.account_discovery",
+          work: () => Promise<T>,
+        ): Promise<T> => {
+          const started = performance.now();
+          try {
+            const result = await work();
+            observeHandCall(stage, toolName ?? "other", started, "ok", context.callId,
+              { thread_id: session.session_id, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
+            return result;
+          } catch (error) {
+            observeHandCall(stage, toolName ?? "other", started, context.signal.aborted ? "cancelled" : "failed", context.callId,
+              { thread_id: session.session_id, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
+            throw error;
+          }
+        };
+        // Independent VM readiness and account discovery must both finish before
+        // capturing the cell, but need not pay each other's transport latency.
+        // Join failures too: do not leave a route-refresh continuation running
+        // after failed preparation. Capture still rechecks current authority and
+        // each verified VM route synchronously after this join.
+        const readiness = observePreparation("namespace.host_readiness",
+          () => this.#refreshMountedHostMounts(authorization));
+        // Publishers reconnect independently of the agent runtime. Always load
+        // fresh inventory for these tools; never use a TTL authority cache here.
+        const discovery = (toolName === "exec_command" || toolName === "mcp__cua_repl__js" || toolName === "mcp__cua_repl__js_reset")
+          && this.#hasFullAccountAuthority(authorization) && this.#accountHostedTools !== undefined
+          ? observePreparation("namespace.account_discovery", () => this.#accountHostedTools!.refresh())
+          : Promise.resolve();
+        const [hostResult, accountResult] = await Promise.allSettled([readiness, discovery]);
+        if (hostResult.status === "rejected") throw hostResult.reason;
+        if (accountResult.status === "rejected") throw accountResult.reason;
+        return hostResult.value;
       },
       {
         tool: computer.tool,

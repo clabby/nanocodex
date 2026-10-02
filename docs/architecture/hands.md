@@ -110,6 +110,83 @@ to that Hand; reconnecting never retargets admitted work. Subagents share this
 mount policy while keeping model state private. Coordinate concurrent file writes.
 
 
+
+## Tool-call latency and measurement
+
+Native Unix pipe children wake their guarded reaper on `SIGCHLD` rather than
+waiting for a fixed polling tick. Notifications never replace child identity
+checks, process-group cleanup, or the retained terminal receipt. Portable PTYs,
+non-Unix hosts and failed signal registration retain the autonomous polling
+fallback; PTY-only embeddings still work on time-only Tokio runtimes. Node
+Hands keep a bounded 64 KiB unread-output window in memory and spill larger
+output to a private file; small commands avoid temporary-file setup/cleanup.
+Reply budgets do not discard unread output, and UTF-8 decoding spans polls and
+spills.
+
+Fresh managed cells join retained-VM readiness and fresh account Hand discovery
+concurrently, then capture one authorized, generation-pinned namespace. Both
+branches are joined even on failure; current authority and verified VM routes
+are rechecked at capture. Account `/snapshot` and `/invoke` build a synchronous
+request-local catalog index once, rather than rebuilding every publisher's
+catalog for each machine primitive. This index is not a persistent authority
+cache: invocation still checks grants, leases, exact generation and the durable
+call ledger before dispatch, and process routes retain their original owner.
+
+Measure the boundaries separately:
+
+- Client/tool-await elapsed time includes routing, transport and result delivery,
+  but not the model's time deciding to call a tool.
+- `wall_time_seconds` is a host-local wait/execution measurement, not complete
+  tool-call latency. Subtracting it from client elapsed time does not establish
+  one-way network latency.
+- `namespace.prepare` includes fresh-cell preparation; its
+  `namespace.host_readiness` and `namespace.account_discovery` sub-stages overlap
+  and must not be summed as serial costs. A successful readiness phase can still
+  exclude individual unavailable VMs. Each stage excludes the cost of recording
+  its own diagnostic event; measure full public/client waits too. `/brain`
+  bypasses Hand preparation.
+- Correlated Hand observations split namespace routing, account input/ownership,
+  broker admission/round trip/settlement, host scheduling/execution and result
+  encoding. Preserve first-observed requests, warm calls and concurrent bursts
+  separately; do not infer a server cold start from the first request.
+
+Run the actual HTTP/WebSocket/workerd-SQLite shell journey with:
+
+```sh
+NANOCODEX_BENCHMARK_LABEL=local pnpm --filter nanocodex-managed-service test:hand-communication
+```
+
+The journey publishes source hashes, distributions, phase traces and ownership,
+replay and restart evidence under `output/hand-communication-journey/`. It also
+checks that shell calls finish while an external CUA request remains pending.
+Only external identity and CUA are synthetic fixtures; loopback results are not
+WAN or screen-action latency measurements.
+
+Measure catalog scaling and the shipped fresh-cell preparation boundary with:
+
+```sh
+pnpm --filter nanocodex-managed-service test:hand-catalog-scaling
+pnpm --filter nanocodex-managed-service test:hand-preparation
+```
+
+The catalog journey uses 1/8/24 real reverse publishers and native shells,
+including stale-token denial, replay, process continuity and disconnected
+identity. The preparation journey runs public managed turns through the real
+Session and WASM Code Mode. Its explicit external-pool and snapshot delays
+exercise dependency overlap, not production network latency. Both retain source
+hashes, public transcripts, wire receipts and phase diagnostics under `output/`.
+
+The native executable/public-WebSocket benchmark runs real pipe and PTY shells:
+
+```sh
+cargo test -p nanocodex-tools --test it native_shell_call_latency_over_public_websocket -- --nocapture
+```
+
+Its wire receipts and per-sample timings are retained in
+`output/native-shell-latency/`. Repeat baseline/candidate runs under comparable
+load and retain outliers. Local source improvements require a separately
+verified Hand build/update before being attributed to deployed machines.
+
 ## Native screen ownership
 
 Screen startup, display allocation, capture-helper supervision and reconnects

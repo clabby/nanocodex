@@ -179,7 +179,8 @@ export default {fetch(request,env){const path=new URL(request.url).pathname;
     const sourceFiles = ["js/managed/src/account-hosted-tools.ts", "js/managed/src/namespace-tools.ts",
       "js/managed/src/hosted-tools-broker.ts", "js/managed/src/hand-call-observation.ts", "js/managed/src/diagnostic-journal.ts",
       "js/nanocodex-tools/src/hosted/broker-core.ts", "js/nanocodex-tools/src/hosted/protocol.ts",
-      "js/nanocodex-tools/tools/attachment.mjs", "js/nanocodex-tools/tools/nodeProcess.mjs"];
+      "js/nanocodex-tools/tools/attachment.mjs", "js/nanocodex-tools/tools/nodeProcess.mjs",
+      "js/nanocodex-tools/tools/processOutput.mjs"];
     const hashes = Object.fromEntries(await Promise.all(sourceFiles.map(async path =>
       [path, createHash("sha256").update(await readFile(join(repo, path))).digest("hex")])));
     const workspaceInputs = Object.keys(bundle.metafile.inputs).map(path => resolve(path)).filter(path => path.includes("/js/nanocodex"));

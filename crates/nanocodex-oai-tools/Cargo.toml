@@ -86,7 +86,7 @@ rquickjs = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"], optional = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"], optional = true }
 tokio-util = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 url = { workspace = true, optional = true }

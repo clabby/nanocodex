@@ -758,3 +758,219 @@ async fn retained_shell_receipts_recover_offline_without_reexecution() -> Result
     );
     Ok(())
 }
+
+// A reproducible native executable benchmark at the public attachment boundary.
+// Every sample runs a real shell and retains/acknowledges its actual wire receipt.
+#[tokio::test]
+async fn native_shell_call_latency_over_public_websocket() -> Result<()> {
+    let _runtime_lock = crate::TOOL_RUNTIME_TEST_LOCK.lock().await;
+    let workspace = tempfile::tempdir()?;
+    let output =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../output/native-shell-latency");
+    std::fs::create_dir_all(&output)?;
+    let path = output.join(format!("wire-{}.jsonl", now_ms()));
+    let evidence = Evidence {
+        file: Arc::new(Mutex::new(File::create(&path)?)),
+        started: Instant::now(),
+    };
+    eprintln!("Native shell latency wire evidence: {}", path.display());
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let target = AttachmentTarget::new(
+        format!("ws://{}/tools", listener.local_addr()?),
+        "synthetic-bearer",
+    )?;
+    let tools = Tools::builder()
+        .without_defaults()
+        .add(WorkspaceTools::new(workspace.path()))
+        .build()?;
+    let (wire, attachment) = tokio::join!(
+        Wire::ready(&listener, evidence.clone(), "benchmark"),
+        tools.attach(target).connect()
+    );
+    let mut wire = wire?;
+    let (attachment, _events) = attachment?;
+    let measured = async {
+        for tty in [false, true] {
+            let mut samples = Vec::new();
+            for index in 0..63 {
+                let id = format!("shell-{}-{index}", if tty { "pty" } else { "pipe" });
+                let expected = format!("sample-{index}");
+                let mut input = shell(&format!("printf '{expected}'; exit 23"));
+                input["tty"] = json!(tty);
+                let started = Instant::now();
+                wire.call(&id, "exec_command", input).await?;
+                let receipt = wire.result(&id, Duration::from_secs(5)).await?;
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let process = successful_process(&receipt)?;
+                ensure!(
+                    process["exit_code"] == 23,
+                    "lost native exit status: {receipt}"
+                );
+                ensure!(
+                    process["output"] == expected,
+                    "lost native output: {receipt}"
+                );
+                ensure!(
+                    process["session_id"].is_null(),
+                    "completed shell retained as running"
+                );
+                evidence.record(
+                    "benchmark",
+                    "sample",
+                    &json!({
+                        "tty":tty, "index":index, "warmup":index < 3,
+                        "roundtrip_ms":elapsed_ms,
+                        "shell_wall_ms":process["wall_time_seconds"].as_f64().unwrap() * 1000.0,
+                        "timing":receipt["timing"],
+                    }),
+                );
+                if index >= 3 {
+                    samples.push(elapsed_ms);
+                }
+            }
+            samples.sort_by(f64::total_cmp);
+            let summary = json!({
+                "tty":tty, "samples":samples.len(),
+                "p50_ms":samples[samples.len()/2],
+                "p95_ms":samples[samples.len()*95/100],
+                "min_ms":samples[0], "max_ms":samples[samples.len()-1],
+            });
+            evidence.record("benchmark", "summary", &summary);
+            eprintln!("Native shell latency {summary}");
+        }
+        // Child notifications are coalesced and shared process-wide. A burst
+        // must still complete each real child with its own output/exit status.
+        for index in 0..24 {
+            let id = format!("concurrent-{index}");
+            let mut input = shell(&format!("sleep 0.02; printf '{id}'; exit 23"));
+            input["tty"] = json!(index % 2 == 0);
+            wire.call(&id, "exec_command", input).await?;
+        }
+        let mut observed = HashSet::new();
+        while observed.len() < 24 {
+            let receipt = wire.recv(Duration::from_secs(5)).await?;
+            ensure!(
+                receipt["type"] == "result",
+                "missing concurrent receipt: {receipt}"
+            );
+            let id = receipt["call_id"].as_str().unwrap();
+            ensure!(
+                wire.pending.remove(id),
+                "unexpected concurrent receipt: {receipt}"
+            );
+            ensure!(
+                observed.insert(id.to_owned()),
+                "duplicate concurrent receipt: {receipt}"
+            );
+            let process = successful_process(&receipt)?;
+            ensure!(
+                process["output"] == id && process["exit_code"] == 23,
+                "crossed or incomplete concurrent child result: {receipt}"
+            );
+            wire.send(json!({"type":"ack", "call_id":id})).await?;
+        }
+        evidence.record(
+            "benchmark",
+            "observation",
+            &json!({"concurrent_children":24, "status":"passed"}),
+        );
+        Ok::<(), eyre::Report>(())
+    }
+    .await;
+    let cleanup = wire.cancel_pending().await;
+    let (drain, detach) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(wire.drain(), attachment.detach())
+    })
+    .await
+    .wrap_err("benchmark cleanup exceeded its progress bound")?;
+    cleanup?;
+    drain?;
+    detach?;
+    measured
+}
+
+// Portable PTY execution does not require Tokio's I/O/signal reactor. Exercise
+// the public workspace API on a time-only runtime, not a private waiter helper.
+#[cfg(unix)]
+#[test]
+fn portable_pty_on_time_only_runtime_retains_output_status_and_session() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()?;
+    runtime.block_on(async {
+        let _runtime_lock = crate::TOOL_RUNTIME_TEST_LOCK.lock().await;
+        let workspace = tempfile::tempdir()?;
+        let tools = nanocodex_tools::workspace_runtime::WorkspaceToolRuntime::new(
+            workspace.path().to_path_buf(),
+        );
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../output/native-shell-latency");
+        std::fs::create_dir_all(&output)?;
+        let path = output.join(format!("time-only-pty-{}.jsonl", now_ms()));
+        let evidence = Evidence {
+            file: Arc::new(Mutex::new(File::create(&path)?)),
+            started: Instant::now(),
+        };
+        eprintln!("Time-only public PTY evidence: {}", path.display());
+        for (id, command, yield_ms) in [
+            ("completed", "printf time-only; exit 23", 1000),
+            (
+                "yielded",
+                "printf retained; sleep 0.6; printf done; exit 17",
+                250,
+            ),
+        ] {
+            let input = json!({
+                "cmd":command, "shell":"/bin/sh", "login":false,
+                "tty":true, "yield_time_ms":yield_ms,
+            });
+            evidence.record("time-only", "input", &input);
+            let result = tools
+                .execute_tool(
+                    "exec_command",
+                    ToolInput::Function(serde_json::value::to_raw_value(&input)?),
+                    ToolContext::new("synthetic-model", "synthetic-session", id, &[], 1000),
+                )
+                .await;
+            let result = result.structured_result();
+            evidence.record("time-only", "result", &result);
+            if id == "completed" {
+                ensure!(
+                    result["exit_code"] == 23 && result["output"] == "time-only",
+                    "time-only PTY completion failed: {result}"
+                );
+            } else {
+                let session = result["session_id"].as_i64().ok_or_else(|| {
+                    eyre::eyre!("time-only PTY did not retain its session: {result}")
+                })?;
+                let initial = result["output"].as_str().unwrap_or_default().to_owned();
+                // Let the real child finish with no active execution/poll call.
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                let input = json!({"session_id":session, "chars":"", "yield_time_ms":5000});
+                evidence.record("time-only", "input", &input);
+                let polled = tools
+                    .execute_tool(
+                        "write_stdin",
+                        ToolInput::Function(serde_json::value::to_raw_value(&input)?),
+                        ToolContext::new("synthetic-model", "synthetic-session", "poll", &[], 1000),
+                    )
+                    .await
+                    .structured_result();
+                evidence.record("time-only", "result", &polled);
+                ensure!(
+                    polled["exit_code"] == 17
+                        && initial + polled["output"].as_str().unwrap_or_default()
+                            == "retaineddone",
+                    "time-only retained PTY output/status lost: {polled}"
+                );
+            }
+        }
+        tools.control().cancel().await;
+        evidence.record(
+            "time-only",
+            "observation",
+            &json!({"status":"passed", "io_driver":false}),
+        );
+        Ok(())
+    })
+}
