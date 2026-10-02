@@ -9545,9 +9545,10 @@ export class DurableAgentSession extends DurableComputerObject {
       resolveNamespaceMachineTool,
       async (context, toolName) => {
         const filter = await this.#refreshMountedHostMounts(this.#authorizationForToolContext(context));
-        // Publishers reconnect independently of shell attachments. A cached
-        // startup inventory must not hide a screen that has since come online.
-        if ((toolName === "mcp__cua_repl__js" || toolName === "mcp__cua_repl__js_reset")
+        // Publishers reconnect independently of the agent runtime. Refresh
+        // before capturing a cell so its shell and screen mounts include Hands
+        // that have come online since the optional startup inventory loaded.
+        if ((toolName === "exec_command" || toolName === "mcp__cua_repl__js" || toolName === "mcp__cua_repl__js_reset")
           && this.#hasFullAccountAuthority(this.#authorizationForToolContext(context))) {
           await this.#accountHostedTools?.refresh();
         }
