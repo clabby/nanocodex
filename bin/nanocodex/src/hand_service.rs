@@ -328,6 +328,7 @@ pub(crate) async fn restart() -> Result<()> {
     start().await
 }
 /// Changes only argv[0]. Caller owns stop/start and rollback ordering.
+#[cfg(not(target_os = "linux"))]
 pub(crate) async fn switch_executable(path: &Path) -> Result<()> {
     refuse_system_service().await?;
     let path = executable(path)?;
@@ -547,6 +548,7 @@ mod tests {
     }
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn lock_legacy_launchers(directory: &Path) -> Result<Vec<fs::File>> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -578,6 +580,7 @@ fn lock_legacy_launchers(directory: &Path) -> Result<Vec<fs::File>> {
     Ok(locks)
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn legacy_publisher(command: &str, uid: &str, install: &Path) -> bool {
     let Some((owner, command)) = command.trim().split_once(char::is_whitespace) else {
         return false;
@@ -596,6 +599,7 @@ fn legacy_publisher(command: &str, uid: &str, install: &Path) -> bool {
 /// Retire only pre-service lease helpers. Old clients may ignore the launch
 /// lock and spawn an unmanaged daemon while launchd is switching executables.
 /// The interactive CLI itself and protocol-aware helpers remain running.
+#[cfg(not(target_os = "linux"))]
 async fn stop_legacy_helpers() -> Result<()> {
     let home = home()?;
     let domain = domain().await?;
@@ -648,6 +652,7 @@ async fn stop_legacy_helpers() -> Result<()> {
     }
     Ok(())
 }
+#[cfg(any(not(target_os = "linux"), test))]
 fn legacy_helper_binary(command: &str, uid: &str, install: &Path) -> Option<PathBuf> {
     let (owner, command) = command.trim().split_once(char::is_whitespace)?;
     let binary = command
@@ -668,6 +673,7 @@ fn legacy_helper_binary(command: &str, uid: &str, install: &Path) -> Option<Path
 
 /// Explicit recovery may retire a legacy publisher that stole the state lock
 /// during an older updater's handover. Never signal a CLI, a VM, or another user.
+#[cfg(not(target_os = "linux"))]
 async fn stop_legacy_publishers() -> Result<()> {
     let home = home()?;
     let domain = domain().await?;
@@ -735,6 +741,7 @@ async fn stop_legacy_publishers() -> Result<()> {
 }
 
 /// Prepared service transaction. Backup remains on disk until commit/rollback.
+#[cfg(not(target_os = "linux"))]
 pub(crate) struct ServiceUpdate {
     candidate: PathBuf,
     previous: Vec<u8>,
@@ -745,6 +752,7 @@ pub(crate) struct ServiceUpdate {
     // Hold them through handover so old clients cannot steal service ownership.
     _legacy_guards: Vec<fs::File>,
 }
+#[cfg(not(target_os = "linux"))]
 pub(crate) async fn prepare_update(
     candidate: &Path,
     start_stopped: bool,
@@ -787,6 +795,7 @@ pub(crate) async fn prepare_update(
         _legacy_guards: legacy_guards,
     }))
 }
+#[cfg(not(target_os = "linux"))]
 impl ServiceUpdate {
     pub(crate) async fn apply(&mut self) -> Result<()> {
         stop_legacy_helpers().await?;
@@ -854,6 +863,7 @@ impl ServiceUpdate {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) async fn recover() -> Result<()> {
     refuse_system_service().await?;
     let backup = plist_path()?.with_extension("plist.update-backup");
@@ -1019,6 +1029,7 @@ pub(crate) async fn finish_recovery() -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn restore_snapshot(mut snapshot: Value) -> Result<(Vec<u8>, bool)> {
     validate_plist(&snapshot)?;
     let was_loaded = snapshot

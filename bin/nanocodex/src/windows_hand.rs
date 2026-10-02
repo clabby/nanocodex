@@ -362,6 +362,7 @@ pub(crate) async fn status() -> Result<ServiceStatus> {
     })
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) async fn print_status() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&status().await?)?);
     Ok(())
@@ -674,6 +675,7 @@ pub(crate) async fn stop() -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) async fn restart() -> Result<()> {
     stop().await?;
     start_and_wait().await
