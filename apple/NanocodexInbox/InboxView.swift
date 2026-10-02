@@ -172,8 +172,8 @@ struct InboxView: View {
     @ObservedObject var model: InboxModel
     @State private var mainSurface: MainSurface = (ProcessInfo.processInfo.arguments.contains("--demo")
         && !ProcessInfo.processInfo.arguments.contains("--todo-ui-fixture")) ? .chat : .todo
-    @State private var todoInputFocused = false
-    private enum MainSurface { case todo, chat, crm, meetings, apps }
+    @State private var newThreadInputFocused = false
+    private enum MainSurface: Hashable { case todo, chat, crm, meetings, apps }
     @State private var selectedGeneratedApp: String?
     @State private var showCreateApp = false
     @State private var showConversations = false
@@ -199,49 +199,64 @@ struct InboxView: View {
     @State private var bottomDockHeight: CGFloat = 0
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if model.connected && mainSurface == .todo {
-                    TodoBoardView(model: model, onChat: { mainSurface = .chat })
-                        .id(model.todoAccountIdentity)
-                        .contentMargins(.bottom, bottomDockHeight, for: .scrollContent)
-                } else if model.connected && mainSurface == .meetings {
-                    MeetingsHomeView(model: model) { showMeeting = true }
-                        .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
-                } else if model.connected && mainSurface == .crm {
-                    CRMView(model: model)
-                        .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
-                } else if model.connected && mainSurface == .apps {
-                    GeneratedAppsView(model: model, selection: $selectedGeneratedApp, create: { showCreateApp = true }, openChat: { mainSurface = .chat; model.openThread() })
-                        .safeAreaInset(edge: .bottom, spacing: 0) { mainNavigation }
-                } else { inbox }
-            }
-                .environment(\.conversationComposerHeight, bottomDockHeight)
-                #if os(iOS)
-                .navigationTitle("Conversations")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar(.hidden, for: .navigationBar)
-                #endif
-                .navigationDestination(isPresented: $showScheduledJobs) {
-                    ScheduledJobsView(model: model) {
-                        showScheduledJobs = false
-                        composerFocused = false
-                    }
-                    #if os(iOS)
-                    .toolbar(.visible, for: .navigationBar)
-                    .navigationBarTitleDisplayMode(.inline)
-                    #endif
+        VStack(spacing: 0) {
+            NavigationStack {
+                Group {
+                    if model.connected && mainSurface == .todo {
+                        TodoBoardView(model: model, onChat: { selectMainSurface(.chat) })
+                            .id(model.todoAccountIdentity)
+                    } else if model.connected && mainSurface == .meetings {
+                        MeetingsHomeView(model: model) { showMeeting = true }
+                    } else if model.connected && mainSurface == .crm {
+                        CRMView(model: model)
+                    } else if model.connected && mainSurface == .apps {
+                        GeneratedAppsView(model: model, selection: $selectedGeneratedApp, create: { showCreateApp = true }, openChat: { selectMainSurface(.chat); model.openThread() })
+                    } else { inbox }
                 }
-                .navigationDestination(isPresented: $showConnectors) {
-                    ConnectorsView(model: model)
+                    .environment(\.conversationComposerHeight, bottomDockHeight)
+                    #if os(iOS)
+                    .navigationTitle("Conversations")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar(.hidden, for: .navigationBar)
+                    #endif
+                    .navigationDestination(isPresented: $showScheduledJobs) {
+                        ScheduledJobsView(model: model) {
+                            showScheduledJobs = false
+                            composerFocused = false
+                        }
                         #if os(iOS)
                         .toolbar(.visible, for: .navigationBar)
                         .navigationBarTitleDisplayMode(.inline)
                         #endif
+                    }
+                    .navigationDestination(isPresented: $showConnectors) {
+                        ConnectorsView(model: model)
+                            #if os(iOS)
+                            .toolbar(.visible, for: .navigationBar)
+                            .navigationBarTitleDisplayMode(.inline)
+                            #endif
+                    }
+            }
+            // A tab switch must leave implicit pushed destinations such as CRM profiles.
+            .id(mainSurface)
+            // Shell-owned controls remain available through pushed destinations.
+            // Reserve actual viewport space, not a safe-area inset that the Chat
+            // panel deliberately extends through.
+            if model.connected {
+                VStack(spacing: 0) {
+                    if showsNewThreadComposer {
+                        NewThreadComposer(model: model, focused: $newThreadInputFocused) {
+                            if model.startNewThreadFromDraft() { selectMainSurface(.chat) }
+                        }
+                        .frame(maxWidth: InboxChrome.maximumWidth).frame(maxWidth: .infinity)
+                    }
+                    mainNavigation
                 }
+                .background(Ink.background.ignoresSafeArea(edges: .bottom))
+            }
         }
         .sheet(isPresented: $showCreateApp) {
-            CreateGeneratedAppSheet(model: model) { mainSurface = .chat; model.openThread() }
+            CreateGeneratedAppSheet(model: model) { selectMainSurface(.chat); model.openThread() }
         }
         .task(id: model.screenScope) {
             while !Task.isCancelled {
@@ -251,9 +266,6 @@ struct InboxView: View {
         }
         // Account changes discard navigation destinations and their private state.
         .id(model.screenScope)
-        .overlay(alignment: .bottom) {
-            if model.connected && mainSurface == .todo { bottomDock }
-        }
         .safeAreaInset(edge: .top, spacing: 0) {
             if !model.isDemo, let update = appUpdates.update {
                 HStack(spacing: 12) {
@@ -316,6 +328,8 @@ struct InboxView: View {
         .onAppear { MeetingLockedCoordinator.shared.recoverOutstanding() }
         .onChange(of: model.screenScope) { _, _ in
             screenThreads.removeAll(); screenExpanded = false; showScreens = false; controlsScreen = nil
+            selectedGeneratedApp = nil; showCreateApp = false
+            resetSurfaceNavigation(); bottomDockHeight = 0
         }
         .onChange(of: model.focused?.id) { _, _ in screenExpanded = false }
         .onChange(of: showScreens) { _, visible in
@@ -338,22 +352,15 @@ struct InboxView: View {
         .onChange(of: model.connected) { _, connected in
             if connected { Task { await model.refreshGeneratedApps() } }
             if connected && model.musicConnectorToOpen != nil { showConnectors = true }
-            if !connected { selectedGeneratedApp = nil; showCreateApp = false; mainSurface = .todo; screenThreads.removeAll(); screenExpanded = false; showConversations = false; showScreens = false; showScheduledJobs = false; showConnectors = false; showSettings = false; readingPositions.values.removeAll() }
+            if !connected { selectedGeneratedApp = nil; showCreateApp = false; mainSurface = .todo; screenThreads.removeAll(); screenExpanded = false; resetSurfaceNavigation(); bottomDockHeight = 0; showScreens = false; showSettings = false; readingPositions.values.removeAll() }
         }
 
     }
 
     @ViewBuilder
     private var bottomDock: some View {
-        if !showScreens && !showScheduledJobs && !showConnectors {
-            VStack(spacing: 0) {
-                if mainSurface == .todo {
-                    TodoCaptureComposer(model: model, inputFocused: $todoInputFocused)
-                } else {
-                    conversationBottomControls
-                }
-                mainNavigation
-            }
+        if !showScreens && !showsNewThreadComposer {
+            conversationBottomControls
             .frame(maxWidth: InboxChrome.maximumWidth)
             .frame(maxWidth: .infinity)
             .background(Ink.background.ignoresSafeArea(edges: .bottom))
@@ -361,15 +368,30 @@ struct InboxView: View {
                 LinearGradient(colors: [Ink.background.opacity(0), Ink.background], startPoint: .top, endPoint: .bottom)
                     .frame(height: 16).offset(y: -16).allowsHitTesting(false)
             }
-            // Keep the idle dock near the home indicator, restoring keyboard clearance on focus.
-            .offset(y: composerFocused || todoInputFocused ? 0 : 14)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomDockHeight = $0 }
         }
     }
 
+    private var showsNewThreadComposer: Bool {
+        mainSurface != .chat || model.focused == nil || showScheduledJobs || showConnectors
+    }
+
+    private func resetSurfaceNavigation() {
+        composerFocused = false; newThreadInputFocused = false
+        showScheduledJobs = false; showConnectors = false
+        showConversations = false; drawerTranslation = 0; drawerDragIsHorizontal = nil
+    }
+
+    private func selectMainSurface(_ surface: MainSurface) {
+        resetSurfaceNavigation()
+        if mainSurface != surface { bottomDockHeight = 0 }
+        mainSurface = surface
+        if surface == .todo { Task { await model.refreshTodo() } }
+    }
+
     private var navigationTabs: some View {
         HStack(spacing: 2) {
-            mainNavigationButton(.todo, title: "TODO", symbol: "checkmark.square", identifier: "main-tab-todo")
+            mainNavigationButton(.todo, title: "Inbox", symbol: "checkmark.square", identifier: "main-tab-todo")
             mainNavigationButton(.chat, title: "Chat", symbol: "bubble.left", identifier: "main-tab-chat")
             mainNavigationButton(.crm, title: "CRM", symbol: "person.2", identifier: "main-tab-crm")
             mainNavigationButton(.meetings, title: "Meetings", symbol: "text.bubble", identifier: "main-tab-meetings")
@@ -377,18 +399,16 @@ struct InboxView: View {
                 Menu {
                     ForEach(model.generatedApps) { app in
                         Button(app.title) {
-                            composerFocused = false; todoInputFocused = false
-                            selectedGeneratedApp = app.id; mainSurface = .apps
+                            selectedGeneratedApp = app.id; selectMainSurface(.apps)
                         }
                         .accessibilityIdentifier("app-store-app-\(app.id)")
                     }
                     if !model.generatedApps.isEmpty { Divider() }
                     Button {
-                        composerFocused = false; todoInputFocused = false
-                        selectedGeneratedApp = nil; mainSurface = .apps
+                        selectedGeneratedApp = nil; selectMainSurface(.apps)
                     } label: { Label("Your apps", systemImage: "square.grid.2x2") }
                     Button {
-                        composerFocused = false; todoInputFocused = false
+                        composerFocused = false; newThreadInputFocused = false
                         showCreateApp = true
                     } label: { Label("Create an app", systemImage: "plus") }
                 } label: {
@@ -418,10 +438,7 @@ struct InboxView: View {
 
     private func mainNavigationButton(_ surface: MainSurface, title: String, symbol: String, identifier: String) -> some View {
         Button {
-            composerFocused = false
-            todoInputFocused = false
-            mainSurface = surface
-            if surface == .todo { Task { await model.refreshTodo() } }
+            selectMainSurface(surface)
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: 19, weight: .medium))
@@ -698,7 +715,7 @@ struct InboxView: View {
                 Label(screenThreads.contains(model.focusedConversationIdentity ?? "") ? "Hide screen" : "Screen", systemImage: "display")
             }.disabled(model.remoteService == nil || model.focused == nil).accessibilityIdentifier("conversation-remote-screens")
             if !model.isDemo {
-                Button { composerFocused = false; mainSurface = .meetings } label: {
+                Button { selectMainSurface(.meetings) } label: {
                     Label("Meetings", systemImage: "text.bubble")
                 }.accessibilityIdentifier("inbox-meeting")
             }
@@ -1100,6 +1117,45 @@ private struct ConnectionStatusView: View {
             do { try await Task.sleep(for: .seconds(5)) } catch { return }
             showDelay = true
         }
+    }
+}
+
+private struct NewThreadComposer: View {
+    @ObservedObject var model: InboxModel
+    @Binding var focused: Bool
+    let send: () -> Void
+    @State private var overflowing = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let error = model.newThreadError {
+                Text(error).font(.caption).foregroundStyle(Ink.amber)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                ChatComposerEditor(text: $model.newThreadDraft, focused: $focused,
+                                   overflowing: $overflowing, accessibilityLabel: "New thread")
+                    .accessibilityIdentifier("new-thread-composer")
+                    .overlay(alignment: .topLeading) {
+                        if model.newThreadDraft.isEmpty {
+                            Text("Start a new thread…").font(.body).foregroundStyle(.tertiary)
+                                .padding(.top, 8).allowsHitTesting(false).accessibilityHidden(true)
+                        }
+                    }
+                Button(action: send) {
+                    Image(systemName: "arrow.up").font(.system(size: 16, weight: .semibold))
+                        .frame(width: 32, height: 32)
+                        .background(Ink.accent.opacity(model.canStartNewThread ? 1 : 0.22), in: Circle())
+                        .foregroundStyle(Ink.background)
+                        .frame(width: 44, height: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!model.canStartNewThread)
+                .accessibilityLabel("Start new thread").accessibilityIdentifier("new-thread-send")
+                .keyboardShortcut(.return, modifiers: .command)
+            }
+            .padding(.leading, 16).padding(.trailing, 4).padding(.vertical, 4)
+        }
+        .modifier(InboxComposerShell(focused: focused))
     }
 }
 
@@ -3481,14 +3537,14 @@ private struct VaultIntakeCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(intake.operation == "browser_takeover" ? "Control browser privately" : intake.operation == "browser_verification" ? (verificationSubmitted ? "Code submitted" : "Verify browser login") : (receipt == nil ? "Add to Vault securely" : "Saved to Vault"), systemImage: "lock.shield")
+            Label(intake.operation == "browser_login" ? "Sign in privately" : intake.operation == "browser_takeover" ? "Control browser privately" : intake.operation == "browser_verification" ? (verificationSubmitted ? "Code submitted" : "Verify browser login") : (receipt == nil ? "Add to Vault securely" : "Saved to Vault"), systemImage: "lock.shield")
                 .font(.headline)
             if verificationSubmitted { Text("Browser verification is pending.") } else if let receipt {
                 Text(receipt.name).font(.subheadline)
             } else {
                 if !intake.name.isEmpty { Text(intake.name).font(.subheadline) }
                 if let origin = intake.origin { Text(origin).font(.caption).textSelection(.enabled) }
-                Text(intake.operation == "browser_takeover" ? "Control the browser privately. The screen and input stay out of chat." : intake.operation == "browser_verification" ? "The code goes directly to this browser session. It stays out of chat and is not saved to Vault." : "Your information goes directly to your encrypted Vault. It stays out of chat.")
+                Text(intake.operation == "browser_login" ? "Sign in in the secure pane. Your password and codes stay out of chat and are not saved to Vault." : intake.operation == "browser_takeover" ? "Control the browser privately. The screen and input stay out of chat." : intake.operation == "browser_verification" ? "The code goes directly to this browser session. It stays out of chat and is not saved to Vault." : "Your information goes directly to your encrypted Vault. It stays out of chat.")
                     .font(.subheadline).foregroundStyle(.secondary)
                 Button("Open secure form") { receiptAgentID = model.focused?.id ?? ""; showingForm = true }
                     .buttonStyle(.borderedProminent)
@@ -3508,7 +3564,9 @@ private struct VaultIntakeCard: View {
             BrowserTakeoverSheet(model: model, intake: intake)
         }
         .sheet(isPresented: Binding(get: { showingForm && intake.operation != "browser_takeover" }, set: { showingForm = $0 })) {
-            if intake.operation == "browser_verification" {
+            if intake.operation == "browser_login" {
+                BrowserTakeoverSheet(model: model, intake: intake)
+            } else if intake.operation == "browser_verification" {
                 BrowserVerificationSheet(model: model, intake: intake, agentID: receiptAgentID) { verificationSubmitted = true }
             } else { VaultLoginSheet(model: model, intake: intake, agentID: receiptAgentID) { receipt = $0 } }
         }
@@ -3697,6 +3755,9 @@ private struct BrowserTakeoverSheet: View {
     @State private var viewport = CGSize(width: 390, height: 700)
     @State private var finishing = false
     @State private var touching = false
+    @State private var reviewed = false
+    @State private var currentOrigin: String?
+    private var login: Bool { intake.operation == "browser_login" }
 
     private func clear() {
         generation = UUID(); submission?.cancel(); submission = nil
@@ -3715,11 +3776,12 @@ private struct BrowserTakeoverSheet: View {
     }
     private func enqueue(_ action: [String: JSON]) {
         guard scenePhase == .active, account == model.vaultIntakeAccount, !finishing else { return }
-        guard failure == nil || action["action"] == .string("finish") else { return }
+        guard failure == nil || ["finish", "cancel", "approve"].contains(action["action"]?.string ?? "") else { return }
+        guard !login || reviewed || ["approve", "cancel"].contains(action["action"]?.string ?? "") else { return }
         if action["action"] == .string("touch") {
             touching = action["phase"] == .string("start") || action["phase"] == .string("move")
         }
-        if action["action"] == .string("finish") { finishing = true; keyboardVisible = false }
+        if action["action"] == .string("finish") || action["action"] == .string("cancel") { finishing = true; keyboardVisible = false }
         // Only replace adjacent unsent moves. Text, keys and gesture boundaries retain order.
         if action["phase"] == .string("move"), queue.last?["phase"] == .string("move") {
             queue[queue.count - 1] = action
@@ -3735,6 +3797,17 @@ private struct BrowserTakeoverSheet: View {
                 guard !Task.isCancelled, generation == token, scenePhase == .active,
                       account == model.vaultIntakeAccount else { return }
                 switch frame {
+                case .approved:
+                    guard login, action["action"] == .string("approve") else { throw APIError.invalidResponse }
+                    reviewed = true; failure = nil; submission = nil; observe(configureViewport: true); return
+                case .cancelled:
+                    guard login, action["action"] == .string("cancel") else { throw APIError.invalidResponse }
+                    model.publishBrowserVerificationReceipt(intake: intake, agentID: intake.agentID ?? "", account: account, cancelled: true)
+                    clear(); dismiss(); return
+                case .loginActive(let data, let hint, let regions, let origin):
+                    guard let image = UIImage(data: data) else { throw APIError.invalidResponse }
+                    screen = image; keyboard = hint; inputs = regions; currentOrigin = origin
+                    if hint != nil { keyboardVisible = true }
                 case .finished:
                     guard action["action"] == .string("finish") else { throw APIError.invalidResponse }
                     model.publishBrowserVerificationReceipt(intake: intake, agentID: intake.agentID ?? "", account: account)
@@ -3757,6 +3830,11 @@ private struct BrowserTakeoverSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                if login && !reviewed {
+                    BrowserLoginReview(origin: intake.origin ?? "", sites: intake.allowedOrigins ?? [], busy: submission != nil,
+                        approve: { failure = nil; enqueue(["action": .string("approve")]) },
+                        cancel: { enqueue(["action": .string("cancel")]) })
+                } else {
                 GeometryReader { geometry in
                     PrivateBrowserCanvas(image: screen, keyboard: keyboard, inputs: inputs,
                         keyboardVisible: keyboardVisible && failure == nil && !finishing && scenePhase == .active,
@@ -3765,28 +3843,32 @@ private struct BrowserTakeoverSheet: View {
                         .onAppear { viewport = geometry.size }
                         .onChange(of: geometry.size) { _, size in if !keyboardVisible { viewport = size } }
                 }
+                }
                 if let failure { Text(failure).font(.footnote).foregroundStyle(.red).padding(8) }
             }
-            .background(Color.black).privacySensitive()
+            .background(login && !reviewed ? Color(uiColor: .systemBackground) : Color.black).privacySensitive()
             .overlay {
-                if screen == nil && failure == nil {
+                if screen == nil && failure == nil && (!login || reviewed) {
                     ProgressView("Opening private browser…").tint(.white).foregroundStyle(.white)
                 }
             }
-            .navigationTitle(intake.origin ?? "Private browser")
+            .navigationTitle(currentOrigin ?? (login && !reviewed ? "Private sign-in" : intake.origin ?? "Private browser"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { enqueue(["action": .string("finish")]) }
-                        .disabled(finishing || scenePhase != .active)
+                    if !login || reviewed { Button("Done") { enqueue(["action": .string("finish")]) }
+                        .disabled(finishing || scenePhase != .active) }
                 }
                 ToolbarItemGroup(placement: .bottomBar) {
+                    if !login || reviewed {
+                    if login { Button("Cancel") { enqueue(["action": .string("cancel")]) }.disabled(finishing) }
                     Button { guard submission == nil else { return }; failure = nil; observe(configureViewport: true) } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }.disabled(submission != nil || finishing || touching)
                     Spacer()
                     Button { keyboardVisible.toggle() } label: { Label("Keyboard", systemImage: "keyboard") }
                         .disabled(screen == nil || failure != nil || finishing)
+                    }
                 }
             }
             .overlay { if scenePhase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
@@ -3794,12 +3876,12 @@ private struct BrowserTakeoverSheet: View {
         .presentationDetents([.large]).presentationDragIndicator(.hidden)
         .interactiveDismissDisabled()
         .task {
-            account = model.vaultIntakeAccount; observe(configureViewport: true)
+            account = model.vaultIntakeAccount; if !login { observe(configureViewport: true) }
             observing = Task { @MainActor in
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(1))
                     guard !Task.isCancelled else { return }
-                    if submission == nil && queue.isEmpty && failure == nil && !finishing && !touching { observe() }
+                    if (!login || reviewed) && submission == nil && queue.isEmpty && failure == nil && !finishing && !touching { observe() }
                 }
             }
         }
@@ -3809,6 +3891,35 @@ private struct BrowserTakeoverSheet: View {
         }
         .onChange(of: model.vaultIntakeAccount) { _, _ in clear(); dismiss() }
         .onChange(of: model.connected) { _, connected in if !connected { clear(); dismiss() } }
+    }
+}
+
+private struct BrowserLoginReview: View {
+    let origin: String
+    let sites: [String]
+    let busy: Bool
+    let approve: () -> Void
+    let cancel: () -> Void
+    var body: some View {
+        Form {
+            Section("Sign in privately") {
+                Label(origin, systemImage: "lock.shield")
+                Text("Your password, verification codes and browser screen stay out of chat. Credentials are not saved to Vault.")
+                    .foregroundStyle(.secondary)
+            }
+            Section("Allowed websites") {
+                ForEach(sites, id: \.self) { Text($0) }
+            }
+            Section {
+                Text("When you tap Done, the agent checks your sign-in and continues in this browser.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button("Continue to private login", action: approve).disabled(busy)
+                    .accessibilityIdentifier("browser-login-approve")
+                Button("Cancel", role: .cancel, action: cancel).disabled(busy)
+                    .accessibilityIdentifier("browser-login-cancel")
+            }
+        }
+        .accessibilityIdentifier("browser-login-review")
     }
 }
 
@@ -4422,6 +4533,29 @@ private struct SecureBrowserField: View {
     }
 }
 #if DEBUG && targetEnvironment(simulator)
+struct BrowserLoginUIFixture: View {
+    @State private var showing = false
+    @State private var result = ""
+    var body: some View {
+        VStack {
+            Text("Conversation")
+            Button("Open secure form") { showing = true }
+                .accessibilityIdentifier("browser-login-open")
+            Text(result).accessibilityIdentifier("browser-login-result")
+        }
+        .sheet(isPresented: $showing) {
+            NavigationStack {
+                BrowserLoginReview(origin: "https://example.com", sites: ["https://example.com", "https://auth.example.com"], busy: false,
+                    approve: { result = "Private browser approved"; showing = false },
+                    cancel: { result = "Private sign-in cancelled"; showing = false })
+                    .navigationTitle("Private sign-in")
+            }
+            .presentationDetents([.large])
+            .interactiveDismissDisabled()
+        }
+    }
+}
+
 struct NativeSecureInputUIFixture: View {
     private let description: NativeSecureInputDescription
     @State private var password = ""

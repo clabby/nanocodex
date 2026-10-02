@@ -33,9 +33,6 @@ pub(crate) struct PreparedToolEntry {
     definition: ToolDefinition,
     supports_parallel_tool_calls: bool,
     timeout_ms: u64,
-    // Reserved locally until effect-domain semantics have a protocol contract.
-    // It must never cause this executor to be replicated.
-    _effect_domain: Option<Box<str>>,
     handler: PreparedToolHandler,
 }
 
@@ -52,7 +49,6 @@ impl PreparedToolEntry {
             definition,
             supports_parallel_tool_calls,
             timeout_ms: DEFAULT_TOOL_TIMEOUT_MS,
-            _effect_domain: None,
             handler: PreparedToolHandler::Fixed(tool),
         }
     }
@@ -63,13 +59,26 @@ impl PreparedToolEntry {
         workspace: Arc<crate::workspace_runtime::WorkspaceToolRuntime>,
     ) -> Self {
         let remote_name = definition.name().into();
+        let supports_parallel_tool_calls =
+            workspace.supports_parallel_tool_calls(definition.name());
+        // Shell handlers return a process session after their bounded yield.
+        // Include transport/cleanup grace and bound an unresponsive handler
+        // even while its connection stays healthy.
+        let timeout_ms = match definition.name() {
+            name if name == crate::StandardTool::ExecCommand.name() => {
+                crate::shell::MAX_EXEC_YIELD_MS + 10_000
+            }
+            name if name == crate::StandardTool::WriteStdin.name() => {
+                crate::shell::MAX_POLL_YIELD_MS + 10_000
+            }
+            _ => DEFAULT_TOOL_TIMEOUT_MS,
+        };
         Self {
             provider: "workspace".into(),
             remote_name,
             definition,
-            supports_parallel_tool_calls: false,
-            timeout_ms: DEFAULT_TOOL_TIMEOUT_MS,
-            _effect_domain: None,
+            supports_parallel_tool_calls,
+            timeout_ms,
             handler: PreparedToolHandler::Workspace(workspace),
         }
     }
@@ -82,7 +91,6 @@ impl PreparedToolEntry {
             definition: tool.definition().clone(),
             supports_parallel_tool_calls: tool.supports_parallel_tool_calls(),
             timeout_ms: u64::try_from(tool.timeout().as_millis()).unwrap_or(u64::MAX),
-            _effect_domain: None,
             handler: PreparedToolHandler::Mcp(tool),
         }
     }
@@ -227,13 +235,6 @@ impl PreparedToolRuntime {
             .iter()
             .find(|entry| entry.definition.name() == name)
             .map(|entry| entry.timeout_ms)
-    }
-
-    pub(crate) fn parallel_safe(&self, name: &str) -> bool {
-        self.entries
-            .iter()
-            .find(|entry| entry.definition.name() == name)
-            .is_some_and(|entry| entry.supports_parallel_tool_calls)
     }
 
     /// Returns one complete immutable language-neutral catalog snapshot.

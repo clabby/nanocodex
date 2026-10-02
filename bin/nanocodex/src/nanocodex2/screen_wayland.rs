@@ -2,6 +2,7 @@
 //! capture and input across signaling reconnects; viewers receive complete frames.
 use super::{
     screen_gamepad::Controller,
+    screen_linux_session::WaylandSession,
     screen_publisher::ScreenBackend,
     screen_video::{Capture, VideoSource},
     screen_wayland_input::{Input, record},
@@ -36,6 +37,7 @@ struct InputPipe {
 }
 struct State {
     input: Mutex<InputPipe>,
+    session: Option<WaylandSession>,
     gamepad: Controller,
     frames: broadcast::Sender<EncodedPacket>,
     alive: AtomicBool,
@@ -47,10 +49,12 @@ pub(crate) struct Platform {
     worker: Option<tokio::task::JoinHandle<()>>,
 }
 impl Platform {
-    pub(crate) async fn start() -> Result<Self> {
-        Self::start_command(Self::command()?).await
+    pub(crate) async fn start(session: WaylandSession) -> Result<Self> {
+        session.prepare_output().await?;
+        let command = Self::command(&session)?;
+        Self::start_session(command, Some(session)).await
     }
-    fn command() -> Result<tokio::process::Command> {
+    fn command(session: &WaylandSession) -> Result<tokio::process::Command> {
         let bitrate = std::env::var("NANOCODEX_SCREEN_BITRATE_KBPS")
             .unwrap_or("6000".into())
             .parse::<u32>()
@@ -58,9 +62,14 @@ impl Platform {
         if !(1000..=100000).contains(&bitrate) {
             return Err(error("screen bitrate must be 1000 through 100000"));
         }
-        let executable =
-            std::env::var_os("NANOCODEX_WAYMOTE").unwrap_or_else(|| "waymote-streamd".into());
-        let mut command = tokio::process::Command::new(executable);
+        let mut command = match std::env::var_os("NANOCODEX_WAYMOTE") {
+            Some(executable) if !executable.is_empty() => tokio::process::Command::new(executable),
+            Some(_) => return Err(error("NANOCODEX_WAYMOTE must not be empty")),
+            None => {
+                tokio::process::Command::from(super::screen_helpers::command("waymote-streamd")?)
+            }
+        };
+        session.configure(&mut command)?;
         command
             .args([
                 "--frame-rate",
@@ -82,7 +91,14 @@ impl Platform {
             .process_group(0);
         Ok(command)
     }
+    #[cfg(test)]
     async fn start_command(command: tokio::process::Command) -> Result<Self> {
+        Self::start_session(command, None).await
+    }
+    async fn start_session(
+        command: tokio::process::Command,
+        session: Option<WaylandSession>,
+    ) -> Result<Self> {
         let (sender, _) = broadcast::channel(8);
         let (stop, _) = watch::channel(false);
         let mut platform = Self {
@@ -91,6 +107,7 @@ impl Platform {
                     pipe: None,
                     sequence: 0,
                 }),
+                session,
                 gamepad: Controller::configured(),
                 frames: sender,
                 alive: AtomicBool::new(false),
@@ -110,7 +127,13 @@ impl Platform {
                 .is_none_or(tokio::task::JoinHandle::is_finished)
     }
     pub(crate) async fn restart(&mut self) -> Result<()> {
-        self.restart_command(Self::command()?).await
+        let session = self
+            .state
+            .session
+            .as_ref()
+            .ok_or_else(|| error("Wayland session unavailable"))?;
+        session.prepare_output().await?;
+        self.restart_command(Self::command(session)?).await
     }
     async fn restart_command(&mut self, command: tokio::process::Command) -> Result<()> {
         // Retain backend/video state and the publisher. Reap the old process group
@@ -179,7 +202,13 @@ impl Platform {
                     Some("capabilities") => Ok(
                         json!({"status":"ok","relativePointer":state.alive.load(Ordering::Acquire),"gamepad":state.alive.load(Ordering::Acquire)&&state.gamepad.available()}),
                     ),
-                    Some("observe") if state.alive.load(Ordering::Acquire) => snapshot().await,
+                    Some("observe") if state.alive.load(Ordering::Acquire) => {
+                        let session = state
+                            .session
+                            .as_ref()
+                            .ok_or_else(|| error("Wayland session unavailable"))?;
+                        snapshot(session).await
+                    }
                     Some("input") if state.alive.load(Ordering::Acquire) => {
                         let event = Input::parse(input["input"].clone()).map_err(error)?;
                         state.apply(event).await?;
@@ -292,10 +321,16 @@ impl State {
         if let Input::Gamepad { gamepad } = &event {
             return self.gamepad.apply(gamepad).map_err(error);
         }
-        if let Input::Text { text } = &event
-            && self::text::type_text(text).await.map_err(error)?
-        {
-            return Ok(());
+        if let Input::Text { text } = &event {
+            if (std::env::var("NANOCODEX_WAYLAND_TEXT_X11").as_deref() == Ok("1")
+                || std::env::var("NANOCODEX_WAYLAND_TEXT_WTYPE").as_deref() == Ok("1"))
+                && let Some(session) = &self.session
+            {
+                session.validate_inherited_text_session()?;
+            }
+            if self::text::type_text(text).await.map_err(error)? {
+                return Ok(());
+            }
         }
         let release = matches!(event, Input::ReleaseAll {});
         let gamepad = if release {
@@ -333,11 +368,13 @@ async fn write(input: &mut InputPipe, bytes: &[u8]) -> Result<()> {
         }
     }
 }
-async fn snapshot() -> Result<Value> {
+async fn snapshot(session: &WaylandSession) -> Result<Value> {
     use base64::Engine;
     // grim's output scale is independent of physical monitor resolution. Decode
     // with image limits, then enforce the shared screenshot size/transport budget.
-    let mut child = tokio::process::Command::new("grim")
+    let mut command = tokio::process::Command::from(super::screen_helpers::command("grim")?);
+    session.configure(&mut command)?;
+    let mut child = command
         .args(["-t", "png", "-l", "1", "-s", "0.5", "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -389,6 +426,7 @@ mod tests {
                 pipe: None,
                 sequence: 0,
             }),
+            session: None,
             gamepad: Controller::configured(),
             frames: sender,
             alive: AtomicBool::new(true),

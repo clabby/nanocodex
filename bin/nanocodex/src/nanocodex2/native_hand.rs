@@ -36,6 +36,10 @@ struct Identity {
 pub(super) struct NativeState {
     pub(super) machine: AttachmentMachine,
     _lock: NativeStateLock,
+    directory: PathBuf,
+    service_status: bool,
+    connection_phase: std::sync::atomic::AtomicU8,
+    screen_ready: std::sync::atomic::AtomicBool,
 }
 
 pub(super) struct NativeStateLock(pub(super) File);
@@ -49,6 +53,74 @@ impl Drop for NativeStateLock {
 }
 
 impl NativeState {
+    // A persistent native service publishes bounded readiness independently of
+    // CLI/controller lifetime. DeviceHand owns its richer status file separately.
+    fn publish_service_status(&self, status: &str) -> Result<(), ManagedError> {
+        self.connection_phase.store(
+            match status {
+                "connected" => 1,
+                "stopped" => 2,
+                _ => 0,
+            },
+            std::sync::atomic::Ordering::Release,
+        );
+        self.write_service_status()
+    }
+
+    fn publish_screen_status(&self, ready: bool) -> Result<(), ManagedError> {
+        self.screen_ready
+            .store(ready, std::sync::atomic::Ordering::Release);
+        self.write_service_status()
+    }
+
+    fn write_service_status(&self) -> Result<(), ManagedError> {
+        if !self.service_status {
+            return Ok(());
+        }
+        let status = match self
+            .connection_phase
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            1 => "connected",
+            2 => "stopped",
+            _ => "connecting",
+        };
+        let path = self.directory.join("status.json");
+        if path.try_exists().map_err(configuration)? {
+            require_regular(&path, false)?;
+        }
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(&self.directory).map_err(configuration)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            temporary
+                .as_file()
+                .set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(configuration)?;
+        }
+        let executable = std::env::current_exe().map_err(configuration)?;
+        let updated_at_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(configuration)?
+            .as_millis();
+        serde_json::to_writer(
+            &mut temporary,
+            &serde_json::json!({
+                "status": status,
+                "machine_id": self.machine.id(),
+                "updated_at_millis": updated_at_millis,
+                "screen": { "status": if self.screen_ready.load(std::sync::atomic::Ordering::Acquire) { "ready" } else { "unavailable" }, "transport": "webrtc" },
+                "daemon": {"pid": std::process::id(), "executable": executable},
+            }),
+        )
+        .map_err(configuration)?;
+        temporary.write_all(b"\n").map_err(configuration)?;
+        temporary.as_file().sync_all().map_err(configuration)?;
+        temporary.persist(&path).map_err(configuration)?;
+        Ok(())
+    }
+
     pub(super) fn advertise_vm_provider(&mut self, provider: &str) -> Result<(), ManagedError> {
         super::validate_vm_factory_name(provider)?;
         let mut capabilities: Vec<String> = self
@@ -166,6 +238,10 @@ impl NativeState {
         Ok(Self {
             machine,
             _lock: lock,
+            directory: directory.to_path_buf(),
+            service_status: false,
+            connection_phase: std::sync::atomic::AtomicU8::new(0),
+            screen_ready: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -228,15 +304,21 @@ async fn serve(client: &ManagedClient, command: NativeHand) -> Result<(), Manage
         .machine_name
         .unwrap_or_else(|| host::bounded_display_name(whoami::devicename()));
     let mut state = NativeState::open(&command.workspace, &directory, name)?;
+    state.service_status = true;
     if let Some(provider) = command.vm_provider {
         state.advertise_vm_provider(&provider)?;
     }
     let target = client.account_attachment_target()?;
     // Display readiness must not delay shell/filesystem publication. Keep the
     // NativeState lock until both the attachment and screen have shut down.
-    super::screen_supervisor::while_attached(
+    super::screen_supervisor::while_attached_observed(
         || super::screen_native::NativeScreen::start(&target, &state.machine, &directory),
         run(target.clone(), &state, super::service::shutdown_signal()),
+        |error| {
+            if state.publish_screen_status(error.is_none()).is_err() {
+                tracing::warn!(target: "nanocodex2", stage = "native.hand.status_write_failed", "Cannot publish bounded device service status");
+            }
+        },
     )
     .await
 }
@@ -267,6 +349,7 @@ pub(super) async fn run_observed(
     shutdown: impl Future<Output = Result<(), ManagedError>>,
     mut observe: impl FnMut(&AttachmentEvent),
 ) -> Result<(), ManagedError> {
+    state.publish_service_status("connecting")?;
     // WorkspaceTools uses the existing sanitized subprocess environment. Do not
     // forward the account credential or ambient sensitive variables to programs.
     let mut tools = Tools::builder()
@@ -299,22 +382,29 @@ pub(super) async fn run_observed(
         tokio::select! {
             result = &mut shutdown => {
                 result?;
+                state.publish_service_status("stopped")?;
                 return attachment.detach().await.map_err(configuration);
             }
-            result = closed.closed() => return result.map_err(|error| {
+            result = closed.closed() => {
+                state.publish_service_status("stopped")?;
+                return result.map_err(|error| {
                 let status = match &error {
                     AttachmentError::Authentication(_) => reqwest::StatusCode::UNAUTHORIZED,
                     AttachmentError::Fenced(_) => reqwest::StatusCode::FORBIDDEN,
                     _ => return configuration(error),
                 };
                 ManagedError::Http { status, code: "hand_attachment_access".into(), message: error.to_string() }
-            }),
+                });
+            },
             Some(event) = events.recv() => {
               observe(&event);
               match event {
-                AttachmentEvent::Connecting => tracing::info!(target: "nanocodex2",
-                    stage = "native.hand.connecting", "Connecting native Hand"),
+                AttachmentEvent::Connecting => {
+                    state.publish_service_status("connecting")?;
+                    tracing::info!(target: "nanocodex2", stage = "native.hand.connecting", "Connecting native Hand");
+                },
                 AttachmentEvent::CatalogPublished { .. } => {
+                    state.publish_service_status("connected")?;
                     super::service::ready();
                     tracing::info!(target: "nanocodex2",
                     stage = "native.hand.ready", machine_id = state.machine.id(),
@@ -477,6 +567,50 @@ mod tests {
             command.browser_executable,
             Some(PathBuf::from("/opt/chrome"))
         );
+    }
+
+    #[test]
+    fn persistent_owner_status_distinguishes_catalog_capture_and_stop() {
+        let workspace = tempfile::tempdir().unwrap();
+        let directory = private_state_directory();
+        let mut state =
+            NativeState::open(workspace.path(), directory.path(), "Service".into()).unwrap();
+        state.service_status = true;
+        let read = || -> Value {
+            serde_json::from_slice(&fs::read(directory.path().join("status.json")).unwrap())
+                .unwrap()
+        };
+        state.publish_service_status("connecting").unwrap();
+        assert_eq!(read()["status"], "connecting");
+        state.publish_service_status("connected").unwrap();
+        assert_eq!(read()["screen"]["status"], "unavailable");
+        state.publish_screen_status(true).unwrap();
+        let ready = read();
+        assert_eq!(ready["status"], "connected");
+        assert_eq!(ready["screen"]["status"], "ready");
+        assert_eq!(ready["screen"]["transport"], "webrtc");
+        assert_eq!(ready["daemon"]["pid"], std::process::id());
+        assert_eq!(ready["machine_id"], state.machine.id());
+        assert_eq!(
+            ready["daemon"]["executable"],
+            std::env::current_exe().unwrap().to_str().unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(directory.path().join("status.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        state.publish_screen_status(false).unwrap();
+        assert_eq!(read()["screen"]["status"], "unavailable");
+        state.publish_service_status("stopped").unwrap();
+        assert_eq!(read()["status"], "stopped");
     }
 
     #[test]

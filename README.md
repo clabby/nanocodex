@@ -164,7 +164,11 @@ the [release switcher documentation](bin/nanocodex/src/update.rs).
 To install a branch or an open pull request from source, run
 `nanocodex update --branch master` or `nanocodex update --pr 123`. Both commands fetch the selected
 revision and compile the CLI and Hand locally with Cargo. PR selection also
-requires `gh`. These source builds do not package the native voice runtime.
+requires `gh`. The updater reuses its checkout and Cargo cache under
+`~/.nanocodex/source-build`, builds both binaries together, and uses the optimized
+`nightly` profile without release LTO. Cargo timing reports are saved under
+`~/.nanocodex/source-build/target/cargo-timings` (or your `CARGO_TARGET_DIR`).
+These source builds do not package the native voice runtime.
 
 For managed agents, `nanocodex2 login` signs in with an SMS code and saves an
 account key; `nanocodex2 status` verifies it, and `nanocodex2 logout` removes the

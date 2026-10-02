@@ -34,21 +34,10 @@ impl ScreenPublisher {
         } else {
             broadcast
         };
-        let macos_video = cfg!(target_os = "macos") && video.is_some();
-        let video = if std::env::var("NANOCODEX_SCREEN_TRANSPORT").as_deref() == Ok("frames-v1") {
-            if macos_video {
-                return Err(error(
-                    "macOS remote viewing requires WebRTC; remove NANOCODEX_SCREEN_TRANSPORT=frames-v1",
-                ));
-            }
-            None
-        } else {
-            video
-        };
-        // A recovering Linux capture must return to WebRTC instead of keeping
-        // an accidental screenshot-only session after a transient helper failure.
-        // The explicit frames-v1 override above remains available on Linux.
-        let require_video = video.is_some() && cfg!(any(target_os = "macos", target_os = "linux"));
+        validate_video_transport(
+            std::env::var("NANOCODEX_SCREEN_TRANSPORT").ok().as_deref(),
+            video.is_some(),
+        )?;
         let backend: runtime::Backend = Arc::new(move |value| {
             let result = backend(value);
             Box::pin(async move { result.await.map_err(|error| Box::new(error) as _) })
@@ -67,7 +56,6 @@ impl ScreenPublisher {
                 video,
                 audio,
                 microphone_factory,
-                require_video,
                 observation: Some(Arc::new(providers)),
                 broadcast: Box::new(broadcast),
             },
@@ -85,6 +73,19 @@ impl ScreenPublisher {
     pub(crate) async fn shutdown(self) -> Result<(), ManagedError> {
         self.0.shutdown().await.map_err(error)
     }
+}
+fn validate_video_transport(transport: Option<&str>, has_video: bool) -> Result<(), ManagedError> {
+    if transport == Some("frames-v1") {
+        return Err(error(
+            "Native and VM live viewing requires WebRTC; remove NANOCODEX_SCREEN_TRANSPORT=frames-v1 (JPEG transport is reserved for restricted Cloudflare sandboxes)",
+        ));
+    }
+    if !has_video {
+        return Err(error(
+            "Hand live view requires an H.264 video source; JPEG transport is not supported",
+        ));
+    }
+    Ok(())
 }
 fn publisher_target(target: &AttachmentTarget) -> Result<PublisherTarget, ManagedError> {
     PublisherTarget::from_attachment(target.endpoint().as_str(), target.bearer()).map_err(error)
@@ -128,6 +129,14 @@ impl runtime::Broadcast for super::screen_broadcast::Broadcast {
 mod tests {
     use super::*;
     use nanocodex_remote::runtime::Observation;
+    #[test]
+    fn live_view_never_selects_jpeg_transport() {
+        assert!(validate_video_transport(None, true).is_ok());
+        assert!(validate_video_transport(Some("webrtc"), true).is_ok());
+        assert!(validate_video_transport(Some("frames-v1"), true).is_err());
+        assert!(validate_video_transport(Some("frames-v1"), false).is_err());
+        assert!(validate_video_transport(None, false).is_err());
+    }
     #[tokio::test]
     async fn stalled_provider_adapter_finishes_within_budget() {
         let registry = Registry::stalled();

@@ -27,6 +27,8 @@ mod installation;
 mod launcher;
 #[cfg(any(target_os = "linux", test))]
 mod linux_hand_install;
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+mod linux_hand_update;
 mod managed2;
 mod native_hand;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -38,8 +40,12 @@ mod screen_broadcast;
 #[cfg(target_os = "linux")]
 mod screen_gamepad;
 #[cfg(target_os = "linux")]
+mod screen_helpers;
+#[cfg(target_os = "linux")]
 mod screen_host;
 mod screen_ice;
+#[cfg(target_os = "linux")]
+mod screen_linux_session;
 #[cfg(target_os = "macos")]
 mod screen_macos;
 mod screen_native;
@@ -153,6 +159,10 @@ enum Command {
     #[cfg(any(target_os = "linux", test))]
     #[command(name = "__install-hand", hide = true)]
     InstallHand,
+    /// Update an existing native Linux Hand without enrollment or factory migration.
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    #[command(name = "__update-hand", hide = true)]
+    UpdateHand,
     /// Share an existing Wayland session through the shared Rust publisher.
     #[cfg(target_os = "linux")]
     #[command(name = "wayland-host", hide = true)]
@@ -704,6 +714,8 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::HandDesktop(command)) => return screen_native::serve_desktop(command).await,
         #[cfg(any(target_os = "linux", test))]
         Some(Command::InstallHand) => return linux_hand_install::run().await,
+        #[cfg(any(target_os = "linux", target_os = "macos", test))]
+        Some(Command::UpdateHand) => return linux_hand_update::run().await,
         Some(Command::Hand(command)) if command.rootfs.is_none() && command.docker.is_none() => {
             return native_hand::serve_hand(command).await;
         }
@@ -774,6 +786,8 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::HandDesktop(_)) => unreachable!("handled before managed client setup"),
         #[cfg(any(target_os = "linux", test))]
         Some(Command::InstallHand) => unreachable!("handled before managed client setup"),
+        #[cfg(any(target_os = "linux", target_os = "macos", test))]
+        Some(Command::UpdateHand) => unreachable!("handled before managed client setup"),
         Some(Command::Host(_)) => unreachable!("handled before managed client setup"),
         Some(Command::New(settings)) => {
             let account = settings.chatgpt_account.clone();

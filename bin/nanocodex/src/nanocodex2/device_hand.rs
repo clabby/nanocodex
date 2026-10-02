@@ -524,7 +524,7 @@ async fn share(
             // while capture starts, repair helpers in place, and retain replacement
             // fences instead of leaving a failed screen idle until daemon restart.
             let screen_target = client.account_attachment_target()?;
-            let result = super::screen_supervisor::while_attached(
+            let result = super::screen_supervisor::while_attached_observed(
                 || {
                     super::screen_native::NativeScreen::start(
                         &screen_target,
@@ -551,6 +551,11 @@ async fn share(
                         emit(&status);
                     },
                 ),
+                |error| {
+                    let mut status = status.lock().unwrap();
+                    status["screen"] = json!({"status": if error.is_none() { "ready" } else { "unavailable" }, "transport":"webrtc"});
+                    let _ = publish(directory, &status);
+                },
             )
             .await;
             cancel.cancel();

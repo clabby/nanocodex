@@ -58,6 +58,9 @@ by credential revision. HTTP rejections can be retried once per eligible account
 The Responses WebSocket forwards a retryable error after a successful switch,
 using the SDK's existing reconnect/full-history recovery so provider checkpoint
 IDs do not cross accounts. Once output has started, the original error is kept.
+Pinned accounts and responses with output forward quota errors without waiting
+for bookkeeping. Eligible failover decisions wait at most five seconds; failed
+or timed-out bookkeeping preserves the provider error.
 Generic 429s, authorization denials, and sponsored quota do not trigger this
 pool failover. Public credential status includes account IDs, active/connected
 flags, and `limited_until` timestamps, never tokens. ChatGPT disconnect removes

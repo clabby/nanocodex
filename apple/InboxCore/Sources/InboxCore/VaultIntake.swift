@@ -37,9 +37,10 @@ public struct VaultIntake: Codable, Equatable, Sendable {
     public let challengeID: String?
     public let agentID: String?
     public var expiresAt: Double? = nil
+    public var allowedOrigins: [String]? = nil
 
     public func isCurrentBrowserRequest(agentID: String, now: Date = Date()) -> Bool {
-        guard operation == "browser_takeover" || operation == "browser_verification",
+        guard operation == "browser_takeover" || operation == "browser_verification" || operation == "browser_login",
               self.agentID == agentID, challengeID != nil, let expiresAt else { return false }
         return expiresAt > now.timeIntervalSince1970 * 1000
     }
@@ -47,6 +48,21 @@ public struct VaultIntake: Codable, Equatable, Sendable {
     public static func parse(_ value: JSON, depth: Int = 0) -> VaultIntake? {
         guard depth < 12 else { return nil }
         let value = ToolPresentation.decoded(value)
+        if value["type"].string == "browser_login", value["status"].string == "input_required" {
+            guard case .object(let fields) = value,
+                  Set(fields.keys).isSubset(of: ["type", "status", "request_id", "challenge_id", "agent_id", "origin", "allowed_origins", "expires_at", "approved", "login_url"]),
+                  UUID(uuidString: value["request_id"].string) != nil,
+                  value["challenge_id"].string == value["request_id"].string,
+                  (try? ManagedClient.agentPath(value["agent_id"].string)) != nil,
+                  case .number(let expiry) = value["expires_at"], expiry.isFinite, expiry > 0,
+                  case .array(let origins) = value["allowed_origins"], (1...8).contains(origins.count) else { return nil }
+            let sites = origins.map(\.string)
+            guard Set(sites).count == sites.count, sites.contains(value["origin"].string), sites.allSatisfy({ site in
+                parse(.object(["type": .string("vault_intake"), "status": .string("input_required"), "kind": .string("login"), "origin": .string(site)]))?.origin != nil
+            }) else { return nil }
+            return .init(kind: "login", name: "", origin: value["origin"].string, operation: "browser_login", vaultID: nil,
+                         challengeID: value["request_id"].string, agentID: value["agent_id"].string, expiresAt: expiry, allowedOrigins: sites)
+        }
         if ["browser_vault_challenge", "browser_vault_takeover"].contains(value["type"].string), value["status"].string == "input_required" {
             guard case .object(let fields) = value,
                   Set(fields.keys) == Set(["type", "status", "challenge_id", "agent_id", "origin", "expires_at"]),
@@ -199,12 +215,36 @@ public enum BrowserTakeoverFrame: Sendable {
         return .active(image: data, width: Int(width), height: Int(height))
     }
     case finished
+    case approved
+    case cancelled
+    case loginActive(image: Data, keyboard: BrowserKeyboardHint?, inputs: [BrowserInputRegion], origin: String)
 }
 extension ManagedClient {
     public func browserTakeover(intake: VaultIntake, action: [String: JSON], configuration: URLSessionConfiguration = .ephemeral) async throws -> BrowserTakeoverFrame {
-        guard intake.operation == "browser_takeover", let challenge = intake.challengeID, let agent = intake.agentID else { throw APIError.invalidResponse }
+        guard ["browser_takeover", "browser_login"].contains(intake.operation ?? ""), let challenge = intake.challengeID, let agent = intake.agentID else { throw APIError.invalidResponse }
         var body = action; body["challenge_id"] = .string(challenge)
         let response = try await vaultIntakeJSON(path: Self.agentPath(agent) + "/browser-vault/takeover", method: "POST", body: .object(body), configuration: configuration, maximumResponseBytes: 16 * 1024 * 1024)
+        if intake.operation == "browser_login" {
+            guard case .object(var fields) = response else { throw APIError.invalidResponse }
+            let mode = action["action"]?.string ?? ""
+            if mode == "approve" {
+                guard fields.count == 1, response["status"].string == "approved" else { throw APIError.invalidResponse }
+                return .approved
+            }
+            if mode == "finish" || mode == "cancel" {
+                guard Set(fields.keys) == Set(["type", "status", "request_id"]),
+                      response["type"].string == "browser_login_receipt", response["request_id"].string == challenge,
+                      response["status"].string == (mode == "finish" ? "finished" : "cancelled") else { throw APIError.invalidResponse }
+                return mode == "finish" ? .finished : .cancelled
+            }
+            let origin = fields.removeValue(forKey: "origin")?.string ?? ""
+            guard intake.allowedOrigins?.contains(origin) == true else { throw APIError.invalidResponse }
+            switch try BrowserTakeoverFrame.parse(.object(fields)) {
+            case .active(let data, _, _): return .loginActive(image: data, keyboard: nil, inputs: [], origin: origin)
+            case .activeWithInput(let data, _, _, let keyboard, let inputs): return .loginActive(image: data, keyboard: keyboard, inputs: inputs, origin: origin)
+            default: throw APIError.invalidResponse
+            }
+        }
         return try BrowserTakeoverFrame.parse(response, finishing: action["action"] == .string("finish"))
     }
 }
@@ -214,8 +254,16 @@ public enum BrowserReceiptPresentation {
     public static func summary(_ text: String) -> String? {
         guard text.utf8.count <= 1024, let data = text.data(using: .utf8),
               let value = try? JSONDecoder().decode(JSON.self, from: data),
-              case .object(let fields) = value,
-              Set(fields.keys) == Set(["type", "status", "challenge_id"]),
+              case .object(let fields) = value else { return nil }
+        if value["type"].string == "browser_login_receipt" {
+            guard Set(fields.keys) == Set(["type", "status", "request_id"]), UUID(uuidString: value["request_id"].string) != nil else { return nil }
+            switch value["status"].string {
+            case "finished": return "Private sign-in finished; verification pending"
+            case "cancelled": return "Private sign-in cancelled"
+            default: return nil
+            }
+        }
+        guard Set(fields.keys) == Set(["type", "status", "challenge_id"]),
               value["challenge_id"].string.range(of: #"^[A-Za-z0-9_-]{22,256}$"#, options: .regularExpression) != nil else { return nil }
         switch (value["type"].string, value["status"].string) {
         case ("browser_vault_takeover_receipt", "finished"): return "Private browser control finished"

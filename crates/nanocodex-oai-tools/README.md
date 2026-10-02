@@ -72,9 +72,9 @@ Namespaced Code Mode names such as `image_gen__imagegen` remain available to
 `exec`; normal Code Mode exposes the Codex-compatible `image_gen.imagegen`
 Responses namespace and routes its namespaced call to the same handler.
 
-Macro tools execute serially unless `parallel = true` explicitly marks their
-local effects as safe to overlap. This does not change the provider wire
-protocol.
+Tools execute concurrently. The `parallel` declaration remains provider
+metadata; the runtime does not use it to serialize calls. Await dependent calls
+explicitly in Code Mode and handle conflicts reported by the provider.
 
 Implement [`Tool`] directly when execution needs [`ToolContext`], freeform
 input, multimodal [`ToolOutput`], or a custom definition:
@@ -188,6 +188,22 @@ observer.await?;
 # Ok(())
 # }
 ```
+
+Workspace attachments dispatch calls concurrently, including patches and tools
+whose provider metadata declares them nonparallel. The attached
+`exec_command` call has a 40-second deadline and `write_stdin` a 310-second
+deadline, including queueing and cleanup. These bounds cover their maximum
+30-second execution yield and 300-second process poll with transport grace;
+longer processes return retained session IDs for later polling. A deadline
+after execution starts reports an uncertain outcome rather than resending the
+command.
+
+`AttachmentStatus::Ready` means the remote acknowledged the catalog. Tool
+responsiveness is established by call results. Transport failures reconnect
+with backoff while the same runtime retains its processes; old connection
+results stay on their original connection. Terminal cleanup publishes
+`Disconnected`, or `Fenced` for authentication and policy rejection, before
+`closed()` resolves.
 
 Only sources with a concrete attached executor are accepted: fixed tools,
 MCP added with `add`, and pinned `WorkspaceTools`. Generic dynamic providers

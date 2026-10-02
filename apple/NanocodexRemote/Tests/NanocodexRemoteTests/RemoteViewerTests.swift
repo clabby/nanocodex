@@ -107,11 +107,38 @@ private final class FrameDecodeGate: @unchecked Sendable {
 #endif
 
 final class RemoteViewerTests: XCTestCase {
+    @MainActor func testNativeFramesFailBeforeSignalingAndRemainTerminal() async throws {
+        let service = try service { _ in XCTFail("Rejected native frames must not make account requests") }
+        defer { service.close() }
+        for machine in ["mac:test", "server:test", "vm:test", "phone:test", "cf:"] {
+            var catalog = surface("legacy", machine: machine)
+            catalog["transport"] = "frames-v1"
+            let selected = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
+            XCTAssertThrowsError(try RemoteSignaling(service: service).connect(hand: selected))
+            let viewer = RemoteViewer()
+            viewer.makeSignaling = { _ in XCTFail("Native JPEG transport must not open"); return ViewerSocket() }
+            await viewer.connect(service: service, hand: selected)
+            XCTAssertFalse(viewer.connected); XCTAssertFalse(viewer.connecting)
+            XCTAssertNil(viewer.track); XCTAssertNil(viewer.frame)
+            XCTAssertEqual(viewer.status, RemoteError.invalidMessage.localizedDescription)
+            viewer.close()
+        }
+    }
+
+    func testNativeFrameCatalogDoesNotHideHealthyScreensAtAccountDiscoveryBoundary() async throws {
+        var catalog = surface("legacy", machine: "server:test"); catalog["transport"] = "frames-v1"
+        let healthy = surface("healthy")
+        let service = try service { $0.respond(200, ["surfaces": [catalog, healthy]]) }
+        defer { service.close() }
+        let hands = try await service.list()
+        XCTAssertEqual(hands.count, 1); XCTAssertEqual(hands.first?.generation, "healthy")
+    }
+
     @MainActor func testBroadcastStoppingBlocksMutationsAndPollsUntilStopped() async throws {
         let service = try service { _ in XCTFail("Frame transport must not fetch ICE") }
         defer { service.close() }
         var catalog = surface("broadcast-stopping")
-        catalog["transport"] = "frames-v1"; catalog["broadcast"] = true
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"; catalog["broadcast"] = true
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket()
         socket.onConnect = { socket.onMessage(.init(type: "ready")) }
@@ -154,7 +181,7 @@ final class RemoteViewerTests: XCTestCase {
         let service = try service { _ in XCTFail("Frame transport must not fetch ICE") }
         defer { service.close() }
         var catalog = surface("window")
-        catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket()
         socket.onConnect = { socket.onMessage(.init(type: "ready")) }
@@ -193,7 +220,7 @@ final class RemoteViewerTests: XCTestCase {
         let service = try service { _ in XCTFail("No ICE for frames") }
         defer { service.close() }
         var catalog = surface("audio-capability")
-        catalog["transport"] = "frames-v1"
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket(), viewer = RemoteViewer()
         socket.onConnect = { socket.onMessage(.init(type: "ready")) }
@@ -237,7 +264,7 @@ final class RemoteViewerTests: XCTestCase {
         let service = try service { _ in XCTFail("No ICE for frames") }
         defer { service.close() }
         var catalog = surface("pointer-capability")
-        catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket(), viewer = RemoteViewer()
         socket.onConnect = { socket.onMessage(.init(type: "ready")) }
@@ -308,7 +335,7 @@ final class RemoteViewerTests: XCTestCase {
         let service = try service { _ in XCTFail("No ICE for frames") }
         defer { service.close() }
         var catalog = surface("gamepad-capability")
-        catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket(), viewer = RemoteViewer()
         socket.onConnect = { socket.onMessage(.init(type: "ready")) }
@@ -416,7 +443,7 @@ final class RemoteViewerTests: XCTestCase {
         let service = try service { _ in XCTFail("No ICE for frames") }
         defer { service.close() }
         var catalog = surface("latest")
-        catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket(), viewer = RemoteViewer()
         socket.onConnect = { socket.onMessage(.init(type: "ready")) }
@@ -451,7 +478,7 @@ final class RemoteViewerTests: XCTestCase {
         let service = try service { _ in XCTFail("No ICE for frames") }
         defer { service.close() }
         var catalog = surface("publication-suspend")
-        catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket(), viewer = RemoteViewer()
         socket.onConnect = { socket.onMessage(.init(type: "ready")) }
@@ -477,7 +504,7 @@ final class RemoteViewerTests: XCTestCase {
         let service = try service { _ in XCTFail("No ICE for frames") }
         defer { service.close() }
         var catalog = surface("legacy-pacing")
-        catalog["transport"] = "frames-v1"
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket(), viewer = RemoteViewer()
         socket.onConnect = { socket.onMessage(.init(type: "ready")) }
@@ -505,7 +532,7 @@ final class RemoteViewerTests: XCTestCase {
         let service = try service { _ in XCTFail("No ICE for frames") }
         defer { service.close() }
         var catalog = surface("publication")
-        catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket(), viewer = RemoteViewer()
         socket.onConnect = { socket.onMessage(.init(type: "ready")) }
@@ -539,7 +566,7 @@ final class RemoteViewerTests: XCTestCase {
         let service = try service { _ in XCTFail("No ICE for frames") }
         defer { service.close() }
         var catalog = surface("bounded")
-        catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket(), viewer = RemoteViewer()
         socket.onConnect = { socket.onMessage(.init(type: "ready")) }
@@ -566,7 +593,7 @@ final class RemoteViewerTests: XCTestCase {
             let service = try service { _ in XCTFail("No ICE for frames") }
             defer { service.close() }
             var catalog = surface("epoch")
-            catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
+            catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"; catalog["frame_window"] = 6
             let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
             let old = ViewerSocket(), fresh = ViewerSocket(), viewer = RemoteViewer()
             old.onConnect = { old.onMessage(.init(type: "ready")) }
@@ -638,7 +665,7 @@ final class RemoteViewerTests: XCTestCase {
         defer { service.close() }
         var catalog = surface("mouse-hold")
         catalog["kind"] = "desktop"
-        catalog["transport"] = "frames-v1"
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket(), viewer = RemoteViewer()
         viewer.makeSignaling = { _ in socket }
@@ -810,7 +837,7 @@ final class RemoteViewerTests: XCTestCase {
         let service = try service { _ in XCTFail("Frame transport must not fetch ICE") }
         defer { service.close() }
         var catalog = surface("mouse-hold")
-        catalog["transport"] = "frames-v1"
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"
         let hand = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         let socket = ViewerSocket(), viewer = RemoteViewer()
         viewer.makeSignaling = { _ in socket }
@@ -1224,7 +1251,7 @@ final class RemoteViewerTests: XCTestCase {
 
     @MainActor func testRefreshConnectionRecoversAfterDeadlineWithFreshGeneration() async throws {
         var catalog = surface("fresh")
-        catalog["transport"] = "frames-v1"
+        catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"
         let service = try service { request in
             if request.request.url?.path.hasSuffix("/screens") == true {
                 request.respond(200, ["surfaces": [catalog]])
@@ -1239,7 +1266,7 @@ final class RemoteViewerTests: XCTestCase {
             return socket
         }
         defer { viewer.close(); service.close() }
-        await viewer.connect(service: service, hand: try hand("expired"))
+        await viewer.connect(service: service, hand: try hand("expired", machine: "cf:test"))
         XCTAssertFalse(viewer.connecting)
         XCTAssertFalse(viewer.connected)
         XCTAssertEqual(viewer.hand?.generation, "expired")
@@ -1456,7 +1483,7 @@ extension RemoteViewerTests {
         // socket callbacks and timers cannot reconnect or tear down this scope.
         let replacement = ViewerSocket()
         viewer.makeSignaling = { _ in replacement }
-        var catalog = surface("new"); catalog["transport"] = "frames-v1"
+        var catalog = surface("new"); catalog["machine_id"] = "cf:test"; catalog["transport"] = "frames-v1"
         let selected = try JSONDecoder().decode(RemoteHand.self, from: JSONSerialization.data(withJSONObject: catalog))
         await viewer.connect(service: service, hand: selected)
         let decoded = expectation(description: "Replacement frame viewer is ready")

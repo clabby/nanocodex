@@ -11,7 +11,35 @@ import {
 
 const CANCELLATION_MESSAGE = "Code Mode execution was cancelled";
 
+// Trusted instrumentation must preserve the handler's outcome even if span
+// setup/annotation fails, returns another value, or invokes its callback twice.
+export async function traceToolInvocation(traceTool, name, context, run) {
+  let runPromise;
+  const invoke = () => {
+    if (runPromise === undefined) {
+      let resolveRun, rejectRun;
+      runPromise = new Promise((resolve, reject) => { resolveRun = resolve; rejectRun = reject; });
+      // A broken hook may discard this promise before its own setup settles.
+      void runPromise.catch(() => undefined);
+      // Code Mode registers its observation queue before Rust reads it. Invoke
+      // synchronously while assigning the memoized promise before any reentry.
+      try { resolveRun(run()); }
+      catch (error) { rejectRun(error); }
+    }
+    return runPromise;
+  };
+  try {
+    const tracing = traceTool(name, context, invoke);
+    // Also preserve synchronous host setup when a hook postpones its callback.
+    invoke();
+    if (tracing?.then) void Promise.resolve(tracing).catch(() => undefined);
+  }
+  catch { /* Instrumentation cannot replace a real tool failure or result. */ }
+  return invoke();
+}
+
 export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
+  const traceTool = extras.traceTool;
   const activeExecutions = new Set();
   const codeObservations = new Map();
   const cells = new Map();
@@ -66,7 +94,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       const tool = resolveTool(name);
       if (!tool) return encodeToolOutput(`unknown application tool: ${name}`, false, null);
       if (extras.effectJournal) return await executeJournalledTool(name, input, execution, model, turnId);
-      const result = await router.execute(name, input, {
+      const context = {
         sessionId,
         parentCallId: "",
         callId,
@@ -74,7 +102,12 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         ...(turnId == null ? {} : { turnId }),
         signal: controller.signal,
         subagent: subagentBindingsBySession.get(sessionId)?.descriptor,
-      });
+      };
+      const result = await (traceTool === undefined
+        ? router.execute(name, input, context)
+        : traceToolInvocation(traceTool, name, {
+          sessionId, callId, ...(turnId == null ? {} : { turnId }),
+        }, () => router.execute(name, input, context)));
       return encodeToolOutput(
         outputBody(result),
         toolSucceeded(result),
@@ -138,11 +171,16 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     let result, receipt;
     try {
       controller.signal.throwIfAborted();
-      result = await router.execute(name, input, {
+      const context = {
         sessionId, parentCallId: callId, callId, model,
         ...(turnId == null ? {} : { turnId }), signal: controller.signal,
         subagent: subagentBindingsBySession.get(sessionId)?.descriptor,
-      });
+      };
+      result = await (traceTool === undefined
+        ? router.execute(name, input, context)
+        : traceToolInvocation(traceTool, name, {
+          sessionId, callId, parentCallId: callId, ...(turnId == null ? {} : { turnId }),
+        }, () => router.execute(name, input, context)));
     } catch (error) {
       if (error?.code === "host_interrupted") interrupt(error);
       // An abort is not proof that the dispatched operation did not write.
@@ -379,7 +417,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         let result;
         try {
           controller.signal.throwIfAborted();
-          result = await admission.invoke(name, input, {
+          const context = {
             sessionId,
             parentCallId,
             callId,
@@ -387,7 +425,12 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
             ...(turnId == null ? {} : { turnId }),
             signal: controller.signal,
             subagent: subagentBindingsBySession.get(sessionId)?.descriptor,
-          });
+          };
+          result = await (traceTool === undefined
+            ? admission.invoke(name, input, context)
+            : traceToolInvocation(traceTool, name, {
+              sessionId, callId, parentCallId, ...(turnId == null ? {} : { turnId }),
+            }, () => admission.invoke(name, input, context)));
         } catch (error) {
           if (error?.code === "host_interrupted") {
             execution.interruption = error;

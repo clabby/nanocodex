@@ -22,6 +22,9 @@ func serveDesktop(parent context.Context, config hostConfig, workspace string) e
 // A server desktop runs as the SSH user without a nested VM or a privileged
 // compositor. Its machine credential is independent of the SSH login key.
 func serveDesktopSession(parent context.Context, config hostConfig, workspace, desktopConfig string, vm bool) error {
+	if err := config.validateTransport(); err != nil {
+		return err
+	}
 	if !filepath.IsAbs(workspace) {
 		return errors.New("desktop workspace must be absolute")
 	}

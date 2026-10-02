@@ -124,22 +124,26 @@ impl WorkspaceToolRuntime {
         input: ToolInput,
         context: ToolContext<'_>,
     ) -> ToolOutput {
-        let result = match name {
-            name if name == StandardTool::ApplyPatch.name() => {
-                self.apply_patch.execute(input, context).await
-            }
-            name if name == StandardTool::ExecCommand.name() => {
-                self.exec_command.execute(input, context).await
-            }
-            name if name == StandardTool::ViewImage.name() => {
-                self.view_image.execute(input, context).await
-            }
-            name if name == StandardTool::WriteStdin.name() => {
-                self.write_stdin.execute(input, context).await
-            }
-            _ => return ToolOutput::error(format!("unknown workspace tool `{name}`")),
+        let Some(handler) = self.handler(name) else {
+            return ToolOutput::error(format!("unknown workspace tool `{name}`"));
         };
+        let result = handler.execute(input, context).await;
         result.unwrap_or_else(|error| ToolOutput::error(error.to_string()))
+    }
+
+    pub(crate) fn supports_parallel_tool_calls(&self, name: &str) -> bool {
+        self.handler(name)
+            .is_some_and(Tool::supports_parallel_tool_calls)
+    }
+
+    fn handler(&self, name: &str) -> Option<&dyn Tool> {
+        match name {
+            name if name == StandardTool::ApplyPatch.name() => Some(&self.apply_patch),
+            name if name == StandardTool::ExecCommand.name() => Some(&self.exec_command),
+            name if name == StandardTool::ViewImage.name() => Some(&self.view_image),
+            name if name == StandardTool::WriteStdin.name() => Some(&self.write_stdin),
+            _ => None,
+        }
     }
 
     /// Returns cancellation and shutdown control for retained subprocesses.

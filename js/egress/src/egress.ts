@@ -2,6 +2,7 @@ import { handleGmailPush, gmailMailboxName, type GmailPushIngressEnv } from "./g
 export { GmailPushMailbox } from "./gmail-push";
 import { cachedAccountMetadata, validDiscoveryOptions } from "./metadata-cache";
 import { consumeRpcData } from "nanocodex/cloudflare/rpc";
+import { annotateActiveSpan, tracing } from "nanocodex/cloudflare/tracing";
 import type { CloudflareAccountCatalogResult, CloudflareAccountVaultResult, CloudflareAccountDiscoveryResult } from "nanocodex/cloudflare/egress";
 import { durablePlacementOptions, ingressColo, TRUSTED_INGRESS_HEADER, type IngressPlacement } from "nanocodex/cloudflare/durable-placement";
 import { LINK_PATH } from "./connectors/link";
@@ -73,6 +74,7 @@ const MAX_CONTROL_BODY_BYTES = 16 * 1024;
 const MAX_CHATGPT_IMPORT_BODY_BYTES = 64 * 1024;
 const MAX_VAULT_BODY_BYTES = 12 * 1024;
 const MAX_BROKER_RESPONSE_BYTES = 4 * 1024;
+const CHATGPT_LIMIT_REPORT_TIMEOUT_MS = 5_000;
 const MAX_MODEL_BODY_BYTES = 32 * 1024 * 1024;
 const MAX_SSH_BODY_BYTES = 72 * 1024;
 const MAX_VAULT_EGRESS_ENVELOPE_BYTES = 96 * 1024;
@@ -477,7 +479,11 @@ export function handleEgress(
   return handleEgressWithOwner(request, env, ctx, upstreamFetch, diagnostics, sessionModelAuthority);
 }
 
-async function handleEgressWithOwner(
+function handleEgressWithOwner(...args: Parameters<typeof handleMeasuredEgressWithOwner>): Promise<Response> {
+  return tracing.enterSpan("egress.request", () => handleMeasuredEgressWithOwner(...args));
+}
+
+async function handleMeasuredEgressWithOwner(
   request: Request,
   env: EgressEnv,
   ctx?: Pick<ExecutionContext, "waitUntil">,
@@ -685,7 +691,7 @@ async function handleEgressWithOwner(
           resetAt = chatGptLimitReset(rejectionBody, upstream.headers.get("retry-after"));
         } catch { /* An unrecognized rejection must not switch accounts. */ }
         if (!resetAt) break;
-        if (!await reportChatGptLimit(env, userId, credential, resetAt, !accountId)) {
+        if (!await reportChatGptLimit(env, userId, credential, resetAt, !accountId, egressRequestId)) {
           return auditedError(429, accountId ? "chatgpt_account_exhausted" : "chatgpt_accounts_exhausted", request, url, operation.id, started, {
             user_id: userId, deployment_sha: env.DEPLOYMENT_SHA, egress_request_id: egressRequestId,
           });
@@ -779,15 +785,20 @@ async function handleEgressWithOwner(
           ctx,
         );
         sponsoredConnectionId = undefined;
+        if (response.status === 101 && egressRequestId) response.headers.set("x-nanocodex-egress-request-id", egressRequestId);
         return response;
       }
       if (credential.kind === "chatgpt" && credential.source === "user"
         && operation.id === "responses" && upstream.status === 101) {
         const socketCredential = credential;
-        return chatGptFailoverSocket(upstream, sanitizedUpstreamHeaders(upstream.headers),
-          (resetAt) => reportChatGptLimit(env, userId!, socketCredential, resetAt, !accountId), ctx);
+        const headers = sanitizedUpstreamHeaders(upstream.headers);
+        if (egressRequestId) headers.set("x-nanocodex-egress-request-id", egressRequestId);
+        return chatGptFailoverSocket(upstream, headers,
+          (resetAt) => reportChatGptLimit(env, userId!, socketCredential, resetAt, !accountId, egressRequestId), ctx, !accountId);
       }
-      return sanitizeUpstreamResponse(upstream);
+      const response = sanitizeUpstreamResponse(upstream);
+      if (response.status === 101 && egressRequestId) response.headers.set("x-nanocodex-egress-request-id", egressRequestId);
+      return response;
     } finally {
       if (sponsoredConnectionId) {
         await updateSponsoredConnection(env, userId, sponsoredConnectionId, "release")
@@ -2953,15 +2964,36 @@ async function reportChatGptLimit(
   credential: UserCredentialSnapshot,
   resetAt: number,
   select = true,
+  egressRequestId?: string,
 ): Promise<boolean> {
-  const response = await userBroker(env, userId).fetch("https://credentials.internal/v1/chatgpt/limit", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ account_id: credential.accountId, revision: credential.revision, reset_at: resetAt, select }),
+  const controller = new AbortController();
+  const started = Date.now();
+  const failed = (outcome: "timeout" | "error") => console.warn({
+    type: "egress.chatgpt_limit_report_failed", egress_request_id: egressRequestId,
+    outcome, duration_ms: Date.now() - started,
   });
-  if (!response.ok) { await cancelResponseBody(response); return false; }
-  const value = await response.json<{ available?: boolean }>();
-  return value.available === true;
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => { resolve(false); controller.abort(); failed("timeout"); }, CHATGPT_LIMIT_REPORT_TIMEOUT_MS);
+  });
+  const reporting = (async () => {
+    const response = await userBroker(env, userId).fetch("https://credentials.internal/v1/chatgpt/limit", {
+      method: "POST", signal: controller.signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ account_id: credential.accountId, revision: credential.revision, reset_at: resetAt, select }),
+    });
+    if (controller.signal.aborted || !response.ok) { await cancelResponseBody(response); return false; }
+    const value = JSON.parse(await readBoundedText(response, MAX_BROKER_RESPONSE_BYTES)) as { available?: boolean };
+    return value?.available === true;
+  })().catch(() => {
+    if (!controller.signal.aborted) failed("error");
+    return false;
+  });
+  try {
+    // Bound both fetch and body consumption even if a service binding ignores abort.
+    // Reporting failure preserves the provider's original quota error.
+    return await Promise.race([reporting, deadline]);
+  } finally { clearTimeout(timer!); }
 }
 
 async function resolveCredential(
@@ -3327,6 +3359,12 @@ function audit(
     ...(typeof detail.connector === "string" ? { connector: detail.connector } : {}),
     ...(typeof detail.deployment_sha === "string" ? { deployment_sha: detail.deployment_sha } : {}),
   };
+  try { annotateActiveSpan({ "nanocodex.egress_request_id": safeDetail.egress_request_id,
+    "nanocodex.operation": rule, "nanocodex.egress.outcome": action,
+    "nanocodex.egress.credential_ms": typeof detail.credential_ms === "number" && Number.isFinite(detail.credential_ms) && detail.credential_ms >= 0 ? detail.credential_ms : undefined,
+    "nanocodex.egress.upstream_ms": typeof detail.upstream_ms === "number" && Number.isFinite(detail.upstream_ms) && detail.upstream_ms >= 0 ? detail.upstream_ms : undefined,
+    "http.response.status_code": safeDetail.status }); }
+  catch { /* Keep audit delivery and the response independent of tracing. */ }
   log({
     type: "egress.request",
     ...(SUBJECT.test(request.headers.get(SUBJECT_HEADER) ?? "")

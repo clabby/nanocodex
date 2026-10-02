@@ -207,24 +207,20 @@ where
         let mut prepared = Vec::with_capacity(calls.len());
         for call in calls {
             let active = self.prepare_model_tool_call(call_index, &call)?;
-            let supports_parallel = tools.supports_parallel_tool_calls(&qualified_tool_name(&call));
-            prepared.push((call, supports_parallel, active));
+            prepared.push((call, active));
         }
 
-        let gate = Arc::new(RwLock::new(()));
         let events = self.events.clone();
         let tool_call_indices = self.tool_call_indices.clone();
         let session_id = events.request_id().to_owned();
         let model = self.model;
         let host_context = self.host_context.clone();
-        // Every call in this response retains the revision consumed by its model request,
-        // including calls queued behind the execution gate.
+        // Every call in this response retains the revision consumed by its model request.
         let instruction_revision = self.instruction_revision;
         let execution_steps = self.execution_steps.clone();
         let mut executions = prepared
             .into_iter()
-            .map(|(call, supports_parallel, active)| {
-                let gate = Arc::clone(&gate);
+            .map(|(call, active)| {
                 let history = history.clone();
                 let events = events.clone();
                 let tool_call_indices = tool_call_indices.clone();
@@ -256,55 +252,28 @@ where
                         (Ok(completed), false)
                     } else {
                         let dispatch = async {
-                            if supports_parallel {
-                                let _guard = gate.read().await;
-                                active
-                                    .execution_started_at
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .replace(Instant::now());
-                                Self::execute_model_tool_call(
-                                    tools,
-                                    &events,
-                                    &tool_call_indices,
-                                    call_index,
-                                    call,
-                                    history,
-                                    &session_id,
-                                    &turn_id,
-                                    model,
-                                    host_context.as_deref(),
-                                    instruction_revision,
-                                    started_at,
-                                    &active.progress,
-                                    &active.span,
-                                )
-                                .await
-                            } else {
-                                let _guard = gate.write().await;
-                                active
-                                    .execution_started_at
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .replace(Instant::now());
-                                Self::execute_model_tool_call(
-                                    tools,
-                                    &events,
-                                    &tool_call_indices,
-                                    call_index,
-                                    call,
-                                    history,
-                                    &session_id,
-                                    &turn_id,
-                                    model,
-                                    host_context.as_deref(),
-                                    instruction_revision,
-                                    started_at,
-                                    &active.progress,
-                                    &active.span,
-                                )
-                                .await
-                            }
+                            active
+                                .execution_started_at
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .replace(Instant::now());
+                            Self::execute_model_tool_call(
+                                tools,
+                                &events,
+                                &tool_call_indices,
+                                call_index,
+                                call,
+                                history,
+                                &session_id,
+                                &turn_id,
+                                model,
+                                host_context.as_deref(),
+                                instruction_revision,
+                                started_at,
+                                &active.progress,
+                                &active.span,
+                            )
+                            .await
                         };
                         let result = match AssertUnwindSafe(dispatch).catch_unwind().await {
                             Ok(result) => result,

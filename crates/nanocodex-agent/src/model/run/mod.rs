@@ -38,7 +38,7 @@ use nanocodex_oai_api::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
-use tokio::sync::{RwLock, watch};
+use tokio::sync::watch;
 use tower::Service;
 use tracing::{Instrument, info, info_span};
 use web_time::Instant;

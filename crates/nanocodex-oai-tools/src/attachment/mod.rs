@@ -352,12 +352,14 @@ async fn initialize_and_run(
         biased;
         command = command_rx.recv() => {
             debug_assert!(matches!(command, Some(driver::Command::Detach) | None));
+            let _ = status_tx.send(AttachmentStatus::Disconnected);
             let _ = closed_tx.send(Some(Ok(())));
             return;
         }
         initialized = PreparedToolRuntime::initialize(prepared) => match initialized {
             Ok(runtime) => Arc::new(runtime),
             Err(error) => {
+                let _ = status_tx.send(AttachmentStatus::Disconnected);
                 let _ = closed_tx.send(Some(Err(error.into())));
                 return;
             }
@@ -393,6 +395,7 @@ async fn initialize_and_run(
     let config = match config {
         Ok(config) => config,
         Err(error) => {
+            let _ = status_tx.send(AttachmentStatus::Disconnected);
             runtime.shutdown().await;
             let _ = closed_tx.send(Some(Err(error)));
             return;
@@ -528,7 +531,8 @@ pub enum AttachmentStatus {
     Connecting,
     /// The exact catalog was acknowledged.
     Ready,
-    /// The transport is temporarily disconnected.
+    /// The transport is offline. [`Attachment::closed`] distinguishes terminal
+    /// closure from a transport that may reconnect.
     Disconnected,
     /// The remote endpoint authoritatively rejected this socket.
     Fenced,

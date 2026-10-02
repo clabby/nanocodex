@@ -84,8 +84,9 @@ These tests establish the covered cases, not complete V8 equivalence. Engine
 resource limits, global-object details, native audio decoding, dynamic imports,
 and immediate notification injection into an active model turn have separate
 compatibility boundaries. Browser Worker transport tests are not a claim of a
-live browser deployment test. Hand executor capacity/admission is a separate
-host scheduling issue; this change does not relax parallel-safety restrictions.
+live browser deployment test. Calls dispatch concurrently regardless of
+parallel-safety metadata. Await dependencies explicitly and handle conflicts
+returned by providers.
 
 The portable evaluators still execute source inside an async-function wrapper,
 whereas Codex uses a V8 ES module. For example, a top-level `return` is accepted

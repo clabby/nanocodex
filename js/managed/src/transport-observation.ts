@@ -20,15 +20,17 @@ export function transportObservation(event: AgentEvent, turnId?: string): Record
     .filter((value): value is string => typeof value === "string" && /^[A-Za-z0-9_.:-]{1,80}$/.test(value)).join(":");
   if (operation) detail.operation_kind = operation;
   for (const [source, target] of Object.entries({ attempt: "attempt_count", next_attempt: "next_attempt",
-    max_attempts: "max_attempts", connection_generation: "connection_generation", model_call_index: "model_call_index",
+    max_attempts: "max_attempts", connection_generation: "connection_generation", call_index: "model_call_index", model_call_index: "model_call_index",
     status_code: "status_code" })) {
     const value = p[source];
     if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) detail[target] = value;
   }
-  for (const [source, target] of Object.entries({ delay_ns: "retry_delay_ms", duration_ns: "duration_ms" })) {
+  for (const [source, target] of Object.entries({ delay_ns: "retry_delay_ms", duration_ns: "duration_ms",
+    time_to_first_event_ns: "time_to_first_event_ms", time_to_first_output_ns: "time_to_first_output_ms" })) {
     const value = p[source];
     if (typeof value === "number" && Number.isFinite(value) && value >= 0) detail[target] = value / 1_000_000;
   }
+  if (typeof p.response_id === "string" && /^resp_[A-Za-z0-9_-]{1,160}$/.test(p.response_id)) detail.response_id = p.response_id;
   for (const key of ["opens_new_socket", "server_requested_delay"]) {
     if (typeof p[key] === "boolean") detail[key] = p[key];
   }
