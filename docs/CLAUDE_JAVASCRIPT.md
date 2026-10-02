@@ -44,6 +44,10 @@ Both families use the same `spawn_agent`, `wait_agent`, messaging, result
 submission, and subtree lifecycle. Model names belong to their selected family:
 for example, `sol` selects Codex and `sonnet` selects Claude. Omitted family
 inherits the parent; selecting another family uses that family's defaults.
+Within a Claude tree, `{ model: "sonnet", ... }` selects Sonnet without repeating
+`harness: "claude"`. `Subagents.spawnMany` inherits the parent's family, model
+and thinking for the entire batch and rejects any overrides before admitting
+children. Use `Subagents.spawn` to select a child's family or model explicitly.
 Children retain their native transcripts and are reusable only while the root
 runtime lives. A durable root's reopen does not recreate a child task tree.
 

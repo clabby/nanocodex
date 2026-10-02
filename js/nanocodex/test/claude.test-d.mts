@@ -45,7 +45,11 @@ HostAgent.create({ harness: 'claude', ...options, subagents: {}, harnesses: {
   codex: { transport: Transport.openAi({ apiKey: 'synthetic-key', stateless: true }) },
 } }).then(async agent => {
   await Subagents.spawn(agent, { harness: 'claude', model: 'sonnet', role: 'fixture', task: 'synthetic', outputSchema: { type: 'string' } });
+  await Subagents.spawn(agent, { model: 'sonnet', role: 'fixture', task: 'synthetic', outputSchema: { type: 'string' } });
+  await Subagents.spawn(agent, { model: 'claude-haiku-4-5', role: 'fixture', task: 'synthetic', outputSchema: { type: 'string' } });
   await Subagents.spawn(agent, { harness: 'codex', model: 'sol', role: 'fixture', task: 'synthetic', outputSchema: { type: 'string' } });
   // @ts-expect-error models are scoped to the selected harness family
   await Subagents.spawn(agent, { harness: 'codex', model: 'sonnet', role: 'fixture', task: 'synthetic', outputSchema: { type: 'string' } });
+  // @ts-expect-error models are scoped to the selected harness family
+  await Subagents.spawn(agent, { harness: 'claude', model: 'sol', role: 'fixture', task: 'synthetic', outputSchema: { type: 'string' } });
 });

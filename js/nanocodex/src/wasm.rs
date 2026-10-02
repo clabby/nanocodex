@@ -3659,10 +3659,10 @@ impl WasmSubagents {
             .map_err(|error| js_error(format!("invalid subagent tasks: {error}")))?;
         if tasks
             .iter()
-            .any(|task| task.model.is_some() || task.thinking.is_some())
+            .any(|task| task.harness.is_some() || task.model.is_some() || task.thinking.is_some())
         {
             return Err(js_error(
-                "batch subagent spawn does not accept model or thinking overrides",
+                "batch subagent spawn does not accept harness, model or thinking overrides",
             ));
         }
         let tasks = tasks

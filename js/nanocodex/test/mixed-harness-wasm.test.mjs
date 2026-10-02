@@ -29,7 +29,7 @@ async function within(operation, label) {
 
 test('public SDK shares canonical children across both native harness families', { timeout: 60_000 }, async () => {
   const module = await WebAssembly.compile(await readFile(new URL('../pkg-web/nanocodex_bg.wasm', import.meta.url)));
-  const trace = [], effects = [], events = [], fixtureErrors = [];
+  const trace = [], effects = [], events = [], fixtureErrors = [], rejectedBatches = [];
   let responseId = 0;
   let blockedCallIssued = false;
   let codeCalls = 0;
@@ -44,7 +44,8 @@ test('public SDK shares canonical children across both native harness families',
       const body = JSON.parse(Buffer.concat(chunks));
       const claude = request.url === '/v1/messages';
       assert.equal(request.url, claude ? '/v1/messages' : '/v1/responses');
-      trace.push({ path: request.url, model: body.model, body });
+      assert.equal(claude ? request.headers['x-api-key'] : request.headers.authorization, claude ? 'synthetic-claude' : 'Bearer synthetic-codex', 'each family uses its explicitly authorized credential');
+      trace.push({ path: request.url, model: body.model, familyAuthMatched: true, body });
       const history = claude ? body.messages : body.input;
       const encoded = JSON.stringify(history.filter(item => item.type !== 'additional_tools'));
       const submitted = history.some(item => item.type === 'function_call' && item.name === 'submit_result'
@@ -101,6 +102,15 @@ test('public SDK shares canonical children across both native harness families',
     roots.push(await Agent.create({ ...claude, harness: 'claude', subagents: {}, harnesses: { codex: { ...codex, toolMode: 'code', codeEvaluator: createQuickJsEvaluator(quickJs) } } }));
     roots.push(await NodeAgent.create({ ...claude, module: undefined, harness: 'claude', subagents: {}, harnesses: { codex: { ...codex, toolMode: 'code' } } }));
     roots.push(await Agent.create({ ...claude, model: 'claude-proxy-fixture', thinking: undefined, harness: 'claude', subagents: {} }));
+    const batchTask = { role: 'batch fixture', task: 'Perform proof once, then submit the typed result.', outputSchema: { type: 'object' } };
+    for (const override of [{ harness: 'claude' }, { harness: 'codex' }, { model: 'sol' }, { thinking: 'low' }]) {
+      const before = trace.length;
+      await assert.rejects(Subagents.spawnMany(roots[0], [batchTask, { ...batchTask, ...override }]), /batch.*overrides/);
+      assert.equal(trace.length, before, 'unsupported batch selection fails before any provider dispatch');
+      const admittedChildren = (await Subagents.list(roots[0], { includeCompleted: true })).agents.length;
+      assert.equal(admittedChildren, 0, 'the entire rejected batch leaves no admitted child');
+      rejectedBatches.push({ override, providerRequests: trace.length - before, admittedChildren });
+    }
     for (const [index, harness, model] of [[0, 'claude', 'sonnet'], [1, 'codex', 'sol'], [2, 'codex', 'sol'], [3, 'codex', 'sol'], [4, undefined, undefined]]) {
       const root = roots[index], watcher = root.events.watch();
       const off = watcher.onEvent(event => events.push(event));
@@ -118,6 +128,13 @@ test('public SDK shares canonical children across both native harness families',
     assert.equal(codeCalls, 2, 'host explicit evaluator and Node default evaluator execute actual Code Mode');
     for (const effect of effects.slice(2, 4)) assert.match(effect.parentCallId, /^proof-code-/, 'the actual host effect belongs to the Code Mode cell');
     assert.deepEqual(new Set(trace.map(row => row.path)), new Set(['/v1/responses', '/v1/messages']));
+    const modelOnly = await Subagents.spawn(roots[1], { role: 'model fixture', task: 'Perform proof once, then submit the typed result.', model: 'sonnet', outputSchema: { type: 'object' } });
+    const modelReport = await Subagents.wait(roots[1], { agentIds: [modelOnly.agent_id], timeoutMs: 10_000 });
+    assert.equal(modelReport.timed_out, false);
+    assert.equal(modelReport.agents[0].status.state, 'completed', JSON.stringify(modelReport));
+    assert.equal(modelReport.agents[0].status.output.model, 'claude-sonnet-5-5', 'model-only selection inherits the Claude family');
+    assert.equal(effects[5].model, 'claude-sonnet-5-5');
+    await Subagents.close(roots[1], modelOnly.agent_id);
     const before = trace.length;
     await assert.rejects(Subagents.spawn(roots[0], { role: 'invalid', task: 'wrong family', harness: 'claude', model: 'sol', outputSchema: { type: 'string' } }), /model|harness/);
     assert.equal(trace.length, before, 'invalid family/model fails before dispatch');
@@ -134,15 +151,15 @@ test('public SDK shares canonical children across both native harness families',
     assert.equal(recovered.timed_out, false, JSON.stringify(recovered));
     assert.equal(recovered.agents[0].status.state, 'completed', JSON.stringify(recovered));
     assert.equal(recovered.agents[0].status.output.ok, true);
-    assert.equal(effects.length, 6, 'recovered child executes exactly one fresh proof');
-    assert.equal(effects[5].sessionId, blockedContext.sessionId, 'recovery preserves the child session');
-    assert.equal(effects[5].subagent.agentId, blockedContext.subagent.agentId, 'recovery preserves canonical child identity');
+    assert.equal(effects.length, 7, 'recovered child executes exactly one fresh proof');
+    assert.equal(effects[6].sessionId, blockedContext.sessionId, 'recovery preserves the child session');
+    assert.equal(effects[6].subagent.agentId, blockedContext.subagent.agentId, 'recovery preserves canonical child identity');
     await Subagents.close(root, child.agent_id);
   } finally {
     await Promise.all(roots.map(root => root.session.shutdown()));
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     const output = new URL('../../../output/mixed-harness-wasm/', import.meta.url);
     await mkdir(output, { recursive: true });
-    await writeFile(new URL('trace.json', output), JSON.stringify({ command: 'node --test js/nanocodex/test/mixed-harness-wasm.test.mjs', expected: 'four mixed children and one inherited native model; host and Node Code Mode; interrupt aborts handler before inactive; same identity on recovery; six proof effects; invalid family never dispatched', observed: { codeCalls, blockedCallIssued, blockedSignalAborted: blockedContext?.signal.aborted }, fixtureErrors, trace, effects, events }, null, 2));
+    await writeFile(new URL('trace.json', output), JSON.stringify({ command: 'node --test js/nanocodex/test/mixed-harness-wasm.test.mjs', expected: 'four mixed children, one inherited native model and one model-only Claude selection; host and Node Code Mode; interrupt aborts handler before inactive; same identity on recovery; seven proof effects; invalid family and batch overrides never dispatched', observed: { codeCalls, blockedCallIssued, blockedSignalAborted: blockedContext?.signal.aborted }, fixtureErrors, rejectedBatches, trace, effects, events }, null, 2));
   }
 });
