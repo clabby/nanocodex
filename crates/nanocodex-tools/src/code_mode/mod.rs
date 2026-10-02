@@ -18,8 +18,10 @@ use std::{
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use serde::Deserialize;
 use serde_json::Value;
+#[cfg(test)]
+use tokio::sync::Semaphore;
 use tokio::{
-    sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore, mpsc, oneshot},
+    sync::{Mutex, OwnedMutexGuard, mpsc, oneshot},
     task::JoinHandle,
     time::Duration,
 };
@@ -38,7 +40,6 @@ const INITIAL_YIELD: Duration = Duration::from_secs(10);
 const DEFAULT_WAIT_YIELD: Duration = Duration::from_secs(10);
 const OBSERVER_YIELD_GRACE: Duration = Duration::from_secs(1);
 const MIN_YIELD_FOR_OBSERVER_GRACE: Duration = Duration::from_secs(10);
-const MAX_CONCURRENT_NESTED_CALLS: usize = 128;
 const MAX_JS_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
 const EXEC_PRAGMA_PREFIX: &str = "// @exec:";
 const CELL_RUNNING: u8 = 0;
@@ -1140,8 +1141,6 @@ impl EmbeddedHost {
             calls: HashMap::new(),
             updates: updates.clone(),
         };
-        let nested_call_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_NESTED_CALLS));
-        let parallel_execution = Arc::new(RwLock::new(()));
         let mut event_count = 0_u64;
         loop {
             tokio::select! {
@@ -1191,35 +1190,14 @@ impl EmbeddedHost {
                                 name: name.clone(),
                                 input: input.clone(),
                             });
-                            let permit = Arc::clone(&nested_call_permits);
-                            let supports_parallel = tools.supports_parallel_tool_calls(&name);
-                            let parallel_execution = Arc::clone(&parallel_execution);
-                            let nested_call = async move {
-                                let _permit = permit.acquire_owned().await;
-                                if supports_parallel {
-                                    let _guard = parallel_execution.read().await;
-                                    execute_nested_call(
-                                        tools,
-                                        id,
-                                        name,
-                                        input,
-                                        context,
-                                        actor_started_at,
-                                    )
-                                    .await
-                                } else {
-                                    let _guard = parallel_execution.write().await;
-                                    execute_nested_call(
-                                        tools,
-                                        id,
-                                        name,
-                                        input,
-                                        context,
-                                        actor_started_at,
-                                    )
-                                    .await
-                                }
-                            };
+                            let nested_call = execute_nested_call(
+                                tools,
+                                id,
+                                name,
+                                input,
+                                context,
+                                actor_started_at,
+                            );
                             pending_calls.push(nested_call.boxed());
                         }
                         RuntimeEvent::Notify { text, .. } => {

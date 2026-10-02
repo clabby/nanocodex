@@ -310,9 +310,9 @@ function createClient(endpoint, transport, options, admission, machines, attachm
   async function handleCall(frame, socket, timing) {
     const callId = frame.call_id;
     if (state.calls.has(callId) || state.receipts.has(callId)) throw new Error("duplicate call on socket");
-    // The retained ToolRouter schedules parallel/nonparallel work and honors
-    // cancellation while queued. A connection-local count must not reject
-    // otherwise valid calls or disconnect a socket with unacknowledged results.
+    // Dispatch calls concurrently through the retained ToolRouter snapshot,
+    // checking cancellation before dispatch. A connection-local count must not
+    // reject valid calls or disconnect a socket with unacknowledged results.
     if (frame.deadline_at <= Date.now()) {
       retainAndSend(callId, { status: "unavailable", message: "tool attachment call deadline elapsed before dispatch" }, socket, timing);
       return;

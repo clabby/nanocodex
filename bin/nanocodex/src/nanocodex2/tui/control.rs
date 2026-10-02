@@ -29,7 +29,7 @@ pub(super) fn snapshot(bridge: &Bridge, app: &AppNode, runtime: &DriverRuntime, 
     );
     state["settings"] = json!({"model":runtime.settings.model.as_str(),"effort":runtime.settings.thinking.to_string(),
         "fast_mode":runtime.settings.fast_mode,"reasoning_mode":format!("{:?}",runtime.settings.reasoning_mode).to_lowercase()});
-    state["active_turn_ids"] = json!(runtime.managed_active_turns.ids);
+    state["active_turn_ids"] = json!(runtime.active_managed_turn_ids());
     state["managed_cursor"] = json!(runtime.observed_cursor);
     state["local_shells"] = json!(runtime.active_shells);
     if !runtime.agent_id.is_empty() {

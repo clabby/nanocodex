@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { createCodeRuntime } from "../runtime/code-runtime.mjs";
 
-test("nested Code Mode admits at most 128 explicitly parallel-safe calls", async () => {
+test("nested Code Mode dispatches all calls beyond the former concurrency cap", async () => {
   let active = 0;
   let maximum = 0;
   const releases = [];
@@ -14,7 +14,7 @@ test("nested Code Mode admits at most 128 explicitly parallel-safe calls", async
       async handler() {
         active += 1;
         maximum = Math.max(maximum, active);
-        if (active === 128) saturated.resolve();
+        if (active === 129) saturated.resolve();
         await new Promise((resolve) => releases.push(resolve));
         active -= 1;
         return "done";
@@ -29,19 +29,17 @@ test("nested Code Mode admits at most 128 explicitly parallel-safe calls", async
   );
   await withDeadline(saturated.promise, 1_000, "nested calls did not saturate");
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(active, 128);
-  assert.equal(maximum, 128);
+  assert.equal(active, 129);
+  assert.equal(maximum, 129);
 
-  for (const release of releases.slice(0, 128)) release();
-  while (releases.length < 129) await new Promise((resolve) => setImmediate(resolve));
-  releases[128]();
+  for (const release of releases) release();
   const completed = JSON.parse(await execution);
   assert.equal(completed.success, true);
   assert.equal(completed.nested_calls.length, 129);
-  assert.equal(maximum, 128);
+  assert.equal(maximum, 129);
 });
 
-test("an unsafe nested call excludes safe siblings through a fair per-cell gate", async () => {
+test("parallel-safety metadata does not prevent nested sibling dispatch", async () => {
   const firstStarted = deferred();
   const releaseFirst = deferred();
   const unsafeStarted = deferred();
@@ -81,24 +79,21 @@ test("an unsafe nested call excludes safe siblings through a fair per-cell gate"
     ]);
   `, "exclusive", "exec-exclusive");
 
-  await firstStarted.promise;
-  assert.equal(unsafeStarted.settled, false);
-  assert.equal(secondStarted.settled, false);
+  await Promise.all([firstStarted.promise, unsafeStarted.promise, secondStarted.promise]);
+  assert.equal(order.includes("end:first"), false);
+  assert.equal(order.includes("end:unsafe"), false);
   releaseFirst.resolve();
-  await unsafeStarted.promise;
-  assert.equal(secondStarted.settled, false);
   releaseUnsafe.resolve();
-  await secondStarted.promise;
 
   const completed = JSON.parse(await execution);
   assert.equal(completed.success, true);
   assert.deepEqual(order, [
     "start:first",
-    "end:first",
     "start:unsafe",
-    "end:unsafe",
     "start:second",
     "end:second",
+    "end:first",
+    "end:unsafe",
   ]);
 });
 

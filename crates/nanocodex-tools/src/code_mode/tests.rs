@@ -26,7 +26,7 @@ struct ConcurrencyProbe {
     state: Arc<ConcurrencyProbeState>,
 }
 
-struct SerialConcurrencyProbe {
+struct DefaultConcurrencyProbe {
     state: Arc<ConcurrencyProbeState>,
 }
 
@@ -70,10 +70,10 @@ impl Tool for ConcurrencyProbe {
 }
 
 #[async_trait::async_trait]
-impl Tool for SerialConcurrencyProbe {
+impl Tool for DefaultConcurrencyProbe {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
-            "serial_concurrency_probe",
+            "default_concurrency_probe",
             "Records whether default tool execution overlaps.",
             serde_json::json!({
                 "type": "object",
@@ -86,15 +86,16 @@ impl Tool for SerialConcurrencyProbe {
     async fn execute(&self, _input: ToolInput, _context: ToolContext<'_>) -> ToolResult {
         let active = self.state.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.state.maximum.fetch_max(active, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        let permit = self.state.release.acquire().await?;
+        permit.forget();
         self.state.active.fetch_sub(1, Ordering::SeqCst);
         Ok(ToolOutput::text("completed"))
     }
 }
 
 #[tokio::test]
-async fn nested_tool_calls_are_serial_by_default() -> Result<()> {
-    let workspace = temporary_workspace("serial-nested-tools")?;
+async fn nested_tool_calls_dispatch_concurrently_with_default_metadata() -> Result<()> {
+    let workspace = temporary_workspace("default-parallel-nested-tools")?;
     let state = Arc::new(ConcurrencyProbeState {
         active: AtomicUsize::new(0),
         maximum: AtomicUsize::new(0),
@@ -102,36 +103,57 @@ async fn nested_tool_calls_are_serial_by_default() -> Result<()> {
     });
     let tools = Tools::builder()
         .without_defaults()
-        .tool(SerialConcurrencyProbe {
+        .tool(DefaultConcurrencyProbe {
             state: Arc::clone(&state),
         })
         .build()?;
     let runtime = ToolRuntime::new_with_tools(&workspace, None, None, &tools);
-    let history = Vec::new();
-    let execution = runtime
-        .execute_code(
-            r"
-await Promise.all([
-  tools.serial_concurrency_probe({}),
-  tools.serial_concurrency_probe({}),
-]);
+    let execution = tokio::spawn(async move {
+        let history = Vec::new();
+        runtime
+            .execute_code(
+                r"
+text(await Promise.all([
+  tools.default_concurrency_probe({}),
+  tools.default_concurrency_probe({}),
+]));
 ",
-            test_context(&history),
-        )
-        .await
-        .unwrap();
-
+                test_context(&history),
+            )
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.active.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    state.release.add_permits(2);
+    let execution = tokio::time::timeout(Duration::from_secs(5), execution).await??;
     assert!(execution.success, "{}", execution_output(&execution));
-    assert_eq!(state.maximum.load(Ordering::SeqCst), 1);
+    assert_eq!(state.maximum.load(Ordering::SeqCst), 2);
+    assert_eq!(emitted_text(&execution)?, "[\"completed\",\"completed\"]");
+    assert_eq!(
+        call_ids(&execution.nested_calls),
+        ["call-exec/code-1", "call-exec/code-2"]
+    );
+    assert!(execution.nested_calls.iter().all(|call| call.success));
+    eprintln!(
+        "Default-metadata nested calls: maximum active=2; calls={:?}; output={}",
+        execution.nested_calls,
+        execution_output(&execution)
+    );
+
     std::fs::remove_dir_all(workspace)?;
     Ok(())
 }
 
 #[tokio::test]
-async fn nested_tool_calls_are_bounded_at_128() -> Result<()> {
-    const CALLS: usize = super::MAX_CONCURRENT_NESTED_CALLS + 1;
+async fn nested_tool_calls_dispatch_past_the_former_global_limit() -> Result<()> {
+    const CALLS: usize = 129;
 
-    let workspace = temporary_workspace("bounded-nested-tools")?;
+    let workspace = temporary_workspace("unbounded-nested-tools")?;
     let state = Arc::new(ConcurrencyProbeState {
         active: AtomicUsize::new(0),
         maximum: AtomicUsize::new(0),
@@ -149,8 +171,8 @@ async fn nested_tool_calls_are_bounded_at_128() -> Result<()> {
         runtime
             .execute_code(
                 &format!(
-                    "await Promise.all(Array.from({{ length: {CALLS} }}, () => \
-                     tools.concurrency_probe({{}})));"
+                    "const results = await Promise.all(Array.from({{ length: {CALLS} }}, () => \
+                     tools.concurrency_probe({{}}))); text(results.length);"
                 ),
                 test_context(&history),
             )
@@ -159,29 +181,32 @@ async fn nested_tool_calls_are_bounded_at_128() -> Result<()> {
     });
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        while state.active.load(Ordering::SeqCst) < super::MAX_CONCURRENT_NESTED_CALLS {
+        while state.active.load(Ordering::SeqCst) < CALLS {
             tokio::task::yield_now().await;
         }
     })
     .await?;
-    tokio::time::sleep(Duration::from_millis(25)).await;
-    assert_eq!(
-        state.active.load(Ordering::SeqCst),
-        super::MAX_CONCURRENT_NESTED_CALLS
-    );
-    assert_eq!(
-        state.maximum.load(Ordering::SeqCst),
-        super::MAX_CONCURRENT_NESTED_CALLS
-    );
+    assert_eq!(state.active.load(Ordering::SeqCst), CALLS);
+    assert_eq!(state.maximum.load(Ordering::SeqCst), CALLS);
 
     state.release.add_permits(CALLS);
-    let execution = execution.await?;
+    let execution = tokio::time::timeout(Duration::from_secs(5), execution).await??;
     assert!(execution.success, "{}", execution_output(&execution));
     assert_eq!(execution.nested_calls.len(), CALLS);
-    assert_eq!(
-        state.maximum.load(Ordering::SeqCst),
-        super::MAX_CONCURRENT_NESTED_CALLS
+    assert_eq!(emitted_text(&execution)?, "129");
+    let expected_ids = (1..=CALLS)
+        .map(|id| format!("call-exec/code-{id}"))
+        .collect::<Vec<_>>();
+    assert_eq!(call_ids(&execution.nested_calls), expected_ids);
+    assert!(execution.nested_calls.iter().all(|call| call.success));
+    eprintln!(
+        "Nested calls beyond former cap: maximum active={CALLS}; receipts={}; first={}; last={}; output={}",
+        execution.nested_calls.len(),
+        execution.nested_calls.first().unwrap().call_id,
+        execution.nested_calls.last().unwrap().call_id,
+        execution_output(&execution)
     );
+    assert_eq!(state.maximum.load(Ordering::SeqCst), CALLS);
 
     std::fs::remove_dir_all(workspace)?;
     Ok(())
@@ -643,11 +668,11 @@ async fn missing_tool_rejects_without_cancelling_sibling_calls() -> Result<()> {
     let workspace = temporary_workspace("missing-tool-all-settled")?;
     let tools = Tools::builder()
         .without_defaults()
-        .tool(SerialConcurrencyProbe {
+        .tool(DefaultConcurrencyProbe {
             state: Arc::new(ConcurrencyProbeState {
                 active: AtomicUsize::new(0),
                 maximum: AtomicUsize::new(0),
-                release: Semaphore::new(0),
+                release: Semaphore::new(2),
             }),
         })
         .build()?;
@@ -657,8 +682,8 @@ async fn missing_tool_rejects_without_cancelling_sibling_calls() -> Result<()> {
         .execute_code(
             r#"
 const results = await Promise.allSettled([
-  tools.serial_concurrency_probe({}),
-  tools.serial_concurrency_probe({}),
+  tools.default_concurrency_probe({}),
+  tools.default_concurrency_probe({}),
   tools.missing_tool({}),
 ]);
 text([results.map(result => result.status), results[2].reason.code === "TOOL_NOT_AVAILABLE"]);

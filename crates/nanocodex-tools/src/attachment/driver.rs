@@ -6,7 +6,7 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{
     client_async_tls_with_config,
     tungstenite::{
@@ -61,7 +61,6 @@ pub(crate) async fn run(
     // Transport generations may change while the same runtime owns processes.
     // A new driver gets a new identity so local numeric IDs cannot be retargeted.
     let runtime_id = uuid::Uuid::new_v4().to_string();
-    let execution = Arc::new(RwLock::new(()));
     let mut active = Vec::<InFlight>::new();
     let mut backoff = Duration::from_millis(100);
     let mut attempt = 0_u64;
@@ -155,7 +154,6 @@ pub(crate) async fn run(
                 config: &config,
                 runtime_id: &runtime_id,
                 connection_id: &connection_id,
-                execution: &execution,
                 runtime: &runtime,
                 events: &events,
                 status: &status,
@@ -201,6 +199,17 @@ pub(crate) async fn run(
             }
         }
     };
+    // Closure must not leave surviving handles advertising a ready transport.
+    let _ = status.send(
+        if matches!(
+            terminal,
+            Err(AttachmentError::Authentication(_) | AttachmentError::Fenced(_))
+        ) {
+            AttachmentStatus::Fenced
+        } else {
+            AttachmentStatus::Disconnected
+        },
+    );
     shutdown_calls(&mut active).await;
     runtime.shutdown().await;
     if terminal.is_ok() {
@@ -306,22 +315,17 @@ impl CallClock {
     }
 
     fn snapshot(&self, now: Instant) -> ReceiptTiming {
-        let task_started = self.task_started.unwrap_or(now);
         let started = self
             .execution_started
-            .unwrap_or(self.result_queued.unwrap_or(now));
+            .unwrap_or(self.task_started.unwrap_or(now));
         let finished = self.execution_finished.unwrap_or(now);
         let queued = self.result_queued.unwrap_or(now);
         let ms = |end: Instant, start: Instant| {
             end.saturating_duration_since(start).as_secs_f64() * 1000.0
         };
         ReceiptTiming {
-            scheduler_ms: ms(task_started, self.received),
-            execution_gate_ms: if self.task_started.is_some() {
-                ms(started, task_started)
-            } else {
-                0.0
-            },
+            scheduler_ms: ms(started, self.received),
+            execution_gate_ms: 0.0,
             execution_ms: if self.execution_started.is_some() {
                 ms(finished, started)
             } else {
@@ -494,7 +498,6 @@ struct CallIdentity {
 )]
 fn start_call(
     runtime: &Arc<PreparedToolRuntime>,
-    execution: &Arc<RwLock<()>>,
     active: &mut Vec<InFlight>,
     identity: CallIdentity,
     timing: Arc<Mutex<CallClock>>,
@@ -503,9 +506,7 @@ fn start_call(
     completed: mpsc::Sender<Completion>,
     event_sender: &mpsc::Sender<AttachmentEvent>,
 ) -> tokio::task::AbortHandle {
-    let parallel_safe = runtime.parallel_safe(&identity.name);
     let runtime = Arc::clone(runtime);
-    let execution = Arc::clone(execution);
     let task_span = events.span.clone();
     let mut events = TaskEvents {
         call: Some(events),
@@ -532,25 +533,9 @@ fn start_call(
                     task_identity.output_token_budget as usize,
                 )
                 .with_turn_id(task_identity.turn_id.as_deref().map(str::to_owned));
-                // A nonparallel provider owns the execution gate exclusively;
-                // other calls wait fairly within their original deadline. Keep
-                // this gate across reconnects so abandoned socket work cannot
-                // overlap a replacement generation's nonparallel execution.
-                let mut dispatched = false;
                 let execute = async {
-                    if parallel_safe {
-                        let _permit = execution.read().await;
-                        dispatched = true;
-                        let _phase =
-                            ExecutionPhase::start(&timing, &completed, &task_identity.call_id);
-                        runtime.execute(call).await
-                    } else {
-                        let _permit = execution.write().await;
-                        dispatched = true;
-                        let _phase =
-                            ExecutionPhase::start(&timing, &completed, &task_identity.call_id);
-                        runtime.execute(call).await
-                    }
+                    let _phase = ExecutionPhase::start(&timing, &completed, &task_identity.call_id);
+                    runtime.execute(call).await
                 };
                 let executed = tokio::time::timeout(duration, execute).await;
                 match executed {
@@ -580,10 +565,6 @@ fn start_call(
                     ),
                     Ok(Err(error)) => (
                         unavailable(&error.to_string()),
-                        AttachmentCallOutcome::Unavailable,
-                    ),
-                    Err(_) if !dispatched => (
-                        unavailable("tool deadline elapsed while waiting for execution"),
                         AttachmentCallOutcome::Unavailable,
                     ),
                     Err(_) => (
@@ -664,7 +645,6 @@ struct ConnectionContext<'a> {
     config: &'a Config,
     runtime_id: &'a str,
     connection_id: &'a str,
-    execution: &'a Arc<RwLock<()>>,
     runtime: &'a Arc<PreparedToolRuntime>,
     events: &'a mpsc::Sender<AttachmentEvent>,
     status: &'a watch::Sender<AttachmentStatus>,
@@ -683,7 +663,6 @@ where
         config,
         runtime_id,
         connection_id,
-        execution,
         runtime,
         events,
         status,
@@ -844,7 +823,7 @@ where
                             continue;
                         }
                         let identity = CallIdentity { session_id:session_id.into(), turn_id:turn_id.map(Into::into), call_id:call_id.clone().into(), model:model.into(), name:name.clone().into(), input, output_token_budget, output_byte_budget, deadline_at };
-                        let task = start_call(runtime, execution, active, identity, Arc::clone(&timing), tool_timeout, call_events, completed_tx.clone(), events);
+                        let task = start_call(runtime, active, identity, Arc::clone(&timing), tool_timeout, call_events, completed_tx.clone(), events);
                         in_flight.insert(call_id.into(), SocketCall { task, timing });
                     }
                     RemoteFrame::Cancel { call_id } => {

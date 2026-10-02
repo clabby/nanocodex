@@ -552,6 +552,7 @@ struct DriverRuntime {
     next_shell: u64,
     controls: HashMap<TurnId, TurnControl>,
     local_managed_turns: HashMap<TurnId, String>,
+    local_terminal_turns: HashSet<TurnId>,
     submitted_turns: HashSet<String>,
     detached_submissions: HashSet<String>,
     unacknowledged_inputs: HashMap<TurnId, (PaneId, String, Submission)>,
@@ -765,6 +766,31 @@ async fn clone_elevenlabs_voice(name: String, path: PathBuf) -> Result<String, S
 }
 
 impl DriverRuntime {
+    fn active_managed_turn_ids(&self) -> Vec<&str> {
+        // Attached turns and locally controlled turns are counted separately by
+        // the UI, but control clients need the complete durable active set.
+        let mut ids = self
+            .managed_active_turns
+            .ids
+            .iter()
+            .map(String::as_str)
+            .chain(
+                self.local_managed_turns
+                    .iter()
+                    .filter_map(|(local, managed)| {
+                        (!self.local_terminal_turns.contains(local)
+                            && (self.controls.contains_key(local)
+                                || (self.admitting.contains(local)
+                                    && self.confirmed_requests.contains(managed))))
+                        .then_some(managed.as_str())
+                    }),
+            )
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     fn voice_status(&self) -> Option<crate::voice_state::Status> {
         if let Some(panel) = &self.clone_panel {
             return Some(crate::voice_state::Status {
@@ -1097,6 +1123,7 @@ impl DriverRuntime {
                 ))
             });
             self.local_managed_turns.clear();
+            self.local_terminal_turns.clear();
             self.managed_active_turns = ManagedActiveTurns::default();
             self.history_generation = self.history_generation.wrapping_add(1);
             self.history_loads = JoinSet::new();
@@ -1529,6 +1556,7 @@ impl DriverRuntime {
         self.admitting.clear();
         self.cancel_after_admission.clear();
         self.local_managed_turns.clear();
+        self.local_terminal_turns.clear();
         self.unacknowledged_inputs.clear();
         self.confirmed_requests.clear();
         self.waiting_steers.clear();
@@ -1573,6 +1601,7 @@ impl DriverRuntime {
         self.routing_updates = JoinSet::new();
         self.managed_active_turns = ManagedActiveTurns::default();
         self.local_managed_turns.clear();
+        self.local_terminal_turns.clear();
         self.submitted_turns.clear();
         self.detached_submissions.clear();
         self.unacknowledged_inputs.clear();
@@ -1942,6 +1971,7 @@ async fn run_inner(
         next_shell: 1,
         controls: HashMap::new(),
         local_managed_turns: HashMap::new(),
+        local_terminal_turns: HashSet::new(),
         submitted_turns: HashSet::new(),
         detached_submissions: HashSet::new(),
         unacknowledged_inputs: HashMap::new(),
@@ -2117,6 +2147,7 @@ async fn run_inner(
                 .extend(runtime.submitted_turns.drain());
             runtime.confirmed_requests.clear();
             runtime.local_managed_turns.clear();
+            runtime.local_terminal_turns.clear();
             request_render(
                 app.update(AppEvent::SettingsHydrated {
                     pane: PaneId::Main,
@@ -2552,6 +2583,7 @@ async fn run_inner(
                                         (managed_id == id).then_some(*local_id)
                                     })
                                 {
+                                    runtime.local_terminal_turns.insert(local_id);
                                     runtime.cancellation_fences.local_terminal(local_id);
                                 }
                             }
@@ -3208,6 +3240,7 @@ async fn run_inner(
                         }
                         Err(error) => {
                             runtime.local_managed_turns.remove(&id);
+                            runtime.local_terminal_turns.remove(&id);
                             let record = runtime.local_record(LocalEvent::WorkerTurnFinished {
                                 id,
                                 error: Some(error.to_string()),
@@ -3256,6 +3289,7 @@ async fn run_inner(
                     }
                     runtime.controls.remove(&id);
                     runtime.local_managed_turns.remove(&id);
+                    runtime.local_terminal_turns.remove(&id);
                     runtime.cancellation_fences.local_terminal(id);
                     let error = outcome.err().map(|error| error.to_string());
                     let record = runtime.local_record(LocalEvent::WorkerTurnFinished { id, error })?;
@@ -5255,6 +5289,7 @@ mod tests {
             next_shell: 1,
             controls: HashMap::new(),
             local_managed_turns: HashMap::new(),
+            local_terminal_turns: HashSet::new(),
             submitted_turns: HashSet::new(),
             detached_submissions: HashSet::new(),
             unacknowledged_inputs: HashMap::new(),

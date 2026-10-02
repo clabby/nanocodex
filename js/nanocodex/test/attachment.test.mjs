@@ -799,7 +799,7 @@ async function waitForTimer(predicate) {
 }
 
 
-test("attachment queues serial work beyond the former call and receipt caps", async () => {
+test("attachment dispatches nonparallel calls beyond the former call and receipt caps", async () => {
   let release;
   const seen = [];
   const fixture = await readyAttachment({ handler: async ({ index }) => {
@@ -807,21 +807,19 @@ test("attachment queues serial work beyond the former call and receipt caps", as
     if (index === 0) await new Promise(resolve => { release = resolve; });
     return index;
   } });
-  for (let index = 0; index < 70; index++) {
-    fixture.socket.receive({ ...callFrame({ index }), call_id: `queued:${index}` });
+  for (let index = 0; index < 160; index++) {
+    fixture.socket.receive({ ...callFrame({ index }), call_id: `concurrent:${index}` });
   }
-  await waitFor(() => release);
-  assert.deepEqual(seen, [0]);
+  await waitFor(() => fixture.socket.frames().filter(frame => frame.type === "result").length === 159);
+  assert.equal(seen.length, 160);
   assert.equal(fixture.socket.closed, undefined);
-  assert.equal(fixture.socket.frames().filter(frame => frame.type === "result").length, 0);
-  fixture.socket.receive({ type: "cancel", call_id: "queued:35" });
+  assert.equal(fixture.socket.frames().some(frame => frame.type === "result" && frame.call_id === "concurrent:0"), false);
   release();
-  await waitFor(() => fixture.socket.frames().filter(frame => frame.type === "result").length === 70);
+  await waitFor(() => fixture.socket.frames().filter(frame => frame.type === "result").length === 160);
   assert.equal(fixture.socket.closed, undefined);
-  assert.equal(seen.includes(35), false);
-  assert.equal(seen.length, 69);
+  assert.deepEqual(diagnostics(fixture.socket).filter(frame => frame.call_id === "concurrent:159").map(frame => frame.stage), ["received", "execution_started", "execution_finished", "result_prepared"]);
   for (const frame of fixture.socket.frames().filter(frame => frame.type === "result")) {
-    assert.equal(frame.outcome.status, frame.call_id === "queued:35" ? "ambiguous" : "completed");
+    assert.equal(frame.outcome.status, "completed");
     fixture.socket.receive({ type: "ack", call_id: frame.call_id });
   }
   await drain(fixture.client, fixture.socket);
