@@ -323,6 +323,12 @@ rely on platform close/error signals and admitted command deadlines; they do
 not send an application heartbeat. Provisioned VM authorization renewal and
 revocation continue separately from transport liveness.
 
+Older publishers without `command_recovery` still receive matching JSON `pong`
+replies to their bounded JSON `ping` frames. Ownership and provisioned VM
+authorization checks also apply to these heartbeats. They do not introduce an
+ordinary Hand liveness lease or opt an older runtime into command recovery;
+the broker sends no `recover` frames to those catalogs.
+
 While a VM command is admitted, cached authorization expiry triggers a fresh
 authority check. An independently renewed VM lease preserves the runtime epoch;
 revocation fences it. Authority lookups have a finite timeout, and cannot delay
@@ -462,6 +468,16 @@ reconnects. The original command ID and ownership epoch recover from SQLite,
 the completed output and exit code return, the original effect occurs once,
 and a fresh command succeeds. Evidence is retained in ignored
 `output/hand-owner-restart-journey/`.
+
+`pnpm --filter nanocodex-managed-service run test:hand-reconnect` also runs a
+frozen publisher from `546bec456` against the current broker over real Workerd
+WebSockets and native `/bin/sh`. It verifies matching legacy JSON heartbeats
+across hibernation and reconnect, shell progress while a command waits, and
+ambiguity after disconnecting a pending legacy command without replay. A fresh
+command succeeds with no recovery frames for the older catalog. The journey
+also verifies strict malformed-frame rejection.
+Evidence is retained in ignored `output/hand-legacy-heartbeat/`; the existing
+recovery journey continues to cover current publishers and control heartbeats.
 
 `pnpm --filter nanocodex-managed-service run test:hand-communication` measures
 warm calls, shell calls while CUA waits, and a 50-command burst over the real

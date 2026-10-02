@@ -787,7 +787,12 @@ export class HostedToolsBrokerCore {
       return;
     }
     await this.#validateLeasedAttachment(socket);
-    if (frame.type === "status") this.#recoverStatus(socket, frame);
+    if (frame.type === "ping") {
+      // Older publishers do not advertise command recovery and still expect
+      // JSON pongs. Preserve ownership/authority checks without a liveness TTL.
+      this.#activeAttachment(socket);
+      this.#send(socket, { type: "pong", nonce: frame.nonce });
+    } else if (frame.type === "status") this.#recoverStatus(socket, frame);
     else if (frame.type === "drain") this.#drain(socket);
     else if (frame.type === "diagnostic") this.#hostProgress(socket, frame);
     else this.#completeResult(socket, frame);
