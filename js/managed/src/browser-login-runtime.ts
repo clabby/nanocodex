@@ -2,7 +2,7 @@ import { createBrowserSession, deleteBrowserSession, type BrowserBinding } from 
 import type { NamedTool, ToolContext } from "nanocodex";
 import { parseBrowserLoginRequest, browserLoginIdentity } from "./browser-login";
 import { PrivateBrowserContinuationSession, snapshotBrowserVault, actBrowserVault, type BrowserVaultIdentity, type BrowserVaultAction } from "./browser-vault";
-import { privateVaultTakeover, releasePrivateVaultTakeover, validateBrowserVaultTakeoverAction, type BrowserVaultTakeoverAction, type BrowserVaultTouchState } from "./browser-vault-takeover";
+import { privateVaultTakeover, releasePrivateVaultTakeover, validateBrowserVaultTakeoverAction, rememberPrivateBrowserValues, type BrowserVaultTakeoverAction, type BrowserVaultTouchState } from "./browser-vault-takeover";
 import { privateBrowserOperation, parsePrivateBrowserAction } from "./browser-private-operations";
 
 type Login = { id: string; sessionId: string; targetId: string; origin: string; allowedOrigins: string[];
@@ -42,6 +42,12 @@ export function createBrowserLoginRuntime(options: { storage: DurableObjectStora
     return login;
   };
   const remember = (action:Record<string,unknown>) => {
+    if (action.action === "fill_fields") {
+      segment = undefined;
+      if (!rememberPrivateBrowserValues(secrets,
+        (action as Extract<BrowserVaultTakeoverAction, {action:"fill_fields"}>).fields.map(field => field.value))) complete = false;
+      return;
+    }
     if(action.action==="click" || (action.action==="touch" && action.phase==="start") || (action.action==="key" && ["Enter","Tab","Escape"].includes(String(action.key))))segment=undefined;
     const text=["type","edit"].includes(String(action.action)) && typeof action.text==="string" ? action.text : "";
     const deleted=action.action==="edit" ? Number(action.delete_backward) : action.action==="key" && action.key==="Backspace" ? 1:0;

@@ -1948,6 +1948,12 @@ final class InboxModel: ObservableObject {
         return receipt
     }
     func browserTakeover(intake: VaultIntake, action: [String: JSON], account: UUID) async throws -> BrowserTakeoverFrame {
+        #if DEBUG && targetEnvironment(simulator)
+        if ProcessInfo.processInfo.arguments.contains("--browser-native-form-ui-fixture") {
+            guard generation == account else { throw APIError.invalidCredential }
+            return try await BrowserNativeFormUITransport.shared.request(intake: intake, action: action)
+        }
+        #endif
         guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
         let frame = try await client.browserTakeover(intake: intake, action: action)
         guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
