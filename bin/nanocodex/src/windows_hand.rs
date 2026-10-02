@@ -12,7 +12,7 @@ use std::{
     fs,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tokio::process::Command;
@@ -304,6 +304,16 @@ fn command_from_definition(definition: &str) -> Option<PathBuf> {
 }
 
 fn worker(executable: &Path) -> Option<u32> {
+    worker_identity(executable).map(|worker| worker.pid)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct WorkerIdentity {
+    pid: u32,
+    started: u64,
+}
+
+fn worker_identity(executable: &Path) -> Option<WorkerIdentity> {
     let executable = executable.canonicalize().ok()?;
     let mut system = System::new();
     system.refresh_processes_specifics(
@@ -321,7 +331,10 @@ fn worker(executable: &Path) -> Option<u32> {
             .iter()
             .skip(1)
             .any(|argument| argument == OsStr::new("hand"));
-        (candidate == executable && is_hand).then(|| pid.as_u32())
+        (candidate == executable && is_hand && process.start_time() > 0).then(|| WorkerIdentity {
+            pid: pid.as_u32(),
+            started: process.start_time(),
+        })
     })
 }
 
@@ -428,11 +441,73 @@ async fn install_task(candidate: &Path) -> Result<()> {
     write_record(candidate)
 }
 
-async fn wait_ready(candidate: &Path) -> Result<()> {
+fn service_json(path: &Path) -> Option<(serde_json::Value, fs::Metadata)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return None;
+    }
+    Some((
+        serde_json::from_slice(&fs::read(path).ok()?).ok()?,
+        metadata,
+    ))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadinessProof {
+    Candidate,
+    Restored,
+}
+
+fn ready_machine(
+    candidate: &Path,
+    worker: WorkerIdentity,
+    since: SystemTime,
+    proof: ReadinessProof,
+) -> Option<String> {
+    let directory = data_directory().ok()?.join("state");
+    let (identity, _) = service_json(&directory.join("identity.json"))?;
+    let machine = identity["machine_id"].as_str()?;
+    if machine.is_empty() {
+        return None;
+    }
+    // Historical native Hands did not publish status.json. Rollback is already
+    // bound to the retained task and executable hash; use their original account
+    // catalog contract and keep the exact native process pinned across requests.
+    if proof == ReadinessProof::Restored {
+        return Some(machine.to_owned());
+    }
+    let (status, metadata) = service_json(&directory.join("status.json"))?;
+    let since = since.max(SystemTime::UNIX_EPOCH + Duration::from_secs(worker.started));
+    let since_millis = since
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let executable = Path::new(status["daemon"]["executable"].as_str()?);
+    (metadata.modified().ok()? >= since
+        && u128::from(status["updated_at_millis"].as_u64()?) >= since_millis
+        && status["status"] == "connected"
+        && status["screen"]["status"] == "ready"
+        && status["screen"]["transport"] == "webrtc"
+        && status["machine_id"].as_str() == Some(machine)
+        && status["daemon"]["pid"].as_u64() == Some(u64::from(worker.pid))
+        && same_executable(executable, candidate))
+    .then(|| machine.to_owned())
+}
+
+async fn wait_ready(candidate: &Path, since: SystemTime) -> Result<()> {
+    wait_publication(candidate, since, ReadinessProof::Candidate).await
+}
+
+async fn wait_publication(
+    candidate: &Path,
+    since: SystemTime,
+    proof: ReadinessProof,
+) -> Result<()> {
+    let candidate = executable(candidate)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        if worker(candidate).is_some() {
-            break;
+    let worker = loop {
+        if let Some(worker) = worker_identity(&candidate) {
+            break worker;
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
@@ -441,52 +516,52 @@ async fn wait_ready(candidate: &Path) -> Result<()> {
             );
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    let identity_path = data_directory()?.join("state/identity.json");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    let machine = loop {
-        if let Ok(metadata) = fs::symlink_metadata(&identity_path)
-            && metadata.is_file()
-            && metadata.len() <= 64 * 1024
-            && let Ok(identity) = fs::read(&identity_path)
-            && let Ok(identity) = serde_json::from_slice::<serde_json::Value>(&identity)
-            && let Some(machine) = identity["machine_id"].as_str()
-        {
-            break machine.to_owned();
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "Windows Hand did not create a valid identity. Check {}",
-                data_directory()?.join("hand.log").display()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
     };
 
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let (origin, credential) = nanocodex_cli_auth::enrollment_credentials(None)?;
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(15))
         .build()?;
     while tokio::time::Instant::now() < deadline {
-        let hands = account_get(&client, &origin, credential.as_str(), "/v1/account/hands").await;
-        let screens = account_get(
-            &client,
-            &origin,
-            credential.as_str(),
-            "/v1/account/hands/screens",
-        )
-        .await;
-        if let (Ok(hands), Ok(screens)) = (hands, screens)
-            && catalog_ready(&hands, &screens, &machine)
-        {
-            return Ok(());
+        if worker_identity(&candidate) != Some(worker) {
+            bail!(
+                "Selected Windows Hand worker exited or changed identity during readiness verification"
+            );
+        }
+        if let Some(machine) = ready_machine(&candidate, worker, since, proof) {
+            let catalogs = tokio::time::timeout_at(deadline, async {
+                tokio::join!(
+                    account_get(&client, &origin, credential.as_str(), "/v1/account/hands"),
+                    account_get(
+                        &client,
+                        &origin,
+                        credential.as_str(),
+                        "/v1/account/hands/screens"
+                    )
+                )
+            })
+            .await;
+            // Catalog IDs can survive a disconnected publisher. Re-read the
+            // fresh local proof and exact process after the network requests.
+            if let Ok((Ok(hands), Ok(screens))) = catalogs
+                && catalog_ready(&hands, &screens, &machine)
+                && ready_machine(&candidate, worker, since, proof).as_deref()
+                    == Some(machine.as_str())
+                && worker_identity(&candidate) == Some(worker)
+            {
+                return Ok(());
+            }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    let required = match proof {
+        ReadinessProof::Candidate => "fresh connected and WebRTC screen-ready status",
+        ReadinessProof::Restored => "its retained Hand and desktop",
+    };
     bail!(
-        "Windows started the Hand, but its Hand and desktop did not appear in the account catalog. Check {}",
+        "Windows Hand did not publish {required} from the selected worker and appear in the account catalog. Check {}",
         data_directory()?.join("hand.log").display()
     )
 }
@@ -542,7 +617,7 @@ pub(crate) async fn ensure(candidate: Option<PathBuf>) -> Result<()> {
         if executable(&selected).ok().as_deref() == Some(candidate.as_path())
             && worker(&candidate).is_some()
         {
-            return wait_ready(&candidate).await;
+            return wait_ready(&candidate, SystemTime::UNIX_EPOCH).await;
         }
         stop().await?;
     }
@@ -567,10 +642,15 @@ pub(crate) async fn start_and_wait() -> Result<()> {
     let executable = state
         .executable
         .ok_or_else(|| eyre!("Windows Hand is not installed; run `nanocodex hand install`"))?;
+    let since = if state.loaded {
+        SystemTime::UNIX_EPOCH
+    } else {
+        SystemTime::now()
+    };
     if !state.loaded {
         start().await?;
     }
-    wait_ready(&executable).await
+    wait_ready(&executable, since).await
 }
 
 pub(crate) async fn stop() -> Result<()> {
@@ -975,7 +1055,9 @@ impl ServiceUpdate {
         restore_definition(&snapshot.definition).await?;
         restore_record(&record_path()?, snapshot.record.as_deref())?;
         if self.recovery.was_loaded {
-            start_and_wait().await?;
+            let since = SystemTime::now();
+            start().await?;
+            wait_publication(&self.recovery.previous, since, ReadinessProof::Restored).await?;
         } else {
             stop_update_task(&self.recovery).await?;
         }
@@ -1020,7 +1102,7 @@ async fn finish_recovery(record: &RecoveryRecord) -> Result<()> {
     if record.start_candidate {
         // Never start the task here: a committed stopped task stays stopped, and
         // a missing running task is an ambiguous state, not a repair request.
-        wait_ready(&record.candidate).await?;
+        wait_ready(&record.candidate, SystemTime::UNIX_EPOCH).await?;
     }
     let backup = backup_path()?;
     match fs::symlink_metadata(&backup) {
@@ -1062,7 +1144,12 @@ async fn verify_restored(record: &RecoveryRecord) -> Result<()> {
         );
     }
     if record.was_loaded {
-        wait_ready(&record.previous).await?;
+        wait_publication(
+            &record.previous,
+            SystemTime::UNIX_EPOCH,
+            ReadinessProof::Restored,
+        )
+        .await?;
     }
     Ok(())
 }

@@ -109,8 +109,70 @@ impl VersionStore {
             .wrap_err("failed to locate the running Nanocodex executable")?;
         let contents = fs::read(&executable)
             .wrap_err_with(|| format!("failed to read {}", executable.display()))?;
+        #[cfg(windows)]
+        self.retain_windows_baseline(manager_version, &executable, &contents)?;
         self.prepare_with_contents(manager_version, &contents)?;
         self.seed_running_updater_checksum(&executable, &contents)
+    }
+
+    #[cfg(windows)]
+    fn retain_windows_baseline(
+        &self,
+        manager_version: &str,
+        executable: &Path,
+        contents: &[u8],
+    ) -> Result<()> {
+        let active = self.active()?;
+        let key = active.as_deref().unwrap_or(manager_version);
+        if self.is_cached_bundle(key, false)? {
+            return Ok(());
+        }
+        let cli = if active.is_some() {
+            if !self.is_cached(key)? {
+                bail!("The previous Windows CLI failed verification; refusing update preparation");
+            }
+            fs::read(self.binary_path(key))?
+        } else {
+            contents.to_vec()
+        };
+        // The installer and older updater bootstrap cached only the CLI. Freeze
+        // and probe the exact bytes we will retain before any service handover.
+        // The updater directory has no companion, so also inspect stable bin.
+        let frozen = tempfile::tempdir()?;
+        let cli_path = frozen.path().join(BINARY_NAME);
+        let hand_path = frozen.path().join(NANOCODEX2_BINARY_NAME);
+        atomic_write(&cli_path, &cli, true)?;
+        let mut failure = None;
+        for candidate in [
+            self.version_dir(key).join(NANOCODEX2_BINARY_NAME),
+            executable.with_file_name(NANOCODEX2_BINARY_NAME),
+            self.root.join("bin").join(NANOCODEX2_BINARY_NAME),
+        ] {
+            if !candidate.is_file() {
+                continue;
+            }
+            let hand = fs::read(&candidate)?;
+            atomic_write(&hand_path, &hand, true)?;
+            // prepare is synchronous and is called inside the updater's Tokio
+            // runtime. Reuse the bounded real-pair probes on a separate thread.
+            let verified = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?
+                            .block_on(super::local::verify_pair(&cli_path, &hand_path))
+                    })
+                    .join()
+                    .map_err(|_| eyre!("Windows rollback-pair verification panicked"))?
+            });
+            match verified {
+                Ok(()) => return self.install_bundle(key, &cli, &hand, None, None),
+                Err(error) => failure = Some(error),
+            }
+        }
+        Err(failure.unwrap_or_else(|| eyre!("No previous Windows Hand companion was found")))
+            .wrap_err("Cannot retain a verified previous Windows CLI/Hand pair; repair the matching installation before updating. No service handover was attempted")
     }
 
     fn prepare_with_contents(&self, manager_version: &str, contents: &[u8]) -> Result<()> {
@@ -288,6 +350,16 @@ impl VersionStore {
             && !self.is_cached_voice(key, None)?
         {
             bail!("Nanocodex version {key} has an incomplete or corrupt voice runtime");
+        }
+
+        // --apply can consume a bundle staged by an older updater without
+        // prepare. Establish its previous-pair rollback invariant here too,
+        // before the coordinator reaches any service handover.
+        #[cfg(windows)]
+        if let Some(previous) = self.active()?
+            && !self.is_cached_bundle(&previous, false)?
+        {
+            self.retain_windows_baseline(&previous, &std::env::current_exe()?, &[])?;
         }
 
         Ok(())
