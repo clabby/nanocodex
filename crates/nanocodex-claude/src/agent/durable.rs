@@ -139,6 +139,7 @@ impl State {
         &self,
         conversation: &mut Conversation,
         operation: Option<&str>,
+        speed: Option<crate::Speed>,
     ) -> Result<Cursor> {
         if let (Some(policy), Some(operation)) = (&self.policy, operation)
             && let Some(value) = policy.continuation(operation.to_owned()).await?
@@ -158,7 +159,7 @@ impl State {
         let mut cursor = Cursor {
             instruction_revision: None,
             snapshot: self.snapshot(conversation).await?,
-            template: self.request_template(),
+            template: self.request_template(speed),
             wire_profile: Some(self.client.freeze_wire_profile()),
             threshold: self.compaction_threshold(),
             parallel: self.parallel_tools,

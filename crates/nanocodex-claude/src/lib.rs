@@ -21,6 +21,8 @@ pub const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages"
 pub const ANTHROPIC_SUBSCRIPTION_MESSAGES_URL: &str =
     "https://api.anthropic.com/v1/messages?beta=true";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// Research-preview beta required alongside `speed` on Messages requests.
+const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 
 #[derive(Debug, Error)]
 pub enum ClaudeError {
@@ -375,6 +377,16 @@ pub struct OutputConfig {
     pub effort: Effort,
 }
 
+/// Inference speed for models that offer fast mode. Fast mode runs the same
+/// model at premium rates and does not share prompt-cache prefixes with
+/// standard-speed requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Speed {
+    Standard,
+    Fast,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessagesRequest {
     pub model: String,
@@ -383,6 +395,8 @@ pub struct MessagesRequest {
     pub cache_control: Option<CacheControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<OutputConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<Speed>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1032,6 +1046,9 @@ impl ClaudeClient {
                 && !betas.contains(&"context-management-2025-06-27")
             {
                 betas.push("context-management-2025-06-27");
+            }
+            if request.speed.is_some() && !betas.contains(&FAST_MODE_BETA) {
+                betas.push(FAST_MODE_BETA);
             }
             if !betas.is_empty() {
                 let value = reqwest::header::HeaderValue::from_str(&betas.join(","))
