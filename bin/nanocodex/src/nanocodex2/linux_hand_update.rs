@@ -17,6 +17,8 @@ use std::{
 const ROOT: &str = "/opt/nanocodex";
 const HAND: &str = "nanocodex-hand.service";
 const EXE: &str = "/opt/nanocodex/current/nanocodex2";
+const ANCILLARY: &str = "nanocodex-win11-webrtc.service";
+const ANCILLARY_EXE: &str = "/usr/local/sbin/nanocodex-win11-webrtc";
 const NOFOLLOW: i32 = nix::libc::O_NOFOLLOW;
 
 #[derive(Deserialize)]
@@ -590,6 +592,8 @@ const PROPERTIES: &[&str] = &[
     "BoundBy",
     "PropagatesStopTo",
     "StopPropagatedFrom",
+    "Triggers",
+    "TriggeredBy",
     "KillMode",
     "RootDirectory",
     "RootImage",
@@ -713,6 +717,13 @@ fn unit_layout(props: &BTreeMap<String, String>) -> Result<BTreeMap<String, Stri
         layout.remove(key);
     }
     layout.insert("argv".into(), serde_json::to_string(&command_argv(props)?)?);
+    pin_unit_files(props, &mut layout)?;
+    Ok(layout)
+}
+fn pin_unit_files(
+    props: &BTreeMap<String, String>,
+    layout: &mut BTreeMap<String, String>,
+) -> Result<()> {
     // Never read the unit's Environment or account credential contents. Pin the
     // root-owned unit/drop-in inodes and metadata instead of copying their text.
     let paths = std::iter::once(value(props, "FragmentPath"))
@@ -754,7 +765,7 @@ fn unit_layout(props: &BTreeMap<String, String>) -> Result<BTreeMap<String, Stri
             ),
         );
     }
-    Ok(layout)
+    Ok(())
 }
 fn cgroup(props: &BTreeMap<String, String>) -> Result<String> {
     let group = value(props, "ControlGroup");
@@ -844,11 +855,128 @@ fn dependent(a: &BTreeMap<String, String>, unit: &str) -> bool {
         "BoundBy",
         "PropagatesStopTo",
         "StopPropagatedFrom",
+        "Triggers",
+        "TriggeredBy",
     ]
     .iter()
     .any(|key| value(a, key).split_whitespace().any(|v| v == unit))
 }
-fn factories(hand: &BTreeMap<String, String>) -> Result<Vec<Factory>> {
+// This is a bounded exception, not a name-prefix exemption. The existing
+// Windows VM's UDP forwarding service/timer are unrelated to the Hand runtime.
+// Revalidate all evidence on every guard; never execute or change either unit.
+fn ancillary_layout(props: &BTreeMap<String, String>) -> Result<()> {
+    if value(props, "Id") != ANCILLARY
+        || value(props, "LoadState") != "loaded"
+        || value(props, "ActiveState") != "inactive"
+        || value(props, "SubState") != "dead"
+        || pid(props)? != 0
+        || !matches!(value(props, "Type"), "oneshot" | "simple" | "exec")
+        || !matches!(value(props, "User"), "" | "root" | "0")
+        || value(props, "DynamicUser") != "no"
+        || value(props, "PrivateUsers") != "no"
+        || command_argv(props)? != [ANCILLARY_EXE, "apply"]
+    {
+        bail!("unknown ancillary Nanocodex service layout");
+    }
+    for key in [
+        "ExecStartPre",
+        "ExecStartPost",
+        "ExecStop",
+        "ExecStopPost",
+        "ExecReload",
+        "ExecCondition",
+        "RootDirectory",
+        "RootImage",
+        "BindsTo",
+        "PartOf",
+    ] {
+        if !value(props, key).is_empty() {
+            bail!("ancillary service has hooks, alternate root or lifecycle coupling");
+        }
+    }
+    if props.values().any(|v| v.contains(ROOT)) {
+        bail!("ancillary service references the Hand installation");
+    }
+    Ok(())
+}
+fn ancillary_binary(path: &Path) -> Result<()> {
+    // Reject aliases/symlinks (including ancestors) into current or a release.
+    if path.canonicalize()? != path {
+        bail!("ancillary executable must be a canonical independent path");
+    }
+    for ancestor in path
+        .parent()
+        .context("ancillary executable parent")?
+        .ancestors()
+    {
+        trusted_directory(ancestor)?;
+    }
+    let file = trusted_open(path, false)?;
+    if file.metadata()?.mode() & 0o111 == 0 {
+        bail!("ancillary executable is not executable");
+    }
+    Ok(())
+}
+fn verify_ancillary(
+    props: &BTreeMap<String, String>,
+    hand: &BTreeMap<String, String>,
+) -> Result<()> {
+    ancillary_layout(props)?;
+    ancillary_binary(Path::new(ANCILLARY_EXE))?;
+    pin_unit_files(props, &mut BTreeMap::new())?;
+    let timer = "nanocodex-win11-webrtc.timer";
+    // Timer-triggered forwarding is allowed, but neither direction may share
+    // the Hand's start/stop lifecycle, directly or through intermediate units.
+    for name in [ANCILLARY, timer] {
+        let props = if name == ANCILLARY {
+            props.clone()
+        } else {
+            unit(name)?
+        };
+        if name == timer && value(&props, "LoadState") == "not-found" {
+            continue;
+        }
+        if name == timer {
+            if value(&props, "LoadState") != "loaded"
+                || value(&props, "Id") != timer
+                || props.values().any(|v| v.contains(ROOT))
+            {
+                bail!("unknown ancillary timer layout");
+            }
+            pin_unit_files(&props, &mut BTreeMap::new())?;
+        }
+        if dependent(hand, name)
+            || dependent(&props, HAND)
+            || lifecycle_reaches(HAND, name)?
+            || lifecycle_reaches(name, HAND)?
+        {
+            bail!("Hand/ancillary systemd dependencies are coupled");
+        }
+    }
+    Ok(())
+}
+fn runtime_executable(path: &Path, resolved: Option<&Path>) -> bool {
+    matches!(
+        path.file_name().and_then(|v| v.to_str()),
+        Some("nanocodex2" | "nanocodex")
+    ) || path.starts_with(ROOT)
+        || resolved.is_some_and(|p| p.starts_with(ROOT))
+}
+fn runtime_unit(name: &str, props: &BTreeMap<String, String>) -> bool {
+    name.starts_with("nanocodex")
+        || props.values().any(|v| v.contains(ROOT))
+        // Inspect every command path, including hooks and multi-command units.
+        // Aliases must not evade discovery merely by using a non-Nanocodex name.
+        || props.iter().filter(|(key, _)| key.starts_with("Exec")).any(|(_, commands)| {
+            commands.split("{ path=").skip(1).any(|command| {
+                command.split_once(" ; ").is_some_and(|(path, _)| {
+                    let path = Path::new(path);
+                    runtime_executable(path, path.canonicalize().ok().as_deref())
+                })
+            })
+        })
+}
+fn service_units() -> Result<Vec<String>> {
     let text = systemctl(&[
         "list-units",
         "--all",
@@ -857,17 +985,26 @@ fn factories(hand: &BTreeMap<String, String>) -> Result<Vec<Factory>> {
         "--plain",
         "--no-pager",
     ])?;
-    let mut result = Vec::new();
-    for name in text
+    Ok(text
         .lines()
         .filter_map(|line| line.split_whitespace().next())
-    {
-        if !name.ends_with(".service") || name == HAND {
+        .filter(|name| name.ends_with(".service"))
+        .map(str::to_owned)
+        .collect())
+}
+fn factories(hand: &BTreeMap<String, String>) -> Result<Vec<Factory>> {
+    let mut result = Vec::new();
+    let names = service_units()?;
+    for name in names.iter().map(String::as_str) {
+        if name == HAND {
             continue;
         }
         let props = unit(name)?;
-        let executable = value(&props, "ExecStart");
-        if !executable.contains("/opt/nanocodex/") && !name.starts_with("nanocodex") {
+        if name == ANCILLARY {
+            verify_ancillary(&props, hand)?;
+            continue;
+        }
+        if !runtime_unit(name, &props) {
             continue;
         }
         if !matches!(
@@ -1267,6 +1404,9 @@ fn guard(journal: &Journal) -> Result<()> {
         || service_uid(value(&props, "User"))? != journal.service_uid
     {
         bail!("Hand unit/drop-ins/service user changed since prepare");
+    }
+    if service_units()?.iter().any(|name| name == ANCILLARY) {
+        verify_ancillary(&unit(ANCILLARY)?, &props)?;
     }
     for factory in &journal.factories {
         let props = unit(&factory.unit)?;
@@ -1859,7 +1999,7 @@ fn lifecycle_reaches(from: &str, target: &str) -> Result<bool> {
     // Keep start and stop graphs separate: a shared network/boot prerequisite
     // is not coupling, but a chain of restart/stop propagation is.
     for edges in [
-        &["Requires", "Wants", "BindsTo"][..],
+        &["Requires", "Wants", "BindsTo", "Triggers"][..],
         &["ConsistsOf", "BoundBy", "PropagatesStopTo", "RequiredBy"][..],
     ] {
         let mut todo = vec![from.to_owned()];
@@ -2076,6 +2216,180 @@ mod tests {
             format!("{{ path={EXE} ; argv[]=/other hand ; ignore_errors=no }}"),
         );
         assert!(command_argv(&props).is_err());
+    }
+    fn ancillary_props() -> BTreeMap<String, String> {
+        [
+            ("Id", ANCILLARY),
+            ("LoadState", "loaded"),
+            ("ActiveState", "inactive"),
+            ("SubState", "dead"),
+            ("MainPID", "0"),
+            ("Type", "oneshot"),
+            ("User", "root"),
+            ("DynamicUser", "no"),
+            ("PrivateUsers", "no"),
+            ("Requires", "sysinit.target system.slice docker.service"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .chain([(
+            "ExecStart".into(),
+            format!("{{ path={ANCILLARY_EXE} ; argv[]={ANCILLARY_EXE} apply ; ignore_errors=no }}"),
+        )])
+        .collect()
+    }
+    #[test]
+    fn permits_only_the_known_inactive_forwarder_layout() {
+        let props = ancillary_props();
+        ancillary_layout(&props).unwrap();
+        for user in ["", "root", "0"] {
+            let mut p = props.clone();
+            p.insert("User".into(), user.into());
+            ancillary_layout(&p).unwrap();
+        }
+        for (key, invalid) in [
+            ("Id", "nanocodex-other.service"),
+            ("LoadState", "not-found"),
+            ("ActiveState", "active"),
+            ("SubState", "running"),
+            ("MainPID", "123"),
+            ("MainPID", "invalid"),
+            ("Type", "forking"),
+            ("User", "nanocodex"),
+            ("DynamicUser", "yes"),
+            ("PrivateUsers", "yes"),
+            ("ExecStartPre", "/bin/true"),
+            ("ExecStartPost", "/bin/true"),
+            ("ExecStop", "/bin/true"),
+            ("ExecStopPost", "/bin/true"),
+            ("ExecReload", "/bin/true"),
+            ("ExecCondition", "/bin/true"),
+            ("RootDirectory", "/other"),
+            ("RootImage", "/other"),
+            ("BindsTo", "docker.service"),
+            ("PartOf", "docker.service"),
+            (
+                "FragmentPath",
+                "/opt/nanocodex/releases/old/forwarder.service",
+            ),
+            ("Requires", HAND),
+        ] {
+            let mut p = props.clone();
+            p.insert(key.into(), invalid.into());
+            // Direct dependency rejection is performed by verify_ancillary.
+            assert!(
+                ancillary_layout(&p).is_err() || dependent(&p, HAND),
+                "accepted {key}={invalid}"
+            );
+        }
+    }
+    #[test]
+    fn rejects_forwarder_runtime_paths_alias_argv_and_extra_commands() {
+        for command in [
+            format!("{EXE} hand"),
+            "/opt/nanocodex/releases/old/nanocodex2 host".into(),
+            format!("{ANCILLARY_EXE} host"),
+            format!("{ANCILLARY_EXE} apply extra"),
+            format!("{ANCILLARY_EXE} apply --state-dir /opt/nanocodex/current"),
+            "/usr/local/bin/nanocodex2 apply".into(),
+        ] {
+            let mut p = ancillary_props();
+            let executable = command.split_whitespace().next().unwrap();
+            p.insert(
+                "ExecStart".into(),
+                format!("{{ path={executable} ; argv[]={command} ; ignore_errors=no }}"),
+            );
+            assert!(ancillary_layout(&p).is_err(), "accepted {command}");
+        }
+        let mut p = ancillary_props();
+        p.get_mut("ExecStart")
+            .unwrap()
+            .push_str(" { path=/bin/true ; argv[]=/bin/true ; ignore_errors=no }");
+        assert!(ancillary_layout(&p).is_err());
+        p.insert(
+            "ExecStart".into(),
+            format!("{{ path={ANCILLARY_EXE} ; argv[]=/other apply ; ignore_errors=no }}"),
+        );
+        assert!(ancillary_layout(&p).is_err());
+    }
+    #[test]
+    fn discovers_unknown_runtime_names_commands_hooks_and_resolved_aliases() {
+        let mut p = BTreeMap::new();
+        assert!(runtime_unit("nanocodex-unknown.service", &p));
+        assert!(!runtime_unit("unrelated.service", &p));
+        for command in [
+            EXE,
+            "/opt/nanocodex/releases/old/nanocodex2",
+            "/usr/local/bin/nanocodex2",
+            "/usr/local/bin/nanocodex",
+        ] {
+            for key in [
+                "ExecStart",
+                "ExecStartPre",
+                "ExecStartPost",
+                "ExecStop",
+                "ExecStopPost",
+                "ExecReload",
+                "ExecCondition",
+            ] {
+                p.clear();
+                p.insert(key.into(), format!("{{ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no }} {{ path={command} ; argv[]={command} host ; ignore_errors=no }}"));
+                assert!(
+                    runtime_unit("unrelated.service", &p),
+                    "missed {key} {command}"
+                );
+            }
+        }
+        for resolved in [EXE, "/opt/nanocodex/releases/old/nanocodex2"] {
+            assert!(runtime_executable(
+                Path::new("/usr/local/bin/alias"),
+                Some(Path::new(resolved))
+            ));
+        }
+        assert!(!runtime_executable(
+            Path::new(ANCILLARY_EXE),
+            Some(Path::new(ANCILLARY_EXE))
+        ));
+    }
+    #[test]
+    fn rejects_ancillary_symlinks_and_untrusted_executables() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("binary");
+        fs::write(&binary, b"untrusted").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(ancillary_binary(&binary).is_err());
+        let alias = dir.path().join("alias");
+        symlink(&binary, &alias).unwrap();
+        assert!(ancillary_binary(&alias).is_err());
+        let release_alias = dir.path().join("release-alias");
+        symlink(EXE, &release_alias).unwrap();
+        assert!(ancillary_binary(&release_alias).is_err());
+    }
+    #[test]
+    fn ancillary_service_and_timer_direct_coupling_remains_rejected() {
+        let props = ancillary_props();
+        for name in [ANCILLARY, "nanocodex-win11-webrtc.timer"] {
+            assert!(!dependent(&props, HAND));
+            for key in [
+                "Requires",
+                "Wants",
+                "BindsTo",
+                "PartOf",
+                "ConsistsOf",
+                "RequiredBy",
+                "BoundBy",
+                "PropagatesStopTo",
+                "StopPropagatedFrom",
+                "Triggers",
+                "TriggeredBy",
+            ] {
+                let mut p = props.clone();
+                p.insert(key.into(), HAND.into());
+                assert!(dependent(&p, HAND), "missed {key}");
+                p.insert(key.into(), name.into());
+                assert!(dependent(&p, name), "missed reverse {key}");
+            }
+        }
     }
     #[test]
     fn elf_header_checks_arch_and_format() {
