@@ -18,8 +18,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if bytes == 0 || bytes > 64 * 1024 * 1024 {
                 return Err("Linux screen helper bundle must be 1 byte through 64 MiB".into());
             }
-            if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64") {
-                return Err("Linux screen helper payload is only supported for x86_64".into());
+            let architecture = std::env::var("CARGO_CFG_TARGET_ARCH")?;
+            if !matches!(architecture.as_str(), "x86_64" | "aarch64") {
+                return Err("Linux screen helper payload requires x86_64 or aarch64".into());
             }
             let verifier = std::path::PathBuf::from(
                 std::env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR missing")?,
@@ -32,6 +33,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let status = std::process::Command::new("python3")
                 .arg(&verifier)
                 .arg("--verify-only")
+                .arg("--architecture")
+                .arg(&architecture)
                 .arg(&destination)
                 .status()
                 .map_err(|error| {

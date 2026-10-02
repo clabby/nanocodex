@@ -17,6 +17,18 @@ RUN git init && git remote add origin https://github.com/rockorager/waymote.git 
 # example ARM LSE/SVE unavailable on some supported deployment machines).
 RUN /opt/zig/zig build -Dcpu=baseline -Doptimize=ReleaseFast
 
+# Build and relocate-test the same self-contained payload as release binaries,
+# natively for the image architecture, with the glibc 2.35 release baseline.
+FROM ubuntu:22.04 AS screen-helpers
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates curl git xz-utils python3 build-essential pkg-config binutils \
+    meson ninja-build libwayland-dev libwayland-bin libxkbcommon-dev libpixman-1-dev libpng-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /source
+COPY scripts/build-linux-screen-helpers.sh scripts/build-linux-screen-helpers.py ./scripts/
+COPY scripts/tests/linux-screen-helpers-bundle.py ./scripts/tests/
+RUN scripts/build-linux-screen-helpers.sh --auto /out/linux-screen-helpers.tar.gz /tmp/screen-build
+
 # The standalone server image uses the same publisher as desktop and VM Hands.
 FROM rust:1.97-slim-trixie AS remote-chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -42,6 +54,9 @@ COPY --from=remote-planner /source/recipe.json recipe.json
 # Keep cooked dependencies and Cargo sources in image layers: BuildKit cache
 # mounts are local to each fresh runner and cannot warm source-only PR builds.
 RUN CARGO_BUILD_JOBS=2 cargo chef cook --release --locked -p nanocodex2-bin --bin nanocodex2 --recipe-path recipe.json
+# Install the payload verifier after cooking to preserve shared dependency layers.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY bin ./bin
 COPY crates ./crates
@@ -49,8 +64,13 @@ COPY examples ./examples
 COPY js/nanocodex ./js/nanocodex
 COPY py/bindings ./py/bindings
 COPY third_party ./third_party
-RUN CARGO_BUILD_JOBS=2 cargo build --release --locked -p nanocodex2-bin --bin nanocodex2 \
-    && mkdir -p /out && cp target/release/nanocodex2 /out/nanocodex-remote
+COPY --from=screen-helpers /out/linux-screen-helpers.tar.gz /opt/linux-screen-helpers.tar.gz
+COPY scripts/tests/linux-screen-helpers-bundle.py ./scripts/tests/
+RUN NANOCODEX_LINUX_SCREEN_BUNDLE=/opt/linux-screen-helpers.tar.gz \
+    CARGO_BUILD_JOBS=2 cargo build --release --locked -p nanocodex2-bin --bin nanocodex2 \
+    && mkdir -p /out && cp target/release/nanocodex2 /out/nanocodex-remote \
+    && python3 scripts/tests/linux-screen-helpers-bundle.py \
+       --binary /out/nanocodex-remote /opt/linux-screen-helpers.tar.gz
 
 FROM rust:1.97-slim-trixie AS rust-toolchain
 RUN rustup component add clippy rustfmt && rustup target add wasm32-unknown-unknown
