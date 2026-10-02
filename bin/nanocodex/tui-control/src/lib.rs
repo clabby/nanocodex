@@ -764,7 +764,7 @@ impl Cli {
         #[cfg(unix)]
         match self.command {
             CliCommand::List { .. } => {
-                println!("{}", serde_json::to_string(&list()?)?);
+                println!("{}", serde_json::to_string(&list().await?)?);
                 Ok(())
             }
             CliCommand::Connect { instance_id, .. } => connect(&instance_id).await,
