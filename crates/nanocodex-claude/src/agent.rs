@@ -1640,6 +1640,7 @@ fn provider_error(error: impl std::fmt::Display) -> NanocodexError {
 #[derive(Clone, Copy)]
 enum CompactionMode {
     Automatic,
+    ContextRecovery,
     Manual,
 }
 // A failed remote request may already have executed server tools. Keep only
@@ -2042,6 +2043,15 @@ impl State {
             Vec::new()
         };
         let tools = cursor.template.tools.clone();
+        let mut template = cursor.template.clone();
+        if matches!(mode, CompactionMode::ContextRecovery) {
+            // Exhaustion leaves only the earlier prefix available to summarize.
+            // Reserve a bounded text answer independently of the task's output
+            // and thinking budgets; rejection leaves the original state intact.
+            template.max_tokens = template.max_tokens.min(4096);
+            template.thinking = Some(json!({"type":"disabled"}));
+            template.output_config = None;
+        }
         messages.push(Message::text(Role::User,"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Summarize the conversation so far, preserving user goals, constraints, decisions and tool results."));
         let response = self
             .response(
@@ -2054,7 +2064,7 @@ impl State {
                     disable_tools: true,
                     container: context.container.as_deref(),
                     previous_message_id: context.previous_message_id.as_deref(),
-                    template: Some(&cursor.template),
+                    template: Some(&template),
                     wire_profile: cursor.wire_profile.as_ref(),
                     effect: cursor.effect(self, step),
                 },
@@ -2111,7 +2121,7 @@ impl State {
             CompactionMode::Automatic if context.rounds_since_compaction < 3 => {
                 context.rapid_compactions.saturating_add(1)
             }
-            CompactionMode::Automatic => 1,
+            CompactionMode::Automatic | CompactionMode::ContextRecovery => 1,
             CompactionMode::Manual => 0,
         };
         context.rounds_since_compaction = 0;
@@ -2731,10 +2741,11 @@ impl State {
                 self.advance_cursor(&mut cursor, conversation).await?;
                 continue;
             }
-            if has_server_effects {
-                // The provider already executed these tools. Even an output
-                // limit or cancellation must retain the complete, signed server
-                // boundary before returning an error to the caller.
+            let exhausted = response.stop_reason == Some(StopReason::ModelContextWindowExceeded);
+            if has_server_effects || exhausted {
+                // Complete provider content owns partial output and any server
+                // effects. Keep this boundary even if recovery or cancellation
+                // prevents the next assistant response.
                 conversation.messages = pending.clone();
                 conversation.previous_message_id = previous_message_id.clone();
                 conversation.summary.clear();
@@ -2755,6 +2766,41 @@ impl State {
                 return Err(provider_error(
                     "server turn ended without a complete server-tool result; outcome unknown",
                 ));
+            }
+            if exhausted {
+                if cancel.flag.load(Ordering::SeqCst) {
+                    return Err(NanocodexError::TurnCancelled);
+                }
+                if cursor.context_recovery_attempted {
+                    return Err(provider_error("context window exhausted after recovery"));
+                }
+                cursor.context_recovery_attempted = true;
+                add_usage(
+                    &mut usage,
+                    &self
+                        .compact_locked(
+                            conversation,
+                            cancel,
+                            CompactionMode::ContextRecovery,
+                            &cursor,
+                            &format!("context-recovery-{index}"),
+                        )
+                        .await?,
+                );
+                // A user continuation closes the interrupted assistant turn.
+                // Its signed content and completed effects remain lossless;
+                // only fully resolved tool boundaries can reach this point.
+                conversation.messages.push(Message::text(
+                    Role::User,
+                    "Continue the current task from the interrupted response. The context window was exhausted. Do not repeat completed tool actions.",
+                ));
+                pending = conversation.packed_messages();
+                previous_message_id = conversation.previous_message_id.clone();
+                cursor.index = index + 1;
+                cursor.pending = pending.clone();
+                cursor.usage = usage.clone();
+                self.advance_cursor(&mut cursor, conversation).await?;
+                continue;
             }
             if has_tool_calls || response.stop_reason != Some(StopReason::EndTurn) {
                 return Err(provider_error(format!(
