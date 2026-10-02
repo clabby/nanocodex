@@ -805,9 +805,8 @@ where
                 }
                 for call in journal.values_mut() {
                     let replayed = call.receipt.is_some();
-                    if call.receipt.is_none() {
-                        if let Err(error) = call.finish(&ambiguous("attachment shut down during execution")) { return ConnectionEnd::DetachFailed(error); }
-                    }
+                    if call.receipt.is_none()
+                        && let Err(error) = call.finish(&ambiguous("attachment shut down during execution")) { return ConnectionEnd::DetachFailed(error); }
                     if let Err(error) = send_retained(&mut socket, call, replayed).await { return ConnectionEnd::DetachFailed(error); }
                 }
             }
