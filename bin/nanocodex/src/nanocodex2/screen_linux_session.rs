@@ -254,6 +254,175 @@ impl WaylandSession {
     }
 }
 
+// Output ownership belongs to the user's compositor, not the Hand lifetime.
+// Never remove this output on shutdown or reconfigure any pre-existing output.
+const OWNED_OUTPUT: &str = "NANOCODEX-HEADLESS-1";
+const HYPRCTL_LIMIT: usize = 64 * 1024;
+
+fn hyprland_instance(json: &str, display: &str) -> Result<Option<String>> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(error)?;
+    let instances = value
+        .as_array()
+        .ok_or_else(|| error("invalid Hyprland instances"))?;
+    let mut selected = None;
+    for instance in instances {
+        let socket = instance["wl_socket"]
+            .as_str()
+            .ok_or_else(|| error("invalid Hyprland socket"))?;
+        if socket != display {
+            continue;
+        }
+        let signature = instance["instance"]
+            .as_str()
+            .ok_or_else(|| error("missing Hyprland signature"))?;
+        if signature.is_empty()
+            || signature.len() > 128
+            || !signature
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(error("unsafe Hyprland instance signature"));
+        }
+        if selected.replace(signature.to_owned()).is_some() {
+            return Err(error("ambiguous Hyprland instance for captured display"));
+        }
+    }
+    Ok(selected)
+}
+
+fn hyprland_monitors(json: &str) -> Result<Vec<serde_json::Value>> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(error)?;
+    let monitors = value
+        .as_array()
+        .ok_or_else(|| error("invalid Hyprland monitors"))?;
+    if monitors
+        .iter()
+        .any(|m| m["name"].as_str().is_none_or(str::is_empty))
+    {
+        return Err(error("invalid Hyprland monitor name"));
+    }
+    Ok(monitors.clone())
+}
+
+// The injected runner uses owned arguments so tests never touch a compositor.
+async fn prepare_hyprland_with<F, Fut>(display: &str, mut run: F) -> Result<()>
+where
+    F: FnMut(Option<String>, Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let args = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect();
+    let instances = run(None, args(&["instances", "-j"])).await?;
+    let Some(signature) = hyprland_instance(&instances, display)? else {
+        return Ok(());
+    };
+    let monitors = run(Some(signature.clone()), args(&["monitors", "-j"])).await?;
+    if !hyprland_monitors(&monitors)?.is_empty() {
+        return Ok(());
+    }
+    let created = run(
+        Some(signature.clone()),
+        args(&["output", "create", "headless", OWNED_OUTPUT]),
+    )
+    .await?;
+    if created.trim() != "ok" {
+        return Err(error("Hyprland headless output creation rejected"));
+    }
+    let eval = format!(
+        "hl.monitor({{ output=\"{OWNED_OUTPUT}\", mode=\"3840x2160@60\", position=\"0x0\", scale=2 }})"
+    );
+    // Only a definite compositor rejection permits the legacy syntax fallback;
+    // transport/timeouts are uncertain mutations and must not be retried.
+    let configured = run(Some(signature.clone()), args(&["eval", &eval])).await?;
+    if configured.trim() != "ok" {
+        let legacy = format!("{OWNED_OUTPUT},3840x2160@60,0x0,2");
+        let reply = run(
+            Some(signature.clone()),
+            args(&["keyword", "monitor", &legacy]),
+        )
+        .await?;
+        if reply.trim() != "ok" {
+            return Err(error("Hyprland headless output configuration rejected"));
+        }
+    }
+    let verified = run(Some(signature), args(&["monitors", "-j"])).await?;
+    if !hyprland_monitors(&verified)?.iter().any(|m| {
+        m["name"] == OWNED_OUTPUT
+            && m["width"] == 3840
+            && m["height"] == 2160
+            && m["scale"].as_f64() == Some(2.0)
+            && m["refreshRate"]
+                .as_f64()
+                .is_some_and(|rate| (rate - 60.0).abs() < 1.0)
+    }) {
+        return Err(error(
+            "Hyprland did not expose the configured Nanocodex output",
+        ));
+    }
+    Ok(())
+}
+
+impl WaylandSession {
+    pub(crate) async fn prepare_output(&self) -> Result<()> {
+        self.validate()?;
+        if !Path::new("/usr/bin/hyprctl").is_file() {
+            return Ok(());
+        }
+        let display = self
+            .display
+            .to_str()
+            .ok_or_else(|| error("invalid display name"))?;
+        prepare_hyprland_with(display, |signature, args| self.hyprctl(signature, args)).await
+    }
+
+    async fn hyprctl(&self, signature: Option<String>, args: Vec<String>) -> Result<String> {
+        use std::{process::Stdio, time::Duration};
+        use tokio::io::AsyncReadExt;
+        let mut command = tokio::process::Command::new("/usr/bin/hyprctl");
+        self.configure(&mut command)?;
+        command.env_remove("HYPRLAND_INSTANCE_SIGNATURE");
+        if let Some(signature) = signature {
+            command.env("HYPRLAND_INSTANCE_SIGNATURE", signature);
+        }
+        let eval = args.first().is_some_and(|arg| arg == "eval");
+        let mut child = command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(error)?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| error("hyprctl stdout missing"))?
+            .take((HYPRCTL_LIMIT + 1) as u64);
+        let mut bytes = Vec::new();
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::try_join!(stdout.read_to_end(&mut bytes), child.wait())
+        })
+        .await;
+        let (_, status) = match result {
+            Ok(result) => result.map_err(error)?,
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+                return Err(error("hyprctl timed out for captured Wayland session"));
+            }
+        };
+        if bytes.len() > HYPRCTL_LIMIT {
+            return Err(error("hyprctl output exceeded limit"));
+        }
+        if !status.success() {
+            if eval {
+                return Ok("eval rejected".into());
+            }
+            return Err(error("hyprctl failed for captured Wayland session"));
+        }
+        String::from_utf8(bytes).map_err(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,5 +638,187 @@ mod tests {
             session.configure(&mut child).is_err(),
             "recovery must not trust stale captured socket"
         );
+    }
+}
+
+#[cfg(test)]
+mod hyprland_tests {
+    use super::*;
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
+
+    const INSTANCE: &str = r#"[{"instance":"safe_123-ab","wl_socket":"wayland-1"}]"#;
+    const VERIFIED: &str = r#"[{"name":"NANOCODEX-HEADLESS-1","width":3840,"height":2160,"scale":2.0,"refreshRate":60.0}]"#;
+
+    async fn fixture(
+        replies: Vec<Result<String>>,
+    ) -> (Result<()>, Vec<(Option<String>, Vec<String>)>) {
+        let replies = Arc::new(Mutex::new(VecDeque::from(replies)));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let trace = calls.clone();
+        let result = prepare_hyprland_with("wayland-1", move |signature, args| {
+            calls.lock().unwrap().push((signature, args));
+            let reply = replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected command");
+            std::future::ready(reply)
+        })
+        .await;
+        let calls = trace.lock().unwrap().clone();
+        (result, calls)
+    }
+    fn replies(values: &[&str]) -> Vec<Result<String>> {
+        values.iter().map(|s| Ok((*s).into())).collect()
+    }
+
+    #[test]
+    fn exact_same_session_signature_is_bounded_and_unambiguous() {
+        assert_eq!(
+            hyprland_instance(INSTANCE, "wayland-1").unwrap().as_deref(),
+            Some("safe_123-ab")
+        );
+        for display in ["wayland-0", "wayland-10", "/foreign/wayland-1"] {
+            assert!(hyprland_instance(INSTANCE, display).unwrap().is_none());
+        }
+        for signature in [
+            "".to_owned(),
+            "../foreign".into(),
+            "a;b".into(),
+            "x".repeat(129),
+        ] {
+            let data =
+                serde_json::json!([{"instance": signature, "wl_socket":"wayland-1"}]).to_string();
+            assert!(hyprland_instance(&data, "wayland-1").is_err());
+        }
+        let duplicate = serde_json::json!([
+            {"instance":"a", "wl_socket":"wayland-1"},
+            {"instance":"b", "wl_socket":"wayland-1"}
+        ])
+        .to_string();
+        assert!(hyprland_instance(&duplicate, "wayland-1").is_err());
+        assert!(
+            OWNED_OUTPUT.len() < 64
+                && OWNED_OUTPUT
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_or_foreign_hyprland_is_noop() {
+        for instances in ["[]", r#"[{"instance":"foreign","wl_socket":"wayland-0"}]"#] {
+            let (result, calls) = fixture(replies(&[instances])).await;
+            assert!(result.is_ok());
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0], (None, vec!["instances".into(), "-j".into()]));
+        }
+    }
+
+    #[tokio::test]
+    async fn all_existing_outputs_remain_untouched_on_start_and_recovery() {
+        for monitors in [
+            r#"[{"name":"DP-1"}]"#,
+            r#"[{"name":"HEADLESS-1"}]"#,
+            VERIFIED,
+        ] {
+            for _ in 0..2 {
+                let (result, calls) = fixture(replies(&[INSTANCE, monitors])).await;
+                assert!(result.is_ok());
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[1].0.as_deref(), Some("safe_123-ab"));
+                assert_eq!(calls[1].1, ["monitors", "-j"]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_output_creates_configures_and_verifies_only_owned_name() {
+        let (result, calls) = fixture(replies(&[INSTANCE, "[]", "ok", "ok", VERIFIED])).await;
+        assert!(result.is_ok());
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[2].1, ["output", "create", "headless", OWNED_OUTPUT]);
+        assert_eq!(
+            calls[3].1,
+            [
+                "eval",
+                &format!(
+                    "hl.monitor({{ output=\"{OWNED_OUTPUT}\", mode=\"3840x2160@60\", position=\"0x0\", scale=2 }})"
+                )
+            ]
+        );
+        assert_eq!(calls[4].1, ["monitors", "-j"]);
+        assert!(
+            calls
+                .iter()
+                .skip(1)
+                .all(|c| c.0.as_deref() == Some("safe_123-ab"))
+        );
+    }
+
+    #[tokio::test]
+    async fn definite_eval_rejection_uses_bounded_legacy_fallback() {
+        let (result, calls) = fixture(replies(&[
+            INSTANCE,
+            "[]",
+            "ok",
+            "unknown request",
+            "ok",
+            VERIFIED,
+        ]))
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(calls.len(), 6);
+        assert_eq!(
+            calls[4].1,
+            [
+                "keyword",
+                "monitor",
+                &format!("{OWNED_OUTPUT},3840x2160@60,0x0,2")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_rejected_and_unverified_results_fail_closed() {
+        for values in [
+            vec!["not json"],
+            vec!["{}"],
+            vec![INSTANCE, "{}"],
+            vec![INSTANCE, "[{}]"],
+            vec![INSTANCE, "[]", "not ok"],
+            vec![INSTANCE, "[]", "ok", "ok", "[]"],
+            vec![
+                INSTANCE,
+                "[]",
+                "ok",
+                "ok",
+                r#"[{"name":"DP-1","width":3840,"height":2160,"scale":2,"refreshRate":60}]"#,
+            ],
+            vec![
+                INSTANCE,
+                "[]",
+                "ok",
+                "ok",
+                r#"[{"name":"NANOCODEX-HEADLESS-1","width":1920,"height":1080,"scale":1,"refreshRate":60}]"#,
+            ],
+            vec![INSTANCE, "[]", "ok", "rejected", "rejected"],
+        ] {
+            assert!(fixture(replies(&values)).await.0.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_or_transport_failure_never_retries_mutations() {
+        for stage in 0..5 {
+            let mut values = replies(&[INSTANCE, "[]", "ok", "ok", VERIFIED][..stage]);
+            values.push(Err(error("hyprctl timed out")));
+            let (result, calls) = fixture(values).await;
+            assert!(result.is_err());
+            assert_eq!(calls.len(), stage + 1);
+        }
     }
 }

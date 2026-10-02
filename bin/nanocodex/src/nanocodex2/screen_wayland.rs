@@ -50,6 +50,7 @@ pub(crate) struct Platform {
 }
 impl Platform {
     pub(crate) async fn start(session: WaylandSession) -> Result<Self> {
+        session.prepare_output().await?;
         let command = Self::command(&session)?;
         Self::start_session(command, Some(session)).await
     }
@@ -131,6 +132,7 @@ impl Platform {
             .session
             .as_ref()
             .ok_or_else(|| error("Wayland session unavailable"))?;
+        session.prepare_output().await?;
         self.restart_command(Self::command(session)?).await
     }
     async fn restart_command(&mut self, command: tokio::process::Command) -> Result<()> {
