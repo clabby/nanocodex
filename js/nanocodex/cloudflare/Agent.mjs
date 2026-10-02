@@ -506,8 +506,30 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
     const reservation = prepareCloudflareAgentSession(stateId, subject);
     let claude;
     try {
+      const codexEndpoint = internalRuntime.codex === undefined ? undefined
+        : cloudflareEgress({ binding: scopeCloudflareEgress(egress, subject) });
+      const harnesses = codexEndpoint === undefined ? internalRuntime.harnesses : {
+        ...internalRuntime.harnesses,
+        codex: { ...internalRuntime.codex, transport: Transport.hostManaged({
+          ...codexEndpoint, stateless: true, websocketPreconnect: false,
+          async createResponse(url, id, request) {
+            const profile = await internalRuntime.inferenceForSession(request.threadId ?? id);
+            const body = JSON.parse(request.body);
+            if (profile?.native !== true || !["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(body.model)) {
+              throw new Error("Alternate Codex inference requires an authorized native child route");
+            }
+            return codexEndpoint.createResponse(url, id, request);
+          },
+        }) },
+      };
       claude = await internalRuntime.claude.create({
         [CLOUDFLARE_SESSION_RESERVATION]: reservation,
+        [Symbol.for("nanocodex.browser.internalRuntime")]: {
+          subagentSessions: cloudflareSubagentSessions(reservation, internalRuntime?.subagentLifecycle),
+          subagentRouting: internalRuntime?.subagentRouting,
+          toolProviders: internalRuntime?.toolProviders,
+        },
+        harnesses,
         model: internalConfiguration.model, thinking: internalConfiguration.thinking,
         instructions: agentOptions.instructions ?? agentOptions.additionalInstructions,
         tools: agentOptions.tools, module, durability, durabilityId: stateId,
@@ -662,6 +684,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
   try {
     agent = await hostAgent.create({
       ...agentOptions,
+      harnesses: internalRuntime?.harnesses,
       ...(internalConfiguration === undefined ? {} : {
         model: internalConfiguration.model,
         thinking: internalConfiguration.thinking,

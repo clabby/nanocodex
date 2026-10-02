@@ -64,7 +64,30 @@ public struct ClaudeConnectionStatus: Equatable, Sendable {
     }
 }
 
+/// Model/effort updates shared by the native picker and HTTP journeys.
+public enum ManagedModelSelection: Sendable {
+    case manual(model: String, thinking: String)
+    case automatic
+    case effort(String)
+}
+
 public extension ManagedClient {
+    /// Routing owns fast/reasoning defaults; its contract only accepts model and thinking.
+    @discardableResult
+    func updateModelSelection(_ agentID: String, selection: ManagedModelSelection) async throws -> JSON {
+        let path = try Self.agentPath(agentID)
+        switch selection {
+        case .manual(let model, let thinking):
+            return try await json(path: path + "/routing", method: "POST",
+                body: .object(["model": .string(model), "thinking": .string(thinking)]))
+        case .automatic:
+            return try await json(path: path + "/routing", method: "POST", body: .object([:]))
+        case .effort(let thinking):
+            return try await json(path: path + "/settings", method: "PATCH",
+                body: .object(["thinking": .string(thinking)]))
+        }
+    }
+
     /// Always read account-authenticated availability; no hardcoded native model grants.
     func modelCatalog() async throws -> ModelCatalog { try ModelCatalog(await json(path: "/v1/models")) }
     func claudeConnectionStatus() async throws -> ClaudeConnectionStatus {

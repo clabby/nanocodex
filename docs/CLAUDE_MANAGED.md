@@ -62,17 +62,27 @@ streams are not silently replayed.
 
 Managed Claude sessions expose native `Bash`, `Read`, `Write`, `Edit` and supported
 account/Hand capabilities. Discovery uses `ToolSearch`/`ToolExecute` and
-`MCPToolSearch`/`MCPExecute`, not Responses tool-search declarations. Optional
-`Task` children use real provider-pinned Claude sessions, durable receipts and
-explicit uncertainty after interruption. The session's native prompt describes
-these tools rather than instructing Claude to call Codex Code Mode.
+`MCPToolSearch`/`MCPExecute`, not Responses tool-search declarations.
+
+Default managed Claude sessions expose the canonical `spawn_agent`, `list_agents`,
+`send_agent_message`, `wait_agent`, `interrupt_agent` and `close_agent` tools.
+Account-owned managed sessions can select `harness: "claude"` from a Codex
+parent or `harness: "codex"` from a Claude parent. Each child uses its native
+Messages or Responses transport and the spawning turn's retained authority;
+selecting a child never changes the parent's model. Claude-root Codex children
+currently support the available GPT models; gateway models are rejected at
+admission. Child selection is checked against the account's available model
+catalog before inference. Explicit `multi_agent: { enabled: false }` disables
+delegation, and an explicit tool allowlist does not acquire additional tools. Existing configurations
+that explicitly enable `Task` retain its blocking execution, durable receipts and
+uncertainty after interruption. The session's native prompt describes its actual
+tools rather than instructing Claude to call Codex Code Mode.
 
 Native Messages history, opaque content and completed receipts survive normal
 Durable Object reopen in the shared durability store. Events retain streaming
 assistant text and tool cards. This does **not** make OpenAI snapshots portable
 to Claude. Managed Claude currently accepts text input only. Voice steering,
-cross-provider child overrides, snapshot forks and portable import/export are
-explicitly unsupported, rather than silently converting or discarding state.
+snapshot forks and portable import/export are explicitly unsupported, rather than silently converting or discarding state.
 See the [Claude runtime](CLAUDE_RUNTIME.md),
 [JavaScript SDK](CLAUDE_JAVASCRIPT.md) and
 [tool matrix](CLAUDE_TOOL_MATRIX.md) for the distinct library boundaries.

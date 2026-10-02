@@ -66,7 +66,7 @@ function ownMessagesFetch(fetchImpl, endpoint) {
   messagesFetches.set(id, { fetch: fetchImpl, endpoint });
   return { id, release() { messagesFetches.delete(id); } };
 }
-export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, endpoint }) {
+export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, endpoint, subagentSessions, subagentRouting }) {
   if (!auth || typeof auth !== 'object' || Array.isArray(auth)
     || Object.keys(auth).some((key) => !['apiKey', 'headers'].includes(key))
     || (auth.headers !== undefined && typeof auth.headers !== 'function')
@@ -110,8 +110,26 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
     sleep(_sessionId, milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); },
     cancelCodeTurn: abort,
     cancelCode: abort,
-    bindSubagentSession(sessionId, descriptor, hostContextRef) { children.set(sessionId, { descriptor, hostContextRef }); },
-    releaseSession(sessionId) { abort(sessionId); sessions.delete(sessionId); children.delete(sessionId); },
+    routeSubagent(request) {
+      if (!subagentRouting) throw new Error('subagent routing is not configured');
+      return subagentRouting.resolve(request);
+    },
+    bindSubagentRoute(request) {
+      if (!subagentRouting) throw new Error('subagent routing is not configured');
+      return subagentRouting.bind(request);
+    },
+    bindSubagentSession(sessionId, descriptor, hostContextRef) {
+      descriptor = subagentSessions?.bindingDescriptor?.(sessionId, descriptor, hostContextRef) ?? descriptor;
+      subagentSessions?.bind?.(sessionId, descriptor, hostContextRef);
+      children.set(sessionId, { descriptor, hostContextRef });
+    },
+    releaseSession(sessionId) {
+      abort(sessionId);
+      sessions.delete(sessionId);
+      const retained = children.get(sessionId);
+      if (retained) subagentSessions?.release?.(sessionId, retained.hostContextRef);
+      children.delete(sessionId);
+    },
     releaseTurn(sessionId, turnId) { sessions.get(sessionId)?.delete(turnId); },
     executeClaudeTool(name, encodedInput, sessionId, callId, model, turnId) {
       const operation = (async () => {
@@ -164,8 +182,8 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
       apiKey = undefined;
       headerProvider = undefined;
       for (const sessionId of sessions.keys()) abort(sessionId);
+      for (const sessionId of [...children.keys()]) host.releaseSession(sessionId);
       sessions.clear();
-      children.clear();
       handlers.clear();
     },
   };

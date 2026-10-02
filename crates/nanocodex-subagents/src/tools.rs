@@ -1085,7 +1085,12 @@ pub fn install_claude_tools(
                     usize::MAX,
                 )
                 .with_turn_id(Some(&invocation.turn_id))
-                .with_host_context(invocation.host_context.as_deref())
+                .with_host_context(
+                    invocation
+                        .host_context
+                        .as_deref()
+                        .or(Some(&invocation.turn_id)),
+                )
                 .with_instruction_revision(invocation.instruction_revision);
                 let output = tool
                     .execute(ToolInput::Function(raw), context)
