@@ -179,7 +179,7 @@ hashes, public transcripts, wire receipts and phase diagnostics under `output/`.
 The native executable/public-WebSocket benchmark runs real pipe and PTY shells:
 
 ```sh
-cargo test -p nanocodex-tools --test it native_shell_call_latency_over_public_websocket -- --nocapture
+cargo test -p nanocodex-oai-tools --test it native_shell_call_latency_over_public_websocket -- --nocapture
 ```
 
 Its wire receipts and per-sample timings are retained in

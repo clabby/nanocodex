@@ -900,7 +900,7 @@ fn portable_pty_on_time_only_runtime_retains_output_status_and_session() -> Resu
     runtime.block_on(async {
         let _runtime_lock = crate::TOOL_RUNTIME_TEST_LOCK.lock().await;
         let workspace = tempfile::tempdir()?;
-        let tools = nanocodex_tools::workspace_runtime::WorkspaceToolRuntime::new(
+        let tools = nanocodex_oai_tools::workspace_runtime::WorkspaceToolRuntime::new(
             workspace.path().to_path_buf(),
         );
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
