@@ -60,7 +60,6 @@ test("real CLI and desktop leases share one authenticated host across account ke
     socket.on("message", data => {
       const frame = JSON.parse(String(data));
       if (frame.type === "catalog") { catalogs++; socket.send('{"type":"ready"}'); }
-      if (frame.type === "ping") socket.send(JSON.stringify({ type: "pong", nonce: frame.nonce }));
       if (frame.type === "drain") socket.send('{"type":"draining"}');
       if (frame.type === "result") { result = frame; socket.send(JSON.stringify({ type: "ack", call_id: frame.call_id })); }
     });
@@ -124,11 +123,11 @@ test("real CLI and desktop leases share one authenticated host across account ke
   await delay(2500);
   assert.equal(current.readyState, 1);
   assert.equal(catalogs, 1);
-  step("reconnecting an expired transport lease");
-  current.close(1012, "Hosted Tools lease expired");
+  step("reconnecting after a transport disconnect");
+  current.close(1012, "Synthetic transport reset");
   const reconnectDeadline = Date.now() + 5000;
   while (catalogs < 2 && Date.now() < reconnectDeadline) await delay(20);
-  assert.equal(catalogs, 2, "Lease expiry must reconnect the same daemon");
+  assert.equal(catalogs, 2, "Transport loss must reconnect the same daemon");
   assert.equal(publisher.exitCode, null);
   const closed = once(current, "close");
   publisher.kill("SIGINT");

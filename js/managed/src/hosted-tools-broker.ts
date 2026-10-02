@@ -56,12 +56,7 @@ export class HostedToolsBroker extends HostedToolsBrokerCore {
       connectGrantId,
       leasedAttachment,
     );
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-      // Rust attachments select diagnostic wire extensions before their catalog.
-      headers: { "x-nanocodex-tools-diagnostics": "v1" },
-    });
+    return new Response(null, { status: 101, webSocket: client });
   }
 }
 
@@ -77,7 +72,10 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
         lease_id TEXT,
         lease_expires_at INTEGER NOT NULL DEFAULT 0,
         catalog_json TEXT,
-        machines_json TEXT
+        machines_json TEXT,
+        runtime_id TEXT,
+        command_recovery INTEGER NOT NULL DEFAULT 0,
+        connect_grant_id TEXT
       );
       CREATE TABLE IF NOT EXISTS hosted_tool_calls (
         call_id TEXT PRIMARY KEY,
@@ -115,6 +113,16 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
       CREATE INDEX IF NOT EXISTS hosted_tool_calls_created_at
         ON hosted_tool_calls(created_at);
     `);
+    const routeColumns = this.storage.sql.exec<{ name: string }>("PRAGMA table_info(hosted_tool_routes)").toArray();
+    if (!routeColumns.some(column => column.name === "runtime_id")) {
+      this.storage.sql.exec("ALTER TABLE hosted_tool_routes ADD COLUMN runtime_id TEXT");
+    }
+    if (!routeColumns.some(column => column.name === "command_recovery")) {
+      this.storage.sql.exec("ALTER TABLE hosted_tool_routes ADD COLUMN command_recovery INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!routeColumns.some(column => column.name === "connect_grant_id")) {
+      this.storage.sql.exec("ALTER TABLE hosted_tool_routes ADD COLUMN connect_grant_id TEXT");
+    }
     const columns = this.storage.sql.exec<{ name: string }>("PRAGMA table_info(hosted_tool_calls)").toArray();
     if (!columns.some((column) => column.name === "turn_id")) {
       this.storage.sql.exec("ALTER TABLE hosted_tool_calls ADD COLUMN turn_id TEXT");
@@ -137,9 +145,17 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
         JSON.stringify(hostedToolsUnavailable("Hosted Tools lifecycle restarted before dispatch")),
         now,
       );
+      // Cached VM expiry is not authoritative revocation. A living runtime
+      // must revalidate on reconnect; its original call deadlines remain pinned.
       this.storage.sql.exec(
         `UPDATE hosted_tool_calls SET state = 'ambiguous', result_json = ?, updated_at = ?
-         WHERE state = 'dispatched'`,
+         WHERE state = 'dispatched' AND NOT EXISTS (
+           SELECT 1 FROM hosted_tool_routes r
+           WHERE r.lease_id = hosted_tool_calls.lease_id AND r.generation = hosted_tool_calls.generation
+             AND r.host_id = hosted_tool_calls.host_id
+             AND r.command_recovery = 1 AND r.runtime_id IS NOT NULL AND r.catalog_json IS NOT NULL
+             AND r.runtime_id = hosted_tool_calls.host_runtime_id
+         )`,
         JSON.stringify(hostedToolsAmbiguous("Hosted Tools lifecycle restarted after dispatch")),
         now,
       );
@@ -151,14 +167,14 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
 
   states(): readonly HostedToolsStateRow[] {
     return this.storage.sql.exec<HostedToolsStateRow>(
-      `SELECT route_id, generation, host_id, lease_id, lease_expires_at, catalog_json, machines_json
+      `SELECT route_id, generation, host_id, lease_id, lease_expires_at, catalog_json, machines_json, runtime_id, command_recovery, connect_grant_id
        FROM hosted_tool_routes ORDER BY route_id`,
     ).toArray();
   }
 
   state(routeId: string): HostedToolsStateRow | undefined {
     const row = this.storage.sql.exec<HostedToolsStateRow>(
-      `SELECT route_id, generation, host_id, lease_id, lease_expires_at, catalog_json, machines_json
+      `SELECT route_id, generation, host_id, lease_id, lease_expires_at, catalog_json, machines_json, runtime_id, command_recovery, connect_grant_id
        FROM hosted_tool_routes WHERE route_id = ?`,
       routeId,
     ).toArray()[0];
@@ -168,15 +184,18 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
   replaceHost(row: HostedToolsStateRow): void {
     this.storage.sql.exec(
       `INSERT INTO hosted_tool_routes
-         (route_id, generation, host_id, lease_id, lease_expires_at, catalog_json, machines_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+         (route_id, generation, host_id, lease_id, lease_expires_at, catalog_json, machines_json, runtime_id, command_recovery, connect_grant_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(route_id) DO UPDATE SET
          generation = excluded.generation,
          host_id = excluded.host_id,
          lease_id = excluded.lease_id,
          lease_expires_at = excluded.lease_expires_at,
          catalog_json = excluded.catalog_json,
-         machines_json = excluded.machines_json`,
+         machines_json = excluded.machines_json,
+         runtime_id = excluded.runtime_id,
+         command_recovery = excluded.command_recovery,
+         connect_grant_id = excluded.connect_grant_id`,
       row.route_id,
       row.generation,
       row.host_id,
@@ -184,6 +203,9 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
       row.lease_expires_at,
       row.catalog_json,
       row.machines_json,
+      row.runtime_id ?? null,
+      row.command_recovery ?? 0,
+      row.connect_grant_id ?? null,
     );
   }
 

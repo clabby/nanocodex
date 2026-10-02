@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -38,8 +38,6 @@ const STABLE_CONNECTION: Duration = Duration::from_secs(30);
 const STABLE_CONNECTION: Duration = Duration::from_millis(250);
 
 const HEARTBEAT_TIMEOUT_REASON: &str = "attachment heartbeat timed out";
-const DIAGNOSTICS_HEADER: &str = "x-nanocodex-tools-diagnostics";
-const DIAGNOSTICS_VERSION: &str = "v1";
 
 pub(crate) struct Config {
     pub(crate) endpoint: Url,
@@ -64,6 +62,8 @@ pub(crate) async fn run(
     // A new driver gets a new identity so local numeric IDs cannot be retargeted.
     let runtime_id = uuid::Uuid::new_v4().to_string();
     let mut active = Vec::<InFlight>::new();
+    let mut journal = HashMap::<Box<str>, RetainedCall>::new();
+    let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<Completion>();
     let mut backoff = Duration::from_millis(100);
     let mut attempt = 0_u64;
     let mut previous_delay = Duration::ZERO;
@@ -120,22 +120,15 @@ pub(crate) async fn run(
                 upgraded
             }.instrument(connection_span.clone())) => connected,
         };
-        let (socket, diagnostics) = match connected {
+        let socket = match connected {
             Ok(Ok((socket, response))) => {
-                // Negotiate before sending the immutable catalog. Older strict
-                // brokers reject all diagnostic extensions, including receipts.
-                let diagnostics = response
-                    .headers()
-                    .get(DIAGNOSTICS_HEADER)
-                    .and_then(|value| value.to_str().ok())
-                    == Some(DIAGNOSTICS_VERSION);
                 tracing::info!(target: "nanocodex_oai_tools::attachment",
                     stage = "attachment.websocket_connected",
                     duration_ms = connect_started.elapsed().as_secs_f64() * 1000.0,
-                    runtime_id = runtime_id.as_str(), client_connection_id = connection_id.as_str(), attempt, diagnostics,
+                    runtime_id = runtime_id.as_str(), client_connection_id = connection_id.as_str(), attempt,
                     request_id = response.headers().get("x-nanocodex-request-id").and_then(|v| v.to_str().ok()).and_then(safe_uuid).unwrap_or_default(),
                     "attachment WebSocket connected");
-                (socket, diagnostics)
+                socket
             }
             Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
                 if matches!(response.status().as_u16(), 401 | 403) =>
@@ -163,11 +156,13 @@ pub(crate) async fn run(
                 config: &config,
                 runtime_id: &runtime_id,
                 connection_id: &connection_id,
-                diagnostics,
                 runtime: &runtime,
                 events: &events,
                 status: &status,
                 active: &mut active,
+                journal: &mut journal,
+                completed_tx: &completed_tx,
+                completed_rx: &mut completed_rx,
             },
             &mut commands,
         )
@@ -297,7 +292,6 @@ enum Completion {
     Result {
         call_id: Box<str>,
         outcome: Value,
-        timing: Arc<Mutex<CallClock>>,
     },
 }
 
@@ -356,9 +350,34 @@ impl CallClock {
     }
 }
 
-struct SocketCall {
-    task: tokio::task::AbortHandle,
+// This RAM journal belongs to the living executor runtime, never a socket.
+// A process restart loses proof; recovery may only report missing in that case.
+struct RetainedCall {
+    identity: CallIdentity,
+    task: Option<tokio::task::AbortHandle>,
     timing: Arc<Mutex<CallClock>>,
+    receipt: Option<String>,
+}
+
+impl RetainedCall {
+    fn finish(&mut self, outcome: &Value) -> Result<(), AttachmentError> {
+        if self.receipt.is_none() {
+            self.receipt = Some(encode_result(
+                &self.identity.call_id,
+                outcome,
+                &self.timing,
+            )?);
+            self.task = None;
+            let span = self.timing.lock().unwrap().span.clone();
+            span.in_scope(|| {
+                tracing::info!(target: "nanocodex_oai_tools::attachment",
+                stage = "attachment.result_retained",
+                transport_call_id = self.identity.call_id.as_ref(),
+                "attachment terminal receipt retained")
+            });
+        }
+        Ok(())
+    }
 }
 
 struct InFlight {
@@ -490,6 +509,7 @@ const fn attachment_call_outcome_name(outcome: AttachmentCallOutcome) -> &'stati
     }
 }
 
+#[derive(Clone, PartialEq)]
 struct CallIdentity {
     session_id: Box<str>,
     turn_id: Option<Box<str>>,
@@ -513,7 +533,7 @@ fn start_call(
     timing: Arc<Mutex<CallClock>>,
     tool_timeout: u64,
     events: CallEvents,
-    completed: mpsc::Sender<Completion>,
+    completed: mpsc::UnboundedSender<Completion>,
     event_sender: &mpsc::Sender<AttachmentEvent>,
 ) -> tokio::task::AbortHandle {
     let runtime = Arc::clone(runtime);
@@ -586,15 +606,12 @@ fn start_call(
             if let Some(call) = events.call.take() {
                 call.complete(&events.events, observed);
             }
-            // This channel belongs only to the socket that dispatched the call.
+            // The runtime owns this channel across every transport connection.
             timing.lock().unwrap().result_queued = Some(Instant::now());
-            let _ = completed
-                .send(Completion::Result {
-                    call_id: task_identity.call_id,
-                    outcome,
-                    timing,
-                })
-                .await;
+            let _ = completed.send(Completion::Result {
+                call_id: task_identity.call_id,
+                outcome,
+            });
         }
         .instrument(task_span),
     );
@@ -603,18 +620,18 @@ fn start_call(
     abort
 }
 
-// Diagnostics never wait on the socket. If the bounded channel is full, the
-// clock retains the phases and send_result flushes them before the receipt.
+// Diagnostics never wait on the socket; the runtime channel survives disconnects.
+// The clock retains phases and receipt transmission flushes them before the result.
 struct ExecutionPhase<'a> {
     timing: &'a Arc<Mutex<CallClock>>,
-    completed: &'a mpsc::Sender<Completion>,
+    completed: &'a mpsc::UnboundedSender<Completion>,
     call_id: &'a str,
 }
 
 impl<'a> ExecutionPhase<'a> {
     fn start(
         timing: &'a Arc<Mutex<CallClock>>,
-        completed: &'a mpsc::Sender<Completion>,
+        completed: &'a mpsc::UnboundedSender<Completion>,
         call_id: &'a str,
     ) -> Self {
         timing.lock().unwrap().execution_started = Some(Instant::now());
@@ -636,7 +653,7 @@ impl<'a> ExecutionPhase<'a> {
     }
 
     fn notify(&self) {
-        let _ = self.completed.try_send(Completion::Diagnostic {
+        let _ = self.completed.send(Completion::Diagnostic {
             call_id: self.call_id.into(),
             timing: self.timing.clone(),
         });
@@ -655,11 +672,13 @@ struct ConnectionContext<'a> {
     config: &'a Config,
     runtime_id: &'a str,
     connection_id: &'a str,
-    diagnostics: bool,
     runtime: &'a Arc<PreparedToolRuntime>,
     events: &'a mpsc::Sender<AttachmentEvent>,
     status: &'a watch::Sender<AttachmentStatus>,
     active: &'a mut Vec<InFlight>,
+    journal: &'a mut HashMap<Box<str>, RetainedCall>,
+    completed_tx: &'a mpsc::UnboundedSender<Completion>,
+    completed_rx: &'a mut mpsc::UnboundedReceiver<Completion>,
 }
 
 async fn connection<S>(
@@ -674,11 +693,13 @@ where
         config,
         runtime_id,
         connection_id,
-        diagnostics,
         runtime,
         events,
         status,
         active,
+        journal,
+        completed_tx,
+        completed_rx,
     } = context;
     let catalog_started = Instant::now();
     if let Err(error) = send(
@@ -686,8 +707,9 @@ where
         &ExecutorFrame::Catalog {
             capabilities: ["turn_metadata"],
             runtime_id,
-            diagnostics: diagnostics.then_some(true),
-            connection_id: diagnostics.then_some(connection_id),
+            command_recovery: true,
+            diagnostics: Some(true),
+            connection_id: Some(connection_id),
             tools: &config.tools,
             machines: config
                 .metadata
@@ -732,21 +754,38 @@ where
         },
     );
 
-    let (completed_tx, mut completed_rx) = mpsc::channel::<Completion>(256);
-    let mut in_flight = HashMap::<Box<str>, SocketCall>::new();
-    let mut receipts = HashSet::<Box<str>>::new();
+    // Collect completions that arrived offline before replaying retained receipts.
+    while let Ok(completion) = completed_rx.try_recv() {
+        if let Completion::Result {
+            call_id, outcome, ..
+        } = completion
+            && let Some(call) = journal.get_mut(&call_id)
+            && let Err(error) = call.finish(&outcome)
+        {
+            return ConnectionEnd::Failed(error);
+        }
+    }
+    for call in journal.values() {
+        let replayed = true;
+        if call.receipt.is_some()
+            && let Err(error) = send_retained(&mut socket, call, replayed).await
+        {
+            return ConnectionEnd::Failed(error);
+        }
+    }
     let mut heartbeat = tokio::time::interval_at(
         tokio::time::Instant::now() + protocol::HEARTBEAT_INTERVAL,
         protocol::HEARTBEAT_INTERVAL,
     );
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut pong_timeout = Box::pin(tokio::time::sleep(PONG_TIMEOUT));
-    let mut awaiting_pong: Option<String> = None;
+    let mut awaiting_pong: Option<Vec<u8>> = None;
+    let mut detach_deadline = Box::pin(tokio::time::sleep(Duration::from_secs(10)));
     let mut detaching = false;
     let mut draining = false;
 
     let end = loop {
-        if detaching && draining && in_flight.is_empty() && receipts.is_empty() {
+        if detaching && draining && journal.is_empty() {
             break ConnectionEnd::Detached;
         }
         tokio::select! {
@@ -755,41 +794,49 @@ where
                 if let Err(error) = send(&mut socket, &ExecutorFrame::Drain {}).await {
                     break ConnectionEnd::DetachFailed(error);
                 }
-                tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.drain_requested", pending_calls = in_flight.len(), pending_receipts = receipts.len(), reason_code = "detach_requested", "attachment drain requested");
+                tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.drain_requested", pending_calls = journal.values().filter(|call| call.task.is_some()).count(), pending_receipts = journal.values().filter(|call| call.receipt.is_some()).count(), reason_code = "detach_requested", "attachment drain requested");
                 detaching = true;
+                detach_deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(10));
                 shutdown_calls(active).await;
-                for (call_id, call) in in_flight.drain() {
-                    let outcome = ambiguous("attachment shut down during execution");
-                    if let Err(error) = send_result(&mut socket, &call_id, &outcome, &call.timing, diagnostics).await {
-                        return ConnectionEnd::DetachFailed(error);
+                while let Ok(completion) = completed_rx.try_recv() {
+                    if let Completion::Result { call_id, outcome, .. } = completion
+                        && let Some(call) = journal.get_mut(&call_id)
+                        && let Err(error) = call.finish(&outcome) { return ConnectionEnd::DetachFailed(error); }
+                }
+                for call in journal.values_mut() {
+                    let replayed = call.receipt.is_some();
+                    if call.receipt.is_none() {
+                        if let Err(error) = call.finish(&ambiguous("attachment shut down during execution")) { return ConnectionEnd::DetachFailed(error); }
                     }
-                    receipts.insert(call_id);
+                    if let Err(error) = send_retained(&mut socket, call, replayed).await { return ConnectionEnd::DetachFailed(error); }
                 }
             }
+            _ = &mut detach_deadline, if detaching => break ConnectionEnd::Detached,
             _ = &mut pong_timeout, if awaiting_pong.is_some() => {
-                tracing::warn!(target: "nanocodex_oai_tools::attachment", stage = "attachment.heartbeat_timeout", pending_calls = in_flight.len(), pending_receipts = receipts.len(), reason_code = "heartbeat_timeout", "attachment heartbeat timed out");
+                tracing::warn!(target: "nanocodex_oai_tools::attachment", stage = "attachment.heartbeat_timeout", pending_calls = journal.values().filter(|call| call.task.is_some()).count(), pending_receipts = journal.values().filter(|call| call.receipt.is_some()).count(), reason_code = "heartbeat_timeout", "attachment heartbeat timed out");
                 break ConnectionEnd::HeartbeatTimeout;
             },
             _ = heartbeat.tick() => {
                 if awaiting_pong.is_some() { break ConnectionEnd::HeartbeatTimeout; }
-                let nonce = uuid::Uuid::new_v4().to_string();
-                if let Err(error) = send(&mut socket, &ExecutorFrame::Ping { nonce: &nonce }).await {
+                let nonce = uuid::Uuid::new_v4().as_bytes().to_vec();
+                if let Err(error) = socket.send(Message::Ping(nonce.clone().into())).await.map_err(|error| AttachmentError::Transport(error.to_string().into())) {
                     break if detaching { ConnectionEnd::DetachFailed(error) } else { ConnectionEnd::Failed(error) };
                 }
-                tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.heartbeat_ping", pending_calls = in_flight.len(), pending_receipts = receipts.len(), "attachment heartbeat sent");
+                tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.heartbeat_ping", pending_calls = journal.values().filter(|call| call.task.is_some()).count(), pending_receipts = journal.values().filter(|call| call.receipt.is_some()).count(), "attachment heartbeat sent");
                 awaiting_pong = Some(nonce);
                 pong_timeout.as_mut().reset(tokio::time::Instant::now() + PONG_TIMEOUT);
             }
             completion = completed_rx.recv() => if let Some(completion) = completion {
                 let sent = match completion {
                     Completion::Diagnostic { call_id, timing } => {
-                        if !in_flight.contains_key(&call_id) { continue; }
-                        send_diagnostics(&mut socket, &call_id, &timing, false, diagnostics).await
+                        if !journal.contains_key(&call_id) { continue; }
+                        send_diagnostics(&mut socket, &call_id, &timing, false).await
                     }
-                    Completion::Result { call_id, outcome, timing } => {
-                        if in_flight.remove(&call_id).is_none() { continue; }
-                        receipts.insert(call_id.clone());
-                        send_result(&mut socket, &call_id, &outcome, &timing, diagnostics).await
+                    Completion::Result { call_id, outcome } => {
+                        let Some(call) = journal.get_mut(&call_id) else { continue; };
+                        let replayed = call.receipt.is_some();
+                        if let Err(error) = call.finish(&outcome) { break ConnectionEnd::Failed(error); }
+                        send_retained(&mut socket, call, replayed).await
                     }
                 };
                 if let Err(error) = sent {
@@ -797,6 +844,13 @@ where
                 }
             },
             incoming = socket.next() => {
+                if let Some(Ok(Message::Pong(payload))) = &incoming {
+                    if awaiting_pong.as_deref() == Some(payload.as_ref()) {
+                        awaiting_pong = None;
+                        tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.heartbeat_pong", pending_calls = journal.values().filter(|call| call.task.is_some()).count(), pending_receipts = journal.values().filter(|call| call.receipt.is_some()).count(), "attachment heartbeat acknowledged");
+                    }
+                    continue;
+                }
                 let frame = match incoming_frame(&mut socket, incoming).await {
                     Ok(Some(frame)) => frame,
                     Ok(None) => continue,
@@ -807,14 +861,20 @@ where
                     RemoteFrame::Call { session_id, turn_id, call_id, model, name, input, output_token_budget, output_byte_budget, deadline_at } => {
                         let timing = CallClock::received();
                         if draining { break ConnectionEnd::Rejected("call received after drain barrier".into()); }
-                        if receipts.contains(call_id.as_str()) || in_flight.contains_key(call_id.as_str()) {
-                            break ConnectionEnd::Rejected("duplicate call on socket".into());
+                        let identity = CallIdentity { session_id:session_id.clone().into(), turn_id:turn_id.clone().map(Into::into), call_id:call_id.clone().into(), model:model.clone().into(), name:name.clone().into(), input:input.clone(), output_token_budget, output_byte_budget, deadline_at };
+                        if let Some(retained) = journal.get(call_id.as_str()) {
+                            if retained.identity != identity { break ConnectionEnd::Rejected("call identity conflicts with retained command".into()); }
+                            let sent = if retained.receipt.is_some() {
+                                send_retained(&mut socket, retained, true).await
+                            } else { send(&mut socket, &ExecutorFrame::Status { call_id: &call_id, state: "running" }).await };
+                            if let Err(error) = sent { break ConnectionEnd::Failed(error); }
+                            continue;
                         }
                         let phase_span = tracing::info_span!(target: "nanocodex_oai_tools::attachment", "attachment.call.phases",
                             transport_call_id = call_id.as_str(), session_id = session_id.as_str(),
                             host_turn_id = turn_id.as_deref().filter(|id| id.len() <= 256 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))).unwrap_or(""));
                         timing.lock().unwrap().span = phase_span;
-                        if let Err(error) = send_diagnostics(&mut socket, &call_id, &timing, false, diagnostics).await { break ConnectionEnd::Failed(error); }
+                        if let Err(error) = send_diagnostics(&mut socket, &call_id, &timing, false).await { break ConnectionEnd::Failed(error); }
                         let call_events = begin_call_events(
                             events,
                             call_id.clone().into(),
@@ -830,43 +890,53 @@ where
                         } else { None };
                         if let Some(reason) = reason {
                             call_events.complete(events, AttachmentCallOutcome::Unavailable);
-                            if let Err(error) = send_result(&mut socket, &call_id, &unavailable(reason), &timing, diagnostics).await { break ConnectionEnd::Failed(error); }
-                            receipts.insert(call_id.into());
+                            let mut retained = RetainedCall { identity, task: None, timing, receipt: None };
+                            if let Err(error) = retained.finish(&unavailable(reason)) { break ConnectionEnd::Failed(error); }
+                            journal.insert(call_id.clone().into(), retained);
+                            if let Err(error) = send_retained(&mut socket, journal.get(call_id.as_str()).unwrap(), false).await { break ConnectionEnd::Failed(error); }
                             continue;
                         }
-                        let identity = CallIdentity { session_id:session_id.into(), turn_id:turn_id.map(Into::into), call_id:call_id.clone().into(), model:model.into(), name:name.clone().into(), input, output_token_budget, output_byte_budget, deadline_at };
-                        let task = start_call(runtime, active, identity, Arc::clone(&timing), tool_timeout, call_events, completed_tx.clone(), events);
-                        in_flight.insert(call_id.into(), SocketCall { task, timing });
+                        let task = start_call(runtime, active, identity.clone(), Arc::clone(&timing), tool_timeout, call_events, completed_tx.clone(), events);
+                        journal.insert(call_id.into(), RetainedCall { identity, task: Some(task), timing, receipt: None });
                     }
                     RemoteFrame::Cancel { call_id } => {
-                        tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.call.cancel_received", transport_call_id = call_id.as_str(), pending_calls = in_flight.len(), pending_receipts = receipts.len(), reason_code = "cancel_received", "attachment cancellation received");
-                        if let Some(call) = in_flight.get(call_id.as_str()) {
-                            // If execution already finished, its queued result wins the race.
+                        tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.call.cancel_received", transport_call_id = call_id.as_str(), pending_calls = journal.values().filter(|call| call.task.is_some()).count(), pending_receipts = journal.values().filter(|call| call.receipt.is_some()).count(), reason_code = "cancel_received", "attachment cancellation received");
+                        if let Some(call) = journal.get_mut(call_id.as_str()) {
+                            let replayed = call.receipt.is_some();
+                            // A queued terminal receipt wins cancellation races.
                             if call.timing.lock().unwrap().result_queued.is_some() { continue; }
-                            call.task.abort();
-                            if let Some(index) = active.iter().position(|active| active.task.id() == call.task.id()) {
-                                let _ = active.swap_remove(index).task.await;
+                            if let Some(task) = call.task.take() {
+                                task.abort();
+                                if let Some(index) = active.iter().position(|active| active.task.id() == task.id()) {
+                                    let _ = active.swap_remove(index).task.await;
+                                }
+                                // Completion may have won between the first clock check and abort.
+                                if call.timing.lock().unwrap().result_queued.is_some() { continue; }
+                                if let Err(error) = call.finish(&ambiguous("tool execution was cancelled after dispatch")) { break ConnectionEnd::Failed(error); }
                             }
-                            let call = in_flight.remove(call_id.as_str()).unwrap();
-                            receipts.insert(call_id.clone().into());
-                            let outcome = ambiguous("tool execution was cancelled after dispatch");
-                            if let Err(error) = send_result(&mut socket, &call_id, &outcome, &call.timing, diagnostics).await { break ConnectionEnd::Failed(error); }
+                            if call.receipt.is_some()
+                                && let Err(error) = send_retained(&mut socket, call, replayed).await { break ConnectionEnd::Failed(error); }
                         }
                     }
                     RemoteFrame::Ack { call_id } => {
-                        tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.result_ack_received", transport_call_id = call_id.as_str(), pending_calls = in_flight.len(), pending_receipts = receipts.len(), "attachment receipt acknowledgement received");
-                        if !receipts.remove(call_id.as_str()) {
-                            break ConnectionEnd::Rejected("acknowledgement did not match a retained result".into());
+                        tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.result_ack_received", transport_call_id = call_id.as_str(), pending_calls = journal.values().filter(|call| call.task.is_some()).count(), pending_receipts = journal.values().filter(|call| call.receipt.is_some()).count(), "attachment receipt acknowledgement received");
+                        if journal.get(call_id.as_str()).is_some_and(|call| call.receipt.is_some()) {
+                            journal.remove(call_id.as_str());
                         }
                     }
-                    RemoteFrame::Pong { nonce } => {
-                        let Some(expected) = awaiting_pong.take() else { break ConnectionEnd::Rejected("unexpected pong without an outstanding ping".into()) };
-                        if nonce != expected { break ConnectionEnd::Rejected("pong nonce did not match the outstanding ping".into()); }
-                        tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.heartbeat_pong", pending_calls = in_flight.len(), pending_receipts = receipts.len(), "attachment heartbeat acknowledged");
+                    RemoteFrame::Recover { call_ids } => {
+                        for call_id in call_ids {
+                            let sent = match journal.get(call_id.as_str()) {
+                                Some(call) if call.receipt.is_some() => send_retained(&mut socket, call, true).await,
+                                Some(_) => send(&mut socket, &ExecutorFrame::Status { call_id: &call_id, state: "running" }).await,
+                                None => send(&mut socket, &ExecutorFrame::Status { call_id: &call_id, state: "missing" }).await,
+                            };
+                            if let Err(error) = sent { return ConnectionEnd::Failed(error); }
+                        }
                     }
                     RemoteFrame::Draining {} => {
                         if !detaching || draining { break ConnectionEnd::Rejected("unexpected draining acknowledgement".into()); }
-                        tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.draining", pending_calls = in_flight.len(), pending_receipts = receipts.len(), "attachment drain barrier acknowledged");
+                        tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.draining", pending_calls = journal.values().filter(|call| call.task.is_some()).count(), pending_receipts = journal.values().filter(|call| call.receipt.is_some()).count(), "attachment drain barrier acknowledged");
                         draining = true;
                     }
                     RemoteFrame::Ready {} => break ConnectionEnd::Rejected("unexpected ready".into()),
@@ -875,7 +945,7 @@ where
         }
     };
 
-    tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.socket.pending_at_close", reason_code = end.reason_code(), pending_calls = in_flight.len(), pending_receipts = receipts.len(), "attachment socket pending work at close");
+    tracing::info!(target: "nanocodex_oai_tools::attachment", stage = "attachment.socket.pending_at_close", reason_code = end.reason_code(), pending_calls = journal.values().filter(|call| call.task.is_some()).count(), pending_receipts = journal.values().filter(|call| call.receipt.is_some()).count(), "attachment socket pending work at close");
     if matches!(&end, ConnectionEnd::HeartbeatTimeout) {
         // The transport is still writable: send a reason before relinquishing
         // the socket, including when a detach was draining in the background.
@@ -965,8 +1035,7 @@ where
             })?;
             Ok(None)
         }
-        // WebSocket control pongs may be unsolicited. They are independent of
-        // the JSON heartbeat and must not fence a healthy attachment.
+        // Unsolicited control pongs are harmless; only matching pongs prove health.
         Some(Ok(Message::Pong(_))) => Ok(None),
         Some(Ok(Message::Close(Some(frame)))) if frame.code == CloseCode::Policy => {
             Err(ConnectionEnd::Rejected(if frame.reason.is_empty() {
@@ -1034,7 +1103,6 @@ async fn send_diagnostics<S>(
     call_id: &str,
     clock: &Arc<Mutex<CallClock>>,
     prepared: bool,
-    diagnostics: bool,
 ) -> Result<(), AttachmentError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1069,43 +1137,50 @@ where
         ) {
             span.in_scope(|| tracing::info!(target: "nanocodex_oai_tools::attachment", stage = stage.name(), elapsed_ms, "attachment execution phase"));
         }
-        if diagnostics {
-            send(
-                socket,
-                &ExecutorFrame::Diagnostic {
-                    call_id,
-                    stage,
-                    elapsed_ms,
-                },
-            )
-            .await?;
-        }
+        send(
+            socket,
+            &ExecutorFrame::Diagnostic {
+                call_id,
+                stage,
+                elapsed_ms,
+            },
+        )
+        .await?;
     }
     Ok(())
 }
 
-async fn send_result<S>(
+async fn send_retained<S>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
-    call_id: &str,
-    outcome: &Value,
-    clock: &Arc<Mutex<CallClock>>,
-    diagnostics: bool,
+    call: &RetainedCall,
+    replayed: bool,
 ) -> Result<(), AttachmentError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    send_diagnostics(socket, call_id, clock, true, diagnostics).await?;
-    if !diagnostics {
-        return send(
-            socket,
-            &ExecutorFrame::Result {
-                call_id,
-                outcome,
-                timing: None,
-            },
-        )
-        .await;
-    }
+    send_diagnostics(socket, &call.identity.call_id, &call.timing, true).await?;
+    socket
+        .send(Message::Text(
+            call.receipt
+                .as_ref()
+                .expect("terminal receipt")
+                .clone()
+                .into(),
+        ))
+        .await
+        .map_err(|error| AttachmentError::Transport(error.to_string().into()))?;
+    tracing::info!(target: "nanocodex_oai_tools::attachment",
+        stage = if replayed { "attachment.result_replayed" } else { "attachment.result_sent" },
+        transport_call_id = call.identity.call_id.as_ref(),
+        "attachment terminal receipt sent");
+    Ok(())
+}
+
+fn encode_result(
+    call_id: &str,
+    outcome: &Value,
+    clock: &Arc<Mutex<CallClock>>,
+) -> Result<String, AttachmentError> {
     let encode_started = Instant::now();
     let mut timing = clock.lock().unwrap().snapshot(encode_started);
     // Encode the business receipt once, then append small timing metadata. Its
@@ -1127,10 +1202,7 @@ where
             .map_err(|error| AttachmentError::Transport(error.to_string().into()))?,
     );
     text.push('}');
-    socket
-        .send(Message::Text(text.into()))
-        .await
-        .map_err(|error| AttachmentError::Transport(error.to_string().into()))
+    Ok(text)
 }
 
 async fn send<S, T: serde::Serialize>(

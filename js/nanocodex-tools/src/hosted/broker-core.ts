@@ -1,5 +1,5 @@
 import {
-  HOSTED_TOOLS_LEASE_MS,
+  MAX_HOSTED_TOOLS_RECOVER_CALL_IDS,
   HostedToolsProtocolError,
   parseHostedToolsHostFrame,
   parseHostedToolsManagedFrame,
@@ -70,6 +70,9 @@ export type HostedToolsStateRow = {
   lease_expires_at: number;
   catalog_json: string | null;
   machines_json: string | null;
+  runtime_id?: string | null;
+  command_recovery?: number;
+  connect_grant_id?: string | null;
 };
 
 export type HostedToolsCallRow = {
@@ -112,10 +115,11 @@ type HostedToolsSocketAttachment = {
   routeId?: string;
   leaseId?: string;
   generation?: number;
-  active?: true;
+  active?: boolean;
   draining?: true;
   machines?: readonly HostedMachine[];
   runtimeId?: string;
+  commandRecovery?: true;
   hostConnectionId?: string;
   diagnostics?: true;
   last_heartbeat_at?: number;
@@ -135,6 +139,7 @@ type PendingCall = {
   resolve(outcome: HostedToolCallOutcome): void;
   timeout?: ReturnType<typeof setTimeout>;
   removeAbort?: () => void;
+  restored?: true;
 };
 
 export type HostedToolsSocket = {
@@ -258,7 +263,7 @@ export interface HostedToolsBrokerPersistence {
   markGenerationAmbiguous(leaseId: string, generation: number, resultJson: string, now: number): void;
   activeCallCount(leaseId: string, generation: number): number;
   generationCallCount(leaseId: string, generation: number): number;
-  /** Optional diagnostic enumeration; never used to authorize or resend calls. */
+  /** Required for command recovery; enumerates durable calls without resending commands. */
   generationCalls?(leaseId: string, generation: number): readonly HostedToolsCallRow[];
 }
 
@@ -267,7 +272,7 @@ export type HostedToolsDiagnosticReason = "transport_closed" | "transport_error"
   | "lease_expired" | "lease_validation_failed" | "lease_validation_unavailable"
   | "generation_limit" | "call_conflict" | "call_deadline" | "attachment_unavailable"
   | "call_send_failed" | "cancel_send_failed" | "ack_send_failed"
-  | "ready_send_failed" | "heartbeat_send_failed" | "drain_send_failed"
+  | "ready_send_failed" | "drain_send_failed"
   | "cancelled_before_dispatch" | "in_flight_limit" | "invalid_call" | "admission_uncertain"
   | "dispatch_ownership_lost";
 
@@ -281,7 +286,9 @@ export type HostedToolsCallObservation = Readonly<{
   transport_call_id?: string;
   connection_id?: string;
   lease_id?: string;
+  /** Compatibility field: retained runtime ownership epoch, not a socket counter. */
   connection_generation?: number;
+  runtime_generation?: number;
   host_connection_id?: string;
   host_runtime_id?: string;
   hand_id?: string;
@@ -305,7 +312,9 @@ export type HostedToolsConnectionObservation = Readonly<{
   /** Broker-generated socket identity; host_connection_id identifies the client attempt. */
   connection_id?: string;
   lease_id?: string;
+  /** Compatibility field: retained runtime ownership epoch, not a socket counter. */
   connection_generation?: number;
+  runtime_generation?: number;
   host_connection_id?: string;
   host_runtime_id?: string;
   hand_id?: string;
@@ -332,7 +341,7 @@ export type HostedToolsBrokerCoreOptions = Readonly<{
   onCallTiming?: (timing: Readonly<{ session_id: string; source_call_id: string; transport_call_id: string; admission_ms: number; roundtrip_ms: number; settlement_ms: number }>) => void;
   onCallObservation?: (observation: HostedToolsCallObservation) => void;
   onConnectionObservation?: (observation: HostedToolsConnectionObservation) => void;
-  /** Successful heartbeats emit once initially, then at this interval (default five minutes). */
+  /** @deprecated Control frames are handled by the WebSocket platform. */
   heartbeatObservationIntervalMs?: number;
   onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
   entryAllowed?: (
@@ -367,7 +376,6 @@ export class HostedToolsBrokerCore {
   readonly #onCallTiming: HostedToolsBrokerCoreOptions["onCallTiming"];
   readonly #onCallObservation: HostedToolsBrokerCoreOptions["onCallObservation"];
   readonly #onConnectionObservation: HostedToolsBrokerCoreOptions["onConnectionObservation"];
-  readonly #heartbeatObservationIntervalMs: number;
   readonly #randomUUID: () => string;
   readonly #maxInFlight: number | undefined;
   readonly #maxCallsPerGeneration: number;
@@ -384,6 +392,8 @@ export class HostedToolsBrokerCore {
     | undefined;
   #catalogValidator: HostedToolsCatalogValidator | undefined;
   #nextCandidateGeneration: number;
+  #catalogPublication: Promise<void> = Promise.resolve();
+  readonly #leaseValidationTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     readonly context: HostedToolsBrokerCoreContext,
@@ -393,10 +403,6 @@ export class HostedToolsBrokerCore {
     this.#onCallTiming = options.onCallTiming;
     this.#onCallObservation = options.onCallObservation;
     this.#onConnectionObservation = options.onConnectionObservation;
-    this.#heartbeatObservationIntervalMs = options.heartbeatObservationIntervalMs ?? 300_000;
-    if (!Number.isSafeInteger(this.#heartbeatObservationIntervalMs) || this.#heartbeatObservationIntervalMs < 1) {
-      throw new TypeError("heartbeatObservationIntervalMs must be a positive safe integer");
-    }
     this.#randomUUID = options.randomUUID ?? (() => crypto.randomUUID());
     this.#maxInFlight = options.maxInFlight;
     if (this.#maxInFlight !== undefined
@@ -414,7 +420,7 @@ export class HostedToolsBrokerCore {
     const now = this.#now();
     const sockets = this.context.sockets();
     const retainHosts = options.resumeRetainedSockets === true && sockets.length > 0;
-    // Initialization settles abandoned calls. Capture their public correlation
+    // Initialization settles unproven legacy calls. Capture their public correlation
     // before that transition; a fresh database can legitimately have no tables.
     const interruptedCalls: HostedToolsCallRow[] = [];
     if (this.#onCallObservation && this.#persistence.generationCalls) {
@@ -427,33 +433,37 @@ export class HostedToolsBrokerCore {
       } catch { /* First initialization or an unavailable diagnostic read. */ }
     }
     const retained = this.#persistence.initialize(now);
-    for (const row of interruptedCalls) this.#observe("transport_lost", row, { reason_code: "owner_restarted", outcome: "ambiguous" });
-    this.#nextCandidateGeneration = Math.max(0, ...this.#persistence.states().map((state) => state.generation));
+    for (const row of interruptedCalls) {
+      if (this.#persistence.call(row.call_id)?.state === "ambiguous") {
+        this.#observe("transport_lost", row, { reason_code: "owner_restarted", outcome: "ambiguous" });
+      }
+    }
+    this.#nextCandidateGeneration = Math.max(0, ...this.#persistence.states().map(state => state.generation));
     for (const socket of sockets) {
       const generation = this.#attachment(socket)?.generation;
       if (generation !== undefined) this.#nextCandidateGeneration = Math.max(this.#nextCandidateGeneration, generation);
     }
     for (const state of retained) {
       if (!state.lease_id) continue;
-      const resumed = retainHosts
-        && state.lease_expires_at > now
-        && this.#routingSocketForState(state) !== undefined;
-      if (resumed) {
-        this.#observeConnection("resumed", this.#attachment(this.#routingSocketForState(state)!), {}, state);
+      const recoverable = this.#canRecover(state);
+      const retainedSocket = this.#routingSocketForState(state);
+      if (recoverable) {
+        this.#restoreGeneration(state);
+        if (retainedSocket) {
+          this.#observeConnection("resumed", this.#attachment(retainedSocket), {}, state);
+          this.#requestRecovery(retainedSocket, state);
+        }
         continue;
       }
-      const retainedSocket = sockets.find(socket => {
-        const attachment = this.#attachment(socket);
-        return attachment?.leaseId === state.lease_id && attachment.generation === state.generation;
-      });
-      this.#observeConnection("fenced", retainedSocket ? this.#attachment(retainedSocket) : undefined,
-        { reason_code: state.lease_expires_at <= now ? "lease_expired" : "owner_restarted", close_code: 1012 }, state);
-      this.#persistence.clearHost(state.lease_id, state.generation);
+      if (retainHosts && state.lease_expires_at > now && retainedSocket) {
+        this.#observeConnection("resumed", this.#attachment(retainedSocket), {}, state);
+        continue;
+      }
+      this.#retireState(state, "Hosted Tools owner restarted", "owner_restarted");
       for (const socket of sockets) {
         const attachment = this.#attachment(socket);
-        if (attachment?.routeId !== state.route_id
-          || attachment.leaseId !== state.lease_id
-          || attachment.generation !== state.generation) continue;
+        if (attachment?.leaseId !== state.lease_id || attachment.generation !== state.generation) continue;
+        this.context.writeAttachment(socket, { ...attachment, active: false });
         closeSocket(socket, 1012, "Hosted Tools owner restarted");
       }
     }
@@ -700,8 +710,8 @@ export class HostedToolsBrokerCore {
         : new HostedToolsProtocolError("broker_failure", errorMessage(error));
       const attachment = this.#attachment(socket);
       const state = attachment?.routeId === undefined ? undefined : this.#persistence.state(attachment.routeId);
-      const deliveryFailure = protocol.code === "ready_send_failed" || protocol.code === "heartbeat_send_failed" || protocol.code === "drain_send_failed";
-      const reasonCode: HostedToolsDiagnosticReason = deliveryFailure ? protocol.code as "ready_send_failed" | "heartbeat_send_failed" | "drain_send_failed"
+      const deliveryFailure = protocol.code === "ready_send_failed" || protocol.code === "drain_send_failed";
+      const reasonCode: HostedToolsDiagnosticReason = deliveryFailure ? protocol.code as "ready_send_failed" | "drain_send_failed"
         : protocol.code === "lease_validation_unavailable" ? "lease_validation_unavailable"
         : protocol.code === "route_revoked" ? "route_revoked"
         : protocol.code === "stale_socket" && state && state.lease_id === attachment?.leaseId
@@ -718,7 +728,7 @@ export class HostedToolsBrokerCore {
   webSocketClose(socket: HostedToolsSocket, code: number, reason: string): void {
     if (!this.handles(socket)) return;
     this.#observeConnection("closed", this.#attachment(socket), { close_code: code, reason_code: "transport_closed" });
-    this.#retire(socket, reason || `peer closed with code ${code}`, "transport_closed");
+    this.#retire(socket, reason || `peer closed with code ${code}`, code === 1008 ? "protocol_error" : "transport_closed");
     closeSocket(socket, code, reason || "Hosted Tools peer closed");
   }
 
@@ -734,28 +744,28 @@ export class HostedToolsBrokerCore {
     for (const state of this.#persistence.states()) {
       if (!state.lease_id || state.lease_expires_at > this.#now()) continue;
       const socket = this.#socketForState(state);
-      if (socket) this.#fence(socket, "Hosted Tools lease expired", 1012, "lease_expired");
-      else this.#retireState(state, "Hosted Tools lease expired", "lease_expired");
+      if (socket && this.#attachment(socket)?.renewalToken) void this.#checkCachedLease(socket);
+      else if (!this.#canRecover(state)) {
+        if (socket) this.#fence(socket, "Hosted Tools lease expired", 1012, "lease_expired");
+        else this.#retireState(state, "Hosted Tools lease expired", "lease_expired");
+      }
     }
   }
 
   cancel(callId: string): boolean {
-    const pending = this.#pending.get(callId);
-    if (!pending) return false;
     const row = this.#persistence.call(callId);
     if (!row || row.state !== "dispatched") return false;
     const state = this.#stateForLease(row.lease_id, row.generation);
     const socket = this.#socketForState(state);
-    if (!socket
-      || !state
-      || state.lease_expires_at <= this.#now()) {
-      this.#finishAmbiguous(row, "Hosted Tools cancellation lost its pinned attachment", state && state.lease_expires_at <= this.#now() ? "lease_expired" : "attachment_unavailable");
+    if (!state || (state.lease_expires_at <= this.#now() && !this.#canRecover(state))) {
+      this.#finishAmbiguous(row, "Hosted Tools cancellation lost its pinned attachment", "lease_expired");
       return false;
     }
     const cancelRequested = this.#persistence.markCancelRequested(callId, this.#now());
     if (!cancelRequested || cancelRequested.state !== "dispatched"
       || cancelRequested.cancel_requested !== 1) return false;
     this.#observe("cancel_requested", row);
+    if (!socket) return this.#canRecover(state);
     try {
       this.#send(socket, {
         type: "cancel",
@@ -770,8 +780,14 @@ export class HostedToolsBrokerCore {
   }
 
   async #dispatchHostFrame(socket: HostedToolsSocket, frame: HostedToolsHostFrame): Promise<void> {
-    if (frame.type === "catalog") await this.#publishCatalog(socket, frame);
-    else if (frame.type === "ping") await this.#heartbeat(socket, frame);
+    if (frame.type === "catalog") {
+      const publication = this.#catalogPublication.then(() => this.#publishCatalog(socket, frame));
+      this.#catalogPublication = publication.catch(() => {});
+      await publication;
+      return;
+    }
+    await this.#validateLeasedAttachment(socket);
+    if (frame.type === "status") this.#recoverStatus(socket, frame);
     else if (frame.type === "drain") this.#drain(socket);
     else if (frame.type === "diagnostic") this.#hostProgress(socket, frame);
     else this.#completeResult(socket, frame);
@@ -799,71 +815,110 @@ export class HostedToolsBrokerCore {
     if (!attachment?.active || !attachment.leaseId || attachment.generation === undefined || !state
       || state.lease_id !== attachment.leaseId
       || state.generation !== attachment.generation
+      || this.#socketForState(state) !== socket
       || state.lease_expires_at <= this.#now()) {
       throw new HostedToolsProtocolError("stale_socket", "socket no longer owns the tool attachment");
     }
     return attachment;
   }
 
-  async #heartbeat(
-    socket: HostedToolsSocket,
-    frame: Extract<HostedToolsHostFrame, { type: "ping" }>,
-  ): Promise<void> {
-    let attachment = this.#activeAttachment(socket);
-    if (attachment.renewalToken !== undefined) {
-      const renewal = {
-        expectedAttachmentId: attachment.expectedAttachmentId!,
-        fixedRouteId: attachment.fixedRouteId!,
-        renewalToken: attachment.renewalToken,
-      };
-      let maximumLeaseExpiresAt: number | undefined;
-      try {
-        maximumLeaseExpiresAt = await this.#renewLeasedAttachment?.(renewal);
-      } catch {
-        this.#retire(socket, "leased Hosted Tools validation unavailable", "lease_validation_unavailable");
-        closeSocket(socket, 1011, "leased Hosted Tools validation unavailable");
-        return;
-      }
-      if (!Number.isSafeInteger(maximumLeaseExpiresAt)
-        || Number(maximumLeaseExpiresAt) <= this.#now()) {
-        this.#observeConnection("error", attachment, { reason_code: "lease_validation_failed" });
-        this.revokeRoute(renewal.fixedRouteId, "leased Hosted Tools validation failed");
-        return;
-      }
-      const renewedExpiry = Number(maximumLeaseExpiresAt);
-      const renewed = this.#activeAttachment(socket);
-      if (renewed.routeId !== attachment.routeId
-        || renewed.leaseId !== attachment.leaseId
-        || renewed.generation !== attachment.generation
-        || renewed.fixedRouteId !== renewal.fixedRouteId
-        || renewed.expectedAttachmentId !== renewal.expectedAttachmentId
-        || renewed.renewalToken !== renewal.renewalToken) {
-        throw new HostedToolsProtocolError(
-          "stale_socket",
-          "socket changed while its leased attachment was being validated",
-        );
-      }
-      attachment = { ...renewed, maximumLeaseExpiresAt: renewedExpiry };
-      this.context.writeAttachment(socket, attachment);
+  async #validateLeasedAttachment(socket: HostedToolsSocket): Promise<void> {
+    const attachment = this.#attachment(socket);
+    if (!attachment?.renewalToken) return;
+    const state = attachment.routeId ? this.#persistence.state(attachment.routeId) : undefined;
+    if (!attachment.active || !state || this.#socketForState(state) !== socket) {
+      throw new HostedToolsProtocolError("stale_socket", "socket no longer owns the tool attachment");
     }
-    const expiresAt = Math.min(
-      this.#now() + HOSTED_TOOLS_LEASE_MS,
-      attachment.maximumLeaseExpiresAt ?? Number.MAX_SAFE_INTEGER,
-    );
+    let renewed: number | undefined;
+    try {
+      renewed = await this.#renewLeaseAuthority({
+        expectedAttachmentId: attachment.expectedAttachmentId!,
+        fixedRouteId: attachment.fixedRouteId!, renewalToken: attachment.renewalToken,
+      });
+    } catch {
+      throw new HostedToolsProtocolError("lease_validation_unavailable", "leased Hosted Tools validation unavailable");
+    }
+    const current = this.#persistence.state(state.route_id);
+    if (!current || this.#socketForState(current) !== socket) {
+      throw new HostedToolsProtocolError("stale_socket", "socket changed while validating authorization");
+    }
+    if (!Number.isSafeInteger(renewed) || Number(renewed) <= this.#now()) {
+      this.revokeRoute(attachment.fixedRouteId!, "leased Hosted Tools validation failed");
+      throw new HostedToolsProtocolError("route_revoked", "leased Hosted Tools validation failed");
+    }
+    const refreshed = { ...current, lease_expires_at: Number(renewed) };
+    this.#persistence.replaceHost(refreshed);
+    this.context.writeAttachment(socket, { ...this.#attachment(socket), maximumLeaseExpiresAt: Number(renewed), lease_expires_at: Number(renewed) });
+    this.#armLeaseValidation(refreshed);
+  }
+
+  #canRecover(state: HostedToolsStateRow): boolean {
+    return state.command_recovery === 1 && !!state.runtime_id && !!state.catalog_json && !!this.#persistence.generationCalls;
+  }
+
+  #restorePending(row: HostedToolsCallRow): PendingCall {
+    const existing = this.#pending.get(row.call_id);
+    if (existing) return existing;
+    let resolve!: PendingCall["resolve"];
+    const promise = new Promise<HostedToolCallOutcome>(done => { resolve = done; });
+    const pending: PendingCall = {
+      ...(row.thread_id ? { threadId: row.thread_id } : {}),
+      receivedAt: performance.now(), dispatchedAt: performance.now(), leaseId: row.lease_id,
+      generation: row.generation, deadlineAt: row.deadline_at, promise, resolve, restored: true,
+    };
+    this.#pending.set(row.call_id, pending);
+    this.#armExpiry(row.call_id, pending);
+    return pending;
+  }
+
+  #restoreGeneration(state: HostedToolsStateRow): void {
+    for (const row of this.#persistence.generationCalls?.(state.lease_id!, state.generation) ?? []) {
+      if (row.state !== "dispatched") continue;
+      if (row.host_runtime_id !== state.runtime_id || row.host_id !== state.host_id) {
+        this.#finishAmbiguous(row, "Hosted Tools retained runtime identity does not match", "owner_restarted");
+      } else if (row.deadline_at <= this.#now()) {
+        this.#finishAmbiguous(row, "Hosted Tools call deadline expired after dispatch", "call_deadline");
+      } else this.#restorePending(row);
+    }
+  }
+
+  #requestRecovery(socket: HostedToolsSocket, state: HostedToolsStateRow): void {
+    this.#armLeaseValidation(state);
+    const ids = (this.#persistence.generationCalls?.(state.lease_id!, state.generation) ?? [])
+      .filter(row => row.state === "dispatched").map(row => row.call_id);
+    try {
+      for (let offset = 0; offset < ids.length; offset += MAX_HOSTED_TOOLS_RECOVER_CALL_IDS) {
+        this.#send(socket, { type: "recover", call_ids: ids.slice(offset, offset + MAX_HOSTED_TOOLS_RECOVER_CALL_IDS) });
+      }
+    } catch {
+      this.#retire(socket, "recovery delivery failed", "call_send_failed");
+      closeSocket(socket, 1011, "Hosted Tools recovery delivery failed");
+    }
+  }
+
+  #recoverStatus(socket: HostedToolsSocket, frame: Extract<HostedToolsHostFrame, { type: "status" }>): void {
+    const attachment = this.#activeAttachment(socket);
     const state = this.#persistence.state(attachment.routeId!)!;
-    this.#persistence.replaceHost({ ...state, lease_expires_at: expiresAt });
-    this.#send(socket, {
-      type: "pong",
-      nonce: frame.nonce,
-    });
-    const now = this.#now();
-    const heartbeatCount = Math.min(Number.MAX_SAFE_INTEGER, (attachment.heartbeat_count ?? 0) + 1);
-    const emit = attachment.last_heartbeat_observation_at === undefined
-      || now - attachment.last_heartbeat_observation_at >= this.#heartbeatObservationIntervalMs;
-    const updated = { ...attachment, lease_expires_at: expiresAt, last_heartbeat_at: now, heartbeat_count: heartbeatCount,
-      ...(emit ? { last_heartbeat_observation_at: now } : {}) };
-    this.context.writeAttachment(socket, updated);
-    if (emit) this.#observeConnection("heartbeat", updated);
+    const row = this.#persistence.call(frame.call_id);
+    if (!this.#canRecover(state) || !row || row.lease_id !== attachment.leaseId
+      || row.generation !== attachment.generation || row.host_runtime_id !== attachment.runtimeId) {
+      throw new HostedToolsProtocolError("unknown_call", "status does not match the retained runtime call");
+    }
+    if (row.state !== "dispatched") return;
+    if (frame.state === "missing") {
+      this.#finishAmbiguous(row, "The living Hand runtime has no retained proof of this dispatched call; it was not resent");
+    } else if (row.deadline_at <= this.#now()) {
+      this.#finishAmbiguous(row, "Hosted Tools call deadline expired after dispatch", "call_deadline");
+    } else {
+      this.#restorePending(row);
+      if (row.cancel_requested === 1) {
+        try { this.#send(socket, { type: "cancel", call_id: row.call_id }); }
+        catch {
+          this.#retire(socket, "cancellation delivery failed", "cancel_send_failed");
+          closeSocket(socket, 1011, "Hosted Tools cancellation delivery failed");
+        }
+      }
+    }
   }
 
   async #publishCatalog(
@@ -888,7 +943,7 @@ export class HostedToolsBrokerCore {
         renewalToken: initial.renewalToken,
       };
       try {
-        const renewed = await this.#renewLeasedAttachment?.(renewal);
+        const renewed = await this.#renewLeaseAuthority(renewal);
         if (!Number.isSafeInteger(renewed) || Number(renewed) <= this.#now()) {
           this.revokeRoute(routeId, "leased Hosted Tools validation failed before admission");
           throw new HostedToolsProtocolError(
@@ -912,7 +967,8 @@ export class HostedToolsBrokerCore {
         "tool attachment route was revoked before admission",
       );
     }
-    if (state.lease_id && state.lease_expires_at <= this.#now()) {
+    if (state.lease_id && state.lease_expires_at <= this.#now()
+      && !(initial.renewalToken && this.#canRecover(state))) {
       const expiredSocket = this.#socketForState(state);
       if (expiredSocket) this.#fence(expiredSocket, "Hosted Tools lease expired", 1012, "lease_expired");
       else this.#retireState(state, "Hosted Tools lease expired", "lease_expired");
@@ -928,12 +984,15 @@ export class HostedToolsBrokerCore {
         "another Connect grant already owns this agent's tool host",
       );
     }
-    const generation = ++this.#nextCandidateGeneration;
-    const leaseId = this.#randomUUID();
-    const expiresAt = Math.min(
-      this.#now() + HOSTED_TOOLS_LEASE_MS,
-      maximumLeaseExpiresAt ?? Number.MAX_SAFE_INTEGER,
-    );
+    const catalogJson = canonicalJson(frame.tools);
+    const machinesJson = frame.machines?.length ? canonicalJson(frame.machines) : null;
+    const resumes = this.#canRecover(state) && frame.command_recovery === true
+      && state.host_id === initial.sessionId && state.runtime_id === frame.runtime_id
+      && (state.connect_grant_id ?? null) === (initial.connectGrantId ?? null)
+      && state.catalog_json === catalogJson && state.machines_json === machinesJson;
+    const generation = resumes ? state.generation : ++this.#nextCandidateGeneration;
+    const leaseId = resumes ? state.lease_id! : this.#randomUUID();
+    const expiresAt = maximumLeaseExpiresAt ?? Number.MAX_SAFE_INTEGER;
     const candidate = {
       ...initial,
       ...(maximumLeaseExpiresAt === undefined ? {} : { maximumLeaseExpiresAt }),
@@ -942,11 +1001,11 @@ export class HostedToolsBrokerCore {
       generation,
       lease_expires_at: expiresAt,
       ...(frame.runtime_id === undefined ? {} : { runtimeId: frame.runtime_id }),
+      ...(frame.command_recovery === true ? { commandRecovery: true as const } : {}),
       ...(frame.connection_id === undefined ? {} : { hostConnectionId: frame.connection_id }),
       ...(frame.diagnostics === true ? { diagnostics: true as const } : {}),
     } satisfies HostedToolsSocketAttachment;
     this.context.writeAttachment(socket, candidate);
-    const catalogJson = JSON.stringify(frame.tools);
     const machine = frame.machines?.[0];
     const candidateEntries = frame.tools
       .filter((entry) => !reservedMachineEntry(entry, machine))
@@ -959,6 +1018,9 @@ export class HostedToolsBrokerCore {
       }),
     }));
     try {
+      if (frame.command_recovery && !this.#persistence.generationCalls) {
+        throw new Error("command recovery requires durable call enumeration");
+      }
       if (initial.connectGrantId !== undefined && (frame.machines?.length ?? 0) > 0) {
         throw new Error("Connect tool hosts cannot publish account machine metadata");
       }
@@ -1041,12 +1103,21 @@ export class HostedToolsBrokerCore {
       );
     }
     const now = this.#now();
-    const replaced = state.lease_id ? state : undefined;
-    // A failed ready send must leave the previous attachment routable.
-    this.#send(socket, { type: "ready" });
+    const replaced = !resumes && state.lease_id ? state : undefined;
+    const oldSockets = this.context.sockets().filter(existing => {
+      const old = this.#attachment(existing);
+      return existing !== socket && old?.active && old.leaseId === state.lease_id && old.generation === state.generation;
+    });
+    // Fence the physical attachment before ready; the ownership epoch may stay unchanged.
+    for (const old of oldSockets) this.context.writeAttachment(old, { ...this.#attachment(old), active: false });
+    try { this.#send(socket, { type: "ready" }); }
+    catch (error) {
+      for (const old of oldSockets) this.context.writeAttachment(old, { ...this.#attachment(old), active: true });
+      throw error;
+    }
     if (replaced?.lease_id) this.#observeGenerationCalls(replaced.lease_id, replaced.generation, "host_replaced");
     this.#persistence.transaction(() => {
-      if (state.lease_id) {
+      if (!resumes && state.lease_id) {
         this.#persistence.markGenerationAmbiguous(
           state.lease_id,
           state.generation,
@@ -1061,19 +1132,21 @@ export class HostedToolsBrokerCore {
         lease_id: leaseId,
         lease_expires_at: expiresAt,
         catalog_json: catalogJson,
-        machines_json: frame.machines?.length ? JSON.stringify(frame.machines) : null,
+        machines_json: machinesJson,
+        runtime_id: frame.runtime_id ?? null,
+        command_recovery: frame.command_recovery === true ? 1 : 0,
+        connect_grant_id: initial.connectGrantId ?? null,
       });
     });
     if (replaced?.lease_id) {
       const outcome = hostedToolsAmbiguous("Hosted Tools call became ambiguous when its host was replaced");
       this.#resolveGeneration(replaced.lease_id, replaced.generation, outcome);
-      for (const existing of this.context.sockets()) {
-        if (existing === socket) continue;
-        const old = this.#attachment(existing);
-        if (!old?.active || old.leaseId !== replaced.lease_id || old.generation !== replaced.generation) continue;
-        this.#observeConnection("replaced", old, { reason_code: "host_replaced", close_code: 1008 }, replaced);
-        closeSocket(existing, 1008, "Hosted Tools attachment replaced");
-      }
+    }
+    for (const existing of oldSockets) {
+      this.#observeConnection("replaced", this.#attachment(existing), {
+        reason_code: "host_replaced", close_code: resumes ? 1012 : 1008,
+      }, state);
+      closeSocket(existing, resumes ? 1012 : 1008, resumes ? "Hosted Tools runtime reattached" : "Hosted Tools attachment replaced");
     }
     this.context.writeAttachment(
       socket,
@@ -1083,7 +1156,11 @@ export class HostedToolsBrokerCore {
         ...(frame.machines === undefined ? {} : { machines: frame.machines }),
       } satisfies HostedToolsSocketAttachment,
     );
-    this.#observeConnection("ready", this.#attachment(socket));
+    this.#observeConnection(resumes ? "resumed" : "ready", this.#attachment(socket));
+    if (this.#canRecover(this.#persistence.state(routeId)!)) {
+      this.#restoreGeneration(this.#persistence.state(routeId)!);
+      this.#requestRecovery(socket, this.#persistence.state(routeId)!);
+    }
     this.#notifyCatalogChanged();
   }
 
@@ -1115,7 +1192,9 @@ export class HostedToolsBrokerCore {
     const stored = JSON.stringify(frame.outcome);
     if (!row
       || row.lease_id !== attachment.leaseId
-      || row.generation !== attachment.generation) {
+      || row.generation !== attachment.generation
+      || row.host_id !== attachment.sessionId
+      || (row.host_runtime_id != null && row.host_runtime_id !== attachment.runtimeId)) {
       throw new HostedToolsProtocolError("unknown_call", "result does not match an admitted pinned call");
     }
     if (row.state === "ambiguous") {
@@ -1171,14 +1250,14 @@ export class HostedToolsBrokerCore {
       outcome: frame.outcome.status,
       ...(frame.outcome.status === "completed" ? { success: frame.outcome.output.success } : {}),
       ...(frame.timing ? { host_timing: frame.timing } : {}),
-      ...(pending ? {
+      ...(pending && !pending.restored ? {
         admission_ms: Math.max(0, pending.dispatchedAt - pending.receivedAt),
         roundtrip_ms: Math.max(0, resultAt - pending.dispatchedAt),
         settlement_ms: Math.max(0, performance.now() - resultAt),
         ...(frame.timing ? { transit_return_overhead_ms: resultAt - pending.dispatchedAt - frame.timing.host_elapsed_ms } : {}),
       } : {}),
     });
-    if (pending && this.#onCallTiming) {
+    if (pending && !pending.restored && this.#onCallTiming) {
       try {
         this.#onCallTiming({ session_id: row.session_id, source_call_id: row.source_call_id,
           transport_call_id: row.call_id, admission_ms: pending.dispatchedAt - pending.receivedAt,
@@ -1302,6 +1381,16 @@ export class HostedToolsBrokerCore {
     };
     this.#observe("received", identity);
     try {
+      const socket = this.#socketForState(this.#persistence.state(binding.routeId));
+      if (socket && this.#attachment(socket)?.renewalToken) {
+        try { await this.#validateLeasedAttachment(socket); }
+        catch (error) {
+          this.#fence(socket, errorMessage(error),
+            error instanceof HostedToolsProtocolError && error.code === "route_revoked" ? 1008 : 1011,
+            error instanceof HostedToolsProtocolError && error.code === "route_revoked" ? "route_revoked" : "lease_validation_unavailable");
+          return hostedToolsUnavailable("Hosted Tools authorization could not be validated before dispatch");
+        }
+      }
       const outcome = await this.#invokeCall(binding, request);
       try {
         const row = this.#persistence.callBySource(request.sessionId, request.callId);
@@ -1336,7 +1425,7 @@ export class HostedToolsBrokerCore {
       this.#onCallObservation(Object.freeze({
         ...fields, stage,
         tool: MACHINE_TOOL_NAMES.has(row.name) ? row.name : "other",
-        ...(row.generation === undefined ? {} : { connection_generation: row.generation }),
+        ...(row.generation === undefined ? {} : { connection_generation: row.generation, runtime_generation: row.generation }),
         ...safeObservationIds({ session_id: row.session_id, source_call_id: row.source_call_id,
           transport_call_id: row.call_id, thread_id: row.thread_id, lease_id: row.lease_id,
           connection_id: connectionId,
@@ -1379,8 +1468,8 @@ export class HostedToolsBrokerCore {
     return Object.freeze({
       ...fields, stage,
       ...safeObservationIds({ connection_id: attachment?.connectionId, lease_id: leaseId,
-        host_connection_id: attachment?.hostConnectionId, host_runtime_id: attachment?.runtimeId, hand_id: handId }),
-      ...(generation === undefined ? {} : { connection_generation: generation }),
+        host_connection_id: attachment?.hostConnectionId, host_runtime_id: attachment?.runtimeId ?? exactState?.runtime_id, hand_id: handId }),
+      ...(generation === undefined ? {} : { connection_generation: generation, runtime_generation: generation }),
       ...(leaseExpiresAt === undefined ? {} : { lease_expires_at: leaseExpiresAt }),
       ...(attachment?.last_heartbeat_at === undefined ? {} : { last_heartbeat_at: attachment.last_heartbeat_at,
         heartbeat_age_ms: Math.max(0, this.#now() - attachment.last_heartbeat_at) }),
@@ -1436,7 +1525,7 @@ export class HostedToolsBrokerCore {
 
     const leaseId = binding.leaseId;
     const now = this.#now();
-    const deadlineAt = request.deadlineAt === undefined && retained
+    const deadlineAt = retained
       ? retained.deadline_at
       : Math.min(
         request.deadlineAt ?? Number.MAX_SAFE_INTEGER,
@@ -1490,9 +1579,9 @@ export class HostedToolsBrokerCore {
       result_json: null,
       receipt_json: null,
     };
-    if (retained) return this.#repeatedCall(retained, proposed, binding);
+    if (retained) return this.#repeatedCall(retained, proposed, binding, request.signal);
     const existing = this.#persistence.call(call.call_id);
-    if (existing) return this.#repeatedCall(existing, proposed, binding);
+    if (existing) return this.#repeatedCall(existing, proposed, binding, request.signal);
     if (!this.#attachmentIsPresent(binding, now)) {
       this.#observe("admission_failed", proposed, { reason_code: "attachment_unavailable", outcome: "unavailable" });
       return Promise.resolve(preAdmissionUnavailable(
@@ -1517,7 +1606,7 @@ export class HostedToolsBrokerCore {
     } catch {
       const recovered = this.#persistence.callBySource(request.sessionId, request.callId)
         ?? this.#persistence.call(call.call_id);
-      if (recovered) return this.#repeatedCall(recovered, proposed, binding);
+      if (recovered) return this.#repeatedCall(recovered, proposed, binding, request.signal);
       this.#observe("admission_failed", proposed, { reason_code: "admission_uncertain", outcome: "ambiguous" });
       return Promise.resolve(hostedToolsAmbiguous("Hosted Tools admission may have persisted; replay is unsafe"));
     }
@@ -1579,12 +1668,8 @@ export class HostedToolsBrokerCore {
     };
     this.#pending.set(call.call_id, pending);
     this.#observe("dispatched", proposed, { admission_ms: Math.max(0, pending.dispatchedAt - receivedAt) });
-    if (request.signal) {
-      const cancel = () => { this.cancel(call.call_id); };
-      request.signal.addEventListener("abort", cancel, { once: true });
-      pending.removeAbort = () => request.signal?.removeEventListener("abort", cancel);
-    }
-    this.#armExpiry(call.call_id, pending, Math.min(current.lease_expires_at, deadlineAt));
+    this.#attachAbort(call.call_id, pending, request.signal);
+    this.#armExpiry(call.call_id, pending);
     try {
       this.#observe("send_started", proposed);
       this.#send(socket, call);
@@ -1610,7 +1695,16 @@ export class HostedToolsBrokerCore {
       && this.#routingSocketForState(current) !== undefined;
   }
 
-  async #repeatedCall(existing: HostedToolsCallRow, proposed: HostedToolsCallRow, binding: HostedToolsCatalogBinding): Promise<HostedToolsInvocationOutcome> {
+  #attachAbort(callId: string, pending: PendingCall, signal?: AbortSignal): void {
+    if (!signal) return;
+    if (signal.aborted) { this.cancel(callId); return; }
+    const cancel = () => { this.cancel(callId); };
+    signal.addEventListener("abort", cancel, { once: true });
+    const removePrevious = pending.removeAbort;
+    pending.removeAbort = () => { removePrevious?.(); signal.removeEventListener("abort", cancel); };
+  }
+
+  async #repeatedCall(existing: HostedToolsCallRow, proposed: HostedToolsCallRow, binding: HostedToolsCatalogBinding, signal?: AbortSignal): Promise<HostedToolsInvocationOutcome> {
     this.#observe("replay", { ...existing, thread_id: existing.thread_id ?? proposed.thread_id },
       sameImmutableCall(existing, proposed) ? {} : { reason_code: "call_conflict" });
     if (!sameImmutableCall(existing, proposed)) {
@@ -1619,7 +1713,11 @@ export class HostedToolsBrokerCore {
       if (socket) this.#fence(socket, "call ID was reused with different immutable fields", 1008, "call_conflict");
       return Promise.resolve(hostedToolsAmbiguous("Hosted Tools call ID conflicts with retained durable state"));
     }
-    const pending = this.#pending.get(existing.call_id);
+    const owner = this.#stateForLease(existing.lease_id, existing.generation);
+    const pending = this.#pending.get(existing.call_id)
+      ?? (existing.state === "dispatched" && owner && this.#canRecover(owner)
+        && owner.runtime_id === existing.host_runtime_id ? this.#restorePending(existing) : undefined);
+    if (pending && existing.state === "dispatched") this.#attachAbort(existing.call_id, pending, signal);
     const outcome = existing.result_json
       ? JSON.parse(existing.result_json) as HostedToolCallOutcome
       : existing.state === "dispatched" && pending
@@ -1652,34 +1750,61 @@ export class HostedToolsBrokerCore {
     return outcome;
   }
 
-  #armExpiry(callId: string, pending: PendingCall, at: number): void {
+  async #renewLeaseAuthority(renewal: HostedToolsLeasedAttachmentRenewal): Promise<number | undefined> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.#renewLeasedAttachment?.(renewal),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error("Hosted Tools authorization validation timed out")), 5_000);
+        }),
+      ]);
+    } finally { if (timeout !== undefined) clearTimeout(timeout); }
+  }
+
+  async #checkCachedLease(socket: HostedToolsSocket): Promise<void> {
+    try { await this.#validateLeasedAttachment(socket); }
+    catch (error) {
+      // A successor socket may have taken over while the authority was queried.
+      if (error instanceof HostedToolsProtocolError && error.code === "stale_socket") return;
+      this.#fence(socket, errorMessage(error),
+        error instanceof HostedToolsProtocolError && error.code === "route_revoked" ? 1008 : 1011,
+        error instanceof HostedToolsProtocolError && error.code === "route_revoked" ? "route_revoked" : "lease_validation_unavailable");
+    }
+  }
+
+  #armLeaseValidation(state: HostedToolsStateRow): void {
+    if (!state.lease_id) return;
+    const existing = this.#leaseValidationTimers.get(state.lease_id);
+    if (existing !== undefined) clearTimeout(existing);
+    this.#leaseValidationTimers.delete(state.lease_id);
+    if (![...this.#pending.values()].some(pending => pending.leaseId === state.lease_id && pending.generation === state.generation)) return;
+    const socket = this.#socketForState(state);
+    if (!socket || !this.#attachment(socket)?.renewalToken) return;
+    const leaseId = state.lease_id;
+    this.#leaseValidationTimers.set(leaseId, setTimeout(() => {
+      this.#leaseValidationTimers.delete(leaseId);
+      const current = this.#stateForLease(leaseId, state.generation);
+      if (!current || this.#socketForState(current) !== socket) return;
+      if (current.lease_expires_at > this.#now()) { this.#armLeaseValidation(current); return; }
+      void this.#checkCachedLease(socket);
+    }, Math.min(2_147_483_647, Math.max(1, state.lease_expires_at - this.#now()))));
+  }
+
+  #armExpiry(callId: string, pending: PendingCall): void {
     if (pending.timeout !== undefined) clearTimeout(pending.timeout);
+    // The admitted deadline has its own timer: authority I/O must never delay it.
     pending.timeout = setTimeout(() => {
-      const current = this.#pending.get(callId);
-      if (current !== pending) return;
-      const state = this.#stateForLease(pending.leaseId, pending.generation);
-      const now = this.#now();
-      if (state?.lease_id === pending.leaseId
-        && state.generation === pending.generation
-        && state.lease_expires_at > now
-        && pending.deadlineAt > now) {
-        this.#armExpiry(callId, pending, Math.min(state.lease_expires_at, pending.deadlineAt));
-        return;
-      }
-      if (state?.lease_id === pending.leaseId
-        && state.generation === pending.generation
-        && state.lease_expires_at <= now) {
-        const socket = this.#socketForState(state);
-        if (socket) this.#fence(socket, "Hosted Tools lease expired during a call", 1012, "lease_expired");
-        else this.#retireState(state, "Hosted Tools lease expired during a call", "lease_expired");
-        return;
-      }
+      if (this.#pending.get(callId) !== pending) return;
+      if (pending.deadlineAt > this.#now()) { this.#armExpiry(callId, pending); return; }
       const row = this.#persistence.call(callId);
       if (row) {
         this.cancel(callId);
         this.#finishAmbiguous(row, "Hosted Tools call deadline expired after dispatch", "call_deadline");
       }
-    }, Math.max(1, at - this.#now()));
+    }, Math.min(2_147_483_647, Math.max(1, pending.deadlineAt - this.#now())));
+    const state = this.#stateForLease(pending.leaseId, pending.generation);
+    if (state) this.#armLeaseValidation(state);
   }
 
   #finishAmbiguous(row: HostedToolsCallRow, message: string, reasonCode: HostedToolsDiagnosticReason = "attachment_unavailable"): void {
@@ -1701,10 +1826,31 @@ export class HostedToolsBrokerCore {
       || reasonCode === "ack_send_failed" || reasonCode === "lease_validation_unavailable") {
       this.#observeConnection("error", attachment, { reason_code: reasonCode, close_code: 1011 });
     }
-    if (!attachment?.leaseId || attachment.generation === undefined) return;
+    if (!attachment?.active || !attachment.leaseId || attachment.generation === undefined) return;
     const state = attachment.routeId === undefined
       ? undefined
       : this.#persistence.state(attachment.routeId);
+    this.context.writeAttachment(socket, { ...attachment, active: false });
+    if (state && this.#canRecover(state) && reasonCode === "lease_validation_unavailable" && !attachment.draining
+      && state.lease_id === attachment.leaseId && state.generation === attachment.generation) {
+      // Unavailable authority is not proof of revocation. Settle current waiters
+      // finitely, but retain the epoch so later validated reconnects can ACK
+      // journal receipts without issuing the command again.
+      const outcome = hostedToolsAmbiguous("Hosted Tools authorization could not be validated after dispatch");
+      this.#persistence.markGenerationAmbiguous(state.lease_id!, state.generation, JSON.stringify(outcome), this.#now());
+      this.#resolveGeneration(state.lease_id!, state.generation, outcome);
+      this.#notifyCatalogChanged();
+      return;
+    }
+    const transient = ["transport_closed", "transport_error", "call_send_failed", "cancel_send_failed", "ack_send_failed"].includes(reasonCode);
+    if (state && this.#canRecover(state) && transient && !attachment.draining
+      && state.lease_id === attachment.leaseId && state.generation === attachment.generation) {
+      for (const row of this.#persistence.generationCalls!(state.lease_id!, state.generation)) {
+        if (row.state === "dispatched") this.#observe("transport_lost", row, { reason_code: reasonCode });
+      }
+      this.#notifyCatalogChanged();
+      return;
+    }
     if (state) this.#retireState(state, reason, reasonCode, attachment.leaseId, attachment.generation);
   }
 
@@ -1748,6 +1894,11 @@ export class HostedToolsBrokerCore {
     if (pending.timeout !== undefined) clearTimeout(pending.timeout);
     pending.removeAbort?.();
     this.#pending.delete(callId);
+    if (![...this.#pending.values()].some(call => call.leaseId === pending.leaseId && call.generation === pending.generation)) {
+      const timer = this.#leaseValidationTimers.get(pending.leaseId);
+      if (timer !== undefined) clearTimeout(timer);
+      this.#leaseValidationTimers.delete(pending.leaseId);
+    }
     return pending;
   }
 
@@ -1783,8 +1934,9 @@ export class HostedToolsBrokerCore {
   #liveRoutingSocketForState(state: HostedToolsStateRow): HostedToolsSocket | undefined {
     if (state.lease_id && state.lease_expires_at <= this.#now()) {
       const socket = this.#socketForState(state);
+      if (socket && this.#attachment(socket)?.renewalToken) return this.#routingSocketForState(state);
       if (socket) this.#fence(socket, "Hosted Tools lease expired", 1012, "lease_expired");
-      else this.#retireState(state, "Hosted Tools lease expired", "lease_expired");
+      else if (!this.#canRecover(state)) this.#retireState(state, "Hosted Tools lease expired", "lease_expired");
       return undefined;
     }
     return this.#routingSocketForState(state);
@@ -1843,7 +1995,7 @@ export class HostedToolsBrokerCore {
           generation: state.generation,
           wireName: entry.definition.name,
           ...(attachment?.connectionId === undefined ? {} : { connectionId: attachment.connectionId }),
-          ...(attachment?.runtimeId === undefined ? {} : { runtimeId: attachment.runtimeId }),
+          ...((attachment?.runtimeId ?? state.runtime_id) == null ? {} : { runtimeId: attachment?.runtimeId ?? state.runtime_id! }),
           ...(attachment?.hostConnectionId === undefined ? {} : { hostConnectionId: attachment.hostConnectionId }),
           providerDefinition: entry.definition,
           ...(machine === undefined ? {} : { machine }),
@@ -1895,7 +2047,6 @@ export class HostedToolsBrokerCore {
     try { socket.send(JSON.stringify(frame)); }
     catch (error) {
       const code = frame.type === "ready" ? "ready_send_failed"
-        : frame.type === "pong" ? "heartbeat_send_failed"
         : frame.type === "draining" ? "drain_send_failed" : undefined;
       if (code) throw new HostedToolsProtocolError(code, "Hosted Tools control frame delivery failed");
       throw error;
@@ -2107,6 +2258,15 @@ function toolResult(
     structuredResult,
     success,
     value: structuredResult ?? output,
+  });
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) => {
+    if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+      return Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)));
+    }
+    return item;
   });
 }
 

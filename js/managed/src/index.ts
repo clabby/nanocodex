@@ -1455,7 +1455,7 @@ function isUniqueStringArray(value: unknown): value is string[] {
 
 const SAFE_OBSERVATION_FIELDS = new Set([
   "request_id", "turn_id", "failure_phase", "replay_mode", "next_attempt", "max_attempts",
-  "connection_generation", "model_call_index", "status_code", "retry_delay_ms", "duration_ms",
+  "connection_generation", "runtime_generation", "model_call_index", "status_code", "retry_delay_ms", "duration_ms",
   "time_to_first_event_ms", "time_to_first_output_ms", "response_id",
   "opens_new_socket", "server_requested_delay",
   "runtime_ready_ms",

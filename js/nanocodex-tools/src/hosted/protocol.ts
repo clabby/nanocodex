@@ -3,9 +3,8 @@ import {
   type HostedMachine,
 } from "../../tools/hostedMachine.mjs";
 
-export const HOSTED_TOOLS_LEASE_MS = 60_000;
+export const MAX_HOSTED_TOOLS_RECOVER_CALL_IDS = 100;
 export const MAX_HOSTED_TOOL_NAME_BYTES = 128;
-const MAX_NONCE_BYTES = 128;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const RESERVED_TOOL_NAMES = new Set(["exec", "tool_search", "wait"]);
 const encoder = new TextEncoder();
@@ -90,6 +89,8 @@ export type HostedToolsHostFrame =
       attachment_id?: string;
       /** Identity of the retained executor runtime, stable only across reconnects. */
       runtime_id?: string;
+      /** Retained command journal in this living executor runtime. */
+      command_recovery?: true;
       /** Opt-in is rejected by older strict brokers before any call executes. */
       diagnostics?: true;
       /** Opaque client-generated identity for this connection attempt. */
@@ -102,10 +103,7 @@ export type HostedToolsHostFrame =
       outcome: HostedToolCallOutcome;
       timing?: HostedToolReceiptTiming;
     }
-  | {
-      type: "ping";
-      nonce: string;
-    }
+  | { type: "status"; call_id: string; state: "running" | "missing" }
   | { type: "drain" };
 
 export type HostedToolsManagedFrame =
@@ -130,16 +128,13 @@ export type HostedToolsManagedFrame =
       type: "ack";
       call_id: string;
     }
-  | {
-      type: "pong";
-      nonce: string;
-    }
+  | { type: "recover"; call_ids: string[] }
   | { type: "draining" };
 
 export type HostedToolsFrame = HostedToolsHostFrame | HostedToolsManagedFrame;
 
-const HOST_FRAME_TYPES = new Set(["catalog", "result", "ping", "drain", "diagnostic"]);
-const MANAGED_FRAME_TYPES = new Set(["ready", "call", "cancel", "ack", "pong", "draining"]);
+const HOST_FRAME_TYPES = new Set(["catalog", "result", "status", "drain", "diagnostic"]);
+const MANAGED_FRAME_TYPES = new Set(["ready", "call", "cancel", "ack", "recover", "draining"]);
 
 export function parseHostedToolsHostFrame(encoded: string): HostedToolsHostFrame {
   const frame = parseHostedToolsFrame(encoded);
@@ -178,8 +173,8 @@ export function parseHostedToolsFrame(encoded: string): HostedToolsFrame {
       return parseResult(frame);
     case "diagnostic":
       return parseDiagnostic(frame);
-    case "ping":
-      return parsePing(frame);
+    case "status":
+      return parseStatus(frame);
     case "drain":
       exactKeys(frame, ["type"]);
       return { type: "drain" };
@@ -192,8 +187,8 @@ export function parseHostedToolsFrame(encoded: string): HostedToolsFrame {
       return parseCancel(frame);
     case "ack":
       return parseAck(frame);
-    case "pong":
-      return parsePong(frame);
+    case "recover":
+      return parseRecover(frame);
     case "draining":
       exactKeys(frame, ["type"]);
       return { type: "draining" };
@@ -205,7 +200,7 @@ export function parseHostedToolsFrame(encoded: string): HostedToolsFrame {
 function parseCatalog(
   frame: Record<string, unknown>,
 ): Extract<HostedToolsHostFrame, { type: "catalog" }> {
-  exactKeys(frame, ["type", "tools", "machines", "attachment_id", "capabilities", "runtime_id", "diagnostics", "connection_id"]);
+  exactKeys(frame, ["type", "tools", "machines", "attachment_id", "capabilities", "runtime_id", "diagnostics", "connection_id", "command_recovery"]);
   if (Object.hasOwn(frame, "diagnostics") && frame.diagnostics !== true) {
     throw new HostedToolsProtocolError("invalid_catalog", "diagnostics must be true when advertised");
   }
@@ -228,6 +223,9 @@ function parseCatalog(
   const runtimeId = frame.runtime_id === undefined
     ? undefined
     : sourceIdentifier(frame.runtime_id, "runtime_id");
+  if (Object.hasOwn(frame, "command_recovery") && (frame.command_recovery !== true || runtimeId === undefined)) {
+    throw new HostedToolsProtocolError("invalid_catalog", "command_recovery must be true and requires runtime_id");
+  }
   const attachmentId = frame.attachment_id === undefined
     ? undefined
     : sourceIdentifier(frame.attachment_id, "attachment_id");
@@ -261,6 +259,7 @@ function parseCatalog(
     ...(machines === undefined ? {} : { machines }),
     ...(attachmentId === undefined ? {} : { attachment_id: attachmentId }),
     ...(runtimeId === undefined ? {} : { runtime_id: runtimeId }),
+    ...(frame.command_recovery === true ? { command_recovery: true as const } : {}),
     ...(frame.diagnostics === true ? { diagnostics: true as const } : {}),
     ...(typeof frame.connection_id === "string" ? { connection_id: frame.connection_id } : {}),
   };
@@ -318,12 +317,12 @@ function receiptTiming(value: unknown): HostedToolReceiptTiming {
   return Object.freeze(Object.fromEntries(keys.map(key => [key, timing[key]]))) as HostedToolReceiptTiming;
 }
 
-function parsePing(frame: Record<string, unknown>): Extract<HostedToolsHostFrame, { type: "ping" }> {
-  exactKeys(frame, ["type", "nonce"]);
-  return {
-    type: "ping",
-    nonce: boundedText(frame.nonce, 0, MAX_NONCE_BYTES, "nonce"),
-  };
+function parseStatus(frame: Record<string, unknown>): Extract<HostedToolsHostFrame, { type: "status" }> {
+  exactKeys(frame, ["type", "call_id", "state"]);
+  if (frame.state !== "running" && frame.state !== "missing") {
+    throw new HostedToolsProtocolError("invalid_message", "status state must be running or missing");
+  }
+  return { type: "status", call_id: identifier(frame.call_id, "call_id"), state: frame.state };
 }
 
 function parseCall(frame: Record<string, unknown>): Extract<HostedToolsManagedFrame, { type: "call" }> {
@@ -377,12 +376,17 @@ function parseAck(
   };
 }
 
-function parsePong(frame: Record<string, unknown>): Extract<HostedToolsManagedFrame, { type: "pong" }> {
-  exactKeys(frame, ["type", "nonce"]);
-  return {
-    type: "pong",
-    nonce: boundedText(frame.nonce, 0, MAX_NONCE_BYTES, "nonce"),
-  };
+function parseRecover(frame: Record<string, unknown>): Extract<HostedToolsManagedFrame, { type: "recover" }> {
+  exactKeys(frame, ["type", "call_ids"]);
+  if (!Array.isArray(frame.call_ids) || frame.call_ids.length < 1
+    || frame.call_ids.length > MAX_HOSTED_TOOLS_RECOVER_CALL_IDS) {
+    throw new HostedToolsProtocolError("invalid_message", "recover requires 1-100 call IDs per frame");
+  }
+  const call_ids = frame.call_ids.map(value => identifier(value, "call_id"));
+  if (new Set(call_ids).size !== call_ids.length) {
+    throw new HostedToolsProtocolError("invalid_message", "recover call IDs must be unique");
+  }
+  return { type: "recover", call_ids };
 }
 
 function catalogEntry(value: unknown, index: number): HostedToolCatalogEntry {

@@ -3,6 +3,7 @@ import { utf8ByteLength } from "../runtime/utf8.mjs";
 import { hostedCatalog } from "./hostedCatalog.mjs";
 import { normalizeHostedMachines } from "./hostedMachine.mjs";
 
+// heartbeatMs is the deprecated compatibility name for the control ping interval.
 const DEFAULT_HEARTBEAT_MS = 30_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
 const DEFAULT_DRAIN_TIMEOUT_MS = 10_000;
@@ -91,7 +92,7 @@ function createClient(endpoint, transport, options, admission, machines, attachm
     attempt: 0,
     stoppedObserved: false,
     calls: new Map(),
-    receipts: new Set(),
+    receipts: new Map(),
     active: new Set(),
     heartbeat: undefined,
     handshakeTimer: undefined,
@@ -254,6 +255,7 @@ function createClient(endpoint, transport, options, admission, machines, attachm
       type: "catalog",
       capabilities: ["turn_metadata"],
       diagnostics: true,
+      command_recovery: true,
       connection_id: state.connection.id,
       runtime_id: state.runtimeId,
       tools: state.catalog,
@@ -278,6 +280,7 @@ function createClient(endpoint, transport, options, admission, machines, attachm
         clearTimeout(state.handshakeTimer);
         state.handshakeTimer = undefined;
         startHeartbeat(socket);
+        for (const callId of state.receipts.keys()) replayReceipt(callId, socket);
         if (!state.readySettled) { state.readySettled = true; resolveReady(publicClient); }
         break;
       case "call":
@@ -291,11 +294,13 @@ function createClient(endpoint, transport, options, admission, machines, attachm
       case "ack":
         handleAck(frame, socket);
         break;
-      case "pong":
-        if (state.pendingNonce === undefined || frame.nonce !== state.pendingNonce) {
-          throw new Error("pong nonce did not match the outstanding ping");
+      case "recover":
+        if (!state.readyReceived) throw new Error("recover received outside a routing-ready socket");
+        for (const callId of frame.call_ids) {
+          const call = state.calls.get(callId);
+          if (call?.encoded) replayReceipt(callId, socket);
+          else send(socket, { type: "status", call_id: callId, state: call ? "running" : "missing" });
         }
-        state.pendingNonce = undefined;
         break;
       case "draining":
         if (!state.draining || state.drainAcknowledged) throw new Error("unexpected draining acknowledgement");
@@ -309,7 +314,17 @@ function createClient(endpoint, transport, options, admission, machines, attachm
 
   async function handleCall(frame, socket, timing) {
     const callId = frame.call_id;
-    if (state.calls.has(callId) || state.receipts.has(callId)) throw new Error("duplicate call on socket");
+    const identity = immutableIdentity(frame);
+    const retained = state.calls.get(callId);
+    if (retained) {
+      if (retained.identity !== identity) throw new Error("call identity conflicts with retained command");
+      if (retained.encoded) replayReceipt(callId, socket);
+      else send(socket, { type: "status", call_id: callId, state: "running" });
+      return;
+    }
+    const controller = new AbortController();
+    const call = { controller, timing, identity, frame };
+    state.calls.set(callId, call);
     // Dispatch calls concurrently through the retained ToolRouter snapshot,
     // checking cancellation before dispatch. A connection-local count must not
     // reject valid calls or disconnect a socket with unacknowledged results.
@@ -317,10 +332,7 @@ function createClient(endpoint, transport, options, admission, machines, attachm
       retainAndSend(callId, { status: "unavailable", message: "tool attachment call deadline elapsed before dispatch" }, socket, timing);
       return;
     }
-    const controller = new AbortController();
-    const call = { controller, timing };
     state.active.add(call);
-    state.calls.set(callId, call);
     let deadline;
     const deadlineAt = frame.deadline_at;
     const deadlinePromise = new Promise((resolve) => {
@@ -367,11 +379,7 @@ function createClient(endpoint, transport, options, admission, machines, attachm
         : { status: "completed", output: failedOutput(error) };
     }
     clearTimeout(deadline);
-    if (state.calls.get(callId) !== call) {
-      if (state.socket !== socket) observe("result_discarded", { reason_code: "generation_changed" }, timing.connection);
-      return;
-    }
-    state.calls.delete(callId);
+    if (state.calls.get(callId) !== call || call.encoded) return;
     if (!outcome) {
       try {
         const output = wireOutput(value);
@@ -382,33 +390,28 @@ function createClient(endpoint, transport, options, admission, machines, attachm
         outcome = { status: "ambiguous", message: "tool attachment result was not valid bounded wire output after dispatch" };
       }
     }
-    if (state.socket !== socket) {
-      observe("result_discarded", { reason_code: "generation_changed" }, timing.connection);
-      return;
-    }
-    retainAndSend(callId, outcome, socket, timing);
-    maybeFinishDrain(socket);
+    retainAndSend(callId, outcome, state.socket, timing);
+    if (state.socket) maybeFinishDrain(state.socket);
   }
 
   function handleCancel(frame, socket) {
     const callId = frame.call_id;
     const call = state.calls.get(callId);
-    if (!call) return;
-    state.calls.delete(callId);
+    if (!call || call.encoded) return;
     call.controller.abort(new Error("tool attachment call was cancelled"));
     retainAndSend(callId, { status: "ambiguous", message: "tool execution was cancelled after dispatch" }, socket, call.timing);
     maybeFinishDrain(socket);
   }
 
   function handleAck(frame, socket) {
-    if (!state.receipts.has(frame.call_id)) throw new Error("ack did not match a retained terminal result");
+    if (!state.receipts.has(frame.call_id)) return;
     state.receipts.delete(frame.call_id);
+    state.calls.delete(frame.call_id);
     maybeFinishDrain(socket);
   }
 
   function retainAndSend(callId, outcome, socket, clock) {
     const result = { type: "result", call_id: callId, outcome };
-    state.receipts.add(callId);
     const encodeStarted = performance.now();
     const task = clock.taskStarted ?? encodeStarted;
     const execution = clock.executionStarted ?? encodeStarted;
@@ -428,13 +431,36 @@ function createClient(endpoint, transport, options, admission, machines, attachm
       const encodingMs = performance.now() - encodeStarted;
       timing.result_encode_ms += encodingMs;
       timing.host_elapsed_ms += encodingMs;
-      diagnostic(socket, callId, "result_prepared", clock);
-      socket.send(`${encoded.slice(0, -1)},"timing":${JSON.stringify(timing)}}`);
-    } catch (error) { throw new AttachmentTransportError(error); }
+      const receipt = `${encoded.slice(0, -1)},"timing":${JSON.stringify(timing)}}`;
+      state.calls.get(callId).encoded = receipt;
+      state.receipts.set(callId, receipt);
+      observe("result_retained", { transport_call_id: callId }, clock.connection);
+      if (socket && state.socket === socket && state.readyReceived) {
+        diagnostic(socket, callId, "result_prepared", clock);
+        socket.send(receipt);
+      }
+    } catch (error) {
+      if (socket && state.socket === socket) transportFailure(socket, error);
+    }
+  }
+
+  function replayReceipt(callId, socket) {
+    const encoded = state.receipts.get(callId);
+    if (encoded === undefined) return;
+    try { socket.send(encoded); }
+    catch (error) { throw new AttachmentTransportError(error); }
+    observe("result_replayed", { transport_call_id: callId });
   }
 
   function startHeartbeat(socket) {
     clearInterval(state.heartbeat);
+    state.pendingNonce = undefined;
+    // Browser-standard WebSockets cannot send or observe control frames. Their
+    // close/error events and admitted call deadlines provide failure detection.
+    if (typeof socket.ping !== "function" || typeof socket.on !== "function") return;
+    socket.on("pong", bytes => {
+      if (state.socket === socket && equalBytes(bytes, state.pendingNonce)) state.pendingNonce = undefined;
+    });
     state.heartbeat = setInterval(() => {
       if (state.socket !== socket) return;
       if (state.pendingNonce !== undefined) {
@@ -442,9 +468,8 @@ function createClient(endpoint, transport, options, admission, machines, attachm
         closeSocket(socket, 1012, "tool attachment heartbeat timed out");
         return;
       }
-      const nonce = randomNonce();
-      state.pendingNonce = nonce;
-      try { send(socket, { type: "ping", nonce }); }
+      state.pendingNonce = crypto.getRandomValues(new Uint8Array(16));
+      try { socket.ping(state.pendingNonce); }
       catch (error) { transportFailure(socket, error); }
     }, positiveOption(options.heartbeatMs, DEFAULT_HEARTBEAT_MS, "heartbeatMs"));
   }
@@ -492,7 +517,6 @@ function createClient(endpoint, transport, options, admission, machines, attachm
     state.catalogSent = false;
     state.readyReceived = false;
     clearTimers(state);
-    state.calls.clear(); state.receipts.clear();
     if (state.stopped || options.reconnect === false) abortGeneration(state, new Error("tool attachment stopped"));
     if (!state.stopped && state.readySettled && options.reconnect !== false) {
       scheduleReconnect();
@@ -650,8 +674,9 @@ function parseFrame(encoded) {
     positiveInteger(frame.output_byte_budget, "output_byte_budget");
     positiveInteger(frame.deadline_at, "deadline_at");
   } else if (frame.type === "cancel" || frame.type === "ack") requiredIdentifier(frame.call_id, "call_id");
-  else if (frame.type === "pong") {
-    if (typeof frame.nonce !== "string" || !frame.nonce || utf8ByteLength(frame.nonce) > 128) throw new Error("invalid pong nonce");
+  else if (frame.type === "recover") {
+    if (!Array.isArray(frame.call_ids) || frame.call_ids.length > 100 || new Set(frame.call_ids).size !== frame.call_ids.length) throw new Error("recover requires at most 100 unique call ids");
+    for (const callId of frame.call_ids) requiredIdentifier(callId, "call_id");
   }
   return frame;
 }
@@ -694,9 +719,15 @@ function closeReason(reason) {
   let bounded = ""; for (const scalar of reason) { if (utf8ByteLength(bounded + scalar) > 123) break; bounded += scalar; }
   return bounded;
 }
-function randomNonce() {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+function equalBytes(value, expected) {
+  if (expected === undefined || !ArrayBuffer.isView(value)) return false;
+  const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  return bytes.length === expected.length && bytes.every((byte, index) => byte === expected[index]);
+}
+function immutableIdentity(frame) {
+  const stable = value => Array.isArray(value) ? value.map(stable)
+    : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
+  return JSON.stringify(stable(frame));
 }
 
 const DO_KEYS = Object.freeze({
@@ -704,6 +735,6 @@ const DO_KEYS = Object.freeze({
   call: ["type", "session_id", "turn_id", "call_id", "model", "name", "input", "output_token_budget", "output_byte_budget", "deadline_at"],
   cancel: ["type", "call_id"],
   ack: ["type", "call_id"],
-  pong: ["type", "nonce"],
+  recover: ["type", "call_ids"],
   draining: ["type"],
 });

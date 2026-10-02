@@ -92,6 +92,8 @@ describe("hosted tools socket protocol", () => {
       { type: "fenced" },
       { type: "cancel_ack", call_id: "call:1" },
       { type: "result_ack", call_id: "call:1" },
+      { type: "ping", nonce: "heartbeat" },
+      { type: "pong", nonce: "heartbeat" },
     ]) expect(() => parseHostedToolsHostFrame(JSON.stringify(frame))).toThrow(HostedToolsProtocolError);
     expect(() => parseHostedToolsHostFrame(JSON.stringify({ type: "ready" }))).toThrow("host-to-managed");
     expect(() => parseHostedToolsManagedFrame(JSON.stringify({ type: "drain" }))).toThrow("managed-to-host");
@@ -106,8 +108,6 @@ describe("hosted tools socket protocol", () => {
       outcome: { status: "completed", output: { output: "ok", success: true } },
     }))).toThrow("nullable output metadata fields");
     expect(() => parseHostedToolsHostFrame("{" )).toThrow("JSON objects");
-    expect(() => parseHostedToolsHostFrame(JSON.stringify({ type: "ping", nonce: "x".repeat(129) })))
-      .toThrow("nonce");
     const large = "x".repeat(512 * 1024);
     expect(parseHostedToolsHostFrame(JSON.stringify({
       type: "result",
