@@ -2,9 +2,13 @@ use std::{path::PathBuf, process::Command};
 
 use clap::{Args, Subcommand};
 use eyre::{Result, WrapErr};
+use nanocodex::HarnessFamily;
 use nanocodex::oai::auth::{ChatGptLogin, logout_chatgpt, resolve_chatgpt_auth_status};
 
 use crate::config::default_auth_file;
+
+mod claude;
+pub(crate) use claude::ClaudeAuthArgs;
 
 #[derive(Args)]
 pub(crate) struct Auth {
@@ -14,18 +18,18 @@ pub(crate) struct Auth {
 
 #[derive(Subcommand)]
 enum AuthCommand {
-    /// Sign Codex and Nanocodex in with a `ChatGPT` subscription.
+    /// Sign in with the selected harness family's subscription.
     Login(AuthLogin),
-    /// Show the locally selected `ChatGPT` account without displaying tokens.
+    /// Show the selected harness family's account without displaying tokens.
     Status(AuthFile),
-    /// Remove the shared credentials, logging Codex and Nanocodex out.
+    /// Log out of the selected harness family's subscription.
     Logout(AuthFile),
 }
 
 #[derive(Args)]
 struct AuthFile {
     /// Override the shared Codex `auth.json` credential file.
-    #[arg(long, env = "NANOCODEX_AUTH_FILE")]
+    #[arg(long)]
     auth_file: Option<PathBuf>,
 }
 
@@ -39,7 +43,23 @@ struct AuthLogin {
 }
 
 impl Auth {
-    pub(crate) async fn run(self) -> Result<()> {
+    pub(crate) async fn run(self, family: HarnessFamily, claude: ClaudeAuthArgs) -> Result<()> {
+        if family == HarnessFamily::Claude {
+            return match self.command {
+                AuthCommand::Login(args) => {
+                    args.auth.reject_claude_override()?;
+                    claude.login(!args.no_open).await
+                }
+                AuthCommand::Status(args) => {
+                    args.reject_claude_override()?;
+                    claude.status().await
+                }
+                AuthCommand::Logout(args) => {
+                    args.reject_claude_override()?;
+                    claude.logout().await
+                }
+            };
+        }
         match self.command {
             AuthCommand::Login(args) => login(args.auth.path()?, !args.no_open).await,
             AuthCommand::Status(args) => status(&args.path()?).await,
@@ -49,8 +69,19 @@ impl Auth {
 }
 
 impl AuthFile {
+    fn reject_claude_override(&self) -> Result<()> {
+        if self.auth_file.is_some() {
+            eyre::bail!(
+                "--auth-file selects Codex credentials; use --claude-auth-file or NANOCODEX_CLAUDE_AUTH_FILE with --claude"
+            );
+        }
+        Ok(())
+    }
+
     fn path(self) -> Result<PathBuf> {
-        self.auth_file.map_or_else(default_auth_file, Ok)
+        self.auth_file
+            .or_else(|| std::env::var_os("NANOCODEX_AUTH_FILE").map(PathBuf::from))
+            .map_or_else(default_auth_file, Ok)
     }
 }
 

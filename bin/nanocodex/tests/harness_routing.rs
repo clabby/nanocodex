@@ -12,12 +12,25 @@ use std::{
     time::Duration,
 };
 
-use axum::{Json, Router, response::IntoResponse, routing::post, serve::ListenerExt as _};
+use axum::{
+    Json, Router,
+    http::HeaderMap,
+    response::IntoResponse,
+    routing::{get, post},
+    serve::ListenerExt as _,
+};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use eyre::{Result, eyre};
 use futures_util::{SinkExt as _, StreamExt as _};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde_json::{Value, json};
-use tokio::{net::TcpListener, process::Command, time::timeout};
+use sha2::{Digest as _, Sha256};
+use tokio::{
+    io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
+    net::TcpListener,
+    process::Command,
+    time::timeout,
+};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 const CODEX_MODEL: &str = "gpt-6.1-sol";
@@ -29,6 +42,7 @@ enum Journey {
     Smoke,
     Mixed,
     MissingChildAuth,
+    Subscription,
 }
 
 struct Provider {
@@ -72,6 +86,29 @@ impl Provider {
     }
 
     fn script(&self, label: &str, stage: usize) -> Reply {
+        if self.journey == Journey::Subscription {
+            return match (self.root, label, stage) {
+                ("claude", "root", 0) => Reply::Write {
+                    path: "grandchild.txt",
+                    content: "grandchild-effect",
+                },
+                ("claude", "root", _) => Reply::Text("subscription-native-answer".into()),
+                ("codex", "root", 0) => Reply::Code(format!(r#"
+const c=await tools.spawn_agent({{harness:'claude',model:'{CLAUDE_MODEL}',role:'MIXED_CHILD',task:'MIXED_CHILD',thinking:null,output_contract:{}}});
+const w=await tools.wait_agent({{agent_ids:[c.agent_id],timeout_ms:20000}}); text(w);
+if(w.timed_out || w.agents[0].status.state!=='completed' || w.agents[0].status.output.answer!=='subscription-child-answer') throw Error('subscription child failed');
+text('subscription-child-ok');
+"#, contract())),
+                ("codex", "root", _) => Reply::Text("subscription-mixed-answer".into()),
+                ("codex", "child", 0) => Reply::Write {
+                    path: "subscription-child.txt",
+                    content: "subscription-child-effect",
+                },
+                ("codex", "child", 1) => Reply::Code("const receipt=await tools.submit_result({output:{answer:'subscription-child-answer'}}); text(receipt); if(!receipt.accepted) throw Error('subscription result rejected');".into()),
+                ("codex", "child", _) => Reply::Text("subscription child finished".into()),
+                _ => Reply::Text("unexpected subscription request".into()),
+            };
+        }
         if self.journey == Journey::Smoke {
             return Reply::Text("claude-only-answer".into());
         }
@@ -92,8 +129,13 @@ impl Provider {
         if self.journey == Journey::MissingChildAuth {
             return if stage == 0 {
                 Reply::Code(format!(
-                    "let denied=false; try {{ await tools.spawn_agent({}); }} catch(e) {{ denied=true; text(String(e)); }} if(!denied) throw Error('missing credentials admitted'); const d=await tools.list_agents({{include_completed:true}}); if(d.agents.length) throw Error('failed spawn retained child'); text('auth-denied-ok');",
-                    spawn(Some(other), "AUTH_CHILD")
+                    "let denied=false; try {{ await tools.spawn_agent({}); }} catch(e) {{ denied=true; text(String(e)); {} }} if(!denied) throw Error('missing credentials admitted'); const d=await tools.list_agents({{include_completed:true}}); if(d.agents.length) throw Error('failed spawn retained child'); text('auth-denied-ok');",
+                    spawn(Some(other), "AUTH_CHILD"),
+                    if other == "claude" {
+                        "if(!String(e).includes('nanocodex --claude auth login')) throw Error('missing login hint');"
+                    } else {
+                        ""
+                    }
                 ))
             } else {
                 Reply::Text("auth-denied-answer".into())
@@ -155,7 +197,10 @@ if(!receipt.accepted) throw Error('valid output rejected'); text('contract-recov
             ("child", _) => Reply::Text("child finished".into()),
             ("followup", 0) => Reply::Code("text(await tools.submit_result({output:{answer:'followup-answer'}}));".into()),
             ("followup", _) => Reply::Text("followup finished".into()),
-            ("grandchild", 0) if self.root == "claude" => Reply::Write,
+            ("grandchild", 0) if self.root == "claude" => Reply::Write {
+                path: "grandchild.txt",
+                content: "grandchild-effect",
+            },
             ("grandchild", 1) if self.root == "claude" => Reply::Code("text(await tools.submit_result({output:{answer:'grandchild-answer'}}));".into()),
             ("grandchild", 0) => Reply::Code(r#"
 text(await tools.exec_command({cmd:"printf 'grandchild-effect' > grandchild.txt",shell:'/bin/sh',login:false}));
@@ -172,7 +217,10 @@ text(await tools.submit_result({output:{answer:'grandchild-answer'}}));
 enum Reply {
     Code(String),
     Text(String),
-    Write,
+    Write {
+        path: &'static str,
+        content: &'static str,
+    },
     Pause,
 }
 impl Reply {
@@ -180,8 +228,8 @@ impl Reply {
         match self {
             Self::Code(code) => json!({"code":code}),
             Self::Text(text) => json!({"text":text}),
-            Self::Write => {
-                json!({"tool":"Write","file_path":"grandchild.txt","content":"grandchild-effect"})
+            Self::Write { path, content } => {
+                json!({"tool":"Write","file_path":path,"content":content})
             }
             Self::Pause => json!({"paused":true}),
         }
@@ -194,16 +242,26 @@ impl Reply {
             Self::Text(text) => {
                 json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]})
             }
-            Self::Write => unreachable!("native Claude Write cannot route to Responses"),
+            Self::Write { .. } => unreachable!("native Claude Write cannot route to Responses"),
             Self::Pause => unreachable!("paused generation has no terminal response"),
         };
         json!({"type":"response.completed","response":{"id":id,"status":"completed","output":[output],
             "usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2}}})
     }
-    fn claude(&self, id: &str) -> String {
+    fn claude(&self, id: &str, request: &Value) -> String {
+        let tool_name = |name: &str| {
+            if request["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == format!("_{name}")))
+            {
+                format!("_{name}")
+            } else {
+                name.to_owned()
+            }
+        };
         let (block, delta, stop) = match self {
             Self::Code(code) => (
-                json!({"type":"tool_use","id":id,"name":"exec","input":{}}),
+                json!({"type":"tool_use","id":id,"name":tool_name("exec"),"input":{}}),
                 json!({"type":"input_json_delta","partial_json":json!({"code":code}).to_string()}),
                 "tool_use",
             ),
@@ -212,9 +270,9 @@ impl Reply {
                 json!({"type":"text_delta","text":text}),
                 "end_turn",
             ),
-            Self::Write => (
-                json!({"type":"tool_use","id":id,"name":"Write","input":{}}),
-                json!({"type":"input_json_delta","partial_json":json!({"file_path":"grandchild.txt","content":"grandchild-effect"}).to_string()}),
+            Self::Write { path, content } => (
+                json!({"type":"tool_use","id":id,"name":tool_name("Write"),"input":{}}),
+                json!({"type":"input_json_delta","partial_json":json!({"file_path":path,"content":content}).to_string()}),
                 "tool_use",
             ),
             Self::Pause => unreachable!("paused generation has no terminal response"),
@@ -305,6 +363,117 @@ struct Servers {
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+// Secrets remain in fixture memory; persisted HTTP evidence is redacted.
+struct SubscriptionFixture {
+    artifact: PathBuf,
+    oauth: Vec<Value>,
+    messages: Vec<Value>,
+    bodies: Vec<Vec<u8>>,
+    login_query: HashMap<String, String>,
+    tokens: usize,
+    reject_next: bool,
+}
+
+fn redact(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            for (name, value) in fields {
+                if matches!(
+                    name.as_str(),
+                    "authorization"
+                        | "access_token"
+                        | "refresh_token"
+                        | "token"
+                        | "code"
+                        | "code_verifier"
+                        | "state"
+                ) {
+                    *value = json!("<redacted>");
+                } else {
+                    redact(value);
+                }
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(redact),
+        _ => {}
+    }
+}
+
+impl SubscriptionFixture {
+    fn record(&mut self, mut event: Value) {
+        redact(&mut event);
+        self.oauth.push(event);
+        std::fs::write(
+            self.artifact.join("oauth-http.json"),
+            serde_json::to_vec_pretty(&self.oauth).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn token(&mut self, headers: &HeaderMap, body: Value) -> Value {
+        assert!(!headers.contains_key("anthropic-beta"));
+        assert_eq!(body["client_id"], "synthetic-cli-client");
+        if self.tokens == 0 {
+            assert_eq!(body["grant_type"], "authorization_code");
+            assert_eq!(body["code"], "synthetic-login-code");
+            assert_eq!(body["state"], self.login_query["state"]);
+            let verifier = body["code_verifier"].as_str().unwrap();
+            assert_eq!(
+                URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+                self.login_query["code_challenge"]
+            );
+            assert_eq!(self.login_query["code_challenge_method"], "S256");
+        } else {
+            assert_eq!(self.tokens, 1, "unexpected refresh or second login");
+            assert_eq!(body["grant_type"], "refresh_token");
+            assert_eq!(body["refresh_token"], "synthetic-refresh-1");
+        }
+        self.tokens += 1;
+        self.record(json!({"endpoint":"token","request":body,"status":200}));
+        json!({"access_token":format!("synthetic-access-{}",self.tokens),"refresh_token":format!("synthetic-refresh-{}",self.tokens),"expires_in":3600,"scope":"user:profile user:inference user:sessions:claude_code","token_type":"Bearer"})
+    }
+
+    fn profile(&mut self, headers: &HeaderMap) {
+        assert_eq!(
+            headers["authorization"].to_str().unwrap(),
+            format!("Bearer synthetic-access-{}", self.tokens)
+        );
+        assert!(!headers.contains_key("anthropic-beta"));
+        self.record(json!({"endpoint":"profile","authorization":"<redacted>","status":200}));
+    }
+
+    fn messages(&mut self, headers: &HeaderMap, body: &[u8], request: &Value) -> bool {
+        assert_eq!(
+            headers["authorization"].to_str().unwrap(),
+            format!("Bearer synthetic-access-{}", self.tokens)
+        );
+        assert!(
+            !headers.contains_key("x-api-key"),
+            "subscription accidentally used an API key"
+        );
+        assert!(
+            headers["anthropic-beta"]
+                .to_str()
+                .unwrap()
+                .split(',')
+                .any(|beta| beta.trim() == "oauth-2025-04-20")
+        );
+        assert_eq!(headers["x-app"], "cli");
+        assert_eq!(headers["x-stainless-runtime"], "node");
+        let user_agent = headers["user-agent"].to_str().unwrap();
+        assert!(user_agent.starts_with("claude-cli/"));
+        let accepted = !std::mem::take(&mut self.reject_next);
+        self.bodies.push(body.to_vec());
+        self.messages.push(json!({"endpoint":"messages","authorization":"<redacted>","token_generation":self.tokens,"anthropic-beta":headers["anthropic-beta"].to_str().unwrap(),"user-agent":user_agent,"x-app":"cli","x-stainless-runtime":"node","status":if accepted {200} else {401},"request":request}));
+        std::fs::write(
+            self.artifact.join("messages-http.json"),
+            serde_json::to_vec_pretty(&self.messages).unwrap(),
+        )
+        .unwrap();
+        accepted
+    }
+}
+
 struct PauseGuard {
     state: Arc<Mutex<Provider>>,
     observed: bool,
@@ -344,16 +513,31 @@ impl Drop for Servers {
 }
 
 async fn servers(provider: Arc<Mutex<Provider>>) -> Result<Servers> {
+    subscription_servers(provider, None).await
+}
+
+async fn subscription_servers(
+    provider: Arc<Mutex<Provider>>,
+    subscription: Option<Arc<Mutex<SubscriptionFixture>>>,
+) -> Result<Servers> {
     let http = TcpListener::bind("127.0.0.1:0").await?;
     let claude = format!("http://{}/v1/messages", http.local_addr()?);
     let state = Arc::clone(&provider);
-    let router = Router::new().route(
+    let messages_auth = subscription.clone();
+    let mut router = Router::new().route(
         "/v1/messages",
-        post(move |Json(request): Json<Value>| {
+        post(move |headers: HeaderMap, body: axum::body::Bytes| {
             let state = Arc::clone(&state);
+            let auth = messages_auth.clone();
             async move {
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                if let Some(auth) = auth {
+                    if !auth.lock().unwrap().messages(&headers, &body, &request) {
+                        return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"type":"error","error":{"type":"authentication_error","message":"synthetic access expired"}}))).into_response();
+                    }
+                }
                 let label = label(&request);
-                let reply = state.lock().unwrap().respond("claude", &label, request);
+                let reply = state.lock().unwrap().respond("claude", &label, request.clone());
                 if matches!(reply, Reply::Pause) {
                     return axum::response::Response::builder()
                         .header("content-type", "text/event-stream")
@@ -367,12 +551,32 @@ async fn servers(provider: Arc<Mutex<Provider>>) -> Result<Servers> {
                 }
                 (
                     [("content-type", "text/event-stream")],
-                    reply.claude(&uuid::Uuid::new_v4().to_string()),
+                    reply.claude(&uuid::Uuid::new_v4().to_string(), &request),
                 )
                     .into_response()
             }
         }),
     );
+    if let Some(auth) = subscription {
+        let token_auth = Arc::clone(&auth);
+        let profile_auth = Arc::clone(&auth);
+        router = router
+            .route("/oauth/token", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let response = token_auth.lock().unwrap().token(&headers, body);
+                async move { Json(response) }
+            }))
+            .route("/oauth/profile", get(move |headers: HeaderMap| {
+                let mut state = profile_auth.lock().unwrap();
+                state.profile(&headers);
+                async { Json(json!({"account":{"uuid":"synthetic-account"},"organization":{"uuid":"synthetic-org"}})) }
+            }))
+            .route("/oauth/token/revoke", post(move |Json(body): Json<Value>| {
+                let mut state = auth.lock().unwrap();
+                assert_eq!(body["token"], "synthetic-refresh-2");
+                state.record(json!({"endpoint":"revoke","request":body,"status":200}));
+                async { Json(json!({})) }
+            }));
+    }
     let connections = Arc::clone(&provider);
     let http = http.tap_io(move |_| connections.lock().unwrap().connected("claude"));
     let http_task = tokio::spawn(async move {
@@ -733,6 +937,7 @@ async fn journey(family: &'static str, kind: Journey) -> Result<()> {
         Journey::Smoke => "claude-only-answer",
         Journey::Mixed => "mixed-routing-answer",
         Journey::MissingChildAuth => "auth-denied-answer",
+        Journey::Subscription => "subscription-native-answer",
     };
     if kind == Journey::Smoke {
         run_tui(command, &artifact, answer).await?;
@@ -934,6 +1139,12 @@ async fn root_selection_and_missing_auth_fail_before_provider_dispatch() -> Resu
             "invalid root opened a provider connection"
         );
         assert!(!output.stderr.is_empty(), "invalid root omitted its error");
+        if name == "claude-no-auth" {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("nanocodex --claude auth login"),
+                "missing actionable subscription login hint"
+            );
+        }
         assert!(
             provider.lock().unwrap().log.is_empty(),
             "invalid root dispatched a provider request; evidence {}",
@@ -941,6 +1152,579 @@ async fn root_selection_and_missing_auth_fail_before_provider_dispatch() -> Resu
         );
         assert!(!artifact.join("workspace/grandchild.txt").exists());
     }
+    Ok(())
+}
+
+fn subscription_auth_command(workspace: &Path, config: &Path, action: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nanocodex"));
+    command
+        .current_dir(workspace)
+        .env_clear()
+        .env("HOME", workspace.join("home"))
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("CODEX_HOME", workspace.join("codex-home"))
+        .args(["--claude", "--claude-oauth-config"])
+        .arg(config)
+        .args(["auth", action])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
+async fn subscription_login(
+    workspace: &Path,
+    config: &Path,
+    artifact: &Path,
+    fixture: &Arc<Mutex<SubscriptionFixture>>,
+) -> Result<()> {
+    let mut command = subscription_auth_command(workspace, config, "login");
+    command.arg("--no-open").stdin(Stdio::piped());
+    let evidence = artifact.join("login");
+    std::fs::create_dir_all(&evidence)?;
+    std::fs::write(
+        evidence.join("scenario.json"),
+        serde_json::to_vec_pretty(
+            &json!({"command":format!("{command:?}"),"stdin":"<redacted-code>#<redacted-state>\\n","expected":"PKCE authorization URL, code exchange, profile validation, encrypted durable authentication","reproduce":"cargo test --locked -p nanocodex-bin --test harness_routing claude_subscription_login_refresh_restart_and_logout -- --nocapture"}),
+        )?,
+    )?;
+    let mut child = command.spawn()?;
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut authorization_url = None;
+    let mut process_status = None;
+    let result = timeout(LIMIT, async {
+        let mut out_open = true;
+        let mut err_open = true;
+        let login_url = loop {
+            let mut out_line = String::new();
+            let mut err_line = String::new();
+            let (count, is_stdout, line) = tokio::select! {
+                result = stdout.read_line(&mut out_line), if out_open => (result?, true, out_line),
+                result = stderr.read_line(&mut err_line), if err_open => (result?, false, err_line),
+                else => return Err(eyre!("login exited without an authorization URL")),
+            };
+            if count == 0 {
+                if is_stdout {
+                    out_open = false;
+                } else {
+                    err_open = false;
+                }
+                continue;
+            }
+            if is_stdout {
+                out.extend_from_slice(line.as_bytes());
+            } else {
+                err.extend_from_slice(line.as_bytes());
+            }
+            if let Some(url) = line
+                .split_whitespace()
+                .filter_map(|word| reqwest::Url::parse(word).ok())
+                .find(|url| url.path() == "/oauth/authorize")
+            {
+                break url;
+            }
+        };
+        let query: HashMap<String, String> = login_url
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        authorization_url = Some(login_url);
+        if query.get("client_id").map(String::as_str) != Some("synthetic-cli-client")
+            || query.get("state").is_none_or(|state| state.len() != 43)
+        {
+            return Err(eyre!(
+                "login authorization URL has invalid client ID or state"
+            ));
+        }
+        fixture.lock().unwrap().login_query = query.clone();
+        let mut input = child.stdin.take().unwrap();
+        input
+            .write_all(format!("synthetic-login-code#{}\n", query["state"]).as_bytes())
+            .await?;
+        input.shutdown().await?;
+        drop(input);
+        let (out_result, err_result) =
+            tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
+        out_result?;
+        err_result?;
+        process_status = Some(child.wait().await?);
+        if !process_status.as_ref().unwrap().success() {
+            return Err(eyre!("login process failed"));
+        }
+        Ok::<_, eyre::Report>(())
+    })
+    .await
+    .map_err(|_| eyre!("subscription login timed out"))
+    .and_then(|result| result);
+    // Capture failures before URL parsing or code exchange as well as success.
+    // Reap or terminate the child so even an early error records its outcome.
+    let mut cleanup_error = None;
+    if process_status.is_none() {
+        process_status = child.try_wait().ok().flatten();
+        if process_status.is_none() {
+            if let Err(error) = child.kill().await {
+                cleanup_error = Some(error.to_string());
+            }
+            process_status = child.try_wait().ok().flatten();
+        }
+    }
+    let safe = |bytes: &[u8]| {
+        let mut text = String::from_utf8_lossy(bytes).into_owned();
+        if let Some(url) = &authorization_url {
+            text = text.replace(url.as_str(), "<redacted-authorization-url>");
+            for (name, value) in url.query_pairs() {
+                if name == "state" {
+                    text = text.replace(value.as_ref(), "<redacted-state>");
+                }
+            }
+        }
+        // A malformed printed URL may not have reached the parser above.
+        for word in text
+            .split_whitespace()
+            .filter(|word| word.contains("/oauth/authorize"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        {
+            text = text.replace(&word, "<redacted-authorization-url>");
+        }
+        for secret in [
+            "synthetic-login-code",
+            "synthetic-access-1",
+            "synthetic-access-2",
+            "synthetic-refresh-1",
+            "synthetic-refresh-2",
+        ] {
+            text = text.replace(secret, "<redacted>");
+        }
+        text
+    };
+    std::fs::write(evidence.join("stdout.log"), safe(&out))?;
+    std::fs::write(evidence.join("stderr.log"), safe(&err))?;
+    std::fs::write(
+        evidence.join("outcome.json"),
+        serde_json::to_vec_pretty(&json!({
+            "success":result.is_ok(),"exit_code":process_status.as_ref().and_then(|status| status.code()),
+            "error":result.as_ref().err().map(ToString::to_string),"cleanup_error":cleanup_error,
+            "authorization_url_observed":authorization_url.is_some(),
+            "pkce":result.is_ok().then_some("S256 challenge checked against token exchange verifier"),
+            "stdout":"stdout.log","stderr":"stderr.log","oauth_trace":"../oauth-http.json"
+        }))?,
+    )?;
+    eprintln!("journey evidence: {}", evidence.display());
+    result.map_err(|error| eyre!("{error}; evidence {}", evidence.display()))
+}
+
+async fn subscription_step(
+    command: Command,
+    artifact: &Path,
+    name: &str,
+    expected: &str,
+    fixture: &Arc<Mutex<SubscriptionFixture>>,
+    provider: &Arc<Mutex<Provider>>,
+) -> Result<Output> {
+    let evidence = artifact.join(name);
+    std::fs::create_dir_all(&evidence)?;
+    let output = run(command, &evidence, expected).await?;
+    for bytes in [&output.stdout, &output.stderr] {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(
+            !text.contains("synthetic-access-") && !text.contains("synthetic-refresh-"),
+            "CLI leaked subscription credentials; evidence {}",
+            evidence.display()
+        );
+    }
+    std::fs::write(
+        evidence.join("provider.json"),
+        serde_json::to_vec_pretty(&provider.lock().unwrap().log)?,
+    )?;
+    let state = fixture.lock().unwrap();
+    std::fs::write(
+        evidence.join("oauth-http.json"),
+        serde_json::to_vec_pretty(&state.oauth)?,
+    )?;
+    std::fs::write(
+        evidence.join("messages-http.json"),
+        serde_json::to_vec_pretty(&state.messages)?,
+    )?;
+    Ok(output)
+}
+
+fn encrypted_subscription_store(path: &Path) -> Result<()> {
+    let bytes = std::fs::read(path)?;
+    for secret in [
+        "synthetic-access-",
+        "synthetic-refresh-",
+        "synthetic-login-code",
+    ] {
+        assert!(
+            !bytes
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes()),
+            "credential store contains plaintext secrets"
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(path)?.permissions().mode() & 0o777,
+            0o600,
+            "credential store must be owner-only"
+        );
+        assert_eq!(
+            std::fs::metadata(path.parent().unwrap())?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "credential directory must be owner-only"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn claude_subscription_login_refresh_restart_and_logout() -> Result<()> {
+    let artifact = artifact("claude-subscription")?;
+    let workspace = artifact.join("workspace");
+    let config = workspace.join("claude-oauth.json");
+    let journal = workspace.join("codex-home/claude");
+    std::fs::create_dir_all(&journal)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let provider = Arc::new(Mutex::new(Provider {
+        root: "claude",
+        journey: Journey::Subscription,
+        counts: HashMap::new(),
+        log: vec![],
+        artifact: artifact.clone(),
+        pauses: 0,
+        cancellations: 0,
+        connections: vec![],
+    }));
+    let fixture = Arc::new(Mutex::new(SubscriptionFixture {
+        artifact: artifact.clone(),
+        oauth: vec![],
+        messages: vec![],
+        bodies: vec![],
+        login_query: HashMap::new(),
+        tokens: 0,
+        reject_next: true,
+    }));
+    let servers = subscription_servers(Arc::clone(&provider), Some(Arc::clone(&fixture))).await?;
+    let base = servers.claude.strip_suffix("/v1/messages").unwrap();
+    std::fs::write(
+        &config,
+        serde_json::to_vec_pretty(&json!({
+            "authorize_url":format!("{base}/oauth/authorize"),"token_url":format!("{base}/oauth/token"),"profile_url":format!("{base}/oauth/profile"),"manual_redirect_uri":format!("{base}/oauth/callback"),"client_id":"synthetic-cli-client","scopes":["user:profile","user:inference","user:sessions:claude_code"],"refresh_margin_millis":300000,"login_ttl_millis":600000,"allow_loopback_http":true
+        }))?,
+    )?;
+    let mut invalid = Command::new(env!("CARGO_BIN_EXE_nanocodex"));
+    invalid
+        .current_dir(&workspace)
+        .env_clear()
+        .env("HOME", workspace.join("home"))
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("CODEX_HOME", workspace.join("codex-home"))
+        .args([
+            "--prompt",
+            "must-not-start-agent",
+            "--claude",
+            "auth",
+            "status",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let invalid = subscription_step(
+        invalid,
+        &artifact,
+        "interactive-flag-before-auth",
+        "exit 2 naming --prompt; no OAuth or model provider request/connection",
+        &fixture,
+        &provider,
+    )
+    .await?;
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("--prompt"));
+    assert!(fixture.lock().unwrap().oauth.is_empty());
+    assert!(fixture.lock().unwrap().messages.is_empty());
+    assert!(provider.lock().unwrap().connections.is_empty());
+    subscription_login(&workspace, &config, &artifact, &fixture).await?;
+    let store = journal.join("private/auth");
+    encrypted_subscription_store(&store)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&journal)?.permissions().mode() & 0o777,
+            0o755,
+            "subscription login changed existing journal directory permissions"
+        );
+    }
+    let mut status = subscription_auth_command(&workspace, &config, "status");
+    status.env("NANOCODEX_CLAUDE_AUTH_FILE", &store);
+    let output = subscription_step(
+        status,
+        &artifact,
+        "authenticated-status",
+        "authenticated safe JSON status",
+        &fixture,
+        &provider,
+    )
+    .await?;
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout)?["state"],
+        "authenticated"
+    );
+
+    let invocation = |family: &str| {
+        let mut command = command(
+            &workspace,
+            &servers,
+            family,
+            family == "codex",
+            false,
+            false,
+        );
+        command.arg("--claude-oauth-config").arg(&config).args([
+            "--model",
+            model(family),
+            "SUBSCRIPTION_ROOT",
+        ]);
+        command
+    };
+    let native = subscription_step(
+        invocation("claude"),
+        &artifact,
+        "native-root",
+        "native Write effect, one 401 refresh and identical-byte retry",
+        &fixture,
+        &provider,
+    )
+    .await?;
+    success(
+        &native,
+        &artifact.join("native-root"),
+        "subscription-native-answer",
+    )?;
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("grandchild.txt"))?,
+        "grandchild-effect"
+    );
+    {
+        let state = fixture.lock().unwrap();
+        assert_eq!(state.tokens, 2);
+        assert_eq!(state.messages[0]["status"], 401);
+        assert_eq!(state.messages[1]["status"], 200);
+        assert_eq!(
+            state.bodies[0], state.bodies[1],
+            "refresh changed frozen Messages request bytes"
+        );
+        assert_eq!(state.messages[0]["token_generation"], 1);
+        assert_eq!(state.messages[1]["token_generation"], 2);
+    }
+    encrypted_subscription_store(&store)?;
+    {
+        let mut state = provider.lock().unwrap();
+        state.root = "codex";
+        state.counts.clear();
+    }
+    let mixed = subscription_step(
+        invocation("codex"),
+        &artifact,
+        "mixed-restart",
+        "new Codex process uses persisted subscription for Claude child and custom Code Mode tool",
+        &fixture,
+        &provider,
+    )
+    .await?;
+    success(
+        &mixed,
+        &artifact.join("mixed-restart"),
+        "subscription-mixed-answer",
+    )?;
+    {
+        let state = provider.lock().unwrap();
+        let parent_result = state
+            .log
+            .iter()
+            .find(|call| call["family"] == "codex" && call["label"] == "root" && call["stage"] == 1)
+            .ok_or_else(|| {
+                eyre!(
+                    "missing mixed parent completion tool result; evidence {}",
+                    artifact.display()
+                )
+            })?["tool_result"]
+            .to_string();
+        assert!(
+            parent_result.contains("subscription-child-ok"),
+            "parent did not validate child completion: {parent_result}; evidence {}",
+            artifact.display()
+        );
+        assert!(
+            !parent_result.contains("Script failed"),
+            "parent Code Mode failed: {parent_result}; evidence {}",
+            artifact.display()
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("subscription-child.txt"))?,
+        "subscription-child-effect"
+    );
+    {
+        let state = fixture.lock().unwrap();
+        assert_eq!(
+            state.tokens, 2,
+            "restart unnecessarily exchanged credentials"
+        );
+        let mut first_device: Option<String> = None;
+        let mut sessions = HashMap::<String, String>::new();
+        for call in &state.messages {
+            let request = &call["request"];
+            let identity: Value =
+                serde_json::from_str(request["metadata"]["user_id"].as_str().unwrap())?;
+            assert_eq!(identity["account_uuid"], "synthetic-account");
+            let device = identity["device_id"].as_str().unwrap();
+            assert_eq!(device.len(), 64);
+            if let Some(previous) = &first_device {
+                assert_eq!(
+                    device,
+                    previous.as_str(),
+                    "installation identity changed across root/child/restart"
+                );
+            } else {
+                first_device = Some(device.to_owned());
+            }
+            let session = identity["session_id"].as_str().unwrap();
+            assert!(!session.is_empty());
+            let label = label(request);
+            if let Some(previous) = sessions.insert(label, session.to_owned()) {
+                assert_eq!(
+                    session, previous,
+                    "agent session identity changed across turns/retry"
+                );
+            }
+            let tools = request["tools"].as_array().unwrap();
+            assert!(
+                tools.iter().any(|tool| tool["name"] == "_exec"),
+                "custom Code Mode tool lacks subscription wire prefix"
+            );
+        }
+        assert_ne!(
+            sessions["root"], sessions["child"],
+            "root and child shared session affinity"
+        );
+    }
+    let mut logout_command = subscription_auth_command(&workspace, &config, "logout");
+    logout_command.arg("--claude-auth-file").arg(&store);
+    let logout = subscription_step(
+        logout_command,
+        &artifact,
+        "logout",
+        "durable signed-out state and refresh token revocation",
+        &fixture,
+        &provider,
+    )
+    .await?;
+    assert!(logout.status.success());
+    encrypted_subscription_store(&store)?;
+    let status = subscription_auth_command(&workspace, &config, "status");
+    let output = subscription_step(
+        status,
+        &artifact,
+        "signed-out-status",
+        "safe signed_out JSON after process restart",
+        &fixture,
+        &provider,
+    )
+    .await?;
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout)?["state"],
+        "signed_out"
+    );
+    let before = provider.lock().unwrap().connections.len();
+    let denied = subscription_step(
+        invocation("claude"),
+        &artifact,
+        "logged-out-root",
+        "nonzero exit with nanocodex --claude auth login, zero provider connections",
+        &fixture,
+        &provider,
+    )
+    .await?;
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("nanocodex --claude auth login"));
+    assert_eq!(provider.lock().unwrap().connections.len(), before);
+    let claude_before = fixture.lock().unwrap().messages.len();
+    let claude_connections_before = provider
+        .lock()
+        .unwrap()
+        .connections
+        .iter()
+        .filter(|connection| connection["family"] == "claude")
+        .count();
+    {
+        let mut state = provider.lock().unwrap();
+        state.journey = Journey::MissingChildAuth;
+        state.counts.clear();
+    }
+    let denied = subscription_step(
+        invocation("codex"),
+        &artifact,
+        "logged-out-child",
+        "Claude child refused with login hint, no registry effect or Claude dispatch",
+        &fixture,
+        &provider,
+    )
+    .await?;
+    success(
+        &denied,
+        &artifact.join("logged-out-child"),
+        "auth-denied-answer",
+    )?;
+    assert_eq!(fixture.lock().unwrap().messages.len(), claude_before);
+    assert_eq!(
+        provider
+            .lock()
+            .unwrap()
+            .connections
+            .iter()
+            .filter(|connection| connection["family"] == "claude")
+            .count(),
+        claude_connections_before,
+        "logged-out child connected to Claude before authorization"
+    );
+    assert!(
+        provider.lock().unwrap().log.last().unwrap()["tool_result"]
+            .to_string()
+            .contains("auth-denied-ok")
+    );
+    assert_eq!(
+        fixture
+            .lock()
+            .unwrap()
+            .oauth
+            .iter()
+            .map(|call| call["endpoint"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["token", "profile", "token", "profile", "revoke"]
+    );
+    std::fs::write(
+        artifact.join("subscription-contract.json"),
+        serde_json::to_vec_pretty(&json!({
+            "observed":{"pkce":"S256 matches exchange verifier","messages_retry":"401 then 200, exact request bytes equal","token_exchanges":2,"native_effect":"grandchild.txt = grandchild-effect","child_effect":"subscription-child.txt = subscription-child-effect","restart":"authenticated JSON status and inference with no additional token exchange","identity":"stable device/account across processes, stable session within agent, distinct root/child sessions","store":"encrypted credentials contain no synthetic plaintext tokens; auth permissions 0600 and private directory 0700; existing journal directory retains 0755","logout":"signed_out JSON status, root login hint before dispatch, child login hint without registry or transport effects"},
+            "provider_trace":"provider.json","oauth_trace":"oauth-http.json","messages_trace":"messages-http.json"
+        }))?,
+    )?;
     Ok(())
 }
 

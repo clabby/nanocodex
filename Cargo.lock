@@ -5816,6 +5816,7 @@ dependencies = [
 name = "nanocodex-bin"
 version = "0.6.6"
 dependencies = [
+ "aes-gcm",
  "alloy-primitives",
  "alloy-rlp",
  "alloy-signer",

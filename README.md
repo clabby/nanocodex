@@ -290,15 +290,23 @@ instructions, and the real Notepad control smoke test.
 
 ## Native CLI harnesses
 
-`nanocodex --claude` starts the native Claude Messages agent. Use
-`ANTHROPIC_API_KEY` for Claude authentication and select a model within that
-family:
+`nanocodex --claude` starts the native Claude Messages agent with OMP-style
+subscription authentication. Sign in once, then select a model within that family:
 
 ```sh
+nanocodex --claude auth login
 nanocodex --claude --model sonnet
 nanocodex run "inspect the repository" --harness claude --model opus
 nanocodex run "inspect the repository" --harness codex --model sol
 ```
+
+Use `nanocodex --claude auth status` or `nanocodex --claude auth logout` to manage
+that subscription.
+Claude roots and Claude children share its token-refresh manager, including when
+the root uses Codex. `ANTHROPIC_API_KEY` or `--claude-api-key` explicitly selects
+Console API-key authentication instead. Claude credentials are encrypted outside
+agent sessions; `--claude-auth-file` overrides their private store. See
+[Claude authentication](docs/claude-authentication.md) for setup and recovery.
 
 `spawn_agent` accepts `harness: "codex" | "claude"` and a model within that
 family. Null values inherit the parent family and its current settings; switching

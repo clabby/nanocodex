@@ -80,7 +80,6 @@ impl RetryableProcessExit {
     version = version::SHORT_VERSION,
     long_version = version::LONG_VERSION,
     about = "An interactive coding agent and headless JSONL runner",
-    args_conflicts_with_subcommands = true,
     subcommand_negates_reqs = true
 )]
 struct Cli {
@@ -115,7 +114,7 @@ enum Command {
     Hand(hand_setup::Hand),
     /// Sign in to the managed Nanocodex account shared with nanocodex2.
     Account(nanocodex_cli_auth::Account),
-    /// Manage `ChatGPT` subscription login.
+    /// Manage subscription login for the selected harness.
     Auth(auth::Auth),
     /// Sign in to Nanocodex Connect and authorize this installation.
     Login(login::Login),
@@ -199,11 +198,43 @@ fn try_main() -> Result<()> {
     // requiring shell-specific syntax to load the repository's `.env` file.
     let _ = dotenvy::dotenv();
 
-    let cli = Cli::parse();
+    let cli = parse_cli();
     if let Some(Command::VmRunConfig(command)) = &cli.command {
         return command.run();
     }
     run_with_runtime(run(cli))
+}
+
+fn parse_cli() -> Cli {
+    use clap::{CommandFactory, FromArgMatches, error::ErrorKind, parser::ValueSource};
+
+    let mut command = Cli::command();
+    let matches = command.get_matches_mut();
+    // Global harness/auth flags apply on either side of a subcommand. Local
+    // interactive flags must not be silently ignored by a subcommand's config.
+    let misplaced = matches.subcommand_name().and_then(|_| {
+        command
+            .get_arguments()
+            .find(|argument| {
+                !argument.is_global_set()
+                    && matches.value_source(argument.get_id().as_str())
+                        == Some(ValueSource::CommandLine)
+            })
+            .map(|argument| {
+                argument
+                    .get_long()
+                    .map_or_else(|| argument.get_id().to_string(), |long| format!("--{long}"))
+            })
+    });
+    if let Some(name) = misplaced {
+        command
+            .error(
+                ErrorKind::ArgumentConflict,
+                format!("{name} must follow a subcommand that supports it, or be used in interactive mode"),
+            )
+            .exit();
+    }
+    Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
 }
 
 fn run_with_runtime(future: impl std::future::Future<Output = Result<()>>) -> Result<()> {
@@ -246,7 +277,11 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Computer(command)) => command.run().await.map_err(|error| eyre!(error)),
         Some(Command::Hand(command)) => command.run().await,
         Some(Command::Account(command)) => command.run().await.map_err(Into::into),
-        Some(Command::Auth(command)) => command.run().await,
+        Some(Command::Auth(command)) => {
+            command
+                .run(cli.agent.selected_harness()?, cli.agent.claude_auth)
+                .await
+        }
         Some(Command::Login(command)) => command.run().await,
         Some(Command::Connect(command)) => command.run().await,
         Some(Command::Status(command)) => command.run().await,

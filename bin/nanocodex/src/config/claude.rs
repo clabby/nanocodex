@@ -17,6 +17,44 @@ use nanocodex::{
 use serde_json::{Value, json, value::to_raw_value};
 use tokio::time::{Duration, Instant};
 
+/// Resolve Claude credentials only when its family is used, then share the
+/// native client and its refresh gate across every root and child session.
+#[derive(Clone)]
+pub(super) struct ClaudeConnection {
+    auth: crate::auth::ClaudeAuthArgs,
+    api_key: Option<String>,
+    endpoint: Option<String>,
+    client: Arc<tokio::sync::OnceCell<std::result::Result<ClaudeClient, String>>>,
+}
+
+impl ClaudeConnection {
+    pub(super) fn new(
+        auth: crate::auth::ClaudeAuthArgs,
+        api_key: Option<String>,
+        endpoint: Option<String>,
+    ) -> Self {
+        Self {
+            auth,
+            api_key,
+            endpoint,
+            client: Arc::new(tokio::sync::OnceCell::new()),
+        }
+    }
+
+    async fn client(&self) -> std::result::Result<ClaudeClient, String> {
+        self.client
+            .get_or_init(|| async {
+                self.auth
+                    .clone()
+                    .client(self.api_key.clone(), self.endpoint.clone())
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .clone()
+    }
+}
+
 impl AgentArgs {
     pub(super) async fn build_claude(
         self,
@@ -57,19 +95,12 @@ impl AgentArgs {
         if self.memory {
             return Err(eyre!("the native Claude CLI does not yet support --memory"));
         }
-        let api_key = self.claude_api_key.clone().ok_or_else(|| eyre!(
-            "Claude requires --claude-api-key or ANTHROPIC_API_KEY; ChatGPT credentials cannot authorize Anthropic Messages"
-        ))?;
-        if api_key.trim().is_empty() {
-            return Err(eyre!("Claude API key must not be empty"));
-        }
-        let client = ClaudeClient::new(
-            reqwest::Client::new(),
-            self.claude_messages_url
-                .clone()
-                .unwrap_or_else(|| nanocodex::claude::ANTHROPIC_MESSAGES_URL.to_owned()),
-            api_key,
+        let connection = ClaudeConnection::new(
+            self.claude_auth,
+            self.claude_api_key,
+            self.claude_messages_url,
         );
+        let client = connection.client().await.map_err(|error| eyre!(error))?;
         let workspace = self
             .cwd
             .unwrap_or_else(|| PathBuf::from("."))
@@ -188,8 +219,7 @@ impl AgentArgs {
             });
         let harness = register_claude_recipe(
             harness_builder,
-            self.claude_api_key,
-            self.claude_messages_url,
+            connection,
             workspace.clone(),
             instructions.clone(),
             tools.clone(),
@@ -297,11 +327,9 @@ fn configured_claude_builder(
     builder
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn register_claude_recipe(
     harness: nanocodex::HarnessBuilder,
-    api_key: Option<String>,
-    endpoint: Option<String>,
+    connection: ClaudeConnection,
     workspace: PathBuf,
     instructions: String,
     tools: Tools,
@@ -309,28 +337,19 @@ pub(super) fn register_claude_recipe(
     registry: Option<Arc<nanocodex_subagents::Registry>>,
 ) -> nanocodex::HarnessBuilder {
     harness.register(HarnessFamily::Claude, move |request| {
-        let api_key = api_key.clone();
-        let endpoint = endpoint.clone();
+        let connection = connection.clone();
         let workspace = workspace.clone();
         let instructions = instructions.clone();
         let tools = tools.clone();
         let registry = registry.clone();
         async move {
-            let api_key = api_key
-                .filter(|key| !key.trim().is_empty())
-                .ok_or_else(|| {
-                    nanocodex::NanocodexError::InvalidRequest(
-                        "Claude requires --claude-api-key or ANTHROPIC_API_KEY".into(),
-                    )
-                })?;
+            let client = connection
+                .client()
+                .await
+                .map_err(nanocodex::NanocodexError::InvalidRequest)?;
             let files = Arc::new(
                 ClaudeWorkspaceFiles::new(&workspace)
                     .map_err(nanocodex::NanocodexError::InvalidRequest)?,
-            );
-            let client = ClaudeClient::new(
-                reqwest::Client::new(),
-                endpoint.unwrap_or_else(|| nanocodex::claude::ANTHROPIC_MESSAGES_URL.to_owned()),
-                api_key,
             );
             let mut builder = configured_claude_builder(
                 client,

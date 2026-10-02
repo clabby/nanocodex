@@ -6,6 +6,44 @@ agent's durable transcript. Reopening an agent attaches the same subscription
 manager and the same `DurableSession`; it does not place credentials in that
 session or discover an installed Claude Code login.
 
+## Native CLI
+
+The shipped CLI owns the subscription host and private credential store:
+
+```sh
+nanocodex --claude auth login
+nanocodex --claude auth status
+nanocodex --claude --model sonnet
+nanocodex run "inspect the repository" --harness claude --model opus
+nanocodex --claude auth logout
+```
+
+Login opens the authorization URL and accepts the browser's `code#state` through
+private terminal input. `--no-open` prints the URL for opening manually; piped
+stdin is also accepted. Never put the code in command arguments or agent prompts.
+The same subscription is used by Claude children of either harness family. One
+manager per CLI task tree serializes refreshes; its durable compare-and-swap
+revisions fence exchanges across processes and logout. Roots and children retain
+their own native session identity and transcript.
+
+Credentials default to `CODEX_HOME/claude/private/auth`, separately from agent
+journals, encrypted with a local key in `auth.key`. On Unix, the private directory
+requires mode `0700`, and credential, key and lock files require mode `0600`.
+Logout clears the saved grant while retaining the store's revision and installation
+identity; use the logout command instead of deleting the store.
+`--claude-auth-file` or `NANOCODEX_CLAUDE_AUTH_FILE` selects a separate store.
+`--claude-oauth-config` accepts a public JSON `ClaudeSubscriptionConfig` for an
+explicit integration; omitted fields use defaults and unknown fields fail.
+The configuration is bound to saved credentials, so use the same configuration
+for login and subsequent runs. Default authentication uses the subscription
+Messages URL and the pinned OMP compatibility profile described below.
+
+`--claude-api-key` or `ANTHROPIC_API_KEY` explicitly selects Console API-key
+authentication. Subscription login does not modify ChatGPT credentials;
+`nanocodex auth login` continues to select Codex unless `--claude` or
+`--harness claude` is provided. Missing Claude login fails before provider dispatch
+or child admission and names the login command.
+
 ## Subscription login
 
 `nanocodex_claude::subscription::ClaudeSubscription` implements

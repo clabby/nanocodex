@@ -150,6 +150,9 @@ pub(crate) struct AgentArgs {
     #[command(flatten)]
     auth: AuthArgs,
 
+    #[command(flatten)]
+    pub(crate) claude_auth: crate::auth::ClaudeAuthArgs,
+
     /// Working directory exposed to the coding tools.
     #[arg(long)]
     cwd: Option<PathBuf>,
@@ -627,7 +630,9 @@ impl AgentArgs {
                 }
             });
         let harness = claude::register_claude_recipe(
-            harness_builder, self.claude_api_key, self.claude_messages_url,
+            harness_builder, claude::ClaudeConnection::new(
+                self.claude_auth, self.claude_api_key, self.claude_messages_url,
+            ),
             session.workspace.clone(), self.instructions.clone().unwrap_or_else(||
                 "You are a coding agent. Use native Claude file tools and Bash for the workspace; use exec for shared MCP and subagent capabilities.".to_owned()),
             claude_tools,

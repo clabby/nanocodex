@@ -143,7 +143,8 @@ pub trait ClaudeSubscriptionHost: Send + Sync + 'static {
 /// Defaults observed in Claude Code 2.1.283; alternative registrations can supply
 /// their own endpoints, client ID, and scopes. Only explicit loopback fixtures
 /// may use HTTP. Exact endpoint URLs are pinned throughout a stored login.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ClaudeSubscriptionConfig {
     pub authorize_url: String,
     pub token_url: String,
