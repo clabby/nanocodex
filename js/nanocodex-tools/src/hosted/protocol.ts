@@ -5,6 +5,7 @@ import {
 
 export const MAX_HOSTED_TOOLS_RECOVER_CALL_IDS = 100;
 export const MAX_HOSTED_TOOL_NAME_BYTES = 128;
+const MAX_NONCE_BYTES = 128;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const RESERVED_TOOL_NAMES = new Set(["exec", "tool_search", "wait"]);
 const encoder = new TextEncoder();
@@ -104,6 +105,8 @@ export type HostedToolsHostFrame =
       timing?: HostedToolReceiptTiming;
     }
   | { type: "status"; call_id: string; state: "running" | "missing" }
+  /** Compatibility with publishers predating command recovery/control heartbeats. */
+  | { type: "ping"; nonce: string }
   | { type: "drain" };
 
 export type HostedToolsManagedFrame =
@@ -129,12 +132,13 @@ export type HostedToolsManagedFrame =
       call_id: string;
     }
   | { type: "recover"; call_ids: string[] }
+  | { type: "pong"; nonce: string }
   | { type: "draining" };
 
 export type HostedToolsFrame = HostedToolsHostFrame | HostedToolsManagedFrame;
 
-const HOST_FRAME_TYPES = new Set(["catalog", "result", "status", "drain", "diagnostic"]);
-const MANAGED_FRAME_TYPES = new Set(["ready", "call", "cancel", "ack", "recover", "draining"]);
+const HOST_FRAME_TYPES = new Set(["catalog", "result", "status", "ping", "drain", "diagnostic"]);
+const MANAGED_FRAME_TYPES = new Set(["ready", "call", "cancel", "ack", "recover", "pong", "draining"]);
 
 export function parseHostedToolsHostFrame(encoded: string): HostedToolsHostFrame {
   const frame = parseHostedToolsFrame(encoded);
@@ -175,6 +179,10 @@ export function parseHostedToolsFrame(encoded: string): HostedToolsFrame {
       return parseDiagnostic(frame);
     case "status":
       return parseStatus(frame);
+    case "ping":
+    case "pong":
+      exactKeys(frame, ["type", "nonce"]);
+      return { type: frame.type, nonce: boundedText(frame.nonce, 0, MAX_NONCE_BYTES, "nonce") };
     case "drain":
       exactKeys(frame, ["type"]);
       return { type: "drain" };

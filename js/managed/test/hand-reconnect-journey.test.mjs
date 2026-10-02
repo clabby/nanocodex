@@ -11,6 +11,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { createTools } from "nanocodex/tools";
 import { createAttachment } from "nanocodex-tools/attachment";
 import { createNodeProcessTools } from "nanocodex-tools/node";
+import { createAttachment as createLegacyAttachment } from "./fixtures/hand-publisher-546bec456.mjs";
 
 // Real public JS publisher, ToolRouter, workerd WebSockets, broker, SQLite and
 // native /bin/sh. Only admission credentials and clocks are fixture inputs.
@@ -27,7 +28,7 @@ import { routeManaged } from '../account/worker/managedProxy.ts';
 export class FixtureBroker extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env); this.offset = 0; this.bindings = new Map(); this.cancellations = new Map();
-    this.broker = new HostedToolsBroker(ctx, {now: () => Date.now() + this.offset});
+    this.broker = new HostedToolsBroker(ctx, {resumeRetainedSockets: true, now: () => Date.now() + this.offset});
   }
   async fetch(request) {
     if (request.headers.get('authorization') !== '${credential}') return new Response(null, {status: 401});
@@ -300,5 +301,148 @@ test("control pong loss reconnects finitely and browser-standard sockets send no
     await new Promise(resolve=>server.close(resolve));
     await writeFile(join(output,"wire.json"),JSON.stringify(wire,null,2));
     await writeFile(join(output,"README.md"),"Run: pnpm --filter nanocodex-managed-service test:hand-reconnect\nExpected and observed: injected ws emits 16-byte control pings; withholding pong closes 1012 and reconnects within several 30ms intervals. Public global WebSocket remains connected over eight 10ms intervals, emits no JSON heartbeat, reconnects after real transport loss. wire.json captures frames/control events.\n");
+  }
+});
+
+// The historical publisher is frozen independently of today's implementation:
+// it sends JSON ping, accepts JSON pong and never advertises command_recovery.
+test("a frozen legacy Hand keeps JSON heartbeats across hibernation and reconnect without recovery frames", {timeout:30_000}, async () => {
+  const output = join(root, "../../output/hand-legacy-heartbeat", String(Date.now()) + "-" + process.pid);
+  const workspace = join(output, "hand");
+  await mkdir(workspace, {recursive:true});
+  const wire = [], trace = [], runtime = [], sockets = [], connectors = [];
+  const evidence = {command:"pnpm --filter nanocodex-managed-service test:hand-reconnect",
+    inputs:{publisher_commit:"546bec45642622d718bdb7d23c42d276b21b388d", shell:"/bin/sh", heartbeat_ms:250, transport_loss:"terminate"},
+    expected:{before:"LEGACY_BEFORE", parallel:"LEGACY_PARALLEL", pending:"LEGACY_PENDING", after:"LEGACY_AFTER", disconnected_status:"ambiguous", disconnected_effect_count:1, disconnected_call_frames:1, fresh_after_disconnect:"LEGACY_FRESH", recovered_commands:0, matched_pongs:true, invalid_frame_close:1008}, observed:{}};
+  const bundle = await build({stdin:{contents:source, resolveDir:root}, bundle:true, write:false,
+    metafile:true, format:"esm", platform:"node", target:"es2022", external:["cloudflare:*", "node:*"],
+    alias:{"nanocodex-tools/hosted":fileURLToPath(new URL("../../nanocodex-tools/src/hosted/index.ts", import.meta.url))}, logLevel:"warning"});
+  await writeFile(join(output,"worker.mjs"),bundle.outputFiles[0].text);
+  await writeFile(join(output,"fixture-source.mjs"),source);
+  await writeFile(join(output,"source-resolution.json"),JSON.stringify({bundleInputs:Object.keys(bundle.metafile.inputs),
+    legacyPublisher:fileURLToPath(new URL("./fixtures/hand-publisher-546bec456.mjs",import.meta.url))},null,2));
+  const mf = new Miniflare({name:"legacy-heartbeat",port:0,modules:true,script:bundle.outputFiles[0].text,
+    compatibilityDate:"2026-07-30",compatibilityFlags:["nodejs_compat","enable_request_signal"],
+    durableObjects:{BROKER:{className:"FixtureBroker",useSQLite:true}},durableObjectsPersist:join(output,"sqlite"),
+    handleRuntimeStdio(stdout,stderr) {
+      createInterface({input:stdout}).on("line",line=>runtime.push(line));
+      createInterface({input:stderr}).on("line",line=>runtime.push(line));
+    }});
+  const base=await mf.ready, endpoint=new URL("/v1/account/tool-host",base);endpoint.protocol="ws:";
+  const inspect=async()=>await(await fetch(new URL("/inspect",base),{headers:{authorization:credential}})).json();
+  const waitFor=async(predicate,description)=>{
+    const deadline=performance.now()+5000;
+    while(performance.now()<deadline){const value=await predicate();if(value)return value;await delay(10);}
+    assert.fail(description+": "+JSON.stringify({wire,inspection:await inspect()}));
+  };
+  const native=await createNodeProcessTools({workspace,onActivity:event=>trace.push({native:event})});
+  const tools=await createTools({tools:native.tools.map(tool=>tool.name!=="exec_command"?tool:{
+    ...tool,async handler(input,context) {
+      try{return await tool.handler(input,context);}
+      finally{trace.push({native_finished:context.callId});}
+    },
+  })});
+  let connector, client, pending, disconnectedPending, failure;
+  const pongs=attempt=>wire.filter(row=>row.attempt===attempt&&row.direction==="broker"&&row.frame?.type==="pong");
+  const file=async name=>{try{return await readFile(join(workspace,name),"utf8");}catch(error){if(error.code!=="ENOENT")throw error;}};
+  const invoke=async(callId,cmd)=>{
+    const response=await fetch(new URL("/invoke",base),{method:"POST",headers:{authorization:credential,"content-type":"application/json"},
+      body:JSON.stringify({call_id:callId,input:{cmd,shell:"/bin/sh",login:false,yield_time_ms:30000}})});
+    const value=await response.json();assert.equal(response.status,200,JSON.stringify(value));
+    trace.push({call_id:callId,result:value});return value;
+  };
+  const connect=label=>{
+    const value=createLegacyAttachment(tools,{endpoint:endpoint.href,transport:{connect(){
+      const attempt=sockets.length+1,socket=new WebSocket(endpoint,{headers:{authorization:credential}});sockets.push(socket);
+      const send=socket.send.bind(socket);
+      socket.send=(data,...args)=>{wire.push({label,attempt,direction:"host",frame:JSON.parse(String(data))});return send(data,...args);};
+      socket.on("message",data=>wire.push({label,attempt,direction:"broker",frame:JSON.parse(String(data))}));
+      socket.on("close",(code,reason)=>wire.push({label,attempt,event:"close",code,reason:String(reason)}));
+      return socket;
+    }}},{machines:[{id:machineId,name:"Synthetic legacy Hand",workspace,capabilities:["shell"]}],
+      attachmentId:machineId,heartbeatMs:250,reconnectDelayMs:1,drainTimeoutMs:500});
+    connectors.push(value);return value;
+  };
+  try {
+    connector=connect("legacy");client=await connector.connect();
+    await waitFor(()=>pongs(1).length>=3,"legacy matching pongs before shell");
+    const initial=await inspect();assert.equal(initial.online,true);trace.push({phase:"initial",inspection:initial});
+    const before=await invoke("legacy-before","printf LEGACY_BEFORE");assert.equal(before.structuredResult.output,"LEGACY_BEFORE");
+    // Wake the actual SQLite-backed DO through a legacy heartbeat after hibernation.
+    const beforeHibernate=pongs(1).length;
+    await mf.unsafeEvictDurableObject("legacy-heartbeat","FixtureBroker",{name:"synthetic-broker",webSockets:"hibernate"});
+    await waitFor(()=>pongs(1).length>=beforeHibernate+2,"legacy heartbeat after hibernation");
+    assert.equal(client.connected,true);
+    sockets.at(-1).terminate();
+    await waitFor(()=>sockets.length>=2&&client.connected,"legacy reconnect");
+    await waitFor(()=>pongs(2).length>=3,"legacy pongs after reconnect");
+    trace.push({phase:"reconnected",inspection:await inspect()});
+    pending=invoke("legacy-pending","printf E >> effects.log; while [ ! -f release ]; do sleep 0.02; done; printf LEGACY_PENDING");
+    await waitFor(async()=>await file("effects.log")==="E","native pending shell started");
+    const pendingPongs=pongs(2).length;
+    const parallel=await invoke("legacy-parallel","printf LEGACY_PARALLEL");assert.equal(parallel.structuredResult.output,"LEGACY_PARALLEL");
+    await waitFor(()=>pongs(2).length>=pendingPongs+3,"legacy heartbeats while native command pending");
+    await writeFile(join(workspace,"release"),"release");
+    const completed=await pending;assert.equal(completed.structuredResult.output,"LEGACY_PENDING");assert.equal(await file("effects.log"),"E");
+    const after=await invoke("legacy-after","printf LEGACY_AFTER");assert.equal(after.structuredResult.output,"LEGACY_AFTER");
+    // A legacy runtime has no command-recovery journal. Lose transport after
+    // the actual shell effect, preserve ambiguity, and never retry that input.
+    const lostCommand="printf L >> disconnected.log; while [ ! -f release-disconnected ]; do sleep 0.02; done; printf LEGACY_LOST";
+    disconnectedPending=invoke("legacy-disconnected",lostCommand);
+    await waitFor(async()=>await file("disconnected.log")==="L","legacy effect before pending disconnect");
+    const lostCall=wire.find(row=>row.direction==="broker"&&row.frame?.type==="call"&&row.frame.input.cmd===lostCommand);
+    assert.ok(lostCall);const lostCallId=lostCall.frame.call_id;
+    sockets.at(-1).terminate();
+    const disconnected=await Promise.race([disconnectedPending,delay(5000,undefined,{ref:false}).then(()=>assert.fail("legacy pending caller did not settle after disconnect"))]);
+    assert.equal(disconnected.structuredResult.status,"ambiguous");
+    await waitFor(()=>sockets.length>=3&&client.connected,"legacy pending-call reconnect");
+    await waitFor(()=>pongs(3).length>=3,"legacy heartbeats after pending-call reconnect");
+    await writeFile(join(workspace,"release-disconnected"),"release");
+    await waitFor(()=>trace.some(row=>row.native_finished===lostCallId),"disconnected native shell cleanup");
+    const fresh=await invoke("legacy-fresh","printf LEGACY_FRESH");assert.equal(fresh.structuredResult.output,"LEGACY_FRESH");
+    assert.equal(await file("disconnected.log"),"L");
+    const lostFrames=wire.filter(row=>row.direction==="broker"&&row.frame?.type==="call"&&row.frame.call_id===lostCallId);
+    assert.equal(lostFrames.length,1);trace.push({phase:"legacy_pending_disconnect",lost_call_id:lostCallId,disconnected,fresh,original_dispatches:lostFrames.length,effect_count:1});
+    for(const row of wire.filter(row=>row.direction==="broker"&&row.frame?.type==="pong")) {
+      assert.ok(wire.some(sent=>sent.attempt===row.attempt&&sent.direction==="host"&&sent.frame?.type==="ping"&&sent.frame.nonce===row.frame.nonce));
+    }
+    assert.ok(wire.filter(row=>row.frame?.type==="catalog").every(row=>row.frame.command_recovery===undefined));
+    assert.equal(wire.filter(row=>row.frame?.type==="recover").length,0);
+    await connector.close();
+    // A valid heartbeat cannot claim a route before catalog admission.
+    const unclaimed=new WebSocket(endpoint,{headers:{authorization:credential}});sockets.push(unclaimed);
+    await new Promise((resolve,reject)=>{unclaimed.once("open",resolve);unclaimed.once("error",reject);});
+    const unclaimedClose=new Promise(resolve=>unclaimed.once("close",(code,detail)=>resolve({code,reason:String(detail)})));
+    unclaimed.send(JSON.stringify({type:"ping",nonce:"before-catalog"}));
+    const unclaimedResult=await Promise.race([unclaimedClose,delay(3000,undefined,{ref:false}).then(()=>assert.fail("unclaimed heartbeat not fenced"))]);
+    assert.equal(unclaimedResult.code,1008);assert.equal(unclaimedResult.reason.split(":")[0],"stale_socket");
+    trace.push({invalid:"before-catalog",...unclaimedResult});
+    // Exercise strict wire validation over real sockets, after valid legacy traffic.
+    for(const [label,frame,reason] of [
+      ["extra-field",{type:"ping",nonce:"synthetic",extra:true},"invalid_message"],
+      ["oversized-nonce",{type:"ping",nonce:"\ud83d\udca3".repeat(33)},"invalid_string"],
+      ["wrong-direction",{type:"pong",nonce:"synthetic"},"wrong_direction"],
+    ]) {
+      const invalid=connect(label);await invalid.connect();const socket=sockets.at(-1);
+      const closed=new Promise(resolve=>socket.once("close",(code,detail)=>resolve({code,reason:String(detail)})));
+      socket.send(JSON.stringify(frame));
+      const result=await Promise.race([closed,delay(3000,undefined,{ref:false}).then(()=>assert.fail("malformed legacy frame not fenced"))]);
+      assert.equal(result.code,1008);assert.equal(result.reason.split(":")[0],reason);trace.push({invalid:label,...result});await invalid.close();
+    }
+    evidence.observed={before:before.structuredResult.output,parallel:parallel.structuredResult.output,pending:completed.structuredResult.output,
+      after:after.structuredResult.output,legacy_json_pongs:wire.filter(row=>row.frame?.type==="pong").length,
+      hibernation:true,reconnected:true,disconnected_status:disconnected.structuredResult.status,disconnected_effect_count:1,
+      disconnected_call_frames:lostFrames.length,fresh_after_disconnect:fresh.structuredResult.output,
+      recovered_commands:0,matched_pongs:true,effect_count:1,invalid_frame_close:1008};
+    console.log(JSON.stringify({evidence:output,...evidence.observed}));
+  }catch(error){failure=error;evidence.error=error.stack;throw error;}
+  finally {
+    await writeFile(join(workspace,"release"),"cleanup");await writeFile(join(workspace,"release-disconnected"),"cleanup");
+    await pending?.catch(()=>{});await disconnectedPending?.catch(()=>{});
+    await Promise.all(connectors.map(value=>value.close()));for(const socket of sockets)socket.terminate();
+    await tools.close();await native.close();await mf.dispose();
+    await writeFile(join(output,"trace.json"),JSON.stringify({evidence,trace},null,2));
+    await writeFile(join(output,"wire.json"),JSON.stringify(wire,null,2));await writeFile(join(output,"runtime.log"),runtime.join("\n"));
+    await writeFile(join(output,"README.md"),"Command: "+evidence.command+"\nInputs: "+JSON.stringify(evidence.inputs)+"\nExpected: "+JSON.stringify(evidence.expected)+"\nObserved: "+JSON.stringify(evidence.observed)+"\nStatus: "+(failure?failure.stack:"PASS")+"\nEvidence: trace.json,wire.json,runtime.log,source-resolution.json,worker.mjs,hand/,sqlite/. Only admission credentials are synthetic; historical publisher, broker, Workerd WS, SQLite and native /bin/sh execute unchanged.\n");
   }
 });
