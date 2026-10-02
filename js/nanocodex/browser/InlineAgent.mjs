@@ -113,6 +113,7 @@ export async function create(options = {}) {
   const tempoMcp = mpp?.[Symbol.for("nanocodex.tempo.mcp")];
   let hostDefinitionId;
   const host = createBrowserHost({
+    [Symbol.for("nanocodex.browser.internalRuntime")]: { traceTool: internalRuntime?.traceTool },
     WebSocketImpl,
     createWebSocket,
     createResponse,
@@ -129,6 +130,7 @@ export async function create(options = {}) {
     subagentSessions,
     subagentRouting: internalRuntime?.subagentRouting,
     onSocketTiming: internalRuntime?.onSocketTiming,
+    onSocketEvent: internalRuntime?.onSocketEvent,
     toolMode,
     mcp: mcp === false
       ? undefined

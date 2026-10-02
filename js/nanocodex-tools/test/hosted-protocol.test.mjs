@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseHostedToolsManagedFrame } from "../dist/hosted/index.js";
+import { parseHostedToolsHostFrame, parseHostedToolsManagedFrame } from "../dist/hosted/index.js";
 
 const call = {
   type: "call", session_id: "session:1", call_id: "call:1", model: "gpt-6-astra",
@@ -17,5 +17,51 @@ test("model routing metadata survives parsing without relaxing identities", () =
   }
   for (const field of ["session_id", "call_id", "name"]) {
     assert.throws(() => parseHostedToolsManagedFrame(JSON.stringify({ ...call, [field]: "provider/name" })), /safe ASCII/);
+  }
+});
+
+test("optional local receipt timing preserves old Hosts and rejects unbounded or extra telemetry", () => {
+  const receipt = { type: "result", call_id: "call:1", outcome: { status: "unavailable", message: "fixture" } };
+  assert.deepEqual(parseHostedToolsHostFrame(JSON.stringify(receipt)), receipt);
+  const timing = { scheduler_ms: 1, execution_gate_ms: 2, execution_ms: 3,
+    result_encode_ms: 4, result_queue_ms: 5, host_elapsed_ms: 15 };
+  assert.deepEqual(parseHostedToolsHostFrame(JSON.stringify({ ...receipt, timing })), { ...receipt, timing });
+  for (const invalid of [null, {}, { ...timing, path: "/private" }, { ...timing, execution_ms: -1 },
+    { ...timing, execution_ms: "3" }, { ...timing, execution_ms: Number.MAX_SAFE_INTEGER + 1 },
+    { ...timing, host_elapsed_ms: 14 }, { ...timing, execution_ms: null }]) {
+    assert.throws(() => parseHostedToolsHostFrame(JSON.stringify({ ...receipt, timing: invalid })));
+  }
+  assert.throws(() => parseHostedToolsManagedFrame(JSON.stringify({ ...call, thread_id: "thread:1" })), /unsupported fields/);
+});
+
+test("diagnostics require strict advertised fields while legacy catalogs remain unchanged", () => {
+  const legacy = { type: "catalog", capabilities: ["turn_metadata"], tools: [] };
+  assert.deepEqual(parseHostedToolsHostFrame(JSON.stringify(legacy)), legacy);
+  const connection_id = "00000000-0000-4000-8000-000000000007";
+  for (const optional of [{ diagnostics: true }, { connection_id }, { diagnostics: true, connection_id }]) {
+    assert.deepEqual(parseHostedToolsHostFrame(JSON.stringify({ ...legacy, ...optional })), { ...legacy, ...optional });
+  }
+  for (const optional of [{ diagnostics: false }, { diagnostics: null }, { diagnostics: "true" },
+    { diagnostics: {} }, { connection_id: "host/path" }, { connection_id: null },
+    { connection_id: "00000000-0000-1000-8000-000000000007" },
+    { connection_id: "00000000-0000-4000-7000-000000000007" }, { diagnostics: true, private_path: "/fixture" }]) {
+    assert.throws(() => parseHostedToolsHostFrame(JSON.stringify({ ...legacy, ...optional })));
+  }
+  for (const stage of ["received", "execution_started", "execution_finished", "result_prepared"]) {
+    for (const elapsed_ms of [0, 0.25, Number.MAX_SAFE_INTEGER]) {
+      const diagnostic = { type: "diagnostic", call_id: "call:1", stage, elapsed_ms };
+      assert.deepEqual(parseHostedToolsHostFrame(JSON.stringify(diagnostic)), diagnostic);
+      assert.throws(() => parseHostedToolsManagedFrame(JSON.stringify(diagnostic)), /host-to-managed|managed-to-host/);
+    }
+  }
+  const diagnostic = { type: "diagnostic", call_id: "call:1", stage: "received", elapsed_ms: 0 };
+  for (const fields of [{ elapsed_ms: -1 }, { elapsed_ms: Number.MAX_SAFE_INTEGER + 1 }, { elapsed_ms: null },
+    { elapsed_ms: "0" }, { stage: "unknown" }, { call_id: "private/path" }, { runtime_id: "fixture" }]) {
+    assert.throws(() => parseHostedToolsHostFrame(JSON.stringify({ ...diagnostic, ...fields })));
+  }
+  for (const field of ["call_id", "stage", "elapsed_ms"]) {
+    const missing = { ...diagnostic };
+    delete missing[field];
+    assert.throws(() => parseHostedToolsHostFrame(JSON.stringify(missing)));
   }
 });

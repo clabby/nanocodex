@@ -87,6 +87,9 @@ function createClient(endpoint, transport, options, admission, machines, attachm
     machines,
     attachmentId,
     runtimeId: crypto.randomUUID(),
+    connection: undefined,
+    attempt: 0,
+    stoppedObserved: false,
     calls: new Map(),
     receipts: new Set(),
     active: new Set(),
@@ -129,11 +132,12 @@ function createClient(endpoint, transport, options, admission, machines, attachm
         abortGeneration(state, new Error("tool attachment detached"));
         releaseAdmission();
         if (socket) closeSocket(socket, 1000, "tool attachment detached");
-        else resolveClosed();
+        else finishStopped();
         return closed;
       }
       if (!state.draining) {
         state.draining = true;
+        observe("draining");
         try { send(socket, { type: "drain" }); }
         catch (error) {
           closeSocket(socket, 1011, closeReason(`tool attachment drain failed: ${errorMessage(error)}`));
@@ -154,9 +158,18 @@ function createClient(endpoint, transport, options, admission, machines, attachm
 
   async function connectGeneration() {
     if (state.stopped) return;
+    state.reconnectTimer = undefined;
+    const connection = { id: crypto.randomUUID(), attempt: ++state.attempt };
+    state.connection = connection;
+    if (connection.attempt > 1) observe("reconnect_started", {}, connection);
+    observe("connection_start", {}, connection);
     try {
       const socket = await openSocket(endpoint, transport);
-      if (state.stopped) { socket.close(1000, "attachment stopped"); return; }
+      if (state.stopped) {
+        try { socket.close(1000, "attachment stopped"); } catch {}
+        finishStopped();
+        return;
+      }
       state.socket = socket;
       state.catalogSent = false;
       state.readyReceived = false;
@@ -165,6 +178,7 @@ function createClient(endpoint, transport, options, admission, machines, attachm
       bindSocket(socket, {
         open() {
           if (state.socket !== socket) return;
+          if (!state.catalogSent) observe("open", {}, connection);
           try { publishCatalog(socket); }
           catch (error) { transportFailure(socket, error); }
         },
@@ -182,17 +196,19 @@ function createClient(endpoint, transport, options, admission, machines, attachm
         close(event) { socketClosed(socket, event); },
         error(error) {
           if (state.socket !== socket) return;
+          observe("error", {}, connection);
           if (!state.readySettled) {
             state.readySettled = true;
             state.stopped = true;
             releaseAdmission();
             rejectReady(error);
             closeSocket(socket, 1011, "tool attachment initial connection failed");
-          }
+          } else transportFailure(socket, error, false);
         },
       });
       state.handshakeTimer = setTimeout(() => {
         if (state.socket !== socket || state.readyReceived) return;
+        observe("handshake_timeout", {}, connection);
         if (!state.readySettled) {
           state.readySettled = true;
           state.stopped = true;
@@ -202,26 +218,32 @@ function createClient(endpoint, transport, options, admission, machines, attachm
       }, positiveOption(options.handshakeTimeoutMs, DEFAULT_HANDSHAKE_TIMEOUT_MS, "handshakeTimeoutMs"));
       if (socket.readyState === OPEN) queueMicrotask(() => {
         if (state.socket !== socket) return;
+        if (!state.catalogSent) observe("open", {}, connection);
         try { publishCatalog(socket); }
         catch (error) { transportFailure(socket, error); }
       });
     } catch (error) {
+      observe("error", {}, connection);
       if (error instanceof AttachmentRejectedError) state.stopped = true;
       if (!state.stopped && state.readySettled && options.reconnect !== false) {
         scheduleReconnect();
       } else if (!state.readySettled) {
         state.readySettled = true;
+        state.stopped = true;
         releaseAdmission();
         rejectReady(error);
       }
-      if (state.stopped || options.reconnect === false) { abortGeneration(state, error); releaseAdmission(); resolveClosed(); }
+      if (state.stopped || options.reconnect === false) { abortGeneration(state, error); releaseAdmission(); finishStopped(); }
     }
   }
 
   function scheduleReconnect() {
+    if (state.stopped || options.reconnect === false || state.reconnectTimer !== undefined) return;
     if (state.connectedAt && Date.now() - state.connectedAt >= 30_000) state.retryDelay = options.reconnectDelayMs ?? 250;
     state.connectedAt = 0;
-    state.reconnectTimer = setTimeout(connectGeneration, Math.min(5_000, state.retryDelay) * (0.75 + Math.random() / 4));
+    const delayMs = Math.min(5_000, state.retryDelay) * (0.75 + Math.random() / 4);
+    observe("reconnect_scheduled", { delay_ms: delayMs });
+    state.reconnectTimer = setTimeout(connectGeneration, delayMs);
     state.retryDelay = Math.min(5_000, state.retryDelay * 2);
   }
 
@@ -231,22 +253,28 @@ function createClient(endpoint, transport, options, admission, machines, attachm
     send(socket, {
       type: "catalog",
       capabilities: ["turn_metadata"],
+      diagnostics: true,
+      connection_id: state.connection.id,
       runtime_id: state.runtimeId,
       tools: state.catalog,
       ...(state.machines.length === 0 ? {} : { machines: state.machines }),
       ...(state.attachmentId === undefined ? {} : { attachment_id: state.attachmentId }),
     });
+    observe("catalog");
   }
 
   async function handleFrame(encoded, socket) {
     if (state.socket !== socket) return;
     const frame = parseFrame(encoded);
+    const timing = frame.type === "call" ? { received: performance.now(), connection: state.connection } : undefined;
+    if (timing) diagnostic(socket, frame.call_id, "received", timing);
     switch (frame.type) {
       case "ready":
         if (!state.catalogSent || state.readyReceived) throw new Error("ready received outside the catalog handshake");
         state.readyReceived = true;
         state.connected = true;
         state.connectedAt = Date.now();
+        observe("ready");
         clearTimeout(state.handshakeTimer);
         state.handshakeTimer = undefined;
         startHeartbeat(socket);
@@ -254,7 +282,7 @@ function createClient(endpoint, transport, options, admission, machines, attachm
         break;
       case "call":
         if (!state.readyReceived || state.drainAcknowledged) throw new Error("call received outside a routing-ready socket");
-        await handleCall(frame, socket);
+        await handleCall(frame, socket, timing);
         break;
       case "cancel":
         if (!state.readyReceived) throw new Error("cancel received outside a routing-ready socket");
@@ -279,18 +307,18 @@ function createClient(endpoint, transport, options, admission, machines, attachm
     }
   }
 
-  async function handleCall(frame, socket) {
+  async function handleCall(frame, socket, timing) {
     const callId = frame.call_id;
     if (state.calls.has(callId) || state.receipts.has(callId)) throw new Error("duplicate call on socket");
     // The retained ToolRouter schedules parallel/nonparallel work and honors
     // cancellation while queued. A connection-local count must not reject
     // otherwise valid calls or disconnect a socket with unacknowledged results.
     if (frame.deadline_at <= Date.now()) {
-      retainAndSend(callId, { status: "unavailable", message: "tool attachment call deadline elapsed before dispatch" }, socket);
+      retainAndSend(callId, { status: "unavailable", message: "tool attachment call deadline elapsed before dispatch" }, socket, timing);
       return;
     }
     const controller = new AbortController();
-    const call = { controller };
+    const call = { controller, timing };
     state.active.add(call);
     state.calls.set(callId, call);
     let deadline;
@@ -311,14 +339,22 @@ function createClient(endpoint, transport, options, admission, machines, attachm
     let value;
     try {
       value = await Promise.race([
-        Promise.resolve().then(() => admission.invoke(frame.name, frame.input, {
+        Promise.resolve().then(() => {
+          timing.taskStarted = performance.now();
+          return admission.invoke(frame.name, frame.input, {
           sessionId: frame.session_id,
           ...(frame.turn_id === undefined ? {} : { turnId: frame.turn_id }),
           parentCallId: "",
           callId,
           model: frame.model,
           signal: controller.signal,
-        })).finally(() => {
+          }, stage => {
+            if (stage === "execution_started") timing.executionStarted = performance.now();
+            else if (stage === "execution_finished") timing.executionFinished = performance.now();
+            else return;
+            diagnostic(socket, callId, stage, timing);
+          });
+        }).finally(() => {
           state.active.delete(call);
           if (state.stopped) releaseAdmission();
         }),
@@ -331,7 +367,10 @@ function createClient(endpoint, transport, options, admission, machines, attachm
         : { status: "completed", output: failedOutput(error) };
     }
     clearTimeout(deadline);
-    if (state.calls.get(callId) !== call) return;
+    if (state.calls.get(callId) !== call) {
+      if (state.socket !== socket) observe("result_discarded", { reason_code: "generation_changed" }, timing.connection);
+      return;
+    }
     state.calls.delete(callId);
     if (!outcome) {
       try {
@@ -343,8 +382,11 @@ function createClient(endpoint, transport, options, admission, machines, attachm
         outcome = { status: "ambiguous", message: "tool attachment result was not valid bounded wire output after dispatch" };
       }
     }
-    if (state.socket !== socket) return;
-    retainAndSend(callId, outcome, socket);
+    if (state.socket !== socket) {
+      observe("result_discarded", { reason_code: "generation_changed" }, timing.connection);
+      return;
+    }
+    retainAndSend(callId, outcome, socket, timing);
     maybeFinishDrain(socket);
   }
 
@@ -354,7 +396,7 @@ function createClient(endpoint, transport, options, admission, machines, attachm
     if (!call) return;
     state.calls.delete(callId);
     call.controller.abort(new Error("tool attachment call was cancelled"));
-    retainAndSend(callId, { status: "ambiguous", message: "tool execution was cancelled after dispatch" }, socket);
+    retainAndSend(callId, { status: "ambiguous", message: "tool execution was cancelled after dispatch" }, socket, call.timing);
     maybeFinishDrain(socket);
   }
 
@@ -364,10 +406,31 @@ function createClient(endpoint, transport, options, admission, machines, attachm
     maybeFinishDrain(socket);
   }
 
-  function retainAndSend(callId, outcome, socket) {
+  function retainAndSend(callId, outcome, socket, clock) {
     const result = { type: "result", call_id: callId, outcome };
     state.receipts.add(callId);
-    send(socket, result);
+    const encodeStarted = performance.now();
+    const task = clock.taskStarted ?? encodeStarted;
+    const execution = clock.executionStarted ?? encodeStarted;
+    const finished = clock.executionFinished ?? encodeStarted;
+    const timing = {
+      scheduler_ms: task - clock.received,
+      execution_gate_ms: clock.taskStarted === undefined ? 0 : execution - task,
+      execution_ms: clock.executionStarted === undefined ? 0 : finished - execution,
+      result_encode_ms: clock.executionFinished === undefined ? 0 : encodeStarted - finished,
+      result_queue_ms: 0, // Node sends synchronously; there is no result channel.
+      host_elapsed_ms: encodeStarted - clock.received,
+    };
+    try {
+      // Encode the business receipt once. The small metadata append and socket
+      // handoff remain in the broker's combined transit/return residual.
+      const encoded = JSON.stringify(result);
+      const encodingMs = performance.now() - encodeStarted;
+      timing.result_encode_ms += encodingMs;
+      timing.host_elapsed_ms += encodingMs;
+      diagnostic(socket, callId, "result_prepared", clock);
+      socket.send(`${encoded.slice(0, -1)},"timing":${JSON.stringify(timing)}}`);
+    } catch (error) { throw new AttachmentTransportError(error); }
   }
 
   function startHeartbeat(socket) {
@@ -375,6 +438,7 @@ function createClient(endpoint, transport, options, admission, machines, attachm
     state.heartbeat = setInterval(() => {
       if (state.socket !== socket) return;
       if (state.pendingNonce !== undefined) {
+        observe("heartbeat_timeout");
         closeSocket(socket, 1012, "tool attachment heartbeat timed out");
         return;
       }
@@ -396,6 +460,7 @@ function createClient(endpoint, transport, options, admission, machines, attachm
 
   function rejectProtocol(socket, reason) {
     if (state.socket !== socket) return;
+    observe("error");
     state.stopped = true;
     state.connected = false;
     clearTimers(state);
@@ -404,8 +469,9 @@ function createClient(endpoint, transport, options, admission, machines, attachm
     closeSocket(socket, 1008, closeReason(reason));
   }
 
-  function transportFailure(socket, error) {
+  function transportFailure(socket, error, report = true) {
     if (state.socket !== socket) return;
+    if (report) observe("error");
     state.connected = false;
     closeSocket(socket, 1011, closeReason(`tool attachment transport failed: ${errorMessage(error)}`));
   }
@@ -413,12 +479,13 @@ function createClient(endpoint, transport, options, admission, machines, attachm
   function closeSocket(socket, code, reason) {
     try { socket.close(code, reason); }
     catch {}
-    socketClosed(socket);
+    socketClosed(socket, { code });
   }
 
   function socketClosed(socket, event) {
     if (state.socket !== socket) return;
     const policyRejected = event?.code === 1008;
+    observe("close", Number.isInteger(event?.code) ? { close_code: event.code } : {});
     if (policyRejected) state.stopped = true;
     state.connected = false;
     state.socket = undefined;
@@ -431,12 +498,48 @@ function createClient(endpoint, transport, options, admission, machines, attachm
       scheduleReconnect();
     } else if (!state.readySettled) {
       state.readySettled = true;
+      state.stopped = true;
       releaseAdmission();
       rejectReady(policyRejected
         ? new AttachmentRejectedError(event?.reason)
         : new Error("tool attachment closed before ready"));
     } else releaseAdmission();
-    if (state.stopped || options.reconnect === false) resolveClosed();
+    if (state.stopped || options.reconnect === false) finishStopped();
+  }
+
+  function diagnostic(socket, callId, stage, clock) {
+    if (state.socket !== socket) return;
+    // Passive telemetry must never alter business outcomes or retry execution.
+    try {
+      const elapsed = performance.now() - clock.received;
+      if (!Number.isFinite(elapsed)) return;
+      socket.send(JSON.stringify({
+        type: "diagnostic", call_id: callId, stage,
+        elapsed_ms: Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, elapsed)),
+      }));
+    } catch {}
+  }
+
+  function observe(event, extra = {}, connection = state.connection) {
+    try {
+      console.info({
+        type: "hand.attachment", event,
+        client_connection_id: connection?.id,
+        attempt: connection?.attempt,
+        runtime_id: state.runtimeId,
+        active_calls: state.active.size,
+        retained_calls: state.receipts.size,
+        ...extra,
+      });
+    } catch {}
+  }
+
+  function finishStopped() {
+    if (!state.stoppedObserved) {
+      state.stoppedObserved = true;
+      observe("stopped");
+    }
+    resolveClosed();
   }
 
   function releaseAdmission() {

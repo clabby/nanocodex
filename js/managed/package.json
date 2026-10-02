@@ -13,7 +13,7 @@
     "deploy": "node ../../scripts/cloudflare/managed-crm.mjs deploy",
     "prebuild": "npm run prepare:code-evaluator",
     "prepare:code-evaluator": "node scripts/prepare-code-evaluator.mjs && node scripts/prepare-hand-image.mjs && node scripts/prepare-just-bash-lazy.mjs",
-    "test": "vitest run && npm run test:apps && npm run test:rpc-lifecycle && npm run test:discovery-cache && npm run test:routing && npm run test:todo-mail && npm run test:done && npm run test:meetings && npm run test:recovery",
+    "test": "vitest run && npm run test:apps && npm run test:rpc-lifecycle && npm run test:discovery-cache && npm run test:routing && npm run test:todo-mail && npm run test:done && npm run test:meetings && npm run test:recovery && npm run test:model-pause && npm run test:tool-timing && npm run test:hand-owner-restart",
     "test:browser-login": "node --experimental-strip-types scripts/browser-login-chrome.mjs",
     "test:apps": "vitest run --config vitest.apps.config.ts",
     "test:apps:native": "node --test test/native-app-validation-journey.test.mjs",
@@ -32,7 +32,10 @@
     "test:todo-mail": "node --test test/todo-mail-journey.test.mjs test/todo-snooze-journey.test.mjs",
     "test:meetings": "node --test test/meeting-library-journey.test.mjs",
     "fixture:meetings": "node scripts/meeting-library-fixture.mjs",
-    "test:recovery": "node --test test/managed-crash-recovery-journey.test.mjs"
+    "test:recovery": "node --test test/managed-crash-recovery-journey.test.mjs",
+    "test:model-pause": "node --test test/model-pause-journey.test.mjs",
+    "test:tool-timing": "node --test test/thread-tool-timing-journey.test.mjs",
+    "test:hand-owner-restart": "node --test test/hand-owner-restart-journey.test.mjs"
   },
   "dependencies": {
     "nanocodex-computer": "workspace:*",

@@ -820,13 +820,15 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     "@cf/moonshotai/kimi-k2.5",
   ])("durably dispatches model %s and ACKs both the result and duplicate receipt", async (model) => {
     const onCallTiming = vi.fn(() => { throw new Error("diagnostic sink failed"); });
-    const fixture = createFixture(undefined, { onCallTiming });
+    const onCallObservation = vi.fn<NonNullable<HostedToolsBrokerOptions["onCallObservation"]>>(() => { throw new Error("observation sink failed"); });
+    const fixture = createFixture(undefined, { onCallTiming, onCallObservation });
     const host = fixture.socket();
     await catalog(fixture.broker, host);
     const tool = fixture.broker.provider().resolve("fixture__lookup")!;
     const pending = tool.handler({ id: "42" }, {
       sessionId: "session:1",
       callId: "source:1",
+      threadId: "thread:1",
       model,
     });
     const call = host.sent.find((frame) => frame.type === "call")!;
@@ -851,6 +853,16 @@ describe("HostedToolsBroker socket-owned protocol", () => {
       session_id: "session:1", source_call_id: "source:1", transport_call_id: IDS[1],
       admission_ms: expect.any(Number), roundtrip_ms: expect.any(Number), settlement_ms: expect.any(Number),
     });
+    expect(onCallObservation.mock.calls.map(([entry]) => entry.stage)).toEqual([
+      "received", "admitted", "dispatched", "send_started", "sent", "ack_attempt", "ack_sent", "receipt", "terminal",
+      "ack_attempt", "ack_sent", "receipt_replay",
+    ]);
+    for (const [entry] of onCallObservation.mock.calls) {
+      expect(entry).toMatchObject({ session_id: "session:1", source_call_id: "source:1", thread_id: "thread:1", tool: "other" });
+      expect(JSON.stringify(entry)).not.toMatch(/fixture__lookup|diagnostic sink|observation sink/);
+      expect(entry).not.toHaveProperty("input");
+      expect(entry).not.toHaveProperty("output");
+    }
   });
 
   it("removes routing before acknowledging graceful drain while dispatched calls can finish", async () => {
@@ -1177,6 +1189,7 @@ function createFixture(
   options?: Readonly<{
     now?: () => number;
     onCallTiming?: HostedToolsBrokerOptions["onCallTiming"];
+    onCallObservation?: HostedToolsBrokerOptions["onCallObservation"];
     maxInFlight?: number;
     renewLeasedAttachment?: (renewal: {
       expectedAttachmentId: string;
@@ -1197,6 +1210,7 @@ function createFixture(
     persistence,
     now: options?.now ?? (() => NOW),
     onCallTiming: options?.onCallTiming,
+    onCallObservation: options?.onCallObservation,
     maxInFlight: options?.maxInFlight,
     ...(options?.renewLeasedAttachment === undefined ? {} : {
       renewLeasedAttachment: options.renewLeasedAttachment,

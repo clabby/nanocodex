@@ -1,22 +1,25 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { setSpanAttributes, tracing } from "nanocodex/cloudflare/tracing";
 
 type Context = { trace_id: string; scope: string; closed?: boolean; reads: Record<string, { count: number; duration_ms: number }> };
 const contexts = new AsyncLocalStorage<Context>();
 
 export function performanceSyncScope<T>(traceId: string, scope: string, run: () => T): T {
   const context: Context = { trace_id: traceId, scope, reads: {} };
-  return contexts.run(context, () => {
+  return tracing.enterSpan("managed.operation", span => contexts.run(context, () => {
+    setSpanAttributes(span, scopeAttributes(traceId, scope));
     const began = performance.now();
     try { return run(); }
     finally { context.closed = true; console.info({ type: "managed.performance", trace_id: traceId, stage: scope,
       duration_ms: performance.now() - began, reads: context.reads }); }
-  });
+  }));
 }
 
 /** Timings only: never record query arguments, tool results or credentials. */
 export async function performanceScope<T>(traceId: string, scope: string, run: () => Promise<T>): Promise<T> {
   const context: Context = { trace_id: traceId, scope, reads: {} };
-  return contexts.run(context, async () => {
+  return tracing.enterSpan("managed.operation", span => contexts.run(context, async () => {
+    setSpanAttributes(span, scopeAttributes(traceId, scope));
     const began = performance.now();
     try { return await run(); }
     finally {
@@ -24,17 +27,27 @@ export async function performanceScope<T>(traceId: string, scope: string, run: (
       console.info({ type: "managed.performance", trace_id: traceId, stage: scope,
         duration_ms: performance.now() - began, reads: context.reads });
     }
-  });
+  }));
 }
 
 export async function performanceStage<T>(stage: string, run: () => Promise<T>): Promise<T> {
   const context = contexts.getStore();
-  if (!context) return run();
-  const began = performance.now();
-  let success = false;
-  try { const result = await run(); success = true; return result; }
-  finally { console.info({ type: "managed.performance", trace_id: context.trace_id,
-    stage, started_at: Date.now() - (performance.now() - began), duration_ms: performance.now() - began, success }); }
+  return tracing.enterSpan("managed.stage", async span => {
+    setSpanAttributes(span, scopeAttributes(context?.trace_id, stage));
+    if (!context) return run();
+    const began = performance.now();
+    let success = false;
+    try { const result = await run(); success = true; return result; }
+    finally { console.info({ type: "managed.performance", trace_id: context.trace_id,
+      stage, started_at: Date.now() - (performance.now() - began), duration_ms: performance.now() - began, success }); }
+  });
+}
+
+function scopeAttributes(operationId: string | undefined, operation: string) {
+  // Some legacy scope labels contain request paths. Native span names and
+  // attributes use only fixed labels, never those paths or their capabilities.
+  return { "nanocodex.operation_id": operationId,
+    "nanocodex.operation": /^[a-z][a-z0-9_.]{0,63}$/.test(operation) ? operation : "request" };
 }
 
 /** One bounded discovery record; no owner, authority key or metadata payload. */
@@ -193,6 +206,43 @@ export function performanceSocketTiming(sessionId: string, observation: unknown)
     }
   } catch { /* Passive observations cannot fail transport cleanup. */ }
 }
+
+/** Live fixed lifecycle fields. No frame content, headers, reasons or errors. */
+export function performanceSocketEvent(sessionId: string, observation: unknown, turnId?: string, record?: (value: unknown) => void): void {
+  if (!observation || typeof observation !== "object" || Array.isArray(observation)) return;
+  const input = observation as Record<string, unknown>;
+  const event = input.event;
+  if (typeof event !== "string" || !SOCKET_EVENTS.has(event) || !correlationId(input.socket_id)) return;
+  const safe: Record<string, string | number | boolean> = { socket_id: input.socket_id };
+  if (correlationId(input.request_id)) safe.request_id = input.request_id;
+  if (correlationId(input.egress_request_id)) safe.egress_request_id = input.egress_request_id;
+  if (correlationId(turnId)) safe.turn_id = turnId;
+  if (typeof input.provider_request_id === "string" && (correlationId(input.provider_request_id)
+    || /^req_[A-Za-z0-9_-]{1,128}$/.test(input.provider_request_id))) safe.provider_request_id = input.provider_request_id;
+  if (typeof input.response_id === "string" && /^resp_[A-Za-z0-9_-]{1,160}$/.test(input.response_id)) safe.response_id = input.response_id;
+  for (const key of ["elapsed_ms", "send_wait_ms", "first_message_ms", "first_output_ms", "last_message_age_ms",
+    "socket_queue_residence_max_ms", "pre_inference_ms", "engine_queue_max_ms", "engine_service_ttft_total_ms"]) {
+    const value = input[key];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 86_400_000) safe[key] = value;
+  }
+  for (const key of ["socket_request_index", "model_call_index", "received_message_count", "queued_message_count",
+    "socket_delivered_message_count", "buffered_send_bytes"]) {
+    const value = input[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) safe[key] = value;
+  }
+  if (typeof input.close_code === "number" && Number.isInteger(input.close_code) && input.close_code >= 0 && input.close_code <= 4999) safe.close_code = input.close_code;
+  for (const key of ["intentional", "close_clean"]) if (typeof input[key] === "boolean") safe[key] = input[key];
+  if (typeof input.phase === "string" && ["generation", "compaction", "warmup"].includes(input.phase)) safe.phase = input.phase;
+  if (typeof input.outcome === "string" && ["completed", "failed", "send_failed", "superseded"].includes(input.outcome)) safe.outcome = input.outcome;
+  const observationRecord = { type: "managed.performance", stage: `transport.${event}`, session_id: sessionId, thread_id: sessionId, ...safe };
+  try { record?.(observationRecord); } catch { /* Persistence is optional diagnostics. */ }
+  try { console.info(observationRecord); }
+  catch { /* Passive diagnostics cannot alter an active model request. */ }
+}
+
+const SOCKET_EVENTS = new Set(["socket.connecting", "socket.connect_waiting", "socket.opened", "socket.closed", "socket.error",
+  "request.send_started", "request.send_waiting", "request.sent", "request.waiting", "request.first_message", "request.first_output", "request.finished", "provider.timing"]);
+function correlationId(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value); }
 
 /** Post-policy WebSocket request controls; no input, tool schema, IDs or metadata. */
 export function performanceRequestShape(sessionId: string, observation: unknown): void {

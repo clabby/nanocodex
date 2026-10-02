@@ -1,7 +1,7 @@
 import { observeHandCall } from "./hand-call-observation";
 import { getSandbox, type ProcessOptions } from "@cloudflare/sandbox";
 import { performanceScope, performanceStage } from "./performance";
-import type { ToolMap } from "nanocodex";
+import type { ToolContext, ToolMap } from "nanocodex";
 import {
   EXEC_COMMAND_PARAMETERS,
   EXECUTION_OUTPUT_SCHEMA,
@@ -185,6 +185,7 @@ export function cloudflareSandboxTools(
           persistent: false,
         }),
     outputCursorStorage,
+    brainWorkspace?.resourceId,
   );
 }
 
@@ -295,8 +296,11 @@ export function createCloudflareSandboxTools(
   createSandbox: () => Promise<SandboxToolClient>,
   createPreview?: (port: number) => Promise<{ port: number; url: string; persistent: boolean }>,
   outputCursorStorage: SandboxOutputCursorStorage = memoryOutputCursorStorage(),
+  threadId?: string,
 ): ToolMap {
-  return {
+  const correlation = (context?: ToolContext) => ({ thread_id: threadId,
+    session_id: context?.sessionId, turn_id: context?.turnId, parent_call_id: context?.parentCallId });
+  const tools: ToolMap = {
     exec_command: {
       description: "Run a shell command in the retained native Linux sandbox, returning a session when it remains live.",
       parameters: EXEC_COMMAND_PARAMETERS,
@@ -320,9 +324,9 @@ export function createCloudflareSandboxTools(
         const preflightAt = performance.now();
         try {
           await assertSandboxWorkdirAvailable(sandbox, cwd);
-          observeHandCall("sandbox.preflight", "exec_command", preflightAt, "ok", context?.callId);
+          observeHandCall("sandbox.preflight", "exec_command", preflightAt, "ok", context?.callId, correlation(context));
         } catch (error) {
-          observeHandCall("sandbox.preflight", "exec_command", preflightAt, "unavailable", context?.callId);
+          observeHandCall("sandbox.preflight", "exec_command", preflightAt, "unavailable", context?.callId, correlation(context));
           throw error;
         }
         context?.signal.throwIfAborted();
@@ -402,6 +406,22 @@ export function createCloudflareSandboxTools(
       },
     },
   };
+  // This is the complete awaited SDK boundary, including provisioning and RPC;
+  // it does not claim to measure container execution separately.
+  return Object.fromEntries(Object.entries(tools).map(([name, tool]) => [name, {
+    ...tool,
+    handler: async (input, context) => {
+      const started = performance.now();
+      try {
+        const result = await tool.handler(input, context);
+        observeHandCall("sandbox.invoke", name, started, "ok", context?.callId, correlation(context));
+        return result;
+      } catch (error) {
+        observeHandCall("sandbox.invoke", name, started, context?.signal.aborted ? "cancelled" : "failed", context?.callId, correlation(context));
+        throw error;
+      }
+    },
+  }]));
 }
 
 export async function cloudflareSandboxPreviewUrl(

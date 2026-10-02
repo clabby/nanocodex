@@ -79,6 +79,11 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
         session_id TEXT NOT NULL,
         source_call_id TEXT NOT NULL,
         turn_id TEXT,
+        thread_id TEXT,
+        connection_id TEXT,
+        host_connection_id TEXT,
+        host_runtime_id TEXT,
+        hand_id TEXT,
         host_id TEXT NOT NULL,
         lease_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
@@ -108,6 +113,12 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
     const columns = this.storage.sql.exec<{ name: string }>("PRAGMA table_info(hosted_tool_calls)").toArray();
     if (!columns.some((column) => column.name === "turn_id")) {
       this.storage.sql.exec("ALTER TABLE hosted_tool_calls ADD COLUMN turn_id TEXT");
+    }
+    if (!columns.some((column) => column.name === "thread_id")) {
+      this.storage.sql.exec("ALTER TABLE hosted_tool_calls ADD COLUMN thread_id TEXT");
+    }
+    for (const name of ["connection_id", "host_connection_id", "host_runtime_id", "hand_id"]) {
+      if (!columns.some(column => column.name === name)) this.storage.sql.exec(`ALTER TABLE hosted_tool_calls ADD COLUMN ${name} TEXT`);
     }
     // Legacy rows remain NULL (dispatch history unknown); new admissions use 0.
     if (!columns.some((column) => column.name === "dispatched_at")) {
@@ -194,7 +205,7 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
 
   call(callId: string): HostedToolsCallRow | undefined {
     return this.storage.sql.exec<HostedToolsCallRow>(
-      `SELECT call_id, session_id, source_call_id, turn_id, host_id, lease_id, generation,
+      `SELECT call_id, session_id, source_call_id, turn_id, thread_id, connection_id, host_connection_id, host_runtime_id, hand_id, host_id, lease_id, generation,
               model, name, input_json, output_token_budget, output_byte_budget,
               deadline_at, cancel_requested, state, result_json, receipt_json
        FROM hosted_tool_calls WHERE call_id = ?`,
@@ -204,7 +215,7 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
 
   callBySource(sessionId: string, sourceCallId: string): HostedToolsCallRow | undefined {
     return this.storage.sql.exec<HostedToolsCallRow>(
-      `SELECT call_id, session_id, source_call_id, turn_id, host_id, lease_id, generation,
+      `SELECT call_id, session_id, source_call_id, turn_id, thread_id, connection_id, host_connection_id, host_runtime_id, hand_id, host_id, lease_id, generation,
               model, name, input_json, output_token_budget, output_byte_budget,
               deadline_at, cancel_requested, state, result_json, receipt_json
        FROM hosted_tool_calls WHERE session_id = ? AND source_call_id = ?`,
@@ -216,14 +227,19 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
   insertCall(row: HostedToolsCallRow, now: number): void {
     this.storage.sql.exec(
       `INSERT INTO hosted_tool_calls
-         (call_id, session_id, source_call_id, turn_id, host_id, lease_id, generation,
+         (call_id, session_id, source_call_id, turn_id, thread_id, connection_id, host_connection_id, host_runtime_id, hand_id, host_id, lease_id, generation,
           model, name, input_json, output_token_budget, output_byte_budget, deadline_at,
           cancel_requested, state, result_json, receipt_json, created_at, updated_at, dispatched_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       row.call_id,
       row.session_id,
       row.source_call_id,
       row.turn_id ?? null,
+      row.thread_id ?? null,
+      row.connection_id ?? null,
+      row.host_connection_id ?? null,
+      row.host_runtime_id ?? null,
+      row.hand_id ?? null,
       row.host_id,
       row.lease_id,
       row.generation,
@@ -265,7 +281,7 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
       `UPDATE hosted_tool_calls SET state = ?, result_json = ?, updated_at = ?,
          dispatched_at = CASE WHEN ? = 'dispatched' THEN ? ELSE dispatched_at END
        WHERE call_id = ? AND state IN (${placeholders})
-       RETURNING call_id, session_id, source_call_id, turn_id, host_id, lease_id, generation,
+       RETURNING call_id, session_id, source_call_id, turn_id, thread_id, connection_id, host_connection_id, host_runtime_id, hand_id, host_id, lease_id, generation,
                  model, name, input_json, output_token_budget, output_byte_budget,
                  deadline_at, cancel_requested, state, result_json, receipt_json`,
       state,
@@ -319,6 +335,14 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
       leaseId,
       generation,
     ).toArray()[0]?.count ?? 0);
+  }
+
+  generationCalls(leaseId: string, generation: number): readonly HostedToolsCallRow[] {
+    // This enumeration runs before initialize() migrates old rows. SELECT *
+    // tolerates legacy nullable diagnostic columns without changing ownership.
+    return this.storage.sql.exec<HostedToolsCallRow>(
+      "SELECT * FROM hosted_tool_calls WHERE lease_id=? AND generation=? ORDER BY created_at", leaseId, generation,
+    ).toArray();
   }
 
 }
