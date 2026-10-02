@@ -283,6 +283,7 @@ struct InboxView: View {
                     mainNavigation
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { navigationChromeHeight = $0 }
+                .offset(y: chromeBottomOffset)
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom } action: { bottomSafeInset = $0 }
@@ -390,6 +391,12 @@ struct InboxView: View {
 
     }
 
+    // Move both chrome surfaces together so idle and typing keep the same gap.
+    // The keyboard owns the lower inset while editing; preserve its clearance.
+    private var chromeBottomOffset: CGFloat {
+        keyboardPresented ? 0 : min(12, max(0, bottomSafeInset - 16))
+    }
+
     @ViewBuilder
     private var bottomDock: some View {
         if hasConversationPanelChrome {
@@ -403,6 +410,7 @@ struct InboxView: View {
             .frame(maxWidth: InboxChrome.maximumWidth)
             .frame(maxWidth: .infinity)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomDockHeight = $0 }
+            .offset(y: chromeBottomOffset)
         }
     }
 
@@ -479,9 +487,6 @@ struct InboxView: View {
         .frame(maxWidth: 380)
         .frame(maxWidth: .infinity)
         .padding(.horizontal, InboxChrome.gutter).padding(.top, 4).padding(.bottom, 2)
-        // Use some of the home-indicator inset without moving the composer.
-        // The keyboard owns this space while typing; keep the selector above it.
-        .offset(y: keyboardPresented ? 0 : min(12, max(0, bottomSafeInset - 16)))
     }
 
     private func mainNavigationButton(_ surface: MainSurface, title: String, symbol: String, identifier: String) -> some View {
