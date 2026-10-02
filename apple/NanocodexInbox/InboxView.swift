@@ -213,6 +213,8 @@ struct InboxView: View {
     @State private var composerFocused = false
     @State private var bottomDockHeight: CGFloat = 0
     @State private var navigationChromeHeight: CGFloat = 0
+    @State private var bottomSafeInset: CGFloat = 0
+    @State private var keyboardPresented = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -276,6 +278,9 @@ struct InboxView: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { navigationChromeHeight = $0 }
             }
         }
+        .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom } action: { bottomSafeInset = $0 }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboardPresented = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardPresented = false }
         .sheet(isPresented: $showCreateApp) {
             CreateGeneratedAppSheet(model: model) { selectMainSurface(.chat); model.openThread() }
         }
@@ -451,6 +456,9 @@ struct InboxView: View {
         .frame(maxWidth: 380)
         .frame(maxWidth: .infinity)
         .padding(.horizontal, InboxChrome.gutter).padding(.top, 4).padding(.bottom, 2)
+        // Use some of the home-indicator inset without moving the composer.
+        // The keyboard owns this space while typing; keep the selector above it.
+        .offset(y: keyboardPresented ? 0 : min(12, max(0, bottomSafeInset - 16)))
     }
 
     private func mainNavigationButton(_ surface: MainSurface, title: String, symbol: String, identifier: String) -> some View {
