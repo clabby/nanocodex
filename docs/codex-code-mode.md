@@ -47,6 +47,13 @@ providers are enumerated and resolved again for each new admission; a newly
 published catalog or replaced handler is visible to the next cell, not to an
 already-running cell.
 
+QuickJS transfers the admitted `ALL_TOOLS` catalog as JSON data into each fresh
+context instead of compiling schema object literals as guest source. Metadata is
+parsed independently per cell: schema keys and descriptions remain data, guest
+edits do not persist, and omitted definitions remain undefined. The outer catalog
+is frozen as before. This changes neither callable bindings nor authorization,
+journal decisions, cancellation or once-only effect receipts.
+
 Factory-owned `toolMapSource` entries can reuse contract normalization within
 one router when the complete definition-array JSON is unchanged. The public
 array is still read and serialized every time, so array edits and contract
