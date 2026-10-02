@@ -1184,3 +1184,147 @@ async fn queued_ephemeral_cancellation_retires_without_aborting_active_model_or_
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn response_usage_arrives_before_tool_completion_and_excludes_summary() {
+    use nanocodex_agent::events::{AgentEventData, ModelEvent};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let count = requests.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(_): Json<Value>| {
+            let count = count.clone();
+            async move {
+                let index = count.fetch_add(1, Ordering::SeqCst);
+                let (blocks, stop) = if index == 0 {
+                    (
+                        vec![json!({"type":"tool_use","id":"held","name":"hold","input":{}})],
+                        "tool_use",
+                    )
+                } else {
+                    (vec![json!({"type":"text","text":"done"})], "end_turn")
+                };
+                let body = stream(blocks, stop).replace(
+                    "\"input_tokens\":3",
+                    &format!("\"input_tokens\":{}", 3 + index * 10),
+                );
+                ([("content-type", "text/event-stream")], body)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let release = Arc::new(Notify::new());
+    let finished = Arc::new(AtomicUsize::new(0));
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+        .tool(
+            ToolDefinition {
+                name: "hold".into(),
+                description: "Held tool".into(),
+                input_schema: json!({"type":"object"}),
+                strict: None,
+                defer_loading: false,
+            },
+            {
+                let release = release.clone();
+                let finished = finished.clone();
+                move |_| {
+                    let release = release.clone();
+                    let finished = finished.clone();
+                    async move {
+                        release.notified().await;
+                        finished.fetch_add(1, Ordering::SeqCst);
+                        Ok("released".into())
+                    }
+                }
+            },
+        )
+        .build()
+        .unwrap();
+    let turn = agent.prompt("hold then answer").await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = events.next().await.unwrap();
+            assert_ne!(event.kind, AgentEventKind::RunCompleted);
+            if event.kind == AgentEventKind::ModelCallCompleted
+                && let AgentEventData::Model(ModelEvent::CallCompleted(call)) =
+                    event.data().unwrap()
+            {
+                break call;
+            }
+        }
+    })
+    .await
+    .expect("completed response must publish usage while the tool is blocked");
+    assert_eq!(finished.load(Ordering::SeqCst), 0);
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_eq!(first.call_index, 1);
+    assert_eq!(first.tool_calls, 1);
+    let usage = first.usage.unwrap();
+    assert_eq!(
+        (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+        (6, 5, 11)
+    );
+    let details = usage.input_tokens_details.unwrap();
+    assert_eq!((details.cached_tokens, details.cache_write_tokens), (2, 1));
+    release.notify_one();
+    let result = turn.result().await.unwrap();
+    assert_eq!(result.usage().unwrap().total_tokens(), 32);
+    agent.compact().await.unwrap();
+    agent
+        .prompt("after summary")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let mut completions = Vec::new();
+    let mut terminals = 0;
+    while terminals < 2 {
+        let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        if event.kind == AgentEventKind::RunCompleted {
+            terminals += 1;
+        }
+        if event.kind == AgentEventKind::ModelCallCompleted
+            && let AgentEventData::Model(ModelEvent::CallCompleted(call)) = event.data().unwrap()
+        {
+            completions.push(call);
+        }
+    }
+    assert_eq!(
+        completions.len(),
+        2,
+        "summary usage is not an active response"
+    );
+    assert_eq!(completions[0].call_index, 2);
+    let continued_usage = completions[0].usage.as_ref().unwrap();
+    assert_eq!(
+        (continued_usage.input_tokens, continued_usage.total_tokens),
+        (16, 21)
+    );
+    let continued_cache = continued_usage.input_tokens_details.as_ref().unwrap();
+    assert_eq!(
+        (
+            continued_cache.cached_tokens,
+            continued_cache.cache_write_tokens
+        ),
+        (2, 1)
+    );
+    assert_eq!(completions[1].usage.as_ref().unwrap().total_tokens, 41);
+    assert_eq!(requests.load(Ordering::SeqCst), 4);
+    agent.shutdown().await.unwrap();
+    server.abort();
+}

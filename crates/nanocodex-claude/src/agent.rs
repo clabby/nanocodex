@@ -1813,6 +1813,41 @@ impl State {
         index: u32,
         context: ResponseContext<'_>,
     ) -> std::result::Result<crate::MessageResponse, ResponseFailure> {
+        let started = Instant::now();
+        let elapsed_ns = || u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let completed = |response: &crate::MessageResponse,
+                         attempt: u32,
+                         first_event: u64,
+                         first_output: Option<u64>| {
+            let Some(events) = events else { return };
+            // Shared usage counts all input, including cache reads and writes.
+            let input_tokens = response
+                .usage
+                .input_tokens
+                .saturating_add(response.usage.cache_read_input_tokens)
+                .saturating_add(response.usage.cache_creation_input_tokens);
+            self.emit(events, AgentEventKind::ModelCallCompleted, json!({
+                "call_index": index.saturating_add(1),
+                "model": response.model,
+                "response_id": response.id,
+                "attempt": attempt,
+                "connection_generation": 0,
+                "status": response.stop_reason.unwrap_or(StopReason::Unknown),
+                "duration_ns": elapsed_ns(),
+                "time_to_first_event_ns": first_event,
+                "time_to_first_output_ns": first_output,
+                "tool_calls": response.content.iter().filter(|block| matches!(block, ContentBlock::ToolUse { .. })).count(),
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "input_tokens_details": {
+                        "cached_tokens": response.usage.cache_read_input_tokens,
+                        "cache_write_tokens": response.usage.cache_creation_input_tokens,
+                    },
+                    "output_tokens": response.usage.output_tokens,
+                    "total_tokens": input_tokens.saturating_add(response.usage.output_tokens),
+                },
+            }));
+        };
         let client = self.client.restore_wire_profile(context.wire_profile);
         let mut recovery = (!context.disable_tools
             && tools
@@ -1845,8 +1880,9 @@ impl State {
                 )
                 .await?
         {
-            return serde_json::from_value(value)
-                .map_err(|error| durable::recovery_error(error).into());
+            let response = serde_json::from_value(value).map_err(durable::recovery_error)?;
+            completed(&response, 0, 0, None);
+            return Ok(response);
         }
         if cancel.flag.load(Ordering::SeqCst) {
             return Err(NanocodexError::TurnCancelled.into());
@@ -1872,6 +1908,8 @@ impl State {
             }),
         };
         let mut captured = Vec::new();
+        let mut first_event = None;
+        let mut first_output = None;
         loop {
             let event = tokio::select! {
                 event = stream.next() => event,
@@ -1881,6 +1919,10 @@ impl State {
             };
             match event {
                 Some(Ok(event)) => {
+                    first_event.get_or_insert_with(&elapsed_ns);
+                    if matches!(event, StreamEvent::ContentBlockDelta { .. }) {
+                        first_output.get_or_insert_with(&elapsed_ns);
+                    }
                     if let Some(recovery) = &mut recovery {
                         recovery.observe(&event);
                     }
@@ -1926,6 +1968,7 @@ impl State {
                 .complete(serde_json::to_value(&response).map_err(provider_error)?)
                 .await?;
         }
+        completed(&response, 1, first_event.unwrap_or_default(), first_output);
         Ok(response)
     }
     async fn run(&self, request: BackendPrompt, cancel: Arc<Cancellation>) -> Result<TurnResult> {
