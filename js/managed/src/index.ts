@@ -1051,14 +1051,20 @@ async function readPrivateBrowserChallenge(request: Request, takeover = false, s
       size += value.byteLength;
       // Aggregate UTF-8 JSON cap includes field names, escaping, and envelope;
       // individual field maxima do not promise eight simultaneous maximum values.
-      if (size > ((secureInput || nativeInput) ? 32768 : 2048)) {
+      if (size > (takeover ? 256 * 1024 : (secureInput || nativeInput) ? 32768 : 2048)) {
         void reader.cancel().catch(() => {});
         return json({ error: "request_too_large" }, { status: 413 });
       }
       text += decoder.decode(value, { stream: true });
     }
     text += decoder.decode();
-    const value: unknown = JSON.parse(text);
+    // Native batches allow JSON escaping plus field refs around 32 KiB of values.
+    // Preserve the original small-action transport limit for older clients.
+    let value: unknown;
+    try { value = JSON.parse(text); }
+    catch { if (takeover && size > 2048) return json({ error: "request_too_large" }, { status: 413 }); throw new Error(); }
+    if (takeover && size > 2048 && (!value || typeof value !== "object" || (value as Record<string, unknown>).action !== "fill_fields"))
+      return json({ error: "request_too_large" }, { status: 413 });
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
     const fields = value as Record<string, unknown>;
     if (nativeInput) return parseNativeSecureInput(fields);

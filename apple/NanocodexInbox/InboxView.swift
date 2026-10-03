@@ -3804,6 +3804,12 @@ private struct BrowserTakeoverSheet: View {
     @State private var keyboard: BrowserKeyboardHint?
     @State private var inputs: [BrowserInputRegion] = []
     @State private var keyboardVisible = false
+    @State private var nativeForm: BrowserNativeForm?
+    @State private var drafts: [String: String] = [:]
+    @State private var editingFields = false
+    @State private var prefersViewport = false
+    @State private var nativeFieldsEnabled = true
+    @State private var nativeFieldsConfirmed = false
     @State private var failure: String?
     @State private var queue: [[String: JSON]] = []
     @State private var submission: Task<Void, Never>?
@@ -3819,11 +3825,44 @@ private struct BrowserTakeoverSheet: View {
     private func clear() {
         generation = UUID(); submission?.cancel(); submission = nil
         queue.removeAll(); screen = nil; keyboard = nil; inputs = []; keyboardVisible = false
-        finishing = false; touching = false
+        nativeForm = nil; drafts.removeAll(); editingFields = false; prefersViewport = false
+        currentOrigin = nil; finishing = false; touching = false
+    }
+    private var busy: Bool { submission != nil || !queue.isEmpty || finishing }
+    private func receiveForm(_ form: BrowserNativeForm?) {
+        if nativeForm != form { drafts.removeAll() }
+        nativeForm = form
+        if form != nil { nativeFieldsConfirmed = true }
+        if form == nil { editingFields = false; prefersViewport = false }
+        else if !prefersViewport && !touching && queue.isEmpty {
+            editingFields = true; keyboardVisible = false
+        }
+    }
+    private func fieldBinding(_ field: BrowserNativeField) -> Binding<String> {
+        Binding(get: { drafts[field.id] ?? "" }, set: { value in
+            guard editingFields, !busy, scenePhase == .active,
+                  account == model.vaultIntakeAccount, nativeForm?.fields.contains(field) == true else { return }
+            drafts[field.id] = value
+        })
+    }
+    private func fillFields() {
+        guard !busy, let form = nativeForm, editingFields else { return }
+        do {
+            let action = try form.fillAction(values: drafts)
+            drafts.removeAll()
+            enqueue(action)
+        } catch {
+            clear(); failure = "Couldn’t fill the fields. Refresh before continuing."
+        }
+    }
+    private func showViewport() {
+        drafts.removeAll(); editingFields = false; prefersViewport = true; keyboardVisible = false
     }
     private func observe(configureViewport: Bool = false) {
+        guard !editingFields else { return }
         // Poll pixels without resizing the remote page as the native keyboard opens.
         var action: [String: JSON] = ["action": .string("observe")]
+        if nativeFieldsEnabled { action["native_fields"] = .bool(true) }
         if configureViewport {
             action["viewport"] = .object([
                 "width": .number(Double(min(1920, max(240, viewport.width)).rounded())),
@@ -3835,10 +3874,14 @@ private struct BrowserTakeoverSheet: View {
         guard scenePhase == .active, account == model.vaultIntakeAccount, !finishing else { return }
         guard failure == nil || ["finish", "cancel", "approve"].contains(action["action"]?.string ?? "") else { return }
         guard !login || reviewed || ["approve", "cancel"].contains(action["action"]?.string ?? "") else { return }
+        if editingFields && !["fill_fields", "finish", "cancel"].contains(action["action"]?.string ?? "") { return }
         if action["action"] == .string("touch") {
             touching = action["phase"] == .string("start") || action["phase"] == .string("move")
         }
-        if action["action"] == .string("finish") || action["action"] == .string("cancel") { finishing = true; keyboardVisible = false }
+        if action["action"] == .string("finish") || action["action"] == .string("cancel") {
+            drafts.removeAll(); nativeForm = nil; editingFields = false
+            finishing = true; keyboardVisible = false
+        }
         // Only replace adjacent unsent moves. Text, keys and gesture boundaries retain order.
         if action["phase"] == .string("move"), queue.last?["phase"] == .string("move") {
             queue[queue.count - 1] = action
@@ -3853,6 +3896,8 @@ private struct BrowserTakeoverSheet: View {
                 let frame = try await model.browserTakeover(intake: intake, action: action, account: account)
                 guard !Task.isCancelled, generation == token, scenePhase == .active,
                       account == model.vaultIntakeAccount else { return }
+                if action["action"] == .string("observe"), action["native_fields"] == .bool(true) { nativeFieldsConfirmed = true }
+                if action["action"] == .string("fill_fields") { showViewport() }
                 switch frame {
                 case .approved:
                     guard login, action["action"] == .string("approve") else { throw APIError.invalidResponse }
@@ -3861,9 +3906,14 @@ private struct BrowserTakeoverSheet: View {
                     guard login, action["action"] == .string("cancel") else { throw APIError.invalidResponse }
                     model.publishBrowserVerificationReceipt(intake: intake, agentID: intake.agentID ?? "", account: account, cancelled: true)
                     clear(); dismiss(); return
+                case .activeWithForm(let data, let hint, let regions, let form, let origin):
+                    guard let image = UIImage(data: data) else { throw APIError.invalidResponse }
+                    screen = image; keyboard = hint; inputs = regions; currentOrigin = origin
+                    receiveForm(form)
                 case .loginActive(let data, let hint, let regions, let origin):
                     guard let image = UIImage(data: data) else { throw APIError.invalidResponse }
                     screen = image; keyboard = hint; inputs = regions; currentOrigin = origin
+                    receiveForm(nil)
                     if hint != nil { keyboardVisible = true }
                 case .finished:
                     guard action["action"] == .string("finish") else { throw APIError.invalidResponse }
@@ -3871,17 +3921,37 @@ private struct BrowserTakeoverSheet: View {
                     clear(); dismiss(); return
                 case .active(let data, _, _):
                     guard let image = UIImage(data: data) else { throw APIError.invalidResponse }
-                    screen = image; keyboard = nil; inputs = []
+                    screen = image; keyboard = nil; inputs = []; receiveForm(nil)
                 case .activeWithInput(let data, _, _, let hint, let regions):
                     guard let image = UIImage(data: data) else { throw APIError.invalidResponse }
-                    screen = image; keyboard = hint; inputs = regions
+                    screen = image; keyboard = hint; inputs = regions; receiveForm(nil)
                     if hint != nil { keyboardVisible = true }
                 }
                 submission = nil; drain()
             } catch {
                 guard generation == token, !Task.isCancelled else { return }
+                // Old workers reject the new observation key before taking any action.
+                // Retry only this read-only capability probe, once for this lease.
+                if nativeFieldsEnabled, !nativeFieldsConfirmed,
+                   action["action"] == .string("observe"), action["native_fields"] == .bool(true),
+                   (error as? APIError) == .http(400) {
+                    nativeFieldsEnabled = false
+                    clear()
+                    var legacy = action; legacy.removeValue(forKey: "native_fields")
+                    enqueue(legacy)
+                    return
+                }
                 clear(); failure = "Couldn’t confirm the action. Refresh before continuing."
             }
+        }
+    }
+    private func nativeKeyboardType(_ type: String) -> UIKeyboardType {
+        switch type {
+        case "email": return .emailAddress
+        case "url": return .URL
+        case "tel": return .phonePad
+        case "number": return .decimalPad
+        default: return .default
         }
     }
     var body: some View {
@@ -3891,6 +3961,38 @@ private struct BrowserTakeoverSheet: View {
                     BrowserLoginReview(origin: intake.origin ?? "", sites: intake.allowedOrigins ?? [], busy: submission != nil,
                         approve: { failure = nil; enqueue(["action": .string("approve")]) },
                         cancel: { enqueue(["action": .string("cancel")]) })
+                } else if editingFields, let form = nativeForm {
+                    Form {
+                        Section {
+                            ForEach(form.fields) { field in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(field.label).font(.subheadline)
+                                    if field.type == "password" {
+                                        SecureField(field.label, text: fieldBinding(field))
+                                            .textContentType(.password)
+                                    } else if field.multiline {
+                                        TextEditor(text: fieldBinding(field)).frame(minHeight: 88)
+                                            .accessibilityLabel(field.label)
+                                    } else {
+                                        TextField(field.label, text: fieldBinding(field))
+                                            .keyboardType(nativeKeyboardType(field.type))
+                                            .submitLabel(.next)
+                                    }
+                                }
+                                .autocorrectionDisabled().textInputAutocapitalization(.never)
+                            }
+                        } footer: {
+                            Text("Fill these fields, then use the website’s button to continue. Values stay out of chat and are not saved to Vault.")
+                        }
+                        Section {
+                            Button("Fill fields", action: fillFields)
+                                .disabled(drafts.isEmpty)
+                                .accessibilityIdentifier("browser-native-fill")
+                            Button("Use website instead", action: showViewport)
+                        }
+                    }
+                    .disabled(busy || scenePhase != .active)
+                    .accessibilityIdentifier("browser-native-form")
                 } else {
                 GeometryReader { geometry in
                     PrivateBrowserCanvas(image: screen, keyboard: keyboard, inputs: inputs,
@@ -3903,7 +4005,7 @@ private struct BrowserTakeoverSheet: View {
                 }
                 if let failure { Text(failure).font(.footnote).foregroundStyle(.red).padding(8) }
             }
-            .background(login && !reviewed ? Color(uiColor: .systemBackground) : Color.black).privacySensitive()
+            .background(editingFields || (login && !reviewed) ? Color(uiColor: .systemBackground) : Color.black).privacySensitive()
             .overlay {
                 if screen == nil && failure == nil && (!login || reviewed) {
                     ProgressView("Opening private browser…").tint(.white).foregroundStyle(.white)
@@ -3914,17 +4016,21 @@ private struct BrowserTakeoverSheet: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     if !login || reviewed { Button("Done") { enqueue(["action": .string("finish")]) }
-                        .disabled(finishing || scenePhase != .active) }
+                        .disabled(busy || scenePhase != .active) }
                 }
                 ToolbarItemGroup(placement: .bottomBar) {
                     if !login || reviewed {
-                    if login { Button("Cancel") { enqueue(["action": .string("cancel")]) }.disabled(finishing) }
+                    if login { Button("Cancel") { enqueue(["action": .string("cancel")]) }.disabled(busy) }
                     Button { guard submission == nil else { return }; failure = nil; observe(configureViewport: true) } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
-                    }.disabled(submission != nil || finishing || touching)
+                    }.disabled(busy || touching || editingFields)
                     Spacer()
+                    if nativeForm != nil && !editingFields {
+                        Button("Fields") { editingFields = true; keyboardVisible = false }
+                            .disabled(busy || touching || failure != nil)
+                    }
                     Button { keyboardVisible.toggle() } label: { Label("Keyboard", systemImage: "keyboard") }
-                        .disabled(screen == nil || failure != nil || finishing)
+                        .disabled(screen == nil || failure != nil || finishing || editingFields)
                     }
                 }
             }
@@ -3938,7 +4044,7 @@ private struct BrowserTakeoverSheet: View {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(1))
                     guard !Task.isCancelled else { return }
-                    if (!login || reviewed) && submission == nil && queue.isEmpty && failure == nil && !finishing && !touching { observe() }
+                    if (!login || reviewed) && submission == nil && queue.isEmpty && failure == nil && !finishing && !touching && !editingFields { observe() }
                 }
             }
         }
@@ -4081,6 +4187,7 @@ private struct PrivateBrowserCanvas: UIViewRepresentable {
         ripple.fillColor = UIColor.systemBlue.withAlphaComponent(0.3).cgColor
         layer.addSublayer(trail); layer.addSublayer(ripple)
         accessibilityLabel = "Private browser screen"
+        accessibilityIdentifier = "browser-private-viewport"
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layoutSubviews() { super.layoutSubviews(); imageView.frame = bounds; bridge.frame = .zero }
@@ -4590,6 +4697,124 @@ private struct SecureBrowserField: View {
     }
 }
 #if DEBUG && targetEnvironment(simulator)
+/// Runs the production takeover sheet and ManagedClient; only browser HTTP is synthetic.
+struct BrowserNativeFormUIFixture: View {
+    @ObservedObject private var transport = BrowserNativeFormUITransport.shared
+    @State private var showing = false
+    private let intake = VaultIntake.parse(.object([
+        "type": .string("browser_vault_takeover"), "status": .string("input_required"),
+        "challenge_id": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "agent_id": .string("fixture"),
+        "origin": .string("https://example.com"), "expires_at": .number(4_000_000_000_000)
+    ]))!
+    var body: some View {
+        Button("Open native browser form") { showing = true }
+            .sheet(isPresented: $showing) {
+                BrowserTakeoverSheet(model: .shared, intake: intake)
+                    .safeAreaInset(edge: .top) {
+                        VStack {
+                            Text("Observations: \(transport.observations)").accessibilityIdentifier("native-fixture-observations")
+                            Text("Capability probes: \(transport.probes)").accessibilityIdentifier("native-fixture-probes")
+                            Text("Fills: \(transport.fills) · Site submits: \(transport.submits)")
+                                .accessibilityIdentifier("native-fixture-actions")
+                            if transport.filled { Text("Synthetic fields matched").accessibilityIdentifier("native-fixture-filled") }
+                        }.font(.caption).padding(4).background(.background)
+                    }
+            }
+    }
+}
+
+@MainActor final class BrowserNativeFormUITransport: ObservableObject {
+    static let shared = BrowserNativeFormUITransport()
+    @Published private(set) var observations = 0
+    @Published private(set) var probes = 0
+    private var legacy: Bool { ProcessInfo.processInfo.arguments.contains("--browser-native-form-legacy") }
+    @Published private(set) var fills = 0
+    @Published private(set) var submits = 0
+    @Published private(set) var filled = false
+    private var documentID = UUID().uuidString.lowercased()
+    private var refs = (0..<2).map { _ in UUID().uuidString.lowercased() }
+    private let client = ManagedClient(credential: try! AccountCredential(
+        origin: "https://native-form-fixture.invalid", apiKey: "ncx_live_abcdefgh1234_" + String(repeating: "x", count: 43)))
+
+    func request(intake: VaultIntake, action: [String: JSON]) async throws -> BrowserTakeoverFrame {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [BrowserNativeFormUIProtocol.self]
+        return try await client.browserTakeover(intake: intake, action: action, configuration: configuration)
+    }
+    func reply(_ action: JSON) -> (Int, JSON) {
+        let mode = action["action"].string
+        switch mode {
+        case "observe":
+            if action["native_fields"] == .bool(true) {
+                probes += 1
+                if legacy { return (400, .object([:])) }
+            } else if !legacy { return (400, .object([:])) }
+            observations += 1
+        case "fill_fields":
+            fills += 1
+            guard !ProcessInfo.processInfo.arguments.contains("--browser-native-form-fill-fails"),
+                  action["document_id"].string == documentID,
+                  action["fields"] == .array([
+                    .object(["ref": .string(refs[0]), "value": .string("synthetic@example.com")]),
+                    .object(["ref": .string(refs[1]), "value": .string("synthetic-password")])
+                  ]) else { return (409, .object([:])) }
+            filled = true
+        case "touch":
+            if action["phase"] == .string("end"), filled { submits += 1 }
+        case "finish": return (200, .object(["status": .string("finished")]))
+        default: return (400, .object([:]))
+        }
+        // Like the service, every observation/action invalidates the previous refs.
+        documentID = UUID().uuidString.lowercased()
+        refs = (0..<2).map { _ in UUID().uuidString.lowercased() }
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 390, height: 700))
+        let image = renderer.pngData { context in
+            UIColor.systemBackground.setFill(); context.fill(CGRect(x: 0, y: 0, width: 390, height: 700))
+            let title = filled ? "Fields filled. Tap to sign in." : "Synthetic website"
+            (title as NSString).draw(at: CGPoint(x: 30, y: 300), withAttributes: [.font: UIFont.systemFont(ofSize: 20), .foregroundColor: UIColor.label])
+        }
+        let fields: [JSON] = [("Email", "email"), ("Password", "password")].enumerated().map { index, field in
+            .object(["ref": .string(refs[index]), "label": .string(field.0), "type": .string(field.1), "multiline": .bool(false)])
+        }
+        var response: [String: JSON] = ["status": .string("active"), "image": .string("data:image/png;base64," + image.base64EncodedString()),
+            "width": .number(390), "height": .number(700)]
+        if !legacy { response["native_form"] = .object(["document_id": .string(documentID), "fields": .array(fields)]) }
+        return (200, .object(response))
+    }
+}
+
+private final class BrowserNativeFormUIProtocol: URLProtocol, @unchecked Sendable {
+    private var pending: Task<Void, Never>?
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "native-form-fixture.invalid" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        var body = request.httpBody ?? Data()
+        if let stream = request.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }
+                body.append(contentsOf: buffer.prefix(count))
+            }
+        }
+        guard let action = try? JSONDecoder().decode(JSON.self, from: body) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse)); return
+        }
+        pending = Task { @MainActor in
+            let (status, reply) = BrowserNativeFormUITransport.shared.reply(action)
+            if action["action"] == .string("fill_fields") { try? await Task.sleep(for: .milliseconds(400)) }
+            guard !Task.isCancelled, let url = request.url,
+                  let data = try? JSONEncoder().encode(reply) else { return }
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: status,
+                httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+    override func stopLoading() { pending?.cancel(); pending = nil }
+}
+
 struct BrowserLoginUIFixture: View {
     @State private var showing = false
     @State private var result = ""

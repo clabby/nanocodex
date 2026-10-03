@@ -17,7 +17,7 @@ import type { NamedTool, ToolContext } from "nanocodex";
 import { inspectPrivateCheckout } from "./browser-private-checkout";
 import { privateBrowserOperation, parsePrivateBrowserAction } from "./browser-private-operations";
 import { privateWaitlist } from "./browser-private-waitlist";
-import { privateVaultTakeover, releasePrivateVaultTakeover, validateBrowserVaultTakeoverAction, type BrowserVaultTakeoverAction, type BrowserVaultTouchState } from "./browser-vault-takeover";
+import { privateVaultTakeover, releasePrivateVaultTakeover, validateBrowserVaultTakeoverAction, rememberPrivateBrowserValues, type BrowserVaultTakeoverAction, type BrowserVaultTouchState } from "./browser-vault-takeover";
 
 import {
   parseSecureFormFields, parsePrivateSecureInput, secureBrowserForm, type SecureFormField,
@@ -977,6 +977,12 @@ export async function createManagedBrowserRuntime(
   let takeoverTyping: { index: number; text: string } | undefined;
   const rememberPrivateTyping = (action: Record<string, unknown>) => {
     if(!takeoverRedactionComplete)return;
+    if (action.action === "fill_fields") {
+      takeoverTyping = undefined;
+      if (!rememberPrivateBrowserValues(secrets,
+        (action as Extract<BrowserVaultTakeoverAction, {action:"fill_fields"}>).fields.map(field => field.value))) takeoverRedactionComplete = false;
+      return;
+    }
     if (action.action === "click" || (action.action === "touch" && action.phase === "start")
       || (action.action === "key" && ["Enter", "Tab", "Escape"].includes(String(action.key)))) takeoverTyping = undefined;
     const text = (action.action === "type" || action.action === "edit") && typeof action.text === "string" ? action.text : "";
@@ -997,7 +1003,7 @@ export async function createManagedBrowserRuntime(
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Invalid private control request");
     const value = input as Record<string, unknown>;
     if (typeof value.challenge_id !== "string" || !/^[0-9a-f-]{36}$/.test(value.challenge_id)
-      || !["observe", "click", "type", "edit", "touch", "key", "scroll", "finish"].includes(String(value.action))) throw new Error("Invalid private control request");
+      || !["observe", "click", "type", "edit", "fill_fields", "touch", "key", "scroll", "finish"].includes(String(value.action))) throw new Error("Invalid private control request");
     signal.throwIfAborted();
     const lease = await options.ctx.storage.get<HumanLease>(takeoverKey);
     if (!lease || value.challenge_id !== lease.id) throw new Error("Private control is unavailable");

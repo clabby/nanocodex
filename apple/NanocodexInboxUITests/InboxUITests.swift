@@ -2,6 +2,116 @@ import XCTest
 import UIKit
 
 final class InboxUITests: XCTestCase {
+    func testNativeBrowserFormFallsBackToLegacyBackendOnce() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--browser-native-form-ui-fixture", "--browser-native-form-legacy"]
+        app.launch()
+        let open = app.buttons["Open native browser form"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10))
+        open.tap()
+        let viewport = app.descendants(matching: .any)["browser-private-viewport"].firstMatch
+        XCTAssertTrue(viewport.waitForExistence(timeout: 5))
+        let observationCount = app.staticTexts["native-fixture-observations"]
+        let observed = expectation(for: NSPredicate(format: "label BEGINSWITH 'Observations: ' AND label != 'Observations: 0'"), evaluatedWith: observationCount)
+        wait(for: [observed], timeout: 5)
+        XCTAssertEqual(app.staticTexts["native-fixture-probes"].label, "Capability probes: 1")
+        XCTAssertFalse(app.textFields["Email"].exists)
+        let observations = app.staticTexts["native-fixture-observations"]
+        let before = observations.label
+        app.buttons["Refresh"].tap()
+        let refreshed = expectation(for: NSPredicate(format: "label != %@", before), evaluatedWith: observations)
+        wait(for: [refreshed], timeout: 5)
+        XCTAssertEqual(app.staticTexts["native-fixture-probes"].label, "Capability probes: 1", "Legacy mode must survive refresh and polling")
+        XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 0 · Site submits: 0")
+        XCTAssertFalse(app.staticTexts["Couldn’t confirm the action. Refresh before continuing."].exists)
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "legacy-browser-capability-fallback"; attachment.lifetime = .keepAlways
+        add(attachment)
+        app.buttons["Done"].tap()
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+    }
+
+    func testNativeBrowserFormFillsOnceThenRequiresWebsiteSubmit() {
+        let app = launchNativeBrowserForm()
+        let email = app.textFields["Email"]
+        let password = app.secureTextFields["Password"]
+        email.tap(); email.typeText("discarded@example.com")
+        password.tap(); password.typeText("discarded-password")
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(app.staticTexts["Private view paused. Refresh to continue."].waitForExistence(timeout: 5))
+        app.buttons["Refresh"].tap()
+        XCTAssertTrue(email.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["browser-native-fill"].isEnabled, "Backgrounding must discard all drafts")
+        XCTAssertTrue(["", "Email"].contains(email.value as? String ?? ""))
+        XCTAssertTrue(["", "Password"].contains(password.value as? String ?? ""))
+        enterNativeBrowserFields(app)
+        let observations = app.staticTexts["native-fixture-observations"]
+        let before = observations.label
+        let polling = expectation(for: NSPredicate(format: "label != %@", before), evaluatedWith: observations)
+        polling.isInverted = true
+        wait(for: [polling], timeout: 2)
+        revealNativeFill(app).tap()
+        XCTAssertTrue(app.staticTexts["native-fixture-filled"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Fills: 1 · Site submits: 0"].exists)
+        XCTAssertFalse(password.exists)
+        let viewport = app.descendants(matching: .any)["browser-private-viewport"].firstMatch
+        XCTAssertTrue(viewport.waitForExistence(timeout: 5))
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "native-fields-filled-before-website-submit"; attachment.lifetime = .keepAlways
+        add(attachment)
+        viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.staticTexts["Fills: 1 · Site submits: 1"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.buttons["Open native browser form"].waitForExistence(timeout: 5))
+    }
+
+    func testNativeBrowserFormFailureClearsDraftsWithoutRetry() {
+        let app = launchNativeBrowserForm(arguments: ["--browser-native-form-fill-fails"])
+        enterNativeBrowserFields(app)
+        revealNativeFill(app).tap()
+        XCTAssertTrue(app.staticTexts["Couldn’t confirm the action. Refresh before continuing."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.secureTextFields["Password"].exists)
+        let actions = app.staticTexts["native-fixture-actions"]
+        XCTAssertEqual(actions.label, "Fills: 1 · Site submits: 0")
+        let retry = expectation(for: NSPredicate(format: "label != %@", actions.label), evaluatedWith: actions)
+        retry.isInverted = true
+        wait(for: [retry], timeout: 2)
+        app.buttons["Refresh"].tap()
+        XCTAssertTrue(app.secureTextFields["Password"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["browser-native-fill"].isEnabled)
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "native-fill-failure-cleared-drafts"; attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func launchNativeBrowserForm(arguments: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["--browser-native-form-ui-fixture"] + arguments
+        app.launch()
+        let open = app.buttons["Open native browser form"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10))
+        open.tap()
+        XCTAssertTrue(app.textFields["Email"].waitForExistence(timeout: 5))
+        return app
+    }
+    private func enterNativeBrowserFields(_ app: XCUIApplication) {
+        let email = app.textFields["Email"]
+        email.tap(); email.typeText("synthetic@example.com")
+        let password = app.secureTextFields["Password"]
+        password.tap(); password.typeText("synthetic-password")
+        XCTAssertNotEqual(password.value as? String, "synthetic-password")
+    }
+    private func revealNativeFill(_ app: XCUIApplication) -> XCUIElement {
+        let fill = app.buttons["browser-native-fill"]
+        for _ in 0..<4 {
+            if fill.isHittable { break }
+            app.collectionViews.firstMatch.swipeUp()
+        }
+        XCTAssertTrue(fill.isEnabled)
+        return fill
+    }
+
     func testPrivateLoginUsesNativeSecureReviewPane() {
         let app = XCUIApplication()
         app.launchArguments = ["--browser-login-ui-fixture"]
