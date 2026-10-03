@@ -108,14 +108,14 @@ private struct InboxNavigationSurface: ViewModifier {
         if reduceTransparency {
             content.background(Ink.card, in: shape)
         } else if #available(iOS 26.0, *) {
-            content.glassEffect(.clear, in: shape)
+            content.glassEffect(.regular, in: shape)
         } else {
-            content.background(.ultraThinMaterial, in: shape)
+            content.background(.regularMaterial, in: shape)
         }
     }
 }
 
-/// Floating transcript controls share the composer's transparent chrome.
+/// Floating transcript controls share the composer's frosted chrome.
 private struct InboxThreadControlSurface: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
@@ -123,9 +123,9 @@ private struct InboxThreadControlSurface: ViewModifier {
         if reduceTransparency {
             content.background(Ink.card, in: Circle())
         } else if #available(iOS 26.0, *) {
-            content.glassEffect(.clear.interactive(), in: Circle())
+            content.glassEffect(.regular.interactive(), in: Circle())
         } else {
-            content.background(.ultraThinMaterial, in: Circle())
+            content.background(.regularMaterial, in: Circle())
         }
     }
 }
@@ -160,10 +160,10 @@ struct InboxComposerShell: ViewModifier {
                 .background(ChatPalette.composer, in: shape)
                 .overlay(shape.strokeBorder(Color.primary.opacity(focused ? 0.18 : 0.1)))
         } else if #available(iOS 26.0, *) {
-            // Keep text and controls legible over the clear glass surface.
-            content.glassEffect(.clear, in: shape)
+            // Regular glass diffuses the transcript behind text and controls.
+            content.glassEffect(.regular, in: shape)
         } else {
-            content.background(.ultraThinMaterial, in: shape)
+            content.background(.regularMaterial, in: shape)
                 .overlay(shape.strokeBorder(Color.primary.opacity(focused ? 0.12 : 0.06)))
         }
     }
@@ -913,9 +913,9 @@ private struct InboxHeaderGlass: ViewModifier {
         if reduceTransparency {
             content.background(Ink.card, in: RoundedRectangle(cornerRadius: 24))
         } else if #available(iOS 26.0, *) {
-            content.glassEffect(.clear, in: RoundedRectangle(cornerRadius: 24))
+            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24))
         } else {
-            content.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
+            content.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
         }
     }
 }
