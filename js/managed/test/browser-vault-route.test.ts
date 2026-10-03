@@ -98,6 +98,9 @@ describe("private browser direct takeover endpoint", () => {
     const { principal, call } = await fixture("takeover");
     for (const action of [
       { action: "observe", viewport: { width: 390, height: 700, mobile: true } },
+      { action: "observe", native_fields: true },
+      { action: "fill_fields", document_id: crypto.randomUUID(), fields: [{ref:crypto.randomUUID(), value:"synthetic🙂"}] },
+      { action: "fill_fields", document_id: crypto.randomUUID(), fields: Array.from({length:8}, () => ({ref:crypto.randomUUID(), value:"\u0001".repeat(4096)})) },
       { action: "touch", phase: "start", x: 0.5, y: 0.5 },
       { action: "touch", phase: "move", x: 0.5, y: 0.2 },
       { action: "touch", phase: "end" },
@@ -119,6 +122,9 @@ describe("private browser direct takeover endpoint", () => {
     const { principal, call } = await fixture("takeover");
     for (const action of [
       { action: "evaluate", code: "private-text" },
+      { action: "observe", native_fields: "true" },
+      { action: "fill_fields", document_id: crypto.randomUUID(), fields: [{ref:crypto.randomUUID(),value:"private-text".repeat(400)}] },
+      { action: "fill_fields", document_id: crypto.randomUUID(), fields: Array.from({length:9}, () => ({ref:crypto.randomUUID(),value:"x".repeat(4096)})) },
       { action: "observe", text: "private-text" },
       { action: "observe", viewport: { width: 390, height: 700, mobile: true, secret: "private-text" } },
       { action: "observe", viewport: { width: 239, height: 700, mobile: true } },

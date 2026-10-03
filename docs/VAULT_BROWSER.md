@@ -110,3 +110,43 @@ input directly to the bound browser challenge. Passwords, codes, cookies and
 browser connection URLs never belong in chat, tool arguments or artifacts.
 `browser_vault_close` discards the private browser session. Idle sessions are swept,
 and deleting the agent closes its browser.
+
+## Native fields in private takeover
+
+New clients opt in on each `observe` with `native_fields: true`. That choice
+applies to subsequent actions until the next observation. Observations that omit
+the flag or set it to false restore the original frame schema for older iOS versions
+with strict decoders. An opted-in frame can include a `native_form` descriptor with a
+`document_id` and up to 32 fields (`ref`, `label`, `type`, `multiline`). It contains
+no input values. iPhone and iPad can collect these values locally and send one
+`fill_fields` action with the current document ID and `{ref, value}` entries to
+the authenticated private takeover endpoint. Account web clients continue using
+the screenshot controls and accept the optional descriptor.
+
+Discovery includes supported editable, unobstructed top-frame inputs and text areas
+inside the viewport. Custom controls, shadow DOM and iframes retain the viewport fallback. Each descriptor
+is bound to its document, origin and exact elements, and consumed once. A refresh
+or any other action issues fresh references. Batches are bounded to 32 fields,
+4096 UTF-16 code units per value and 32768 UTF-8 bytes in total. The batch HTTP
+envelope is limited to 256 KiB to accommodate JSON escaping; other takeover
+actions retain their 2 KiB limit. Filling uses
+native setters and bubbling input/change events; it does not click or submit.
+A stale, replaced, disabled or read-only element rejects the batch before its
+first mutation. Event-driven changes can interrupt a batch after earlier fields
+were filled, so uncertain actions require explicit refresh and are never replayed.
+Raw values and browser-normalized variants (single-line newline removal, email/URL
+whitespace trimming, multiple-email token trimming and textarea line endings) enter
+the private redaction set before dispatch. Subsequent model snapshots remain
+redacted even when the action response is lost.
+
+Run the synthetic Chromium journey with:
+
+```sh
+CHROME_PATH=/path/to/chrome node --experimental-strip-types js/managed/test/browser-vault-takeover.chrome.mjs
+```
+
+It writes its timing and checked outcomes to ignored `output/private-native-fields/`.
+
+Updated native clients retry a rejected capability observation once without the
+capability flag when an older server returns HTTP 400, then retain the legacy
+viewport for that sheet. Fills and other user actions are never retried.

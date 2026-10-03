@@ -2,16 +2,32 @@ import { browserLoginIdentity } from "./browser-login";
 import { PrivateBrowserNoActiveTouch, isBrowserVaultOrigin, type BrowserVaultIdentity, type PrivateBrowserCdp } from "./browser-vault";
 
 export type BrowserVaultTakeoverAction =
-  | { action: "observe"; viewport?: { width: number; height: number; mobile: boolean } }
+  | { action: "observe"; native_fields?: boolean; viewport?: { width: number; height: number; mobile: boolean } }
   | { action: "click"; x: number; y: number }
   | { action: "type"; text: string }
+  | { action: "fill_fields"; document_id: string; fields: { ref: string; value: string }[] }
   | { action: "edit"; delete_backward: number; text: string }
   | { action: "touch"; phase: "start" | "move" | "end" | "cancel"; x?: number; y?: number }
   | { action: "key"; key: "Enter" | "Tab" | "Backspace" | "Escape" }
   | { action: "scroll"; delta_y: number };
-export type BrowserVaultTouchState = { active?: boolean; uncertain?: boolean };
+export type BrowserVaultTouchState = { active?: boolean; uncertain?: boolean; nativeFields?: boolean; nativeForm?: { documentId: string; contextId: number; frameId: string; loaderId: string; origin: string } };
 export type BrowserVaultKeyboard = { type: "text" | "email" | "url" | "tel" | "number" | "password"; multiline: boolean };
-export type BrowserVaultTakeoverResult = { status: "active"; image: string; width: number; height: number; keyboard?: BrowserVaultKeyboard; inputs?: (BrowserVaultKeyboard & { x: number; y: number; width: number; height: number })[] };
+export type BrowserVaultNativeForm = { document_id: string; fields: (BrowserVaultKeyboard & { ref: string; label: string })[] };
+export type BrowserVaultTakeoverResult = { native_form?: BrowserVaultNativeForm; status: "active"; image: string; width: number; height: number; keyboard?: BrowserVaultKeyboard; inputs?: (BrowserVaultKeyboard & { x: number; y: number; width: number; height: number })[] };
+
+/** Register before dispatch: browser value sanitization may finish even if CDP
+ * loses its reply. Keep raw and all supported native-input normalization variants
+ * without depending on post-fill DOM inspection or exposing values in metadata. */
+export function rememberPrivateBrowserValues(secrets: string[], values: readonly string[]): boolean {
+  const trimAscii = (value: string) => value.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "");
+  for (const value of values) {
+    const singleLine = value.replace(/[\r\n]/g, "");
+    const variants = [value, singleLine, trimAscii(singleLine),
+      singleLine.split(",").map(trimAscii).join(","), value.replace(/\r\n?/g, "\n")];
+    for (const variant of variants) if (variant && !secrets.includes(variant)) secrets.push(variant);
+  }
+  return secrets.length <= 128 && secrets.reduce((size, value) => size + value.length, 0) <= 65536;
+}
 
 const MAX_IMAGE_BASE64 = 8 * 1024 * 1024;
 const keys = { Enter: 13, Tab: 9, Backspace: 8, Escape: 27 } as const;
@@ -20,16 +36,31 @@ export function validateBrowserVaultTakeoverAction(value: BrowserVaultTakeoverAc
   let allowed: string[];
   switch (value.action) {
     case "observe":
+      if (value.native_fields !== undefined && typeof value.native_fields !== "boolean") throw new Error();
       if (value.viewport !== undefined) {
         const v = value.viewport;
         if (!v || typeof v !== "object" || Array.isArray(v) || typeof v.mobile !== "boolean"
           || ![v.width,v.height].every(n => Number.isInteger(n) && n >= 240 && n <= 1920)
           || Object.keys(v).some(k => !["width","height","mobile"].includes(k))) throw new Error();
       }
-      allowed = ["action", "viewport"]; break;
+      allowed = ["action", "viewport", "native_fields"]; break;
     case "click":
       if (![value.x, value.y].every(n => Number.isFinite(n) && n >= 0 && n <= 1)) throw new Error();
       allowed = ["action", "x", "y"]; break;
+    case "fill_fields": {
+      if (typeof value.document_id !== "string" || !/^[0-9a-f-]{36}$/.test(value.document_id)
+        || !Array.isArray(value.fields) || !value.fields.length || value.fields.length > 32) throw new Error();
+      const refs = new Set<string>(); let size = 0;
+      for (const field of value.fields) {
+        if (!field || typeof field !== "object" || Array.isArray(field)
+          || Object.keys(field).some(k => !["ref", "value"].includes(k))
+          || typeof field.ref !== "string" || !/^[0-9a-f-]{36}$/.test(field.ref) || refs.has(field.ref)
+          || typeof field.value !== "string" || field.value.length > 4096 || field.value.includes("\0")) throw new Error();
+        refs.add(field.ref); size += new TextEncoder().encode(field.value).length;
+      }
+      if (size > 32768) throw new Error();
+      allowed = ["action", "document_id", "fields"]; break;
+    }
     case "type":
       if (typeof value.text !== "string" || !value.text.length || value.text.length > 512) throw new Error();
       allowed = ["action", "text"]; break;
@@ -90,7 +121,7 @@ export async function privateVaultTakeover(
     const attached = cdp.attachTarget ? await cdp.attachTarget(identity.target_id) : await cdp.send("Target.attachToTarget", { targetId: identity.target_id, flatten: true });
     if (typeof attached?.sessionId !== "string" || !attached.sessionId) throw new Error();
     sid = attached.sessionId;
-    let frameId = "";
+    let frameId = "", loaderId = "", currentOrigin = "";
     const check = async () => {
       if (allowedOrigins) await browserLoginIdentity(cdp as PrivateBrowserCdp, identity, allowedOrigins);
       await checkTarget();
@@ -98,10 +129,11 @@ export async function privateVaultTakeover(
       const frame = tree?.frameTree?.frame;
       if (!frame || frame.parentId || typeof frame.id !== "string" || !frame.id) throw new Error();
       sameOrigin(frame.url);
-      frameId = frame.id;
+      frameId = frame.id; loaderId = typeof frame.loaderId === "string" ? frame.loaderId : ""; currentOrigin = new URL(frame.url).origin;
     };
     await check();
     if (action.action === "observe") {
+      touch.nativeFields = action.native_fields === true;
       // Observation is explicit recovery after an ambiguous gesture, never a replay.
       await check();
       // Chrome rejects touchCancel when no touch sequence has started.
@@ -137,7 +169,22 @@ export async function privateVaultTakeover(
       await cdp.send(method, params, sid);
       await check();
     };
-    if (action.action === "touch") {
+    if (action.action === "fill_fields") {
+      const binding = touch.nativeForm;
+      delete touch.nativeForm; // A batch is single-use even if its response is lost.
+      if (!binding || binding.documentId !== action.document_id || binding.frameId !== frameId
+        || !loaderId || binding.loaderId !== loaderId || binding.origin !== currentOrigin) throw new Error();
+      touch.uncertain = true;
+      await check();
+      const filled = await cdp.send("Runtime.callFunctionOn", {
+        executionContextId: binding.contextId, returnByValue: true, silent: true,
+        functionDeclaration: NATIVE_FORM_FILL,
+        arguments: [binding.documentId, binding.origin, action.fields].map(value => ({value})),
+      }, sid);
+      await check();
+      if (filled?.exceptionDetails || filled?.result?.value !== true) throw new Error();
+      touch.uncertain = false;
+    } else if (action.action === "touch") {
       // Mark uncertain before sending: a disconnected response must never replay input.
       touch.uncertain = true;
       await input("Input.dispatchTouchEvent", {
@@ -170,6 +217,8 @@ export async function privateVaultTakeover(
     // Fixed isolated-world code returns only an allowlisted descriptor, never field values.
     let keyboard: BrowserVaultKeyboard | undefined;
     let inputs: BrowserVaultTakeoverResult["inputs"];
+    let nativeForm: BrowserVaultNativeForm | undefined;
+    delete touch.nativeForm;
     try {
       const world = await cdp.send("Page.createIsolatedWorld", { frameId, worldName: "nanocodex-private-keyboard", grantUniveralAccess: false }, sid);
       if (Number.isInteger(world?.executionContextId)) {
@@ -214,6 +263,27 @@ export async function privateVaultTakeover(
         }
       }
     } catch { /* Optional focus metadata is unavailable; never forward provider errors. */ }
+    // Only opted-in clients receive new metadata; older clients reject unknown keys.
+    // Separate optional discovery keeps the viewport usable for custom controls and iframes.
+    if (touch.nativeFields) try {
+      const world = await cdp.send("Page.createIsolatedWorld", { frameId, worldName: "nanocodex-private-native-form", grantUniveralAccess: false }, sid);
+      if (Number.isInteger(world?.executionContextId) && loaderId) {
+        const documentId = crypto.randomUUID();
+        const refs = Array.from({length:32}, () => crypto.randomUUID());
+        const result = await cdp.send("Runtime.callFunctionOn", {
+          executionContextId: world.executionContextId, returnByValue: true, silent: true,
+          functionDeclaration: NATIVE_FORM_DISCOVER,
+          arguments: [documentId, currentOrigin, refs].map(value => ({value})),
+        }, sid);
+        const fields = result?.result?.value;
+        if (!result?.exceptionDetails && Array.isArray(fields) && fields.length > 0 && fields.length <= 32
+          && fields.every((f: any, i: number) => f && f.ref === refs[i] && typeof f.label === "string" && f.label.length <= 160
+            && ["text","email","url","tel","number","password"].includes(f.type) && typeof f.multiline === "boolean")) {
+          nativeForm = { document_id: documentId, fields: fields.map((f: any) => ({ref:f.ref,label:f.label,type:f.type,multiline:f.multiline})) };
+          touch.nativeForm = {documentId,contextId:world.executionContextId,frameId,loaderId,origin:currentOrigin};
+        }
+      }
+    } catch { /* Native forms are optional. Never forward provider errors. */ }
     await check();
     const screenshot = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false }, sid);
     await check();
@@ -225,8 +295,8 @@ export async function privateVaultTakeover(
     const dimension = (offset: number) => [...header.slice(offset, offset + 4)].reduce((n, c) => n * 256 + c.charCodeAt(0), 0);
     const imageWidth = dimension(16), imageHeight = dimension(20);
     if (!imageWidth || !imageHeight || imageWidth > 8192 || imageHeight > 8192 || imageWidth * imageHeight > 16_777_216) throw new Error();
-    return { status: "active", image: `data:image/png;base64,${data}`, width: imageWidth, height: imageHeight, ...(keyboard ? { keyboard } : {}), ...(inputs ? { inputs } : {}) };
-  } catch { throw new Error("Private browser takeover could not be completed safely"); }
+    return { status: "active", image: `data:image/png;base64,${data}`, width: imageWidth, height: imageHeight, ...(keyboard ? { keyboard } : {}), ...(inputs ? { inputs } : {}), ...(nativeForm ? {native_form:nativeForm} : {}) };
+  } catch { delete touch.nativeForm; throw new Error("Private browser takeover could not be completed safely"); }
   finally {
     if (sid && !cdp.attachTarget) {
       try { await cdp.send("Target.detachFromTarget", { sessionId: sid }); }
@@ -253,3 +323,56 @@ export async function releasePrivateVaultTakeover(cdp: Pick<PrivateBrowserCdp, "
   } catch { /* User can always relinquish control, including an unavailable page. */ }
   finally { if (sid && !cdp.attachTarget) { try { await cdp.send("Target.detachFromTarget", {sessionId:sid}); } catch {} } }
 }
+
+// Kept entirely in an isolated world. Neither DOM handles nor field values leave
+// this world during discovery. The host remembers only a document/context binding.
+const NATIVE_FORM_VISIBLE = `e => (e instanceof HTMLInputElement || e instanceof HTMLTextAreaElement)
+  && e.ownerDocument === document && e.getRootNode() === document && e.isConnected
+  && !e.disabled && !e.matches(':disabled') && !e.readOnly
+  && (e instanceof HTMLTextAreaElement || ["text","search","email","url","tel","number","password"].includes(e.type))
+  && !e.closest('[inert],[hidden],[aria-hidden="true"]')
+  && e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})
+  && (() => {
+    const r = e.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0
+      && r.right <= innerWidth && r.bottom <= innerHeight
+      && document.elementFromPoint(r.left + r.width/2, r.top + r.height/2) === e;
+  })()`;
+const NATIVE_FORM_DISCOVER = `function(documentId, origin, refs) {
+  if (window.top !== window || location.origin !== origin) return null;
+  const visible = ${NATIVE_FORM_VISIBLE};
+  const entries = [], fields = [];
+  for (const e of document.querySelectorAll('input,textarea')) {
+    if (entries.length === refs.length) break;
+    if (!visible(e)) continue;
+    const ref = refs[entries.length], multiline = e instanceof HTMLTextAreaElement;
+    const type = multiline || e.type === 'search' ? 'text' : e.type;
+    const label = (Array.from(e.labels || [], l => l.textContent || '').join(' ').trim()
+      || e.getAttribute('aria-label') || e.getAttribute('placeholder') || (type === 'password' ? 'Password' : 'Field ' + (entries.length + 1)))
+      .replace(/[\\u0000-\\u001f\\u007f]/g, ' ').slice(0,160);
+    entries.push({ref,element:e,type:e.type,form:e.form,name:e.name});
+    fields.push({ref,label,type,multiline});
+  }
+  globalThis.__nanocodexNativeForm = {documentId,document,origin,entries};
+  return fields;
+}`;
+const NATIVE_FORM_FILL = `function(documentId, origin, fields) {
+  const bound = globalThis.__nanocodexNativeForm;
+  delete globalThis.__nanocodexNativeForm;
+  if (!bound || bound.documentId !== documentId || bound.document !== document
+    || bound.origin !== origin || location.origin !== origin || window.top !== window) return false;
+  const visible = ${NATIVE_FORM_VISIBLE};
+  const valid = b => b && visible(b.element) && b.element.type === b.type
+    && b.element.form === b.form && b.element.name === b.name && location.origin === origin;
+  const selected = fields.map(f => ({field:f,binding:bound.entries.find(b => b.ref === f.ref)}));
+  if (!selected.every(s => valid(s.binding))) return false;
+  for (const {field,binding} of selected) {
+    if (!valid(binding)) return false;
+    const e = binding.element;
+    const prototype = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(e, field.value);
+    e.dispatchEvent(new Event('input', {bubbles:true,composed:true}));
+    e.dispatchEvent(new Event('change', {bubbles:true}));
+  }
+  return true;
+}`;
