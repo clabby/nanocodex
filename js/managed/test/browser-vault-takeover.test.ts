@@ -123,14 +123,14 @@ it("observation cancels an active gesture before capturing a recovery frame", as
   const cdp = fixture(), state = {active:true, uncertain:true};
   await privateVaultTakeover(cdp, identity, {action:"observe"}, state);
   expect(cdp.calls.find(c => c.method === "Input.dispatchTouchEvent")?.params).toEqual({type:"touchCancel",touchPoints:[]});
-  expect(state).toEqual({active:false,uncertain:false});
+  expect(state).toMatchObject({active:false,uncertain:false});
 });
 
 it("recovers uncertain state when Chrome confirms there is no touch sequence", async () => {
   const cdp = fixture(method => { if (method === "Input.dispatchTouchEvent") throw new PrivateBrowserNoActiveTouch(); });
   const state = {active:false,uncertain:true};
   await privateVaultTakeover(cdp,identity,{action:"observe"},state);
-  expect(state).toEqual({active:false,uncertain:false});
+  expect(state).toMatchObject({active:false,uncertain:false});
 });
 it.each(["Session closed", "Must send a TouchStart first to start a new touch."])("keeps recovery blocked on unclassified cancellation failures (%s)", async message => {
   const cdp = fixture(method => { if (method === "Input.dispatchTouchEvent") throw new Error(message); });

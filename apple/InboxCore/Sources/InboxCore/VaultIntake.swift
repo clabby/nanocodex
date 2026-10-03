@@ -175,8 +175,51 @@ public struct BrowserInputRegion: Sendable, Equatable {
     public let height: Double
     public let keyboard: BrowserKeyboardHint
 }
+/// Value-free metadata from the private, authenticated browser transport.
+public struct BrowserNativeField: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let label: String
+    public let type: String
+    public let multiline: Bool
+}
+public struct BrowserNativeForm: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let fields: [BrowserNativeField]
+
+    static func parse(_ value: JSON) throws -> Self {
+        guard case .object(let form) = value, Set(form.keys) == Set(["document_id", "fields"]),
+              case .string(let id) = value["document_id"], UUID(uuidString: id) != nil,
+              case .array(let entries) = value["fields"], (1...32).contains(entries.count) else { throw APIError.invalidResponse }
+        var fields: [BrowserNativeField] = []
+        for entry in entries {
+            guard case .object(let field) = entry,
+                  Set(field.keys) == Set(["ref", "label", "type", "multiline"]),
+                  case .string(let fieldID) = entry["ref"], UUID(uuidString: fieldID) != nil,
+                  !fields.contains(where: { $0.id == fieldID }),
+                  case .string(let label) = entry["label"], !label.isEmpty, label.utf16.count <= 160,
+                  !label.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
+                  case .string(let type) = entry["type"], ["text", "email", "url", "tel", "number", "password"].contains(type),
+                  case .bool(let multiline) = entry["multiline"], !multiline || type == "text" else { throw APIError.invalidResponse }
+            fields.append(.init(id: fieldID, label: label, type: type, multiline: multiline))
+        }
+        return .init(id: id, fields: fields)
+    }
+
+    /// Build one fill-only request from the current discovery. Never submits the website form.
+    public func fillAction(values: [String: String]) throws -> [String: JSON] {
+        guard !values.isEmpty, Set(values.keys).isSubset(of: Set(fields.map(\.id))),
+              values.values.allSatisfy({ $0.utf16.count <= 4096 && !$0.contains("\0") }),
+              values.values.reduce(0, { $0 + $1.utf8.count }) <= 32768 else { throw APIError.invalidResponse }
+        return ["action": .string("fill_fields"), "document_id": .string(id),
+                "fields": .array(fields.compactMap { field in
+                    values[field.id].map { .object(["ref": .string(field.id), "value": .string($0)]) }
+                })]
+    }
+}
+
 public enum BrowserTakeoverFrame: Sendable {
     case active(image: Data, width: Int, height: Int)
+    case activeWithForm(image: Data, keyboard: BrowserKeyboardHint?, inputs: [BrowserInputRegion], form: BrowserNativeForm, origin: String?)
     case activeWithInput(image: Data, width: Int, height: Int, keyboard: BrowserKeyboardHint?, inputs: [BrowserInputRegion])
 
     public static func parse(_ response: JSON, finishing: Bool = false) throws -> Self {
@@ -184,7 +227,7 @@ public enum BrowserTakeoverFrame: Sendable {
         if finishing, fields.count == 1, response["status"].string == "finished" { return .finished }
         let prefix = "data:image/png;base64,", encoded = response["image"].string
         guard case .number(let width) = response["width"], case .number(let height) = response["height"],
-              !finishing, Set(fields.keys).isSubset(of: ["status", "image", "width", "height", "keyboard", "inputs"]),
+              !finishing, Set(fields.keys).isSubset(of: ["status", "image", "width", "height", "keyboard", "inputs", "native_form"]),
               response["status"].string == "active", encoded.hasPrefix(prefix),
               width.isFinite, height.isFinite, width >= 1, width <= 16384, height >= 1, height <= 16384,
               width.rounded() == width, height.rounded() == height,
@@ -208,6 +251,9 @@ public enum BrowserTakeoverFrame: Sendable {
                       w > 0, h > 0, x + w <= 1.000001, y + h <= 1.000001 else { throw APIError.invalidResponse }
                 inputs.append(.init(x: x, y: y, width: w, height: h, keyboard: keyboard))
             }
+        }
+        if let value = fields["native_form"] {
+            return .activeWithForm(image: data, keyboard: keyboard, inputs: inputs, form: try BrowserNativeForm.parse(value), origin: nil)
         }
         if keyboard != nil || !inputs.isEmpty {
             return .activeWithInput(image: data, width: Int(width), height: Int(height), keyboard: keyboard, inputs: inputs)
@@ -240,6 +286,7 @@ extension ManagedClient {
             let origin = fields.removeValue(forKey: "origin")?.string ?? ""
             guard intake.allowedOrigins?.contains(origin) == true else { throw APIError.invalidResponse }
             switch try BrowserTakeoverFrame.parse(.object(fields)) {
+            case .activeWithForm(let data, let keyboard, let inputs, let form, _): return .activeWithForm(image: data, keyboard: keyboard, inputs: inputs, form: form, origin: origin)
             case .active(let data, _, _): return .loginActive(image: data, keyboard: nil, inputs: [], origin: origin)
             case .activeWithInput(let data, _, _, let keyboard, let inputs): return .loginActive(image: data, keyboard: keyboard, inputs: inputs, origin: origin)
             default: throw APIError.invalidResponse
