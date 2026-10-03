@@ -6223,6 +6223,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "http",
+ "httpdate",
  "image",
  "opusic-c",
  "reqwest",

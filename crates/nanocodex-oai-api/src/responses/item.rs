@@ -300,7 +300,9 @@ impl ResponseItem {
         match self {
             Self::Message { content, .. } => {
                 for item in content {
-                    if let ContentItem::InputImage { detail, .. } = item {
+                    if let ContentItem::InputImage { detail, .. }
+                    | ContentItem::InputImageFile { detail, .. } = item
+                    {
                         *detail = None;
                     }
                 }
@@ -308,7 +310,9 @@ impl ResponseItem {
             Self::FunctionCallOutput { output, .. } | Self::CustomToolCallOutput { output, .. } => {
                 if let FunctionOutputBody::Content(content) = output {
                     for item in content {
-                        if let FunctionOutputContent::InputImage { detail, .. } = item {
+                        if let FunctionOutputContent::InputImage { detail, .. }
+                        | FunctionOutputContent::InputImageFile { detail, .. } = item
+                        {
                             *detail = None;
                         }
                     }
@@ -700,6 +704,75 @@ mod tests {
                 "type": "configuration_update",
                 "reasoning": {"effort": "low"}
             })
+        );
+    }
+}
+
+#[cfg(all(test, feature = "client"))]
+mod image_file_detail_tests {
+    use super::*;
+    #[test]
+    fn lite_profile_strips_file_image_details_without_changing_references() {
+        let mut message = ResponseItem::message(
+            MessageRole::User,
+            [ContentItem::InputImageFile {
+                file_id: "file-message_123".into(),
+                detail: Some(crate::ImageDetail::Original),
+            }],
+        );
+        message.strip_image_details();
+        let value = serde_json::to_value(message).unwrap();
+        assert_eq!(value["content"][0]["file_id"], "file-message_123");
+        assert!(value["content"][0].get("detail").is_none());
+        let mut output = ResponseItem::custom_tool_output(
+            "c".to_owned(),
+            None,
+            FunctionOutputBody::Content(vec![FunctionOutputContent::InputImageFile {
+                file_id: "file-output_123".into(),
+                detail: Some(crate::ImageDetail::Original),
+            }]),
+        );
+        output.strip_image_details();
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["output"][0]["file_id"], "file-output_123");
+        assert!(value["output"][0].get("detail").is_none());
+    }
+    #[test]
+    fn full_response_history_roundtrip_restores_typed_file_images() {
+        let message = ResponseItem::message(
+            MessageRole::User,
+            [ContentItem::InputImageFile {
+                file_id: "file-message_123".into(),
+                detail: Some(crate::ImageDetail::Original),
+            }],
+        );
+        let restored: ResponseItem =
+            serde_json::from_value(serde_json::to_value(message).unwrap()).unwrap();
+        let ResponseItem::Message { content, .. } = restored else {
+            panic!("typed message expected");
+        };
+        assert!(
+            matches!(&content[0],ContentItem::InputImageFile { file_id,detail:Some(crate::ImageDetail::Original) } if file_id.as_ref()=="file-message_123")
+        );
+        let output = ResponseItem::custom_tool_output(
+            "c".to_owned(),
+            None,
+            FunctionOutputBody::Content(vec![FunctionOutputContent::InputImageFile {
+                file_id: "file-output_123".into(),
+                detail: Some(crate::ImageDetail::Original),
+            }]),
+        );
+        let restored: ResponseItem =
+            serde_json::from_value(serde_json::to_value(output).unwrap()).unwrap();
+        let ResponseItem::CustomToolCallOutput {
+            output: FunctionOutputBody::Content(content),
+            ..
+        } = restored
+        else {
+            panic!("typed output expected");
+        };
+        assert!(
+            matches!(&content[0],FunctionOutputContent::InputImageFile { file_id,detail:Some(crate::ImageDetail::Original) } if file_id.as_ref()=="file-output_123")
         );
     }
 }

@@ -1,8 +1,8 @@
-use std::time::Duration;
+use super::RetryAfter;
 
 use super::api_error::{
-    api_error_has_code, api_error_is_checkpoint_missing, invalid_tool_schema_path,
-    retryable_api_error,
+    api_error_has_code, api_error_is_checkpoint_missing, api_error_is_terminal,
+    invalid_tool_schema_path, retryable_api_error, retryable_api_error_received,
 };
 
 /// Errors produced by the standard `OpenAI` Responses transports.
@@ -61,7 +61,7 @@ pub enum ResponsesError {
         /// Retained response body.
         body: String,
         /// Server-requested retry delay when present.
-        retry_after: Option<Duration>,
+        retry_after: Option<RetryAfter>,
     },
     /// Sending a WebSocket frame failed.
     #[error("failed to send a Responses WebSocket frame: {detail}")]
@@ -117,6 +117,8 @@ pub enum ResponsesError {
     Api {
         /// Complete retained provider event.
         event: String,
+        /// Server advice captured when the event was received.
+        retry_after: Option<RetryAfter>,
     },
     /// The request exceeded the model context window.
     #[error("Responses input exceeded the model context window")]
@@ -157,7 +159,7 @@ pub enum ResponsesError {
         /// Retained response body.
         body: String,
         /// Server-requested retry delay when present.
-        retry_after: Option<Duration>,
+        retry_after: Option<RetryAfter>,
     },
     /// An SSE response body contained invalid UTF-8.
     #[error("Responses HTTPS stream contained invalid UTF-8: {detail}")]
@@ -173,6 +175,11 @@ impl ResponsesError {
     /// Returns the SDK-owned retry classification, if retrying is safe.
     #[must_use]
     pub fn retry_advice(&self) -> Option<RetryAdvice> {
+        if matches!(self, Self::HttpRejected { body, .. } | Self::HandshakeRejected { body, .. }
+            if api_error_is_terminal(body))
+        {
+            return None;
+        }
         let (class, server_delay) = match self {
             Self::Handshake {
                 reconnectable: true,
@@ -181,7 +188,11 @@ impl ResponsesError {
             Self::HandshakeTimeout { .. } => ("handshake_timeout", None),
             // ChatGPT's edge can transiently reject an otherwise valid upgrade. Treating the
             // rejection as bounded recovery also unlocks the standard HTTPS fallback.
-            Self::HandshakeRejected { status: 403, .. } => ("handshake_forbidden", None),
+            Self::HandshakeRejected {
+                status: 403,
+                retry_after,
+                ..
+            } => ("handshake_forbidden", *retry_after),
             Self::HandshakeRejected {
                 status,
                 retry_after,
@@ -202,7 +213,7 @@ impl ResponsesError {
                 reconnectable: true,
                 ..
             } => ("receive_transport", None),
-            Self::Api { event } => retryable_api_error(event)?,
+            Self::Api { event, retry_after } => (retryable_api_error(event)?.0, *retry_after),
             // Hosted stream adapters surface parser failures through the same
             // reader rejection as network failures. Replaying a malformed
             // provider stream cannot repair its protocol and must also remain
@@ -230,6 +241,27 @@ impl ResponsesError {
         })
     }
 
+    /// Returns advice captured at receipt, without restarting its interval.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<RetryAfter> {
+        match self {
+            Self::Api { retry_after, .. }
+            | Self::HttpRejected { retry_after, .. }
+            | Self::HandshakeRejected { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_terminal_provider_error(&self) -> bool {
+        match self {
+            Self::Api { event, .. } => api_error_is_terminal(event),
+            Self::HttpRejected { body, .. } | Self::HandshakeRejected { body, .. } => {
+                api_error_is_terminal(body)
+            }
+            _ => false,
+        }
+    }
+
     /// Returns a stable low-cardinality error class for telemetry.
     #[must_use]
     pub fn class(&self) -> &'static str {
@@ -251,8 +283,12 @@ impl ResponsesError {
             Self::EncodeRequest(_) => "encode_request",
             Self::InvalidPayload { .. } => "invalid_payload",
             Self::Closed { .. } => "closed",
-            Self::Api { event } if api_error_is_checkpoint_missing(event) => "checkpoint_missing",
-            Self::Api { event } if api_error_has_code(event, "misalignment_policy_violation") => {
+            Self::Api { event, .. } if api_error_is_checkpoint_missing(event) => {
+                "checkpoint_missing"
+            }
+            Self::Api { event, .. }
+                if api_error_has_code(event, "misalignment_policy_violation") =>
+            {
                 "misalignment_policy_violation"
             }
             Self::Api { .. } => "api",
@@ -279,7 +315,7 @@ impl ResponsesError {
     /// Returns whether the provider no longer recognizes a continuation ID.
     #[must_use]
     pub fn is_checkpoint_missing(&self) -> bool {
-        matches!(self, Self::Api { event } if api_error_is_checkpoint_missing(event))
+        matches!(self, Self::Api { event, .. } if api_error_is_checkpoint_missing(event))
     }
 
     /// Returns whether the provider rejected the request for context exhaustion.
@@ -302,7 +338,7 @@ impl ResponsesError {
         mut input: impl Iterator<Item = &'a crate::ResponseItem>,
     ) -> Self {
         let event = match &self {
-            Self::Api { event } => event,
+            Self::Api { event, .. } => event,
             Self::HttpRejected {
                 status: 400, body, ..
             } => body,
@@ -345,7 +381,7 @@ impl ResponsesError {
     #[must_use]
     pub fn is_misalignment_policy_violation(&self) -> bool {
         match self {
-            Self::Api { event } => api_error_has_code(event, "misalignment_policy_violation"),
+            Self::Api { event, .. } => api_error_has_code(event, "misalignment_policy_violation"),
             Self::HttpRejected { body, .. } => {
                 api_error_has_code(body, "misalignment_policy_violation")
             }
@@ -356,7 +392,7 @@ impl ResponsesError {
     pub(crate) fn http_rejected(
         status: u16,
         body: String,
-        retry_after: Option<std::time::Duration>,
+        retry_after: Option<RetryAfter>,
     ) -> Self {
         if status == 400 {
             let classified = Self::api_event(body.clone());
@@ -374,7 +410,14 @@ impl ResponsesError {
         }
     }
 
-    pub(crate) fn api_event(event: String) -> Self {
+    /// Classifies a received provider error and captures its advice once.
+    /// Pass this error between layers rather than reparsing it after observers.
+    #[must_use]
+    pub fn api_event(event: String) -> Self {
+        Self::api_event_received(event, super::RetryReceipt::now())
+    }
+
+    pub(crate) fn api_event_received(event: String, received: super::RetryReceipt) -> Self {
         // Provider policy stops take precedence over incidental image diagnostics.
         if [
             "misalignment_policy_violation",
@@ -384,7 +427,10 @@ impl ResponsesError {
         .iter()
         .any(|code| api_error_has_code(&event, code))
         {
-            return Self::Api { event };
+            return Self::Api {
+                event,
+                retry_after: None,
+            };
         }
         // Validation failures identify the rejected input field, whereas older image
         // decoding failures only carry the provider's diagnostic message.
@@ -415,7 +461,9 @@ impl ResponsesError {
         } else if api_error_has_code(&event, "context_length_exceeded") {
             Self::ContextWindowExceeded { event }
         } else {
-            Self::Api { event }
+            let retry_after =
+                retryable_api_error_received(&event, received).and_then(|(_, advice)| advice);
+            Self::Api { event, retry_after }
         }
     }
 }
@@ -436,8 +484,8 @@ fn invalid_provider_stream(detail: &str) -> bool {
 pub struct RetryAdvice {
     /// Stable low-cardinality retry class.
     pub class: &'static str,
-    /// Server-supplied minimum delay, if any.
-    pub server_delay: Option<Duration>,
+    /// Original receipt-time server deadline, if any.
+    pub server_delay: Option<RetryAfter>,
 }
 
 #[cfg(test)]
@@ -446,7 +494,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::ResponsesError;
+    use super::{ResponsesError, RetryAfter};
     use crate::transport::api_error::retryable_api_error;
 
     #[test]
@@ -534,7 +582,11 @@ mod tests {
         assert!(error.is_context_window_exceeded());
         assert!(matches!(error, ResponsesError::ContextWindowExceeded { event } if event == body));
         assert!(matches!(
-            ResponsesError::http_rejected(500, body, Some(Duration::from_secs(2))),
+            ResponsesError::http_rejected(
+                500,
+                body,
+                RetryAfter::from_delay(Duration::from_secs(2))
+            ),
             ResponsesError::HttpRejected {
                 status: 500,
                 retry_after: Some(_),
@@ -559,7 +611,11 @@ mod tests {
                 ResponsesError::InvalidImageRequest { event } if event == body
             ));
             assert!(matches!(
-                ResponsesError::http_rejected(500, body, Some(Duration::from_secs(2))),
+                ResponsesError::http_rejected(
+                    500,
+                    body,
+                    RetryAfter::from_delay(Duration::from_secs(2))
+                ),
                 ResponsesError::HttpRejected {
                     status: 500,
                     retry_after: Some(_),
@@ -631,6 +687,7 @@ mod tests {
             ] {
                 for error in [
                     ResponsesError::Api {
+                        retry_after: None,
                         event: event.to_string(),
                     },
                     ResponsesError::HttpRejected {
@@ -682,6 +739,7 @@ mod tests {
             "",
         ] {
             let error = ResponsesError::Api {
+                retry_after: None,
                 event: json!({ "error": {
                     "code": "invalid_function_parameters", "param": param
                 }})
@@ -704,6 +762,7 @@ mod tests {
             }}),
         ] {
             let error = ResponsesError::Api {
+                retry_after: None,
                 event: event.to_string(),
             }
             .with_request_input(input.iter());
@@ -730,14 +789,14 @@ mod tests {
         let error = ResponsesError::HandshakeRejected {
             status: 429,
             body: r#"{"error":"slow down"}"#.to_owned(),
-            retry_after: Some(delay),
+            retry_after: RetryAfter::from_delay(delay),
         };
 
         let advice = error
             .retry_advice()
             .expect("HTTP 429 handshake rejection must remain retryable");
         assert_eq!(advice.class, "handshake_rate_limit");
-        assert_eq!(advice.server_delay, Some(delay));
+        assert!(advice.server_delay.unwrap().remaining_delay() <= delay);
     }
 
     #[test]
@@ -802,11 +861,16 @@ mod tests {
             let error = ResponsesError::HttpRejected {
                 status,
                 body: "temporary failure".into(),
-                retry_after: Some(Duration::from_secs(2)),
+                retry_after: RetryAfter::from_delay(Duration::from_secs(2)),
             };
-            assert_eq!(
-                error.retry_advice().unwrap().server_delay,
-                Some(Duration::from_secs(2))
+            assert!(
+                error
+                    .retry_advice()
+                    .unwrap()
+                    .server_delay
+                    .unwrap()
+                    .remaining_delay()
+                    <= Duration::from_secs(2)
             );
         }
     }

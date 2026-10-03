@@ -233,3 +233,92 @@ async fn send_http_completion(mut stream: TcpStream, response_id: &str) -> Resul
     stream.shutdown().await?;
     Ok(())
 }
+
+/// Full Agent journey (warmup, seed generation, automatic pre-turn compaction,
+/// HTTPS fallback and resumed generation), not a compaction helper mock.
+#[tokio::test]
+async fn automatic_compaction_fallback_honors_last_websocket_advice() -> Result<()> {
+    use std::{
+        num::NonZeroU32,
+        time::{Duration, Instant},
+    };
+    let websocket_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let http_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let openai = OpenAi::builder("test-key")
+        .websocket_url(format!("ws://{}", websocket_listener.local_addr()?))
+        .api_base_url(format!("http://{}", http_listener.local_addr()?))
+        .max_attempts(NonZeroU32::new(1).unwrap())
+        .build()?;
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let websocket_server = tokio::spawn(async move {
+        let (stream, _) = websocket_listener.accept().await?;
+        let mut socket = accept_async(stream).await?;
+        assert_warmup(&next_json(&mut socket).await?);
+        send_warmup(&mut socket, "resp-warmup").await?;
+        next_json(&mut socket).await?;
+        send_final(&mut socket, "resp-seed").await?;
+        let compact = next_json(&mut socket).await?;
+        assert!(compact.to_string().contains("compaction_trigger"));
+        sent.send(Instant::now() + Duration::from_millis(200))
+            .unwrap();
+        send_json(
+            &mut socket,
+            json!({"type": "response.failed", "response": {
+                "error": {"code": "server_is_overloaded", "retry_after": 0.2}
+            }}),
+        )
+        .await?;
+        Ok::<_, eyre::Report>(websocket_listener)
+    });
+    let http_server = tokio::spawn(async move {
+        let deadline = received.await?;
+        let (mut stream, compact) = read_http_json(&http_listener).await?;
+        assert!(
+            Instant::now() >= deadline,
+            "automatic compaction bypassed WS advice"
+        );
+        assert!(compact.get("previous_response_id").is_none());
+        assert!(compact.to_string().contains("compaction_trigger"));
+        assert!(compact.to_string().contains("seed context"));
+        let body = format!(
+            "data: {}\n\ndata: {}\n\n",
+            json!({
+                "type": "response.output_item.done", "item": {"type": "compaction", "encrypted_content": "opaque-retry-summary"}
+            }),
+            completed_response_with_usage("resp-compact", &[], 0)
+        );
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
+        stream.shutdown().await?;
+        let (stream, generation) = read_http_json(&http_listener).await?;
+        assert!(generation.get("previous_response_id").is_none());
+        assert!(generation.to_string().contains("continue after retry"));
+        assert!(generation.to_string().contains("opaque-retry-summary"));
+        send_http_completion(stream, "resp-final").await?;
+        Ok::<_, eyre::Report>(http_listener)
+    });
+    let workspace = temporary_workspace("automatic-compaction-retry-deadline")?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .model(Model::Astra)
+        .thinking(Thinking::Low)
+        .context_window_tokens(1)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .build()?;
+    drop(events);
+    agent.prompt("seed context").await?.await?;
+    agent.prompt("continue after retry").await?.await?;
+    agent.shutdown().await?;
+    let ws = websocket_server.await??;
+    let http = http_server.await??;
+    assert!(
+        timeout(Duration::from_millis(20), ws.accept())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(Duration::from_millis(20), http.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}

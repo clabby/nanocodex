@@ -25,6 +25,7 @@ client = [
     "dep:base64",
     "dep:getrandom",
     "dep:http",
+    "dep:httpdate",
     "dep:reqwest",
     "dep:rustls",
     "dep:sha1",
@@ -51,6 +52,7 @@ async-trait.workspace = true
 base64 = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
+httpdate = { version = "1.0.3", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 smallvec.workspace = true

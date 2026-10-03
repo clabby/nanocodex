@@ -257,6 +257,31 @@ Sources: [model/defaults](../crates/nanocodex-oai-api/src/lib.rs),
 [pricing](../crates/nanocodex-oai-api/src/pricing/estimate.rs),
 [transport errors](../crates/nanocodex-oai-api/src/transport/error.rs).
 
+### Receipt-time retry advice — source breaking
+
+`transport::RetryAfter` replaces raw durations in
+`ResponsesError::{HandshakeRejected, HttpRejected}.retry_after`,
+`RetryAdvice.server_delay`, and the corresponding embedded `HostError` fields.
+`ResponsesError::Api` also carries `retry_after`; use
+`ResponsesError::api_event(event)` to capture advice when constructing an error
+from a newly received event. Existing exhaustive constructors/patterns must
+include the new field or `..` where appropriate.
+
+Capture advice at **receipt**, before buffering a body or notifying observers:
+`RetryAfter::from_header(value)` accepts numeric seconds and HTTP-date;
+`RetryAfter::from_delay(duration)` captures an already-parsed delay. Both
+return `Option<RetryAfter>` because malformed or unrepresentable advice is
+rejected. Call `remaining_delay()` when waiting, not when receiving. Cloning
+advice preserves its deadline, including before WebSocket-to-HTTP fallback;
+terminal failures still veto retries and existing attempt budgets still apply.
+
+Do not serialize monotonic clocks. Hosted boundaries carry only the validated
+`deadline_unix_ms()` value, reconstructed once with
+`RetryAfter::from_unix_ms(value)`. Portable adapters accept
+`retry_after_deadline_ms` and retain legacy numeric `retry_after` input.
+The service-level `server_retry_after()` compatibility accessor still returns
+the remaining `Option<Duration>`.
+
 ## 4. Tools, Code Mode, and MCP
 
 ### Embedded host rename and shared recipe — source breaking

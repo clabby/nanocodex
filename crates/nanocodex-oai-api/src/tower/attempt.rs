@@ -668,6 +668,7 @@ mod tests {
                 .pop_front()
                 .expect("captured response fixture should end with a completion event");
             Ok(crate::socket::ReceivedText {
+                retry_receipt: crate::transport::RetryReceipt::now(),
                 text: Utf8Bytes::from(text),
                 received_ns: crate::monotonic_now_ns(),
             })

@@ -132,14 +132,22 @@ impl ContextManager {
                 continue;
             };
             for part in content {
-                if let FunctionOutputContent::InputImage { image_url, .. } = part
-                    && !valid_tool_image_data_url(image_url)
-                {
-                    *part = FunctionOutputContent::InputText {
-                        text:
-                            "[image omitted: malformed base64 image data in restored tool output]"
-                                .into(),
+                let invalid = match part {
+                    FunctionOutputContent::InputImage { image_url, .. } => {
+                        !valid_tool_image_data_url(image_url)
+                    }
+                    FunctionOutputContent::InputImageFile { file_id, .. } => {
+                        !crate::responses::valid_image_file_id(file_id)
+                    }
+                    _ => false,
+                };
+                if invalid {
+                    let text = if matches!(part, FunctionOutputContent::InputImageFile { .. }) {
+                        "[image omitted: invalid file ID in restored tool output]"
+                    } else {
+                        "[image omitted: malformed base64 image data in restored tool output]"
                     };
+                    *part = FunctionOutputContent::InputText { text: text.into() };
                     replaced += 1;
                 }
             }
@@ -157,7 +165,10 @@ impl ContextManager {
             match item {
                 ResponseItem::Message { content, .. } => {
                     for content in content {
-                        if matches!(content, ContentItem::InputImage { .. }) {
+                        if matches!(
+                            content,
+                            ContentItem::InputImage { .. } | ContentItem::InputImageFile { .. }
+                        ) {
                             *content = ContentItem::input_text(
                                 "[image omitted after the provider rejected its data]",
                             );
@@ -171,7 +182,11 @@ impl ContextManager {
                         continue;
                     };
                     for content in content {
-                        if matches!(content, FunctionOutputContent::InputImage { .. }) {
+                        if matches!(
+                            content,
+                            FunctionOutputContent::InputImage { .. }
+                                | FunctionOutputContent::InputImageFile { .. }
+                        ) {
                             *content = FunctionOutputContent::InputText {
                                 text: "[image omitted after the provider rejected its data]".into(),
                             };
@@ -778,6 +793,7 @@ fn truncate_output_content(items: &mut Vec<FunctionOutputContent>, token_limit: 
                 }
             }
             FunctionOutputContent::InputImage { .. }
+            | FunctionOutputContent::InputImageFile { .. }
             | FunctionOutputContent::EncryptedContent { .. } => output.push(item),
             FunctionOutputContent::InputAudio { .. } => {}
         }
@@ -1370,5 +1386,32 @@ mod tests {
             tools: Vec::new(),
             internal_chat_message_metadata_passthrough: None,
         }
+    }
+    #[test]
+    fn file_images_survive_history_text_truncation_and_legacy_image_repair() {
+        let mut context = ContextManager::new(vec![ResponseItem::custom_tool_output(
+            "call".to_owned(),
+            None,
+            FunctionOutputBody::Content(vec![
+                FunctionOutputContent::InputText {
+                    text: "x".repeat(48_004).into(),
+                },
+                FunctionOutputContent::InputImageFile {
+                    file_id: "file-history_123".into(),
+                    detail: Some(crate::ImageDetail::Original),
+                },
+            ]),
+        )]);
+        assert_eq!(context.replace_invalid_tool_images(), 0);
+        let history = context.flattened_items();
+        let encoded = serde_json::to_value(&history).unwrap();
+        assert_eq!(encoded[0]["output"][1]["file_id"], "file-history_123");
+        assert_eq!(encoded[0]["output"][1]["detail"], "original");
+        assert_eq!(context.replace_rejected_images(), 1);
+        assert!(
+            !serde_json::to_string(&context.flattened_items())
+                .unwrap()
+                .contains("file-history_123")
+        );
     }
 }

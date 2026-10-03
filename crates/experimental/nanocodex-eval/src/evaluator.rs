@@ -2254,7 +2254,7 @@ fn output_aliases_task_package(_output: &Path, _task: &Path) -> io::Result<bool>
 }
 
 fn is_safety_refusal(error: &NanocodexError) -> bool {
-    let Some(ResponsesError::Api { event }) = error.responses_error() else {
+    let Some(ResponsesError::Api { event, .. }) = error.responses_error() else {
         return false;
     };
     serde_json::from_str::<ResponsesApiErrorEnvelope>(event)

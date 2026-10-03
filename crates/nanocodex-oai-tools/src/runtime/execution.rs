@@ -404,6 +404,11 @@ fn group_direct_code_mode_definitions(
 }
 
 impl ToolRuntimeControl {
+    /// Yield current Code Mode observers; retained cells and effects continue.
+    pub async fn preempt_turn(&self) {
+        self.code_mode.preempt_turn();
+    }
+
     #[doc(hidden)]
     pub fn begin_turn(&self) {
         let _ = self

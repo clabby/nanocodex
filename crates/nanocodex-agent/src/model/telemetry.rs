@@ -124,6 +124,8 @@ pub(super) struct ToolResultEvent<'a> {
     pub(super) structured_result: &'a Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) metadata: Option<&'a RawValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) cell: Option<&'a nanocodex_oai_tools::code_mode::CodeModeCell>,
 }
 
 #[allow(clippy::struct_field_names)]

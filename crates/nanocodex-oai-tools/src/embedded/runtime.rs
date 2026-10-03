@@ -455,6 +455,15 @@ fn normalize_identifier(name: &str) -> String {
 }
 
 impl EmbeddedToolRuntimeControl {
+    /// Ask the bound host to yield current observers, without cancelling effects.
+    pub async fn preempt_turn(&self) {
+        if let (Some(host), Some(session_id)) = (&self.host, &self.session_id)
+            && let Err(error) = host.preempt_turn(session_id).await
+        {
+            tracing::warn!(target: "nanocodex_tools", %error, "embedded Code Mode observation preemption failed");
+        }
+    }
+
     /// Begins a new logical agent turn.
     pub fn begin_turn(&self) {
         if let (Some(host), Some(session_id)) = (&self.host, &self.session_id) {

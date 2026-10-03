@@ -3,6 +3,7 @@
 mod attachment;
 mod code_mode_drain;
 mod oauth;
+mod preempt;
 mod support;
 mod tool_macro;
 mod tracing;

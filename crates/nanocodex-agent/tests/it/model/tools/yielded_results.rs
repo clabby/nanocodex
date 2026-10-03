@@ -79,6 +79,7 @@ async fn nested_tool_result_round_trip(yield_count: u32, completion: Completion)
     timeout(std::time::Duration::from_secs(15), async {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = format!("ws://{}", listener.local_addr()?);
+        let server_final_call_id = final_call_id.clone();
         let server = async move {
             let (stream, _) = listener.accept().await?;
             let mut socket = accept_async(stream).await?;
@@ -118,7 +119,7 @@ async fn nested_tool_result_round_trip(yield_count: u32, completion: Completion)
                 assert_eq!(continuation["previous_response_id"], format!("resp-wait-{wait_index}"));
                 assert_eq!(continuation["input"][0]["call_id"], format!("call-wait-{wait_index}"));
             }
-            assert_eq!(continuation["input"][0]["call_id"], final_call_id);
+            assert_eq!(continuation["input"][0]["call_id"], server_final_call_id);
             assert!(continuation["input"][0].to_string().contains("nested-result-delivered"), "{continuation}");
             assert!(!continuation.to_string().contains("Script running with cell ID"));
             send_final(&mut socket, "resp-final").await
@@ -193,6 +194,19 @@ async fn nested_tool_result_round_trip(yield_count: u32, completion: Completion)
         assert_eq!(result["status"], if fails { "failed" } else { "completed" });
         assert_eq!(result["result"], "nested-result-delivered");
         assert_eq!(result["structured_result"], "nested-result-delivered");
+        assert!(result.get("cell").is_none(), "nested tools are not Code Mode observations");
+        if !cancels {
+            let outer_results = captured.iter().filter(|(kind, payload)| {
+                *kind == AgentEventKind::ToolResult
+                    && (payload["tool"] == "exec" || payload["tool"] == "wait")
+            }).collect::<Vec<_>>();
+            assert_eq!(outer_results.len(), (yield_count + 1) as usize);
+            for (_, payload) in outer_results {
+                assert_eq!(payload["cell"]["origin_call_id"], "call-exec",
+                    "durable outer results must retain the original generation operation");
+                assert_eq!(payload["cell"]["running"], payload["call_id"] != final_call_id);
+            }
+        }
         Ok(())
     }).await?
 }

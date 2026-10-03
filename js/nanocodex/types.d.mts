@@ -5,7 +5,8 @@ export type Model = "gpt-6.1-sol" | "gpt-6-luna" | "gpt-6-astra" | "@cf/zai-org/
 
 export type PromptItem =
   | { type: "text"; text: string }
-  | { type: "image"; image_url: string; detail?: "auto" | "low" | "high" | "original" | undefined }
+  | { type: "image"; image_url: string; file_id?: never; detail?: "auto" | "low" | "high" | "original" | undefined }
+  | { type: "image"; file_id: string; image_url?: never; detail?: "auto" | "low" | "high" | "original" | undefined }
   | { type: "audio"; audio_url: string };
 
 export type PromptInput = string | readonly PromptItem[];
@@ -54,6 +55,8 @@ export type AgentOptions = {
   model?: Model | undefined;
   reasoningMode?: ReasoningMode | undefined;
   fastMode?: boolean | undefined;
+  /** Yield exec/wait observations on accepted steering; cells continue. Default false. */
+  instantToolSteering?: boolean | undefined;
   /** Emit full raw API request/response events. Defaults to true. */
   rawApiEvents?: boolean | undefined;
   sessionId?: string | undefined;

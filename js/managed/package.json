@@ -33,6 +33,8 @@
     "test:todo-mail": "node --test test/todo-mail-journey.test.mjs test/todo-snooze-journey.test.mjs",
     "test:meetings": "node --test test/meeting-library-journey.test.mjs",
     "fixture:meetings": "node scripts/meeting-library-fixture.mjs",
+    "test:images:node": "node --experimental-transform-types --import ./test-fixtures/node-types-loader.mjs --test test/managed-images-node.test.mjs",
+    "test:images": "npm run test:images:node && vitest run --config vitest.images.config.ts",
     "test:recovery": "node --test test/managed-crash-recovery-journey.test.mjs",
     "test:model-pause": "node --test test/model-pause-journey.test.mjs",
     "test:tool-timing": "node --test test/thread-tool-timing-journey.test.mjs",

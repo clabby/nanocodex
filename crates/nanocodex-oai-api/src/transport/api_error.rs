@@ -1,13 +1,24 @@
-use std::{collections::HashMap, time::Duration};
+use super::{RetryAfter, RetryReceipt};
+use std::collections::HashMap;
 
 use serde::Deserialize;
 
-pub(super) fn retryable_api_error(event: &str) -> Option<(&'static str, Option<Duration>)> {
+pub(super) fn retryable_api_error(event: &str) -> Option<(&'static str, Option<RetryAfter>)> {
+    retryable_api_error_received(event, RetryReceipt::now())
+}
+
+pub(super) fn retryable_api_error_received(
+    event: &str,
+    received: RetryReceipt,
+) -> Option<(&'static str, Option<RetryAfter>)> {
     let event: ApiErrorEnvelope = serde_json::from_str(event).ok()?;
     let error = event.error();
     let code = event.code();
     let discriminator = code.or_else(|| error.and_then(|error| error.kind.as_deref()));
 
+    if event.is_terminal() {
+        return None;
+    }
     let class = match event.event_type.as_deref() {
         Some("response.incomplete") => "api_incomplete",
         Some("response.failed") => {
@@ -31,8 +42,9 @@ pub(super) fn retryable_api_error(event: &str) -> Option<(&'static str, Option<D
 
     let server_delay = error
         .and_then(|error| error.retry_after)
-        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-        .or_else(|| retry_after_header(&event.headers));
+        .and_then(|seconds| std::time::Duration::try_from_secs_f64(seconds).ok())
+        .and_then(|delay| RetryAfter::from_delay_received(delay, received))
+        .or_else(|| retry_after_header(&event.headers, received));
     Some((class, server_delay))
 }
 
@@ -93,7 +105,7 @@ pub(super) fn api_error_is_checkpoint_missing(event: &str) -> bool {
             .is_some_and(|message| message.eq_ignore_ascii_case("Invalid `previous_response_id`."))
 }
 
-fn is_terminal_response_failure(code: &str) -> bool {
+pub(super) fn is_terminal_response_failure(code: &str) -> bool {
     matches!(
         code,
         "context_length_exceeded"
@@ -106,12 +118,25 @@ fn is_terminal_response_failure(code: &str) -> bool {
     )
 }
 
-fn retry_after_header(headers: &HashMap<String, RetryAfterValue>) -> Option<Duration> {
+pub(super) fn api_error_is_terminal(event: &str) -> bool {
+    serde_json::from_str::<ApiErrorEnvelope>(event)
+        .ok()
+        .is_some_and(|event| event.is_terminal())
+}
+
+fn retry_after_header(
+    headers: &HashMap<String, RetryAfterValue>,
+    received: RetryReceipt,
+) -> Option<RetryAfter> {
     headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-        .and_then(|(_, value)| value.seconds())
-        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .and_then(|(_, value)| match value {
+            RetryAfterValue::Number(seconds) => std::time::Duration::try_from_secs_f64(*seconds)
+                .ok()
+                .and_then(|delay| RetryAfter::from_delay_received(delay, received)),
+            RetryAfterValue::String(value) => RetryAfter::from_header_received(value, received),
+        })
 }
 
 #[derive(Deserialize)]
@@ -131,6 +156,29 @@ struct ApiErrorEnvelope {
 }
 
 impl ApiErrorEnvelope {
+    // Any terminal discriminator vetoes recovery: a transient top-level code
+    // must not hide a nested quota or policy stop (or vice versa).
+    fn is_terminal(&self) -> bool {
+        [self.code.as_deref(), self.event_type.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(is_terminal_response_failure)
+            || [
+                self.error.as_ref(),
+                self.response
+                    .as_ref()
+                    .and_then(|response| response.error.as_ref()),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|error| {
+                [error.code.as_deref(), error.kind.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .any(is_terminal_response_failure)
+            })
+    }
+
     fn error(&self) -> Option<&ApiErrorDetail> {
         self.error
             .as_ref()
@@ -171,20 +219,24 @@ enum RetryAfterValue {
     String(Box<str>),
 }
 
-impl RetryAfterValue {
-    fn seconds(&self) -> Option<f64> {
-        match self {
-            Self::Number(seconds) => Some(*seconds),
-            Self::String(seconds) => seconds.parse().ok(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::{api_error_has_code, api_error_is_checkpoint_missing, retryable_api_error};
+
+    #[test]
+    fn terminal_discriminators_cannot_be_masked_by_transient_codes() {
+        for value in [
+            serde_json::json!({"type": "response.failed", "code": "rate_limit_exceeded", "error": {"type": "insufficient_quota"}}),
+            serde_json::json!({"type": "response.incomplete", "error": {"code": "rate_limit_exceeded", "type": "bio_policy"}}),
+            serde_json::json!({"type": "response.failed", "error": {"code": "rate_limit_exceeded"}, "response": {"error": {"code": "usage_not_included"}}}),
+        ] {
+            let raw = value.to_string();
+            assert!(super::api_error_is_terminal(&raw));
+            assert!(retryable_api_error(&raw).is_none());
+        }
+    }
 
     #[test]
     fn recognizes_both_checkpoint_missing_error_shapes() {
@@ -222,10 +274,9 @@ mod tests {
             "headers": { "Retry-After": "1.25" }
         }"#;
 
-        assert_eq!(
-            retryable_api_error(event),
-            Some(("api_incomplete", Some(Duration::from_millis(1_250))))
-        );
+        let (class, advice) = retryable_api_error(event).unwrap();
+        assert_eq!(class, "api_incomplete");
+        assert!(advice.unwrap().remaining_delay() <= Duration::from_millis(1_250));
     }
 
     #[test]
@@ -273,16 +324,13 @@ mod tests {
                         "headers": {{ "Retry-After": "2.5" }}
                     }}"#
                 );
-                assert_eq!(
-                    retryable_api_error(&failed),
-                    Some(("api_overload", Some(Duration::from_millis(1_250)))),
-                    "failed: {discriminator}={code}"
-                );
-                assert_eq!(
-                    retryable_api_error(&error),
-                    Some(("api_overload", Some(Duration::from_millis(2_500)))),
-                    "error: {discriminator}={code}"
-                );
+                for (raw, millis) in [(&failed, 1250), (&error, 2500)] {
+                    let (class, deadline) = retryable_api_error(raw).unwrap();
+                    assert_eq!(class, "api_overload");
+                    let delay = deadline.unwrap().remaining_delay();
+                    assert!(delay <= Duration::from_millis(millis));
+                    assert!(delay > Duration::from_millis(millis - 10));
+                }
             }
         }
     }

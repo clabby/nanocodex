@@ -82,6 +82,16 @@ impl Policy<ResponsesAttempt, ResponsesServiceResponse, ResponsesServiceError>
         let checkpoint_missing =
             failure.is_checkpoint_missing() && request.previous_response_id().is_some();
         let advice = failure.retry_advice;
+        if failure
+            .responses_error()
+            .is_some_and(ResponsesError::is_terminal_provider_error)
+        {
+            return None;
+        }
+        let server_deadline = failure
+            .responses_error()
+            .and_then(ResponsesError::retry_after);
+
         let upgrade_required = matches!(
             failure.responses_error(),
             Some(ResponsesError::HandshakeRejected { status: 426, .. })
@@ -125,8 +135,10 @@ impl Policy<ResponsesAttempt, ResponsesServiceResponse, ResponsesServiceError>
                     max_attempts: request.max_attempts,
                     failure_phase: failure.phase,
                     error_class: "websocket_fallback",
-                    delay_ns: 0,
-                    server_requested_delay: false,
+                    delay_ns: duration_ns(
+                        server_deadline.map_or(Duration::ZERO, crate::RetryAfter::remaining_delay),
+                    ),
+                    server_requested_delay: server_deadline.is_some(),
                     opens_new_socket: false,
                     replay_mode: "full_history",
                     connection_generation: failure.connection_generation,
@@ -146,11 +158,13 @@ impl Policy<ResponsesAttempt, ResponsesServiceResponse, ResponsesServiceError>
                 .stats
                 .response_retries
                 .fetch_add(1, Ordering::Relaxed);
-            return Some(
-                self.delay
-                    .clone_for_retry()
-                    .wait(request.profile.thread_id().to_owned(), Duration::ZERO),
-            );
+            return Some(wait_for_retry(
+                self.delay.clone_for_retry(),
+                request.profile.thread_id().to_owned(),
+                Arc::clone(&request.observer.stats),
+                server_deadline,
+                Duration::ZERO,
+            ));
         }
         if !checkpoint_missing && advice.is_none() {
             return None;
@@ -163,6 +177,7 @@ impl Policy<ResponsesAttempt, ResponsesServiceResponse, ResponsesServiceError>
         } else {
             advice
                 .and_then(|advice| advice.server_delay)
+                .map(crate::RetryAfter::remaining_delay)
                 .unwrap_or_else(|| retry_delay(request.attempt, request.call_index))
         };
         let error_class = if checkpoint_missing {
@@ -218,13 +233,17 @@ impl Policy<ResponsesAttempt, ResponsesServiceResponse, ResponsesServiceError>
         let stats = Arc::clone(&request.observer.stats);
         let delay_runtime = self.delay.clone_for_retry();
         let thread_id = request.profile.thread_id().to_owned();
-        Some(Box::pin(async move {
-            let started_at = Instant::now();
-            delay_runtime.wait(thread_id, delay).await;
-            stats
-                .retry_backoff_duration_ns
-                .fetch_add(elapsed_ns(started_at), Ordering::Relaxed);
-        }))
+        Some(wait_for_retry(
+            delay_runtime,
+            thread_id,
+            stats,
+            if checkpoint_missing {
+                None
+            } else {
+                server_deadline
+            },
+            delay,
+        ))
     }
 
     fn clone_request(&mut self, request: &ResponsesAttempt) -> Option<ResponsesAttempt> {
@@ -232,6 +251,29 @@ impl Policy<ResponsesAttempt, ResponsesServiceResponse, ResponsesServiceError>
         request.limit_attempts(self.max_attempts);
         Some(request)
     }
+}
+
+// Observers and future scheduling may consume part of the original deadline.
+// Record actual waiting for both ordinary retries and transport fallback.
+fn wait_for_retry(
+    runtime: RetryDelay,
+    thread_id: String,
+    stats: Arc<crate::TransportStats>,
+    deadline: Option<crate::RetryAfter>,
+    local_delay: Duration,
+) -> RetryFuture {
+    Box::pin(async move {
+        let started_at = Instant::now();
+        runtime
+            .wait(
+                thread_id,
+                deadline.map_or(local_delay, crate::RetryAfter::remaining_delay),
+            )
+            .await;
+        stats
+            .retry_backoff_duration_ns
+            .fetch_add(elapsed_ns(started_at), Ordering::Relaxed);
+    })
 }
 
 /// Standard stateful Responses transport wrapped in the SDK-owned retry policy.

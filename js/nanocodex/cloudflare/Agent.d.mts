@@ -96,6 +96,8 @@ export function create(owner: create.Owner, options?: create.Options): Promise<c
 export declare namespace create {
   type Owner = DurableObjectOwner;
   type Options = Readonly<{
+    /** Observer-only instant steering; disabled unless explicitly enabled. */
+    instantToolSteering?: boolean | undefined;
     /** Awaited host preservation barrier; scoped to this root, never inherited by children. */
     beforeCompaction?: AgentOptions["beforeCompaction"];
     /** Stable portable state identity. It cannot change after first construction or import. */

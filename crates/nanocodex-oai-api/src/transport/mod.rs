@@ -8,6 +8,7 @@ mod crypto;
 pub(crate) mod error;
 /// Portable embedding-host interfaces for persistent Responses connections.
 pub mod host;
+mod retry_after;
 #[cfg(target_family = "wasm")]
 pub(crate) use host::socket;
 pub(crate) mod http;
@@ -23,6 +24,8 @@ pub use crate::tower::attempt::{TransportStats, TransportStatsDelta, TransportSt
 #[cfg(not(target_family = "wasm"))]
 pub use crypto::install_default_rustls_crypto_provider;
 pub use error::{ResponsesError, RetryAdvice};
+pub use retry_after::RetryAfter;
+pub(crate) use retry_after::RetryReceipt;
 pub use telemetry::TRANSPORT;
 pub use wire::EncodedRequest;
 

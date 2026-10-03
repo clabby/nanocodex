@@ -15,3 +15,5 @@ Guidelines:
 - If neither mechanism can include every target image, ask the user to attach the missing images again.
 - Directly generate the image without reconfirmation or clarification unless required images must be attached again.
 - Always use this tool for image editing unless the user explicitly requests otherwise. Do not use the `python` tool for image editing unless specifically instructed.
+
+For transparent cutouts or edits that preserve transparency, set transparent_background=true. Omitted or false explicitly produces an opaque background. Recent images may be inline data or provider file-ID references; the exact newest selected window is used.

@@ -1,6 +1,8 @@
 //! Typed request, event, and item model for the Responses protocol.
 
 mod content;
+pub(crate) mod image_reference;
+pub use image_reference::{ImageReference, valid_image_file_id};
 mod event;
 mod format;
 mod item;

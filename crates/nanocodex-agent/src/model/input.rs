@@ -134,6 +134,12 @@ fn function_output(output: ToolOutputBody) -> FunctionOutputBody {
                         image_url: image_url.into_boxed_str(),
                         detail: None,
                     },
+                    ToolOutputContent::InputImageFile { file_id, detail: _ } => {
+                        FunctionOutputContent::InputImageFile {
+                            file_id: file_id.into_boxed_str(),
+                            detail: None,
+                        }
+                    }
                     ToolOutputContent::InputAudio { audio_url } => {
                         FunctionOutputContent::InputAudio {
                             audio_url: audio_url.into_boxed_str(),
@@ -242,6 +248,19 @@ mod tests {
                 "type": "encrypted_content",
                 "encrypted_content": "opaque-provider-payload",
             })
+        );
+    }
+    #[test]
+    fn tool_file_image_conversion_preserves_identity_and_omits_lite_details() {
+        let output = function_output(ToolOutputBody::Content(vec![
+            ToolOutputContent::InputImageFile {
+                file_id: "file-a_123".to_owned(),
+                detail: ImageDetail::Original,
+            },
+        ]));
+        assert_eq!(
+            serde_json::to_value(output).unwrap(),
+            json!([{"type":"input_image","file_id":"file-a_123"}])
         );
     }
 }

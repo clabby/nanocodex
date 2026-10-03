@@ -115,4 +115,27 @@ mod tests {
                 .all(|item| matches!(item, ToolOutputContent::InputText { .. }))
         );
     }
+    #[test]
+    fn file_image_envelopes_are_validated_without_data_url_decoding() {
+        let mut output = ToolOutputBody::Content(vec![
+            ToolOutputContent::InputImageFile {
+                file_id: "file-opaque_123".into(),
+                detail: ImageDetail::Original,
+            },
+            ToolOutputContent::InputImageFile {
+                file_id: "../image.png".into(),
+                detail: ImageDetail::High,
+            },
+        ]);
+        output.replace_invalid_image_envelopes();
+        let ToolOutputBody::Content(items) = output else {
+            panic!("content expected");
+        };
+        assert!(
+            matches!(&items[0],ToolOutputContent::InputImageFile { file_id,detail:ImageDetail::Original } if file_id=="file-opaque_123")
+        );
+        assert!(
+            matches!(&items[1],ToolOutputContent::InputText { text } if text.contains("file ID"))
+        );
+    }
 }

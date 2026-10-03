@@ -1,9 +1,8 @@
-#[cfg(not(target_family = "wasm"))]
-use std::time::Duration;
-
 use crate::{OpenAiAuthSnapshot, monotonic_now_ns};
 use http::header;
 
+#[cfg(not(target_family = "wasm"))]
+use crate::RetryAfter;
 use crate::{EncodedRequest, ResponsesError, socket::ReceivedText};
 
 #[cfg(not(target_family = "wasm"))]
@@ -79,6 +78,14 @@ impl ResponsesHttp {
         let status = response.status();
         if !status.is_success() {
             let retry_after = retry_after(response.headers());
+            // Keep the actual header-receipt boundary observable without
+            // retaining headers/body or exposing any authorization material.
+            tracing::debug!(
+                target: "nanocodex::responses::http",
+                status = status.as_u16(),
+                retry_after_deadline_ms = retry_after.map(RetryAfter::deadline_unix_ms),
+                "Responses HTTPS rejection advice captured before body"
+            );
             let body = response.text().await.unwrap_or_default();
             return Err(ResponsesError::http_rejected(
                 status.as_u16(),
@@ -115,6 +122,10 @@ impl ResponsesHttpStream {
                     #[cfg(target_family = "wasm")]
                     text,
                     received_ns: monotonic_now_ns(),
+                    retry_receipt: self
+                        .decoder
+                        .retry_receipt
+                        .unwrap_or_else(super::RetryReceipt::now),
                 });
             }
             if self.ended {
@@ -140,10 +151,12 @@ struct SseDecoder {
     cursor: usize,
     data: Vec<String>,
     finished: bool,
+    retry_receipt: Option<super::RetryReceipt>,
 }
 
 impl SseDecoder {
     fn push(&mut self, chunk: &[u8]) {
+        self.retry_receipt = Some(super::RetryReceipt::now());
         self.compact();
         self.bytes.extend_from_slice(chunk);
     }
@@ -211,12 +224,11 @@ impl SseDecoder {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<RetryAfter> {
     headers
         .get(header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
+        .and_then(RetryAfter::from_header)
 }
 
 #[cfg(not(target_family = "wasm"))]

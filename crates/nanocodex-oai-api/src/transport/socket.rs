@@ -45,6 +45,7 @@ pub(crate) struct ResponsesSocket {
 pub(crate) struct ReceivedText {
     pub text: Utf8Bytes,
     pub received_ns: u64,
+    pub retry_receipt: super::RetryReceipt,
 }
 
 struct SocketPump {
@@ -56,6 +57,7 @@ struct SocketPump {
 struct PumpMessage {
     message: std::result::Result<Message, WebSocketError>,
     received_ns: u64,
+    retry_receipt: super::RetryReceipt,
 }
 
 enum SocketCommand {
@@ -203,6 +205,7 @@ impl ResponsesSocket {
                     return Ok(ReceivedText {
                         text,
                         received_ns: received.received_ns,
+                        retry_receipt: received.retry_receipt,
                     });
                 }
                 Message::Binary(_) => return Err(ResponsesError::UnexpectedBinary),
@@ -267,6 +270,7 @@ impl SocketPump {
                                     drop(message_sender.send(PumpMessage {
                                         message: Err(error),
                                         received_ns: monotonic_now_ns(),
+                                    retry_receipt: super::RetryReceipt::now(),
                                     }).await);
                                     break;
                                 }
@@ -277,6 +281,7 @@ impl SocketPump {
                                 if message_sender.send(PumpMessage {
                                     message: Ok(message),
                                     received_ns: monotonic_now_ns(),
+                                    retry_receipt: super::RetryReceipt::now(),
                                 }).await.is_err() || should_stop {
                                     break;
                                 }
@@ -285,6 +290,7 @@ impl SocketPump {
                                 drop(message_sender.send(PumpMessage {
                                     message: Err(error),
                                     received_ns: monotonic_now_ns(),
+                                    retry_receipt: super::RetryReceipt::now(),
                                 }).await);
                                 break;
                             }
@@ -334,8 +340,7 @@ fn map_handshake_error(error: WebSocketError) -> ResponsesError {
         .headers()
         .get(header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<f64>().ok())
-        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok());
+        .and_then(crate::RetryAfter::from_header);
     let body = handshake_rejection_detail(response.body().as_deref(), response.headers());
     ResponsesError::HandshakeRejected {
         status,

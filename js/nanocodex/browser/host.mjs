@@ -663,6 +663,8 @@ export function createBrowserHost(options = {}) {
           () => code.waitCodeObserved(input, sessionId, callId)),
     beginCodeTurn: code.beginTurn,
     cancelCodeTurn: code.cancelTurn,
+    preemptCode: code.preempt,
+    preemptCodeTurn: code.preemptTurn,
     nextCodeUpdate: code.nextCodeUpdate,
     executeTool: code.executeTool,
     routeSubagent: (request) => {

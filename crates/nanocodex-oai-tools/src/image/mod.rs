@@ -173,6 +173,15 @@ pub async fn prepare_output_images(output: &mut ToolOutputBody) {
     let ToolOutputBody::Content(content) = output else {
         return;
     };
+    for item in content.iter_mut() {
+        if let ToolOutputContent::InputImageFile { file_id, .. } = item
+            && !nanocodex_oai_api::responses::valid_image_file_id(file_id)
+        {
+            *item = ToolOutputContent::InputText {
+                text: "Image file reference is malformed".to_owned(),
+            };
+        }
+    }
     if !content
         .iter()
         .any(|item| matches!(item, ToolOutputContent::InputImage { .. }))
@@ -308,6 +317,16 @@ fn prepare_user_content_for_host(input: Vec<UserInput>, embedded: bool) -> Vec<C
     for item in input {
         match item {
             UserInput::Text { text } => content.push(input_text(text)),
+            UserInput::ImageFile { file_id, detail } => {
+                if nanocodex_oai_api::responses::valid_image_file_id(&file_id) {
+                    content.push(ContentItem::InputImageFile {
+                        file_id: file_id.into_boxed_str(),
+                        detail,
+                    });
+                } else {
+                    content.push(input_text("Image file reference is malformed"));
+                }
+            }
             UserInput::Image { image_url, detail } => {
                 #[cfg(not(target_family = "wasm"))]
                 {

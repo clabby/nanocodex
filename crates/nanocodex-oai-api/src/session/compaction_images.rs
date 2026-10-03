@@ -17,6 +17,7 @@ pub(super) fn content_tokens(item: &ContentItem) -> usize {
                 RESIZED_IMAGE_BYTES_ESTIMATE
             })
         }
+        ContentItem::InputImageFile { .. } => approx_tokens(RESIZED_IMAGE_BYTES_ESTIMATE),
         ContentItem::InputAudio { .. } => 0,
     }
 }
@@ -36,11 +37,14 @@ pub(super) fn truncate_message(mut item: ResponseItem, max_tokens: usize) -> Opt
     let mut retained = Vec::with_capacity(content.len());
     while let Some(last) = content.len().checked_sub(1) {
         let image_index = match &content[last] {
-            ContentItem::InputImage { .. } => Some(last),
+            ContentItem::InputImage { .. } | ContentItem::InputImageFile { .. } => Some(last),
             ContentItem::InputText { text }
                 if text.as_ref() == "</image>"
                     && last > 0
-                    && matches!(content[last - 1], ContentItem::InputImage { .. }) =>
+                    && matches!(
+                        content[last - 1],
+                        ContentItem::InputImage { .. } | ContentItem::InputImageFile { .. }
+                    ) =>
             {
                 Some(last - 1)
             }
@@ -80,7 +84,9 @@ pub(super) fn truncate_message(mut item: ResponseItem, max_tokens: usize) -> Opt
                 }
             }
             ContentItem::InputAudio { .. } => retained.push(part),
-            ContentItem::InputImage { .. } => unreachable!("images handled atomically above"),
+            ContentItem::InputImage { .. } | ContentItem::InputImageFile { .. } => {
+                unreachable!("images handled atomically above")
+            }
         }
     }
     if retained.is_empty() {
@@ -89,4 +95,39 @@ pub(super) fn truncate_message(mut item: ResponseItem, max_tokens: usize) -> Opt
     retained.reverse();
     *content = retained;
     Some(item)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MessageRole;
+    #[test]
+    fn file_images_have_fixed_opaque_cost_and_atomic_labels() {
+        let image = ContentItem::InputImageFile {
+            file_id: "file-a".into(),
+            detail: Some(ImageDetail::Original),
+        };
+        assert_eq!(
+            content_tokens(&image),
+            approx_tokens(RESIZED_IMAGE_BYTES_ESTIMATE)
+        );
+        let item = ResponseItem::message(
+            MessageRole::User,
+            [
+                ContentItem::input_text("<image>"),
+                image,
+                ContentItem::input_text("</image>"),
+            ],
+        );
+        let cost = message_content_token_count(&item);
+        assert!(truncate_message(item.clone(), cost - 1).is_none());
+        let retained = truncate_message(item, cost).unwrap();
+        let ResponseItem::Message { content, .. } = retained else {
+            panic!("message expected");
+        };
+        assert_eq!(content.len(), 3);
+        assert!(
+            matches!(&content[1], ContentItem::InputImageFile { file_id, detail:Some(ImageDetail::Original) } if file_id.as_ref()=="file-a")
+        );
+    }
 }

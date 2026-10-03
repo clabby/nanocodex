@@ -70,3 +70,15 @@ test("host-managed socket rejection preserves retry metadata", async () => {
     },
   );
 });
+
+test("proxy rejection preserves earlier deadline instead of restarting advice", async () => {
+  FakeWebSocket.nextMessage = { type: "nanocodex.proxy.rejected", status: 429,
+    error: "slow_down", retryAfter: "60", retry_after_deadline_ms: 8_000 };
+  await assert.rejects(openHostManagedWebSocket("wss://nanocodex.example/api/responses", "session-1", {
+    WebSocketImpl: FakeWebSocket,
+  }), (error) => {
+    assert.equal(error.retryAfter, 60);
+    assert.equal(error.retry_after_deadline_ms, 8_000);
+    return true;
+  });
+});

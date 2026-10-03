@@ -46,6 +46,7 @@ pub(super) struct PromptCacheConfig {
 
 #[derive(Clone, Default)]
 pub(super) struct CodexCompatibility {
+    pub(super) instant_tool_steering: bool,
     pub(super) context: ContextSourceConfig,
     pub(super) execution: ExecutionConfig,
     pub(super) before_compaction: Option<Arc<dyn execution::BeforeCompaction>>,
@@ -54,6 +55,14 @@ pub(super) struct CodexCompatibility {
 }
 
 impl<F> NanocodexBuilder<F> {
+    /// Opt into steering-triggered Code Mode observer yields (default false).
+    /// Cells and nested tools continue; this does not interrupt a model stream.
+    #[must_use]
+    pub const fn instant_tool_steering(mut self, enabled: bool) -> Self {
+        self.codex.instant_tool_steering = enabled;
+        self
+    }
+
     /// Awaits durable host preservation before automatic or manual compaction.
     ///
     /// The host must deduplicate by boundary ID, return only after durable success,

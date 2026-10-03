@@ -93,11 +93,22 @@ impl ResponsesServiceError {
 
     pub(crate) fn with_request_input(self, request: &crate::ResponsesAttempt) -> Self {
         match self.source {
-            ResponsesServiceErrorSource::Responses(source) => Self::responses(
-                source.with_request_input(request.input_items()),
-                self.phase,
-                self.connection_generation,
-            ),
+            ResponsesServiceErrorSource::Responses(source) => {
+                let source = source.with_request_input(request.input_items());
+                let class = source.class();
+                let retry_advice = if matches!(source, ResponsesError::InvalidToolSchema { .. }) {
+                    None
+                } else {
+                    self.retry_advice
+                };
+                Self::new(
+                    ResponsesServiceErrorSource::Responses(source),
+                    self.phase,
+                    class,
+                    retry_advice,
+                    self.connection_generation,
+                )
+            }
             _ => self,
         }
     }
@@ -131,7 +142,9 @@ impl ResponsesServiceError {
     /// Returns the server-requested retry delay, if supplied.
     #[must_use]
     pub fn server_retry_after(&self) -> Option<Duration> {
-        self.retry_advice.and_then(|advice| advice.server_delay)
+        self.retry_advice
+            .and_then(|advice| advice.server_delay)
+            .map(crate::RetryAfter::remaining_delay)
     }
 
     /// Returns the underlying Responses transport error when applicable.

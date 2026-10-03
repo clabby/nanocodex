@@ -329,6 +329,7 @@ export function toWasmConfig(options = {}) {
   copy(config, "thinking", options.thinking);
   copy(config, "reasoning_mode", options.reasoningMode);
   copy(config, "fast_mode", options.fastMode);
+  copy(config, "instant_tool_steering", options.instantToolSteering);
   copy(config, "stateless_http", options.stateless);
   copy(config, "subagent_routing", options.subagentRouting);
   copy(config, "websocket_warmup", options.websocketWarmup);
@@ -619,6 +620,12 @@ const hostBridge = Object.freeze({
   },
   executeTool(name, input, sessionId, callId, model, turnId) {
     return requiredSessionHost(sessionId).executeTool(name, input, sessionId, callId, model, turnId);
+  },
+  preemptCode(sessionId, callId) {
+    return hostSessions.get(sessionId)?.preemptCode?.(sessionId, callId) ?? false;
+  },
+  preemptCodeTurn(sessionId) {
+    return hostSessions.get(sessionId)?.preemptCodeTurn?.(sessionId) ?? 0;
   },
   beginCodeTurn(sessionId) {
     hostSessions.get(sessionId)?.beginCodeTurn?.(sessionId);
@@ -1037,7 +1044,9 @@ function connectFailure(error) {
       kind: "handshake_rejected",
       status,
       body: typeof error?.body === "string" ? error.body : errorDetail(error),
-      ...(Number.isFinite(retryAfter) && retryAfter >= 0 ? { retry_after: retryAfter } : {}),
+      ...(error?.retryAfter !== undefined && Number.isFinite(retryAfter) && retryAfter >= 0 ? { retry_after: retryAfter } : {}),
+      ...(Number.isSafeInteger(error?.retry_after_deadline_ms) && error.retry_after_deadline_ms >= 0
+        ? { retry_after_deadline_ms: error.retry_after_deadline_ms } : {}),
     };
   }
   return {

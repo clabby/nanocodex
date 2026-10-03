@@ -1,3 +1,5 @@
+import { retryAfterAdvice } from "../runtime/retry-after.mjs";
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 /** Open Nanocodex's same-origin Responses proxy and consume its setup frame. */
@@ -74,13 +76,20 @@ function waitForProxyHandshake(socket, timeoutMs) {
         && message.status <= 599) {
         const status = message.status;
         const body = typeof message.error === "string" ? message.error : `HTTP ${status}`;
-        const retryAfter = Number(message.retryAfter);
+        const advice = retryAfterAdvice(
+          typeof message.retryAfter === "number" ? String(message.retryAfter) : message.retryAfter,
+        );
+        // The proxy may already have captured advice before draining its rejection body.
+        if (Number.isSafeInteger(message.retry_after_deadline_ms) && message.retry_after_deadline_ms >= 0) {
+          advice.retry_after_deadline_ms = message.retry_after_deadline_ms;
+        }
         fail(Object.assign(
           new Error(`Agent connection rejected with HTTP ${status}: ${body}`),
           {
             status,
             body,
-            ...(Number.isFinite(retryAfter) && retryAfter >= 0 ? { retryAfter } : {}),
+            ...advice,
+            ...(advice.retry_after !== undefined ? { retryAfter: advice.retry_after } : {}),
           },
         ));
         return;

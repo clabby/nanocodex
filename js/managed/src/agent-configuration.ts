@@ -22,6 +22,8 @@ export const environmentSchema = z.object({
   network: networkSchema.default({ access: "enabled" }),
 }).strict();
 export const configurationSchema = z.object({
+  /** Observer-only Code Mode steering. Model streams remain conservative. */
+  instant_tool_steering: z.boolean().optional(),
   model_routing: routingPolicySchema.optional(),
   /** Manual root selection does not constrain independently routed children. */
   model_routing_selection: z.literal("manual").optional(),

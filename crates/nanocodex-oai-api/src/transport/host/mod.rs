@@ -313,7 +313,7 @@ pub enum HostError {
         /// Complete retained response body.
         body: String,
         /// Provider-requested minimum retry delay.
-        retry_after: Option<Duration>,
+        retry_after: Option<super::RetryAfter>,
     },
 }
 
@@ -332,7 +332,7 @@ impl HostError {
     pub fn handshake_rejected(
         status: u16,
         body: impl Into<String>,
-        retry_after: Option<Duration>,
+        retry_after: Option<super::RetryAfter>,
     ) -> Self {
         Self::HandshakeRejected {
             status,

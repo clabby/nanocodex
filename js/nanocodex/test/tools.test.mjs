@@ -61,6 +61,7 @@ test("image generation resolves recent session images without owning conversatio
     async fetch(_url, init) {
       assert.deepEqual(JSON.parse(init.body), {
         images: ["data:image/png;base64,one"],
+        transparent_background: false,
         prompt: "edit it",
       });
       return Response.json({ image_url: "data:image/png;base64,two" });

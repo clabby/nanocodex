@@ -698,11 +698,13 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     cell.observation = observation;
     for (const update of cell.updates.splice(0)) observation.push(update);
     let timer;
+    let stopPreemptWake;
     try {
       if (cell.terminated) await cell.completion;
-      else if (!cell.result && !cell.yieldRequested) {
+      else if (!cell.result && !cell.yieldRequested && !observation.preempted) {
         await new Promise((resolve) => {
           cell.wake = resolve;
+          stopPreemptWake = observation.onPreempt(resolve);
           // JS timer APIs overflow past this boundary; clamp instead of
           // accidentally turning a large valid duration into a 1 ms wait.
           timer = setTimeout(resolve, Math.min(yieldTime + (yieldTime >= 10_000 ? 1_000 : 0), 2_147_483_647));
@@ -729,6 +731,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       });
     } finally {
       clearTimeout(timer);
+      stopPreemptWake?.();
       cell.wake = undefined;
       cell.observation = undefined;
       cell.observing = false;
@@ -744,6 +747,30 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       codeObservations.delete(key);
     }
     return update;
+  }
+
+  // Preempt only a foreground observation, never the evaluator or nested
+  // effects. A signal is scoped to an already admitted exec/wait call ID;
+  // a missing/closed observation does not arm future cells or waits.
+  // This requires observer event-loop progress. A synchronous guest sharing
+  // that event loop cannot be preempted until it yields; evaluator interruption
+  // is NOT a safe substitute because it can destroy pending guest promises.
+  // Child-Worker evaluation keeps the observer reachable while guest JS is busy.
+  function preempt(sessionId, callId) {
+    if (typeof sessionId !== "string" || typeof callId !== "string") {
+      throw new TypeError("preempt requires session and observation call IDs");
+    }
+    return codeObservations.get(codeObservationKey(sessionId, callId))?.preempt() ?? false;
+  }
+
+  function preemptTurn(sessionId) {
+    const turn = turns.get(sessionId) ?? 0;
+    let count = 0;
+    for (const observation of codeObservations.values()) {
+      if (observation.sessionId === sessionId && observation.turn === turn
+        && observation.preempt()) count++;
+    }
+    return count;
   }
 
   function closeCodeObservations(sessionId, turn) {
@@ -846,6 +873,8 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       }));
     },
     nextCodeUpdate,
+    preempt,
+    preemptTurn,
     beginTurn(sessionId) { turns.set(sessionId, (turns.get(sessionId) ?? 0) + 1); },
     cancelTurn(sessionId) { cancel(sessionId, turns.get(sessionId) ?? 0); },
     cancel,
@@ -1025,9 +1054,23 @@ function createCodeObservation(sessionId, turn) {
   const queued = [];
   const waiters = [];
   let closed = false;
+  let preempted = false;
+  let preemptWake;
   return Object.freeze({
     sessionId,
     turn,
+    get preempted() { return preempted; },
+    preempt() {
+      if (closed || preempted) return false;
+      preempted = true;
+      preemptWake?.();
+      return true;
+    },
+    onPreempt(wake) {
+      preemptWake = wake;
+      if (preempted) wake();
+      return () => { if (preemptWake === wake) preemptWake = undefined; };
+    },
     push(update) {
       if (closed) return;
       const resolve = waiters.shift();
@@ -1037,6 +1080,7 @@ function createCodeObservation(sessionId, turn) {
     close() {
       if (closed) return;
       closed = true;
+      preemptWake = undefined;
       while (waiters.length) waiters.shift()(null);
     },
     next() {

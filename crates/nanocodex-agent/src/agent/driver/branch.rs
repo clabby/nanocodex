@@ -1,6 +1,7 @@
 use super::*;
 
 pub(in crate::agent) struct BranchSpawner<S> {
+    pub(in crate::agent) instant_tool_steering: bool,
     pub(in crate::agent) config: Arc<ModelConfig>,
     pub(in crate::agent) tools: ToolsConfiguration,
     pub(in crate::agent) spawn_factory: Option<Arc<dyn backend::AgentFactory>>,
@@ -32,6 +33,7 @@ impl<S> BranchSpawner<S> {
 
     fn with_execution(&self, execution: ExecutionConfig) -> Self {
         Self {
+            instant_tool_steering: self.instant_tool_steering,
             config: Arc::clone(&self.config),
             tools: self.tools.clone(),
             spawn_factory: self.spawn_factory.clone(),
@@ -129,6 +131,7 @@ where
             .map_or_else(|| Arc::clone(&self.lineage_id), Arc::clone);
         let spawner = Self {
             config: Arc::new(config),
+            instant_tool_steering: self.instant_tool_steering,
             tools: self.tools.clone(),
             spawn_factory: self.spawn_factory.clone(),
             lineage_id: Arc::from(session_id_text.as_str()),

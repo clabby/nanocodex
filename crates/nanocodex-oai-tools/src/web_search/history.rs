@@ -62,6 +62,7 @@ fn is_context_item(item: &ContentItem) -> bool {
                 || text.starts_with("<environment_context>")
         }
         ContentItem::InputImage { .. }
+        | ContentItem::InputImageFile { .. }
         | ContentItem::InputAudio { .. }
         | ContentItem::OutputText { .. } => false,
     }

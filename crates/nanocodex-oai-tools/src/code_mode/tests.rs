@@ -2398,7 +2398,10 @@ async fn dropped_observer_preserves_consumed_output_for_the_next_observation() -
             &observed_cell,
             observation,
             std::time::Instant::now(),
-            ObservationMode::YieldAfter(Duration::from_secs(60)),
+            ObservationMode::YieldAfter(
+                Duration::from_secs(60),
+                (tokio::sync::watch::channel((0, 0)).1, 0),
+            ),
             None,
             &mut observer,
         )
@@ -2437,7 +2440,10 @@ async fn dropped_observer_preserves_consumed_output_for_the_next_observation() -
         &cell,
         observation,
         std::time::Instant::now(),
-        ObservationMode::YieldAfter(Duration::from_secs(1)),
+        ObservationMode::YieldAfter(
+            Duration::from_secs(1),
+            (tokio::sync::watch::channel((0, 0)).1, 0),
+        ),
         None,
         &mut super::IgnoreCodeModeUpdates,
     )
@@ -2475,7 +2481,7 @@ async fn yield_deadline_preempts_already_buffered_runtime_output() {
         &cell,
         observation,
         std::time::Instant::now(),
-        ObservationMode::YieldAfter(Duration::ZERO),
+        ObservationMode::YieldAfter(Duration::ZERO, (tokio::sync::watch::channel((0, 0)).1, 0)),
         None,
         &mut super::IgnoreCodeModeUpdates,
     )
@@ -2494,7 +2500,10 @@ async fn yield_deadline_preempts_already_buffered_runtime_output() {
         &cell,
         observation,
         std::time::Instant::now(),
-        ObservationMode::YieldAfter(Duration::from_secs(1)),
+        ObservationMode::YieldAfter(
+            Duration::from_secs(1),
+            (tokio::sync::watch::channel((0, 0)).1, 0),
+        ),
         None,
         &mut super::IgnoreCodeModeUpdates,
     )
@@ -2532,7 +2541,10 @@ async fn nested_tool_start_does_not_extend_the_outer_yield() {
         &cell,
         observation,
         std::time::Instant::now(),
-        ObservationMode::YieldAfter(Duration::from_millis(5)),
+        ObservationMode::YieldAfter(
+            Duration::from_millis(5),
+            (tokio::sync::watch::channel((0, 0)).1, 0),
+        ),
         None,
         &mut super::IgnoreCodeModeUpdates,
     )
@@ -2554,6 +2566,7 @@ fn emitted_text(execution: &CodeModeExecution) -> Result<&str> {
         .find_map(|item| match item {
             ToolOutputContent::InputText { text } => Some(text.as_str()),
             ToolOutputContent::InputImage { .. }
+            | ToolOutputContent::InputImageFile { .. }
             | ToolOutputContent::InputAudio { .. }
             | ToolOutputContent::EncryptedContent { .. } => None,
         })
@@ -2568,6 +2581,7 @@ fn execution_output(execution: &CodeModeExecution) -> String {
             .filter_map(|item| match item {
                 ToolOutputContent::InputText { text } => Some(text.as_str()),
                 ToolOutputContent::InputImage { .. }
+                | ToolOutputContent::InputImageFile { .. }
                 | ToolOutputContent::InputAudio { .. }
                 | ToolOutputContent::EncryptedContent { .. } => None,
             })

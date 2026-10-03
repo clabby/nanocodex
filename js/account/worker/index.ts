@@ -1,3 +1,4 @@
+import { retryAfterAdvice, type RetryAfterAdvice } from "../../nanocodex/runtime/retry-after.mjs";
 import { routeElevenLabs, type ElevenLabsEnv } from "./elevenLabs.ts";
 import { webSearchRequest } from "./webSearchRequest.ts";
 import {
@@ -994,8 +995,10 @@ async function setupResponsesWebSocket(
   }
 }
 
+const brokerRetryAdvice = new WeakMap<Response, RetryAfterAdvice>();
+
 function managedBrokerError(error: unknown): Response {
-  const rejected = error as { body?: unknown; retryAfter?: unknown; status?: unknown };
+  const rejected = error as { body?: unknown; retryAfter?: unknown; status?: unknown; retry_after_deadline_ms?: unknown };
   const status = Number.isInteger(rejected?.status)
     && Number(rejected.status) >= 400
     && Number(rejected.status) <= 599
@@ -1006,7 +1009,7 @@ function managedBrokerError(error: unknown): Response {
     ? rejected.body
     : "credential_broker_rejected";
   const retryAfter = Number(rejected?.retryAfter);
-  return json(
+  const response = json(
     { error: code },
     {
       status,
@@ -1015,18 +1018,26 @@ function managedBrokerError(error: unknown): Response {
         : {}),
     },
   );
+  if (typeof rejected?.retry_after_deadline_ms === "number"
+    && Number.isSafeInteger(rejected.retry_after_deadline_ms) && rejected.retry_after_deadline_ms >= 0) {
+    brokerRetryAdvice.set(response, { retry_after_deadline_ms: rejected.retry_after_deadline_ms });
+  }
+  return response;
 }
 
 async function rejectResponsesWebSocket(socket: WebSocket, response: Response): Promise<void> {
   const status = response.status;
-  const error = await upstreamResponseDetail(response);
   const retryAfter = response.headers.get("retry-after");
+  const advice = brokerRetryAdvice.get(response) ?? retryAfterAdvice(retryAfter);
+  const error = await upstreamResponseDetail(response);
   try {
     socket.send(JSON.stringify({
       type: "nanocodex.proxy.rejected",
       status,
       error,
       ...(retryAfter === null ? {} : { retryAfter }),
+      ...(advice.retry_after_deadline_ms === undefined ? {}
+        : { retry_after_deadline_ms: advice.retry_after_deadline_ms }),
     }));
     socket.close(status === 429 ? 1013 : 1011, "connection rejected");
   } catch { /* The browser may have gone away while the upstream was opening. */ }

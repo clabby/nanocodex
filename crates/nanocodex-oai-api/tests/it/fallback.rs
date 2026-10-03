@@ -504,3 +504,402 @@ async fn compaction_falls_back_after_two_retries_and_preserves_history_on_exhaus
     );
     Ok(())
 }
+
+/// Real public SDK journey: the last WS response carries overload advice;
+/// HTTPS must not start until that receipt-time deadline, even for compaction.
+#[tokio::test]
+async fn last_websocket_advice_delays_sampling_fallback() -> Result<()> {
+    advised_fallback_journey(false).await
+}
+
+#[tokio::test]
+async fn last_websocket_advice_delays_manual_compaction_fallback() -> Result<()> {
+    advised_fallback_journey(true).await
+}
+
+async fn advised_fallback_journey(compact: bool) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let websocket_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let http_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let openai = OpenAi::builder("test-key")
+        .websocket_url(format!("ws://{}", websocket_listener.local_addr()?))
+        .api_base_url(format!("http://{}", http_listener.local_addr()?))
+        .max_attempts(NonZeroU32::new(1).unwrap())
+        .build()?;
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let websocket_server = tokio::spawn(async move {
+        let (stream, _) = websocket_listener.accept().await?;
+        let mut socket = accept_async(stream).await?;
+        let initial = next_ws_json(&mut socket).await?;
+        assert!(initial.to_string().contains("deadline fixture"));
+        if compact {
+            send_ws_json(&mut socket, completed_response("resp-before", "remembered")).await?;
+            let request = next_ws_json(&mut socket).await?;
+            assert_eq!(
+                request["input"].as_array().unwrap().last().unwrap()["type"],
+                "compaction_trigger"
+            );
+        }
+        let deadline = Instant::now() + Duration::from_millis(200);
+        sent.send(deadline).unwrap();
+        send_ws_json(
+            &mut socket,
+            json!({"type": "response.failed", "response": {
+                "error": {"code": "server_is_overloaded", "retry_after": 0.2}
+            }}),
+        )
+        .await?;
+        // Keep the listener, so an unexpected extra WS attempt is detectable.
+        Ok::<_, eyre::Report>(websocket_listener)
+    });
+    let http_server = tokio::spawn(async move {
+        let deadline = received.await?;
+        let request = read_http_json(&http_listener).await?;
+        assert!(Instant::now() >= deadline, "HTTPS bypassed final WS advice");
+        assert!(request.body.get("previous_response_id").is_none());
+        assert!(request.body.to_string().contains("deadline fixture"));
+        if compact {
+            assert_eq!(
+                request.body["input"].as_array().unwrap().last().unwrap()["type"],
+                "compaction_trigger"
+            );
+            send_http_events(request.stream, None, [
+                json!({"type": "response.output_item.done", "item": {
+                    "id": "cmp-deadline", "type": "compaction", "encrypted_content": "retained-summary"
+                }}), completed_response("resp-compacted", "")
+            ]).await?;
+        } else {
+            send_http_events(
+                request.stream,
+                None,
+                [completed_response("resp-fallback", "deadline respected")],
+            )
+            .await?;
+        }
+        Ok::<_, eyre::Report>(http_listener)
+    });
+    let mut session = openai
+        .instructions("Preserve identifiers across retries.")
+        .build()?;
+    if compact {
+        session.turn().create("deadline fixture").await?;
+        session.turn().compact().await?;
+    } else {
+        assert_eq!(
+            session
+                .turn()
+                .create("deadline fixture")
+                .await?
+                .output_text(),
+            "deadline respected"
+        );
+    }
+    let ws = websocket_server.await??;
+    let http = http_server.await??;
+    assert!(
+        timeout(Duration::from_millis(20), ws.accept())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(Duration::from_millis(20), http.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn quota_usage_and_policy_http_errors_with_advice_are_terminal() -> Result<()> {
+    for code in [
+        "insufficient_quota",
+        "usage_not_included",
+        "cyber_policy",
+        "bio_policy",
+        "misalignment_policy_violation",
+    ] {
+        for discriminator in ["code", "type", "mixed"] {
+            for status in [429, 500] {
+                let listener = TcpListener::bind("127.0.0.1:0").await?;
+                let openai = OpenAi::builder("test-key")
+                    .transport(ResponsesTransport::Https)
+                    .api_base_url(format!("http://{}", listener.local_addr()?))
+                    .build()?;
+                let mut payload = json!({"error": {}});
+                if discriminator == "mixed" {
+                    payload["code"] = json!("rate_limit_exceeded");
+                    payload["error"]["code"] = json!("server_error");
+                    payload["error"]["type"] = json!(code);
+                } else {
+                    payload["error"][discriminator] = json!(code);
+                }
+                let body = payload.to_string();
+                let server = tokio::spawn(async move {
+                    let mut request = read_http_json(&listener).await?;
+                    request.stream.write_all(format!("HTTP/1.1 {status} Provider Rejection\r\nRetry-After: 10\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
+                    request.stream.shutdown().await?;
+                    Ok::<_, eyre::Report>(listener)
+                });
+                let mut session = openai.instructions("Return terminal failures.").build()?;
+                let error = match timeout(
+                    std::time::Duration::from_secs(2),
+                    session.turn().create("terminal fixture"),
+                )
+                .await?
+                {
+                    Ok(_) => panic!("terminal provider rejection unexpectedly succeeded"),
+                    Err(error) => error,
+                };
+                assert!(error.to_string().contains(code));
+                let listener = server.await??;
+                assert!(
+                    timeout(std::time::Duration::from_millis(20), listener.accept())
+                        .await
+                        .is_err(),
+                    "{code} retried"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejected_https_body_processing_does_not_restart_numeric_advice() -> Result<()> {
+    delayed_http_body_journey("1".to_owned()).await
+}
+
+#[tokio::test]
+async fn rejected_https_body_processing_does_not_restart_http_date_advice() -> Result<()> {
+    delayed_http_body_journey("date".to_owned()).await
+}
+
+// A transport trace acknowledges the *client's* captured header advice, rather
+// than treating a server write as proof of receipt. The server does not send its
+// body until that acknowledgement plus enough real time to expire the advice.
+// Tokio's paused-clock auto-advance is deliberately not mixed with real TCP IO.
+async fn delayed_http_body_journey(header: String) -> Result<()> {
+    use std::future::IntoFuture;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::prelude::*;
+
+    struct CaptureHeaders(Arc<Mutex<Option<tokio::sync::oneshot::Sender<u64>>>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureHeaders {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "nanocodex::responses::http" {
+                return;
+            }
+            #[derive(Default)]
+            struct Deadline(Option<u64>);
+            impl tracing::field::Visit for Deadline {
+                fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                    if field.name() == "retry_after_deadline_ms" {
+                        self.0 = Some(value);
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    _field: &tracing::field::Field,
+                    _value: &dyn std::fmt::Debug,
+                ) {
+                }
+            }
+            let mut deadline = Deadline::default();
+            event.record(&mut deadline);
+            if let Some(deadline) = deadline.0
+                && let Some(sender) = self.0.lock().unwrap().take()
+            {
+                let _ = sender.send(deadline);
+            }
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let openai = OpenAi::builder("test-key")
+        .transport(ResponsesTransport::Https)
+        .api_base_url(format!("http://{}", listener.local_addr()?))
+        .max_attempts(NonZeroU32::new(2).unwrap())
+        .build()?;
+    let (captured, receipt) = tokio::sync::oneshot::channel();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::registry().with(CaptureHeaders(Arc::new(Mutex::new(Some(captured))))),
+    );
+    // Avoid tracing's single-dispatcher fast path caching no interest in a
+    // parallel test before this scoped subscriber encounters the callsite.
+    let _parallel_test_registration =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let server = tokio::spawn(async move {
+        let mut initial = read_http_json(&listener).await?;
+        // Construct date advice only when the actual fixture request arrives;
+        // client initialization is not part of the server's advised interval.
+        let is_date = header == "date";
+        let header = if is_date {
+            httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(2))
+        } else {
+            header
+        };
+        let headers_written_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+        initial.stream.write_all(format!("HTTP/1.1 503 Service Unavailable\r\nRetry-After: {header}\r\nContent-Length: 1\r\nConnection: close\r\n\r\n").as_bytes()).await?;
+        // This fails if advice is moved after response.text(): the withheld
+        // body cannot finish and no header-receipt acknowledgement can arrive.
+        let deadline_ms = timeout(Duration::from_secs(5), receipt).await??;
+        if header == "1" {
+            assert!(deadline_ms >= headers_written_ms + 1_000);
+        } else {
+            let date_ms = httpdate::parse_http_date(&header)?
+                .duration_since(UNIX_EPOCH)?
+                .as_millis() as u64;
+            assert!(
+                deadline_ms.abs_diff(date_ms) <= 1,
+                "HTTP-date deadline changed at receipt"
+            );
+        }
+        println!(
+            "rejected HTTP header advice captured before body: header={header}, deadline_ms={deadline_ms}"
+        );
+        tokio::time::sleep(Duration::from_millis(if is_date { 2_500 } else { 1_500 })).await;
+        let body_finished = Instant::now();
+        initial.stream.write_all(b"x").await?;
+        initial.stream.shutdown().await?;
+        // A restarted numeric interval is 1s; a header-receipt deadline is
+        // already expired. Bound actual next-request IO well below that 1s.
+        let retried = timeout(Duration::from_millis(500), read_http_json(&listener)).await??;
+        assert!(
+            body_finished.elapsed() < Duration::from_millis(500),
+            "expired server deadline restarted after body processing"
+        );
+        send_http_events(
+            retried.stream,
+            None,
+            [completed_response(
+                "resp-body",
+                "receipt deadline respected",
+            )],
+        )
+        .await?;
+        Ok::<_, eyre::Report>(())
+    });
+    let mut session = openai
+        .instructions("Use receipt-time retry deadlines.")
+        .build()?;
+    let mut turn = session.turn();
+    let completed = IntoFuture::into_future(turn.create("delayed HTTP body fixture"))
+        .with_subscriber(dispatch)
+        .await?;
+    assert_eq!(completed.output_text(), "receipt deadline respected");
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_upgrade_rejection_never_activates_https_fallback() -> Result<()> {
+    let websocket_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let http_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let openai = OpenAi::builder("test-key")
+        .websocket_url(format!("ws://{}", websocket_listener.local_addr()?))
+        .api_base_url(format!("http://{}", http_listener.local_addr()?))
+        .max_attempts(NonZeroU32::new(1).unwrap())
+        .build()?;
+    let server = tokio::spawn(async move {
+        let (stream, _) = websocket_listener.accept().await?;
+        let result = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            let mut rejection = response
+                .map(|()| Some(json!({"error": {"type": "insufficient_quota"}}).to_string()));
+            *rejection.status_mut() = StatusCode::UPGRADE_REQUIRED;
+            rejection
+                .headers_mut()
+                .insert("retry-after", "10".parse().unwrap());
+            Err(rejection)
+        })
+        .await;
+        assert!(result.is_err());
+        Ok::<_, eyre::Report>(websocket_listener)
+    });
+    let mut session = openai
+        .instructions("Do not retry terminal provider errors.")
+        .build()?;
+    let error = match timeout(
+        std::time::Duration::from_secs(2),
+        session.turn().create("terminal upgrade fixture"),
+    )
+    .await?
+    {
+        Ok(_) => panic!("terminal upgrade unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("insufficient_quota"));
+    let ws = server.await??;
+    assert!(
+        timeout(std::time::Duration::from_millis(20), ws.accept())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(std::time::Duration::from_millis(20), http_listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+/// A public streaming caller stalls after the first delta while the native
+/// socket pump receives an error. Resuming the observer must not restart advice.
+#[tokio::test]
+async fn delayed_stream_observer_does_not_restart_queued_websocket_advice() -> Result<()> {
+    use futures_util::TryStreamExt;
+    use std::time::{Duration, Instant};
+    let websocket_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let http_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let openai = OpenAi::builder("test-key")
+        .websocket_url(format!("ws://{}", websocket_listener.local_addr()?))
+        .api_base_url(format!("http://{}", http_listener.local_addr()?))
+        .max_attempts(NonZeroU32::new(1).unwrap())
+        .build()?;
+    let (delta_seen, send_error) = tokio::sync::oneshot::channel();
+    let (error_sent, await_error) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = websocket_listener.accept().await?;
+        let mut socket = accept_async(stream).await?;
+        next_ws_json(&mut socket).await?;
+        send_ws_json(
+            &mut socket,
+            json!({"type": "response.output_text.delta", "output_index": 0, "delta": "partial"}),
+        )
+        .await?;
+        send_error.await?;
+        send_ws_json(&mut socket, json!({"type": "response.failed", "response": {"error": {"code": "server_is_overloaded", "retry_after": 0.5}}})).await?;
+        error_sent.send(()).unwrap();
+        let request = read_http_json(&http_listener).await?;
+        send_http_events(
+            request.stream,
+            None,
+            [completed_response("resp-observer", "observer resumed")],
+        )
+        .await?;
+        Ok::<_, eyre::Report>(())
+    });
+    let mut session = openai.instructions("Use original receipt time.").build()?;
+    let mut turn = session.turn();
+    let mut response = turn.create("delayed observer fixture");
+    assert!(response.try_next().await?.is_some());
+    delta_seen.send(()).unwrap();
+    await_error.await?;
+    // Advice expires while the application does not poll its response at all.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    let resumed = Instant::now();
+    assert_eq!(
+        timeout(Duration::from_millis(300), response)
+            .await??
+            .output_text(),
+        "observer resumed"
+    );
+    assert!(resumed.elapsed() < Duration::from_millis(300));
+    server.await??;
+    Ok(())
+}
