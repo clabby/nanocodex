@@ -122,6 +122,20 @@ test("existing-account login targets only credentials retained by this dialog", 
   });
 });
 
+test("hosted history, personal data, and memory remain separate signed permissions", () => {
+  const resources = [
+    "urn:nanocodex:history:read",
+    "urn:nanocodex:data:read",
+    "urn:nanocodex:data:write",
+    "urn:nanocodex:memory:read",
+    "urn:nanocodex:memory:write",
+  ];
+  assert.deepEqual(appVisibilityPermissions(resources).map(({ resource }) => resource), resources);
+  for (const resource of resources) {
+    assert.deepEqual(appVisibilityPermissions([resource]).map(permission => permission.resource), [resource]);
+  }
+});
+
 test("production Connect policy pins the API and rejects a mismatched app", () => {
   assert.equal(connectApiOrigin({
     challenge: `${productionConnectApiOrigin}/v1/connect/auth/challenge`,

@@ -107,6 +107,8 @@ export type OrganizationCapability =
   | "agents:write"
   | "api_keys:read"
   | "api_keys:write"
+  | "data:read"
+  | "data:write"
   | "history:read"
   | "memory:read"
   | "memory:write"
@@ -134,6 +136,8 @@ const OWNER_CAPABILITIES = [
   "agents:write",
   "api_keys:read",
   "api_keys:write",
+  "data:read",
+  "data:write",
   "history:read",
   "memory:read",
   "memory:write",
@@ -2447,6 +2451,8 @@ const CONNECT_CAPABILITIES = new Set<OrganizationCapability>([
   "agents:read",
   "agents:portability",
   "agents:write",
+  "data:read",
+  "data:write",
   "history:read",
   "memory:read",
   "memory:write",

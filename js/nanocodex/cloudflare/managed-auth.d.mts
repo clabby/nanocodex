@@ -1,4 +1,4 @@
-export type OrganizationCapability = "agents:read" | "agents:portability" | "agents:write" | "api_keys:read" | "api_keys:write" | "history:read" | "memory:read" | "memory:write" | "tools:use" | "organization:read" | "organization:write";
+export type OrganizationCapability = "agents:read" | "agents:portability" | "agents:write" | "api_keys:read" | "api_keys:write" | "data:read" | "data:write" | "history:read" | "memory:read" | "memory:write" | "tools:use" | "organization:read" | "organization:write";
 export type ApiKeyBase = Readonly<{ id: string; label: string; prefix: string; createdAt: number; digest: string; userId: string }>;
 export type StoredApiKey = ApiKeyBase & Readonly<{ organizationId: string; teamId: string; role: "owner" | "writer" | "reader"; capabilities: readonly OrganizationCapability[]; authorizationEpoch: number }>;
 export type ApiKeyPrincipal = Readonly<{ kind: "api_key"; userId: string; organizationId: string; teamId: string; role: StoredApiKey["role"]; subjectId: `api_key:${string}`; credentialId: string; authorizationEpoch: number; capabilities: readonly OrganizationCapability[] }>;

@@ -30,6 +30,8 @@ export function isOrganizationCapabilities(value) {
         || capability === "agents:write"
         || capability === "api_keys:read"
         || capability === "api_keys:write"
+        || capability === "data:read"
+        || capability === "data:write"
         || capability === "history:read"
         || capability === "memory:read"
         || capability === "memory:write"

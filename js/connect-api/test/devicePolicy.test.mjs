@@ -65,6 +65,8 @@ test("CLI device registration accepts exact hosted capabilities without implicit
     ...base,
     "urn:nanocodex:agent:output:final",
     "urn:nanocodex:history:read",
+    "urn:nanocodex:data:read",
+    "urn:nanocodex:data:write",
     "urn:nanocodex:memory:read",
     "urn:nanocodex:memory:write",
     "urn:nanocodex:connectors:chatgpt,github",

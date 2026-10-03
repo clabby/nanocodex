@@ -22,6 +22,7 @@ export {
   type WorkspaceStorageClient,
 } from "./workspace.js";
 export * from "./namespace.js";
+export * from "./user-data.js";
 export * from "./hosted/index.js";
 export { namedTool } from "../tools/namedTool.mjs";
 export * from "../tools/execution-contract.mjs";
