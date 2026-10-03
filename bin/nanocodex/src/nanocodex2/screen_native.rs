@@ -814,6 +814,7 @@ mod recovery_integration_tests {
         let desktop = NativeScreen::spawn_desktop(workspace.path(), &runtime).unwrap();
         let mut screen = NativeScreen {
             publisher: None,
+            recorder: None,
             desktop: Some(desktop),
             wayland: None,
             runtime: runtime.clone(),
