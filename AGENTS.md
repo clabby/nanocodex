@@ -62,3 +62,36 @@
   nonparallel Simulator destination. Explicit caller flags override those
   defaults. Do not boot duplicate simulators for concurrent UI tests; shut down
   only the simulators used by your run when finished.
+
+## Shared-checkout hygiene and delivery
+
+- Record the starting branch, HEAD, and dirty paths; fetch the actual target
+  branch before comparing or integrating. A dirty checkout or absent remote
+  branch name does not prove work is unpublished. Compare against the published
+  tree and commit ancestry, accounting for renamed paths and cherry-picks.
+- Use an isolated, named worktree from the current integration base when the
+  shared checkout contains other work. Keep scratch worktrees outside tracked
+  source or in an ignored directory. Never stage all files, borrow another
+  agent's changes, or overwrite a branch/worktree owned by an active task.
+- When publication is requested, finish the commit and nonforced push, and
+  verify the remote SHA. Verify merge, CI, and deployment receipts separately;
+  a local commit or accepted push is not proof of any of those outcomes.
+- After publishing from a separate worktree, reconcile the original checkout.
+  Remove task-owned tracked changes and untracked copies only after proving
+  they are already published. Fast-forward the primary checkout when safe;
+  preserve unrelated or unpublished work and report its exact remaining paths.
+  Do not leave released copies looking like unfinished work for the user.
+- Before cleanup, inspect fresh status and preserve recoverable before-images.
+  Recheck that files have not changed since inspection. Use explicit paths;
+  never use blanket hard resets, force-clean worktrees, or discard unknown
+  changes. Do not bury unrelated work in an unexplained stash or delete local
+  branches merely because their names do not exist on the server.
+- Remove completed temporary worktrees only after checking both their dirty
+  files and unpublished commits; otherwise retain them with an explicit owner
+  and reason. Keep operational backups and evidence in ignored output, not in
+  tracked source. Ignore local worktree containers rather than deleting their
+  contents just to silence an untracked-directory entry.
+- Finish with verified local and remote HEADs plus fresh tracked/untracked
+  status. Distinguish already-published duplicates, actual unpublished work,
+  and generated/local-only files. Never claim every dirty file is on master
+  without checking; report blockers instead of making the user repeat cleanup.
