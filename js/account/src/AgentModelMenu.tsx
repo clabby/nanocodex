@@ -1,6 +1,7 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { Check, ChevronDown, ChevronRight, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Link } from "react-router";
 import type { ManagedCreateSettings } from "nanocodex/managed";
 import { useAccountSession } from "./AccountSession";
 import { useAccountQuery } from "./useAccountQuery";
@@ -43,6 +44,7 @@ export function AgentModelMenu({
     return () => window.removeEventListener("nanocodex:model-credential-changed", changed);
   }, [refresh]);
   const models = (query.error ? [] : query.data?.models ?? []).filter(model => managed || model.provider === "openai");
+  const claude = query.error ? undefined : query.data?.claude;
   const selected = models.find(model => model.id === settings.model);
   const effortPinned = modelLocked && settings.model.startsWith("claude-");
   const [error, setError] = useState<string>();
@@ -141,6 +143,15 @@ export function AgentModelMenu({
                 </Menu.SubContent>
               </Menu.Portal>
             </Menu.Sub>
+            {managed && claude && !claude.available ? <>
+              <Menu.Separator className="agent-model-menu-separator" />
+              {claude.connected ? <Menu.Label className="agent-model-menu-label">
+                {claude.error ? "Couldn’t load Claude models. Reopen to retry." : "No Claude models are available for this subscription."}
+              </Menu.Label> : null}
+              <Menu.Item asChild className="agent-model-menu-item">
+                <Link to="/connect#claude-connection">{claude.connected ? "Manage Claude connection" : "Connect Claude"}</Link>
+              </Menu.Item>
+            </> : null}
             <Menu.Separator className="agent-model-menu-separator" />
             <Menu.Sub>
               <Menu.SubTrigger className="agent-model-menu-item">
