@@ -1,5 +1,6 @@
 import AuthenticationServices
 import InboxCore
+import NanocodexUI
 import SwiftUI
 import UIKit
 
@@ -61,18 +62,40 @@ private struct ConnectorContentView: View {
             || "ChatGPT accounts model subscriptions".localizedCaseInsensitiveContains(query.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    private var showsClaude: Bool {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty || "Claude Anthropic model subscriptions".localizedCaseInsensitiveContains(query)
+    }
+
     var body: some View {
         List {
-            if showsChatGpt, let url = model.chatGptAccountsURL {
+            if showsChatGpt || showsClaude {
                 Section {
-                    Link(destination: url) {
-                        Label("ChatGPT accounts", systemImage: "person.crop.circle.badge.plus")
+                    if showsChatGpt, let url = model.chatGptAccountsURL {
+                        Link(destination: url) {
+                            Label("ChatGPT accounts", systemImage: "person.crop.circle.badge.plus")
+                        }
+                        .accessibilityIdentifier("chatgpt-accounts")
                     }
-                    .accessibilityIdentifier("chatgpt-accounts")
+                    if showsClaude {
+                        NavigationLink {
+                            Form {
+                                ClaudeConnectionSection(read: model.claudeConnectionStatus, start: model.startClaudeLogin,
+                                    complete: model.completeClaudeLogin, disconnect: model.disconnectClaude,
+                                    changed: model.refreshModelCatalog)
+                            }
+                            .navigationTitle("Claude")
+                        } label: {
+                            Label("Claude subscription", systemImage: "person.crop.circle.badge.plus")
+                        }
+                        .accessibilityIdentifier("claude-connection")
+                    }
                 } header: {
                     Text("Model access")
                 } footer: {
-                    Text("Add accounts and view account status on the web. Sign in with the same Nanocodex account you use here.")
+                    if showsChatGpt, model.chatGptAccountsURL != nil {
+                        Text("Add ChatGPT accounts and view account status on the web. Sign in with the same Nanocodex account you use here.")
+                    }
                 }
             }
             if center.loading, center.overview == nil {
@@ -162,7 +185,7 @@ private struct ConnectorContentView: View {
                     }
                 }
             }
-            if center.overview != nil, providers.isEmpty, mcpConnections.isEmpty, !showsAddMcp, !showsChatGpt {
+            if center.overview != nil, providers.isEmpty, mcpConnections.isEmpty, !showsAddMcp, !showsChatGpt, !showsClaude {
                 ContentUnavailableView.search(text: query)
                     .listRowBackground(Color.clear)
             }

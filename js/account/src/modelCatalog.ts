@@ -6,7 +6,7 @@ export type AvailableModel = Readonly<{
   id: Model; name: string; provider: string; thinking: readonly Thinking[];
   fastMode: boolean; reasoningModes: readonly string[];
 }>;
-export type ModelCatalog = Readonly<{ models: readonly AvailableModel[]; defaultModel: Model | null }>;
+export type ModelCatalog = Readonly<{ models: readonly AvailableModel[]; defaultModel: Model | null; claude?: Readonly<{ connected: boolean; available: boolean; error?: string }> }>;
 const efforts = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
 export function decodeModelCatalog(value: unknown): ModelCatalog {
   if (!record(value) || value.object !== "list" || !Array.isArray(value.data)
@@ -28,7 +28,12 @@ export function decodeModelCatalog(value: unknown): ModelCatalog {
       thinking: model.thinking as Thinking[], fastMode: model.fast_mode, reasoningModes: model.reasoning_modes as string[] };
   });
   if (value.default_model !== null && !ids.has(value.default_model as string)) throw new Error("Invalid default model response.");
-  return { models, defaultModel: value.default_model as Model | null };
+  const availability = record(value.availability) ? value.availability : undefined;
+  const claude = availability && record(availability.claude) ? availability.claude : undefined;
+  return { models, defaultModel: value.default_model as Model | null,
+    ...(claude && typeof claude.connected === "boolean" && typeof claude.available === "boolean"
+      ? { claude: { connected: claude.connected, available: claude.available,
+        ...(typeof claude.error === "string" ? { error: claude.error } : {}) } } : {}) };
 }
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

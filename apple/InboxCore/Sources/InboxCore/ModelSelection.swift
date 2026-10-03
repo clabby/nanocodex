@@ -31,9 +31,22 @@ public struct ModelChoice: Identifiable, Equatable, Sendable {
     }
 }
 
+public struct ModelProviderAvailability: Equatable, Sendable {
+    public let connected: Bool
+    public let available: Bool
+
+    init?(_ value: JSON) {
+        guard case .bool(let connected) = value["connected"],
+              case .bool(let available) = value["available"] else { return nil }
+        self.connected = connected
+        self.available = available
+    }
+}
+
 public struct ModelCatalog: Equatable, Sendable {
     public let models: [ModelChoice]
     public let defaultModel: String?
+    public let claudeAvailability: ModelProviderAvailability?
     public init(_ value: JSON) throws {
         guard value["object"].string == "list", case .array(let data) = value["data"], data.count <= 64,
               value["default_model"] == .null || !value["default_model"].string.isEmpty else { throw APIError.invalidResponse }
@@ -51,6 +64,7 @@ public struct ModelCatalog: Equatable, Sendable {
         let selected = value["default_model"].string
         guard selected.isEmpty || ids.contains(selected) else { throw APIError.invalidResponse }
         defaultModel = selected.isEmpty ? nil : selected
+        claudeAvailability = ModelProviderAvailability(value["availability"]["claude"])
     }
 }
 

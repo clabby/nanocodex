@@ -2002,7 +2002,12 @@ final class InboxModel: ObservableObject {
         do {
             let catalog = try await client.modelCatalog()
             guard generation == epoch, self.client === client else { return }
-            availableModels = catalog.models; modelCatalogError = nil
+            availableModels = catalog.models
+            if let claude = catalog.claudeAvailability, claude.connected && !claude.available {
+                modelCatalogError = "Claude is connected, but no models are available. Refresh models or check your subscription."
+            } else {
+                modelCatalogError = nil
+            }
         } catch {
             guard generation == epoch else { return }
             availableModels = []; modelCatalogError = "Couldn’t load available models. Refresh your connections."

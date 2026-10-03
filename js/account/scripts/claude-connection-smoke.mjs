@@ -30,7 +30,7 @@ function Journey(){const [settings,setSettings]=React.useState({model:'gpt-6-ast
 createRoot(document.getElementById('root')).render(<MemoryRouter><QueryClientProvider client={appQueryClient}><AccountSessionProvider><Journey/></AccountSessionProvider></QueryClientProvider></MemoryRouter>);
 `, resolveDir:new URL('..',import.meta.url).pathname, loader:'tsx'}, tsconfigRaw:{compilerOptions:{jsx:'react-jsx'}}, bundle:true, write:false, outfile:'app.js', jsx:'automatic', external:['/paradigm-mark.svg'] });
 const model = {id:'claude-sonnet-4-6',name:'Claude Sonnet 4.6',provider:'claude',thinking:['low','medium','high'],fast_mode:false,reasoning_modes:['standard']};
-let connected=false, started=false, failure=false, catalogFailure=false;
+let connected=false, started=false, failure=false, catalogFailure=false, claudeUnavailable=false;
 const trace=[];
 const server=createServer(async(req,res)=>{
  const url=new URL(req.url,'http://fixture.test'); let body='';for await(const chunk of req)body+=chunk;
@@ -49,7 +49,7 @@ const server=createServer(async(req,res)=>{
   connected=true;started=false;return json({state:'authenticated'});
  }
  if(url.pathname==='/v1/credentials/claude'&&req.method==='DELETE'){connected=false;started=false;return json({connected:false,state:'signed_out'})}
- if(url.pathname==='/v1/models')return catalogFailure?json({error:'unavailable'},503):json({object:'list',data:connected?[model]:[],default_model:connected?model.id:null,partial:false,availability:{claude:{connected,available:connected}}});
+ if(url.pathname==='/v1/models')return catalogFailure?json({error:'unavailable'},503):json({object:'list',data:connected&&!claudeUnavailable?[model]:[],default_model:connected&&!claudeUnavailable?model.id:null,partial:claudeUnavailable,availability:{claude:{connected,available:connected&&!claudeUnavailable,...(claudeUnavailable?{error:"claude_models_unavailable"}:{})}}});
  if(url.pathname==='/v1/agents'&&req.method==='POST'){
   const settings=JSON.parse(body).settings;assert.equal(settings.model,model.id);assert.equal(settings.thinking,'low');assert.equal(settings.reasoning_mode,'standard');assert.equal(settings.fast_mode,false);
   return json({agent_id:'018f0000-0000-7000-8000-000000000002'},201);
@@ -100,6 +100,12 @@ try{
   await page.getByText('Thinking fixed for this Claude conversation',{exact:true}).waitFor();
   for(const effort of ['Low','Medium','High'])assert.equal(await page.getByRole('menuitemradio',{name:effort,exact:true}).getAttribute('aria-disabled'),'true');
   await page.keyboard.press('Escape');await page.keyboard.press('Escape');
+  claudeUnavailable=true;
+  await page.getByRole('button',{name:/Model settings:/}).click();
+  await page.getByText('Couldn’t load Claude models. Reopen to retry.',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('menuitem',{name:'Manage Claude connection',exact:true}).getAttribute('href'),'/connect#claude-connection');
+  await page.keyboard.press('Escape');
+  claudeUnavailable=false;
   catalogFailure=true;
   await page.getByRole('button',{name:/Model settings:/}).click();
   await page.locator('.agent-model-error').filter({hasText:'Couldn’t load available models'}).waitFor();
@@ -112,6 +118,9 @@ try{
   if(!inline && await card.count()===0) await page.locator('.account-menu-trigger').click();
   await card.getByRole('button',{name:/Claude.*Disconnect/}).click();await card.getByRole('button',{name:/Claude.*Connect/}).waitFor();
   if(!inline && await card.count()!==0) await page.getByRole('button',{name:'Close account panel'}).click();
+  await page.getByRole('button',{name:/Model settings:/}).click();
+  assert.equal(await page.getByRole('menuitem',{name:'Connect Claude',exact:true}).getAttribute('href'),'/connect#claude-connection');
+  await page.keyboard.press('Escape');
   console.log('Disconnected, checking create denial');
   await page.getByRole('button',{name:'Create managed chat'}).click();await page.getByLabel('create-receipt').filter({hasText:'Connect a model subscription'}).waitFor();
   if(!inline && await card.count()===0) await page.locator('.account-menu-trigger').click();

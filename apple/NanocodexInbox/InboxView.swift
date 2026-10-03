@@ -476,7 +476,12 @@ struct InboxView: View {
     private var mainNavigation: some View {
         InboxNavigationLayout {
             navigationTabs
-            if model.focused != nil && (mainSurface == .chat || mainSurface == .todo) { MobileModelControls(model: model) }
+            if model.focused != nil && (mainSurface == .chat || mainSurface == .todo) {
+                MobileModelControls(model: model) {
+                    composerFocused = false
+                    showConnectors = true
+                }
+            }
         }
         .padding(.horizontal, 5).padding(.vertical, 3)
         .accessibilityElement(children: .contain)
@@ -4335,6 +4340,7 @@ private struct NativeAppUpdateSection: View {
 /// These settings apply to Chat, not to TODO processing.
 private struct MobileModelControls: View {
     @ObservedObject var model: InboxModel
+    let openConnections: () -> Void
     var body: some View {
         if let card = model.focused {
             let selected = (model.isDemo ? ModelChoice.all : model.availableModels).first(where: { $0.id == card.model })
@@ -4349,8 +4355,16 @@ private struct MobileModelControls: View {
                         }
                         .disabled(model.modelChoiceLocked || waiting)
                     }
-                    if model.availableModels.isEmpty && !model.isDemo { Text("Connect a model subscription in account settings") }
-                    if let error = model.modelCatalogError { Text(error) }
+                    if model.availableModels.isEmpty && !model.isDemo { Text("Connect a model subscription to choose a model") }
+                    if let error = model.modelCatalogError {
+                        Text(error)
+                        Button("Refresh models") { Task { await model.refreshModelCatalog() } }
+                            .accessibilityIdentifier("model-catalog-refresh")
+                    }
+                    if !model.isDemo {
+                        Button("Model connections", action: openConnections)
+                            .accessibilityIdentifier("model-connections")
+                    }
                 }
                 Menu {
                     ForEach(selected?.efforts ?? [], id: \.self) { choice in
