@@ -65,15 +65,21 @@ export function toClaudeConfig(options = {}) {
 /** Shared host lifecycle; loader selects the actual Nanoclaude WASM class. */
 export async function createClaude(options, load, type, harnessDefaults) {
   const reservation = options?.[CLOUDFLARE_SESSION_RESERVATION];
+  const internalRuntime = options?.[Symbol.for("nanocodex.browser.internalRuntime")];
   const config = toClaudeConfig(options);
   config.sessionId ??= options.durabilityId ?? createSessionId();
   const { durability, durabilityId, module } = options;
   const events = createEventChannel();
-  const host = createClaudeHost({ auth: options.auth, tools: options.tools, onEvent: events.emit, fetch: options.fetch, endpoint: options.endpoint });
+  const host = createClaudeHost({ auth: options.auth, tools: options.tools, onEvent: events.emit, fetch: options.fetch, endpoint: options.endpoint,
+    subagentSessions: internalRuntime?.subagentSessions, subagentRouting: internalRuntime?.subagentRouting });
   let harnesses;
-  try { harnesses = await prepareHarnesses(options.harnesses, events.emit, harnessDefaults); }
+  try { harnesses = await prepareHarnesses(options.harnesses, events.emit, { ...harnessDefaults,
+    subagentSessions: internalRuntime?.subagentSessions, subagentRouting: internalRuntime?.subagentRouting,
+    toolProviders: internalRuntime?.toolProviders,
+  }); }
   catch (error) { host.dispose(); throw error; }
   config.codexHarness = harnesses.codex;
+  config.subagentRouting = internalRuntime?.subagentRouting !== undefined;
   if (options.subagents !== undefined) config.subagents = options.subagents.maxConcurrency === undefined ? {} : { max_concurrency: options.subagents.maxConcurrency };
   options = undefined; // Do not retain caller credentials in runtime lifecycle closures.
   const hostDefinitionId = registerDefinitionHost(host);

@@ -166,7 +166,8 @@ public struct AgentCard: Identifiable, Equatable, Sendable {
             thinking = state["settings"]["thinking"].string
             routingEnabled = state["model_routing_enabled"].bool
             routingAutomatic = state["model_routing_automatic"].bool
-            provider = !routingEnabled && model.hasPrefix("gpt-") ? "ChatGPT" : ""
+            provider = routingEnabled ? "" : model.hasPrefix("claude-") ? "Claude"
+                : model.hasPrefix("gpt-") ? "ChatGPT" : ""
         }
         acceptedTurns = max(acceptedTurns, Int(state["accepted_turns"].number))
         checked = true; error = nil

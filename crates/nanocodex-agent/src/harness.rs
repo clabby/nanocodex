@@ -185,9 +185,14 @@ impl HarnessModel {
         }
     }
 
-    /// Whether native priority processing is offered by this model.
+    /// Whether native fast processing is offered by this model: priority
+    /// processing on Responses models and fast mode on Claude Opus.
     pub const fn supports_fast_mode(self) -> bool {
-        matches!(self, Self::Codex(Model::Astra | Model::Sol | Model::Luna))
+        matches!(
+            self,
+            Self::Codex(Model::Astra | Model::Sol | Model::Luna)
+                | Self::Claude(ClaudeModel::Opus55)
+        )
     }
 
     /// Validated model choices within one family.

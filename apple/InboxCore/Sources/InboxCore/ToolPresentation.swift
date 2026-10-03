@@ -64,6 +64,7 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
             "read_file": "Read file", "write_file": "Write file", "apply_patch": "Edit files",
             "search_query": "Search the web", "web_search": "Search the web", "search": "Search",
             "browser_navigate": "Open page", "browser_execute": "Use browser", "browser_screenshot": "Capture page",
+            "Task": "Delegate task", "TaskOutput": "Read task result", "TaskStop": "Stop task",
             "spawn_agent": "Delegate task", "wait_agent": "Wait for agent", "send_agent_message": "Message agent",
             "interrupt_agent": "Interrupt agent", "close_agent": "Close agent", "list_agents": "Check agents",
             "sandbox_start_process": "Start process", "sandbox_get_process": "Check process",
@@ -167,6 +168,10 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
         }
         let summary: String
         switch family {
+        case "Task":
+            summary = joined(text("subagent_type").isEmpty ? "Subagent" : text("subagent_type"), text("prompt"))
+        case "TaskOutput", "TaskStop":
+            summary = text("task_id")
         case "spawn_agent":
             summary = joined(text("role").isEmpty ? "Subagent" : text("role"), text("task"))
         case "send_agent_message":

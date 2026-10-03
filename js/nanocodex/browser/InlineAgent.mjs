@@ -166,7 +166,9 @@ export async function create(options = {}) {
             durabilityId,
           );
         }
-        harnesses = await prepareHarnesses(options.harnesses, events.emit);
+        harnesses = await prepareHarnesses(options.harnesses, events.emit, {
+          subagentSessions, subagentRouting: internalRuntime?.subagentRouting,
+        });
         activateHost(host);
         await host.ready();
         await initializeBrowserEngine({ module });

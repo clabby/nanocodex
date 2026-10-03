@@ -8,6 +8,7 @@ const requestSchema = z.object({
   parentSessionId: z.string().min(1).max(256),
   role: z.string().max(4096),
   task: z.string().max(65536),
+  harness: z.enum(["codex", "claude"]).optional(),
   model: z.string().optional(),
   thinking: z.enum(["none", "low", "medium", "high", "xhigh", "max"]).optional(),
   hostContextRef: z.string().min(1).max(256),
@@ -29,6 +30,9 @@ export type RetainedChildRoute = {
   hostContextRef: string;
   /** null preserves native GPT spawning; it is never a missing routed pin. */
   route: ThreadRoute | null;
+  /** Native Claude selections retain their family/model for nested admission. */
+  claudeModel?: string;
+  codexModel?: string;
 };
 export interface ChildRouteStore {
   read(sessionId: string): RetainedChildRoute | undefined;
@@ -54,7 +58,15 @@ export function createSubagentRouteController(options: {
   native?: {
     parentIsNative: (parentSessionId: string) => boolean;
     authorize: (parentSessionId: string, hostContextRef: string) => void;
+    availableModels?: () => Promise<readonly string[]>;
   };
+  claude?: {
+    parentModel: (parentSessionId: string) => string | undefined;
+    authorize: (parentSessionId: string, hostContextRef: string) => void;
+    availableModels: () => Promise<readonly string[]>;
+  };
+  /** The alternate Codex host of a Claude root currently supports native GPT only. */
+  nativeOnlyCodex?: boolean;
   id?: () => string;
   /** Monotonic milliseconds; injected for deterministic expiry tests. */
   now?: () => number;
@@ -68,7 +80,13 @@ export function createSubagentRouteController(options: {
     }
   };
   const authorizeBinding = (binding: RetainedChildRoute) => {
-    if (binding.route === null) {
+    if (binding.claudeModel !== undefined) {
+      if (!options.claude) throw new Error("Claude harness is no longer active");
+      options.claude.authorize(binding.parentSessionId, binding.hostContextRef);
+    } else if (binding.codexModel !== undefined) {
+      if (!options.native) throw new Error("Codex harness is no longer active");
+      options.native.authorize(binding.parentSessionId, binding.hostContextRef);
+    } else if (binding.route === null) {
       if (!options.native?.parentIsNative(binding.parentSessionId)) throw new Error("Native parent is no longer active");
       options.native.authorize(binding.parentSessionId, binding.hostContextRef);
     } else {
@@ -80,6 +98,55 @@ export function createSubagentRouteController(options: {
     async resolve(raw: unknown) {
       const request = requestSchema.parse(raw);
       const model = request.model === undefined ? undefined : aliases.get(request.model) ?? request.model;
+      const claudeParent = options.claude?.parentModel(request.parentSessionId);
+      if (request.harness && model && request.harness !== (model.startsWith("claude-") ? "claude" : "codex")) throw new Error("Model does not belong to selected harness");
+      const family = request.harness ?? (model === undefined ? claudeParent === undefined ? "codex" : "claude" : model.startsWith("claude-") ? "claude" : "codex");
+      if (family === "claude") {
+        if (options.policy.candidates !== undefined) throw new Error("Claude child model is outside the explicit routing policy");
+        if (!options.claude) throw new Error("Claude harness is unavailable for this managed session");
+        if (request.thinking !== undefined && !["low", "medium", "high"].includes(request.thinking)) throw new Error("Unsupported Claude child effort");
+        options.claude!.authorize(request.parentSessionId, request.hostContextRef);
+        expirePending();
+        if (pending.size + resolving >= 64) throw new Error("Too many pending child routes");
+        resolving++;
+        try {
+          const available = await options.claude!.availableModels();
+          const selected = model ?? claudeParent ?? available[0];
+          if (!selected || !available.includes(selected)) throw new Error("Selected Claude child model is unavailable");
+          options.claude!.authorize(request.parentSessionId, request.hostContextRef);
+          const routeId = options.id ? options.id() : crypto.randomUUID();
+          if (!routeId || pending.has(routeId)) throw new Error("Child route reference is not unique");
+          pending.set(routeId, { expiresAt: now() + CHILD_ROUTE_TICKET_TTL_MS, binding: {
+            routeId, parentSessionId: request.parentSessionId, hostContextRef: request.hostContextRef,
+            route: null, claudeModel: selected,
+          } });
+          return claudeParent === undefined
+            ? { harness: "claude" as const, model: selected, thinking: request.thinking ?? "low", routeId }
+            : { native: true as const, routeId };
+        } finally { resolving--; }
+      }
+      if (family === "codex" && options.nativeOnlyCodex && model !== undefined && !["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(model)) throw new Error("This managed lineage supports only native GPT models for Codex children");
+      if (claudeParent !== undefined && (model === undefined || ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(model))) {
+        if (!options.native?.availableModels) throw new Error("Codex harness is unavailable for this managed session");
+        options.native.authorize(request.parentSessionId, request.hostContextRef);
+        expirePending();
+        if (pending.size + resolving >= 64) throw new Error("Too many pending child routes");
+        resolving++;
+        try {
+          const available = await options.native.availableModels();
+          const selected = model ?? available[0];
+          if (!selected || !available.includes(selected)) throw new Error("Selected Codex child model is unavailable");
+          if (selected !== "gpt-6-luna" && request.thinking === "none") throw new Error("Selected Codex child model requires reasoning effort");
+          options.native.authorize(request.parentSessionId, request.hostContextRef);
+          const routeId = options.id ? options.id() : crypto.randomUUID();
+          if (!routeId || pending.has(routeId)) throw new Error("Child route reference is not unique");
+          pending.set(routeId, { expiresAt: now() + CHILD_ROUTE_TICKET_TTL_MS, binding: {
+            routeId, parentSessionId: request.parentSessionId, hostContextRef: request.hostContextRef,
+            route: null, codexModel: selected,
+          } });
+          return { harness: "codex" as const, model: selected, thinking: request.thinking ?? "low", routeId, statelessHttp: true };
+        } finally { resolving--; }
+      }
       if (model === "gpt-6.1-sol" && request.thinking === "none") throw new Error("GPT-6.1 Sol requires reasoning effort");
       const native = options.native?.parentIsNative(request.parentSessionId) === true
         && (model === undefined || ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(model));
@@ -106,8 +173,9 @@ export function createSubagentRouteController(options: {
         pending.set(routeId, { expiresAt: now() + CHILD_ROUTE_TICKET_TTL_MS,
           binding: { routeId, parentSessionId: request.parentSessionId,
             hostContextRef: request.hostContextRef, route } });
+        // Routed models use Codex even when the invoking parent uses Claude.
         return route === null ? { native: true as const, routeId }
-          : { model: route.model, thinking: route.thinking, routeId, statelessHttp: true };
+          : { harness: "codex" as const, model: route.model, thinking: route.thinking, routeId, statelessHttp: true };
       } finally { resolving--; }
     },
     bind(raw: unknown) {

@@ -2027,12 +2027,14 @@ final class InboxModel: ObservableObject {
         let epoch = generation
         try await client.completeClaudeLogin(code: code)
         guard generation == epoch, self.client === client else { throw CancellationError() }
+        await refreshModelCatalog()
     }
     func disconnectClaude() async throws {
         guard let client, connected, !isDemo else { throw APIError.invalidCredential }
         let epoch = generation
         try await client.disconnectClaude()
         guard generation == epoch, self.client === client else { throw CancellationError() }
+        await refreshModelCatalog()
     }
     func cachedConnectorOverview() async -> ConnectorOverview? {
         guard let client, connected, !isDemo else { return nil }
@@ -4166,26 +4168,24 @@ final class InboxModel: ObservableObject {
     func chooseModel(_ modelID: String) {
         guard let card = focused, !modelChoiceLocked, let choice = (isDemo ? ModelChoice.all : availableModels).first(where: { $0.id == modelID }) else { return }
         let effort = choice.efforts.contains(card.thinking) ? card.thinking : (choice.efforts.first ?? "low")
-        updateModelControls(["model": .string(modelID), "thinking": .string(effort),
-            "fast_mode": .bool(false),
-            "reasoning_mode": .string("standard")])
+        updateModelControls(.manual(model: modelID, thinking: effort))
     }
     func toggleAutoRoute() {
         guard let card = focused, !modelChoiceLocked else { return }
         if card.routingAutomatic { chooseModel(card.model) }
-        else { updateModelControls([:]) }
+        else { updateModelControls(.automatic) }
     }
     func chooseEffort(_ effort: String) {
         guard let card = focused, !card.effortLocked, !card.routingAutomatic,
               let choice = (isDemo ? ModelChoice.all : availableModels).first(where: { $0.id == card.model }), choice.efforts.contains(effort) else { return }
         if card.modelLocked {
             // Only the existing native settings path can append a cache-safe effort update.
-            updateModelControls(["thinking": .string(effort)], effortOnly: true)
+            updateModelControls(.effort(effort))
         } else {
-            updateModelControls(["model": .string(choice.id), "thinking": .string(effort)])
+            updateModelControls(.manual(model: choice.id, thinking: effort))
         }
     }
-    private func updateModelControls(_ body: [String: JSON], effortOnly: Bool = false) {
+    private func updateModelControls(_ selection: ManagedModelSelection) {
         guard let localID = focused?.id, !modelSettingsBusy.contains(localID), connected else { return }
         modelSettingsBusy.insert(localID); modelSettingsError = nil
         let epoch = generation
@@ -4196,8 +4196,7 @@ final class InboxModel: ObservableObject {
                 id = try await readyAgent(localID)
                 guard generation == epoch, let client else { throw CancellationError() }
                 modelSettingsBusy.insert(id)
-                _ = try await client.json(path: "/v1/agents/" + id + (effortOnly ? "/settings" : "/routing"),
-                    method: effortOnly ? "PATCH" : "POST", body: .object(body))
+                try await client.updateModelSelection(id, selection: selection)
                 let current = try await client.state(id)
                 guard generation == epoch else { return }
                 if let index = cards.firstIndex(where: { $0.id == id }) { try cards[index].apply(state: current) }
