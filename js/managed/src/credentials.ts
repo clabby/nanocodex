@@ -20,6 +20,9 @@ const ROUTES = new Map<string, ReadonlySet<string>>([
   ["/v1/credentials", new Set(["GET"])],
   ["/v1/credentials/openai", new Set(["PUT", "DELETE"])],
   ["/v1/credentials/chatgpt", new Set(["DELETE"])],
+  ["/v1/credentials/claude", new Set(["DELETE"])],
+  ["/v1/credentials/claude/login", new Set(["GET", "POST"])],
+  ["/v1/credentials/claude/login/complete", new Set(["POST"])],
   ["/v1/credentials/chatgpt/login", new Set(["GET", "POST"])],
   ["/v1/credentials/local-claim", new Set(["POST"])],
 ]);
@@ -47,10 +50,12 @@ export async function routeCredentialRequest(
   // must be tied to a passkey-backed account so a user-supplied provider secret
   // cannot outlive the anonymous session that submitted it.
   const vaultRoute = Boolean(vaultKind || originId || url.pathname === "/v1/credentials");
-  const principal = request.method === "GET" ? await authenticate(request, env, url)
+  const claudeRoute = url.pathname.startsWith("/v1/credentials/claude");
+  const principal = claudeRoute ? await authenticateVaultAccount(request, env, url)
+    : request.method === "GET" ? await authenticate(request, env, url)
     : vaultRoute ? await authenticateVaultAccount(request, env, url)
     : await authenticatePersistentAccount(request, env, url);
-  if (!principal || (principal.kind !== "account_session" && !(vaultRoute && principal.kind === "api_key"
+  if (!principal || principal.connectGrant || (principal.kind !== "account_session" && !((vaultRoute || claudeRoute) && principal.kind === "api_key"
     && principal.capabilities.includes("agents:write") && principal.capabilities.includes("tools:use")))) {
     return json({ error: "unauthorized" }, 401);
   }
@@ -68,6 +73,15 @@ export async function routeCredentialRequest(
   }
 
   let vaultBody: string | undefined;
+  if (url.pathname === "/v1/credentials/claude/login/complete") {
+    if (!isJsonContentType(request.headers.get("content-type"))) return json({ error: "invalid_content_type" }, 415);
+    let value: unknown;
+    try { value = JSON.parse(await readBoundedText(request, 10 * 1024)); }
+    catch (error) { return json({ error: error instanceof BodyTooLarge ? "body_too_large" : "invalid_claude_code" }, error instanceof BodyTooLarge ? 413 : 400); }
+    if (!isRecord(value) || Object.keys(value).length !== 1 || typeof value.code !== "string"
+      || value.code.length === 0 || value.code.length > 8192 || /[\u0000-\u001f\u007f]/.test(value.code)) return json({ error: "invalid_claude_code" }, 400);
+    vaultBody = JSON.stringify({ code: value.code });
+  }
   if ((request.method === "POST" && vaultKind) || originId) {
     let value: unknown;
     try {
@@ -89,7 +103,8 @@ export async function routeCredentialRequest(
   const polling = suffix === "/chatgpt/login" && request.method === "GET";
   const brokerSuffix = suffix === "/local-claim"
     ? "/chatgpt/local-claim"
-    : polling ? "/chatgpt/login/status" : suffix;
+    : polling ? "/chatgpt/login/status"
+    : suffix === "/claude/login" && request.method === "GET" ? "/claude/login/status" : suffix;
   const target = `https://broker.internal/users/${encodeURIComponent(principal.userId)}/credentials${brokerSuffix}`;
   const response = await env.NANOCODEX.fetch(target, {
     method: polling ? "POST" : request.method,

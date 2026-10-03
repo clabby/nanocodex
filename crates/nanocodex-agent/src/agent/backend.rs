@@ -1,5 +1,5 @@
 #[cfg(feature = "openai")]
-use super::handle::{request_fork, request_spawn};
+use super::handle::request_fork;
 use super::*;
 
 /// Input that selects the concrete builder returned by [`Nanocodex::builder`].
@@ -60,12 +60,103 @@ pub enum BackendPromptRoute {
     Steered,
 }
 
+/// Embedding-owned construction of clean native children.
+///
+/// Implementations retain provider recipes and approved host capabilities. The
+/// supplied parent is weak and never extends the owning driver's lifetime.
+pub trait AgentFactory: Send + Sync + 'static {
+    /// Builds the selected native family without starting its first turn.
+    fn spawn(
+        &self,
+        parent: AgentHandle,
+        options: SpawnOptions,
+        host_context: Option<Arc<str>>,
+    ) -> BackendFuture<Result<(Nanocodex, AgentEvents)>>;
+
+    /// Rejects construction after the native owning runtime begins shutdown.
+    fn ensure_available(&self, parent: AgentHandle) -> BackendFuture<Result<()>> {
+        let settings = self.settings(parent);
+        Box::pin(async move { settings.await.map(|_| ()) })
+    }
+
+    /// Constructs an ordered clean batch and observes each materialized child.
+    /// Native runtimes may override this to retain atomic admission and rollback.
+    fn spawn_many(
+        &self,
+        parent: AgentHandle,
+        count: usize,
+        observer: Arc<dyn Fn(&str) + Send + Sync>,
+        host_context: Option<Arc<str>>,
+    ) -> BackendFuture<Result<Vec<(Nanocodex, AgentEvents)>>> {
+        let pending = (0..count)
+            .map(|_| self.spawn(parent.clone(), SpawnOptions::new(), host_context.clone()))
+            .collect::<Vec<_>>();
+        Box::pin(async move {
+            let mut children: Vec<(Nanocodex, AgentEvents)> = Vec::with_capacity(count);
+            for child in pending {
+                match child.await {
+                    Ok((child, events)) => {
+                        observer(child.session_id());
+                        children.push((child, events));
+                    }
+                    Err(error) => {
+                        for (child, _) in &children {
+                            let _ = child.shutdown().await;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            Ok(children)
+        })
+    }
+
+    /// Reads the owning runtime's current settings for model-boundary inheritance.
+    fn settings(
+        &self,
+        parent: AgentHandle,
+    ) -> BackendFuture<Result<(crate::HarnessModel, Thinking)>> {
+        Box::pin(async move {
+            let model = parent.harness_model();
+            Ok((model, model.default_thinking()))
+        })
+    }
+
+    /// Forks a native conversation when this factory supports it.
+    fn fork(&self, _parent: AgentHandle) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+        Box::pin(async {
+            Err(NanocodexError::InvalidRequest(
+                "native factory cannot fork".into(),
+            ))
+        })
+    }
+
+    /// Rebinds approved host capabilities to a native in-memory child checkpoint.
+    fn restore(
+        &self,
+        _parent: AgentHandle,
+        _snapshot: ChildSnapshot,
+        _host_context: Option<Arc<str>>,
+    ) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+        Box::pin(async {
+            Err(NanocodexError::InvalidRequest(
+                "child factory cannot restore native checkpoints".into(),
+            ))
+        })
+    }
+}
+
 /// Backend implementor contract behind the common `Nanocodex` lifecycle.
 ///
 /// This trait erases only lifecycle control after a concrete driver has been
 /// built. Provider Tower services remain concrete, driver-owned types.
 #[doc(hidden)]
 pub trait LifecycleBackend: Send + Sync + 'static {
+    /// Immutable native agent-loop family.
+    fn harness_family(&self) -> crate::HarnessFamily {
+        crate::HarnessFamily::Codex
+    }
+
     /// Admits one prompt and returns the complete accepted turn.
     fn submit(&self, prompt: BackendPrompt) -> BackendFuture<Result<BackendTurn>>;
 
@@ -104,6 +195,18 @@ pub trait LifecycleBackend: Send + Sync + 'static {
     /// Changes the model before the first turn is accepted.
     fn set_model(&self, model: Model) -> BackendFuture<Result<()>>;
 
+    /// Changes a model using its native family-scoped selector.
+    fn set_harness_model(&self, model: crate::HarnessModel) -> BackendFuture<Result<()>> {
+        match model {
+            crate::HarnessModel::Codex(model) => self.set_model(model),
+            _ => Box::pin(async {
+                Err(NanocodexError::InvalidRequest(
+                    "backend does not support selected harness model".into(),
+                ))
+            }),
+        }
+    }
+
     /// Changes reasoning policy for later turns.
     fn set_thinking(&self, thinking: Thinking) -> BackendFuture<Result<()>>;
 
@@ -135,6 +238,12 @@ pub trait LifecycleBackend: Send + Sync + 'static {
                 "backend cannot snapshot children".into(),
             ))
         })
+    }
+
+    /// Captures a native residency checkpoint while retaining the original protocol.
+    fn runtime_snapshot(&self) -> BackendFuture<Result<ChildSnapshot>> {
+        let snapshot = self.child_snapshot();
+        Box::pin(async move { snapshot.await.map(ChildSnapshot::Codex) })
     }
 
     /// Reconstructs a child using this driver's current host capabilities.
@@ -282,6 +391,7 @@ impl BackendRuntime {
 
 #[cfg(feature = "openai")]
 pub(super) struct LocalLifecycle {
+    pub(super) child_handle: AgentHandle,
     pub(super) commands: mpsc::Sender<Command>,
     pub(super) execution: Execution,
     pub(super) shutdown: DriverShutdown,
@@ -559,9 +669,8 @@ impl LifecycleBackend for LocalLifecycle {
     }
 
     fn spawn(&self, options: SpawnOptions) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
-        let commands = self.commands.clone();
-        let shutdown = self.shutdown.clone();
-        Box::pin(async move { request_spawn(&commands, &shutdown, options).await })
+        let parent = self.child_handle.clone();
+        Box::pin(async move { parent.spawn_with(options).await })
     }
 
     fn fork_side_conversation(&self) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {

@@ -14,8 +14,8 @@ use super::{
 };
 use async_trait::async_trait;
 use futures_util::future::join_all;
-use nanocodex_agent::{AgentHandle, Model, SpawnOptions, Thinking};
-use nanocodex_tools::{
+use nanocodex_agent::{AgentHandle, HarnessFamily, HarnessModel, SpawnOptions, Thinking};
+use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, Tools,
     runtime::ToolsBuildError,
 };
@@ -113,7 +113,9 @@ struct SpawnAgentTask {
     role: String,
     task: String,
     #[serde(default)]
-    model: Option<Model>,
+    model: Option<HarnessModel>,
+    #[serde(default)]
+    harness: Option<HarnessFamily>,
     #[serde(default)]
     thinking: Option<Thinking>,
     // Old in-flight calls can finish after deployment. New model declarations
@@ -138,11 +140,15 @@ impl SpawnAgentTask {
         };
         let mut options = SpawnOptions::new();
         if let Some(model) = self.model {
-            options = options.model(model);
+            options = options.harness_model(model);
+        }
+        if let Some(harness) = self.harness {
+            options = options.harness(harness);
         }
         if let Some(thinking) = self.thinking {
             options = options.thinking(thinking);
         }
+        options.validate_harness().map_err(std::io::Error::other)?;
         Ok((
             AgentTask {
                 role: self.role,
@@ -582,15 +588,25 @@ impl Tool for SpawnAgent {
 }
 
 fn spawn_agent_parameters() -> Value {
+    let models = [HarnessFamily::Codex, HarnessFamily::Claude]
+        .into_iter()
+        .flat_map(HarnessModel::for_family)
+        .map(|model| Some(model.as_str()))
+        .chain([Some("glm-5.3"), Some("kimi"), Some("mimo"), None])
+        .collect::<Vec<_>>();
     json!({
         "type": "object",
         "properties": {
             "role": { "type": "string", "description": "A short role describing the subagent's specialty." },
             "task": { "type": "string", "description": "A complete, focused task for the subagent." },
+            "harness": {
+                "type": ["string", "null"], "enum": ["codex", "claude", null],
+                "description": "Native agent-loop family; null inherits the parent's family. A family switch selects that family's defaults."
+            },
             "model": {
                 "type": ["string", "null"],
-                "enum": ["astra", "sol", "luna", "glm-5.3", "kimi", "mimo", null],
-                "description": "Model override; null inherits the parent's model."
+                "enum": models,
+                "description": "Model must belong to the selected harness. Null inherits within the same family; a family switch uses its default model."
             },
             "thinking": {
                 "type": ["string", "null"],
@@ -599,7 +615,7 @@ fn spawn_agent_parameters() -> Value {
             },
             "output_contract": { "$ref": "#/$defs/node" }
         },
-        "required": ["role", "task", "model", "thinking", "output_contract"],
+        "required": ["role", "task", "harness", "model", "thinking", "output_contract"],
         "additionalProperties": false,
         "$defs": {
             "node": { "anyOf": [
@@ -782,6 +798,7 @@ impl Tool for SendAgentMessage {
             .registry
             .upgrade()
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+        #[cfg(not(target_family = "wasm"))]
         let receipt = registry
             .send_message(
                 context.session_id(),
@@ -792,6 +809,26 @@ impl Tool for SendAgentMessage {
                 message,
             )
             .await?;
+        #[cfg(target_family = "wasm")]
+        let receipt = {
+            let session_id = context.session_id().to_owned();
+            let pending = super::platform::spawn(async move {
+                registry
+                    .send_message(
+                        &session_id,
+                        agent_id,
+                        priority,
+                        purpose,
+                        in_reply_to,
+                        message,
+                    )
+                    .await
+            });
+            let _cancel = pending.abort_on_drop();
+            pending
+                .await
+                .map_err(|_| std::io::Error::other("subagent message was cancelled"))??
+        };
         json_output(&receipt)
     }
 }
@@ -960,39 +997,131 @@ impl Tool for ChangeAgentLifecycle {
     }
 }
 
+fn shared_tools(parent: AgentHandle, registry: &Arc<Registry>) -> Vec<Arc<dyn Tool>> {
+    registry.register_handle(parent.clone());
+    vec![
+        Arc::new(SubmitResult {
+            registry: Arc::downgrade(registry),
+        }),
+        Arc::new(SpawnAgent {
+            parent,
+            registry: Arc::downgrade(registry),
+        }),
+        Arc::new(SendAgentMessage {
+            registry: Arc::downgrade(registry),
+        }),
+        Arc::new(ListAgents {
+            registry: Arc::downgrade(registry),
+        }),
+        Arc::new(WaitAgent {
+            registry: Arc::downgrade(registry),
+        }),
+        Arc::new(ChangeAgentLifecycle {
+            registry: Arc::downgrade(registry),
+            operation: LifecycleOperation::Interrupt,
+        }),
+        Arc::new(ChangeAgentLifecycle {
+            registry: Arc::downgrade(registry),
+            operation: LifecycleOperation::Close,
+        }),
+    ]
+}
+
+struct SharedTool(Arc<dyn Tool>);
+#[async_trait]
+impl Tool for SharedTool {
+    fn definition(&self) -> ToolDefinition {
+        self.0.definition()
+    }
+    async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
+        self.0.execute(input, context).await
+    }
+}
+
+/// Installs the task-tree operations into a Responses tool runtime.
 pub fn install_tools(
     tools: Tools,
     parent: AgentHandle,
     registry: Arc<Registry>,
 ) -> Result<Tools, ToolsBuildError> {
-    registry.register_handle(parent.clone());
-    tools
-        .into_builder()
-        .tool(SubmitResult {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(SpawnAgent {
-            parent,
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(SendAgentMessage {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(ListAgents {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(WaitAgent {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(ChangeAgentLifecycle {
-            registry: Arc::downgrade(&registry),
-            operation: LifecycleOperation::Interrupt,
-        })
-        .tool(ChangeAgentLifecycle {
-            registry: Arc::downgrade(&registry),
-            operation: LifecycleOperation::Close,
-        })
-        .build()
+    let mut builder = tools.into_builder();
+    for tool in shared_tools(parent, &registry) {
+        builder = builder.tool(SharedTool(tool));
+    }
+    builder.build()
+}
+
+/// Installs the identical task-tree operations as native Claude callbacks.
+#[cfg(feature = "claude")]
+pub fn install_claude_tools(
+    mut tools: nanocodex_claude::ClaudeTools,
+    parent: AgentHandle,
+    registry: Arc<Registry>,
+) -> nanocodex_agent::Result<nanocodex_claude::ClaudeTools> {
+    use nanocodex_claude::{ClaudeToolReply, ToolResultContent};
+    for tool in shared_tools(parent, &registry) {
+        let definition = serde_json::to_value(tool.definition())
+            .map_err(|error| nanocodex_agent::NanocodexError::InvalidRequest(error.to_string()))?;
+        let native = nanocodex_claude::ToolDefinition {
+            name: definition["name"].as_str().unwrap_or_default().to_owned(),
+            description: definition["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            input_schema: definition["parameters"].clone(),
+            strict: None,
+            defer_loading: false,
+        };
+        tools = tools.tool_with_context(native, move |input, invocation| {
+            let tool = tool.clone();
+            async move {
+                let raw =
+                    serde_json::value::to_raw_value(&input).map_err(|error| error.to_string())?;
+                let context = ToolContext::new(
+                    &invocation.model,
+                    &invocation.session_id,
+                    &invocation.call_id,
+                    &[],
+                    usize::MAX,
+                )
+                .with_turn_id(Some(&invocation.turn_id))
+                .with_host_context(
+                    invocation
+                        .host_context
+                        .as_deref()
+                        .or(Some(&invocation.turn_id)),
+                )
+                .with_instruction_revision(invocation.instruction_revision);
+                let output = tool
+                    .execute(ToolInput::Function(raw), context)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .into_wire()
+                    .map_err(|error| error.to_string())?;
+                let text = match output.output {
+                    nanocodex_oai_tools::contract::ToolOutputBody::Text(text) => text,
+                    nanocodex_oai_tools::contract::ToolOutputBody::Content(content) => {
+                        serde_json::to_string(&content).map_err(|error| error.to_string())?
+                    }
+                };
+                Ok(ClaudeToolReply {
+                    content: ToolResultContent::Text(text),
+                    is_error: !output.success,
+                    metadata: output
+                        .metadata
+                        .map(|value| serde_json::from_str(value.get()))
+                        .transpose()
+                        .map_err(|error| error.to_string())?,
+                    structured_result: output
+                        .structured_result
+                        .map(|value| serde_json::from_str(value.get()))
+                        .transpose()
+                        .map_err(|error| error.to_string())?,
+                })
+            }
+        });
+    }
+    Ok(tools)
 }
 
 fn spawn_agent_output_schema() -> Value {
@@ -1106,7 +1235,14 @@ mod strict_spawn_tests {
         assert_eq!(parameters["additionalProperties"], false);
         assert_eq!(
             parameters["required"],
-            json!(["role", "task", "model", "thinking", "output_contract"])
+            json!([
+                "role",
+                "task",
+                "harness",
+                "model",
+                "thinking",
+                "output_contract"
+            ])
         );
         for shape in ["object", "array", "string_enum", "scalar", "field"] {
             assert_eq!(parameters["$defs"][shape]["additionalProperties"], false);

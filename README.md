@@ -164,7 +164,11 @@ the [release switcher documentation](bin/nanocodex/src/update.rs).
 To install a branch or an open pull request from source, run
 `nanocodex update --branch master` or `nanocodex update --pr 123`. Both commands fetch the selected
 revision and compile the CLI and Hand locally with Cargo. PR selection also
-requires `gh`. These source builds do not package the native voice runtime.
+requires `gh`. The updater reuses its checkout and Cargo cache under
+`~/.nanocodex/source-build`, builds both binaries together, and uses the optimized
+`nightly` profile without release LTO. Cargo timing reports are saved under
+`~/.nanocodex/source-build/target/cargo-timings` (or your `CARGO_TARGET_DIR`).
+These source builds do not package the native voice runtime.
 
 For managed agents, `nanocodex2 login` signs in with an SMS code and saves an
 account key; `nanocodex2 status` verifies it, and `nanocodex2 logout` removes the
@@ -222,6 +226,15 @@ agent (including `Agent.create` / `Agent.createAndPrompt` in JavaScript). Rust
 callers can use `ManagedClient::create_with_chatgpt_account(settings, account_id)`.
 
 
+### Managed Claude subscription
+
+Connect **Claude** in the account Connections screen to use the native Claude
+Messages runtime. OAuth input stays in the private connection form, and model
+availability comes from the account-scoped provider catalog. OpenAI credentials
+are not required for a Claude-only account. See the
+[managed Claude guide](docs/CLAUDE_MANAGED.md) for native clients, API routes,
+refresh/recovery, supported tools, current limits and deployment acceptance.
+
 ### Native Linux Hands
 
 Install or repair the Hand on the current Linux machine after the curl login:
@@ -274,6 +287,36 @@ control that desktop from a Session 0 service. The same `nanocodex hand
 install/status/start/stop/restart` commands work from a new terminal.
 See [`windows/hand`](windows/hand) for behavior, security boundaries, build
 instructions, and the real Notepad control smoke test.
+
+## Native CLI harnesses
+
+`nanocodex --claude` starts the native Claude Messages agent with OMP-style
+subscription authentication. Sign in once, then select a model within that family:
+
+```sh
+nanocodex --claude auth login
+nanocodex --claude --model sonnet
+nanocodex run "inspect the repository" --harness claude --model opus
+nanocodex run "inspect the repository" --harness codex --model sol
+```
+
+Use `nanocodex --claude auth status` or `nanocodex --claude auth logout` to manage
+that subscription.
+Claude roots and Claude children share its token-refresh manager, including when
+the root uses Codex. `ANTHROPIC_API_KEY` or `--claude-api-key` explicitly selects
+Console API-key authentication instead. Claude credentials are encrypted outside
+agent sessions; `--claude-auth-file` overrides their private store. See
+[Claude authentication](docs/claude-authentication.md) for setup and recovery.
+
+`spawn_agent` accepts `harness: "codex" | "claude"` and a model within that
+family. Null values inherit the parent family and its current settings; switching
+families uses the selected family's defaults. Mixed children share the same task
+tree, result contracts and lifecycle tools. Each family uses its own credentials,
+native tools and transcript format. A model from the wrong family fails before
+provider dispatch. Claude aliases are `opus`, `sonnet`, `fable` and `haiku`.
+
+Libraries compose the same routing through [`Harness`](crates/nanocodex/README.md)
+with concrete provider builders and host-owned construction recipes.
 
 ## Rust: start here
 
@@ -393,6 +436,42 @@ ships from repository source; read the
 [durability guide](crates/nanocodex-durability/README.md) and pin a Git revision
 when adopting it outside this workspace.
 
+
+Enable the `claude` feature on `nanocodex-durability` to use the same stores,
+admission rules, and receipts with the Claude builder. Claude checkpoints keep
+native Messages content, including signed thinking and tool results. The
+application supplies its authenticated client again when reopening a session;
+credentials are never part of a checkpoint. The `nanocodex` facade's `claude`
+feature also enables the adapter when its durability feature is enabled.
+[Subscription login](docs/claude-authentication.md) uses a Rust-owned OAuth manager
+with separate private credential storage and the same agent builder.
+
+```rust,ignore
+use nanocodex_agent::{Nanocodex, PromptRequest};
+use nanocodex_claude::{Claude, ClaudeClient};
+use nanocodex_durability::{DurableAgentExt, DurableSession, MemoryStore};
+
+let client = ClaudeClient::official(
+    reqwest::Client::new(),
+    std::env::var("ANTHROPIC_API_KEY")?,
+);
+let state = DurableSession::open(MemoryStore::new()?, "claude-session").await?;
+let (agent, events) = Nanocodex::builder(Claude::latest(client))
+    .durability(state).await?
+    .build()?;
+let result = agent.prompt(
+    PromptRequest::new("hello").request_id("request-7"),
+).await?.result().await?;
+```
+
+Choose `SqliteStore`, `PostgresStore`, or a persistent host store to retain work
+across process restarts. Reopen the same state ID and replay the same request ID
+and input to recover pending work or return its committed receipt. Unfinished
+Claude effects follow the same at-least-once execution rule described above.
+Claude snapshots use the store's chunked immutable payloads; they do not yet
+use the OpenAI adapter's per-message context pages. Snapshot serialization and
+restoration therefore process the full retained Claude context.
+
 ### Tools, Code Mode, and MCP
 
 Tools are caller-owned capabilities, not callbacks hidden behind a global
@@ -446,7 +525,7 @@ tools remain out of the initial model prefix, are found with BM25
 lists, bounded concurrent startup, hot reload, and caller-owned clients live at
 that boundary.
 
-Read [`crates/nanocodex-tools`](crates/nanocodex-tools/README.md), run
+Read [`crates/nanocodex-oai-tools`](crates/nanocodex-oai-tools/README.md), run
 [`examples/custom_tool.rs`](examples/custom_tool.rs), or start the complete MCP
 example in [`examples/mcp.rs`](examples/mcp.rs):
 
@@ -822,7 +901,8 @@ while their pinned native/proxy dependencies are unavailable from crates.io.
 | [`nanocodex-agent`](crates/nanocodex-agent/README.md) | Stable, published | Owned driver, turns/results/events, history policy, snapshots, compaction, branches, and cancellation. |
 | [`nanocodex-durability`](crates/nanocodex-durability/README.md) | Supported, 0.6 registry release, optional | Total execution state, deduplication, recovery policy, staged outcomes, checkpoints, and memory/SQLite/Postgres/host stores. |
 | [`nanocodex-oai-api`](crates/nanocodex-oai-api/README.md) | Stable, published | OpenAI auth, typed Responses and Realtime boundaries, persistent transports, managed context, retry, pricing, and Tower client. |
-| [`nanocodex-tools`](crates/nanocodex-tools/README.md) | Stable, published | Tool contract, standard tools, shell/process lifecycle, Code Mode, deferred search, MCP, and remote dispatch. |
+| [`nanocodex-oai-tools`](crates/nanocodex-oai-tools/README.md) | Supported, publishable | OpenAI tool contracts, standard tools, shell/process lifecycle, Code Mode, deferred search, MCP, and remote dispatch. |
+| [`nanocodex-claude-tools`](crates/nanocodex-claude-tools/README.md) | Supported, publishable | Independent Claude-native file, notebook, task, Bash, web and host/MCP adapters; caller-owned permissions and effects. |
 | [`nanocodex-subagents`](crates/nanocodex-subagents/README.md) | Supported, 0.6 registry release, optional | Task-tree lifecycle and the seven canonical child-agent tools above the core. |
 | [`nanocodex-observability`](crates/nanocodex-observability/README.md) | Stable, published, optional | Full-fidelity tracing and application-owned OpenTelemetry initialization. |
 | [`nanocodex` for JavaScript](js/nanocodex/README.md) | Published headless core binding; narrow source companions | Node/browser hosts around the Rust/WASM agent, plus React hooks, Vite integration, and optional terminal presentation under [`js/`](js/README.md). Agent lifecycle remains headless and caller-owned. |
@@ -841,20 +921,29 @@ while their pinned native/proxy dependencies are unavailable from crates.io.
 
 ## Design boundaries
 
-Nanocodex is intentionally narrow:
+Each provider-native runtime is intentionally narrow:
 
-- one supported OpenAI coding-model family and the Responses WebSocket API;
-- one owned agent lifecycle with client-owned typed history;
+- OpenAI Responses and Claude Messages keep distinct transports and histories;
+- shared owned lifecycle contracts, with provider-native typed state;
 - caller-defined tools and application-owned policy;
 - no provider/model portability layer;
 - no generic JSON-RPC agent daemon or app-server protocol;
 - no approval subsystem or compatibility framework; and
 - no stable generic scheduler hidden inside the core agent.
 
-The separation is what makes the SDK embeddable. A lower OpenAI client works
-without the agent. Tools work without the CLI. Subagents compose above the
+The separation is what makes the SDK embeddable. Lower provider clients work
+without the agent. Provider tools work without the CLI. Subagents compose above the
 agent. VMs, browsers, voice, payment, durable actors, and evaluation remain
 consumers with explicit owners.
+
+The provider tool crates are real implementations, not aliases of a shared
+provider runtime: `nanocodex-oai-tools` owns the OpenAI surface and
+`nanocodex-claude-tools` owns Claude-native adapters. The latter has no OpenAI
+or agent dependency, even with every feature enabled. Hosts provide permissions,
+MCP transport and effect lifecycles explicitly. `nanocodex/oai-tools` and
+`nanocodex/claude-tools` select the corresponding facade surface; the existing
+facade `tools` feature remains an OpenAI compatibility alias. The npm package
+`nanocodex-tools` keeps its name and is not part of this Rust crate rename.
 
 ## Repository map
 
@@ -862,7 +951,9 @@ consumers with explicit owners.
 crates/
 ├── nanocodex/                  facade and prelude
 ├── nanocodex-oai-api/          OpenAI protocol, context, transport, Tower
-├── nanocodex-tools/            tools, Code Mode, MCP, process runtime
+├── nanocodex-oai-tools/        OpenAI tools, Code Mode, MCP, process runtime
+├── nanocodex-claude-tools/     independent Claude-native capability adapters
+├── nanocodex-claude/           Anthropic Messages protocol and agent backend
 ├── nanocodex-agent/            owned agent lifecycle
 ├── nanocodex-subagents/        optional task-tree extension
 ├── nanocodex-observability/    optional tracing and OTLP setup

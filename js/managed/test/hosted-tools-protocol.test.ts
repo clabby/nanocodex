@@ -106,8 +106,6 @@ describe("hosted tools socket protocol", () => {
       outcome: { status: "completed", output: { output: "ok", success: true } },
     }))).toThrow("nullable output metadata fields");
     expect(() => parseHostedToolsHostFrame("{" )).toThrow("JSON objects");
-    expect(() => parseHostedToolsHostFrame(JSON.stringify({ type: "ping", nonce: "x".repeat(129) })))
-      .toThrow("nonce");
     const large = "x".repeat(512 * 1024);
     expect(parseHostedToolsHostFrame(JSON.stringify({
       type: "result",

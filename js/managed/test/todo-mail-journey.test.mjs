@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
+import { readD1Migrations } from "@cloudflare/vitest-pool-workers";
 
 // Real HTTP -> shipped account proxy -> real API-key auth -> shipped TODO router ->
 // real account SQLite DO -> credential egress. Only Google/broker is synthetic.
@@ -12,12 +13,24 @@ import { UserAccount, Organization, ApiKeyRecord, NonceStorage, ensureAccount, c
 import { routeTodoRequest } from "./src/todo-inbox.ts";
 import { routeManaged } from "../account/worker/managedProxy.ts";
 import { Kv } from "accounts/server";
+import { crmRequest } from "./src/crm.ts";
+import { crmIdentityRequest } from "./src/crm-identities.ts";
+import { crmResearchRequest } from "./src/crm-research.ts";
+import { crmRelationshipRequest } from "./src/crm-context.ts";
+import { crmInteractionRequest } from "./src/crm-events.ts";
+import { importCalendarEvents } from "./src/crm-meetings.ts";
 export { UserAccount, Organization, ApiKeyRecord, NonceStorage };
 export default { async fetch(request, env) {
   const url = new URL(request.url);
   if (env.EDGE) return await routeManaged(request, env, url) ?? new Response("not_found", {status:404});
   if (url.pathname === "/__fixture") {
     const input = await request.json(); await ensureAccount(env, input.user, true);
+    if (input.crm) return Response.json(await crmRequest(env.NANOCODEX_CRM,input.user,input.crm.operation,input.crm.args,input.crm.id??crypto.randomUUID()));
+    if (input.identity) return Response.json(await crmIdentityRequest(env.NANOCODEX_CRM,input.user,"save",input.identity.args,input.identity.id));
+    if (input.research) return Response.json(await crmResearchRequest(env.NANOCODEX_CRM,input.user,"save",input.research));
+    if (input.relationship) return Response.json(await crmRelationshipRequest(env.NANOCODEX_CRM,input.user,"save",input.relationship.args,input.relationship.id));
+    if (input.interaction) return Response.json(await crmInteractionRequest(env.NANOCODEX_CRM,input.user,"save",input.interaction.args,input.interaction.id));
+    if (input.calendar) return Response.json(await importCalendarEvents(env.NANOCODEX_CRM,input.user,input.calendar));
     if (input.decision) return Response.json(await env.NANOCODEX_USERS.getByName(input.user).proposeTodoDecision(input.decision));
     const auth = await (await env.NANOCODEX_USERS.getByName(input.user).fetch("https://user.internal/authorization")).json();
     const principal = {kind:"api_key",userId:input.user,...auth.grant,subjectId:"api_key:"+input.user,credentialId:"fixture",capabilities:input.read_only?["agents:read"]:auth.grant.capabilities};
@@ -237,5 +250,160 @@ test("TODO mail HTTP journey: multiaccount read, durable review, exact-version s
     await writeFile(new URL("../../../output/todo-mail-http-journey.json",import.meta.url),JSON.stringify({trace,provider_trace:providerTrace,send_attempts:sends,metadata_peak:metadataPeak,calendar_peak:calendarPeak},null,2));
     await mf.dispose();
     await rm(persistence,{recursive:true,force:true});
+  }
+});
+
+// Observable inbox journeys: exact known/alias CRM links (including grounded
+// context), ambiguous and same-name unmatched senders, blocked inference that
+// retains links, raw-mail readers with zero AI-on-GET, and calendar revalidation.
+// Real public HTTP/proxy/auth/DO alarm/D1 migrations are exercised; only the
+// credential broker/Google and external model are synthetic.
+test("prepared mobile inbox HTTP journey: verified CRM identities survive blocked work; raw reads never infer or send", { timeout: 120_000 }, async () => {
+  const trace = [], providerTrace = [], inference = [], subjects = new Set(); let sends = 0;
+  const addresses = { known: "known@example.test", alias: "alias@example.test", ambiguous: "shared@example.test", unknown: "unknown@example.test" };
+  const raw = tid => ({ id: "m" + tid, threadId: tid, internalDate: "1780000000000", labelIds: ["INBOX", "UNREAD"], payload: {
+    mimeType: "text/plain", headers: [{ name: "From", value: `Same Name <${addresses[tid.slice(1)]}>` }, { name: "To", value: "owner@example.test" },
+      { name: "Subject", value: "Review supplied update" }, { name: "Message-ID", value: `<${tid}@example.test>` }], body: { data: Buffer.from("Here is the supplied update. Please review.").toString("base64url") } } });
+  const broker = async request => {
+    const url = new URL(request.url);
+    if (url.hostname === "inference.internal") { inference.push(await request.json()); return new Response(null, { status: 204 }); }
+    if (url.hostname === "broker.internal") {
+      if (url.pathname.startsWith("/subjects/")) { subjects.add(url.pathname.split("/").at(-1)); return new Response(null, { status: 204 }); }
+      if (url.pathname.endsWith("/connectors")) return Response.json({ connectors: { gmail: { connected: true, connections: [{ id: c1, label: "Synthetic inbox", capabilities: ["gmail"], scopes: ["https://www.googleapis.com/auth/gmail.modify"] }] } } });
+    }
+    assert.equal(request.headers.get("x-nanocodex-connector-connection"), c1);
+    assert.ok(subjects.has(request.headers.get("x-nanocodex-subject")));
+    providerTrace.push({ path: url.pathname, method: request.method, query: Object.fromEntries(url.searchParams) });
+    if (url.pathname.endsWith("/threads")) return Response.json({ threads: Object.keys(addresses).map(key => ({ id: "t" + key })) });
+    if (/\/threads\/t(?:known|alias|ambiguous|unknown)$/.test(url.pathname)) { const tid = url.pathname.split("/").at(-1); return Response.json({ id: tid, messages: [raw(tid)] }); }
+    if (url.pathname.endsWith("/profile")) return Response.json({ emailAddress: "owner@example.test" });
+    if (url.pathname.endsWith("/messages/send")) { sends++; throw Error("No outbound send authorized by this synthetic journey"); }
+    throw Error("Unexpected synthetic provider request: " + url.pathname);
+  };
+  const bundle = await build({ stdin: { contents: source, resolveDir: fileURLToPath(new URL("..", import.meta.url)) }, bundle: true, write: false, format: "esm", target: "es2022", platform: "browser", external: ["cloudflare:workers", "node:*"], alias: { "node-rsa": "./node_modules/nanocodex/tools/browser/unsupportedNodeRsa.mjs" } });
+  const script = bundle.outputFiles[0].text, persistence = fileURLToPath(new URL("../../../output/todo-crm-store-" + crypto.randomUUID(), import.meta.url));
+  const model = `import {WorkerEntrypoint} from "cloudflare:workers";
+    export class SyntheticAI extends WorkerEntrypoint { async run(model,input,options) {
+      if(input.tools || input.stream!==false || options.gateway.collectLog!==false || !options.gateway.skipCache) throw Error("unsafe inference envelope");
+      const context=JSON.parse(input.messages[1].content);
+      await this.env.TRACE.fetch("https://inference.internal/",{method:"POST",body:JSON.stringify(context)});
+      const blocked=context.owner_changes==="blocked" || context.kind==="capture";
+      const result={status:blocked?"blocked":"ready",context:"Supplied update and bounded CRM context.",recommendation:blocked?"Owner facts missing; review linked context.":"Review the grounded proposal.",proposal:blocked?"":"Review the supplied update.",body_text:blocked?"":"Thanks for the supplied update.",source_references:context.evidence.map(e=>e.reference),missing_information:blocked?"Owner judgment is missing.":""};
+      if(context.owner_changes==="fabricate") result.people=[{record_id:"invented",name:"Manufactured Person"}];
+      return {response:JSON.stringify(result)};
+    } }`;
+  const options = { durableObjectsPersist: persistence + "/do", d1Persist: persistence + "/d1", workers: [
+    { name: "edge", script, modules: true, compatibilityDate: "2026-07-29", compatibilityFlags: ["nodejs_compat"], bindings: { EDGE: true }, serviceBindings: { NANOCODEX_BACKEND: "managed" } },
+    { name: "managed", script, modules: true, compatibilityDate: "2026-07-29", compatibilityFlags: ["nodejs_compat", "enable_request_signal"], serviceBindings: { NANOCODEX: broker, AI: { name: "ai", entrypoint: "SyntheticAI" } }, d1Databases: { NANOCODEX_CRM: "fixture-crm" },
+      durableObjects: { NANOCODEX_AUTH: { className: "NonceStorage", useSQLite: true }, NANOCODEX_USERS: { className: "UserAccount", useSQLite: true }, NANOCODEX_ORGANIZATIONS: { className: "Organization", useSQLite: true }, NANOCODEX_API_KEYS: { className: "ApiKeyRecord", useSQLite: true } } },
+    { name: "ai", script: model, modules: true, compatibilityDate: "2026-07-29", serviceBindings: { TRACE: broker } },
+  ] };
+  let mf = new Miniflare(options), base, backend;
+  const owner = crypto.randomUUID(), foreign = crypto.randomUUID(); let token, foreignToken, readOnly;
+  const fixture = async (body, user = owner) => {
+    const response = await backend.fetch("https://fixture.test/__fixture", { method: "POST", body: JSON.stringify({ user, ...body }) });
+    assert.equal(response.status, 200, await response.clone().text()); return response.json();
+  };
+  const call = async (path, method = "GET", body, expected = 200, credential = token) => {
+    const response = await fetch(new URL("/v1/todo" + path, base), { method, headers: { ...(credential ? { authorization: "Bearer " + credential } : {}), "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const data = await response.json(); trace.push({ path, method, expected, status: response.status, data }); assert.equal(response.status, expected, `${method} ${path}: ${JSON.stringify(data)}`); return data;
+  };
+  const settled = async (path, status) => {
+    for (let i = 0; i < 150; i++) { const data = await call(path); const item = data.decision ?? data.item;
+      if (item.preparation.status === status) return item; await new Promise(resolve => setTimeout(resolve, 20)); }
+    assert.fail("Preparation did not reach " + status + ": " + path);
+  };
+  try {
+    base = await mf.ready; backend = await mf.getWorker("managed");
+    const db = await mf.getD1Database("NANOCODEX_CRM", "managed");
+    for (const migration of await readD1Migrations(fileURLToPath(new URL("../migrations/", import.meta.url)))) {
+      await db.batch(migration.queries.map(query => db.prepare(query)));
+    }
+    token = (await fixture({})).token; foreignToken = (await fixture({}, foreign)).token; readOnly = (await fixture({ read_only: true })).token;
+    const save = (id, args, user = owner) => fixture({ crm: { id, operation: "save", args } }, user);
+    await save("company", { kind: "company", name: "Synthetic Labs" });
+    await save("known", { kind: "person", name: "Same Name", email: addresses.known, title: "Research lead", company_id: "company" });
+    await save("other", { kind: "person", name: "Same Name", email: "other@example.test" });
+    await save("known", { kind: "person", name: "Same Name", email: addresses.known }, foreign);
+    await fixture({ crm: { id: "foreign-note", operation: "save_note", args: { record_id: "known", body: "PRIVATE FOREIGN CONTEXT" } } }, foreign);
+    await fixture({ identity: { id: "known-alias", args: { record_id: "known", kind: "email", value: addresses.alias, origin: "source", source_ref: "synthetic-message" } } });
+    for (const id of ["known", "other"]) await fixture({ identity: { id: id + "-shared", args: { record_id: id, kind: "email", value: addresses.ambiguous, origin: "user" } } });
+    await fixture({ research: { record_id: "known", status: "complete", summary: "Grounded synthetic biography", sources: [{ kind: "web", reference: "https://synthetic.example/bio" }] } });
+    await fixture({ relationship: { id: "works", args: { from_id: "known", to_id: "company", type: "works_at", role: "Research lead", origin: "user" } } });
+    await fixture({ crm: { id: "saved-note", operation: "save_note", args: { record_id: "known", body: "Owner-saved priority: review synthetic update" } } });
+    await fixture({ interaction: { id: "prior", args: { participants: [{ record_id: "known" }], occurred_at: "2026-09-01", body: "Owner observed a synthetic prior discussion", origin: "user" } } });
+    // Raw inbox and reader expose only exact current links. Same display names
+    // and domains never disclose a different person's private CRM evidence.
+    const listed = (await call("/mail/threads?connection_id=" + c1)).threads;
+    assert.equal(listed.find(t => t.id === "tknown").people[0].record_id, "known");
+    assert.equal(listed.find(t => t.id === "talias").people[0].match, "exact_alias");
+    for (const [tid, status] of [["tambiguous", "ambiguous"], ["tunknown", "unmatched"]]) {
+      const row = listed.find(t => t.id === tid); assert.equal(row.people_status, status); assert.deepEqual(row.people, []);
+      const full = (await call("/mail/threads/" + tid + "?connection_id=" + c1)).thread; assert.equal(full.people_status, status); assert.deepEqual(full.people, []);
+    }
+    const known = (await call("/mail/threads/tknown?connection_id=" + c1)).thread;
+    assert.equal(known.people[0].name, "Same Name"); assert.equal(known.people[0].title, "Research lead"); assert.equal(known.people[0].company, "Synthetic Labs");
+    assert.equal(known.people[0].summary, "Grounded synthetic biography"); assert.equal(known.people[0].relationships[0].id, "works"); assert.equal(known.people[0].timeline.length, 2);
+    assert.ok(known.people[0].sources.some(s => s.reference === "https://synthetic.example/bio")); assert.equal(inference.length, 0);
+    const metadata = (await call("/mail/threads/talias?connection_id=" + c1 + "&format=metadata")).summary; assert.equal(metadata.people[0].match, "exact_alias");
+    const decision = await fixture({ decision: { source_key: "gmail:synthetic:" + crypto.randomUUID(), title: "Review supplied update", context: "Synthetic preparation", source_label: "Gmail", source_url: "https://mail.google.com/", choices: [{ id: "dismiss", title: "Dismiss" }], source_connection_id: c1, source_thread_id: "tknown", source_message_id: "mtknown", prepare: true } });
+    let ready = await settled("/decisions/" + decision.id, "ready");
+    assert.equal(ready.preparation.people_status, "matched"); assert.equal(ready.preparation.people[0].record_id, "known"); assert.ok(ready.preparation.draft_id);
+    const registry = inference.at(-1).evidence.find(e => e.reference === "crm:verified-people");
+    assert.ok(registry.content.includes("Owner-saved priority")); assert.ok(registry.content.includes("synthetic prior discussion"));
+    assert.equal(registry.content.includes("PRIVATE FOREIGN CONTEXT"), false);
+    const ambiguousDecision = await fixture({ decision: { source_key: "gmail:synthetic:" + crypto.randomUUID(), title: "Review ambiguous sender", context: "Synthetic preparation", source_label: "Gmail", source_url: "https://mail.google.com/", choices: [{ id: "dismiss", title: "Dismiss" }], source_connection_id: c1, source_thread_id: "tambiguous", source_message_id: "mtambiguous", prepare: true } });
+    const ambiguousReady = await settled("/decisions/" + ambiguousDecision.id, "ready");
+    assert.equal(ambiguousReady.preparation.people_status, "ambiguous"); assert.deepEqual(ambiguousReady.preparation.people, []);
+    assert.deepEqual(ambiguousReady.preparation.prepared_draft.to, [addresses.ambiguous]);
+    const ambiguousInput = inference.at(-1).evidence.find(e => e.reference === "crm:verified-people");
+    assert.equal(ambiguousInput.content.includes("Owner-saved priority"), false);
+    const modelCalls = inference.length;
+    await call("/decisions/" + decision.id); await call(""); await call("/mail/threads/tknown?connection_id=" + c1);
+    assert.equal(inference.length, modelCalls, "GETs do not run a model");
+    await call("/decisions/" + decision.id, "GET", undefined, 404, foreignToken);
+    await call("/decisions/" + decision.id + "/prepare", "POST", { version: 1, text: "blocked", operation_id: crypto.randomUUID() }, 403, readOnly);
+    const oldDraft = ready.preparation.prepared_draft;
+    await call("/decisions/" + decision.id + "/prepare", "POST", { version: 1, text: "blocked", operation_id: crypto.randomUUID() }, 202);
+    const blocked = await settled("/decisions/" + decision.id, "blocked");
+    assert.equal(blocked.preparation.people[0].record_id, "known"); assert.equal(blocked.preparation.people_status, "matched"); assert.equal(blocked.preparation.draft_id, null);
+    await call("/mail/send", "POST", { draft_id: oldDraft.id, version: oldDraft.version, operation_id: crypto.randomUUID() }, 409);
+    assert.equal(sends, 0);
+    await call("/decisions/" + decision.id + "/prepare", "POST", { version: blocked.version, text: "fabricate", operation_id: crypto.randomUUID() }, 202);
+    const invalid = await settled("/decisions/" + decision.id, "failed");
+    assert.equal(invalid.preparation.error, "invalid_preparation"); assert.deepEqual(invalid.preparation.people.map(p => p.record_id), ["known"]);
+    const capture = (await call("", "POST", { body: "rewrite these notes about alias@example.test", operation_id: crypto.randomUUID() }, 201)).item;
+    const captureBlocked = await settled("/items/" + capture.id, "blocked"); assert.equal(captureBlocked.preparation.people[0].match, "exact_alias"); assert.equal(captureBlocked.preparation.draft_id, null);
+    const beforeFormatting = inference.length;
+    const formatted = (await call("", "POST", { body: "format this as bullet points:\nalias@example.test\nreview update", operation_id: crypto.randomUUID() }, 201)).item;
+    const formattedReady = await settled("/items/" + formatted.id, "ready"); assert.equal(formattedReady.preparation.people[0].record_id, "known"); assert.equal(formattedReady.preparation.proposal, "- alias@example.test\n- review update");
+    assert.equal(inference.length, beforeFormatting, "Deterministic formatting adds links without invoking AI");
+    const future = Date.now() + 86_400_000;
+    await fixture({ calendar: { connection_id: c1, calendar_id: "primary", events: [{ id: "synthetic-meeting", summary: "Synthetic planning", start: { dateTime: new Date(future).toISOString() }, end: { dateTime: new Date(future + 3600_000).toISOString() }, attendees: [{ email: addresses.alias }, { email: addresses.ambiguous }, { displayName: "Same Name" }] }] } });
+    const calendar = await call("/schedule?briefings_only=true");
+    assert.equal(calendar.briefings[0].attendees[0].people[0].record_id, "known");
+    assert.equal(calendar.briefings[0].attendees[1].people_status, "ambiguous"); assert.deepEqual(calendar.briefings[0].attendees[1].context, []);
+    assert.equal(calendar.briefings[0].attendees[2].people_status, "unmatched");
+    // Changing exact aliases revalidates raw/calendar GET links, even though a
+    // previously prepared snapshot still carries its explicit checked_at date.
+    await fixture({ identity: { id: "other-alias", args: { record_id: "other", kind: "email", value: addresses.alias, origin: "user" } } });
+    assert.equal((await call("/mail/threads/talias?connection_id=" + c1)).thread.people_status, "ambiguous");
+    const changed = await call("/schedule?briefings_only=true"); assert.equal(changed.briefings[0].attendees[0].person_id, null); assert.deepEqual(changed.briefings[0].attendees[0].people, []);
+    await mf.dispose(); mf = new Miniflare(options); base = await mf.ready; backend = await mf.getWorker("managed");
+    const restored = (await call("/decisions/" + decision.id)).decision.preparation;
+    assert.equal(restored.status, "failed"); assert.equal(restored.people[0].record_id, "known"); assert.equal(restored.draft_id, null);
+    // Optional CRM enrichment failure never removes the independently resolved
+    // identity and never spills a D1 error/query into the response.
+    const restoredDB = await mf.getD1Database("NANOCODEX_CRM", "managed");
+    await restoredDB.prepare("DROP TABLE crm_research").run();
+    const partial = (await call("/mail/threads/tknown?connection_id=" + c1)).thread;
+    assert.equal(partial.people_status, "partial"); assert.equal(partial.people[0].record_id, "known"); assert.equal(partial.people[0].summary, null);
+    assert.ok(partial.people_coverage.reasons.some(reason => reason.includes("could not be read")));
+    assert.equal(JSON.stringify(partial).includes("SQLITE"), false);
+    assert.equal(JSON.stringify(trace).includes("PRIVATE FOREIGN CONTEXT"), false); assert.equal(sends, 0);
+  } finally {
+    await mkdir(new URL("../../../output/", import.meta.url), { recursive: true });
+    await writeFile(new URL("../../../output/todo-crm-http-journey.json", import.meta.url), JSON.stringify({ trace, provider_trace: providerTrace, inference, send_attempts: sends }, null, 2));
+    await mf.dispose(); await rm(persistence, { recursive: true, force: true });
   }
 });

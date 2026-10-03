@@ -16,6 +16,7 @@ describe("managed agent event watcher", () => {
       agentId?: number,
     ) => void) | undefined;
     const off = vi.fn();
+    const dispose = vi.fn();
     const watcher = {
       onEvent(listener: (event: AgentEvent) => void) {
         subscribed = listener as typeof subscribed;
@@ -27,22 +28,27 @@ describe("managed agent event watcher", () => {
     const watch = vi.fn((_options?: WatchEventsOptions) => watcher);
     const replayed: Array<{ event: AgentEvent; agentId: number | undefined }> = [];
     const observed: AgentEvent[] = [];
+    const observedAgentIds: Array<number | undefined> = [];
 
-    expect(watchManagedAgentFamilyEvents(
+    const familyWatcher = watchManagedAgentFamilyEvents(
       { events: { watch } },
       {
         replay(event, agentId) {
           replayed.push({ event, agentId });
         },
-        observe(event) {
+        observe(event, agentId) {
           observed.push(event);
+          observedAgentIds.push(agentId);
+          throw new Error("synthetic observation sink failure");
         },
+        dispose,
       },
-    )).toBe(watcher);
+    );
     expect(watch).toHaveBeenCalledWith({ includeAllSessions: true });
 
     const root = agentEvent("root-session", 1, "run.started");
     const child = agentEvent("child-session", 1, "tool.call");
+    const childResult = agentEvent("child-session", 2, "tool.result");
     for (const type of [
       "api.event",
       "model.warmup.started",
@@ -62,6 +68,7 @@ describe("managed agent event watcher", () => {
     }
     subscribed!(root, undefined, undefined, undefined);
     subscribed!(child, undefined, undefined, 1);
+    subscribed!(childResult, undefined, undefined, 1);
     const rootDelta = {
       ...agentEvent("root-session", 3, "assistant.delta"),
       payload: { model_call_index: 0, item_id: "answer", phase: "final_answer", text: "1, " },
@@ -79,7 +86,7 @@ describe("managed agent event watcher", () => {
     subscribed!(nextDelta);
     subscribed!(childDelta, undefined, undefined, 1);
     // Chunks must reach replay/broadcast while the answer is still incomplete.
-    expect(replayed.slice(2)).toEqual([
+    expect(replayed.slice(3)).toEqual([
       { event: rootDelta, agentId: undefined },
       { event: nextDelta, agentId: undefined },
       { event: childDelta, agentId: 1 },
@@ -96,6 +103,7 @@ describe("managed agent event watcher", () => {
     expect(replayed).toEqual([
       { event: root, agentId: undefined },
       { event: child, agentId: 1 },
+      { event: childResult, agentId: 1 },
       { event: rootDelta, agentId: undefined },
       { event: nextDelta, agentId: undefined },
       { event: childDelta, agentId: 1 },
@@ -121,8 +129,18 @@ describe("managed agent event watcher", () => {
       "model.connection.completed",
       "model.connection.failed",
       "model.connection.failed",
+      "tool.call",
+      "tool.result",
       "future.transport",
     ]);
+    expect(observedAgentIds.slice(-3)).toEqual([1, 1, undefined]);
+    familyWatcher.off();
+    familyWatcher.off();
+    expect(off).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+    subscribed!(childResult, undefined, undefined, 1);
+    expect(observedAgentIds.slice(-3)).toEqual([1, 1, undefined]);
+    expect(replayed).toHaveLength(8);
   });
 });
 
@@ -160,7 +178,7 @@ it("keeps compaction retries visible to hosted clients without retaining provide
   expect(replayed[1].event.payload).toMatchObject({ delay_ns: 200000000, error: expect.any(String) });
   expect(replayed[2].event.payload).toMatchObject({ purpose: "reconnect" });
   expect(JSON.stringify(replayed)).not.toContain("provider-private-detail");
-  expect(observed).toEqual([retry, reconnect, connected]);
+  expect(observed).toEqual([started, retry, reconnect, connected]);
 });
 
 function agentEvent(requestId: string, seq: number, type: string): AgentEvent {

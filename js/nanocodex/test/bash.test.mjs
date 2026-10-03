@@ -15,7 +15,7 @@ test("ordinary sequence commands work with host-managed interpreter limits", asy
     Array.from({ length: 12 }, (_, index) => `tick${index + 1}\n`).join(""));
 });
 
-test("buffer compatibility preserves finite host limits and explicit unlimited policy", async () => {
+test("buffer compatibility preserves host overrides without disabling other resource ceilings", async () => {
   for (const executionLimits of [
     { maxOutputSize: 8 },
     { maxStringLength: 8 },
@@ -35,11 +35,14 @@ test("buffer compatibility preserves finite host limits and explicit unlimited p
     if (Object.values(executionLimits).includes(8)) {
       assert.notEqual(larger.exit_code, 0);
       assert.match(larger.output, /output size limit exceeded/);
-      assert.deepEqual(runtime.descriptor.limits, executionLimits);
+      for (const [key, value] of Object.entries(executionLimits)) assert.equal(runtime.descriptor.limits[key], value);
+      assert.ok(runtime.descriptor.limits.maxInputBytes < Number.MAX_SAFE_INTEGER);
     } else {
       assert.equal(larger.exit_code, 0, larger.output);
       assert.equal(larger.output, Array.from({ length: 12 }, (_, index) => `${index + 1}\n`).join(""));
-      assert.deepEqual(runtime.descriptor.limits, {});
+      assert.equal(runtime.descriptor.limits.maxOutputSize, undefined);
+      assert.equal(runtime.descriptor.limits.maxStringLength, undefined);
+      assert.ok(runtime.descriptor.limits.maxInputBytes < Number.MAX_SAFE_INTEGER);
     }
   }
 });
@@ -419,3 +422,35 @@ function toBytes(value) {
   if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
   return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
 }
+
+test("cp and mv admit a missing destination using filesystem ENOENT identity", async () => {
+  const workspace = memoryWorkspace();
+  const runtime = await justBash({ filesystem: workspace });
+  const result = await runtime.tool.handler({
+    cmd: "printf COPY_PROOF > source && mkdir -p target && cp source target/copied && mv target/copied target/moved && cat target/moved",
+  }, context());
+  assert.equal(result.exit_code, 0, result.output);
+  assert.equal(result.output, "COPY_PROOF");
+  assert.equal(new TextDecoder().decode(await runtime.filesystem.readFile("source")), "COPY_PROOF");
+  assert.equal(new TextDecoder().decode(await runtime.filesystem.readFile("target/moved")), "COPY_PROOF");
+  await assert.rejects(runtime.filesystem.readFile("target/copied"));
+});
+
+test("filesystem missing-path compatibility does not weaken copy or move alias safety", async () => {
+  const workspace = memoryWorkspace();
+  const runtime = await justBash({ filesystem: workspace });
+  assert.equal((await runtime.tool.handler({ cmd: "mkdir -p original && printf RETAINED > original/value" }, context())).exit_code, 0);
+  const reference = new Bash({ cwd: "/workspace" });
+  assert.equal((await reference.exec("mkdir -p original && printf RETAINED > original/value")).exitCode, 0);
+  for (const cmd of ["cp original/value original/./value", "mv original/value original/../original/value", "cp -r original original/child"]) {
+    // Upstream mv intentionally accepts a same-file alias as a no-op. Keep
+    // its exit contract AND assert preservation; cp/subtree copies refuse.
+    const expected = await reference.exec(cmd);
+    const result = await runtime.tool.handler({ cmd }, context());
+    assert.equal(result.exit_code, expected.exitCode, cmd);
+    assert.equal(new TextDecoder().decode(await runtime.filesystem.readFile("original/value")), "RETAINED");
+  }
+  await assert.rejects(runtime.filesystem.readFile("original/child/value"));
+  const healthy = await runtime.tool.handler({ cmd: "printf HEALTHY" }, context());
+  assert.equal(healthy.exit_code, 0); assert.equal(healthy.output, "HEALTHY");
+});

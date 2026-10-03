@@ -27,7 +27,7 @@ futures-util.workspace = true
 fs2.workspace = true
 image.workspace = true
 nanocodex-oai-api.workspace = true
-nanocodex-tools = { workspace = true, features = ["code-mode"] }
+nanocodex-oai-tools = { workspace = true, features = ["code-mode"] }
 percent-encoding.workspace = true
 reflink-copy.workspace = true
 reqwest = { workspace = true, features = ["query", "stream"] }

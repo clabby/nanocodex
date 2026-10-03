@@ -258,6 +258,46 @@ test("large unread output survives completion and drains without truncation or b
   } finally { await runtime.close(); await rm(workspace, { recursive: true }); }
 });
 
+test("budgeted pipe output stays exact across small reads and a later large burst", { timeout: 10_000 }, async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "nanocodex-output-transition-"));
+  const runtime = await createNodeProcessTools({ workspace });
+  const [exec, stdin] = runtime.tools;
+  const context = { sessionId: "output-owner" };
+  const prefix = "a😀β\n".repeat(40);
+  const large = "😀β-next\n".repeat(12_000);
+  await writeFile(join(workspace, "prefix.txt"), prefix);
+  await writeFile(join(workspace, "large.txt"), large);
+  try {
+    for (const burst of [false, true]) {
+      let result = await exec.handler({
+        cmd: `cat prefix.txt; read value; ${burst ? "cat large.txt; " : ""}printf '%s' "$value"`,
+        yield_time_ms: 0, max_output_tokens: 1,
+      }, context);
+      const processId = result.session_id;
+      let output = result.output;
+      const deadline = performance.now() + 5_000;
+      // Consume part of a multi-byte character before releasing later output.
+      while (!output.length) {
+        assert.ok(performance.now() < deadline, "prefix must arrive before releasing stdin");
+        assert.equal(typeof result.session_id, "number");
+        result = await stdin.handler({ session_id: result.session_id, yield_time_ms: 10, max_output_tokens: 1 }, context);
+        output += result.output;
+      }
+      assert.equal(output, "a");
+      result = await stdin.handler({ session_id: result.session_id, chars: "tail-ok\n", yield_time_ms: 1_000, max_output_tokens: 1 }, context);
+      output += result.output;
+      while (result.session_id !== undefined) {
+        assert.ok(performance.now() < deadline, "released output must drain");
+        result = await stdin.handler({ session_id: result.session_id, yield_time_ms: 0, max_output_tokens: burst ? 32_000 : 1 }, context);
+        output += result.output;
+      }
+      assert.equal(result.exit_code, 0);
+      assert.equal(output, prefix + (burst ? large : "") + "tail-ok");
+      await assert.rejects(stdin.handler({ session_id: processId, chars: "again\n" }, context), /unavailable/);
+    }
+  } finally { await runtime.close(); await rm(workspace, { recursive: true }); }
+});
+
 test("Finder PATH discovers installed Node while preserving inherited executable priority", { skip: process.platform !== "darwin" }, async t => {
   const installations = await Promise.all(["/opt/homebrew/bin/node", "/usr/local/bin/node"].map(path => access(path).then(() => path, () => undefined)));
   if (!installations.some(Boolean)) { t.skip("No Homebrew or /usr/local Node installation is present."); return; }

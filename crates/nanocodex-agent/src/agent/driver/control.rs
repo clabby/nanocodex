@@ -23,6 +23,14 @@ pub(in crate::agent) struct DriverShutdown {
 }
 
 impl DriverShutdown {
+    pub(in crate::agent) fn is_running(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(state.phase, ShutdownPhase::Running)
+    }
+
     pub(in crate::agent) fn set_execution_policy_owned(&self, owned: bool) {
         self.execution_policy_owned
             .store(owned, std::sync::atomic::Ordering::Release);
@@ -393,21 +401,48 @@ pub(super) fn handle_idle_command<S>(
             result,
         } => {
             let model = options.model.unwrap_or(defaults.model);
-            let thinking = options.thinking.unwrap_or(defaults.thinking);
-            let outcome = validate_model_thinking(model, thinking).and_then(|()| {
-                if let Some(snapshot) = restore {
-                    return spawner.restore_child(snapshot, workspace, session_id, host_context);
+            let thinking = options.thinking.unwrap_or_else(|| {
+                if model == defaults.model {
+                    defaults.thinking
+                } else {
+                    model.default_thinking()
                 }
-                spawner.spawn_clean(
-                    workspace,
-                    session_id,
-                    model,
-                    thinking,
-                    defaults.fast_mode,
-                    options.stateless_http,
-                    host_context.or_else(|| spawner.host_context.as_ref().map(Arc::clone)),
-                )
             });
+            let outcome = options
+                .validate_harness()
+                .and_then(|()| {
+                    if options
+                        .selected_harness()
+                        .is_some_and(|family| family != crate::HarnessFamily::Codex)
+                        || options
+                            .selected_harness_model()
+                            .is_some_and(|model| model.family() != crate::HarnessFamily::Codex)
+                    {
+                        return Err(NanocodexError::InvalidRequest(
+                            "selected harness requires a configured child factory".into(),
+                        ));
+                    }
+                    validate_model_thinking(model, thinking)
+                })
+                .and_then(|()| {
+                    if let Some(snapshot) = restore {
+                        return spawner.restore_child(
+                            snapshot,
+                            workspace,
+                            session_id,
+                            host_context,
+                        );
+                    }
+                    spawner.spawn_clean(
+                        workspace,
+                        session_id,
+                        model,
+                        thinking,
+                        defaults.fast_mode,
+                        options.stateless_http,
+                        host_context.or_else(|| spawner.host_context.as_ref().map(Arc::clone)),
+                    )
+                });
             drop(result.send(outcome));
         }
         Command::SpawnBatch {

@@ -74,6 +74,14 @@ export async function routeLinkPreview(
   headers.set("x-content-type-options", "nosniff");
   headers.delete("content-encoding");
   headers.delete("content-length");
+  if (pathname === "/browser-login") {
+    headers.set("cache-control", "no-store");
+    headers.set("referrer-policy", "no-referrer");
+    headers.set("x-frame-options", "DENY");
+    headers.delete("etag");
+    headers.delete("last-modified");
+    return new Response(request.method === "HEAD" ? null : await assetResponse.text(), { headers, status: 200 });
+  }
   if (pathname === "/artifact-runtime") {
     headers.set("access-control-allow-origin", "*");
     headers.set("content-security-policy", ARTIFACT_RUNTIME_CSP);
@@ -136,7 +144,7 @@ export function documentStatusForPath(pathname: string): 200 | 404 | null {
   pathname = normalizePath(pathname);
   if (pathname === "/" || pathname === "/agent" || isAgentDocumentPath(pathname)
     || isShareDocumentPath(pathname)
-    || pathname === "/multiplayer"
+    || pathname === "/multiplayer" || pathname === "/browser-login"
     || pathname === "/world" || pathname === "/artifact-runtime"
     || pathname === "/demos/chief-of-staff"
     || pathname === "/changelog" || pathname === "/code" || pathname === "/commits"

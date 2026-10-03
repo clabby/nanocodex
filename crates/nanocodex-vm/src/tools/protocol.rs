@@ -1,4 +1,4 @@
-use nanocodex_tools::{ToolInput, contract::ToolOutputWire, standard::StandardTool};
+use nanocodex_oai_tools::{ToolInput, contract::ToolOutputWire, standard::StandardTool};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 

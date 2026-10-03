@@ -2,14 +2,23 @@
 set -eu
 
 if [ "$(uname -s)" = "Darwin" ]; then
-    if command -v brew >/dev/null 2>&1; then
-        brew_bin="$(command -v brew)"
-    elif [ -x /opt/homebrew/bin/brew ]; then
-        brew_bin=/opt/homebrew/bin/brew
-    else
-        brew_bin=/usr/local/bin/brew
-    fi
-    exec "$("$brew_bin" --prefix llvm)/bin/llvm-ar" "$@"
+    for candidate in "$(command -v llvm-ar || true)" \
+        /opt/homebrew/opt/llvm/bin/llvm-ar /usr/local/opt/llvm/bin/llvm-ar; do
+        if [ -x "$candidate" ]; then
+            exec "$candidate" "$@"
+        fi
+    done
+    for brew_bin in "$(command -v brew || true)" \
+        /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        if [ -x "$brew_bin" ]; then
+            prefix="$("$brew_bin" --prefix llvm 2>/dev/null)" || continue
+            if [ -x "$prefix/bin/llvm-ar" ]; then
+                exec "$prefix/bin/llvm-ar" "$@"
+            fi
+        fi
+    done
+    echo "aarch64 musl archiver: llvm-ar not found; install LLVM (brew install llvm) or put llvm-ar on PATH" >&2
+    exit 1
 fi
 
 exec ar "$@"

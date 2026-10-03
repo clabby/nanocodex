@@ -4,7 +4,9 @@
 
 #![allow(dead_code, unused_imports)]
 #![allow(
+    clippy::missing_const_for_fn,
     clippy::too_many_arguments,
+    clippy::use_self,
     reason = "use the same reviewed Tact component ownership as the production binary"
 )]
 

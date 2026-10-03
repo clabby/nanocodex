@@ -149,6 +149,12 @@ jobs:
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           cache-on-failure: true
+      - name: Prepare embedded Linux Wayland helpers
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          ./scripts/build-linux-screen-helpers.sh --container "$RUNNER_TEMP/linux-screen-helpers.tar.gz"
+          echo "NANOCODEX_LINUX_SCREEN_BUNDLE=$RUNNER_TEMP/linux-screen-helpers.tar.gz" >> "$GITHUB_ENV"
       - name: Build release binaries
         shell: bash
         env:
@@ -162,6 +168,13 @@ jobs:
           cargo build --locked --release \
             --package nanocodex2-bin --bin nanocodex2 \
             --target ${{ matrix.target }}
+      - name: Verify shipped Linux Hand screen payload
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          python3 scripts/tests/linux-screen-helpers-bundle.py \
+            --binary "target/${{ matrix.target }}/release/nanocodex2" \
+            "$NANOCODEX_LINUX_SCREEN_BUNDLE"
       - name: Sign macOS VM hand host
         if: matrix.target == 'aarch64-apple-darwin'
         shell: bash

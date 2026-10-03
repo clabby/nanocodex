@@ -13,7 +13,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use nanocodex_tools::ToolsBuilder;
+use nanocodex_oai_tools::ToolsBuilder;
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
@@ -114,14 +114,14 @@ impl DockerWorkspace {
     /// Web search, image generation, and planning keep their normal host behavior.
     pub async fn tools_builder(
         &self,
-    ) -> Result<ToolsBuilder, nanocodex_tools::contract::ToolError> {
+    ) -> Result<ToolsBuilder, nanocodex_oai_tools::contract::ToolError> {
         Ok(self.configure_tools(self.tools().tools_builder().await?))
     }
 
     /// Process tools for the managed Hand cwd namespace, matching VM attachments.
     pub async fn attachment_tools_builder(
         &self,
-    ) -> Result<ToolsBuilder, nanocodex_tools::contract::ToolError> {
+    ) -> Result<ToolsBuilder, nanocodex_oai_tools::contract::ToolError> {
         Ok(self.configure_tools(self.tools().attachment_tools_builder().await?))
     }
 

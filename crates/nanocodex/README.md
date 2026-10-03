@@ -50,6 +50,147 @@ unless an effort was explicitly selected. Astra requires low or greater reasonin
 before the first turn is accepted; it then remains fixed for the thread so follow-on turns can continue from the provider
 checkpoint without replaying the complete retained context.
 
+## Claude
+
+Enable `claude` on the facade to use Anthropic Messages with the same owned
+agent lifecycle and durability extension:
+
+```toml
+[dependencies]
+nanocodex = { version = "0.6.5", features = ["claude"] }
+reqwest = "0.13"
+```
+
+```rust,no_run
+# #[cfg(all(feature = "claude", feature = "durability"))]
+# async fn claude_turn() -> Result<(), Box<dyn std::error::Error>> {
+use nanocodex::{Claude, DurableAgentExt, Nanocodex};
+use nanocodex::claude::ClaudeClient;
+use nanocodex::durability::{DurableSession, MemoryStore};
+
+let client = ClaudeClient::official(
+    reqwest::Client::new(),
+    std::env::var("ANTHROPIC_API_KEY")?,
+);
+let state = DurableSession::open(MemoryStore::new()?, "claude-session").await?;
+let (agent, _events) = Nanocodex::builder(Claude::latest(client))
+    .system("Answer concisely.")
+    .durability(state)
+    .await?
+    .build()?;
+let result = agent.prompt("Explain durable request replay.").await?.await?;
+println!("{}", result.final_message());
+agent.shutdown().await?;
+# Ok(())
+# }
+```
+
+`MemoryStore` retains state in memory; use a persistent host store when state
+must survive process restarts. The facade automatically enables the Claude
+adapter whenever `claude` and `durability` are enabled together.
+
+Default features remain `durability`, `openai`, and `tools`. For the minimal
+Claude provider path, use `default-features = false, features = ["claude"]`.
+Add `durability` for the extension above; durability retains its existing
+OpenAI dependency. On native targets, add `workspace-tools` to expose Claude's optional workspace
+file tools as well as the standard workspace runtime. The `claude` feature
+alone does not enable durability or workspace tools.
+
+## Reusable native harnesses
+
+`Harness` composes explicitly registered construction recipes. Each recipe
+keeps its concrete provider, service type, authentication, tools and execution
+policy until `.build()` returns the common `(Nanocodex, AgentEvents)` lifecycle.
+There is no provider-neutral builder that translates Messages into Responses.
+Enable `claude` alongside `openai` to compose both families:
+
+```rust,no_run
+# #[cfg(all(feature = "claude", feature = "openai"))]
+# async fn mixed() -> Result<(), Box<dyn std::error::Error>> {
+use nanocodex::{
+    Claude, ClaudeModel, Harness, HarnessFamily, HarnessModel, Model,
+    Nanocodex, OpenAi,
+    agent::SpawnOptions,
+    claude::ClaudeClient,
+};
+
+let openai = OpenAi::new(std::env::var("OPENAI_API_KEY")?)?;
+let claude = ClaudeClient::official(
+    reqwest::Client::new(), std::env::var("ANTHROPIC_API_KEY")?,
+);
+let harness = Harness::builder()
+    .register(HarnessFamily::Codex, move |request| {
+        let openai = openai.clone();
+        async move {
+            let HarnessModel::Codex(model) = request.model else { unreachable!() };
+            let mut builder = Nanocodex::builder(openai)
+                .model(model).thinking(request.thinking)
+                .host_context(request.host_context)
+                .spawn_factory(request.spawn_factory);
+            if let Some(snapshot) = request.snapshot {
+                builder = builder.restore_runtime(snapshot)?;
+            }
+            builder.build()
+        }
+    })
+    .register(HarnessFamily::Claude, move |request| {
+        let claude = claude.clone();
+        async move {
+            let mut builder = Nanocodex::builder(Claude::new(claude, request.model.as_str()))
+                .thinking(request.thinking)?
+                .host_context(request.host_context)
+                .spawn_factory(request.spawn_factory);
+            if let Some(snapshot) = request.snapshot {
+                builder = builder.restore_runtime(snapshot)?;
+            }
+            builder.build()
+        }
+    })
+    .build();
+
+let (codex, _events) = harness.start(HarnessModel::Codex(Model::Sol)).await?;
+let (claude, _events) = harness.start_with(
+    SpawnOptions::new().harness(HarnessFamily::Claude)
+        .harness_model(HarnessModel::Claude(ClaudeModel::Sonnet55)),
+).await?;
+println!("{}", claude.prompt("Explain the parser.").await?.await?.final_message());
+claude.shutdown().await?;
+codex.shutdown().await?;
+# Ok(())
+# }
+```
+
+Install host capabilities through each concrete builder's `.tools_factory(...)`.
+The callback receives a weak `AgentHandle` for that particular root or child;
+attach the same `nanocodex-subagents::Registry` to both families to share child
+IDs, messaging, structured submission, waiting, interruption and close. Codex
+returns `Tools`; Claude returns native `ClaudeTools`. The host owns any callback
+bridge and its authorization. Registration alone supplies no tools or credentials.
+`request.spawn_factory` must be attached to each recipe so descendants can route
+through the same harness. `Harness::spawn_factory()` also attaches that router
+to an independently constructed concrete builder.
+
+Omitting child overrides inherits the live parent's family, model and effort.
+Selecting another family uses that family's model and effort defaults; selecting
+another model uses that model's effort default. Explicit family/model mismatches,
+unsupported effort and unregistered routes fail before construction. The model
+stays within the thread's native family. Codex `fork` remains a native history
+operation; mixed-family spawning starts a clean conversation. Weak handles and
+routed factories reject construction and restoration once their owner stops.
+
+Idle residency checkpoints retain provider-native state and child identity in
+memory. Recipes restore `request.snapshot` with newly authorized host tools and
+credentials; they must preserve the selected model, effort and native state.
+Residency restoration does not establish process-restart durability. Attach the
+durability extension separately when that is required.
+
+The [public library journey](tests/it/harness.rs) runs both real native builders
+against localhost Responses HTTP and Messages SSE fixtures, exercises shared
+registry completion and idle restoration, and checks stopped-owner fencing.
+Run `cargo test -p nanocodex --all-features --test it harness:: -- --nocapture`;
+the provider request transcript is retained in ignored `output/library-harness/`.
+These boundaries do not establish full tool, fork, transport or Claude Code parity.
+
 ## Usage and USD estimates
 
 When the provider reports aggregate usage for a completed turn, cost remains
@@ -88,6 +229,8 @@ embedding needs more control:
 - [`durability`] — optional durable admission, effect replay, checkpoints, and
   host-store contracts layered over an agent
 - [`oai`] — managed Responses sessions and the concrete Tower boundary
+- `claude` — Anthropic Messages client, builder, protocol, and authentication
+  when the default-off `claude` feature is enabled
 - [`tools`] — tool contracts, built-ins, Code Mode, and MCP
 - `observability` — native tracing and OTLP setup when the default-off
   `observability` feature is enabled
@@ -127,5 +270,5 @@ intentionally does not repeat sibling convenience exports: provider
 configuration belongs under [`oai`], tool implementation belongs under
 [`tools`], and lifecycle state belongs under [`agent`]. Applications that need
 only one component can depend on its package directly and use
-`nanocodex_oai_api`, `nanocodex_tools`, `nanocodex_agent`, or
+`nanocodex_oai_api`, `nanocodex_oai_tools`, `nanocodex_agent`, or
 `nanocodex_durability`.

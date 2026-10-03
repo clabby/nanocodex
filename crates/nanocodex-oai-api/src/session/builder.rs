@@ -62,7 +62,7 @@ where
     /// Installs the complete tool definitions sent to the model.
     ///
     /// This is the protocol-level API for callers that execute tool calls
-    /// themselves. [`nanocodex-tools`](https://docs.rs/nanocodex-tools)
+    /// themselves. [`nanocodex-oai-tools`](https://docs.rs/nanocodex-oai-tools)
     /// provides a registry and concrete runtimes for applications that want
     /// Nanocodex to dispatch the calls.
     ///

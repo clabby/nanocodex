@@ -73,7 +73,7 @@ func main() {
 		flags.IntVar(&config.Width, "width", 1600, "headless output width")
 		flags.IntVar(&config.Height, "height", 900, "headless output height")
 		flags.BoolVar(&config.IncludeLoopback, "include-loopback", false, "allow local viewers on the host network")
-		flags.BoolVar(&config.Frames, "frames", false, "use bounded HTTPS frame/input relay for restricted sandboxes")
+		flags.BoolVar(&config.Frames, "frames", false, "use explicit HTTPS frame/input relay only for restricted Cloudflare cf: Hands")
 		flags.StringVar(&config.Interface, "interface", "", "optional WebRTC network interface (default: all)")
 		flags.BoolVar(&config.IPv4Only, "ipv4-only", false, "use IPv4 for WebRTC on networks with unreliable IPv6")
 		flags.UintVar(&config.UDPPortMin, "udp-port-min", 0, "first WebRTC UDP port; set with udp-port-max for bounded firewall rules")

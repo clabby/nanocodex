@@ -9,7 +9,7 @@ function reverseTarget(connect, endpoint = "wss://managed.test/tools") {
   return { endpoint, transport: { connect } };
 }
 
-test("attachment publishes one exact catalog and exchanges ready, call, result, and ack", async () => {
+test("attachment publishes one exact catalog and exchanges ready, call, result, and ack", async (t) => {
   const socket = new FakeSocket();
   let context;
   const tools = await createTools({ tools: {
@@ -32,6 +32,9 @@ test("attachment publishes one exact catalog and exchanges ready, call, result, 
     type: "catalog",
     runtime_id: socket.frames()[0].runtime_id,
     capabilities: ["turn_metadata"],
+    diagnostics: true,
+    command_recovery: true,
+    connection_id: socket.frames()[0].connection_id,
     tools: [{
       provider: "javascript",
       remote_name: "echo",
@@ -47,6 +50,7 @@ test("attachment publishes one exact catalog and exchanges ready, call, result, 
       timeout_ms: Number.MAX_SAFE_INTEGER,
     }],
   });
+  assert.match(socket.frames()[0].connection_id, UUID_V4);
   socket.receive({ type: "ready" });
   const client = await connecting;
   socket.receive({ ...callFrame({ value: "hello" }), turn_id: "session:1:7" });
@@ -56,6 +60,7 @@ test("attachment publishes one exact catalog and exchanges ready, call, result, 
   assert.deepEqual(lastFrame(socket, "result"), {
     type: "result",
     call_id: "call:1",
+    timing: lastFrame(socket, "result").timing,
     outcome: {
       status: "completed",
       output: {
@@ -64,6 +69,14 @@ test("attachment publishes one exact catalog and exchanges ready, call, result, 
       },
     },
   });
+  const timing = lastFrame(socket, "result").timing;
+  const phases = ["scheduler_ms", "execution_gate_ms", "execution_ms", "result_encode_ms", "result_queue_ms"];
+  assert.deepEqual(Object.keys(timing).sort(), [...phases, "host_elapsed_ms"].sort());
+  assert.ok(Object.values(timing).every(value => Number.isFinite(value) && value >= 0));
+  assert.ok(phases.reduce((sum, key) => sum + timing[key], 0) <= timing.host_elapsed_ms + 0.01);
+  assert.deepEqual(diagnostics(socket).map(frame => frame.stage), ["received", "execution_started", "execution_finished", "result_prepared"]);
+  assert.ok(socket.frames().findIndex(frame => frame.stage === "result_prepared") < socket.frames().findIndex(frame => frame.type === "result"));
+  t.diagnostic(JSON.stringify({ catalog: socket.frames()[0], diagnostics: diagnostics(socket), result: lastFrame(socket, "result") }));
   socket.receive({ type: "ack", call_id: "call:1" });
   await drain(client, socket);
   await tools.close();
@@ -126,9 +139,11 @@ test("attachment transports large admitted inputs and image results without a lo
   await fixture.tools.close();
 });
 
-test("attachment does not confuse transport buffering with a failed tool call", async () => {
+test("attachment does not confuse transport buffering or diagnostic failure with a failed tool call", async (t) => {
   const socket = new FakeSocket();
   socket.bufferedAmount = 3 * 1024 * 1024;
+  socket.throwOnType = "diagnostic";
+  t.mock.method(console, "info", () => { throw new Error("observer failed"); });
   let calls = 0;
   const fixture = await readyAttachment({ handler: () => { calls += 1; return "queued by transport"; } }, socket);
   socket.receive(callFrame({}));
@@ -201,6 +216,7 @@ test("in-flight cancellation uses an ordinary ambiguous result and receipt ack p
   await waitFor(() => fixture.socket.frames().some(({ type }) => type === "result"));
   assert.deepEqual(lastFrame(fixture.socket, "result"), {
     type: "result", call_id: "call:1",
+    timing: lastFrame(fixture.socket, "result").timing,
     outcome: { status: "ambiguous", message: "tool execution was cancelled after dispatch" },
   });
   assert.equal(fixture.socket.frames().some(({ type }) => type === "cancel_ack"), false);
@@ -321,6 +337,13 @@ test("logical close settles when an injected socket emits no close event", async
   await closing;
   assert.deepEqual(socket.closed, { code: 1000, reason: "tool attachment drained" });
   await fixture.tools.close();
+
+  const failed = await readyAttachment({ handler: () => "ok" }, new SilentCloseSocket());
+  failed.socket.emit("error", { error: new Error("private transport failure") });
+  await failed.client.closed();
+  assert.equal(failed.client.connected, false);
+  assert.equal(failed.socket.closed.code, 1011);
+  await failed.tools.close();
 });
 
 test("connector close does not wait for provider settlement", async () => {
@@ -340,18 +363,23 @@ test("connector close does not wait for provider settlement", async () => {
   await router.reset();
 });
 
-test("duplicate calls reject the socket without executing twice", async () => {
-  let finish;
-  let calls = 0;
-  const fixture = await readyAttachment({ handler: () => { calls++; return new Promise((resolve) => { finish = resolve; }); } });
-  const first = callFrame({ id: 1 });
-  fixture.socket.receive(first);
-  fixture.socket.receive(first);
-  await tick();
+test("duplicate immutable calls reuse running work and terminal receipts; conflicts fence", async () => {
+  let finish, calls = 0;
+  const fixture = await readyAttachment({ handler: () => { calls++; return new Promise(resolve => { finish = resolve; }); } });
+  const frame = callFrame({id: 1});
+  fixture.socket.receive(frame);
+  fixture.socket.receive(frame);
+  await waitFor(() => lastFrame(fixture.socket, "status"));
+  assert.deepEqual(lastFrame(fixture.socket, "status"), {type:"status", call_id:frame.call_id, state:"running"});
   assert.equal(calls, 1);
+  finish("once");
+  await waitFor(() => lastFrame(fixture.socket, "result"));
+  fixture.socket.receive(frame);
+  await waitFor(() => fixture.socket.frames().filter(row => row.type === "result").length === 2);
+  assert.equal(calls, 1);
+  fixture.socket.receive({...frame, input:{id:2}});
   await waitFor(() => fixture.socket.closed?.code === 1008);
-  assert.match(fixture.socket.closed.reason, /duplicate call/);
-  finish?.("late");
+  assert.match(fixture.socket.closed.reason, /identity conflicts/);
   await fixture.tools.close();
 });
 
@@ -361,6 +389,7 @@ test("admitted deadlines, invalid, and oversized post-dispatch outcomes preserve
   expired.socket.receive({ ...callFrame({}), deadline_at: Date.now() - 1 });
   await waitFor(() => expired.socket.frames().some(({ type }) => type === "result"));
   assert.equal(calls, 0);
+  assert.deepEqual(diagnostics(expired.socket).map(frame => frame.stage), ["received", "result_prepared"]);
   assert.equal(lastFrame(expired.socket, "result").outcome.status, "unavailable");
   expired.socket.receive({ type: "ack", call_id: "call:1" });
   await drain(expired.client, expired.socket);
@@ -404,52 +433,10 @@ test("admitted deadlines, invalid, and oversized post-dispatch outcomes preserve
   await long.tools.close();
 });
 
-test("heartbeat uses exact ping and pong nonce frames", async () => {
-  const socket = new FakeSocket();
-  const tools = await createTools();
-  const connector = createAttachment(tools, reverseTarget(async () => socket), { reconnect: false, heartbeatMs: 5 });
-  const connecting = connector.connect();
-  await waitFor(() => socket.frames().some(({ type }) => type === "catalog"));
-  socket.receive({ type: "ready" });
-  const client = await connecting;
-  await waitForTimer(() => socket.frames().some(({ type }) => type === "ping"));
-  const ping = lastFrame(socket, "ping");
-  assert.deepEqual(Object.keys(ping), ["type", "nonce"]);
-  socket.receive({ type: "pong", nonce: ping.nonce });
-  await tick();
-  await drain(client, socket);
-  await tools.close();
-});
+// Actual control-frame ping/pong, timeout, and browser-default behavior are
+// covered by hand-reconnect-journey with a real WebSocket server and executor.
 
-test("graceful drain keeps the attachment lease alive until calls are acknowledged", async () => {
-  let finish;
-  const socket = new FakeSocket();
-  const tools = await createTools({ tools: {
-    echo: { handler: () => new Promise((resolve) => { finish = resolve; }) },
-  } });
-  const connector = createAttachment(tools, reverseTarget(async () => socket), {
-    reconnect: false,
-    heartbeatMs: 5,
-  });
-  const connecting = connector.connect();
-  await waitFor(() => socket.frames().some(({ type }) => type === "catalog"));
-  socket.receive({ type: "ready" });
-  const client = await connecting;
-  socket.receive(callFrame({}));
-  await waitFor(() => finish !== undefined);
-  const closing = client.close();
-  socket.receive({ type: "draining" });
-  await waitForTimer(() => socket.frames().some(({ type }) => type === "ping"));
-  const ping = lastFrame(socket, "ping");
-  socket.receive({ type: "pong", nonce: ping.nonce });
-  finish("done");
-  await waitFor(() => socket.frames().some(({ type }) => type === "result"));
-  socket.receive({ type: "ack", call_id: "call:1" });
-  await closing;
-  await tools.close();
-});
-
-test("old protocol fields and unknown acknowledgements reject via close code and reason", async () => {
+test("old protocol fields reject and duplicate acknowledgements are harmless", async () => {
   const old = await readyAttachment({ handler: () => "ok" });
   old.socket.receive({ type: "ready", protocol_version: 1 });
   await waitFor(() => old.socket.closed?.code === 1008);
@@ -458,12 +445,15 @@ test("old protocol fields and unknown acknowledgements reject via close code and
 
   const unknown = await readyAttachment({ handler: () => "ok" });
   unknown.socket.receive({ type: "ack", call_id: "unknown" });
-  await waitFor(() => unknown.socket.closed?.code === 1008);
-  assert.match(unknown.socket.closed.reason, /retained terminal result/);
+  await tick();
+  assert.equal(unknown.socket.closed, undefined);
+  await drain(unknown.client, unknown.socket);
   await unknown.tools.close();
 });
 
-test("ready before catalog publication is rejected", async () => {
+test("ready before catalog publication is rejected", async (t) => {
+  const observations = [];
+  t.mock.method(console, "info", event => observations.push(event));
   const socket = new FakeSocket();
   socket.readyState = 0;
   const tools = await createTools();
@@ -474,6 +464,17 @@ test("ready before catalog publication is rejected", async () => {
   await assert.rejects(connecting, /rejected.*catalog handshake/);
   assert.equal(socket.closed.code, 1008);
   await tools.close();
+
+  const timedOut = new FakeSocket();
+  timedOut.readyState = 0;
+  const empty = await createTools();
+  const timeoutConnector = createAttachment(empty, reverseTarget(async () => timedOut), { handshakeTimeoutMs: 5 });
+  await assert.rejects(timeoutConnector.connect(), /handshake timed out/);
+  await timeoutConnector.closed();
+  assert.equal(timedOut.closed.code, 1012);
+  assert.ok(observations.some(event => event.event === "handshake_timeout"));
+  assert.equal(observations.some(event => event.event.startsWith("reconnect_")), false);
+  await empty.close();
 });
 
 test("result send failure is a reconnectable transport close, not a policy rejection", async () => {
@@ -486,17 +487,24 @@ test("result send failure is a reconnectable transport close, not a policy rejec
   await fixture.tools.close();
 });
 
-test("a replacement socket preserves running work and receives no old results", async () => {
+test("a replacement socket preserves running work and replays its retained result", async (t) => {
+  const observations = [];
+  t.mock.method(console, "info", event => observations.push(event));
   const first = new FakeSocket();
+  const preReady = new SilentCloseSocket();
   const second = new FakeSocket();
-  const sockets = [first, second];
+  const sockets = [first, new Error("private failed reconnect URL"), preReady, second];
   let finish, signal;
   let calls = 0;
   const tools = await createTools({ tools: { echo: { handler: (_input, context) => {
     calls++; signal = context.signal;
     return new Promise(resolve => { finish = resolve; });
   } } } });
-  const connector = createAttachment(tools, reverseTarget(async () => sockets.shift()), {
+  const connector = createAttachment(tools, reverseTarget(async () => {
+    const socket = sockets.shift();
+    if (socket instanceof Error) throw socket;
+    return socket;
+  }), {
     attachmentId: "stable-host",
     reconnectDelayMs: 1,
   });
@@ -506,11 +514,16 @@ test("a replacement socket preserves running work and receives no old results", 
   const client = await connecting;
   first.receive(callFrame({}));
   await waitFor(() => finish);
-  first.close(1012, "replace");
+  first.emit("error", { error: new Error("private transport failure") });
+  assert.equal(first.closed.code, 1011);
   assert.equal(signal.aborted, false);
-  await waitFor(() => second.frames().some(({ type }) => type === "catalog"));
+  await waitForTimer(() => preReady.frames().some(({ type }) => type === "catalog"));
+  preReady.emit("error", { error: new Error("private pre-ready error") });
+  await waitForTimer(() => second.frames().some(({ type }) => type === "catalog"));
   assert.equal(first.frames()[0].attachment_id, "stable-host");
-  assert.deepEqual(second.frames()[0], first.frames()[0]);
+  assert.notEqual(second.frames()[0].connection_id, first.frames()[0].connection_id);
+  assert.match(second.frames()[0].connection_id, UUID_V4);
+  assert.deepEqual({ ...second.frames()[0], connection_id: first.frames()[0].connection_id }, first.frames()[0]);
   second.receive({ type: "ready" });
   await waitFor(() => client.connected);
   first.receive({ type: "ready", protocol_version: 1 });
@@ -521,12 +534,31 @@ test("a replacement socket preserves running work and receives no old results", 
   await tick();
   assert.equal(calls, 1);
   assert.equal(first.frames().some(({ type }) => type === "result"), false);
-  assert.equal(second.frames().some(({ type }) => type === "result"), false);
+  assert.equal(lastFrame(second, "result").outcome.output.output, "old result");
+  assert.equal(observations.filter(event => event.event === "result_retained").length, 1);
+  assert.equal(observations.some(event => event.event === "result_discarded"), false);
+  second.receive({type:"recover", call_ids:["call:1", "missing:1"]});
+  await tick();
+  assert.deepEqual(lastFrame(second, "status"), {type:"status", call_id:"missing:1", state:"missing"});
+  assert.equal(second.frames().filter(row => row.type === "result").length, 2);
+  second.receive({type:"ack", call_id:"call:1"});
   await drain(client, second);
+  assert.deepEqual(observations.filter(event => event.event === "connection_start").map(event => event.attempt), [1, 2, 3, 4]);
+  assert.deepEqual(observations.filter(event => event.event === "reconnect_started").map(event => event.attempt), [2, 3, 4]);
+  assert.equal(observations.filter(event => event.event === "reconnect_scheduled").length, 3);
+  assert.equal(observations.filter(event => event.event === "error").length, 3);
+  assert.ok(observations.every(event => event.type === "hand.attachment" && UUID_V4.test(event.client_connection_id)));
+  assert.equal(new Set(observations.filter(event => event.event === "connection_start").map(event => event.client_connection_id)).size, 4);
+  assert.ok(observations.every(event => Number.isSafeInteger(event.active_calls) && Number.isSafeInteger(event.retained_calls)));
+  assert.ok(observations.filter(event => event.event === "reconnect_scheduled").every(event => event.delay_ms >= 0 && Number.isFinite(event.delay_ms)));
+  assert.doesNotMatch(JSON.stringify(observations), /private|managed\.test|old result/);
+  t.diagnostic(JSON.stringify({ recovery: observations }));
   await tools.close();
 });
 
-test("a policy-close is terminal and never reconnects to replace its successor", async () => {
+test("a policy-close is terminal and never reconnects to replace its successor", async (t) => {
+  const observations = [];
+  t.mock.method(console, "info", event => observations.push(event));
   const first = new FakeSocket();
   const second = new FakeSocket();
   let connections = 0;
@@ -544,6 +576,7 @@ test("a policy-close is terminal and never reconnects to replace its successor",
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(connections, 1);
   assert.deepEqual(second.frames(), []);
+  assert.equal(observations.some(event => event.event.startsWith("reconnect_")), false);
   await tools.close();
 });
 
@@ -653,6 +686,14 @@ async function drain(client, socket) {
   await closing;
 }
 function lastFrame(socket, type) { return socket.frames().filter((frame) => frame.type === type).at(-1); }
+const UUID_V4 = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+function diagnostics(socket) {
+  return socket.frames().filter(frame => frame.type === "diagnostic").map(frame => {
+    assert.deepEqual(Object.keys(frame).sort(), ["type", "call_id", "stage", "elapsed_ms"].sort());
+    assert.ok(Number.isFinite(frame.elapsed_ms) && frame.elapsed_ms >= 0 && frame.elapsed_ms <= Number.MAX_SAFE_INTEGER);
+    return frame;
+  });
+}
 
 class FakeSocket {
   readyState = 1;
@@ -707,7 +748,7 @@ async function waitForTimer(predicate) {
 }
 
 
-test("attachment queues serial work beyond the former call and receipt caps", async () => {
+test("attachment dispatches nonparallel calls beyond the former call and receipt caps", async () => {
   let release;
   const seen = [];
   const fixture = await readyAttachment({ handler: async ({ index }) => {
@@ -715,21 +756,19 @@ test("attachment queues serial work beyond the former call and receipt caps", as
     if (index === 0) await new Promise(resolve => { release = resolve; });
     return index;
   } });
-  for (let index = 0; index < 70; index++) {
-    fixture.socket.receive({ ...callFrame({ index }), call_id: `queued:${index}` });
+  for (let index = 0; index < 160; index++) {
+    fixture.socket.receive({ ...callFrame({ index }), call_id: `concurrent:${index}` });
   }
-  await waitFor(() => release);
-  assert.deepEqual(seen, [0]);
+  await waitFor(() => fixture.socket.frames().filter(frame => frame.type === "result").length === 159);
+  assert.equal(seen.length, 160);
   assert.equal(fixture.socket.closed, undefined);
-  assert.equal(fixture.socket.frames().filter(frame => frame.type === "result").length, 0);
-  fixture.socket.receive({ type: "cancel", call_id: "queued:35" });
+  assert.equal(fixture.socket.frames().some(frame => frame.type === "result" && frame.call_id === "concurrent:0"), false);
   release();
-  await waitFor(() => fixture.socket.frames().filter(frame => frame.type === "result").length === 70);
+  await waitFor(() => fixture.socket.frames().filter(frame => frame.type === "result").length === 160);
   assert.equal(fixture.socket.closed, undefined);
-  assert.equal(seen.includes(35), false);
-  assert.equal(seen.length, 69);
+  assert.deepEqual(diagnostics(fixture.socket).filter(frame => frame.call_id === "concurrent:159").map(frame => frame.stage), ["received", "execution_started", "execution_finished", "result_prepared"]);
   for (const frame of fixture.socket.frames().filter(frame => frame.type === "result")) {
-    assert.equal(frame.outcome.status, frame.call_id === "queued:35" ? "ambiguous" : "completed");
+    assert.equal(frame.outcome.status, "completed");
     fixture.socket.receive({ type: "ack", call_id: frame.call_id });
   }
   await drain(fixture.client, fixture.socket);

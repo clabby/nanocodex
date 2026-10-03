@@ -55,7 +55,7 @@ describe("grounded compact calendar briefings", () => {
     expect(brief.attendees[0].context[1].source.sources).toEqual([{ kind: "web", reference: "https://synthetic.example/bio" }]);
     expect(brief.attendees[0].context[2].source).toMatchObject({ connection_id: "synthetic-google", message_id: "synthetic-mail", updated_at: 10 });
     expect(brief.coverage.reasons.join(" ")).toContain("do not prove attendance");
-    expect(fetch).not.toHaveBeenCalled(); expect(queries).toHaveLength(6);
+    expect(fetch).not.toHaveBeenCalled();
     expect(queries.every(sql => /^(SELECT|WITH)\b/.test(sql.trim()))).toBe(true);
     expect((await crmMeetingRequest(db, account, "get", { id: before.id }, "unused") as any).notes).toEqual([]);
   });

@@ -30,7 +30,7 @@ OpenAI client and tool registry have been composed into an agent:
 ```rust,ignore
 use nanocodex_agent::{Nanocodex, OpenAi, PromptRequest};
 use nanocodex_durability::{DurableAgentExt, DurableSession, MemoryStore};
-use nanocodex_tools::Tools;
+use nanocodex_oai_tools::Tools;
 
 let openai = OpenAi::new(std::env::var("OPENAI_API_KEY")?)?;
 let tools = Tools::builder().without_defaults().build()?;
@@ -50,9 +50,43 @@ let turn = agent
 assert_eq!(turn.request_id(), Some("request-7"));
 ```
 
-Durability is local to the explicitly configured agent. Spawned subagents and
-all descendants are ephemeral: they receive no durable owner, execution journal,
-or inherited rollout recorder. Their live state ends with the parent runtime.
+
+Enable the `claude` feature on `nanocodex-durability` to use the same stores,
+admission rules, and receipts with the Claude builder. Claude checkpoints keep
+native Messages content, including signed thinking and tool results. The
+application supplies its authenticated client again when reopening a session;
+credentials are never part of a checkpoint.
+
+```rust,ignore
+use nanocodex_agent::{Nanocodex, PromptRequest};
+use nanocodex_claude::{Claude, ClaudeClient};
+use nanocodex_durability::{DurableAgentExt, DurableSession, MemoryStore};
+
+let client = ClaudeClient::official(
+    reqwest::Client::new(),
+    std::env::var("ANTHROPIC_API_KEY")?,
+);
+let state = DurableSession::open(MemoryStore::new()?, "claude-session").await?;
+let (agent, events) = Nanocodex::builder(Claude::latest(client))
+    .durability(state).await?
+    .build()?;
+let result = agent.prompt(
+    PromptRequest::new("hello").request_id("request-7"),
+).await?.result().await?;
+```
+
+Choose `SqliteStore`, `PostgresStore`, or a persistent host store to retain work
+across process restarts. Reopen the same state ID and replay the same request ID
+and input to recover pending work or return its committed receipt. Unfinished
+Claude effects follow the same at-least-once execution rule described above.
+Claude snapshots use the store's chunked immutable payloads; they do not yet
+use the OpenAI adapter's per-message context pages. Snapshot serialization and
+restoration therefore process the full retained Claude context.
+
+Durability belongs to each explicitly configured agent. The core spawn/fork
+lifecycle does not inherit a durable owner or journal. An embedding that hosts
+Claude's Agent tool can construct each child with its own `DurableSession` and
+stable identity; attaching the parent's session alone does not persist children.
 
 Without `.durability(...)`, the same builder is an ordinary non-durable agent.
 An OpenAI-only consumer can stop at `OpenAi::instructions(...).build()`, and a
@@ -87,10 +121,10 @@ Completed tool outputs replay exactly without consulting the recovered runtime's
 current tool catalog. Tool availability matters only when an unfinished step
 must execute. Capabilities represented by a tool result, such as spawned-agent
 identity, own their persistence and reconnection semantics outside generic step
-replay. A durability-attached agent passes the same lifecycle to every clean
-descendant. Each child uses its own stable session ID as its state ID and owns
-an independent fence, operation journal, and checkpoint. Forking a durable
-checkpoint remains unsupported because a fork is not a clean state.
+replay. Core spawned descendants remain ephemeral; a host that needs durable
+children must build each child with its own `DurableSession`, stable state ID,
+fence, operation journal and checkpoint. Forking an attached durable checkpoint
+remains unsupported.
 
 This persists agent execution, not a higher-level task-tree registry. An
 orchestrator that assigns separate tree-local IDs, mailboxes, roles, or status

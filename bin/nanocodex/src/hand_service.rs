@@ -421,7 +421,7 @@ pub(crate) async fn ensure(binary: Option<PathBuf>, account_file: Option<PathBuf
     }
     let selected = state.executable.as_deref().map(executable).transpose()?;
     if selected.as_deref() == Some(candidate.as_path()) {
-        if connected_catalog(&state, &candidate) {
+        if connected_catalog(&state, &candidate, SystemTime::UNIX_EPOCH).await? {
             return Ok(());
         }
         let since = SystemTime::now();
@@ -456,25 +456,42 @@ fn fresh_connected(path: &Path, since: SystemTime) -> bool {
             .is_some_and(|v| v["status"] == "connected")
 }
 
-fn connected_catalog(state: &ServiceStatus, expected: &Path) -> bool {
-    let Ok(home) = home() else {
-        return false;
-    };
-    state.pid.is_some()
+async fn connected_catalog(
+    state: &ServiceStatus,
+    expected: &Path,
+    since: SystemTime,
+) -> Result<bool> {
+    let ready = state.loaded
+        && state.pid.is_some_and(|pid| pid > 0)
         && state.executable.as_deref() == Some(expected)
-        && fs::read_dir(home.join(".nanocodex/hands")).is_ok_and(|entries| {
+        && fs::read_dir(home()?.join(".nanocodex/hands")).is_ok_and(|entries| {
             entries.flatten().any(|entry| {
-                fs::read(entry.path().join("status.json"))
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                    .is_some_and(|value| {
-                        value["status"] == "connected"
-                            && daemon_matches(&value, state.pid, expected)
-                    })
+                let path = entry.path().join("status.json");
+                fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .is_ok_and(|modified| modified >= since)
+                    && fs::read(path)
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                        .is_some_and(|value| {
+                            value["status"] == "connected"
+                                && value["screen"]["status"] == "ready"
+                                && value["screen"]["transport"] == "webrtc"
+                                && daemon_matches(&value, state.pid, expected)
+                        })
             })
-        })
+        });
+    if !ready {
+        return Ok(false);
+    }
+    // Publication and launchd inspection are independent. Never accept the
+    // catalog of an owner that exited or was replaced while we read it.
+    let current = status().await?;
+    Ok(current.loaded
+        && current.pid == state.pid
+        && current.executable.as_deref() == Some(expected))
 }
-/// Require a newly published connected catalog and the expected launchd owner.
+/// Require a fresh connected WebRTC screen and the expected launchd owner.
 pub(crate) async fn verify_connected(
     expected: &Path,
     since: SystemTime,
@@ -484,23 +501,12 @@ pub(crate) async fn verify_connected(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let state = status().await?;
-        if state.pid.is_some()
-            && state.executable.as_deref() == Some(expected.as_path())
-            && let Ok(entries) = fs::read_dir(home()?.join(".nanocodex/hands"))
-            && entries.flatten().any(|e| {
-                let path = e.path().join("status.json");
-                fresh_connected(&path, since)
-                    && fs::read(path)
-                        .ok()
-                        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                        .is_some_and(|v| daemon_matches(&v, state.pid, &expected))
-            })
-        {
+        if connected_catalog(&state, &expected, since).await? {
             return Ok(state);
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
-                "Hand did not publish a fresh connected catalog with the expected executable before timeout"
+                "Hand did not publish a fresh connected catalog with a ready WebRTC screen and the expected daemon PID/executable before timeout"
             );
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -572,6 +578,7 @@ fn lock_legacy_launchers(directory: &Path) -> Result<Vec<fs::File>> {
     Ok(locks)
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn legacy_publisher(command: &str, uid: &str, install: &Path) -> bool {
     let Some((owner, command)) = command.trim().split_once(char::is_whitespace) else {
         return false;
@@ -662,6 +669,7 @@ fn legacy_helper_binary(command: &str, uid: &str, install: &Path) -> Option<Path
 
 /// Explicit recovery may retire a legacy publisher that stole the state lock
 /// during an older updater's handover. Never signal a CLI, a VM, or another user.
+#[cfg(not(target_os = "linux"))]
 async fn stop_legacy_publishers() -> Result<()> {
     let home = home()?;
     let domain = domain().await?;
@@ -848,6 +856,7 @@ impl ServiceUpdate {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) async fn recover() -> Result<()> {
     refuse_system_service().await?;
     let backup = plist_path()?.with_extension("plist.update-backup");
@@ -1013,6 +1022,7 @@ pub(crate) async fn finish_recovery() -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn restore_snapshot(mut snapshot: Value) -> Result<(Vec<u8>, bool)> {
     validate_plist(&snapshot)?;
     let was_loaded = snapshot

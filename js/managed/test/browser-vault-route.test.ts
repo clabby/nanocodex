@@ -104,6 +104,9 @@ describe("private browser direct takeover endpoint", () => {
       { action: "touch", phase: "cancel" },
       { action: "edit", delete_backward: 1, text: "synthetic🙂" },
       { action: "finish" },
+      { action: "describe" },
+      { action: "approve" },
+      { action: "cancel" },
     ]) {
       const response = await call(principal, { body: JSON.stringify({ challenge_id: "opaque-fixture", ...action }) });
       // No browser binding or lease exists in this fixture. 409 proves parser acceptance

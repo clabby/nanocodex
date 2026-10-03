@@ -158,7 +158,7 @@ private struct CRMEmptyState: View {
     }
 }
 
-private struct CRMProfileView: View {
+struct CRMProfileView: View {
     @ObservedObject var model: InboxModel
     let recordID: String
     @State private var detail: JSON = .null

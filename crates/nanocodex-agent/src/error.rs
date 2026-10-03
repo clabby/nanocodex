@@ -156,7 +156,6 @@ pub enum NanocodexError {
     InvalidSessionSnapshot(String),
 
     /// A higher-layer execution policy or its host store failed.
-    #[cfg(feature = "openai")]
     #[error("{layer} execution policy failed: {source}")]
     ExecutionPolicy {
         /// Human-readable layer identity.
@@ -237,7 +236,6 @@ pub enum NanocodexError {
     },
 
     /// A previously failed identified operation was replayed from its durable terminal record.
-    #[cfg(feature = "openai")]
     #[error("durable operation previously failed: {0}")]
     ReplayedExecutionFailed(String),
 
@@ -280,7 +278,7 @@ pub enum NanocodexError {
     /// The configured tool registry or runtime could not be built.
     #[cfg(feature = "openai")]
     #[error("failed to build tools for an agent driver: {0}")]
-    Tools(#[from] nanocodex_tools::ToolsBuildError),
+    Tools(#[from] nanocodex_oai_tools::ToolsBuildError),
 }
 
 impl NanocodexError {
@@ -297,7 +295,6 @@ impl NanocodexError {
     }
 
     /// Wraps an error returned by a higher-layer execution policy.
-    #[cfg(feature = "openai")]
     #[doc(hidden)]
     pub fn execution_policy<E>(layer: &'static str, source: E) -> Self
     where
@@ -311,7 +308,6 @@ impl NanocodexError {
     }
 
     /// Wraps an execution-policy error with its required recovery action.
-    #[cfg(feature = "openai")]
     #[doc(hidden)]
     pub fn execution_policy_with_disposition<E>(
         layer: &'static str,
@@ -329,7 +325,6 @@ impl NanocodexError {
     }
 
     /// Returns the recovery action supplied by an execution policy.
-    #[cfg(feature = "openai")]
     #[must_use]
     pub fn execution_policy_disposition(&self) -> Option<ExecutionPolicyDisposition> {
         match self {

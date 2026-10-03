@@ -42,7 +42,7 @@ enum HandCommand {
     Stop,
     /// Restart the local Hand service.
     Restart,
-    /// Restore the LaunchAgent saved by an interrupted update.
+    /// Recover an interrupted coordinated CLI and device Hand update.
     Recover,
 }
 
@@ -267,53 +267,6 @@ async fn install_linux(destination: Destination, artifacts: Option<PathBuf>) -> 
     Ok(())
 }
 
-async fn linux_service_status() -> Result<()> {
-    let output = Command::new("systemctl")
-        .args([
-            "show",
-            LINUX_SERVICE,
-            "--no-pager",
-            "--property=LoadState,ActiveState,SubState,MainPID,FragmentPath",
-        ])
-        .output()
-        .await
-        .wrap_err("Could not inspect the Linux Hand service")?;
-    if !output.status.success() {
-        bail!(
-            "Could not inspect the Linux Hand service: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let mut values = std::collections::BTreeMap::new();
-    let properties = String::from_utf8(output.stdout)?;
-    for line in properties.lines() {
-        if let Some((name, value)) = line.split_once('=') {
-            values.insert(name, value);
-        }
-    }
-    let load = values.get("LoadState").copied().unwrap_or("unknown");
-    let active = values.get("ActiveState").copied().unwrap_or("unknown");
-    let pid = values
-        .get("MainPID")
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|pid| *pid != 0);
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "installed": load == "loaded",
-            "loaded": active == "active",
-            "pid": pid,
-            "executable": "/opt/nanocodex/current/nanocodex2",
-            "unit": LINUX_SERVICE,
-            "load_state": load,
-            "active_state": active,
-            "sub_state": values.get("SubState").copied().unwrap_or("unknown"),
-            "fragment_path": values.get("FragmentPath").copied().unwrap_or(""),
-        }))?
-    );
-    Ok(())
-}
-
 async fn linux_service_action(action: &str) -> Result<()> {
     Destination::Local.authorize_sudo().await?;
     let status = Command::new("sudo")
@@ -346,25 +299,23 @@ impl Hand {
                 artifacts,
             } => install_with(target, port, executable, account_file, artifacts).await,
             HandCommand::Status => {
-                if cfg!(target_os = "linux") {
-                    return linux_service_status().await;
+                #[cfg(target_os = "linux")]
+                {
+                    crate::linux_hand_service::print_status().await
                 }
-                if cfg!(target_os = "windows") {
-                    return crate::windows_hand::print_status().await;
-                }
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&crate::hand_service::status().await?)?
-                );
-                Ok(())
-            }
-            HandCommand::Start => {
-                if cfg!(target_os = "linux") {
-                    linux_service_action("start").await
-                } else {
-                    crate::update::start_hand().await
+                #[cfg(not(target_os = "linux"))]
+                {
+                    if cfg!(target_os = "windows") {
+                        return crate::windows_hand::print_status().await;
+                    }
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&crate::hand_service::status().await?)?
+                    );
+                    Ok(())
                 }
             }
+            HandCommand::Start => crate::update::start_hand().await,
             HandCommand::Stop => {
                 if cfg!(target_os = "linux") {
                     linux_service_action("stop").await
@@ -374,19 +325,8 @@ impl Hand {
                     crate::hand_service::stop().await
                 }
             }
-            HandCommand::Restart => {
-                if cfg!(target_os = "linux") {
-                    linux_service_action("restart").await
-                } else {
-                    crate::update::restart_hand().await
-                }
-            }
-            HandCommand::Recover => {
-                if cfg!(target_os = "linux") {
-                    bail!("Linux Hand repairs are idempotent; rerun `nanocodex hand install`");
-                }
-                crate::update::recover_hand_update().await
-            }
+            HandCommand::Restart => crate::update::restart_hand().await,
+            HandCommand::Recover => crate::update::recover_hand_update().await,
         }
     }
 }

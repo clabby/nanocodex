@@ -28,8 +28,10 @@ or a second agent backend.
 Remote Screens is available in signed-in Home chats, managed chats, and Connect.
 The browser consumes the account screen catalog for Mac, iPhone, VM, and Linux
 server publishers. Video and input use WebRTC; account requests authorize the
-signaling and renewable viewer lease. Hosts explicitly advertising
-`transport: "frames-v1"` instead use that authorized WebSocket for JPEG frames
+signaling and renewable viewer lease. Native screens require video; connection
+or video failures remain visible and never fall back to JPEG polling. Only
+Cloudflare sandbox desktops (`machine_id: "cf:…"`, desktop/VM surfaces) explicitly
+advertising `transport: "frames-v1"` use that authorized WebSocket for JPEG frames
 and the same control/input messages. This path makes no ICE requests, decodes
 and draws one requested frame at a time, and requests at most ten frames per
 second. Encoded frames are limited to 700,000 base64 characters; both JPEG

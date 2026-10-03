@@ -173,6 +173,12 @@ export class RemoteIceCredentials {
   }
 }
 
+// Frames are a separate Cloudflare HTTPS transport, never native WebRTC recovery.
+function supportsLiveTransport(hand: RemoteHand): boolean {
+  return hand.transport !== "frames-v1" || (/^cf:[A-Za-z0-9][A-Za-z0-9._:-]{0,120}$/.test(hand.machine_id)
+    && ["desktop", "vm"].includes(hand.kind));
+}
+
 export async function listRemoteHands(signal?: AbortSignal): Promise<readonly RemoteHand[]> {
   const value = await request("/screens", "GET", undefined, signal);
   const string = (value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 512;
@@ -184,7 +190,7 @@ export async function listRemoteHands(signal?: AbortSignal): Promise<readonly Re
     && Number.isInteger(hand.width) && hand.width > 0 && Number.isInteger(hand.height) && hand.height > 0)) {
     throw new RemoteError("Invalid screen catalog.", true);
   }
-  return value.surfaces;
+  return value.surfaces.filter(supportsLiveTransport);
 }
 
 function frameBytes(value: { jpeg?: unknown; width?: unknown; height?: unknown }) {
@@ -356,6 +362,7 @@ export class RemoteBrowserSession {
       if (this.current(epoch)) this.fail(new RemoteError("Could not establish a screen connection."));
     }, Math.max(0, Math.min(25_000, remaining)));
     try {
+      if (!supportsLiveTransport(this.hand)) throw new RemoteError("Native screens require WebRTC video. Update the screen publisher.", true);
       // A retry needs a current publication and unexpired credentials. Discovery
       // and credential lookup are independent; never reuse publication state.
       // Capture failure as data until discovery determines the transport (a
@@ -383,6 +390,7 @@ export class RemoteBrowserSession {
         this.markStartup("catalogReadyMs");
         if (!this.current(epoch)) return;
       }
+      if (!supportsLiveTransport(this.hand)) throw new RemoteError("Native screens require WebRTC video. Update the screen publisher.", true);
       const frames = this.hand.transport === "frames-v1";
       let peer: RTCPeerConnection | undefined;
       if (frames) {

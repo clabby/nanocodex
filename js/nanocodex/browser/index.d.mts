@@ -70,3 +70,5 @@ export type {
   BrowserWebSocketConnection,
   BrowserWebSocketRequest,
 } from "./host.mjs";
+
+export * as Claude from "./Claude.mjs";

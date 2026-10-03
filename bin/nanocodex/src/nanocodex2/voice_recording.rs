@@ -370,7 +370,7 @@ fn sanitized_command() -> Command {
 
 // GUI-launched terminals often omit Homebrew from PATH. Resolve the binary
 // before clearing the child environment, including packaged and standard installs.
-fn audio_program(program: &str) -> PathBuf {
+pub(crate) fn audio_program(program: &str) -> PathBuf {
     if Path::new(program).is_absolute() {
         return program.into();
     }

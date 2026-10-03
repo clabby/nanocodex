@@ -298,7 +298,7 @@ test("retained_execute prefers a live Hand and falls back only before dispatch",
   ]);
 });
 
-test("overlay schedules for the least parallel-safe possible placement", async () => {
+test("overlay preserves parallel-safety metadata without serializing calls", async () => {
   let active = 0;
   let maxActive = 0;
   const router = new ToolRouter([
@@ -324,28 +324,23 @@ test("overlay schedules for the least parallel-safe possible placement", async (
     router.execute("echo", {}, { signal: new AbortController().signal }),
     router.execute("echo", {}, { signal: new AbortController().signal }),
   ]);
-  assert.equal(maxActive, 1);
+  assert.equal(maxActive, 2);
 });
 
-test("admitted snapshots pin attach/detach and definitions", async () => {
+test("admitted snapshots keep bindings while attach/detach publish immediately", async () => {
   const router = new ToolRouter([source("cloud", [{ definition: contract("echo"), handler: () => "cloud" }], { kind: "cloud" })]);
   const admission = await router.admit();
-  const attaching = router.attachSource(source("attached", [{ definition: contract("echo"), handler: () => "attached" }], { kind: "attached" }));
-  let settled = false;
-  void attaching.then(() => { settled = true; });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(settled, false);
+  await router.attachSource(source("attached", [{ definition: contract("echo"), handler: () => "attached" }], { kind: "attached" }));
   assert.equal(await admission.invoke("echo", {}, { signal: new AbortController().signal }), "cloud");
   assert(Object.isFrozen(admission.definitions));
-  admission.release();
-  await attaching;
   assert.equal(await router.execute("echo", {}, { signal: new AbortController().signal }), "attached");
   const next = await router.admit();
-  const detaching = router.detachSource("attached");
+  assert.equal(await router.detachSource("attached"), true);
   assert.equal(await next.invoke("echo", {}, { signal: new AbortController().signal }), "attached");
-  next.release();
-  await detaching;
   assert.equal(await router.execute("echo", {}, { signal: new AbortController().signal }), "cloud");
+  admission.release();
+  admission.release();
+  next.release();
 });
 
 test("one router-owned tool_search merges MCP and attached discovery", async () => {
@@ -484,7 +479,7 @@ test("an empty attached source reserves byte-stable model tool_search before lat
   ]);
 });
 
-test("direct and Code Mode calls share the exclusive scheduler", async () => {
+test("Code Mode completes while a nonparallel direct call remains active", { timeout: 5000 }, async () => {
   let release;
   let directStarted;
   const started = new Promise((resolve) => { directStarted = resolve; });
@@ -493,12 +488,12 @@ test("direct and Code Mode calls share the exclusive scheduler", async () => {
   });
   const direct = runtime.executeTool("exclusive", JSON.stringify({ direct: true }));
   await started;
-  const code = runtime.executeCode("text(await tools.exclusive({ direct: false }));");
-  let codeSettled = false;
-  void code.then(() => { codeSettled = true; });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(codeSettled, false);
-  release();
-  await direct;
-  assert.equal(JSON.parse(await code).success, true);
+  try {
+    const code = await runtime.executeCode("text(await tools.exclusive({ direct: false }));");
+    assert.equal(JSON.parse(code).success, true);
+  } finally {
+    release();
+    await direct;
+    await runtime.reset();
+  }
 });

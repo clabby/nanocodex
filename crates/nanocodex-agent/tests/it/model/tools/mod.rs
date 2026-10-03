@@ -8,10 +8,10 @@ mod yielded_results;
 struct NativeToolSearch;
 struct NamespacedEcho;
 
-#[nanocodex_tools::contract::async_trait]
-impl nanocodex_tools::Tool for NamespacedEcho {
-    fn definition(&self) -> nanocodex_tools::ToolDefinition {
-        nanocodex_tools::ToolDefinition::function(
+#[nanocodex_oai_tools::contract::async_trait]
+impl nanocodex_oai_tools::Tool for NamespacedEcho {
+    fn definition(&self) -> nanocodex_oai_tools::ToolDefinition {
+        nanocodex_oai_tools::ToolDefinition::function(
             "test_namespace__echo",
             "Echo one value.",
             json!({
@@ -25,11 +25,11 @@ impl nanocodex_tools::Tool for NamespacedEcho {
 
     async fn execute(
         &self,
-        input: nanocodex_tools::ToolInput,
-        _context: nanocodex_tools::ToolContext<'_>,
-    ) -> nanocodex_tools::ToolResult {
+        input: nanocodex_oai_tools::ToolInput,
+        _context: nanocodex_oai_tools::ToolContext<'_>,
+    ) -> nanocodex_oai_tools::ToolResult {
         let arguments: Value = input.decode_json()?;
-        Ok(nanocodex_tools::ToolOutput::text(
+        Ok(nanocodex_oai_tools::ToolOutput::text(
             arguments["value"].as_str().unwrap_or_default(),
         ))
     }
@@ -190,7 +190,7 @@ async fn normal_code_mode_executes_direct_function_and_custom_tools() -> Result<
 
     let workspace = temporary_workspace("normal-code-mode-direct-tools")?;
     let tools = Tools::builder()
-        .exposure(nanocodex_tools::ToolExposure::DirectAndCodeMode)
+        .exposure(nanocodex_oai_tools::ToolExposure::DirectAndCodeMode)
         .tool(NamespacedEcho)
         .build()?;
     let openai = OpenAi::builder("test-key")
@@ -249,10 +249,10 @@ async fn normal_code_mode_executes_direct_function_and_custom_tools() -> Result<
     Ok(())
 }
 
-#[nanocodex_tools::contract::async_trait]
-impl nanocodex_tools::Tool for NativeToolSearch {
-    fn definition(&self) -> nanocodex_tools::ToolDefinition {
-        nanocodex_tools::ToolDefinition::tool_search(
+#[nanocodex_oai_tools::contract::async_trait]
+impl nanocodex_oai_tools::Tool for NativeToolSearch {
+    fn definition(&self) -> nanocodex_oai_tools::ToolDefinition {
+        nanocodex_oai_tools::ToolDefinition::tool_search(
             "client",
             "Search caller-configured deferred tools.",
             nanocodex_oai_api::responses::JsonSchema::from(json!({
@@ -275,12 +275,12 @@ impl nanocodex_tools::Tool for NativeToolSearch {
 
     async fn execute(
         &self,
-        input: nanocodex_tools::ToolInput,
-        _context: nanocodex_tools::ToolContext<'_>,
-    ) -> nanocodex_tools::ToolResult {
+        input: nanocodex_oai_tools::ToolInput,
+        _context: nanocodex_oai_tools::ToolContext<'_>,
+    ) -> nanocodex_oai_tools::ToolResult {
         let arguments: Value = input.decode_json()?;
         assert_eq!(arguments, json!({"query": "calendar create", "limit": 1}));
-        Ok(nanocodex_tools::ToolOutput::json(&json!([{
+        Ok(nanocodex_oai_tools::ToolOutput::json(&json!([{
             "type": "function",
             "name": "calendar_create_event",
             "description": "Create a calendar event.",
@@ -536,16 +536,16 @@ async fn mcp_tool_search_exposes_and_dispatches_a_native_namespace() -> Result<(
     });
 
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../nanocodex-tools/tests/fixtures/mcp-stdio-server.mjs");
-    let mcp = nanocodex_tools::mcp::Mcp::builder()
+        .join("../nanocodex-oai-tools/tests/fixtures/mcp-stdio-server.mjs");
+    let mcp = nanocodex_oai_tools::mcp::Mcp::builder()
         .server(
             "fixture",
-            nanocodex_tools::mcp::McpServer::stdio("node").arg(fixture.to_string_lossy()),
+            nanocodex_oai_tools::mcp::McpServer::stdio("node").arg(fixture.to_string_lossy()),
         )
         .build()?;
     let workspace = temporary_workspace("mcp-native-tool-search")?;
     let tools = Tools::builder()
-        .exposure(nanocodex_tools::ToolExposure::DirectAndCodeMode)
+        .exposure(nanocodex_oai_tools::ToolExposure::DirectAndCodeMode)
         .provider(mcp)
         .build()?;
     let openai = OpenAi::builder("test-key")

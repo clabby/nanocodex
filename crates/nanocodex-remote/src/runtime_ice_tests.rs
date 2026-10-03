@@ -44,7 +44,6 @@ async fn fixture() -> (Publisher, Wire, TcpListener, TcpStream) {
     });
     let options = Options {
         video: Some(video),
-        require_video: true,
         ..Options::default()
     };
     let peer = async {

@@ -2,6 +2,26 @@ import XCTest
 import UIKit
 
 final class InboxUITests: XCTestCase {
+    func testPrivateLoginUsesNativeSecureReviewPane() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--browser-login-ui-fixture"]
+        app.launch()
+        let open = app.buttons["browser-login-open"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10))
+        open.tap()
+        XCTAssertTrue(app.staticTexts["https://auth.example.com"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Done"].exists)
+        XCTAssertTrue(app.buttons["browser-login-approve"].exists)
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "native-private-login-review"; attachment.lifetime = .keepAlways
+        add(attachment)
+        app.buttons["browser-login-cancel"].tap()
+        XCTAssertTrue(app.staticTexts["Private sign-in cancelled"].waitForExistence(timeout: 5))
+        open.tap()
+        app.buttons["browser-login-approve"].tap()
+        XCTAssertTrue(app.staticTexts["Private browser approved"].waitForExistence(timeout: 5))
+    }
+
     func testNativeCommandReviewAndDeniedAuthentication() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--native-secure-input-ui-fixture"]
@@ -165,6 +185,89 @@ final class InboxUITests: XCTestCase {
         capture(app, "crm-related-profile")
     }
 
+    // The app selector belongs to the shell, not a directory or pushed profile.
+    // Switching apps from a nested profile must leave that navigation stack.
+    func testAppSelectorSurvivesCRMProfileNavigation() {
+        let app = XCUIApplication()
+        app.launchEnvironment["NANOCODEX_STARTUP_FIXTURE"] = "1"
+        app.launchEnvironment["NANOCODEX_STARTUP_PROFILE"] = UUID().uuidString
+        app.launch()
+        defer { XCUIDevice.shared.orientation = .portrait }
+
+        func assertSelector(_ name: String) {
+            capture(app, name)
+            for id in ["main-tab-todo", "main-tab-chat", "main-tab-crm", "main-tab-meetings", "main-tab-apps"] {
+                let button = app.buttons[id]
+                XCTAssertTrue(button.waitForExistence(timeout: 5), id)
+                XCTAssertEqual(app.buttons.matching(identifier: id).count, 1, "One persistent selector: " + id)
+                XCTAssertTrue(button.isHittable, id)
+                XCTAssertTrue(app.frame.contains(button.frame), id)
+            }
+        }
+
+        XCTAssertTrue(app.buttons["main-tab-crm"].waitForExistence(timeout: 25))
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 10))
+        assertSelector("selector-crm-directory")
+        let globalInput = app.textViews["new-thread-composer"]
+        XCTAssertTrue(globalInput.waitForExistence(timeout: 5))
+        globalInput.tap(); globalInput.typeText("Keep this new thread draft")
+        app.buttons["main-tab-crm"].tap()
+        app.buttons["crm-record-alex"].tap()
+        XCTAssertTrue(app.staticTexts["Example University"].waitForExistence(timeout: 5))
+        assertSelector("selector-crm-person")
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        XCTAssertTrue(app.textViews["new-thread-composer"].isHittable)
+        for _ in 0..<4 where !app.buttons["crm-related-sam"].isHittable { app.swipeUp() }
+        app.buttons["crm-related-sam"].tap()
+        XCTAssertTrue(app.staticTexts["Sam Rivera"].waitForExistence(timeout: 5))
+        assertSelector("selector-crm-related-person")
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        app.swipeUp()
+        assertSelector("selector-crm-related-scrolled")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in app.frame.width > app.frame.height }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 5), .completed)
+        assertSelector("selector-crm-related-landscape")
+        XCUIDevice.shared.orientation = .portrait
+        let portrait = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in app.frame.width < app.frame.height }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [portrait], timeout: 5), .completed)
+
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(app.buttons["conversation-drawer-open"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Example University"].exists)
+        let input = composer(app)
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap(); input.typeText("Keep this unsent navigation draft")
+        assertSelector("selector-chat-keyboard")
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["crm-related-sam"].exists, "Tab switches must leave the pushed profile")
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(composer(app).waitForExistence(timeout: 10))
+        XCTAssertEqual(composer(app).value as? String, "Keep this unsent navigation draft")
+        app.buttons["main-tab-apps"].tap()
+        app.buttons["Your apps"].tap()
+        XCTAssertTrue(app.buttons["create-generated-app"].waitForExistence(timeout: 10))
+        assertSelector("selector-your-apps")
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        app.buttons["main-tab-meetings"].tap()
+        XCTAssertTrue(app.textFields["meetings-search"].waitForExistence(timeout: 10))
+        assertSelector("selector-meetings")
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        app.buttons["main-tab-todo"].tap()
+        assertUnifiedInbox(app)
+        assertSelector("selector-todo")
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.textViews["new-thread-composer"].waitForExistence(timeout: 25))
+        XCTAssertEqual(app.textViews["new-thread-composer"].value as? String, "Keep this new thread draft")
+        app.buttons["main-tab-chat"].tap()
+        XCTAssertTrue(composer(app).waitForExistence(timeout: 10))
+        XCTAssertEqual(composer(app).value as? String, "Keep this unsent navigation draft")
+        capture(app, "selector-independent-drafts-after-relaunch")
+    }
+
     func testCRMHistoryPaginationAndCalendarStatuses() {
         let app = XCUIApplication()
         app.launchEnvironment["NANOCODEX_STARTUP_FIXTURE"] = "1"
@@ -224,31 +327,108 @@ final class InboxUITests: XCTestCase {
         }
     }
 
-    func testSelectionBarStaysBelowComposerWhileTyping() {
-        let app = launch()
-        let input = composer(app)
-        for typing in [false, true] {
-            if typing { input.tap(); input.typeText("Keep the controls below this draft") }
-            let dock = app.descendants(matching: .any)["main-selection-bar"].firstMatch
-            XCTAssertTrue(dock.waitForExistence(timeout: 5))
-            let controls = [app.buttons["model-picker"]]
-            for control in controls {
-                XCTAssertTrue(control.exists)
-                XCTAssertGreaterThanOrEqual(control.frame.minY, input.frame.maxY)
-                XCTAssertEqual(control.frame.midY, controls[0].frame.midY, accuracy: 1)
+    // A real native typing/dismissal journey: the idle selector must not drift
+    // away from either composer, and keyboard avoidance must remain intact.
+    func testSelectionBarStaysBelowComposerWhileTyping() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["NANOCODEX_STARTUP_FIXTURE"] = "1"
+        app.launchEnvironment["NANOCODEX_STARTUP_PROFILE"] = UUID().uuidString
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-chat"].waitForExistence(timeout: 25))
+        var layouts: [[String: Any]] = []
+        defer {
+            let data = try? JSONSerialization.data(withJSONObject: layouts, options: [.prettyPrinted, .sortedKeys])
+            if let data {
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "composer-selector-layout"; attachment.lifetime = .keepAlways; add(attachment)
             }
-            XCTAssertEqual(dock.frame.midX, app.frame.midX, accuracy: 1)
-            if !typing {
-                XCTAssertLessThanOrEqual(dock.frame.width, 380 + 0.01,
-                                         "The floating app/model selector should stay compact")
-                XCTAssertLessThan(app.frame.maxY - dock.frame.maxY, 30,
-                                  "The dock should sit just above the home indicator, not above a white band")
+            app.terminate()
+        }
+
+        for surface in ["chat", "crm"] {
+            let tab = app.buttons["main-tab-" + surface]
+            tab.tap()
+            let input = surface == "chat" ? composer(app) : app.textViews["new-thread-composer"]
+            XCTAssertTrue(input.waitForExistence(timeout: 10))
+            let composerBoundary = surface == "chat"
+                ? app.descendants(matching: .any)["composer-input"].firstMatch : input
+            let selector = app.descendants(matching: .any)["main-selection-bar"].firstMatch
+
+            func waitForVisibleKeyboard() {
+                let keyboard = app.keyboards.firstMatch
+                let visible = NSPredicate { _, _ in
+                    keyboard.exists && app.frame.intersects(keyboard.frame)
+                        && keyboard.frame.minY < app.frame.maxY
+                }
+                let expectation = XCTNSPredicateExpectation(predicate: visible, object: keyboard)
+                XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 5), .completed,
+                               "Wait for the keyboard to enter the screen, not an offscreen transitioning AX node")
             }
-            if typing {
-                XCTAssertTrue(app.keyboards.firstMatch.exists)
-                XCTAssertLessThanOrEqual(dock.frame.maxY, app.keyboards.firstMatch.frame.minY)
+
+            func captureLayout(_ state: String) -> CGFloat {
+                // The visible-keyboard gate above waits for real geometry, not
+                // merely an accessibility node surviving the transition.
+                capture(app, "composer-selector-" + surface + "-" + state)
+                XCTAssertTrue(composerBoundary.exists); XCTAssertTrue(composerBoundary.isHittable)
+                XCTAssertTrue(selector.exists); XCTAssertTrue(app.frame.contains(selector.frame))
+                let gap = selector.frame.minY - composerBoundary.frame.maxY
+                XCTAssertGreaterThanOrEqual(gap, 0, "Composer and selector must not overlap")
+                // Chat's model controls fill the selector. On CRM, native
+                // accessibility reports only the left-aligned tabs, not the
+                // full-width glass background. Keep Chat's centering contract
+                // and separately verify that both layouts stay horizontally
+                // stable through keyboard transitions below.
+                if surface == "chat" {
+                    XCTAssertEqual(selector.frame.midX, app.frame.midX, accuracy: 1)
+                }
+                XCTAssertLessThanOrEqual(selector.frame.width, 380 + 0.01)
+                for id in ["main-tab-todo", "main-tab-chat", "main-tab-crm", "main-tab-meetings", "main-tab-apps"] {
+                    let control = app.buttons[id]
+                    XCTAssertEqual(app.buttons.matching(identifier: id).count, 1, id)
+                    XCTAssertTrue(control.isHittable, id)
+                    XCTAssertTrue(selector.frame.insetBy(dx: -1, dy: -1).contains(control.frame), id)
+                    XCTAssertGreaterThanOrEqual(control.frame.width, 44 - 0.01, id)
+                    XCTAssertGreaterThanOrEqual(control.frame.height, 44 - 0.01, id)
+                }
+                let keyboard = app.keyboards.firstMatch
+                if keyboard.exists { XCTAssertLessThanOrEqual(selector.frame.maxY, keyboard.frame.minY + 1) }
+                layouts.append(["surface": surface, "state": state, "gap": Double(gap),
+                                "composer": NSCoder.string(for: composerBoundary.frame),
+                                "selector": NSCoder.string(for: selector.frame),
+                                "keyboardVisible": keyboard.exists,
+                                "keyboard": keyboard.exists ? NSCoder.string(for: keyboard.frame) : "absent"])
+                return gap
             }
-            capture(app, typing ? "selection-bar-keyboard" : "selection-bar-idle")
+
+            XCTAssertFalse(app.keyboards.firstMatch.exists)
+            let idleGap = captureLayout("idle")
+            let idleCenter = selector.frame.midX
+            let draft = "Keep this spacing draft"
+            input.tap(); input.typeText(draft)
+            waitForVisibleKeyboard()
+            let typingGap = captureLayout("keyboard")
+            XCTAssertEqual(idleGap, typingGap, accuracy: 1, "Closing the keyboard must retain the typing gap")
+            XCTAssertEqual(selector.frame.midX, idleCenter, accuracy: 1)
+            let multilineDraft = draft + "\nSecond line\nThird line"
+            input.typeText("\nSecond line\nThird line")
+            XCTAssertEqual(captureLayout("multiline-keyboard"), typingGap, accuracy: 1)
+            tab.tap()
+            gone(app.keyboards.firstMatch)
+            XCTAssertEqual(input.value as? String, multilineDraft, "Dismissing the keyboard keeps the draft")
+            XCTAssertEqual(captureLayout("dismissed"), typingGap, accuracy: 1, "No idle-only space after dismissal")
+            XCTAssertEqual(selector.frame.midX, idleCenter, accuracy: 1)
+            input.tap()
+            XCTAssertEqual(input.value as? String, multilineDraft)
+            // XCTest's simulator hardware keyboard may leave the software
+            // keyboard offscreen after focus alone. Resume actual typing and
+            // require onscreen geometry, rather than accepting that stale node.
+            let resumedText = "xyz"
+            input.typeText(resumedText)
+            waitForVisibleKeyboard()
+            XCTAssertEqual((input.value as? String)?.replacingOccurrences(of: resumedText, with: ""), multilineDraft)
+            XCTAssertEqual(captureLayout("reopened"), typingGap, accuracy: 1)
+            XCTAssertEqual(selector.frame.midX, idleCenter, accuracy: 1)
+            tab.tap(); gone(app.keyboards.firstMatch)
         }
     }
 
@@ -316,15 +496,41 @@ final class InboxUITests: XCTestCase {
         }
     }
 
+    private func assertUnifiedInbox(_ app: XCUIApplication) {
+        XCTAssertTrue(app.buttons["main-tab-todo"].waitForExistence(timeout: 15))
+        for legacy in ["For you", "Mail", "Later"] {
+            XCTAssertFalse(app.buttons["todo-split:" + legacy].exists, "Inbox must not have legacy split tabs")
+        }
+    }
+
+    private func revealInboxElement(_ element: XCUIElement, in app: XCUIApplication) {
+        XCTAssertTrue(element.waitForExistence(timeout: 5), element.identifier)
+        for _ in 0..<8 where !element.isHittable {
+            if element.frame.maxY < app.frame.midY && element.frame != .zero { app.swipeDown() }
+            else { app.swipeUp() }
+        }
+        XCTAssertTrue(element.isHittable, element.identifier)
+    }
+
+    private func selectInboxScope(_ app: XCUIApplication, _ scope: String) {
+        let menu = app.buttons["todo-filter-menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5))
+        for _ in 0..<8 where !menu.isHittable { app.swipeDown() }
+        XCTAssertTrue(menu.isHittable); menu.tap()
+        let option = app.buttons["todo-filter:" + scope]
+        XCTAssertTrue(option.waitForExistence(timeout: 5)); option.tap()
+    }
+
     func testDecisionWarmNavigationAndPreparationStates() {
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
         let decision = app.buttons["decision-card:fixture-email"]
+        assertUnifiedInbox(app)
         XCTAssertTrue(decision.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["capture-preparation:fixture-working"].exists)
-        XCTAssertTrue(app.buttons["capture-preparation:fixture-blocked"].exists)
+        XCTAssertTrue(app.buttons["todo-row:capture:fixture-working"].exists)
+        XCTAssertTrue(app.buttons["todo-row:capture:fixture-blocked"].exists)
         var timings: [Double] = []
         for index in 0..<8 {
             let start = ProcessInfo.processInfo.systemUptime
@@ -337,7 +543,10 @@ final class InboxUITests: XCTestCase {
         }
         timings.sort()
         print("DECISION_SIMULATOR_XCTEST_NAVIGATION n=7 p50_ms=\(timings[3]) p95_ms=\(timings[6]) includes_XCTest_tap_wait=true not_phone=true")
-        app.buttons["capture-preparation:fixture-blocked"].tap()
+        let blocked = app.buttons["todo-row:capture:fixture-blocked"]
+        revealInboxElement(blocked, in: app)
+        capture(app, "unified-inbox-blocked-and-preparing")
+        blocked.tap()
         XCTAssertTrue(app.buttons["capture-retry"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["decision-approve-send"].exists)
     }
@@ -351,14 +560,19 @@ final class InboxUITests: XCTestCase {
         let meeting = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "meeting-briefing:")).firstMatch
         XCTAssertTrue(meeting.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["decision-card:fixture-email"].exists)
-        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists, "The main queue is decisions, not all mail")
-        capture(app, "decision-first-queue")
+        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists, "Linked decisions replace only their duplicate raw thread in Inbox")
+        assertUnifiedInbox(app)
+        let raw = app.buttons["todo-row:mail:fixture-mail:fixture-budget"]
+        XCTAssertTrue(raw.exists, "Unlinked raw mail belongs beside prepared decisions in the default Inbox")
+        capture(app, "unified-inbox-calendar-decision-and-raw-mail")
         meeting.tap()
         XCTAssertTrue(app.staticTexts["Prepared briefing"].waitForExistence(timeout: 5))
         app.buttons["Done"].tap()
-        app.buttons["todo-split:Mail"].tap()
-        let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
-        XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.tap()
+        let decision = app.buttons["decision-card:fixture-email"]
+        revealInboxElement(decision, in: app); decision.tap()
+        let conversation = app.buttons["decision-open-conversation"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 5))
+        revealInboxElement(conversation, in: app); conversation.tap()
         XCTAssertTrue(app.buttons["mail-expand-all"].waitForExistence(timeout: 5))
         app.buttons["mail-expand-all"].tap()
         XCTAssertTrue(app.staticTexts["mail-body:fixture-message-1"].exists)
@@ -378,33 +592,197 @@ final class InboxUITests: XCTestCase {
         capture(app, "todo-explicit-fixture-send-receipt")
     }
 
+    func testTodoFilterMenuChangesScopeWithoutSplitTabs() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        assertUnifiedInbox(app)
+        let decision = app.buttons["decision-card:fixture-email"]
+        XCTAssertTrue(decision.waitForExistence(timeout: 10))
+        let menu = app.buttons["todo-filter-menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5)); menu.tap()
+        for scope in ["Inbox", "Mail", "Snoozed", "Drafts", "Sent", "All mail"] {
+            XCTAssertTrue(app.buttons["todo-filter:" + scope].exists, "Missing optional scope: " + scope)
+        }
+        capture(app, "unified-inbox-optional-scope-menu")
+        app.buttons["todo-filter:Mail"].tap()
+        XCTAssertTrue(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].waitForExistence(timeout: 5))
+        XCTAssertFalse(decision.exists, "Mail scope is raw mail, not another decision tab")
+        XCTAssertFalse(app.buttons["todo-row:capture:fixture-blocked"].exists)
+        assertUnifiedInbox(app)
+        selectInboxScope(app, "Inbox")
+        XCTAssertTrue(decision.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["todo-row:capture:fixture-blocked"].exists)
+        XCTAssertTrue(app.buttons["todo-row:mail:fixture-mail:fixture-budget"].exists)
+        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists)
+        capture(app, "unified-inbox-default-restored-after-mail-scope")
+    }
+
+    func testTodoAIQuickActionsKeepContextEditableAndDoNotSend() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        assertUnifiedInbox(app)
+        let decisionAI = app.buttons["inbox-ai:decision:fixture-email"]
+        // A request is reviewable before agent work. None of these commands is a send approval.
+        for action in ["Brief me", "Prepare next steps", "Draft reply", "Ask something else"] {
+            revealInboxElement(decisionAI, in: app); decisionAI.tap()
+            XCTAssertTrue(app.buttons[action].waitForExistence(timeout: 5)); app.buttons[action].tap()
+            let context = app.descendants(matching: .any)["inbox-ai-context"].firstMatch
+            XCTAssertTrue(context.waitForExistence(timeout: 5))
+            XCTAssertTrue(context.label.contains("Maya"), context.label)
+            let instructions = app.descendants(matching: .any)["inbox-ai-instructions"].firstMatch
+            XCTAssertTrue(instructions.waitForExistence(timeout: 5))
+            instructions.tap(); instructions.typeText(" Mention the launch review; prepare only, do not send.")
+            XCTAssertTrue((instructions.value as? String ?? "").contains("prepare only, do not send"))
+            XCTAssertTrue(app.buttons["inbox-ai-prepare"].isEnabled)
+            XCTAssertFalse(app.buttons["mail-send"].exists)
+            XCTAssertFalse(app.buttons["decision-approve-send"].exists)
+            capture(app, "unified-inbox-ai-decision-" + action.lowercased().replacingOccurrences(of: " ", with: "-"))
+            app.buttons["Cancel"].tap()
+            XCTAssertTrue(instructions.waitForNonExistence(timeout: 5))
+            XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+        }
+        let blockedAI = app.buttons["inbox-ai:capture:fixture-blocked"]
+        revealInboxElement(blockedAI, in: app); blockedAI.tap()
+        XCTAssertFalse(app.buttons["Draft reply"].exists, "A capture is not a mail reply target")
+        app.buttons["Prepare next steps"].tap()
+        let context = app.descendants(matching: .any)["inbox-ai-context"].firstMatch
+        XCTAssertTrue(context.waitForExistence(timeout: 5))
+        XCTAssertTrue(context.label.contains("Book a trip"), context.label)
+        let instructions = app.descendants(matching: .any)["inbox-ai-instructions"].firstMatch
+        instructions.tap(); instructions.typeText(" Destination is Oslo, budget is 800. Prepare options only.")
+        capture(app, "unified-inbox-ai-blocked-capture-context")
+        app.buttons["inbox-ai-prepare"].tap()
+        XCTAssertTrue(instructions.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+        XCTAssertTrue(app.buttons["todo-row:capture:fixture-blocked"].exists)
+        // Raw mail uses its own source, not the linked decision's context.
+        let rawAI = app.buttons["inbox-ai:mail:fixture-mail:fixture-budget"]
+        revealInboxElement(rawAI, in: app); rawAI.tap(); app.buttons["Draft reply"].tap()
+        XCTAssertTrue(context.waitForExistence(timeout: 5))
+        XCTAssertTrue(context.label.contains("September notes"), context.label)
+        XCTAssertFalse(context.label.contains("How should we reply to Maya?"))
+        XCTAssertTrue(instructions.waitForExistence(timeout: 5))
+        instructions.tap(); instructions.typeText(" Thank Jordan for the notes. Save a draft only.")
+        XCTAssertTrue(app.buttons["inbox-ai-prepare"].isEnabled)
+        XCTAssertFalse(app.buttons["mail-send"].exists)
+        capture(app, "unified-inbox-ai-raw-mail-context")
+        app.buttons["Cancel"].tap()
+        XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+    }
+
+    func testTodoVerifiedCRMProfileNavigationAndUnverifiedBlockedContext() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        assertUnifiedInbox(app)
+        let decision = app.buttons["decision-card:fixture-email"]
+        revealInboxElement(decision, in: app); decision.tap()
+        let person = app.buttons["inbox-crm:f015eb65-ea12-4bc9-9a80-aa937ac6ffea"]
+        revealInboxElement(person, in: app)
+        XCTAssertTrue(person.label.contains("Maya Chen"), person.label)
+        XCTAssertTrue(person.label.contains("Product lead"), person.label)
+        XCTAssertTrue(person.label.contains("Example Studio"), person.label)
+        XCTAssertTrue(app.staticTexts["Launch collaborator"].exists)
+        capture(app, "unified-inbox-verified-person-in-decision-context")
+        person.tap()
+        XCTAssertTrue(app.navigationBars["Profile"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Maya Chen"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Product lead"].exists)
+        XCTAssertTrue(app.staticTexts["Launch collaborator"].exists)
+        XCTAssertFalse(app.staticTexts["Example University"].exists, "The link must not open an unrelated cached profile")
+        capture(app, "unified-inbox-linked-maya-crm-profile")
+        let back = app.navigationBars["Profile"].buttons.element(boundBy: 0)
+        XCTAssertTrue(back.isHittable); back.tap()
+        XCTAssertTrue(person.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.navigationBars["Profile"].exists)
+        XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+        app.buttons["decision-detail-close"].tap()
+        let blocked = app.buttons["todo-row:capture:fixture-blocked"]
+        revealInboxElement(blocked, in: app); blocked.tap()
+        XCTAssertTrue(app.staticTexts["Destination and budget are needed"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["No verified CRM profile is linked yet."].exists)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "inbox-crm:")).firstMatch.exists,
+                       "Missing source identity must not manufacture a person/profile link")
+        XCTAssertTrue(app.buttons["capture-retry"].exists)
+        XCTAssertFalse(app.buttons["decision-approve-send"].exists)
+        XCTAssertFalse(app.buttons["mail-send"].exists)
+        capture(app, "unified-inbox-blocked-without-guessed-crm-person")
+    }
+
+    func testTodoRawMailWarmReopenKeepsReadableThread() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture"]
+        app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
+        app.launch()
+        assertUnifiedInbox(app); selectInboxScope(app, "Mail")
+        let thread = app.buttons["todo-row:mail:fixture-mail:fixture-budget"]
+        var samples: [Double] = []
+        for index in 0..<3 {
+            revealInboxElement(thread, in: app)
+            let start = ProcessInfo.processInfo.systemUptime
+            thread.tap()
+            let body = app.staticTexts["mail-body:fixture-budget-message"]
+            XCTAssertTrue(body.waitForExistence(timeout: 5))
+            XCTAssertEqual(app.staticTexts["mail-thread-subject"].label, "September notes")
+            XCTAssertEqual(body.label, "The updated September notes are ready for your review.")
+            XCTAssertFalse(app.staticTexts["mail-body:fixture-message-2"].exists,
+                           "Opening September notes must not reuse the linked launch conversation")
+            samples.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
+            XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
+            capture(app, "unified-inbox-raw-thread-open-" + String(index))
+            app.buttons["mail-thread-done"].tap()
+            XCTAssertTrue(thread.waitForExistence(timeout: 5))
+        }
+        print("RAW_MAIL_SIM_UI fixture_n=3 tap_to_body_ms=\(samples) XCTest_automation_included=true not_production=true")
+    }
+
     func testTodoCaptureCompleteUndoAndMailArchiveUndo() {
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--decision-preparation-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
         XCTAssertTrue(app.buttons["todo-compose"].waitForExistence(timeout: 10))
+        assertUnifiedInbox(app)
+        let filter = app.buttons["todo-filter-menu"]
+        revealInboxElement(filter, in: app); filter.tap()
+        let prepare = app.buttons["todo-prepare-thought"]
+        XCTAssertTrue(prepare.waitForExistence(timeout: 5)); prepare.tap()
         let input = app.descendants(matching: .any)["todo-capture"].firstMatch
         input.tap(); input.typeText("Review the launch agenda")
         app.buttons["todo-capture-save"].tap()
+        app.buttons["todo-capture-done"].tap()
         XCTAssertTrue(app.staticTexts["Review the launch agenda"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Pending"].exists, "Capture delegates preparation rather than claiming completion")
         let ready = app.buttons["todo-row:capture:fixture-ready-capture"]
-        if !ready.isHittable { app.swipeUp() }
-        XCTAssertTrue(ready.waitForExistence(timeout: 5)); ready.swipeRight()
+        revealInboxElement(ready, in: app); ready.swipeRight()
         app.buttons["todo-complete:fixture-ready-capture"].tap()
+        XCTAssertTrue(ready.waitForNonExistence(timeout: 5), "Completing the capture removes it from the unified Inbox")
         XCTAssertTrue(app.buttons["Undo"].waitForExistence(timeout: 5)); app.buttons["Undo"].tap()
+        // Unified Inbox keeps the capture's row identity across preparation states.
+        // Undo requeues the same capture; it must not restore the ready proposal.
         XCTAssertTrue(ready.waitForExistence(timeout: 5))
-        app.buttons["todo-split:Mail"].tap()
+        XCTAssertEqual(app.buttons.matching(identifier: "todo-row:capture:fixture-ready-capture").count, 1)
+        revealInboxElement(ready, in: app)
+        XCTAssertTrue(ready.staticTexts["Plan the launch review"].exists)
+        XCTAssertTrue(ready.staticTexts["Pending"].exists, "Undo requeues preparation; it must not pretend the old proposal is still ready")
+        XCTAssertFalse(ready.staticTexts["Ready"].exists)
+        XCTAssertFalse(ready.staticTexts["Hold a focused review"].exists, "Undo must discard the old ready recommendation")
+        capture(app, "todo-undo-requeues-same-capture")
+        selectInboxScope(app, "Mail")
         let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
-        XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.swipeLeft()
+        XCTAssertTrue(thread.waitForExistence(timeout: 5)); revealInboxElement(thread, in: app); thread.swipeLeft()
         app.buttons["todo-archive:fixture-thread"].tap()
         XCTAssertFalse(thread.exists)
         app.buttons["Undo"].tap(); XCTAssertTrue(thread.waitForExistence(timeout: 5))
         capture(app, "todo-capture-prepares-and-archive-undo")
     }
 
-    func testEmptyDecisionQueueDoesNotClaimCaughtUpOrHealthyWatch() {
+    func testRawInboxWithoutPreparedDecisionsDoesNotClaimCaughtUpOrHealthyWatch() {
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--todo-mail-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
@@ -413,14 +791,16 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(tab.waitForExistence(timeout: 15)); tab.tap()
         XCTAssertTrue(app.buttons["todo-compose"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["todo-compose"].isEnabled, "Connected fixture mail accounts do not establish watch coverage")
+        let disclosure = app.descendants(matching: .any)["inbox-coverage"].firstMatch
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 5)); disclosure.tap()
         let coverage = app.staticTexts["todo-source-coverage"]
         XCTAssertTrue(coverage.waitForExistence(timeout: 5))
         XCTAssertTrue(coverage.label.contains("Inbox-scoped"))
         XCTAssertTrue(coverage.label.contains("archived mail is excluded"))
         XCTAssertTrue(coverage.label.contains("Watch coverage is unknown"))
-        let empty = app.staticTexts["Nothing ready to review"]
-        for _ in 0..<4 where !empty.isHittable { app.swipeUp() }
-        XCTAssertTrue(empty.exists)
+        assertUnifiedInbox(app)
+        XCTAssertTrue(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists)
+        XCTAssertFalse(app.buttons["decision-card:fixture-email"].exists)
         XCTAssertFalse(app.staticTexts["Caught up"].exists)
         capture(app, "decision-empty-watch-coverage-unknown")
     }
@@ -483,31 +863,35 @@ final class InboxUITests: XCTestCase {
         let decision = app.buttons["decision-card:fixture-email"]
         XCTAssertTrue(decision.waitForExistence(timeout: 10)); decision.tap()
         XCTAssertTrue(app.staticTexts["decision-complete-draft"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["decision-complete-draft"].label.contains("Thursday at 10 works"))
+        XCTAssertEqual(app.staticTexts["decision-complete-draft"].label, "Thursday at 10 works. I will review the launch plan before then.")
+        XCTAssertTrue(app.staticTexts["From: alex@example.com"].exists)
+        XCTAssertTrue(app.staticTexts["To: maya@example.com"].exists)
+        XCTAssertTrue(app.staticTexts["Re: A quick look at the launch plan"].exists)
+        XCTAssertTrue(app.staticTexts["Account draft · version 1"].exists)
         XCTAssertFalse(app.staticTexts["Fixture send complete · no email sent"].exists)
         let approve = app.buttons["decision-approve-send"]
         XCTAssertTrue(approve.isEnabled)
         capture(app, "decision-ready-for-exact-approval")
-        approve.tap()
+        revealInboxElement(approve, in: app); approve.tap()
         XCTAssertTrue(app.staticTexts["Fixture send complete · no email sent"].waitForExistence(timeout: 5))
         XCTAssertFalse(approve.isEnabled)
     }
 
-    func testTodoSnoozedMailReturnsFromLater() {
+    func testTodoSnoozedMailReturnsThroughScopeMenu() {
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
-        XCTAssertTrue(app.buttons["todo-split:Mail"].waitForExistence(timeout: 10)); app.buttons["todo-split:Mail"].tap()
-        let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
-        XCTAssertTrue(thread.waitForExistence(timeout: 10)); thread.swipeLeft()
+        assertUnifiedInbox(app); selectInboxScope(app, "Mail")
+        let thread = app.buttons["todo-row:mail:fixture-mail:fixture-budget"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 10)); revealInboxElement(thread, in: app); thread.swipeLeft()
         app.buttons["Snooze"].tap(); app.buttons["Tomorrow at 9 AM"].tap()
         XCTAssertTrue(thread.waitForNonExistence(timeout: 5))
-        app.buttons["todo-split:Later"].tap()
-        XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.swipeRight()
+        selectInboxScope(app, "Snoozed")
+        XCTAssertTrue(thread.waitForExistence(timeout: 5)); revealInboxElement(thread, in: app); thread.swipeRight()
         app.buttons["Bring back"].tap()
         XCTAssertTrue(thread.waitForNonExistence(timeout: 5))
-        app.buttons["todo-split:Mail"].tap()
+        selectInboxScope(app, "Mail")
         XCTAssertTrue(thread.waitForExistence(timeout: 5))
         capture(app, "todo-snooze-return")
     }
@@ -519,20 +903,27 @@ final class InboxUITests: XCTestCase {
         app.launch()
         let decision = app.buttons["decision-card:fixture-email"]
         XCTAssertTrue(decision.waitForExistence(timeout: 10))
-        app.buttons["todo-split:Mail"].tap()
+        selectInboxScope(app, "Mail")
         let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
-        XCTAssertTrue(thread.waitForExistence(timeout: 5)); thread.swipeLeft()
+        XCTAssertTrue(thread.waitForExistence(timeout: 5)); revealInboxElement(thread, in: app); thread.swipeLeft()
         app.buttons["Snooze"].tap(); app.buttons["Tomorrow at 9 AM"].tap()
         XCTAssertTrue(thread.waitForNonExistence(timeout: 5))
-        app.buttons["todo-split:For you"].tap()
+        selectInboxScope(app, "Inbox")
         XCTAssertFalse(decision.exists)
-        app.buttons["todo-split:Later"].tap()
+        XCTAssertFalse(thread.exists)
+        capture(app, "unified-inbox-linked-thread-snoozed")
+        app.terminate(); app.launch()
+        assertUnifiedInbox(app)
+        XCTAssertFalse(decision.exists, "A linked snooze must survive app relaunch")
+        selectInboxScope(app, "Snoozed")
         XCTAssertTrue(decision.waitForExistence(timeout: 5))
         XCTAssertFalse(thread.exists)
-        decision.swipeRight(); app.buttons["Bring back"].tap()
+        revealInboxElement(decision, in: app); decision.swipeRight(); app.buttons["Bring back"].tap()
         XCTAssertTrue(decision.waitForNonExistence(timeout: 5))
-        app.buttons["todo-split:For you"].tap()
+        selectInboxScope(app, "Inbox")
         XCTAssertTrue(decision.waitForExistence(timeout: 5))
+        XCTAssertFalse(thread.exists)
+        capture(app, "unified-inbox-linked-snooze-restored-once")
     }
 
     func testTodoDistinctDecisionsInOneThreadRemainActionable() {
@@ -542,8 +933,10 @@ final class InboxUITests: XCTestCase {
         app.launch()
         let latest = app.buttons["decision-card:fixture-email"]
         let earlier = app.buttons["decision-card:fixture-earlier-email"]
+        assertUnifiedInbox(app)
         XCTAssertTrue(latest.waitForExistence(timeout: 10)); XCTAssertTrue(earlier.exists)
-        earlier.tap()
+        XCTAssertFalse(app.buttons["todo-row:mail:fixture-mail:fixture-thread"].exists)
+        revealInboxElement(earlier, in: app); earlier.tap()
         XCTAssertTrue(app.staticTexts["decision-complete-draft"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.staticTexts["decision-complete-draft"].label, "I will review the launch plan before Thursday.")
         app.buttons["decision-detail-close"].tap()
@@ -552,6 +945,7 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["decision-complete-draft"].label.contains("Thursday at 10 works"))
         app.buttons["decision-detail-close"].tap()
         XCTAssertTrue(earlier.exists); XCTAssertTrue(latest.exists)
+        capture(app, "unified-inbox-two-decisions-one-thread")
     }
 
     func testTodoComposeShowsSenderAndCanStartAgainAfterSend() {
@@ -583,7 +977,7 @@ final class InboxUITests: XCTestCase {
         app.launchArguments = ["--demo", "--todo-ui-fixture", "--todo-mail-fixture", "--todo-mail-unknown-fixture"]
         app.launchEnvironment = ["NANOCODEX_DEMO_PROFILE": UUID().uuidString]
         app.launch()
-        XCTAssertTrue(app.buttons["todo-split:Mail"].waitForExistence(timeout: 10)); app.buttons["todo-split:Mail"].tap()
+        assertUnifiedInbox(app); selectInboxScope(app, "Mail")
         let thread = app.buttons["todo-row:mail:fixture-mail:fixture-thread"]
         XCTAssertTrue(thread.waitForExistence(timeout: 10)); thread.tap()
         app.buttons["mail-reply"].tap()
@@ -593,6 +987,7 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Send outcome unknown · retry blocked"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["mail-send"].isEnabled)
         app.terminate(); app.launch()
+        assertUnifiedInbox(app); selectInboxScope(app, "Mail")
         XCTAssertTrue(thread.waitForExistence(timeout: 10)); thread.tap()
         let continued = app.buttons["mail-continue-draft"]
         if !continued.isHittable { app.swipeUp() }
@@ -4605,6 +5000,218 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.buttons["meeting-new"].waitForExistence(timeout: 10))
         XCTAssertFalse(row.exists)
         capture(app, "meetings-native-deleted")
+    }
+
+    func testGlobalComposerAndSelectorClearOtherInputKeyboards() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["NANOCODEX_STARTUP_FIXTURE": "1", "NANOCODEX_STARTUP_PROFILE": UUID().uuidString.lowercased()]
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-todo"].waitForExistence(timeout: 20))
+        assertUnifiedInbox(app)
+        selectInboxScope(app, "Mail")
+        selectInboxScope(app, "Inbox")
+        XCTAssertFalse(app.descendants(matching: .any)["todo-capture"].firstMatch.exists,
+                       "Prepare a thought is an explicit sheet, not the always-new-thread bottom composer")
+        XCTAssertTrue(app.buttons["new-thread-send"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["new-thread-send"].isEnabled)
+        func assertChrome(_ name: String) {
+            let keyboard = app.keyboards.firstMatch
+            XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+            let editor = composerJourneyField(app, identifier: "new-thread-composer")
+            XCTAssertTrue(editor.isHittable)
+            XCTAssertLessThanOrEqual(editor.frame.maxY, keyboard.frame.minY + 1)
+            for id in ["main-tab-todo", "main-tab-chat", "main-tab-crm", "main-tab-meetings", "main-tab-apps"] {
+                let button = app.buttons[id]
+                XCTAssertTrue(button.exists); XCTAssertTrue(button.isHittable)
+                XCTAssertLessThanOrEqual(button.frame.maxY, keyboard.frame.minY + 1)
+                XCTAssertGreaterThanOrEqual(button.frame.minY, editor.frame.maxY - 1)
+            }
+            capture(app, name)
+        }
+        app.buttons["todo-search-open"].tap()
+        let inboxSearch = app.textFields["todo-search"]
+        XCTAssertTrue(inboxSearch.waitForExistence(timeout: 5))
+        inboxSearch.tap(); inboxSearch.typeText("launch")
+        assertChrome("global-chrome-above-inbox-search-keyboard")
+        app.buttons["main-tab-crm"].tap()
+        let crmSearch = app.textFields["crm-search"]
+        XCTAssertTrue(crmSearch.waitForExistence(timeout: 5))
+        crmSearch.tap(); crmSearch.typeText("Alex")
+        assertChrome("global-chrome-above-crm-search-keyboard")
+        let draft = composerJourneyField(app, identifier: "new-thread-composer")
+        draft.tap(); draft.typeText("Unsent global input")
+        assertChrome("global-chrome-above-new-thread-keyboard")
+        XCTAssertTrue(app.buttons["crm-record-alex"].exists, "Typing in the composer must not filter or leave the directory")
+        XCTAssertFalse(app.buttons["conversation-title:composer-agent-1"].exists, "Typing must not create a thread")
+        app.buttons["main-tab-todo"].tap()
+        assertUnifiedInbox(app)
+        let inboxDraft = composerJourneyField(app, identifier: "new-thread-composer")
+        XCTAssertEqual(inboxDraft.value as? String, "Unsent global input")
+        // Search visibility is local view state; the query belongs to the model.
+        let restoredSearch = app.textFields["todo-search"]
+        if !restoredSearch.exists { app.buttons["todo-search-open"].tap() }
+        XCTAssertTrue(restoredSearch.waitForExistence(timeout: 5))
+        XCTAssertEqual(restoredSearch.value as? String, "launch",
+                       "The unified Inbox query is independent of the global thread draft")
+        // UIKit owns the tap-selected caret; explicitly select all before editing.
+        inboxDraft.tap()
+        inboxDraft.typeKey("a", modifierFlags: .command)
+        inboxDraft.typeText("Unsent global input from Inbox")
+        assertChrome("global-chrome-above-unified-inbox-composer-keyboard")
+        XCTAssertEqual(inboxDraft.value as? String, "Unsent global input from Inbox")
+        XCTAssertEqual(app.textFields["todo-search"].value as? String, "launch")
+        XCTAssertTrue(app.buttons["new-thread-send"].isEnabled)
+        XCTAssertFalse(app.descendants(matching: .any)["todo-capture"].firstMatch.exists,
+                       "Typing in Inbox must not open or submit thought preparation")
+        XCTAssertFalse(app.buttons["conversation-title:composer-agent-1"].exists, "An unsent Inbox draft must not create a thread")
+    }
+
+    private func launchComposerTransportJourney(failCreationOnce: Bool = false) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment = [
+            "NANOCODEX_STARTUP_FIXTURE": "1",
+            "NANOCODEX_STARTUP_PROFILE": UUID().uuidString.lowercased(),
+            "NANOCODEX_STARTUP_COMPOSER_JOURNEY": "1",
+            "NANOCODEX_STARTUP_COMPOSER_CREATE_FAIL_ONCE": failCreationOnce ? "1" : "0"
+        ]
+        app.launch()
+        XCTAssertTrue(app.buttons["main-tab-crm"].waitForExistence(timeout: 20))
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 10))
+        app.buttons["crm-record-alex"].tap()
+        XCTAssertTrue(app.staticTexts["Example University"].waitForExistence(timeout: 10))
+        return app
+    }
+
+    private func composerJourneyField(_ app: XCUIApplication, identifier: String) -> XCUIElement {
+        let field = app.textFields[identifier]
+        if field.waitForExistence(timeout: 3) { return field }
+        let editor = app.textViews[identifier]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), "Expected the production native composer: \(identifier)")
+        return editor
+    }
+
+    private func composerRecordedRequests(_ app: XCUIApplication, creates: Int, turns: Int) -> [[String: Any]] {
+        let prefix = "Composer fixture transport ledger: "
+        let rows = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix))
+        for row in rows.allElementsBoundByIndex.reversed() {
+            let text = row.label
+            guard text.hasPrefix(prefix), let bytes = String(text.dropFirst(prefix.count)).data(using: .utf8),
+                  let entries = (try? JSONSerialization.jsonObject(with: bytes)) as? [[String: Any]] else { continue }
+            let creationCount = entries.filter { $0["path"] as? String == "/v1/agents" }.count
+            let turnCount = entries.filter { ($0["path"] as? String ?? "").hasSuffix("/turns") }.count
+            if creationCount == creates && turnCount == turns { return entries }
+        }
+        return []
+    }
+
+    private func awaitComposerRecordedRequests(_ app: XCUIApplication, creates: Int, turns: Int,
+                                               selectedAgent: String = "composer-agent-1",
+                                               file: StaticString = #filePath, line: UInt = #line) -> [[String: Any]] {
+        let recorded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !self.composerRecordedRequests(app, creates: creates, turns: turns).isEmpty
+        }, object: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [recorded], timeout: 15), .completed,
+                       "Await external JSONL POST records, not just local UI labels/bubbles.", file: file, line: line)
+        let entries = composerRecordedRequests(app, creates: creates, turns: turns)
+        XCTAssertEqual(entries.count, creates + turns, file: file, line: line)
+        for entry in entries {
+            XCTAssertEqual(entry["method"] as? String, "POST", file: file, line: line)
+            XCTAssertFalse((entry["idempotency"] as? String ?? "").isEmpty, file: file, line: line)
+            if (entry["path"] as? String ?? "").hasSuffix("/turns") {
+                XCTAssertEqual(entry["idempotency"] as? String, "inbox:" + (entry["id"] as? String ?? ""), file: file, line: line)
+            }
+        }
+        XCTAssertTrue(app.buttons["conversation-title:" + selectedAgent].exists, file: file, line: line)
+        XCTAssertTrue(app.buttons["conversation-title:" + selectedAgent].isSelected, file: file, line: line)
+        XCTAssertTrue(app.buttons["send"].exists, "Non-Chat Send must switch to the ordinary Chat composer", file: file, line: line)
+        XCTAssertFalse(app.buttons["new-thread-send"].exists, file: file, line: line)
+        return entries
+    }
+
+    func testCRMGlobalSendCreatesOneAgentThenChatReusesItsTransportIdentity() {
+        let app = launchComposerTransportJourney()
+        let first = "Synthetic CRM composer first prompt"
+        let reply = "Synthetic Chat same agent follow-up"
+        let draft = composerJourneyField(app, identifier: "new-thread-composer")
+        draft.tap(); draft.typeText(first)
+        XCTAssertTrue(app.staticTexts["Example University"].exists, "Typing must not navigate away from the CRM person")
+        XCTAssertTrue(app.buttons["new-thread-send"].isEnabled)
+        app.buttons["new-thread-send"].tap()
+        let initial = awaitComposerRecordedRequests(app, creates: 1, turns: 1)
+        let firstTurn = initial.first { ($0["path"] as? String ?? "").hasSuffix("/turns") }
+        XCTAssertEqual(firstTurn?["path"] as? String, "/v1/agents/composer-agent-1/turns")
+        XCTAssertEqual(firstTurn?["input"] as? String, first)
+        capture(app, "crm-global-send-new-agent-external-recorder")
+
+        let chatDraft = composerJourneyField(app, identifier: "composer")
+        chatDraft.tap(); chatDraft.typeText(reply)
+        XCTAssertTrue(app.buttons["send"].isEnabled)
+        app.buttons["send"].tap()
+        let afterReply = awaitComposerRecordedRequests(app, creates: 1, turns: 2)
+        let firstThreadTurns = afterReply.filter { ($0["path"] as? String ?? "").hasSuffix("/turns") }
+        XCTAssertEqual(firstThreadTurns.map { $0["path"] as? String ?? "" },
+                       ["/v1/agents/composer-agent-1/turns", "/v1/agents/composer-agent-1/turns"])
+        XCTAssertEqual(firstThreadTurns.map { $0["input"] as? String ?? "" }, [first, reply])
+        XCTAssertEqual(Set(firstThreadTurns.map { $0["id"] as? String ?? "" }).count, 2)
+        capture(app, "chat-reply-same-agent-no-extra-create-external-recorder")
+
+        // Leaving Chat must restore the global new-thread composer; its next
+        // Send must create another identity, never reuse the previously focused ID.
+        app.buttons["main-tab-crm"].tap()
+        XCTAssertTrue(app.buttons["crm-record-alex"].waitForExistence(timeout: 5))
+        app.buttons["crm-record-alex"].tap()
+        XCTAssertTrue(app.staticTexts["Example University"].waitForExistence(timeout: 5))
+        let next = "Synthetic second nonchat new thread prompt"
+        let nextDraft = composerJourneyField(app, identifier: "new-thread-composer")
+        let emptyValue = nextDraft.value as? String ?? ""
+        XCTAssertTrue(emptyValue.isEmpty || emptyValue == nextDraft.placeholderValue)
+        nextDraft.tap(); nextDraft.typeText(next)
+        app.buttons["new-thread-send"].tap()
+        let afterSecondGlobal = awaitComposerRecordedRequests(app, creates: 2, turns: 3, selectedAgent: "composer-agent-2")
+        let creations = afterSecondGlobal.filter { $0["path"] as? String == "/v1/agents" }
+        XCTAssertEqual(Set(creations.map { $0["idempotency"] as? String ?? "" }).count, 2)
+        let allTurns = afterSecondGlobal.filter { ($0["path"] as? String ?? "").hasSuffix("/turns") }
+        XCTAssertEqual(allTurns.map { $0["path"] as? String ?? "" },
+                       ["/v1/agents/composer-agent-1/turns", "/v1/agents/composer-agent-1/turns", "/v1/agents/composer-agent-2/turns"])
+        XCTAssertEqual(allTurns.map { $0["input"] as? String ?? "" }, [first, reply, next])
+        capture(app, "second-nonchat-send-different-agent-external-recorder")
+    }
+
+    func testCRMGlobalSendCreationFailureRetriesSameCreationAndPrompt() {
+        let app = launchComposerTransportJourney(failCreationOnce: true)
+        let prompt = "Synthetic creation failure preserved prompt"
+        let draft = composerJourneyField(app, identifier: "new-thread-composer")
+        draft.tap(); draft.typeText(prompt)
+        app.buttons["new-thread-send"].tap()
+        let retry = app.buttons["retry-pending"].firstMatch
+        XCTAssertTrue(retry.waitForExistence(timeout: 15), "Definite backend creation failure must retain the pending first message")
+        XCTAssertTrue(app.staticTexts[prompt].exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Composer fixture transport ledger:")).firstMatch.exists,
+                       "Rejected creation must not fabricate an admitted turn")
+        XCTAssertTrue(app.buttons["retry-creation"].exists)
+        capture(app, "crm-create-failure-prompt-retained")
+        XCTAssertTrue(retry.isEnabled)
+        retry.tap() // real PendingMessage -> readyAgent -> same creation key
+        let retried = awaitComposerRecordedRequests(app, creates: 2, turns: 1)
+        let creations = retried.filter { $0["path"] as? String == "/v1/agents" }
+        XCTAssertEqual(Set(creations.map { $0["idempotency"] as? String ?? "" }).count, 1)
+        let admitted = retried.first { ($0["path"] as? String ?? "").hasSuffix("/turns") }
+        XCTAssertEqual(admitted?["path"] as? String, "/v1/agents/composer-agent-1/turns")
+        XCTAssertEqual(admitted?["input"] as? String, prompt)
+        XCTAssertFalse(app.buttons["retry-pending"].exists)
+        capture(app, "crm-create-retry-one-agent-one-admitted-prompt-external-recorder")
+
+        let next = "Synthetic follow-up after creation retry"
+        let chatDraft = composerJourneyField(app, identifier: "composer")
+        chatDraft.tap(); chatDraft.typeText(next)
+        app.buttons["send"].tap()
+        let followUp = awaitComposerRecordedRequests(app, creates: 2, turns: 2)
+        let turns = followUp.filter { ($0["path"] as? String ?? "").hasSuffix("/turns") }
+        XCTAssertEqual(turns.map { $0["path"] as? String ?? "" },
+                       ["/v1/agents/composer-agent-1/turns", "/v1/agents/composer-agent-1/turns"])
+        XCTAssertEqual(turns.map { $0["input"] as? String ?? "" }, [prompt, next])
+        capture(app, "crm-create-retry-chat-reuses-created-agent-external-recorder")
     }
 
     private func capture(_ app: XCUIApplication, _ name: String) {

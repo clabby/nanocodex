@@ -32,7 +32,7 @@ import ImageIO
         viewer.makeSignaling = { [socket] _ in socket }
     }
     func start(gamepad: Bool = false) async throws {
-        let hand = try JSONDecoder().decode(RemoteHand.self, from: Data(#"{"id":"desktop","machine_id":"vm:motion","machine_name":"Motion fixture","name":"Desktop","kind":"vm","width":1600,"height":900,"controllable":true,"generation":"publication","transport":"frames-v1"}"#.utf8))
+        let hand = try JSONDecoder().decode(RemoteHand.self, from: Data(#"{"id":"desktop","machine_id":"cf:motion","machine_name":"Motion fixture","name":"Desktop","kind":"vm","width":1600,"height":900,"controllable":true,"generation":"publication","transport":"frames-v1"}"#.utf8))
         await viewer.connect(service: service, hand: hand)
         socket.onMessage(.init(type: "ready"))
         let context = try XCTUnwrap(CGContext(data: nil, width: 3, height: 2, bitsPerComponent: 8,

@@ -484,10 +484,10 @@ struct RevisionProbe {
     release: Arc<tokio::sync::Semaphore>,
 }
 
-#[nanocodex_tools::contract::async_trait]
-impl nanocodex_tools::Tool for RevisionProbe {
-    fn definition(&self) -> nanocodex_tools::ToolDefinition {
-        nanocodex_tools::ToolDefinition::function(
+#[nanocodex_oai_tools::contract::async_trait]
+impl nanocodex_oai_tools::Tool for RevisionProbe {
+    fn definition(&self) -> nanocodex_oai_tools::ToolDefinition {
+        nanocodex_oai_tools::ToolDefinition::function(
             "revision_probe",
             "Reports captured instruction revision.",
             json!({"type":"object","properties":{},"additionalProperties":false}),
@@ -496,12 +496,12 @@ impl nanocodex_tools::Tool for RevisionProbe {
 
     async fn execute(
         &self,
-        _input: nanocodex_tools::ToolInput,
-        context: nanocodex_tools::ToolContext<'_>,
-    ) -> nanocodex_tools::ToolResult {
+        _input: nanocodex_oai_tools::ToolInput,
+        context: nanocodex_oai_tools::ToolContext<'_>,
+    ) -> nanocodex_oai_tools::ToolResult {
         self.observed.send(context.instruction_revision()).unwrap();
         self.release.acquire().await.unwrap().forget();
-        Ok(nanocodex_tools::ToolOutput::text("observed"))
+        Ok(nanocodex_oai_tools::ToolOutput::text("observed"))
     }
 }
 

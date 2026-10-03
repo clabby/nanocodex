@@ -2,7 +2,7 @@ use std::{hint::black_box, time::Duration};
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use nanocodex_browser::{BrowserAction, BrowserTool};
-use nanocodex_tools::{Tool, ToolContext, ToolInput};
+use nanocodex_oai_tools::{Tool, ToolContext, ToolInput};
 use serde_json::value::RawValue;
 
 const OPEN_INPUT: &str = r#"{"action":"open","url":"data:text/html,<main>benchmark</main>"}"#;

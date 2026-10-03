@@ -12,7 +12,8 @@ use eyre::{Result, WrapErr, eyre};
 ))]
 use nanocodex::NanocodexBuilder;
 use nanocodex::{
-    AgentEvents, DurableAgentExt as _, Model, Nanocodex, OpenAi, ReasoningMode, Thinking, Tools,
+    AgentEvents, DurableAgentExt as _, HarnessFamily, HarnessModel, Model, Nanocodex, OpenAi,
+    ReasoningMode, Thinking, Tools,
     agent::{
         rollout::{DurableSession, RolloutConfig},
         session::{SessionId, SessionSnapshot},
@@ -33,6 +34,8 @@ use crate::mpp::{MppAdapter, MppArgs};
 use crate::subagents::{self, ChildAgents, DEFAULT_MAX_SUBAGENTS, SubagentToolSet};
 use crate::vm::{ConfiguredVm, VmArgs};
 
+mod claude;
+
 pub(crate) struct ConfiguredAgent {
     pub(crate) handle: Nanocodex,
     pub(crate) events: AgentEvents,
@@ -44,7 +47,7 @@ pub(crate) struct ConfiguredAgent {
     pub(crate) mcp: Option<McpHandle>,
     pub(crate) browser: Option<ConfiguredBrowser>,
     pub(crate) vm: Option<ConfiguredVm>,
-    pub(crate) model: Model,
+    pub(crate) model: HarnessModel,
 }
 
 struct SessionBuild {
@@ -78,7 +81,7 @@ pub(crate) struct AuthArgs {
 #[derive(Args)]
 pub(crate) struct ModelArgs {
     /// Reasoning effort: none, low, medium, high, xhigh, or max.
-    #[arg(long, env = "OPENAI_REASONING_EFFORT")]
+    #[arg(long)]
     thinking: Option<Thinking>,
 
     /// Whether standalone web search is exposed to the model.
@@ -93,6 +96,26 @@ pub(crate) enum SharedAuth {
     ApiKey(Arc<str>),
     AccessToken(Arc<str>),
     AuthFile(PathBuf),
+}
+
+impl ModelArgs {
+    fn requested_thinking(&self, family: HarnessFamily) -> Result<Option<Thinking>> {
+        if let Some(thinking) = self.thinking {
+            return Ok(Some(thinking));
+        }
+        let variable = match family {
+            HarnessFamily::Codex => "OPENAI_REASONING_EFFORT",
+            HarnessFamily::Claude => "ANTHROPIC_REASONING_EFFORT",
+        };
+        std::env::var(variable)
+            .ok()
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|error: String| eyre!("{variable}: {error}"))
+            })
+            .transpose()
+    }
 }
 
 /// The deliberately small standard-agent configuration accepted by eval
@@ -127,6 +150,9 @@ pub(crate) struct AgentArgs {
     #[command(flatten)]
     auth: AuthArgs,
 
+    #[command(flatten)]
+    pub(crate) claude_auth: crate::auth::ClaudeAuthArgs,
+
     /// Working directory exposed to the coding tools.
     #[arg(long)]
     cwd: Option<PathBuf>,
@@ -134,9 +160,25 @@ pub(crate) struct AgentArgs {
     #[command(flatten)]
     model_policy: ModelArgs,
 
-    /// Coding model: gpt-6-astra, gpt-6.1-sol, or gpt-6-luna.
-    #[arg(long, env = "OPENAI_MODEL")]
-    model: Option<Model>,
+    /// Select the native coding harness: codex or claude.
+    #[arg(long, global = true, value_parser = ["codex", "claude"])]
+    harness: Option<String>,
+
+    /// Select the native Claude harness (shorthand for --harness claude).
+    #[arg(long, global = true)]
+    claude: bool,
+
+    /// Model in the selected harness family. Defaults use OPENAI_MODEL or ANTHROPIC_MODEL.
+    #[arg(long, global = true, value_parser = NonEmptyStringValueParser::new())]
+    model: Option<String>,
+
+    /// Explicit Anthropic Console API key override.
+    #[arg(long, global = true, env = "ANTHROPIC_API_KEY", value_parser = NonEmptyStringValueParser::new(), hide_env_values = true)]
+    claude_api_key: Option<String>,
+
+    /// Native Anthropic Messages endpoint, including /v1/messages.
+    #[arg(long, global = true, env = "ANTHROPIC_MESSAGES_URL", value_parser = NonEmptyStringValueParser::new())]
+    claude_messages_url: Option<String>,
 
     /// Optional namespace prepended to the model identifier on the wire.
     ///
@@ -188,7 +230,7 @@ pub(crate) struct AgentArgs {
     )]
     max_subagents: usize,
 
-    /// Write Codex-compatible resumable threads beneath `CODEX_HOME`.
+    /// Record provider-native resumable sessions beneath `CODEX_HOME`.
     #[arg(
         long,
         env = "NANOCODEX_ROLLOUTS",
@@ -245,6 +287,45 @@ pub(crate) struct AgentArgs {
 }
 
 impl AgentArgs {
+    pub(crate) fn harness_model(&self) -> Result<HarnessModel> {
+        let family = self.selected_harness()?;
+        self.model_policy.requested_thinking(family)?;
+        Ok(self
+            .requested_model(family)?
+            .unwrap_or_else(|| family.default_model()))
+    }
+
+    pub(crate) fn selected_harness(&self) -> Result<HarnessFamily> {
+        match (self.claude, self.harness.as_deref()) {
+            (true, Some("codex")) => Err(eyre!("--claude conflicts with --harness codex")),
+            (true, _) | (false, Some("claude")) => Ok(HarnessFamily::Claude),
+            _ => Ok(HarnessFamily::Codex),
+        }
+    }
+
+    /// Resolve the model family before opening stores, acquiring credentials or starting tools.
+    fn requested_model(&self, family: HarnessFamily) -> Result<Option<HarnessModel>> {
+        let variable = match family {
+            HarnessFamily::Codex => "OPENAI_MODEL",
+            HarnessFamily::Claude => "ANTHROPIC_MODEL",
+        };
+        let environment = std::env::var(variable).ok();
+        self.model
+            .as_deref()
+            .or(environment.as_deref())
+            .map(|value| {
+                let model: HarnessModel =
+                    value.parse().map_err(|error: &'static str| eyre!(error))?;
+                if model.family() != family {
+                    return Err(eyre!(
+                        "model {value:?} does not belong to the {family} harness"
+                    ));
+                }
+                Ok(model)
+            })
+            .transpose()
+    }
+
     pub(crate) fn restrict_to_host_control(&mut self, instructions: impl Into<String>) {
         self.browser.disable();
         self.mcp.disable();
@@ -295,15 +376,26 @@ impl AgentArgs {
     }
 
     pub(crate) fn thinking(&self) -> Thinking {
-        self.model_policy.thinking.unwrap_or(Thinking::Xhigh)
+        self.selected_harness()
+            .ok()
+            .and_then(|family| self.model_policy.requested_thinking(family).ok().flatten())
+            .unwrap_or_else(|| {
+                self.harness_model()
+                    .ok()
+                    .filter(|model| model.family() == HarnessFamily::Claude)
+                    .map_or(Thinking::Xhigh, HarnessModel::default_thinking)
+            })
     }
 
     pub(crate) fn web_search(&self) -> bool {
         self.model_policy.web_search.unwrap_or(true)
     }
 
-    pub(crate) const fn fast_mode(&self) -> bool {
+    pub(crate) fn fast_mode(&self) -> bool {
         self.fast_mode
+            && self
+                .selected_harness()
+                .is_ok_and(|family| family == HarnessFamily::Codex)
     }
 
     pub(crate) fn responses_transport(&self) -> ResponsesTransport {
@@ -320,11 +412,11 @@ impl AgentArgs {
         vm: VmArgs,
         local_durability: Option<LocalDurability>,
     ) -> Result<ConfiguredAgent> {
-        self.build_inner(None, vm, false, local_durability).await
+        Box::pin(self.build_inner(None, vm, false, local_durability)).await
     }
 
     pub(crate) async fn build_tui(self, vm: VmArgs) -> Result<ConfiguredAgent> {
-        self.build_inner(None, vm, true, None).await
+        Box::pin(self.build_inner(None, vm, true, None)).await
     }
 
     pub(crate) async fn build_resumed_tui(
@@ -332,7 +424,7 @@ impl AgentArgs {
         session: DurableSession,
         vm: VmArgs,
     ) -> Result<ConfiguredAgent> {
-        self.build_inner(Some(session), vm, true, None).await
+        Box::pin(self.build_inner(Some(session), vm, true, None)).await
     }
 
     async fn build_inner(
@@ -342,7 +434,17 @@ impl AgentArgs {
         tui: bool,
         local_durability: Option<LocalDurability>,
     ) -> Result<ConfiguredAgent> {
-        let thinking = self.thinking();
+        let harness = self.selected_harness()?;
+        let requested_model = self.requested_model(harness)?;
+        if harness == HarnessFamily::Claude {
+            return self
+                .build_claude(durable, vm, tui, local_durability, requested_model)
+                .await;
+        }
+        let thinking = self
+            .model_policy
+            .requested_thinking(harness)?
+            .unwrap_or(Thinking::Xhigh);
         let web_search = self.web_search();
         if local_durability.is_some() && self.rollouts {
             return Err(eyre!(
@@ -377,8 +479,9 @@ impl AgentArgs {
         } else {
             self.auth.resolve()?.nanocodex()?
         };
-        let model = match self.model {
-            Some(model) => model,
+        let model = match requested_model {
+            Some(HarnessModel::Codex(model)) => model,
+            Some(HarnessModel::Claude(_)) => unreachable!("model family was validated"),
             None => connected_account_default_model(auth.mode()),
         };
         let direct_websocket_url = direct_websocket_url(self.websocket_url, auth.mode());
@@ -468,11 +571,80 @@ impl AgentArgs {
         let generic_subagents = self.subagents;
         let subagent_tools = selected_subagent_tools(generic_subagents, tui);
         let subagent_runtime = subagent_tools.map(|_| subagents::channel(self.max_subagents));
+        let claude_tools = tools
+            .clone()
+            .into_builder()
+            .workspace(false)
+            .web_search(false)
+            .image_generation(false)
+            .build()?;
+        let codex_registry = subagent_runtime
+            .as_ref()
+            .map(|(registry, _, _)| Arc::clone(registry));
+        let codex_tools = tools.clone();
+        let mut codex_recipe = Nanocodex::builder(openai.clone())
+            .reasoning_mode(self.reasoning_mode)
+            .fast_mode(self.fast_mode)
+            .workspace(session.workspace.clone())
+            .codex_home(codex_home.clone())
+            .tools_factory(move |parent| {
+                if let Some(registry) = &codex_registry {
+                    subagents::install_tools(
+                        codex_tools.clone(),
+                        parent,
+                        Arc::clone(registry),
+                        subagent_tools.unwrap_or(SubagentToolSet::Generic),
+                    )
+                } else {
+                    Ok(codex_tools.clone())
+                }
+            });
+        if let Some(instructions) = self.instructions.clone() {
+            codex_recipe = codex_recipe.instructions(instructions);
+        }
+        if let Some(instructions) = session_instructions(
+            self.instructions.as_deref(),
+            generic_subagents,
+            managed_memory.is_some(),
+        ) {
+            codex_recipe = codex_recipe.additional_instructions(instructions);
+        }
+        let harness_builder =
+            nanocodex::Harness::builder().register(HarnessFamily::Codex, move |request| {
+                let mut builder = codex_recipe.clone();
+                async move {
+                    let HarnessModel::Codex(model) = request.model else {
+                        return Err(nanocodex::NanocodexError::InvalidRequest(
+                            "Codex recipe received a Claude model".into(),
+                        ));
+                    };
+                    builder = builder
+                        .model(model)
+                        .thinking(request.thinking)
+                        .host_context(request.host_context)
+                        .spawn_factory(request.spawn_factory);
+                    if let Some(snapshot) = request.snapshot {
+                        builder = builder.restore_runtime(snapshot)?;
+                    }
+                    builder.build()
+                }
+            });
+        let harness = claude::register_claude_recipe(
+            harness_builder, claude::ClaudeConnection::new(
+                self.claude_auth, self.claude_api_key, self.claude_messages_url,
+            ),
+            session.workspace.clone(), self.instructions.clone().unwrap_or_else(||
+                "You are a coding agent. Use native Claude file tools and Bash for the workspace; use exec for shared MCP and subagent capabilities.".to_owned()),
+            claude_tools,
+            web_search,
+            subagent_runtime.as_ref().map(|(registry, _, _)| Arc::clone(registry)),
+        ).build();
         let mut builder = Nanocodex::builder(openai)
             .model(model)
             .reasoning_mode(self.reasoning_mode)
             .thinking(thinking)
             .fast_mode(self.fast_mode)
+            .spawn_factory(harness.spawn_factory())
             .workspace(session.workspace)
             .codex_home(codex_home);
         if let Some(session_id) = session.session_id {
@@ -562,7 +734,7 @@ impl AgentArgs {
             mcp: mcp_handle,
             browser: configured_browser,
             vm: configured_vm,
-            model,
+            model: model.into(),
         })
     }
 }
@@ -633,13 +805,17 @@ impl EvalAgentArgs {
         thinking: Thinking,
         web_search: bool,
     ) -> Result<(NanocodexBuilder, SharedAuth)> {
+        self.model_policy.requested_thinking(HarnessFamily::Codex)?;
         let auth = self.auth.resolve()?;
         let builder = eval_builder_with_auth(auth.nanocodex()?, model, thinking, web_search)?;
         Ok((builder, auth))
     }
 
-    pub(crate) const fn thinking(&self) -> Option<Thinking> {
-        self.model_policy.thinking
+    pub(crate) fn thinking(&self) -> Option<Thinking> {
+        self.model_policy
+            .requested_thinking(HarnessFamily::Codex)
+            .ok()
+            .flatten()
     }
 
     pub(crate) const fn web_search(&self) -> Option<bool> {

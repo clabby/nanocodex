@@ -19,8 +19,11 @@ export type ManagedProxyEnv = {
 };
 
 const GENERATED_APP_ROUTE = /^\/v1\/apps(?:\/[A-Za-z0-9_-]{1,128}(?:\/(?:data|restore))?)?$/;
+// This forwarding policy also runs in the Node route journeys. Native spans
+// are available only inside Workers; their absence preserves the same policy.
+const nativeTracing = import("nanocodex/cloudflare/tracing").catch(() => undefined);
 
-const MANAGED_ROUTE = /^(?:\/auth(?:\/.*)?|\/webauthn\/.*|\/sandbox-preview\/[^/]+(?:\/.*)?|\/v1\/(?:auth(?:\/.*)?|me|account\/(?:admin|communication|hosted-tool-stats|tool-host|vm-host|hand-hosts(?:\/[0-9a-f-]{36})?|hands(?:\/(?:screens|host|view|renew|ice))?)|hand-hosts\/[0-9a-f-]{36}\/[0-9a-f-]{36}\/hands\/(?:host|ice|renew)|system\/vm-host|vm-host-attachments\/[A-Za-z0-9_-]{43}\/[0-9a-f-]{36}\/(?:tool-host|hands\/(?:host|ice|renew))|wallet(?:\/(?:balance|connect|revoke-access-key))?|egress|data|crm(?:\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?:\/(?:identities|facts|relationships))?)?|router|responses|models|inference(?:\/.*)?|api-keys(?:\/.*)?|credentials(?:\/.*)?|connect(?:\/.*)?|connectors(?:\/.*)?|agents(?:\/.*)?|meetings(?:\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\/(?:preview|summarize|audio(?:\/(?:complete|parts\/[1-9]\d*))?))?)?|todo(?:\/(?:traces|schedule|source-health|items\/[0-9a-fA-F-]{36}(?:\/prepare)?|decisions\/[0-9a-fA-F-]{36}(?:\/(?:respond|prepare))?|mail\/(?:accounts|threads(?:\/[A-Za-z0-9_-]+(?:\/modify)?)?|drafts(?:\/[0-9a-fA-F-]{36})?|send|suggest|messages\/[A-Za-z0-9_-]+\/attachments\/[A-Za-z0-9_-]+)))?|rooms(?:\/.*)?|history(?:\/.*)?|memories\/(?:list|read|search|add_ad_hoc_note|write|status)|markdown-memory\/(?:get|search|write|status)|organization(?:\/.*)?))$/;
+const MANAGED_ROUTE = /^(?:\/auth(?:\/.*)?|\/webauthn\/.*|\/sandbox-preview\/[^/]+(?:\/.*)?|\/v1\/(?:auth(?:\/.*)?|me|account\/(?:admin|communication|hosted-tool-stats|tool-host|vm-host|hand-hosts(?:\/[0-9a-f-]{36})?|hands(?:\/(?:screens|host|view|renew|ice))?)|hand-hosts\/[0-9a-f-]{36}\/[0-9a-f-]{36}\/hands\/(?:host|ice|renew)|system\/vm-host|vm-host-attachments\/[A-Za-z0-9_-]{43}\/[0-9a-f-]{36}\/(?:tool-host|hands\/(?:host|ice|renew))|wallet(?:\/(?:balance|connect|revoke-access-key))?|egress|data|crm(?:\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?:\/(?:identities|facts|relationships))?)?|router|responses|models|inference(?:\/.*)?|api-keys(?:\/.*)?|credentials(?:\/.*)?|connect(?:\/.*)?|connectors(?:\/.*)?|agents(?:\/.*)?|meetings(?:\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\/(?:preview|summarize|audio(?:\/(?:complete|parts\/[1-9]\d*))?))?)?|todo(?:\/(?:snooze|traces|schedule|source-health|items\/[0-9a-fA-F-]{36}(?:\/prepare)?|decisions\/[0-9a-fA-F-]{36}(?:\/(?:respond|prepare))?|mail\/(?:accounts|threads(?:\/[A-Za-z0-9_-]+(?:\/modify)?)?|drafts(?:\/[0-9a-fA-F-]{36})?|send|suggest|messages\/[A-Za-z0-9_-]+\/attachments\/[A-Za-z0-9_-]+)))?|rooms(?:\/.*)?|history(?:\/.*)?|memories\/(?:list|read|search|add_ad_hoc_note|write|status)|markdown-memory\/(?:get|search|write|status)|organization(?:\/.*)?))$/;
 
 export function isManagedRoutePath(pathname: string): boolean {
   return GENERATED_APP_ROUTE.test(pathname) || pathname === "/api/router" || pathname === "/v1/agent-runs" || MANAGED_ROUTE.test(pathname) || /^\/v1\/shared\/[0-9a-f-]{36}(?:\/(?:events(?:\/history)?|turns))?$/.test(pathname) || /^\/v1\/phone\/bridge\/(?:health|check|calls(?:\/[0-9a-f-]{36}(?:\/(?:hangup|steer))?)?|status\/[0-9a-f-]{36}|media\/[0-9a-f-]{36}\/|internal\/(?:state|setup))$/.test(pathname);
@@ -34,7 +37,20 @@ export function isManagedRoutePath(pathname: string): boolean {
  * viewer snapshot can use the same shared policy and existing broker directly;
  * every other request preserves its exact original managed route.
  */
-export async function routeManaged(
+export async function routeManaged(...args: Parameters<typeof routeMeasuredManaged>): Promise<Response | undefined> {
+  if (!isManagedRoutePath(args[2].pathname)) return undefined;
+  const native = await nativeTracing;
+  if (!native) return routeMeasuredManaged(...args);
+  const { tracing, setSpanAttributes } = native;
+  return tracing.enterSpan("managed.proxy", span => {
+    const threadId = args[2].pathname.match(/^\/v1\/agents\/([0-9a-f-]{36})(?:\/|$)/)?.[1];
+    try { setSpanAttributes(span, { "nanocodex.thread_id": threadId }); }
+    catch { /* Native tracing must not alter forwarding. */ }
+    return routeMeasuredManaged(...args);
+  });
+}
+
+async function routeMeasuredManaged(
   request: Request,
   env: ManagedProxyEnv,
   url: URL,

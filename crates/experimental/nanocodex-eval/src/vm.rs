@@ -30,7 +30,7 @@ use arcbox_ext4::{
 use chrono::{DateTime, Utc};
 use jiff::{Timestamp, tz::TimeZone};
 use nanocodex_agent::{ExecutionEnvironment, NanocodexBuilder};
-use nanocodex_tools::{Tools, ToolsBuildError, standard::UpdatePlanTool};
+use nanocodex_oai_tools::{Tools, ToolsBuildError, standard::UpdatePlanTool};
 use nanocodex_vm::{
     host::{
         BlockDevice, GuestCommand, Gvproxy as GvproxyProcess, GvproxyError as VmGvproxyError,

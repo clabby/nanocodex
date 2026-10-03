@@ -1,28 +1,23 @@
 // Derived from clabby/tact; modified for Nanocodex2.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Animated linear selector for the model fixed to a new session.
+//! Account-authorized managed models, never a local provider roster.
 
 use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
 use crate::tui::theme::Theme;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
-use nanocodex::Model;
+use crossterm::event::{Event, KeyCode, KeyEventKind};
+use nanocodex_managed::{AvailableModel, ManagedModel};
 use ratatui::{
     Frame,
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
-use std::time::{Duration, Instant};
-
-const MODELS: [Model; 3] = [Model::Astra, Model::Sol, Model::Luna];
-const ANIMATION_DURATION: Duration = Duration::from_millis(280);
-const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const KEY_BINDINGS: [(&str, &str); 3] = [("←/→", "model"), ("enter", "apply"), ("esc", "cancel")];
+use std::time::Instant;
 
 pub(super) enum ModelSelectorEvent {
     Terminal { event: Event, now: Instant },
@@ -31,159 +26,27 @@ pub(super) enum ModelSelectorEvent {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum ModelSelectorEffect {
-    Apply(Model),
+    Apply(ManagedModel),
     Dismiss,
 }
 
 pub(super) struct ModelSelector {
+    models: Vec<AvailableModel>,
     selected: usize,
-    displayed_position: f64,
-    animation: Option<Animation>,
-}
-
-struct Animation {
-    from: f64,
-    to: f64,
-    started_at: Instant,
-    next_frame: Instant,
 }
 
 impl ModelSelector {
-    pub(super) fn new(initial: Model) -> Self {
-        let selected = model_index(initial);
-        Self {
-            selected,
-            displayed_position: selected as f64,
-            animation: None,
-        }
+    pub(super) fn new(initial: ManagedModel, models: Vec<AvailableModel>) -> Self {
+        let selected = models
+            .iter()
+            .position(|entry| entry.id == initial)
+            .unwrap_or(0);
+        Self { models, selected }
     }
 
     pub(super) fn animation_deadline(&self) -> Option<Instant> {
-        self.animation
-            .as_ref()
-            .map(|animation| animation.next_frame)
+        None
     }
-
-    fn update_key(&mut self, key: KeyEvent, now: Instant) -> ComponentUpdate<ModelSelectorEffect> {
-        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-            return ComponentUpdate::none();
-        }
-
-        match key.code {
-            KeyCode::Left | KeyCode::Up => self.select_relative(-1, now),
-            KeyCode::Right | KeyCode::Down => self.select_relative(1, now),
-            KeyCode::Enter => ComponentUpdate {
-                effects: vec![ModelSelectorEffect::Apply(MODELS[self.selected])],
-                render: RenderRequest::Immediate,
-            },
-            KeyCode::Esc | KeyCode::Backspace => ComponentUpdate {
-                effects: vec![ModelSelectorEffect::Dismiss],
-                render: RenderRequest::Immediate,
-            },
-            _ => ComponentUpdate::none(),
-        }
-    }
-
-    fn select_relative(
-        &mut self,
-        direction: isize,
-        now: Instant,
-    ) -> ComponentUpdate<ModelSelectorEffect> {
-        self.advance_animation(now);
-        let next = self
-            .selected
-            .saturating_add_signed(direction)
-            .min(MODELS.len() - 1);
-        if next == self.selected {
-            return ComponentUpdate::none();
-        }
-        self.selected = next;
-        self.animation = Some(Animation {
-            from: self.displayed_position,
-            to: next as f64,
-            started_at: now,
-            next_frame: now + ANIMATION_FRAME_INTERVAL,
-        });
-        ComponentUpdate::render(RenderRequest::Immediate)
-    }
-
-    fn advance_animation(&mut self, now: Instant) -> bool {
-        let Some(animation) = &mut self.animation else {
-            return false;
-        };
-        let elapsed = now.saturating_duration_since(animation.started_at);
-        let progress = (elapsed.as_secs_f64() / ANIMATION_DURATION.as_secs_f64()).min(1.0);
-        let eased = 1.0 - (1.0 - progress).powi(3);
-        self.displayed_position = animation.from + (animation.to - animation.from) * eased;
-        if progress >= 1.0 {
-            self.displayed_position = self.selected as f64;
-            self.animation = None;
-        } else {
-            animation.next_frame = now + ANIMATION_FRAME_INTERVAL;
-        }
-        true
-    }
-
-    fn render_slider(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        if area.width < 5 || area.height < 2 {
-            return;
-        }
-        let left = area.x.saturating_add(2);
-        let right = area.right().saturating_sub(3).max(left);
-        let width = right.saturating_sub(left);
-        let indicator_column = left.saturating_add(
-            (f64::from(width) * self.displayed_position / (MODELS.len() - 1) as f64).round() as u16,
-        );
-        let selected_color = theme.model(MODELS[self.selected]);
-        let buffer = frame.buffer_mut();
-        for column in left..=right {
-            let color = if column <= indicator_column {
-                selected_color
-            } else {
-                theme.muted()
-            };
-            buffer.set_string(column, area.y, "━", Style::default().fg(color));
-        }
-        for index in 0..MODELS.len() {
-            let column = model_column(left, width, index);
-            let color = if column <= indicator_column {
-                selected_color
-            } else {
-                theme.muted()
-            };
-            buffer.set_string(column, area.y, "●", Style::default().fg(color));
-        }
-        buffer.set_string(
-            indicator_column,
-            area.y,
-            "◆",
-            Style::default()
-                .fg(selected_color)
-                .add_modifier(Modifier::BOLD),
-        );
-
-        let labels = [
-            (model_column(left, width, 0), Model::Astra, "Astra"),
-            (model_column(left, width, 1), Model::Sol, "Sol"),
-            (model_column(left, width, 2), Model::Luna, "Luna"),
-        ];
-        for (column, model, label) in labels {
-            let label_width = u16::try_from(label.len()).unwrap_or(u16::MAX);
-            let start = column.saturating_sub(label_width / 2).max(area.x);
-            buffer.set_string(
-                start,
-                area.y.saturating_add(1),
-                label,
-                Style::default().fg(theme.model(model)),
-            );
-        }
-    }
-}
-
-fn model_column(left: u16, width: u16, index: usize) -> u16 {
-    left.saturating_add(
-        (f64::from(width) * index as f64 / (MODELS.len() - 1) as f64).round() as u16,
-    )
 }
 
 impl Component for ModelSelector {
@@ -191,70 +54,76 @@ impl Component for ModelSelector {
     type Effect = ModelSelectorEffect;
 
     fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
-        match event {
-            ModelSelectorEvent::Terminal {
-                event: Event::Key(key),
-                now,
-            } => self.update_key(key, now),
-            ModelSelectorEvent::Terminal { .. } => ComponentUpdate::none(),
-            ModelSelectorEvent::AnimationFrame(now) => {
-                if self.advance_animation(now) {
-                    ComponentUpdate::render(RenderRequest::Streaming)
-                } else {
-                    ComponentUpdate::none()
+        let ModelSelectorEvent::Terminal {
+            event: Event::Key(key),
+            now: _,
+        } = event
+        else {
+            return ComponentUpdate::none();
+        };
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return ComponentUpdate::none();
+        }
+        match key.code {
+            KeyCode::Left | KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Right | KeyCode::Down => {
+                self.selected = (self.selected + 1).min(self.models.len().saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                if let Some(entry) = self.models.get(self.selected) {
+                    return ComponentUpdate {
+                        effects: vec![ModelSelectorEffect::Apply(entry.id)],
+                        render: RenderRequest::Immediate,
+                    };
                 }
             }
+            KeyCode::Esc | KeyCode::Backspace => {
+                return ComponentUpdate {
+                    effects: vec![ModelSelectorEffect::Dismiss],
+                    render: RenderRequest::Immediate,
+                };
+            }
+            _ => return ComponentUpdate::none(),
         }
+        ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let layout = Floating::new("Select model", 52, 7, &KEY_BINDINGS).render(frame, area, theme);
+        let bindings = [("↑/↓", "model"), ("enter", "apply"), ("esc", "cancel")];
+        let height = u16::try_from(self.models.len()).unwrap_or(12).min(12) + 4;
+        let layout =
+            Floating::new("Select model", 64, height, &bindings).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
-        let model = MODELS[self.selected];
-        let title = Line::from(vec![
-            Span::styled("Selected: ", Style::default().fg(theme.border())),
-            Span::styled(
-                model_name(model),
+        let visible = usize::from(layout.body.height.max(1));
+        let start = self.selected.saturating_sub(visible - 1);
+        let mut lines = Vec::new();
+        if self.models.is_empty() {
+            lines.push(Line::from("No authorized models available"));
+        }
+        for (index, entry) in self.models.iter().enumerate().skip(start).take(visible) {
+            let selected = index == self.selected;
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{}{} · {}",
+                    if selected { "› " } else { "  " },
+                    entry.name,
+                    entry.provider
+                ),
                 Style::default()
-                    .fg(theme.model(model))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        frame.render_widget(
-            Paragraph::new(title).alignment(Alignment::Center),
-            Rect {
-                height: 1,
-                ..layout.body
-            },
-        );
-        let slider_offset = if layout.body.height >= 4 { 2 } else { 1 };
-        self.render_slider(
-            frame,
-            Rect {
-                y: layout.body.y.saturating_add(slider_offset),
-                height: 2,
-                ..layout.body
-            }
-            .intersection(layout.body),
-            theme,
-        );
-    }
-}
-
-fn model_index(model: Model) -> usize {
-    MODELS
-        .iter()
-        .position(|candidate| *candidate == model)
-        .unwrap_or_else(|| unreachable!("closed Model roster must have a selector entry"))
-}
-
-fn model_name(model: Model) -> &'static str {
-    match model {
-        Model::Luna => "Luna",
-        Model::Sol => "Sol",
-        Model::Astra => "Astra",
-        _ => model.as_str(),
+                    .fg(if selected {
+                        theme.accent()
+                    } else {
+                        theme.text()
+                    })
+                    .add_modifier(if selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines), layout.body);
     }
 }

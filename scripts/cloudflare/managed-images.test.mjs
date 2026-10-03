@@ -76,7 +76,7 @@ test('Rust inputs follow local Cargo packages and external binary sources', () =
   const sandbox = imageInputs('sandbox');
   const covers = (inputs, path) => inputs.some(p => p === path || path.startsWith(p + '/'));
   for (const inputs of [phone, sandbox]) {
-    for (const path of ['Cargo.lock', 'crates/nanocodex-managed/src/lib.rs', 'crates/nanocodex-tools/src/code_mode/bootstrap.js']) assert.ok(covers(inputs, path), path);
+    for (const path of ['Cargo.lock', 'crates/nanocodex-managed/src/lib.rs', 'crates/nanocodex-oai-tools/src/code_mode/bootstrap.js']) assert.ok(covers(inputs, path), path);
     for (const path of ['js/managed/src/index.ts', 'js/nanocodex/package.json', 'examples/unrelated.rs', 'bin/nanousd/src/lib.rs']) assert.ok(!covers(inputs, path), path);
   }
   for (const path of ['examples/phone_voice.rs', 'examples/phone_audio.rs', 'examples/phone_capture.rs']) assert.ok(covers(phone, path), path);

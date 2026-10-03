@@ -135,8 +135,9 @@ async fn run_inner(
                 }
                 Some(Request::Cancel) => {
                     if let Some(id) = active.as_deref()
-                        && let Err(error) = client.cancel(&agent_id, id).await {
-                            let _ = events.send(Event::Failed { pane, error: error.to_string(), opening: false });
+                        && let Err(error) = client.cancel(&agent_id, id).await
+                    {
+                        let _ = events.send(Event::Failed { pane, error: error.to_string(), opening: false });
                     }
                 }
                 None => return Ok(()),

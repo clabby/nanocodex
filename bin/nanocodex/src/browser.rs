@@ -457,7 +457,7 @@ mod tests {
     use nanocodex::Tools;
     use nanocodex_browser::BraveSession;
     use nanocodex_browser::{BraveSessionError, BrowserProfileKind};
-    use nanocodex_tools::runtime::ToolRuntime;
+    use nanocodex_oai_tools::runtime::ToolRuntime;
 
     use super::{BrowserArgs, BrowserKind, chromium_cookie_source, resolve_browser_launch};
 

@@ -10,7 +10,7 @@ use crate::video::{Video, VideoSource, ice_servers};
 use futures_util::{SinkExt, StreamExt, future::BoxFuture};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -80,10 +80,10 @@ impl Broadcast for NoBroadcast {
     }
 }
 pub struct Options {
+    /// Required for publication. No JPEG live-view transport is available.
     pub video: Option<VideoSource>,
     pub audio: Option<VideoSource>,
     pub microphone_factory: Option<SinkFactory>,
-    pub require_video: bool,
     pub observation: Option<Arc<dyn Observation>>,
     pub broadcast: Box<dyn Broadcast>,
 }
@@ -93,7 +93,6 @@ impl Default for Options {
             video: None,
             audio: None,
             microphone_factory: None,
-            require_video: false,
             observation: None,
             broadcast: Box::new(NoBroadcast),
         }
@@ -129,8 +128,10 @@ impl Publisher {
             microphone_factory,
             mut broadcast,
             observation: providers,
-            require_video,
         } = options;
+        let video = video.ok_or_else(|| {
+            error("Hand live view requires an H.264 video source; JPEG transport is not supported")
+        })?;
         endpoint(target)?;
         crate::tls::ensure_crypto_provider();
         let started = Instant::now();
@@ -176,7 +177,7 @@ impl Publisher {
                         let _ = call(&backend, json!({"action":"release"}), Duration::from_secs(3)).await;
                         continue;
                     },
-                    result = session(&target, &machine, &backend, video.as_ref(), audio.as_ref(), microphone_factory.clone(), dimensions, &capabilities, input_keepalive, require_video, &mut ready, &providers, &mut broadcast, &mut authorized_at) => result,
+                    result = session(&target, &machine, &backend, &video, audio.as_ref(), microphone_factory.clone(), dimensions, &capabilities, input_keepalive, &mut ready, &providers, &mut broadcast, &mut authorized_at) => result,
                 };
                 if let Err(error) = &result {
                     tracing::warn!(target: "nanocodex2", stage = "screen.session.exit", reason = error.category(), http_status = error.http_status(), close_code = error.close_code(), elapsed_ms = session_started.elapsed().as_millis() as u64);
@@ -522,13 +523,12 @@ async fn session(
     target: &PublisherTarget,
     machine: &Machine,
     backend: &Backend,
-    video: Option<&VideoSource>,
+    video: &VideoSource,
     audio: Option<&VideoSource>,
     microphone_factory: Option<SinkFactory>,
     dimensions: (u64, u64),
     capabilities: &Value,
     input_keepalive: bool,
-    require_video: bool,
     ready: &mut Option<oneshot::Sender<bool>>,
     providers: &Option<Arc<dyn Observation>>,
     broadcast: &mut Box<dyn Broadcast>,
@@ -577,26 +577,51 @@ async fn session(
     .map_err(|_| SessionError::Closed)?
     .map_err(|_| SessionError::Closed)?;
     tracing::info!(target: "nanocodex2", stage = "screen.socket.connected", machine_id = machine.id(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0);
-    let video = match video {
-        Some(source) => match Video::start_with_microphone(source, audio, microphone_factory).await
-        {
-            Ok(video) => Some(video),
-            Err(error) => {
-                if require_video {
-                    tracing::error!(%error, "required WebRTC encoder unavailable; retrying video startup");
-                    return Err(SessionError::Closed);
-                }
-                tracing::warn!(%error, "Continuous screen encoder unavailable; using screenshot fallback");
-                None
-            }
+    let video = Video::start_with_microphone(video, audio, microphone_factory)
+        .await
+        .map_err(|error| {
+            tracing::error!(target: "nanocodex2", stage = "screen.video.start_failed", %error,
+                "WebRTC encoder unavailable; retrying video startup (JPEG transport disabled)");
+            SessionError::MediaFailed
+        })?;
+    session_loop(
+        target,
+        machine,
+        backend,
+        dimensions,
+        capabilities,
+        input_keepalive,
+        ready,
+        providers,
+        broadcast,
+        last_authorized,
+        started,
+        Socket {
+            wire,
+            video: Some(video),
+            microphone: MicrophoneControl::default(),
         },
-        None => None,
-    };
-    let mut socket = Socket {
-        wire,
-        video,
-        microphone: MicrophoneControl::default(),
-    };
+    )
+    .await
+}
+// Transport initialization always requires video. Keeping the event loop separate
+// lets lease/cancellation tests exercise failures without an unauthenticated peer.
+#[allow(clippy::too_many_arguments)]
+async fn session_loop(
+    target: &PublisherTarget,
+    machine: &Machine,
+    backend: &Backend,
+    dimensions: (u64, u64),
+    capabilities: &Value,
+    input_keepalive: bool,
+    ready: &mut Option<oneshot::Sender<bool>>,
+    providers: &Option<Arc<dyn Observation>>,
+    broadcast: &mut Box<dyn Broadcast>,
+    last_authorized: &mut Instant,
+    started: Instant,
+    mut socket: Socket,
+) -> Result<(), SessionError> {
+    let base = endpoint(target).map_err(|_| SessionError::Closed)?;
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
@@ -614,12 +639,8 @@ async fn session(
     let mut viewers = HashSet::<String>::new();
     let mut preparations: Preparations<IceResponse> = Preparations::new();
     let mut ice = IceCache::new(http.clone(), base.clone(), target.bearer());
-    let mut pending_frames = HashMap::<String, u64>::new();
-    let mut frame_tick = tokio::time::interval(Duration::from_nanos(33_333_333));
-    frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut lease = Lease::default();
     let mut job = None;
-    let mut frame = None;
     let mut request_id = String::new();
     let broadcast_supported = broadcast.supported();
     // The mutex lends mutable ownership to a single scoped future. Dropping the
@@ -692,23 +713,6 @@ async fn session(
                 let mut result=checked_result(result); result["type"]=json!("agent_result"); result["request_id"]=json!(std::mem::take(&mut request_id));
                 send(&mut socket,result).await?;
             },
-            _ = frame_tick.tick(), if frame.is_none() && !pending_frames.is_empty() => {
-                let backend = backend.clone();
-                frame = Some(OwnedJob(tokio::spawn(async move {
-                    call(&backend, json!({"action":"observe"}), Duration::from_secs(5)).await
-                })));
-            },
-            result = completed(&mut frame) => {
-                frame=None;
-                for (viewer, credits) in &mut pending_frames {
-                    if !viewers.contains(viewer) { *credits = 0; continue; }
-                    *credits -= 1;
-                    if result["status"]=="ok" && valid_frame(&result) {
-                        send(&mut socket,json!({"type":"frame","viewer_id":viewer,"jpeg":result["jpeg"],"width":result["width"],"height":result["height"]})).await?;
-                    } else { send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?; }
-                }
-                pending_frames.retain(|_, credits| *credits > 0);
-            },
             message = socket.next() => {
                 let message=message.ok_or(SessionError::SocketEnded)?.map_err(|_|SessionError::SocketReadFailed)?;
                 let (value, admission)=match message {
@@ -736,7 +740,6 @@ async fn session(
                         connection=value["connection_id"].as_str().filter(|s|!s.is_empty()).ok_or(SessionError::Closed)?.into();
                         let mut surface=json!({"id":"desktop","name":"Desktop","kind":if base.path().starts_with("/v1/vm-host-attachments/"){"vm"}else{"desktop"},"width":dimensions.0,"height":dimensions.1,"controllable":true,"agent_tools":true});
                         surface["broadcast"]=json!(broadcast_supported);
-                        if socket.video.is_none(){surface["transport"]=json!("frames-v1");surface["frame_window"]=json!(6);}
                         send(&mut socket,json!({"type":"catalog","machine_id":machine.id(),"machine_name":machine.name(),"surfaces":[surface]})).await?;
                     },
                     "published" => {
@@ -773,7 +776,6 @@ async fn session(
                         // that viewer without disturbing unrelated peers.
                         if viewers.contains(viewer) || preparations.contains(viewer) {
                             preparations.remove(viewer);
-                            pending_frames.remove(viewer);
                             viewers.remove(viewer);
                             if lease.owner()==viewer{release(&mut lease,backend,&mut socket).await?;}
                             send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?;
@@ -797,7 +799,6 @@ async fn session(
                     "viewer_left"=>{
                         preparations.remove(viewer);
                         viewers.remove(viewer);
-                        pending_frames.remove(viewer);
                         viewer_left(viewer,&mut lease,backend,&mut socket).await?;
                     },
                     "signal" if preparations.contains(viewer)=>{
@@ -813,13 +814,6 @@ async fn session(
                             if lease.owner()==viewer{release(&mut lease,backend,&mut socket).await?;}
                             send(&mut socket,json!({"type":"close_viewer","viewer_id":viewer})).await?;viewers.remove(viewer);
                         }
-                    },
-                    "frame_request" if viewers.contains(viewer)=>{
-                        let count = value["count"].as_u64().unwrap_or(1);
-                        if pending_frames.is_empty() && frame.is_none() { frame_tick.reset_immediately(); }
-                        let credits = pending_frames.entry(viewer.into()).or_default();
-                        if count == 0 || count > 6 || *credits + count > 6 { return Err(SessionError::Closed); }
-                        *credits += count;
                     },
                     "control" if viewers.contains(viewer)=>{
                         let permission = admission;
@@ -1125,14 +1119,44 @@ mod tests {
             .await;
             wire
         });
-        let publisher = Publisher::start(
-            &target,
-            &Machine::new("test", "Test").unwrap(),
-            backend,
-            options,
-        )
+        let machine = Machine::new("test", "Test").unwrap();
+        let (wire, _) = tokio_tungstenite::connect_async({
+            let mut url = target.endpoint().clone();
+            url.set_scheme("ws").unwrap();
+            url.set_path(&format!("{}/host", url.path()));
+            url.to_string()
+        })
         .await
         .unwrap();
+        let (sender, _) = watch::channel(target.clone());
+        let (stop, mut stopped) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut broadcast = options.broadcast;
+            let mut ready = None;
+            let mut authorized = Instant::now();
+            let capabilities = json!({"status":"ok"});
+            tokio::select! {
+                _ = &mut stopped => {},
+                _ = session_loop(&target, &machine, &backend, (1, 1),
+                    &capabilities, false, &mut ready,
+                    &options.observation, &mut broadcast, &mut authorized,
+                    Instant::now(), Socket { wire, video: None,
+                        microphone: MicrophoneControl::default() }) => {},
+            }
+            let _ = call(
+                &backend,
+                json!({"action":"release"}),
+                Duration::from_secs(3),
+            )
+            .await;
+            broadcast.stop().await;
+        });
+        let publisher = Publisher {
+            target: sender,
+            stop: Some(stop),
+            task: Some(task),
+            initially_replaced: false,
+        };
         (publisher, peer.await.unwrap())
     }
     #[tokio::test]
@@ -1214,7 +1238,6 @@ mod tests {
             backend,
             Options {
                 video: Some(video),
-                require_video: true,
                 broadcast: Box::new(Status(calls.clone())),
                 ..Options::default()
             },
@@ -1588,6 +1611,7 @@ mod tests {
     }
     async fn check_replaced_host(before_publication: bool) {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target = PublisherTarget::from_attachment(
@@ -1629,6 +1653,16 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+                // Publication starts ICE prefetch, not another publisher. Drain
+                // that HTTP socket before asserting no reconnect after fencing.
+                let (mut http, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut bytes = [0; 4096];
+                assert!(http.read(&mut bytes).await.unwrap() > 0);
+                http.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"iceServers\":[]}").await.unwrap();
+                drop(http);
                 replaced.await.unwrap();
             }
             wire.close(Some(CloseFrame {
@@ -1647,7 +1681,7 @@ mod tests {
             &target,
             &Machine::new("test", "Test").unwrap(),
             backend,
-            Options::default(),
+            video_options(),
         )
         .await
         .unwrap();
@@ -1716,9 +1750,52 @@ mod tests {
             );
         }
     }
+    fn video_options() -> Options {
+        Options {
+            video: Some(Arc::new(|| {
+                Box::pin(async {
+                    Ok(crate::capture::Capture::packets(
+                        futures_util::stream::unfold(
+                            tokio::time::interval(Duration::from_millis(20)),
+                            |mut tick| async move {
+                                tick.tick().await;
+                                Some((Ok(bytes::Bytes::from_static(&[0, 0, 0, 1, 0x65, 1])), tick))
+                            },
+                        ),
+                        None,
+                    ))
+                })
+            })),
+            ..Options::default()
+        }
+    }
+
     #[tokio::test]
-    async fn frame_window_streams_only_credited_frames_and_stops_on_disconnect() {
+    async fn missing_video_source_fails_before_capture_or_publication() {
+        let target =
+            PublisherTarget::from_attachment("ws://127.0.0.1:1/v1/account/tool-host", "test-token")
+                .unwrap();
+        let backend: Backend = Arc::new(|_| panic!("no source must not call backend"));
+        let result = Publisher::start(
+            &target,
+            &Machine::new("test", "Test").unwrap(),
+            backend,
+            Options::default(),
+        )
+        .await;
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("requires an H.264 video source")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_video_start_and_capture_recover_without_jpeg_live_view() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target = PublisherTarget::from_attachment(
             &format!(
@@ -1728,11 +1805,41 @@ mod tests {
             "test-token",
         )
         .unwrap();
-        let machine = Machine::new("test", "Test").unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let (fail, failed) = oneshot::channel();
+        let failure = Arc::new(std::sync::Mutex::new(Some(failed)));
+        let source: VideoSource = Arc::new(move || {
+            let attempt = observed.fetch_add(1, Ordering::SeqCst);
+            let failed = if attempt == 1 {
+                failure.lock().unwrap().take()
+            } else {
+                None
+            };
+            Box::pin(async move {
+                if attempt == 0 {
+                    return Err(error("fixture encoder unavailable"));
+                }
+                Ok(crate::capture::Capture::packets(
+                    futures_util::stream::once(async {
+                        Ok(bytes::Bytes::from_static(&[0, 0, 0, 1, 0x65, 1]))
+                    })
+                    .chain(futures_util::stream::once(async move {
+                        if let Some(failed) = failed {
+                            let _ = failed.await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                        Err(error("fixture encoder stopped"))
+                    })),
+                    None,
+                ))
+            })
+        });
         let captures = Arc::new(AtomicUsize::new(0));
-        let observed = captures.clone();
+        let count = captures.clone();
         let backend: Backend = Arc::new(move |input| {
-            let captures = observed.clone();
+            let captures = count.clone();
             Box::pin(async move {
                 if input["action"] == "observe" {
                     captures.fetch_add(1, Ordering::SeqCst);
@@ -1741,58 +1848,94 @@ mod tests {
             })
         });
         let peer = tokio::spawn(async move {
+            // The failed initial encoder never advertises any surface or frame.
             let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-            socket
-                .send(Message::Text(
-                    json!({"type":"ready","connection_id":"test"})
-                        .to_string()
-                        .into(),
-                ))
+            let mut wire = tokio_tungstenite::accept_async(stream).await.unwrap();
+            wire_send(&mut wire, json!({"type":"ready","connection_id":"failed"})).await;
+            let next = tokio::time::timeout(Duration::from_secs(2), wire.next())
                 .await
                 .unwrap();
-            let catalog: Value =
-                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
-                    .unwrap();
-            assert_eq!(catalog["surfaces"][0]["frame_window"], 6);
-            for message in [
-                json!({"type":"published","generation":"g"}),
-                json!({"type":"viewer","viewer_id":"v","surface_id":"desktop"}),
-                json!({"type":"frame_request","viewer_id":"v","count":6}),
-            ] {
-                socket
-                    .send(Message::Text(message.to_string().into()))
-                    .await
-                    .unwrap();
+            assert!(matches!(
+                next,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
+            let (stream, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut wire = tokio_tungstenite::accept_async(stream).await.unwrap();
+            wire_send(
+                &mut wire,
+                json!({"type":"ready","connection_id":"recovered"}),
+            )
+            .await;
+            let catalog = wire_read(&mut wire).await;
+            assert_eq!(catalog["type"], "catalog");
+            assert!(catalog["surfaces"][0].get("transport").is_none());
+            assert!(catalog["surfaces"][0].get("frame_window").is_none());
+            wire_send(&mut wire, json!({"type":"published","generation":"g"})).await;
+            // Complete publication's authenticated ICE prefetch independently.
+            let (mut http, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            assert!(http.read(&mut bytes).await.unwrap() > 0);
+            http.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"iceServers\":[]}").await.unwrap();
+            drop(http);
+            for viewer in ["v", "stale"] {
+                wire_send(
+                    &mut wire,
+                    json!({"type":"frame_request","viewer_id":viewer,"count":6}),
+                )
+                .await;
             }
-            for _ in 0..6 {
-                let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .unwrap();
-                let frame: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                assert_eq!(frame["type"], "frame");
-                assert_eq!(frame["viewer_id"], "v");
-            }
-            assert!(
-                tokio::time::timeout(Duration::from_millis(150), socket.next())
-                    .await
-                    .is_err(),
-                "no uncredited seventh frame"
+            wire_send(&mut wire, json!({"type":"agent_call","request_id":"snapshot","agent_id":"a","surface_id":"desktop","generation":"g","deadline_at":now_ms()+3000,"input":{"action":"observe"}})).await;
+            let snapshot = wire_read(&mut wire).await;
+            assert_eq!(snapshot["type"], "agent_result");
+            assert_eq!(snapshot["status"], "ok");
+            assert_eq!(snapshot["jpeg"], "/9j/a");
+            assert_eq!(
+                captures.load(Ordering::SeqCst),
+                2,
+                "only initial capture and on-demand agent observation"
             );
-            socket.close(None).await.unwrap();
+            fail.send(()).unwrap();
+            let next = tokio::time::timeout(Duration::from_secs(2), wire.next())
+                .await
+                .unwrap();
+            assert!(matches!(
+                next,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
+            let (stream, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut wire = tokio_tungstenite::accept_async(stream).await.unwrap();
+            wire_send(
+                &mut wire,
+                json!({"type":"ready","connection_id":"recovered-again"}),
+            )
+            .await;
+            let catalog = wire_read(&mut wire).await;
+            assert_eq!(catalog["type"], "catalog");
+            assert!(catalog["surfaces"][0].get("transport").is_none());
+            wire_send(&mut wire, json!({"type":"published","generation":"g2"})).await;
+            assert_eq!(captures.load(Ordering::SeqCst), 2);
+            wire
         });
-        let publisher = Publisher::start(&target, &machine, backend, Options::default())
-            .await
-            .unwrap();
-        peer.await.unwrap();
+        let publisher = Publisher::start(
+            &target,
+            &Machine::new("test", "Test").unwrap(),
+            backend,
+            Options {
+                video: Some(source),
+                ..Options::default()
+            },
+        )
+        .await
+        .unwrap();
+        let _wire = peer.await.unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
         publisher.shutdown().await.unwrap();
-        assert_eq!(
-            captures.load(Ordering::SeqCst),
-            7,
-            "initial validation plus six requested frames"
-        );
     }
 
     #[test]

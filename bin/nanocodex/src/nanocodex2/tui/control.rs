@@ -29,7 +29,7 @@ pub(super) fn snapshot(bridge: &Bridge, app: &AppNode, runtime: &DriverRuntime, 
     );
     state["settings"] = json!({"model":runtime.settings.model.as_str(),"effort":runtime.settings.thinking.to_string(),
         "fast_mode":runtime.settings.fast_mode,"reasoning_mode":format!("{:?}",runtime.settings.reasoning_mode).to_lowercase()});
-    state["active_turn_ids"] = json!(runtime.managed_active_turns.ids);
+    state["active_turn_ids"] = json!(runtime.active_managed_turn_ids());
     state["managed_cursor"] = json!(runtime.observed_cursor);
     state["local_shells"] = json!(runtime.active_shells);
     if !runtime.agent_id.is_empty() {
@@ -73,8 +73,15 @@ pub(super) fn dispatch(
         return;
     }
     if command.request.method == "models.list" {
-        command.finish(json!({"models":Model::ALL.into_iter().map(|model| json!({"id":model.as_str(),
-            "efforts":nanocodex::Thinking::ALL.into_iter().filter(|effort|model.supports_thinking(*effort)).map(|effort|effort.to_string()).collect::<Vec<_>>()})).collect::<Vec<_>>()}));
+        let client = runtime.client.clone();
+        let agent_id = runtime.agent_id.clone();
+        tasks.spawn(async move {
+            let result = match client.models().await {
+                Ok(catalog) => json!({"models":catalog.data.iter().map(|entry| json!({"id":entry.id.as_str(),"name":entry.name,"provider":entry.provider,"efforts":entry.thinking.iter().map(ToString::to_string).collect::<Vec<_>>(),"fast_mode":entry.fast_mode,"reasoning_modes":entry.reasoning_modes.iter().map(ToString::to_string).collect::<Vec<_>>()})).collect::<Vec<_>>(),"default_model":catalog.default_model,"partial":catalog.partial}),
+                Err(error) => outcome(Err(error)),
+            };
+            (command, result, None, agent_id)
+        });
         return;
     }
     if !matches!(
@@ -167,9 +174,14 @@ pub(super) fn dispatch(
                         "set exactly one setting".into(),
                     ))
                 } else if let Some(model) = settings["model"].as_str() {
-                    match model.parse::<Model>() {
+                    match model.parse::<ManagedModel>().or_else(|_| {
+                        model
+                            .parse::<Model>()
+                            .map(ManagedModel::from)
+                            .map_err(|_| "Unsupported managed model ID")
+                    }) {
                         Ok(model) => client.set_model(&agent_id, model).await,
-                        Err(e) => Err(ManagedError::Configuration(e)),
+                        Err(e) => Err(ManagedError::Configuration(e.into())),
                     }
                 } else if let Some(effort) = settings["effort"].as_str() {
                     match effort.parse::<nanocodex::Thinking>() {

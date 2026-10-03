@@ -1841,7 +1841,7 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
             briefing_status:"ready", briefing:[briefing.description?.text, ...briefing.notes.map(note => note.text)].filter(Boolean).join("\n"),
             briefing_scope:"Imported account evidence; limited coverage, invitations do not prove attendance."})), ...prepared, briefings, partial:true, source:"imported_account_evidence"}, {headers:{"cache-control":"no-store"}});
         }
-        const response = await handleTodoMail(request, this.ctx.storage, this.env.NANOCODEX, account.id, this.env.AI);
+        const response = await handleTodoMail(request, this.ctx.storage, this.env.NANOCODEX, account.id, this.env.AI, this.env.NANOCODEX_CRM);
         if (!response.ok) return response;
         const result = await response.json() as {events:Record<string,any>[];partial:boolean};
         const bySource = new Map(prepared.briefings.map(briefing => [JSON.stringify([briefing.source.connection_id,briefing.source.calendar_id,briefing.source.event_id]), briefing]));
@@ -1853,10 +1853,12 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
         }
         return Response.json({...result, briefings:prepared.briefings, briefing_errors:prepared.errors, partial:result.partial || prepared.partial}, {headers:{"cache-control":"no-store"}});
       }
-      return handleTodoMail(request, this.ctx.storage, this.env.NANOCODEX, account.id, this.env.AI);
+      return handleTodoMail(request, this.ctx.storage, this.env.NANOCODEX, account.id, this.env.AI, this.env.NANOCODEX_CRM);
     }
     if (url.pathname === "/todo" || url.pathname.startsWith("/todo/")) {
-      return handleTodoInbox(request, this.ctx.storage);
+      const account = await this.ctx.storage.get<UserRecord>("account");
+      if (!account) return json({ error: "not_found" }, { status: 404 });
+      return handleTodoInbox(request, this.ctx.storage, { ownerID: account.id, binding: this.env.NANOCODEX });
     }
     if (/^\/(agent-definitions|environment-templates)(?:\/|$)/.test(url.pathname)) {
       return configurationCatalog(request, this.ctx.storage);

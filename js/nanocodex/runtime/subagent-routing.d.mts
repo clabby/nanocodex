@@ -1,6 +1,7 @@
 import type { Model, Thinking } from '../types.mjs';
-export type ChildRouteModel = Model | 'sol' | 'luna' | 'astra' | 'glm-5.3' | 'glm53' | 'kimi' | 'mimo';
+export type ChildRouteModel = Model | 'sol' | 'luna' | 'astra' | 'glm-5.3' | 'glm53' | 'kimi' | 'mimo' | 'opus' | 'sonnet' | 'fable' | 'haiku' | 'claude-opus-5-5' | 'claude-sonnet-5-5' | 'claude-fable-5-1' | 'claude-opus-4-6' | 'claude-sonnet-4-6' | 'claude-haiku-4-5';
 export type ChildRoute = Readonly<{
+  harness?: 'codex' | 'claude';
   provider: string;
   model: ChildRouteModel;
   thinking: Thinking;
@@ -8,6 +9,7 @@ export type ChildRoute = Readonly<{
 }>;
 export type ChildRouteRequest = Readonly<{
   parentSessionId: string;
+  harness?: 'codex' | 'claude';
   role: string;
   task: string;
   model?: ChildRoute['model'];
@@ -21,7 +23,7 @@ export type ChildRouteBinding = Readonly<{
   hostContextRef?: string;
 }>;
 export type SubagentRouting = Readonly<{
-  resolve(request: ChildRouteRequest): Promise<Readonly<{ model: ChildRoute['model']; thinking: Thinking; routeId: string; statelessHttp?: boolean }>>;
+  resolve(request: ChildRouteRequest): Promise<Readonly<{ harness?: 'codex' | 'claude'; model: ChildRoute['model']; thinking: Thinking; routeId: string; statelessHttp?: boolean }>>;
   bind(request: ChildRouteBinding): void;
   route(sessionId: string): ChildRoute;
 }>;

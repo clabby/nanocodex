@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EXEC_COMMAND_PARAMETERS,
   EXECUTION_OUTPUT_SCHEMA,
@@ -17,6 +17,43 @@ import {
 
 const ACCOUNT_A = "11111111-1111-4111-8111-111111111111";
 const ACCOUNT_B = "22222222-2222-4222-8222-222222222222";
+
+const hostSockets = new Map<WebSocket, Promise<void>>();
+
+function acceptHostSocket(socket: WebSocket) {
+  const closed = new Promise<void>(resolve => {
+    socket.addEventListener("close", event => {
+      // A replaced host receives a server-initiated close and must acknowledge it.
+      socket.close(event.code === 1005 ? 1000 : event.code, event.reason);
+      resolve();
+    }, { once: true });
+  });
+  hostSockets.set(socket, closed);
+  socket.accept();
+}
+
+async function closeHostSocket(socket: WebSocket, reason = "test complete") {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    socket.close(1000, reason);
+    await Promise.race([
+      hostSockets.get(socket),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`account Hosted Tools socket close handshake timed out (readyState ${socket.readyState})`)), 3_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+afterEach(async () => {
+  try {
+    await Promise.all([...hostSockets.keys()].map(socket => closeHostSocket(socket)));
+  } finally {
+    hostSockets.clear();
+  }
+});
 
 const snapshot = {
   tools: [{
@@ -102,7 +139,7 @@ describe("account Hosted Tools provider", () => {
         headers: { upgrade: "websocket", "x-nanocodex-owner-id": owner },
       });
       const socket = response.webSocket!;
-      socket.accept();
+      acceptHostSocket(socket);
       const ready = nextFrame(socket);
       socket.send(JSON.stringify({
         type: "catalog", capabilities: ["turn_metadata"], attachment_id: "desktop-vm", tools: [machineEntry()],
@@ -128,7 +165,7 @@ describe("account Hosted Tools provider", () => {
       } },
     }));
     await expect(admitted).resolves.toMatchObject({ output: "saved receipt" });
-    first.close(1000, "VM stopped");
+    await closeHostSocket(first, "VM stopped");
     await vi.waitFor(async () => {
       await provider.refresh();
       expect(provider.machineOnline("desktop-vm")).toBe(false);
@@ -174,7 +211,7 @@ describe("account Hosted Tools provider", () => {
       }));
       await expect(completed).resolves.toMatchObject({ success: true, output: "/usr/bin/blender" });
     } finally {
-      successor.close(1000, "test complete");
+      await closeHostSocket(successor);
     }
   });
 
@@ -301,7 +338,7 @@ describe("account Hosted Tools provider", () => {
         headers: { upgrade: "websocket", "x-nanocodex-owner-id": owner },
       });
       const socket = response.webSocket!;
-      socket.accept();
+      acceptHostSocket(socket);
       const ready = nextFrame(socket);
       socket.send(JSON.stringify({
         type: "catalog", capabilities: ["turn_metadata"], attachment_id: "fixture-phone",
@@ -334,8 +371,8 @@ describe("account Hosted Tools provider", () => {
       await expect(completed).resolves.toMatchObject({ success: true, output: "contact found" });
       expect(provider.resolve("user_fixture-phone_search_contacts")!.routeToken).not.toBe(cached.routeToken);
     } finally {
-      first.close(1000, "test complete");
-      successor.close(1000, "test complete");
+      await closeHostSocket(first);
+      await closeHostSocket(successor);
     }
   });
 
@@ -425,7 +462,7 @@ describe("account Hosted Tools provider", () => {
       });
       expect(upgraded.status).toBe(101);
       const socket = upgraded.webSocket!;
-      socket.accept();
+      acceptHostSocket(socket);
       const ready = nextFrame(socket);
       socket.send(JSON.stringify({
         type: "catalog", capabilities: ["turn_metadata"],
@@ -476,7 +513,7 @@ describe("account Hosted Tools provider", () => {
     expect(outputs.map((output) => (output as { output: string }).output)).toEqual(
       Array.from({ length: 10 }, (_, index) => `from hand-${index}`),
     );
-    for (const socket of sockets) socket.close(1000, "test complete");
+    await Promise.all(sockets.map(socket => closeHostSocket(socket)));
   });
 
   it("keeps one live durable socket routable for calls from two agents", async () => {
@@ -492,7 +529,7 @@ describe("account Hosted Tools provider", () => {
     });
     expect(upgraded.status).toBe(101);
     const socket = upgraded.webSocket!;
-    socket.accept();
+    acceptHostSocket(socket);
     const ready = nextFrame(socket);
     socket.send(JSON.stringify({
       type: "catalog", capabilities: ["turn_metadata"],
@@ -563,7 +600,7 @@ describe("account Hosted Tools provider", () => {
       headers: { upgrade: "websocket", "x-nanocodex-owner-id": ACCOUNT_A },
     });
     const successor = replacement.webSocket!;
-    successor.accept();
+    acceptHostSocket(successor);
     const successorReady = nextFrame(successor);
     successor.send(JSON.stringify({
       type: "catalog", capabilities: ["turn_metadata"],
@@ -588,7 +625,7 @@ describe("account Hosted Tools provider", () => {
       }),
     });
     expect(stale.status).toBe(409);
-    successor.close(1000, "test complete");
+    await closeHostSocket(successor);
   });
 
   it("rechecks account hand calls against the invoking subagent context", async () => {
@@ -676,12 +713,23 @@ function nextFrame(socket: WebSocket): Promise<Record<string, unknown>> {
       cleanup();
       reject(new Error("account Hosted Tools socket failed"));
     };
+    const onClose = (event: CloseEvent) => {
+      cleanup();
+      reject(new Error(`account Hosted Tools socket closed before a frame (${event.code}: ${event.reason})`));
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("account Hosted Tools socket did not deliver a frame within 3000ms"));
+    }, 3_000);
     const cleanup = () => {
+      clearTimeout(timeout);
       socket.removeEventListener("message", onMessage);
       socket.removeEventListener("error", onError);
+      socket.removeEventListener("close", onClose);
     };
     socket.addEventListener("message", onMessage);
     socket.addEventListener("error", onError);
+    socket.addEventListener("close", onClose);
   });
 }
 
@@ -822,7 +870,7 @@ describe("process session transport recovery", () => {
         headers: { upgrade: "websocket", "x-nanocodex-owner-id": owner },
       });
       const socket = response.webSocket!;
-      socket.accept(); sockets.push(socket);
+      acceptHostSocket(socket); sockets.push(socket);
       const ready = nextFrame(socket);
       const writer = machineEntry();
       socket.send(JSON.stringify({ type: "catalog", capabilities: ["turn_metadata"],
@@ -855,7 +903,7 @@ describe("process session transport recovery", () => {
       return ((await pending) as { structuredResult: { session_id: number } }).structuredResult.session_id;
     };
     return { first, provider, attach, router, context, finish, start,
-      close: () => { for (const socket of sockets) socket.close(1000, "test complete"); } };
+      close: () => Promise.all(sockets.map(socket => closeHostSocket(socket))) };
   }
 
   it("polls a retained process across reconnects, preserves ownership, and releases its completed binding", async () => {
@@ -876,7 +924,7 @@ describe("process session transport recovery", () => {
       await f.finish(second, sent, { exit_code: 0 });
       await expect(poll).resolves.toMatchObject({ success: true, structuredResult: { exit_code: 0 } });
       await expect(f.router.execute("write_stdin", { session_id: session }, f.context("finished"))).rejects.toThrow("unknown or stale");
-    } finally { f.close(); }
+    } finally { await f.close(); }
   });
 
   it("does not replay an ambiguous poll or stdin when its socket is replaced", async () => {
@@ -900,7 +948,7 @@ describe("process session transport recovery", () => {
       await f.finish(second, await next, { exit_code: 0 });
       await expect(freshPoll).resolves.toMatchObject({ success: true });
       expect(sent.filter((frame: any) => frame.type === "call")).toHaveLength(1);
-    } finally { f.close(); }
+    } finally { await f.close(); }
   });
 
   it.each(["runtime-one", undefined])("fences saved polls and stdin after replacement of %s", async original => {
@@ -915,7 +963,7 @@ describe("process session transport recovery", () => {
           .resolves.toMatchObject({ success: false, output: expect.stringContaining("cannot prove session continuity") });
       }
       expect(sent).toEqual([]);
-    } finally { f.close(); }
+    } finally { await f.close(); }
   });
 
   it("does not bind a completed exec receipt to a replacement runtime", async () => {
@@ -930,7 +978,7 @@ describe("process session transport recovery", () => {
       await expect(f.router.execute("exec_command", { cmd: "fixture-command", workdir: "/session-hand" }, f.context("start")))
         .resolves.toMatchObject({ success: false, structuredResult: { status: "ambiguous" } });
       expect(sent).toEqual([]);
-    } finally { f.close(); }
+    } finally { await f.close(); }
   });
 
   it("binds an exec refreshed before admission to the runtime that actually started it", async () => {
@@ -943,6 +991,6 @@ describe("process session transport recovery", () => {
       const poll = f.router.execute("write_stdin", { session_id: session }, f.context("poll"));
       await f.finish(second, await frame, { exit_code: 0 });
       await expect(poll).resolves.toMatchObject({ success: true });
-    } finally { f.close(); }
+    } finally { await f.close(); }
   });
 });

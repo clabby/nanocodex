@@ -97,6 +97,9 @@ async function openBrokeredWebSocket(
     socket,
     status: response.status,
     requestId: response.headers?.get("x-request-id") ?? undefined,
+    ...(response.headers?.has("x-nanocodex-egress-request-id") ? {
+      egressRequestId: response.headers.get("x-nanocodex-egress-request-id"),
+    } : {}),
     serverModel: response.headers?.get("openai-model") ?? undefined,
     reasoningIncluded: response.headers?.has("x-reasoning-included") ?? false,
     turnState: response.headers?.get("x-codex-turn-state") ?? undefined,

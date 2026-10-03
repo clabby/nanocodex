@@ -60,7 +60,7 @@ impl Drop for DropProvider {
 impl DynamicToolProvider for DropProvider {
     fn start(&self) {}
 
-    fn direct_tools(&self) -> Vec<Arc<dyn nanocodex_tools::Tool>> {
+    fn direct_tools(&self) -> Vec<Arc<dyn nanocodex_oai_tools::Tool>> {
         Vec::new()
     }
 

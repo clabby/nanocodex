@@ -113,7 +113,7 @@ env=os.environ.copy()
 env['CARGO_TARGET_DIR']=str(a.target_dir.resolve()) if a.target_dir else env.get('CARGO_TARGET_DIR', str(build/'target'))
 output=subprocess.check_output(['cargo','run','--quiet','--manifest-path',str(build/'Cargo.toml')],env=env,text=True)
 value=json.loads(output)
-fixture=ROOT/'crates/nanocodex-tools/src/code_mode/native-behavior.json'
+fixture=ROOT/'crates/nanocodex-oai-tools/src/code_mode/native-behavior.json'
 if a.write: fixture.write_text(json.dumps(value,indent=2,ensure_ascii=False)+'\n')
 else: assert json.loads(fixture.read_text())==value,'native upstream behavior fixture differs'
 print(f'Verified {len(value["helpers"])} upstream V8 helper, {len(value["waits"])} wait parser, and {len(value["truncations"])} truncation cases')
