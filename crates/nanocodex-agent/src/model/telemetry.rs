@@ -125,7 +125,7 @@ pub(super) struct ToolResultEvent<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) metadata: Option<&'a RawValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) cell: Option<&'a nanocodex_tools::code_mode::CodeModeCell>,
+    pub(super) cell: Option<&'a nanocodex_oai_tools::code_mode::CodeModeCell>,
 }
 
 #[allow(clippy::struct_field_names)]

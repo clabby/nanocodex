@@ -632,14 +632,12 @@ impl<'de> Deserialize<'de> for ToolOutputContent {
                 serde_json::from_value(detail.unwrap_or(serde_json::Value::Null))
                     .map_err(serde::de::Error::custom)?;
             return Ok(match reference {
-                crate::responses::ImageReference::Inline { image_url } => Self::InputImage {
-                    image_url: image_url.into(),
-                    detail,
-                },
-                crate::responses::ImageReference::File { file_id } => Self::InputImageFile {
-                    file_id: file_id.into(),
-                    detail,
-                },
+                crate::responses::ImageReference::Inline { image_url } => {
+                    Self::InputImage { image_url, detail }
+                }
+                crate::responses::ImageReference::File { file_id } => {
+                    Self::InputImageFile { file_id, detail }
+                }
             });
         }
         ToolOutputContentFields::deserialize(value).map_err(serde::de::Error::custom)

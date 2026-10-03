@@ -422,7 +422,9 @@ fn prompt_input_text(input: &PromptInput) -> String {
             .iter()
             .map(|item| match item {
                 PromptContent::Text { text } => text.as_str(),
-                PromptContent::Image { .. } => "[image attachment]",
+                PromptContent::Image { .. } | PromptContent::ImageFile { .. } => {
+                    "[image attachment]"
+                }
                 PromptContent::Audio { .. } => "[audio attachment]",
             })
             .collect::<Vec<_>>()
