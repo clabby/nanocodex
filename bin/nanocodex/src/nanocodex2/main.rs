@@ -15,6 +15,8 @@ mod continue_sessions;
 mod control;
 mod device_hand;
 mod hand_observability;
+mod hand_recording;
+mod hand_recording_control;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
     all(target_os = "macos", target_arch = "aarch64")
@@ -193,6 +195,8 @@ enum Command {
     List,
     /// Read owner-only rolling 24-hour Hand tool statistics as JSON.
     HandStats,
+    /// Control this Hand’s recorder locally, without account authentication.
+    HandRecording(hand_recording_control::Args),
     /// Read one managed agent's durable state as JSON.
     State(AgentId),
     /// Read one managed turn's durable state as JSON.
@@ -586,7 +590,15 @@ fn main() -> ExitCode {
     match try_main() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Error: {error}");
+            if matches!(&error, ManagedError::Configuration(message) if message == "local recording control failed")
+            {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": false, "error": "local_recording_control_failed"})
+                );
+            } else {
+                eprintln!("Error: {error}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -658,6 +670,12 @@ fn run_with_runtime(
 }
 
 async fn run(cli: Cli) -> Result<(), ManagedError> {
+    if let Some(Command::HandRecording(command)) = &cli.command {
+        return command
+            .run()
+            .await
+            .map_err(|_| ManagedError::Configuration("local recording control failed".into()));
+    }
     if cli.managed2 {
         return match cli.command {
             None => tui::run_managed2(None).await,
@@ -813,6 +831,7 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         }
         Some(Command::List) => write_json(&client.list().await?),
         Some(Command::HandStats) => write_json(&client.hosted_tool_stats().await?),
+        Some(Command::HandRecording(_)) => unreachable!("handled before managed client setup"),
         Some(Command::State(command)) => write_json(&client.state(&command.agent_id).await?),
         Some(Command::Turn(command)) => write_json(
             &client

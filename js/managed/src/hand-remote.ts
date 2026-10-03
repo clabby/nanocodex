@@ -1,4 +1,4 @@
-import { screenAction, screenResult, screenTool, type AgentScreenResult, type ScreenTarget } from "./hand-remote-agent";
+import { recordingAvailable, validRecordingCapability, screenAction, screenResult, screenTool, type AgentScreenResult, type ScreenTarget } from "./hand-remote-agent";
 
 /** Native human media/input use WebRTC. Cloudflare sandboxes explicitly use scoped HTTPS frames.
  * Bounded agent screenshots are independent of the human media transport. */
@@ -10,7 +10,7 @@ const noStore = { "cache-control": "no-store" };
 export const REMOTE_VM_ASSERTION = "x-nanocodex-remote-vm";
 export type RemoteVMPublisher = { machineId: string; machineName?: string; routeId: string; expiresAt: number; surfaceKind?: "desktop" };
 
-type Surface = { id: string; name: string; kind: "desktop" | "window" | "phone" | "vm"; width: number; height: number; controllable: boolean; agent_tools?: boolean; broadcast?: boolean; transport?: "frames-v1"; frame_window?: number };
+type Surface = { id: string; name: string; kind: "desktop" | "window" | "phone" | "vm"; width: number; height: number; controllable: boolean; agent_tools?: boolean; recording?: ScreenTarget["recording"]; recordingCapabilities?: Record<string, unknown>; broadcast?: boolean; transport?: "frames-v1"; frame_window?: number };
 type Attachment = {
   kind: typeof TAG; role: "host" | "viewer"; id: string; generation: string; expiresAt: number;
   machineId?: string; machineName?: string; surfaces?: Surface[]; hostId?: string; surfaceId?: string;
@@ -54,7 +54,7 @@ const REASON_CODES: ReadonlySet<string> = new Set<HandRemoteReasonCode>([
 
 export class HandRemoteBroker {
   private readonly sendFailures = new WeakSet<object>();
-  private readonly pending = new Map<string, { socket: WebSocket; expectsImage: boolean; observation: CallObservation;
+  private readonly pending = new Map<string, { socket: WebSocket; expectsImage: boolean; recording: boolean; observation: CallObservation;
     finish(result: AgentScreenResult, reasonCode?: HandRemoteReasonCode): void }>();
   constructor(private readonly context: Context, private readonly onObservation?: (observation: HandRemoteObservation) => void) {
     // Socket attachments survive hibernation; pending calls do not. Resumption
@@ -128,7 +128,7 @@ export class HandRemoteBroker {
       this.observe("call.terminal", host.state, { ...observation, reason_code: "busy" });
       return Response.json(screenResult({ status: "busy" }, target));
     }
-    if (action.action !== "observe" && action.action !== "release" && !target.controllable) {
+    if ((action.action === "recording" && !recordingAvailable(target.recording)) || (action.action !== "recording" && action.action !== "observe" && action.action !== "release" && !target.controllable)) {
       this.observe("call.terminal", host.state, { ...observation, reason_code: "not_controllable" });
       return Response.json(screenResult({ status: "unavailable" }, target));
     }
@@ -148,7 +148,7 @@ export class HandRemoteBroker {
       };
       const abort = () => cancel("aborted");
       const timer = setTimeout(() => cancel("timeout"), 9000);
-      this.pending.set(id, { socket: host.socket, expectsImage: action.action !== "release", observation, finish });
+      this.pending.set(id, { socket: host.socket, expectsImage: action.action !== "release" && action.action !== "recording", recording: action.action === "recording", observation, finish });
       this.observe("call.admitted", host.state, observation);
       signal.addEventListener("abort", abort, { once: true });
       if (signal.aborted) { abort(); return; }
@@ -260,13 +260,19 @@ export class HandRemoteBroker {
       const value = JSON.parse(message);
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
       if (value.type === "agent_result" && state.role === "host") {
-        exact(value, ["type", "request_id", "status", "jpeg", "width", "height", "observation"]);
+        exact(value, ["type", "request_id", "status", "jpeg", "width", "height", "observation", "recording"]);
         if (typeof value.request_id !== "string" || !["ok", "busy", "invalid", "unavailable", "cancelled"].includes(value.status)) throw new Error();
         if (value.jpeg !== undefined && (value.status !== "ok" || typeof value.jpeg !== "string"
           || value.jpeg.length > 700_000 || !/^\/9j\/[A-Za-z0-9+/]*={0,2}$/.test(value.jpeg)
           || ![value.width, value.height].every(n => Number.isInteger(n) && n > 0 && n <= 4096))) throw new Error();
         const pending = this.pending.get(value.request_id);
         if (pending?.socket === socket) {
+          if (value.recording !== undefined && (!pending.recording || !value.recording || typeof value.recording !== "object"
+            || Array.isArray(value.recording) || !["ok", "error", "busy", "invalid", "unavailable", "cancelled"].includes(value.recording.status)
+            || (value.status === "ok" && value.recording.status !== "ok")
+            || new TextEncoder().encode(JSON.stringify(value.recording)).length > 740_000
+            || value.jpeg !== undefined || value.observation !== undefined)) throw new Error();
+          if (pending.recording && value.status === "ok" && value.recording === undefined) throw new Error();
           if (pending.expectsImage && value.status === "ok" && value.jpeg === undefined) throw new Error();
           this.observe("call.receipt", state, { ...pending.observation, reason_code: resultReason(value.status) });
           pending.finish(value as AgentScreenResult);
@@ -556,10 +562,13 @@ function normalizeSurfaces(value: unknown): Surface[] {
   const ids = new Set();
   return value.map(surface => {
     if (!surface || typeof surface !== "object") throw new Error();
-    exact(surface, ["id", "name", "kind", "width", "height", "controllable", "agent_tools", "broadcast", "transport", "frame_window"]);
+    exact(surface, ["id", "name", "kind", "width", "height", "controllable", "agent_tools", "recording", "recordingCapabilities", "broadcast", "transport", "frame_window"]);
     if (typeof surface.id !== "string" || !ID.test(surface.id) || ids.has(surface.id)
       || typeof surface.name !== "string" || !surface.name.trim() || new TextEncoder().encode(surface.name).length > 128
       || !["desktop", "window", "phone", "vm"].includes(surface.kind) || typeof surface.controllable !== "boolean"
+      || (surface.recording !== undefined && !validRecordingCapability(surface.recording))
+      || (surface.recordingCapabilities !== undefined && (!surface.recordingCapabilities || typeof surface.recordingCapabilities !== "object"
+        || !validRecordingCapability(surface.recordingCapabilities) || surface.recordingCapabilities.available !== surface.recording))
       || (surface.broadcast !== undefined && typeof surface.broadcast !== "boolean")
       || (surface.agent_tools !== undefined && typeof surface.agent_tools !== "boolean")
       || (surface.transport !== undefined && surface.transport !== "frames-v1")

@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { HandPaths } from "./hand-paths";
 import { HandRemoteBroker, REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
-import { screenTool, type ScreenTarget } from "./hand-remote-agent";
+import { validRecordingCapability, screenTool, type ScreenTarget } from "./hand-remote-agent";
 import { HandHosts, boundedJSON } from "./hand-hosts";
 import { remoteICE, type RemoteICEEnv } from "./hand-remote-ice";
 import {
@@ -915,6 +915,9 @@ function validSnapshot(snapshot: unknown): snapshot is AccountHostedToolsSnapsho
     !target || typeof target.machine_id !== "string" || typeof target.machine_name !== "string"
     || typeof target.id !== "string" || typeof target.name !== "string" || typeof target.kind !== "string"
     || typeof target.generation !== "string" || typeof target.controllable !== "boolean"
+    || (target.recording !== undefined && !validRecordingCapability(target.recording))
+    || (target.recordingCapabilities !== undefined && (!target.recordingCapabilities || typeof target.recordingCapabilities !== "object"
+      || !validRecordingCapability(target.recordingCapabilities) || target.recordingCapabilities.available !== target.recording))
     || typeof target.agent_tools !== "boolean" || !Number.isSafeInteger(target.width) || target.width < 1
     || !Number.isSafeInteger(target.height) || target.height < 1))) return false;
   const toolNames = new Set<string>();
