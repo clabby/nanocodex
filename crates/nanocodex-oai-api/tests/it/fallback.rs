@@ -641,13 +641,15 @@ async fn quota_usage_and_policy_http_errors_with_advice_are_terminal() -> Result
                     Ok::<_, eyre::Report>(listener)
                 });
                 let mut session = openai.instructions("Return terminal failures.").build()?;
-                let error = timeout(
+                let error = match timeout(
                     std::time::Duration::from_secs(2),
                     session.turn().create("terminal fixture"),
                 )
                 .await?
-                .err()
-                .expect("terminal provider rejection unexpectedly succeeded");
+                {
+                    Ok(_) => panic!("terminal provider rejection unexpectedly succeeded"),
+                    Err(error) => error,
+                };
                 assert!(error.to_string().contains(code));
                 let listener = server.await??;
                 assert!(
@@ -710,10 +712,10 @@ async fn delayed_http_body_journey(header: String) -> Result<()> {
             }
             let mut deadline = Deadline::default();
             event.record(&mut deadline);
-            if let Some(deadline) = deadline.0 {
-                if let Some(sender) = self.0.lock().unwrap().take() {
-                    let _ = sender.send(deadline);
-                }
+            if let Some(deadline) = deadline.0
+                && let Some(sender) = self.0.lock().unwrap().take()
+            {
+                let _ = sender.send(deadline);
             }
         }
     }
@@ -822,13 +824,15 @@ async fn terminal_upgrade_rejection_never_activates_https_fallback() -> Result<(
     let mut session = openai
         .instructions("Do not retry terminal provider errors.")
         .build()?;
-    let error = timeout(
+    let error = match timeout(
         std::time::Duration::from_secs(2),
         session.turn().create("terminal upgrade fixture"),
     )
     .await?
-    .err()
-    .expect("terminal upgrade unexpectedly succeeded");
+    {
+        Ok(_) => panic!("terminal upgrade unexpectedly succeeded"),
+        Err(error) => error,
+    };
     assert!(error.to_string().contains("insufficient_quota"));
     let ws = server.await??;
     assert!(
