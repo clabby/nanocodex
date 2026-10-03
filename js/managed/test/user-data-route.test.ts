@@ -175,6 +175,27 @@ describe("user data Workers HTTP journeys (SQLite and R2)", () => {
     console.log("R2 cleanup: superseded payload absent, live payload readable, deleted payload absent after alarm");
   });
 
+  it("fails closed on missing or corrupt R2 bytes and recovers through public operations", async () => {
+    const id = key("integrity");
+    const scope = bindings.NANOCODEX_USER_DATA.getByName("user-data-fixture-alice");
+    const physicalKey = () => runInDurableObject(scope, async (_instance, state) =>
+      state.storage.sql.exec<{ r2_key: string }>("SELECT r2_key FROM user_objects WHERE key = ?", id).toArray()[0]!.r2_key);
+    await call(objectPut(id, "original"));
+    const stored = await physicalKey();
+    // Corruption cannot be requested over HTTP. Mutate only the backing bytes;
+    // public reads still execute the shipped digest and availability checks.
+    await bindings.NANOCODEX_USER_DATA_OBJECTS.put(stored, "corrupt");
+    expect(await call({ operation: "object_get", key: id }, 500)).toEqual({
+      error: "user_data_failed", message: "data service is temporarily unavailable",
+    });
+    await bindings.NANOCODEX_USER_DATA_OBJECTS.delete(stored);
+    await call({ operation: "object_get", key: id }, 500);
+    await call({ operation: "object_delete", key: id, if_version: 1 });
+    expect((await call(objectPut(id, "recovered"))).object.version).toBe(2);
+    expect((await call({ operation: "object_get", key: id })).object.content).toBe("recovered");
+    console.log("R2 integrity: corruption and missing bytes produce HTTP 500; delete/recreate restores readable version 2");
+  });
+
   it("returns actionable malformed/bounded-input errors then recovers", async () => {
     const id = key("bounds");
     const malformed = await SELF.fetch("https://data.example/v1/data", {

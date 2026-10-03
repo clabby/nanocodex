@@ -20,6 +20,19 @@ SQLite-backed Durable Object from the authenticated user ID gives each user a re
 transaction and storage boundary. R2 bodies share a bucket but use a server-derived,
 hashed user prefix; callers never receive a bucket credential or physical R2 key.
 
+## Storage interface and limits
+
+Each user has a separate SQLite database inside a Durable Object. Applications
+access its fixed document, object-index, and time-series operations; this API does
+not accept arbitrary SQL, custom tables, joins, or schema migrations.
+
+Object storage is a logical private namespace in one shared R2 bucket, rather than
+a separately provisioned bucket for every user. The API supports bounded JSON
+uploads/downloads and listing/deletion, not the S3 wire protocol, bucket credentials,
+presigned URLs, multipart uploads, streaming downloads, or range requests. Existing
+S3 SDKs cannot target `/v1/data` directly. Time-series data currently has no delete
+or retention operation, and this feature does not add per-account storage quotas.
+
 ## Data models
 
 | Model | Operations | Intended use |
@@ -151,7 +164,11 @@ it does not assert that an external integration has been implemented or verified
 
 Run `pnpm --dir js/nanocodex-tools build`, then
 `pnpm --dir js/managed test:user-data`. The dedicated Workers suite sends requests
-through the Worker HTTP handler into real local Durable Object SQLite and R2. Only
-the external account identity provider is replaced with synthetic fixtures. Journey
-logs show operation, expected/observed HTTP status, and response. Production account
-credential validation and live Cloudflare deployment are outside this suite.
+through the Worker HTTP handler into real local Durable Object SQLite and R2. The Workers tests substitute only external identity enrollment. A second journey
+uses the real account proxy and locally issued API keys over HTTP, then restarts
+workerd with persisted SQLite/R2 stores to verify data, version, and credential
+survival. Logs and `output/user-data-318/persistence-http-trace.json` retain the
+expected/observed HTTP results. Narrow internal hooks inject missing/corrupt R2
+bytes and advance cleanup deadlines because these failures are not public actions.
+Production credential enrollment, abrupt process crashes, R2 outages, and live
+Cloudflare deployment are outside this suite.
