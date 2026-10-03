@@ -2,6 +2,7 @@ import type {
   AgentLifecycle,
   AgentOptions,
   CodeEvaluator,
+  CodeEffectJournal,
   DefaultAgent,
   DurabilityStore,
   ExecutionEnvironment,
@@ -19,6 +20,7 @@ type ToolExposureOptions =
   | { mcp: McpServers; toolMode?: "code" | undefined };
 
 /** Creates Rust/WASM in the current Web API host isolate. */
+export function create(options: import('../runtime/claude.mjs').Options & { harness: 'claude' }): Promise<import('../runtime/claude.mjs').Agent>;
 export function create(options: create.ManagedOptions): Promise<AgentLifecycle>;
 export function create(options?: create.Options): Promise<create.ReturnType>;
 export declare namespace create {
@@ -36,6 +38,8 @@ export declare namespace create {
     executionEnvironment?: ExecutionEnvironment | undefined;
     /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
     codeEvaluator?: CodeEvaluator | undefined;
+    /** Opt-in durable direct-tool and nested Code Mode receipts for safe cold recovery. */
+    codeEffectJournal?: CodeEffectJournal | undefined;
     /** Defaults to the same-origin Nanocodex `/api/responses` proxy. */
     transport?: ResponsesTransport | undefined;
   } & (

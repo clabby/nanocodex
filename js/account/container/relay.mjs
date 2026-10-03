@@ -182,13 +182,21 @@ function proxyWebSocket(request, socket, head, upstreamOrigin) {
   }
 
   const began = performance.now();
-  const relayId = firstHeader(request.headers["x-nanocodex-relay-id"]);
+  const correlation = {};
+  for (const [name, header] of [["relay_id", "x-nanocodex-relay-id"],
+    ["egress_request_id", "x-nanocodex-egress-request-id"]]) {
+    const value = firstHeader(request.headers[header]);
+    if (typeof value === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+      correlation[name] = value;
+    }
+  }
   const timing = { began, process_age_ms: process.uptime() * 1_000 };
   let timingLogged = false;
   function logTiming(outcome, status) {
     if (timingLogged) return;
     timingLogged = true;
-    // Only durations, a locally generated correlation ID, and fixed outcomes.
+    // Only durations, validated correlation IDs, and fixed outcomes.
     // No socket addresses, upstream errors, headers, or message data.
     try {
       const durations = {
@@ -206,9 +214,7 @@ function proxyWebSocket(request, socket, head, upstreamOrigin) {
       // One JSON line survives container stdout ingestion without inspecting objects.
       console.info(JSON.stringify({
         type: "responses.relay.upstream", transport: "websocket", outcome,
-        ...(typeof relayId === "string"
-          && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(relayId)
-          ? { relay_id: relayId } : {}),
+        ...correlation,
         ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { status } : {}),
         socket_reused: false,
         dns_observed: timing.lookup !== undefined,
@@ -217,6 +223,44 @@ function proxyWebSocket(request, socket, head, upstreamOrigin) {
           .map(([key, value]) => [key, Math.round(value * 100) / 100])),
       }));
     } catch { /* Observability must not change socket behavior. */ }
+  }
+  // Observe bytes arriving from each socket, including upgrade leftovers. These
+  // are transport bytes/chunks, not messages or evidence of model progress.
+  const stream = { downstream_bytes: 0, downstream_chunks: 0, upstream_bytes: 0, upstream_chunks: 0 };
+  let streamClosed = false;
+  function logStream(outcome) {
+    if (stream.began === undefined) return;
+    try {
+      const now = performance.now();
+      const durations = { duration_ms: now - stream.began };
+      for (const side of ["downstream", "upstream"]) {
+        durations[`first_${side}_data_ms`] = stream[`${side}_first_data`] - stream.began;
+        durations[`last_${side}_data_age_ms`] = now - stream[`${side}_last_data`];
+      }
+      console.info(JSON.stringify({
+        type: "responses.relay.stream", transport: "websocket", outcome, ...correlation,
+        downstream_bytes: stream.downstream_bytes, downstream_chunks: stream.downstream_chunks,
+        upstream_bytes: stream.upstream_bytes, upstream_chunks: stream.upstream_chunks,
+        ...Object.fromEntries(Object.entries(durations)
+          .filter(([, value]) => Number.isFinite(value) && value >= 0)
+          .map(([key, value]) => [key, Math.round(value * 100) / 100])),
+      }));
+    } catch { /* Observability must not change socket behavior. */ }
+  }
+  function observeData(side, byteLength) {
+    if (stream.began === undefined || streamClosed || byteLength === 0) return;
+    const now = performance.now();
+    const first = stream[`${side}_first_data`] === undefined;
+    stream[`${side}_first_data`] ??= now;
+    stream[`${side}_last_data`] = now;
+    stream[`${side}_bytes`] += byteLength;
+    stream[`${side}_chunks`]++;
+    if (first) logStream(`first_${side}_data`);
+  }
+  function closeStream(outcome) {
+    if (stream.began === undefined || streamClosed) return;
+    streamClosed = true;
+    logStream(outcome);
   }
   const upstream = connectTls({
     host: upstreamOrigin.hostname,
@@ -269,10 +313,17 @@ function proxyWebSocket(request, socket, head, upstreamOrigin) {
     clearTimeout(timeout);
     upgraded = true;
     upstream.off("data", onHandshake);
-    socket.write(header);
-    if (head.byteLength > 0) upstream.write(head);
     const status = responseStatus(header);
     logTiming(status === 101 ? "upgraded" : "upstream_rejected", status);
+    if (status === 101) {
+      stream.began = timing.headers;
+      observeData("upstream", header.byteLength - headerEnd - 4);
+      observeData("downstream", head.byteLength);
+      upstream.on("data", (chunk) => observeData("upstream", chunk.byteLength));
+      socket.on("data", (chunk) => observeData("downstream", chunk.byteLength));
+    }
+    socket.write(header);
+    if (head.byteLength > 0) upstream.write(head);
     if (status !== 101) {
       upstream.pipe(socket);
       return;
@@ -282,13 +333,19 @@ function proxyWebSocket(request, socket, head, upstreamOrigin) {
   });
   upstream.once("error", () => {
     logTiming("upstream_error");
+    closeStream("upstream_error");
     clearTimeout(timeout);
     if (!upgraded) rejectSocket(socket, 502, "upstream WebSocket failed");
     else socket.destroy();
   });
-  socket.once("error", () => upstream.destroy());
+  upstream.once("close", () => closeStream("upstream_closed"));
+  socket.once("error", () => {
+    closeStream("downstream_error");
+    upstream.destroy();
+  });
   socket.once("close", () => {
     logTiming("downstream_closed");
+    closeStream("downstream_closed");
     upstream.destroy();
   });
 }

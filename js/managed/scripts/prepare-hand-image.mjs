@@ -18,7 +18,8 @@ await cp(toolkit, toolkitTarget, { recursive: true });
 // credentials, caches, target directories, or local build outputs.
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const rustTarget = fileURLToPath(new URL("../.generated/remote-rust/", import.meta.url));
-const rustRoots = ["Cargo.toml", "Cargo.lock", "bin", "crates", "examples", "js/nanocodex", "py/bindings", "third_party"];
+const rustRoots = ["Cargo.toml", "Cargo.lock", "bin", "crates", "examples", "js/nanocodex", "py/bindings", "third_party",
+  "scripts/build-linux-screen-helpers.sh", "scripts/build-linux-screen-helpers.py", "scripts/tests/linux-screen-helpers-bundle.py"];
 const paths = execFileSync("git", ["ls-files", "-z", "--", ...rustRoots], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }).split("\0").filter(Boolean);
 await rm(rustTarget, { recursive: true, force: true });
 await mkdir(rustTarget, { recursive: true });

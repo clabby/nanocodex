@@ -1,3 +1,4 @@
+import { createBrowserLoginRuntime } from "./browser-login-runtime";
 import { asSchema, type Tool as AiSdkTool, type ToolSet as AiSdkToolSet } from "ai";
 import {
   DurableBrowserSessionStore,
@@ -378,6 +379,7 @@ export async function createManagedBrowserRuntime(
     ctx: DurableObjectState;
     env: ManagedBrowserEnv;
     sessionId: string;
+    publicOrigin?: string;
     createRuntime?: BrowserRuntimeFactory;
     fetch?: FetchImplementation;
     /** Internal private companion; never exposes a model CDP runtime. */
@@ -458,6 +460,10 @@ export async function createManagedBrowserRuntime(
     });
     // Public upstream CDP remains one-shot and unmodified. Private input and
     // authenticated continuation share a separate retained Chromium session.
+    const login = provider === "chromium" && options.authorizeVaultAccess
+      ? createBrowserLoginRuntime({storage:options.ctx.storage,browser:options.env.BROWSER!,agentId:options.sessionId,
+        publicOrigin:options.publicOrigin,authorize:options.authorizeVaultAccess}) : undefined;
+    if (login) tools.push(...login.tools);
     const companion = provider === "chromium" && options.resolveVaultLogin && options.authorizeVaultAccess
       ? await createManagedBrowserRuntime({...options, privateOnly:true,
         env:{...options.env,MANAGED_BROWSER_PROVIDER:"cloudflare"}}) : undefined;
@@ -470,15 +476,19 @@ export async function createManagedBrowserRuntime(
         return tool.handler(input, context);
       } })),
       submitSecureInput: companion?.submitSecureInput ?? unsupported,
-      submitVaultTakeover: companion?.submitVaultTakeover ?? unsupported,
+      submitVaultTakeover: async (input, signal) => {
+        const id = input && typeof input === "object" ? (input as {challenge_id?:unknown}).challenge_id : undefined;
+        return login && await login.owns(id) ? login.submit(input,signal) : (companion?.submitVaultTakeover ?? unsupported)(input,signal);
+      },
       submitVaultChallenge: companion?.submitVaultChallenge ?? unsupported,
-      expireAndSweep: async () => { await runtime.runtime.expirePaused(); await companion?.expireAndSweep(); },
+      expireAndSweep: async () => { await runtime.runtime.expirePaused(); await companion?.expireAndSweep(); await login?.expire(); },
       close: () => {
         if (!closing) closing = Promise.resolve().then(async () => {
           for (const controller of privateCalls.keys()) controller.abort();
           await Promise.allSettled([...privateCalls.values()]);
           await runtime.connector.closeSession();
           await companion?.close();
+          await login?.close();
         });
         return closing;
       },

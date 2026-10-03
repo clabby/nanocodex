@@ -27,7 +27,7 @@ ignore.workspace = true
 jiff.workspace = true
 nanocodex-agent.workspace = true
 nanocodex-oai-api.workspace = true
-nanocodex-tools = { workspace = true, features = ["code-mode"] }
+nanocodex-oai-tools = { workspace = true, features = ["code-mode"] }
 nix.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 rusqlite.workspace = true

@@ -149,6 +149,386 @@ async fn terminal_empty_idle_stops_redrawing_and_still_accepts_input_and_live_up
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_discovery_omits_sigkill_orphans_even_with_a_recycled_pid() {
+    use std::{os::unix::fs::FileTypeExt, process::Stdio};
+    use tokio::io::AsyncWriteExt;
+
+    async fn cli(home: &Path, args: &[&str], input: &[u8]) -> std::process::Output {
+        let started = std::time::Instant::now();
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"))
+            .args(args)
+            .env("CODEX_HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let output = tokio::time::timeout(TIMEOUT, async {
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(input).await.unwrap();
+            drop(stdin);
+            child.wait_with_output().await.unwrap()
+        })
+        .await
+        .expect("TUI discovery/control CLI did not finish within its deadline");
+        eprintln!(
+            "CODEX_HOME={} nanocodex2 {} ({:?}): status={}\ninput={}\nstdout={}\nstderr={}",
+            home.display(),
+            args.join(" "),
+            started.elapsed(),
+            output.status,
+            String::from_utf8_lossy(input),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        output
+    }
+
+    async fn list(home: &Path) -> Vec<Value> {
+        let output = cli(home, &["tui", "list", "--json"], b"").await;
+        assert!(output.status.success());
+        let registrations: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            registrations
+                .iter()
+                .all(|registration| registration.get("auth_token").is_none()),
+            "discovery must never expose authentication tokens"
+        );
+        registrations
+    }
+
+    async fn only_survivor(home: &Path, survivor: &Value) {
+        let registrations = list(home).await;
+        assert_eq!(
+            registrations.len(),
+            1,
+            "only the healthy TUI must be listed"
+        );
+        assert_eq!(registrations[0]["instance_id"], survivor["instance_id"]);
+        assert_eq!(registrations[0]["pid"], survivor["pid"]);
+    }
+
+    let mut fixture = Fixture::start().await;
+    let home = fixture.terminal._workspace.path().join(".codex");
+    let registry = home.join("nanocodex/tui/instances");
+    let before = list(&home).await;
+    assert_eq!(before.len(), 1, "the healthy TUI must be discoverable");
+    let survivor = &before[0];
+    fixture.terminal.input("DISCOVERY_SURVIVOR_DRAFT");
+    fixture.terminal.wait_text("DISCOVERY_SURVIVOR_DRAFT").await;
+
+    let mut orphan = Terminal::start_with_command(&fixture.origin, false, None, |command| {
+        command.env("CODEX_HOME", &home);
+        command.env("NANOCODEX_TUI_CONTROL", "on");
+    });
+    orphan.wait_text("actions").await;
+    let both = list(&home).await;
+    assert_eq!(both.len(), 2, "both running TUIs must be discoverable");
+    let mut registration = both
+        .into_iter()
+        .find(|value| value["instance_id"] != survivor["instance_id"])
+        .unwrap();
+    let instance = registration["instance_id"].as_str().unwrap().to_owned();
+    let socket = std::path::PathBuf::from(registration["socket_path"].as_str().unwrap());
+    let path = registry.join(format!("{instance}.json"));
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(registration["pid"].as_u64().unwrap() as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if orphan.child.try_wait().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("SIGKILL fixture TUI did not exit");
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket()
+    );
+    assert!(
+        path.is_file(),
+        "SIGKILL must leave a real orphan registration"
+    );
+    eprintln!(
+        "SIGKILL left registration={} and socket={}",
+        path.display(),
+        socket.display()
+    );
+
+    let refused = cli(&home, &["tui", "connect", &instance, "--stdio"], b"").await;
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("Connection refused"));
+    only_survivor(&home, survivor).await;
+
+    // Simulate PID recycling only in this fixture's registry, without waiting
+    // for OS PID churn. Preserve the server-generated private token and mode.
+    registration = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    registration["pid"] = survivor["pid"].clone();
+    let recycled = serde_json::to_vec(&registration).unwrap();
+    std::fs::write(&path, &recycled).unwrap();
+    eprintln!(
+        "simulated recycled PID={} for orphan instance={instance}",
+        survivor["pid"]
+    );
+    only_survivor(&home, survivor).await;
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        recycled,
+        "discovery must not delete or rewrite the orphan"
+    );
+
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::remove_dir(socket.parent().unwrap()).unwrap();
+    eprintln!("removed orphan socket; discovery must still preserve the healthy TUI");
+    only_survivor(&home, survivor).await;
+    assert_eq!(std::fs::read(&path).unwrap(), recycled);
+
+    let controlled = cli(
+        &home,
+        &[
+            "tui",
+            "connect",
+            survivor["instance_id"].as_str().unwrap(),
+            "--stdio",
+        ],
+        b"{\"id\":\"survivor\",\"method\":\"state.get\"}\n",
+    )
+    .await;
+    assert!(
+        controlled.status.success(),
+        "the surviving TUI must remain controllable"
+    );
+    let state = String::from_utf8(controlled.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|response| response["id"] == "survivor")
+        .expect("public connect did not return the survivor state");
+    assert_eq!(state["result"]["instance_id"], survivor["instance_id"]);
+    assert_eq!(
+        state["result"]["state"]["composer"]["text"],
+        "DISCOVERY_SURVIVOR_DRAFT"
+    );
+
+    fixture.terminal.input("\x03");
+    fixture
+        .terminal
+        .wait_no_text("DISCOVERY_SURVIVOR_DRAFT")
+        .await;
+    fixture.terminal.input("\x03\x03");
+    fixture.terminal.wait_output("\x1b[?1049l").await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_control_keeps_local_root_discoverable_and_stops_it_after_runtime_restart() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+    async fn snapshot(
+        write: &mut OwnedWriteHalf,
+        lines: &mut Lines<BufReader<OwnedReadHalf>>,
+        cursor: u64,
+    ) -> Value {
+        let expected_cursor = cursor.to_string();
+        tokio::time::timeout(TIMEOUT, async {
+            loop {
+                write
+                    .write_all(b"{\"id\":\"observe\",\"method\":\"state.get\"}\n")
+                    .await
+                    .unwrap();
+                let response: Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let snapshot = response["result"].clone();
+                if snapshot["state"]["managed_cursor"].as_str() == Some(expected_cursor.as_str()) {
+                    return snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("control state did not reach the durable event cursor")
+    }
+
+    for keyboard_stop in [true, false] {
+        let mut fixture = Fixture::start().await;
+        fixture.terminal.prompt("LOCAL_ROOT_RESTART_JOURNEY", "\r");
+        let turn = fixture.submission("LOCAL_ROOT_RESTART_JOURNEY").await;
+        fixture.nested(
+            &turn,
+            "run.started",
+            json!({"turn_id":"runtime-before-restart"}),
+        );
+        fixture.terminal.wait_text("Enter steer").await;
+
+        let registry = fixture
+            .terminal
+            ._workspace
+            .path()
+            .join(".codex/nanocodex/tui/instances");
+        let registration_path = std::fs::read_dir(registry)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .unwrap();
+        let registration: Value = tokio::time::timeout(TIMEOUT, async {
+            loop {
+                if let Ok(bytes) = std::fs::read(&registration_path)
+                    && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+                {
+                    break value;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("control registration did not finish writing");
+        let socket = tokio::net::UnixStream::connect(registration["socket_path"].as_str().unwrap())
+            .await
+            .unwrap();
+        let (read, mut write) = socket.into_split();
+        let mut lines = BufReader::new(read).lines();
+        write
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"protocol_version":1,
+        "instance_id":registration["instance_id"],"auth_token":registration["auth_token"]})
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let _: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let accepted = snapshot(&mut write, &mut lines, fixture.cursor).await;
+        eprintln!("local acceptance: {accepted}");
+        assert_eq!(accepted["state"]["execution"], "running");
+        assert_eq!(accepted["state"]["active_turn_ids"], json!([turn]));
+        assert_eq!(accepted["active_turns"][AGENT], json!([turn]));
+
+        let child = "019fc927-b282-79a7-8445-1b9996ad2fb0";
+        for (seq, kind, payload) in [
+            (1, "run.started", json!({"turn_id":"child-runtime"})),
+            (
+                2,
+                "run.failed",
+                json!({"turn_id":"child-runtime","status":"failed","error":"synthetic child failure"}),
+            ),
+        ] {
+            fixture.emit(
+                &turn,
+                json!({"type":"event","agent_id":1,"event":{
+            "protocol_version":1,"request_id":child,"seq":seq,"type":kind,"payload":payload}}),
+            );
+        }
+        // A service runtime reconstruction changes nested IDs and resets its sequence,
+        // but preserves the accepted durable turn and the terminal's connection.
+        fixture.emit(
+            &turn,
+            json!({"type":"event","event":{
+        "protocol_version":1,"request_id":AGENT,"seq":1,"type":"input.accepted",
+        "payload":{"session_id":AGENT,"turn_id":"runtime-after-restart",
+            "item_id":"runtime-after-restart:prompt","kind":"prompt","request_id":turn,
+            "input":"LOCAL_ROOT_RESTART_JOURNEY"}}}),
+        );
+        fixture.emit(
+            &turn,
+            json!({"type":"event","event":{
+        "protocol_version":1,"request_id":AGENT,"seq":2,"type":"run.started",
+        "payload":{"turn_id":"runtime-after-restart"}}}),
+        );
+        fixture.nested(&turn, "tool.call", json!({"turn_id":"runtime-after-restart",
+        "call_id":"held-root-command","tool":"exec_command","arguments":{"cmd":"printf synthetic"}}));
+        let restarted = snapshot(&mut write, &mut lines, fixture.cursor).await;
+        eprintln!("after child failure and root reconstruction: {restarted}");
+        assert_eq!(restarted["state"]["connection"], "ready");
+        assert_eq!(restarted["state"]["execution"], "running");
+        assert_eq!(restarted["state"]["active_turn_ids"], json!([turn]));
+        assert_eq!(restarted["active_turns"][AGENT], json!([turn]));
+        assert_eq!(restarted["active_turns"][child], json!([]));
+
+        if keyboard_stop {
+            fixture.terminal.input("\x1b");
+            fixture.terminal.wait_text("Interrupt").await;
+            fixture.terminal.input("\x1b");
+        } else {
+            let request = json!({"id":"cancel-discovered-local-root","method":"cancel","params":{
+            "expected_instance_id":restarted["instance_id"],
+            "expected_session_id":restarted["active_session_id"],
+            "expected_active_generation":restarted["active_generation"],
+            "expected_turn_id":restarted["state"]["active_turn_ids"][0]}});
+            write
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_str(
+                &tokio::time::timeout(TIMEOUT, lines.next_line())
+                    .await
+                    .expect("control cancel never returned a receipt")
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            eprintln!("control cancellation request: {request}; receipt: {response}");
+            assert_eq!(response["result"]["status"], "accepted");
+            assert_eq!(response["result"]["result"]["turn_id"], turn);
+            assert_eq!(response["result"]["result"]["state"], "cancelling");
+        }
+        let cancelled = tokio::time::timeout(TIMEOUT, fixture.cancellations.recv())
+            .await
+            .expect("confirmed Stop never reached the service")
+            .unwrap();
+        eprintln!(
+            "Stop HTTP cancellation target: {cancelled}; expected durable root: {turn}; keyboard={keyboard_stop}"
+        );
+        assert_eq!(cancelled, turn);
+        if keyboard_stop {
+            fixture.terminal.wait_text("Interrupted response").await;
+        }
+        let cancelling = snapshot(&mut write, &mut lines, fixture.cursor).await;
+        assert_eq!(cancelling["state"]["active_turn_ids"], json!([turn]));
+        fixture.nested(&turn, "tool.result", json!({"turn_id":"runtime-after-restart",
+        "call_id":"held-root-command","tool":"exec_command","status":"cancelled","duration_ns":1,"result":null}));
+        fixture.nested(
+            &turn,
+            "run.failed",
+            json!({"turn_id":"runtime-after-restart","status":"cancelled"}),
+        );
+        fixture.emit(&turn, json!({"type":"turn_cancelled","id":turn}));
+        fixture.terminal.wait_text("Enter send").await;
+        let finished = snapshot(&mut write, &mut lines, fixture.cursor).await;
+        eprintln!(
+            "durable cancellation: {finished}; history: {}",
+            json!(*fixture.history.lock().unwrap())
+        );
+        assert_eq!(finished["state"]["execution"], "idle");
+        assert_eq!(finished["state"]["active_turn_ids"], json!([]));
+        assert_eq!(finished["active_turns"][AGENT], json!([]));
+        assert!(
+            fixture.cancellations.try_recv().is_err(),
+            "Stop must cancel the root only once"
+        );
+        fixture.terminal.prompt("RECOVERY_AFTER_ROOT_STOP", "\r");
+        let next = fixture.submission("RECOVERY_AFTER_ROOT_STOP").await;
+        fixture.complete(&next);
+        fixture.terminal.wait_text("Enter send").await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminal_control_discovers_preserves_draft_and_deduplicates_prompt() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut fixture = Fixture::start().await;
@@ -426,6 +806,10 @@ impl Terminal {
             })
             .unwrap();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_nanocodex2"));
+        command.env_clear();
+        command.env("PATH", std::env::var_os("PATH").unwrap_or_default());
+        command.env("HOME", workspace.path());
+        command.env("NANOCODEX_HOME", workspace.path().join(".nanocodex"));
         if attach {
             command.args(["attach", AGENT]);
         }
@@ -958,7 +1342,13 @@ impl Fixture {
         .await;
         fixture
             .terminal
-            .wait_text(if active { "Enter steer" } else { "actions" })
+            .wait_text(if active {
+                "Enter steer"
+            } else if attach {
+                "Enter send"
+            } else {
+                "actions"
+            })
             .await;
         fixture
     }
@@ -1027,6 +1417,16 @@ impl Fixture {
         let routing_requests = Arc::new(Mutex::new(Vec::new()));
         let model_route = Arc::new(Mutex::new(None));
         let app = Router::new()
+            .route("/v1/models", get(|headers: axum::http::HeaderMap| async move {
+                let authorization = format!("Bearer ncx_live_{}_{}", "a".repeat(12), "b".repeat(43));
+                assert_eq!(headers.get("authorization").and_then(|value| value.to_str().ok()), Some(authorization.as_str()));
+                Json(json!({
+                    "object": "list", "default_model": "gpt-6-astra",
+                    "data": [{"id": "gpt-6-astra", "name": "Astra", "provider": "openai",
+                        "thinking": ["low"],
+                        "fast_mode": false, "reasoning_modes": ["standard"]}]
+                }))
+            }))
             .route("/v1/me", get(|headers: axum::http::HeaderMap| async move {
                 assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer ncx_live_"));
                 Json(json!({"user":{"id":"aabbccdd-1122-4455-8899-aabbccddeeff","persistent":true},"organization":{"id":"fixture-org"},"team":{"id":"fixture-team"},"role":"owner","authentication":"api_key"}))

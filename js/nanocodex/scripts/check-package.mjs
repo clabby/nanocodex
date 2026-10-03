@@ -20,6 +20,20 @@ export function checkDocumentedBrowserVersion(readme, packageVersion) {
 }
 
 const requiredFiles = [
+  "host/Claude.mjs",
+  "host/Claude.d.mts",
+  "node/Claude.mjs",
+  "node/Claude.d.mts",
+  "browser/Claude.mjs",
+  "browser/Claude.d.mts",
+  "worker/Claude.mjs",
+  "worker/Claude.d.mts",
+  "runtime/claude.mjs",
+  "runtime/claude.d.mts",
+  "runtime/claude-host.mjs",
+  "worker/ClaudeSubscription.mjs",
+  "worker/ClaudeSubscription.d.mts",
+  "runtime/claude-subscription.mjs",
   "cloud/index.mjs",
   "cloud/index.d.mts",
   "cloud/Client.mjs",

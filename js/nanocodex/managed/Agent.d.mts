@@ -73,7 +73,7 @@ export type Options = Readonly<{
 }>;
 
 export type CreateSettings = Readonly<{
-  model: Model;
+  model: Model | "claude-sonnet-4-6" | "claude-opus-4-6" | "claude-sonnet-5-5" | "claude-opus-5-5";
   thinking: Thinking;
   reasoningMode: ReasoningMode;
   fastMode: boolean;
@@ -165,7 +165,7 @@ export type State = Readonly<{
   latest_event_cursor: string;
   stream_error: string | null;
   settings: Readonly<{
-    model: Model;
+    model: Model | "claude-sonnet-4-6" | "claude-opus-4-6" | "claude-sonnet-5-5" | "claude-opus-5-5";
     thinking: Thinking;
     reasoning_mode: ReasoningMode;
     fast_mode: boolean;
@@ -359,6 +359,8 @@ export type CronTrigger = Readonly<{
 export type Agent = Readonly<{
   /** Start bounded background runtime/socket preparation for an active conversation.
    * Resolves on acceptance, not provider readiness. Never required before prompt(). */
+  /** Idle manual compaction; uncertain failures are never automatically retried. */
+  compact(options?: Readonly<{ signal?: AbortSignal }>): Promise<void>;
   prepare(options?: Readonly<{ signal?: AbortSignal }>): Promise<void>;
   requiredActions: Readonly<{
     list(): Promise<{ data: readonly Readonly<{ call_id: string; session_id: string; source_call_id: string; name: string; input: unknown; deadline_at: number }>[] }>;

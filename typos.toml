@@ -30,6 +30,10 @@ extend-ignore-re = ['\bpackets(?:Received|Sent)WithEct1\b', '\bOT[0-9]+A[0-9]+\b
 # OpenSSL uses the exact -passin option; changing it breaks key loading.
 extend-ignore-re = ["'truncat'", '-passin\b']
 
+# Waymote's pinned Zig build uses this exact target identifier.
+[type.py.extend-words]
+streamd = "streamd"
+
 # FFmpeg's audio passthrough filter has this exact identifier.
 [type.sh.extend-words]
 anull = "anull"

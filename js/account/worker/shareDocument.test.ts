@@ -24,3 +24,17 @@ test("an invalid share path does not serve the guest application", async () => {
   const response = await routeLinkPreview(new Request(url, { headers: { accept: "text/html" } }), env, url);
   assert.notEqual(response?.status, 200);
 });
+
+
+test("private login links serve the phone client without caching or publishing request metadata", async () => {
+  const url = new URL(`https://nanocodex.example/browser-login?agent=${agentId}&request=11111111-1111-4111-8111-111111111111`);
+  for (const method of ["GET", "HEAD"]) {
+    const response = await routeLinkPreview(new Request(url, { method, headers: { accept: "text/html", "if-none-match": "old" } }), env, url);
+    assert.equal(response?.status, 200);
+    assert.equal(response?.headers.get("cache-control"), "no-store");
+    assert.equal(response?.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(response?.headers.get("x-frame-options"), "DENY");
+    assert.equal(response?.headers.get("etag"), null);
+    assert.equal(await response?.text(), method === "HEAD" ? "" : document);
+  }
+});

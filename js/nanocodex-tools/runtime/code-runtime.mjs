@@ -11,7 +11,35 @@ import {
 
 const CANCELLATION_MESSAGE = "Code Mode execution was cancelled";
 
+// Trusted instrumentation must preserve the handler's outcome even if span
+// setup/annotation fails, returns another value, or invokes its callback twice.
+export async function traceToolInvocation(traceTool, name, context, run) {
+  let runPromise;
+  const invoke = () => {
+    if (runPromise === undefined) {
+      let resolveRun, rejectRun;
+      runPromise = new Promise((resolve, reject) => { resolveRun = resolve; rejectRun = reject; });
+      // A broken hook may discard this promise before its own setup settles.
+      void runPromise.catch(() => undefined);
+      // Code Mode registers its observation queue before Rust reads it. Invoke
+      // synchronously while assigning the memoized promise before any reentry.
+      try { resolveRun(run()); }
+      catch (error) { rejectRun(error); }
+    }
+    return runPromise;
+  };
+  try {
+    const tracing = traceTool(name, context, invoke);
+    // Also preserve synchronous host setup when a hook postpones its callback.
+    invoke();
+    if (tracing?.then) void Promise.resolve(tracing).catch(() => undefined);
+  }
+  catch { /* Instrumentation cannot replace a real tool failure or result. */ }
+  return invoke();
+}
+
 export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
+  const traceTool = extras.traceTool;
   const activeExecutions = new Set();
   const codeObservations = new Map();
   const cells = new Map();
@@ -65,7 +93,8 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     try {
       const tool = resolveTool(name);
       if (!tool) return encodeToolOutput(`unknown application tool: ${name}`, false, null);
-      const result = await router.execute(name, input, {
+      if (extras.effectJournal) return await executeJournalledTool(name, input, execution, model, turnId);
+      const context = {
         sessionId,
         parentCallId: "",
         callId,
@@ -73,7 +102,12 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         ...(turnId == null ? {} : { turnId }),
         signal: controller.signal,
         subagent: subagentBindingsBySession.get(sessionId)?.descriptor,
-      });
+      };
+      const result = await (traceTool === undefined
+        ? router.execute(name, input, context)
+        : traceToolInvocation(traceTool, name, {
+          sessionId, callId, ...(turnId == null ? {} : { turnId }),
+        }, () => router.execute(name, input, context)));
       return encodeToolOutput(
         outputBody(result),
         toolSucceeded(result),
@@ -86,6 +120,104 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     } finally {
       activeExecutions.delete(execution);
     }
+  }
+
+  async function executeJournalledTool(name, input, execution, model, turnId) {
+    const { sessionId, callId, controller } = execution;
+    const journal = extras.effectJournal;
+    function interrupt(cause) {
+      const error = Object.assign(new Error("Application tool effect journal interrupted", { cause }),
+        { code: "host_interrupted" });
+      execution.interruption = error;
+      controller.abort(error);
+      throw error;
+    }
+    let recordedInput;
+    try { recordedInput = boundedEffectSnapshot(input, "direct effect input"); }
+    catch (cause) { interrupt(cause); }
+    let identity;
+    try { identity = await extras.effectIdentity?.(sessionId, callId, turnId, controller.signal) ?? {}; }
+    catch (cause) { interrupt(cause); }
+    const effectContext = { ...identity, sessionId, parentCallId: callId, callId, name,
+      source: "host-tool:" + name, input: recordedInput, ...(turnId == null ? {} : { turnId }) };
+    controller.signal.throwIfAborted();
+    let decision;
+    try { decision = await journal.begin(effectContext); }
+    catch (cause) { interrupt(cause); }
+    controller.signal.throwIfAborted();
+    if (decision?.status === "unknown") {
+      const message = "Application tool effect has a retained dispatch intent but no completed receipt; outcome unknown. Reconcile the original operation before retrying.";
+      return encodeToolOutput(message, false, { error: message, code: "TOOL_CALL_INTERRUPTED", outcome: "unknown" });
+    }
+    if (decision?.status === "replay") {
+      let receipt;
+      try {
+        receipt = boundedEffectSnapshot(decision.receipt, "direct effect replay");
+        if (!receipt || Array.isArray(receipt) || typeof receipt.success !== "boolean"
+          || receipt.thrown !== false || receipt.value !== null
+          || ["output", "structured_result", "metadata", "value"].some(key => !Object.hasOwn(receipt, key))
+          || receipt.valueRef !== undefined || receipt.valueUndefined !== undefined
+          || (receipt.structuredResultRef !== undefined && receipt.structuredResultRef !== "output")
+          || (receipt.outputJsonRef !== undefined && receipt.outputJsonRef !== "structured_result")
+          || (receipt.outputJsonRef !== undefined && receipt.structuredResultRef !== undefined)) {
+          throw new Error("invalid direct effect receipt");
+        }
+        if (receipt.outputJsonRef === "structured_result") receipt.output = JSON.stringify(receipt.structured_result);
+        if (receipt.structuredResultRef === "output") receipt.structured_result = receipt.output;
+      } catch (cause) { interrupt(cause); }
+      return encodeToolOutput(receipt.output, receipt.success, receipt.structured_result, receipt.metadata);
+    }
+    if (decision?.status !== "execute") interrupt(new Error("invalid direct effect admission"));
+    let result, receipt;
+    try {
+      controller.signal.throwIfAborted();
+      const context = {
+        sessionId, parentCallId: callId, callId, model,
+        ...(turnId == null ? {} : { turnId }), signal: controller.signal,
+        subagent: subagentBindingsBySession.get(sessionId)?.descriptor,
+      };
+      result = await (traceTool === undefined
+        ? router.execute(name, input, context)
+        : traceToolInvocation(traceTool, name, {
+          sessionId, callId, parentCallId: callId, ...(turnId == null ? {} : { turnId }),
+        }, () => router.execute(name, input, context)));
+    } catch (error) {
+      if (error?.code === "host_interrupted") interrupt(error);
+      // An abort is not proof that the dispatched operation did not write.
+      // Leave its retained intent pending, even if the handler rejects or ignores abort.
+      if (controller.signal.aborted) throw error;
+      receipt = { output: errorMessage(error), success: false, structured_result: null,
+        metadata: null, value: null, thrown: false };
+    }
+    controller.signal.throwIfAborted();
+    let wire;
+    try {
+      if (!receipt) {
+        // No guest value is exposed by executeTool. Bound unique output/structured
+        // payloads BEFORE outputBody or structuredResult clone/stringify them.
+        const raw = isToolResult(result) ? { output: result.output, metadata: result.metadata } : { result };
+        if (isToolResult(result) && result.structuredResult !== result.output) raw.structured_result = result.structuredResult;
+        boundedEffectSnapshot(raw, "direct effect result");
+        receipt = { output: outputBody(result), success: toolSucceeded(result),
+          structured_result: structuredResult(result, `tool ${name} result`),
+          metadata: toolMetadata(result, `tool ${name} metadata`), value: null, thrown: false };
+      }
+      wire = { ...receipt };
+      const rawOutput = isToolResult(result) ? result.output : result;
+      if (result !== undefined && typeof receipt.output === "string" && typeof rawOutput !== "string"
+        && (!isToolResult(result) || result.output === result.structuredResult)) {
+        wire.output = null; wire.outputJsonRef = "structured_result";
+      } else if (receipt.structured_result === receipt.output
+        || (Array.isArray(receipt.output) && (!isToolResult(result) || result.output === result.structuredResult))) {
+        wire.structured_result = null; wire.structuredResultRef = "output";
+      }
+      wire = boundedEffectSnapshot(wire, "direct effect receipt");
+    } catch (cause) { interrupt(cause); }
+    controller.signal.throwIfAborted();
+    try { await journal.complete(effectContext, wire); }
+    catch (cause) { interrupt(cause); }
+    controller.signal.throwIfAborted();
+    return encodeToolOutput(receipt.output, receipt.success, receipt.structured_result, receipt.metadata);
   }
 
   async function executeCode(source, sessionId = "default", parentCallId = "exec", model = "unknown", observer, cell, turnId) {
@@ -128,6 +260,10 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         })
       : definition);
     const pendingCalls = new Map();
+    // A journalled replay must address the same effects regardless of earlier cells.
+    let nextJournalCallId = 1;
+    const journal = extras.effectJournal;
+    let canonicalIdentity;
     function closePendingCalls() {
       // Guest completion still ends the cell immediately, as in Codex. Host
       // receipts outlive guest promises: every observed start needs a terminal
@@ -167,7 +303,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         // ignores abort. Reject before creating telemetry for a closed cell.
         controller.signal.throwIfAborted();
         if (finished) throw new Error(CANCELLATION_MESSAGE);
-        const callId = `${parentCallId}/code-${nextCallId++}`;
+        const callId = `${parentCallId}/code-${journal ? nextJournalCallId++ : nextCallId++}`;
         const toolStartedAt = performance.now();
         const startedAfterNs = Math.max(
           0,
@@ -200,10 +336,88 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
           name,
           input: recordedInput,
         });
+        let resolvedIdentity;
+        try {
+          canonicalIdentity ??= Promise.resolve(journal ? extras.effectIdentity?.(sessionId, parentCallId, turnId, controller.signal) ?? {} : {});
+          resolvedIdentity = await canonicalIdentity;
+          controller.signal.throwIfAborted();
+        }
+        catch (cause) { interrupt(cause); }
+        const effectContext = { ...resolvedIdentity, sessionId, parentCallId, callId, name, source, input: recordedInput,
+          ...(turnId == null ? {} : { turnId }) };
+        // Never resolve a guest promise before its durable outcome is acknowledged.
+        async function retain(receipt, valueRef, outputJsonRef) {
+          if (!journal) return;
+          try {
+            // JSON receipts need not repeat identical output/structured/value data.
+            // Keep references inside the receipt, never to mutable external state.
+            const wire = { ...receipt };
+            if (outputJsonRef) { wire.output = null; wire.outputJsonRef = outputJsonRef; }
+            if (receipt.structured_result === receipt.output) {
+              wire.structured_result = null;
+              wire.structuredResultRef = "output";
+            }
+            if (valueRef) { wire.value = null; wire.valueRef = valueRef; }
+            await journal.complete(effectContext, boundedEffectSnapshot(wire, "nested effect receipt"));
+          }
+          catch (error) { interrupt(error); }
+        }
+        function interrupt(cause) {
+          const error = Object.assign(new Error("Code Mode effect journal interrupted", { cause }),
+            { code: "host_interrupted" });
+          execution.interruption = error;
+          controller.abort(error);
+          throw error;
+        }
+        let decision;
+        if (journal) {
+          try { decision = await journal.begin(effectContext); }
+          catch (error) { interrupt(error); }
+          if (decision?.status === "unknown") {
+            const message = "Code Mode nested effect has a retained dispatch intent but no completed receipt; outcome unknown. Reconcile the original operation before retrying.";
+            const error = Object.assign(new Error(message), { code: "CODE_MODE_CALL_INTERRUPTED", outcome: "unknown" });
+            complete({ output: message, structured_result: { error: message, code: error.code, outcome: "unknown" }, success: false });
+            // Guest catch blocks cannot turn an uncertain write into a new retry.
+            execution.recoveryFailure = error;
+            controller.abort(error);
+            throw error;
+          }
+          if (decision?.status === "replay") {
+            let receipt;
+            try {
+              receipt = boundedEffectSnapshot(decision.receipt, "nested effect replay");
+              if (!receipt || Array.isArray(receipt)
+                || typeof receipt.success !== "boolean" || typeof receipt.thrown !== "boolean"
+                || ["output", "structured_result", "metadata", "value"].some(key => !Object.hasOwn(receipt, key))
+                || (receipt.valueUndefined !== undefined && typeof receipt.valueUndefined !== "boolean")
+                || (receipt.structuredResultRef !== undefined && receipt.structuredResultRef !== "output")
+                || (receipt.outputJsonRef !== undefined && receipt.outputJsonRef !== "structured_result")
+                || (receipt.outputJsonRef !== undefined && receipt.structuredResultRef !== undefined)
+                || (receipt.valueRef !== undefined && !["output", "structured_result"].includes(receipt.valueRef))
+                || (receipt.thrown && (receipt.success || !validEffectFailure(receipt.failure)))) {
+                throw new Error("invalid nested effect receipt");
+              }
+            } catch (cause) { interrupt(cause); }
+            if (receipt.outputJsonRef === "structured_result") receipt.output = JSON.stringify(receipt.structured_result);
+            if (receipt.structuredResultRef === "output") receipt.structured_result = receipt.output;
+            if (receipt.valueRef) receipt.value = receipt[receipt.valueRef];
+            complete({ output: receipt.output, structured_result: receipt.structured_result,
+              success: receipt.success, metadata: receipt.metadata });
+            if (receipt.thrown) throw restoreEffectFailure(receipt.failure);
+            const value = receipt.valueUndefined ? undefined : receipt.value;
+            if (!receipt.success) throw value;
+            return value;
+          }
+          if (decision?.status !== "execute") interrupt(new Error("invalid nested effect admission"));
+        }
+        function retainedFailure(error) {
+          try { return effectFailure(error); }
+          catch (cause) { interrupt(cause); }
+        }
         let result;
         try {
           controller.signal.throwIfAborted();
-          result = await admission.invoke(name, input, {
+          const context = {
             sessionId,
             parentCallId,
             callId,
@@ -211,21 +425,44 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
             ...(turnId == null ? {} : { turnId }),
             signal: controller.signal,
             subagent: subagentBindingsBySession.get(sessionId)?.descriptor,
-          });
+          };
+          result = await (traceTool === undefined
+            ? admission.invoke(name, input, context)
+            : traceToolInvocation(traceTool, name, {
+              sessionId, callId, parentCallId, ...(turnId == null ? {} : { turnId }),
+            }, () => admission.invoke(name, input, context)));
         } catch (error) {
           if (error?.code === "host_interrupted") {
             execution.interruption = error;
             controller.abort(error);
             throw error;
           }
+          // Cancellation is not evidence that an already dispatched effect failed
+          // before writing. Retain the pending intent, never a replayable failure
+          // that a guest catch block could use to retry the cancelled operation.
+          if (controller.signal.aborted) throw error;
           const message = errorMessage(error);
-          complete({
-            output: message,
-            structured_result: message,
-            success: false,
-            duration_ns: elapsedNs(toolStartedAt),
-          });
+          const receipt = { output: message, structured_result: message, success: false,
+            metadata: null, thrown: true, failure: journal ? retainedFailure(error) : null, value: null };
+          await retain(receipt);
+          complete({ output: receipt.output, structured_result: receipt.structured_result,
+              success: receipt.success, metadata: receipt.metadata });
           throw error;
+        }
+        // Bound host data before outputBody/structuredResult clone or stringify it.
+        // A write already happened: an unretainable receipt leaves its intent unknown,
+        // not a catchable formatting error that could authorize another dispatch.
+        if (journal) {
+          try {
+            // Before cloning/formatting, bound each unique original payload;
+            // ToolResult commonly aliases all three fields to one media object.
+            const raw = isToolResult(result) ? { output: result.output, metadata: result.metadata } : { result };
+            if (isToolResult(result)) {
+              if (result.structuredResult !== result.output) raw.structured_result = result.structuredResult;
+              if (result.value !== result.output && result.value !== result.structuredResult) raw.value = result.value;
+            }
+            boundedEffectSnapshot(raw, "nested effect result");
+          } catch (cause) { interrupt(cause); }
         }
         let structured;
         let output;
@@ -238,21 +475,25 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
           success = toolSucceeded(result);
         } catch (error) {
           const message = errorMessage(error);
-          complete({
-            output: message,
-            structured_result: message,
-            success: false,
-            duration_ns: elapsedNs(toolStartedAt),
-          });
+          const receipt = { output: message, structured_result: message, success: false,
+            metadata: null, thrown: true, failure: journal ? retainedFailure(error) : null, value: null };
+          await retain(receipt);
+          complete({ output: receipt.output, structured_result: receipt.structured_result,
+              success: receipt.success, metadata: receipt.metadata });
           throw error;
         }
-        complete({
-          output,
-          structured_result: structured,
-          success,
-          duration_ns: elapsedNs(toolStartedAt),
-          metadata,
-        });
+        const receipt = { output, structured_result: structured, success, metadata,
+          thrown: false, value: toolValue(result) ?? null,
+          ...(toolValue(result) === undefined ? { valueUndefined: true } : {}) };
+        const valueRef = toolValue(result) === undefined ? undefined
+          : !isToolResult(result) || result.value === result.structuredResult ? "structured_result"
+          : result.value === output ? "output" : undefined;
+        const rawOutput = isToolResult(result) ? result.output : result;
+        const outputJsonRef = typeof output === "string" && rawOutput !== undefined && typeof rawOutput !== "string"
+          && (!isToolResult(result) || result.output === result.structuredResult) ? "structured_result" : undefined;
+        await retain(receipt, valueRef, outputJsonRef);
+        complete({ output: receipt.output, structured_result: receipt.structured_result,
+              success: receipt.success, metadata: receipt.metadata });
         if (!success) throw toolValue(result);
         return toolValue(result);
       }
@@ -355,6 +596,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         if (error !== EXIT) throw error;
       }
       if (execution.interruption) throw execution.interruption;
+      if (execution.recoveryFailure) throw execution.recoveryFailure;
       closePendingCalls();
       return JSON.stringify({
         output: withStatus("Script completed", startedAt, content),
@@ -896,4 +1138,62 @@ function parseCellOptions(encoded, allowed, nullable = [], ignoreUnknown = false
     }
   }
   return value;
+}
+
+// Preserve guest-observable failure kind/code when replaying a failed handler.
+function effectFailure(error) {
+  if (!(error instanceof Error)) return { kind: "value", value: error ?? null,
+    ...(error === undefined ? { undefined: true } : {}) };
+  const value = { message: error.message, name: error.name, stack: error.stack };
+  for (const key of ["code", "details"]) {
+    if (error[key] !== undefined) value[key] = error[key];
+  }
+  return { kind: "error", value };
+}
+function validEffectFailure(failure) {
+  return failure?.kind === "value" ? Object.hasOwn(failure, "value")
+    : failure?.kind === "error" && typeof failure.value?.message === "string";
+}
+function restoreEffectFailure(failure) {
+  if (failure?.kind === "value") return failure.undefined ? undefined : failure.value;
+  if (failure?.kind !== "error" || typeof failure.value?.message !== "string") {
+    return new Error("invalid retained nested failure");
+  }
+  const constructors = { Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError };
+  const Constructor = Object.hasOwn(constructors, failure.value.name) ? constructors[failure.value.name] : Error;
+  return Object.assign(new Constructor(failure.value.message), failure.value);
+}
+
+// Receipt serialization is bounded BEFORE allocating JSON clones or multiplying
+// output/structured/value representations. The managed adapter may encode this
+// snapshot once more, but can never receive an unbounded post-effect payload.
+// Reject rather than truncate: truncated data is not an exact replay receipt.
+const MAX_EFFECT_RECEIPT_BYTES = 8 * 1024 * 1024;
+function boundedEffectSnapshot(value, label) {
+  let budget = MAX_EFFECT_RECEIPT_BYTES;
+  let nodes = 0;
+  try {
+    const encoded = JSON.stringify(value, (key, item) => {
+      if (++nodes > 32768) throw new RangeError("too many receipt entries");
+      if (typeof item === "function" || typeof item === "symbol"
+        || (typeof item === "number" && !Number.isFinite(item))) {
+        throw new TypeError("receipt contains a non-JSON value");
+      }
+      budget -= key.length * 3 + 4;
+      if (typeof item === "string") {
+        // UTF-8 and escaping never require less space than the UTF-16 length.
+        // Check first so JSON.stringify(item) cannot allocate a giant string.
+        if (item.length > budget) throw new RangeError("receipt too large");
+        budget -= new TextEncoder().encode(JSON.stringify(item)).byteLength;
+      } else budget -= 24;
+      if (budget < 0) throw new RangeError("receipt too large");
+      return item;
+    });
+    if (encoded === undefined || new TextEncoder().encode(encoded).byteLength > MAX_EFFECT_RECEIPT_BYTES) {
+      throw new RangeError("receipt too large or not serializable");
+    }
+    return JSON.parse(encoded);
+  } catch (cause) {
+    throw new TypeError(`${label} must be JSON-serializable within the 8 MiB receipt limit; execution outcome unknown`, { cause });
+  }
 }

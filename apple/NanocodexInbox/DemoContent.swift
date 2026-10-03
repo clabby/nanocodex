@@ -400,6 +400,14 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
     private static let queue = DispatchQueue(label: "nanocodex.startup-fixture")
     private static var historyLive = false
     private static var crmFailed = false
+    // Opt-in external-backend replacement only. The production create/send,
+    // durable PendingMessage admission and native composers are not bypassed.
+    private static var composerJourney: Bool { ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_COMPOSER_JOURNEY"] == "1" }
+    private static var composerCreationFailed = false
+    private static var composerAgents: [String: String] = [:] // creation idempotency -> agent
+    private static var composerAdmissions: [String: [String: Any]] = [:]
+    private static var composerEvents: [String: [[String: Any]]] = [:]
+    private static var composerStreams: [String: StartupFixtureProtocol] = [:]
     private static var historyStreams: [String: StartupFixtureProtocol] = [:]
     private static var historyPages: Int { ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_LIVE_READING"] == "1" ? 3 : historyMedia ? 6 : 20 }
     private static let historyPageSize = 128
@@ -411,6 +419,8 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
     private var meetingTask: URLSessionDataTask?
     private var meetingSession: URLSession?
     private let requestID = UUID().uuidString
+    private var composerBody = Data()
+    private var composerStreamCursor = 0
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host?.hasPrefix("startup-fixture-") == true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     private func record(_ phase: String, bytes: Int? = nil) {
@@ -418,6 +428,15 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
                                     "query": request.url!.query ?? "", "method": request.httpMethod ?? "GET",
                                     "time": ProcessInfo.processInfo.systemUptime, "process": ProcessInfo.processInfo.processIdentifier]
         if let bytes { event["bytes"] = bytes }
+        if Self.composerJourney {
+            // Whitelist request evidence. Never serialize headers, credentials,
+            // context/location, or the entire URLRequest into the fixture log.
+            event["idempotency"] = request.value(forHTTPHeaderField: "Idempotency-Key") ?? ""
+            if let payload = (try? JSONSerialization.jsonObject(with: composerBody)) as? [String: Any] {
+                event["input"] = payload["input"]
+                event["id"] = payload["id"]
+            }
+        }
         let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("startup-requests.jsonl")
         let data = (try! JSONSerialization.data(withJSONObject: event)) + Data("\n".utf8)
         if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
@@ -429,6 +448,7 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         Self.queue.async { [self] in
             guard !stopped else { return }
+            if Self.composerJourney, request.url?.path.hasPrefix("/v1/agents") == true { composerBody = readComposerBody() }
             record("start")
             // A second process launch reuses the on-disk account cache while
             // every transport operation fails, including roster and history.
@@ -438,6 +458,7 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
                 return
             }
             let path = request.url!.path
+            if Self.composerJourney, serveComposerJourney(path) { return }
             // Only the simulator fixture may bridge meetings to a real local
             // Worker. Account bootstrap remains synthetic; meeting responses,
             // database persistence and mutation semantics are never mocked.
@@ -564,7 +585,169 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
     }
     override func stopLoading() {
         Self.queue.async { [self] in
-            stopped = true; meetingTask?.cancel(); meetingSession?.invalidateAndCancel(); meetingTask = nil; meetingSession = nil; Self.historyStreams[requestID] = nil; record("stop")
+            stopped = true; meetingTask?.cancel(); meetingSession?.invalidateAndCancel(); meetingTask = nil; meetingSession = nil; Self.historyStreams[requestID] = nil; Self.composerStreams[requestID] = nil; record("stop")
+        }
+    }
+
+    /// URLSession may move a POST body to httpBodyStream. Consume it once on
+    /// the fixture serial queue, retaining only the synthetic payload in memory.
+    private func readComposerBody() -> Data {
+        if let data = request.httpBody { return data }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open(); defer { stream.close() }
+        var data = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count <= 0 { break }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+        return data
+    }
+
+    private static func composerHistory(_ id: String) -> [[String: Any]] {
+        if let events = composerEvents[id] { return events }
+        return [["cursor": "1", "type": "turn_completed", "turn_id": "fixture-saved-" + id,
+                 "final_message": "Loaded \(id) conversation."]]
+    }
+
+    /// Return only ordinary managed API JSON/SSE. Visible evidence is an
+    /// assistant transcript produced by normal event projection, not fixture UI.
+    private func serveComposerJourney(_ path: String) -> Bool {
+        guard path == "/v1/agents" || path.hasPrefix("/v1/agents/") else { return false }
+        let method = request.httpMethod ?? "GET"
+        let id = request.url!.pathComponents.dropFirst(3).first ?? "saved"
+        let key = request.value(forHTTPHeaderField: "Idempotency-Key") ?? ""
+        let payload = (try? JSONSerialization.jsonObject(with: composerBody)) as? [String: Any]
+        let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let stream = path.hasSuffix("/events")
+        var status = 200, delay = 0.05
+        var body: [String: Any] = [:]
+        var admitted = false
+        if path == "/v1/agents", method == "POST" {
+            delay = 1.0 // allow prepare/send + durable outbox flush to share the real creation task
+            if !composerBody.isEmpty || key.isEmpty {
+                status = 400; body = ["error": "fixture_invalid_creation_contract"]
+            } else if ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_COMPOSER_CREATE_FAIL_ONCE"] == "1", !Self.composerCreationFailed {
+                // Definite pre-creation failure; retry may safely reuse the key.
+                Self.composerCreationFailed = true
+                status = 503; body = ["error": "fixture_creation_not_admitted"]
+                record("composer-create-rejected")
+            } else {
+                let created = Self.composerAgents[key] ?? "composer-agent-\(Self.composerAgents.count + 1)"
+                Self.composerAgents[key] = created
+                if Self.composerEvents[created] == nil { Self.composerEvents[created] = [] }
+                body = ["agent_id": created]
+                record("composer-created")
+            }
+        } else if path == "/v1/agents", method == "GET" {
+            let ids = Self.composerAgents.values.sorted() + ["saved", "other", "slow"]
+            var summaries: [String: Any] = [:]
+            for agent in ids {
+                summaries[agent] = ["title": agent.hasPrefix("composer-agent-") ? "Composer journey" : "\(agent.capitalized) conversation",
+                                    "updated_at": Date().timeIntervalSince1970 * 1000, "turn_count": Self.composerAdmissions.values.filter { $0["agent_id"] as? String == agent }.count]
+            }
+            body = ["data": ids, "summaries": summaries]
+        } else if path.hasSuffix("/turns"), method == "POST" {
+            guard let turnID = payload?["id"] as? String, !turnID.isEmpty,
+                  let input = payload?["input"] as? String, key == "inbox:" + turnID,
+                  Self.composerAgents.values.contains(id) else {
+                finishComposerResponse(["error": "fixture_invalid_admission_contract"], status: 400, stream: false, agentID: id, admitted: false, delay: delay)
+                return true
+            }
+            if let prior = Self.composerAdmissions[key] {
+                if prior["agent_id"] as? String != id || prior["input"] as? String != input {
+                    status = 409; body = ["error": "fixture_idempotency_conflict"]
+                } else {
+                    body = ["turn_id": turnID, "accepted_cursor": prior["accepted_cursor"]!]
+                }
+            } else {
+                let cursor = (Self.composerEvents[id]?.count ?? 0) + 1
+                Self.composerAdmissions[key] = ["agent_id": id, "input": input, "turn_id": turnID, "accepted_cursor": String(cursor)]
+                // Publish a snapshot of the actual external request recorder,
+                // not merely a label/count synthesized by UI or model state.
+                let evidence = composerTransportLedger()
+                Self.composerEvents[id, default: []] += [
+                    ["cursor": String(cursor), "type": "turn_accepted", "turn_id": turnID, "input": input],
+                    ["cursor": String(cursor + 1), "type": "turn_completed", "turn_id": turnID, "final_message": evidence]
+                ]
+                body = ["turn_id": turnID, "accepted_cursor": String(cursor)]
+                admitted = true; record("composer-admitted")
+            }
+        } else if path.hasSuffix("/events/history") {
+            let all = Self.composerHistory(id)
+            let before = query.first { $0.name == "before" }?.value.flatMap(Int.init)
+            let after = query.first { $0.name == "after" }?.value.flatMap(Int.init)
+            let events = all.filter { event in
+                let cursor = Int(event["cursor"] as? String ?? "0") ?? 0
+                return (before == nil || cursor < before!) && (after == nil || cursor > after!)
+            }
+            body = ["data": events, "has_more": false, "latest_cursor": all.last?["cursor"] ?? "0"]
+        } else if stream {
+            composerStreamCursor = query.first { $0.name == "cursor" }?.value.flatMap(Int.init) ?? 0
+        } else if path.hasSuffix("/triggers") {
+            body = ["data": []]
+        } else if path.contains("/turns/"), method == "GET" {
+            let turnID = request.url!.lastPathComponent
+            body = Self.composerAdmissions.values.first { $0["turn_id"] as? String == turnID && $0["agent_id"] as? String == id } ?? [:]
+        } else if path == "/v1/agents/" + id, method == "GET" {
+            body = ["agent_id": id, "latest_event_cursor": Self.composerHistory(id).last?["cursor"] ?? "0", "active_turns": []]
+        } else {
+            status = 404; body = ["error": "fixture_unsupported_agent_operation"]
+        }
+        finishComposerResponse(body, status: status, stream: stream, agentID: id, admitted: admitted, delay: delay)
+        return true
+    }
+
+    private func composerTransportLedger() -> String {
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("startup-requests.jsonl")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let entries: [[String: Any]] = text.split(separator: "\n").compactMap { line in
+            guard let data = String(line).data(using: .utf8),
+                  let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  event["process"] as? Int == Int(ProcessInfo.processInfo.processIdentifier),
+                  event["phase"] as? String == "start", event["method"] as? String == "POST",
+                  let path = event["path"] as? String,
+                  path == "/v1/agents" || (path.hasPrefix("/v1/agents/") && path.hasSuffix("/turns")) else { return nil }
+            var request: [String: Any] = ["method": "POST", "path": path, "idempotency": event["idempotency"] ?? ""]
+            request["input"] = event["input"]; request["id"] = event["id"]
+            return request
+        }
+        let data = try! JSONSerialization.data(withJSONObject: entries, options: [.sortedKeys, .withoutEscapingSlashes])
+        return "Composer fixture transport ledger: " + String(decoding: data, as: UTF8.self)
+    }
+
+    private func finishComposerResponse(_ body: [String: Any], status: Int, stream: Bool, agentID: String, admitted: Bool, delay: Double) {
+        let data = stream ? Data(": keepalive\n\n".utf8) : (try! JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]))
+        Self.queue.asyncAfter(deadline: .now() + delay) { [self] in
+            guard !stopped else { return }
+            record("response", bytes: data.count)
+            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": stream ? "text/event-stream" : "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            if stream {
+                Self.composerStreams[requestID] = self
+                emitComposerEvents(agentID: agentID)
+            } else {
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            if admitted {
+                for subscriber in Self.composerStreams.values where subscriber.request.url?.path == "/v1/agents/" + agentID + "/events" {
+                    subscriber.emitComposerEvents(agentID: agentID)
+                }
+            }
+        }
+    }
+
+    private func emitComposerEvents(agentID: String) {
+        guard !stopped else { return }
+        for event in Self.composerHistory(agentID) {
+            let cursor = Int(event["cursor"] as? String ?? "0") ?? 0
+            guard cursor > composerStreamCursor else { continue }
+            let data = try! JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
+            let frame = Data("id: \(cursor)\ndata: ".utf8) + data + Data("\n\n".utf8)
+            client?.urlProtocol(self, didLoad: frame)
+            composerStreamCursor = cursor
         }
     }
 

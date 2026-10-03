@@ -12,12 +12,17 @@ keywords.workspace = true
 categories.workspace = true
 description = "Composable task-tree subagents for Nanocodex"
 
+[features]
+default = []
+claude = ["dep:nanocodex-claude"]
+
 [dependencies]
 async-trait.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true
 nanocodex-agent.workspace = true
-nanocodex-tools = { workspace = true, features = ["code-mode"] }
+nanocodex-claude = { workspace = true, optional = true }
+nanocodex-oai-tools = { workspace = true, features = ["code-mode"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync"] }

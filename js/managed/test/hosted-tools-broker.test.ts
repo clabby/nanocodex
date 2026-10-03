@@ -237,8 +237,6 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     }));
 
     expect(fixture.persistence.state(firstRoute)?.lease_expires_at).toBe(NOW + 10);
-    await fixture.broker.message(host.webSocket, JSON.stringify({ type: "ping", nonce: "" }));
-    expect(fixture.persistence.state(firstRoute)?.lease_expires_at).toBe(NOW + 10);
 
     fixture.persistence.routes.get(firstRoute)!.lease_expires_at = NOW - 1;
     fixture.broker.expire();
@@ -290,7 +288,12 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     }));
 
     now += 40_000;
-    await fixture.broker.message(host.webSocket, JSON.stringify({ type: "ping", nonce: "renew" }));
+    const command = fixture.broker.machineTool("leased-vm", "exec_command")!;
+    const invoked = command.handler({ cmd: "true" }, { sessionId: "session", callId: "renew-command", model: "fixture" });
+    await vi.waitFor(() => expect(host.sent.some(frame => frame.type === "call")).toBe(true));
+    const call = host.sent.find(frame => frame.type === "call")!;
+    await fixture.broker.message(host.webSocket, result(String(call.call_id), "ok"));
+    await invoked;
     expect(renew).toHaveBeenCalledWith({
       expectedAttachmentId: "leased-vm",
       fixedRouteId: route,
@@ -304,7 +307,7 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     expect(fixture.broker.machineOnRoute(route, "leased-vm")).toBeDefined();
 
     renew.mockResolvedValueOnce(undefined as never);
-    await fixture.broker.message(host.webSocket, JSON.stringify({ type: "ping", nonce: "stale" }));
+    await command.handler({ cmd: "true" }, { sessionId: "session", callId: "revoked-command", model: "fixture" });
     expect(host.closed).toMatchObject({ code: 1008 });
     expect(fixture.broker.machineOnRoute(route, "leased-vm")).toBeUndefined();
   });
@@ -531,12 +534,8 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     expect(fixture.broker.provider().definitions().map((definition) => definition.name))
       .toEqual([]);
 
-    fixture.persistence.routes.get("user:machine-a")!.lease_expires_at = NOW + 1;
-    const routeBExpiry = fixture.persistence.routes.get("user:machine-b")!.lease_expires_at;
-    await fixture.broker.message(replacementA.webSocket, JSON.stringify({ type: "ping", nonce: "alive" }));
-    expect(replacementA.sent.at(-1)).toEqual({ type: "pong", nonce: "alive" });
-    expect(fixture.persistence.routes.get("user:machine-a")!.lease_expires_at).toBeGreaterThan(NOW + 1);
-    expect(fixture.persistence.routes.get("user:machine-b")!.lease_expires_at).toBe(routeBExpiry);
+    expect(fixture.persistence.routes.get("user:machine-a")!.lease_expires_at).toBe(Number.MAX_SAFE_INTEGER);
+    expect(fixture.persistence.routes.get("user:machine-b")!.lease_expires_at).toBe(Number.MAX_SAFE_INTEGER);
 
     await fixture.broker.message(replacementA.webSocket, JSON.stringify({ type: "drain" }));
     expect(fixture.broker.machineTool("machine-a", "exec_command")).toBeUndefined();
@@ -820,13 +819,15 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     "@cf/moonshotai/kimi-k2.5",
   ])("durably dispatches model %s and ACKs both the result and duplicate receipt", async (model) => {
     const onCallTiming = vi.fn(() => { throw new Error("diagnostic sink failed"); });
-    const fixture = createFixture(undefined, { onCallTiming });
+    const onCallObservation = vi.fn<NonNullable<HostedToolsBrokerOptions["onCallObservation"]>>(() => { throw new Error("observation sink failed"); });
+    const fixture = createFixture(undefined, { onCallTiming, onCallObservation });
     const host = fixture.socket();
     await catalog(fixture.broker, host);
     const tool = fixture.broker.provider().resolve("fixture__lookup")!;
     const pending = tool.handler({ id: "42" }, {
       sessionId: "session:1",
       callId: "source:1",
+      threadId: "thread:1",
       model,
     });
     const call = host.sent.find((frame) => frame.type === "call")!;
@@ -851,6 +852,16 @@ describe("HostedToolsBroker socket-owned protocol", () => {
       session_id: "session:1", source_call_id: "source:1", transport_call_id: IDS[1],
       admission_ms: expect.any(Number), roundtrip_ms: expect.any(Number), settlement_ms: expect.any(Number),
     });
+    expect(onCallObservation.mock.calls.map(([entry]) => entry.stage)).toEqual([
+      "received", "admitted", "dispatched", "send_started", "sent", "ack_attempt", "ack_sent", "receipt", "terminal",
+      "ack_attempt", "ack_sent", "receipt_replay",
+    ]);
+    for (const [entry] of onCallObservation.mock.calls) {
+      expect(entry).toMatchObject({ session_id: "session:1", source_call_id: "source:1", thread_id: "thread:1", tool: "other" });
+      expect(JSON.stringify(entry)).not.toMatch(/fixture__lookup|diagnostic sink|observation sink/);
+      expect(entry).not.toHaveProperty("input");
+      expect(entry).not.toHaveProperty("output");
+    }
   });
 
   it("removes routing before acknowledging graceful drain while dispatched calls can finish", async () => {
@@ -1177,6 +1188,7 @@ function createFixture(
   options?: Readonly<{
     now?: () => number;
     onCallTiming?: HostedToolsBrokerOptions["onCallTiming"];
+    onCallObservation?: HostedToolsBrokerOptions["onCallObservation"];
     maxInFlight?: number;
     renewLeasedAttachment?: (renewal: {
       expectedAttachmentId: string;
@@ -1197,6 +1209,7 @@ function createFixture(
     persistence,
     now: options?.now ?? (() => NOW),
     onCallTiming: options?.onCallTiming,
+    onCallObservation: options?.onCallObservation,
     maxInFlight: options?.maxInFlight,
     ...(options?.renewLeasedAttachment === undefined ? {} : {
       renewLeasedAttachment: options.renewLeasedAttachment,
@@ -1360,6 +1373,10 @@ class MemoryPersistence implements HostedToolsBrokerPersistence {
     return [...this.calls.values()].filter((row) => row.lease_id === leaseId
       && row.generation === generation
       && (row.state === "admitted" || row.state === "dispatched")).length;
+  }
+  generationCalls(leaseId: string, generation: number): readonly CallRow[] {
+    return [...this.calls.values()].filter(row => row.lease_id === leaseId && row.generation === generation)
+      .map(row => structuredClone(row));
   }
   generationCallCount(leaseId: string, generation: number): number {
     return [...this.calls.values()].filter((row) => row.lease_id === leaseId

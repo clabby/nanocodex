@@ -30,7 +30,7 @@ provide both. VM allocations keep their own workspaces and identities.
 | SSH Linux server | Vault-bound SSH for native commands; `server_hand` installs a dedicated desktop container | Reachable SSH target, Docker access, enrollment, video/input, reconnect |
 | Browser viewer | Screens in Connect and agent terminals | Discovery, video/input, tab background/resume, host restart |
 | iPhone viewer/host | Shared native viewer; hosting uses a paired Mac bridge | Physical-device viewer and paired-host journey; simulator builds alone do not establish this |
-| Windows host | Native Rust Hand; GDI/FFmpeg H.264 WebRTC, native JPEG fallback when encoder startup fails | Interactive-session capture/input, reconnect, bundled encoder and fallback on a physical Windows host |
+| Windows host | Native Rust Hand; GDI/FFmpeg H.264 WebRTC; encoder failures stop video publication | Interactive-session capture/input, reconnect, bundled encoder and visible failure on a physical Windows host |
 | Service connections | Account credential broker with per-agent and per-connection grants | Connected inventory and a read-only request to each granted service |
 
 Mac-hosted factory VMs in this implementation are Linux guests. Linux server
@@ -44,7 +44,10 @@ Hand started directly on the device, whose normal connection is outbound.
 
 ## Transport and ownership
 
-WebRTC video and data channels are the default. Cloudflare sandboxes explicitly
+Native human live screens require WebRTC video and data channels. Encoder or
+WebRTC failure is visible; it never switches to JPEG polling. Agent-requested
+screenshot observations remain independent. Cloudflare sandboxes (`cf:`
+desktop/VM publications only) explicitly
 advertise `transport: "frames-v1"` and use authenticated WebSocket JPEG frames
 and input. VNC is not required. Wayland remains the Linux compositor/input backend.
 

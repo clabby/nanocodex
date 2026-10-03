@@ -19,7 +19,7 @@ use crate::{
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-use nanocodex::Model;
+use nanocodex_managed::ManagedModel as Model;
 use nanocodex_subagents::AgentUpdate;
 use ratatui::{
     Frame,
@@ -841,6 +841,10 @@ impl AppNode {
         self.render_split_hint(frame, area, divider_x);
     }
 
+    pub(crate) fn root_mut(&mut self, pane: PaneId) -> Option<&mut RootNode> {
+        self.pane_mut(pane).map(Node::component_mut)
+    }
+
     pub(crate) fn root(&self, pane: PaneId) -> Option<&RootNode> {
         self.pane(pane).map(Node::component)
     }
@@ -1249,24 +1253,24 @@ mod screen_tests {
             pane: PaneId::Main,
             enabled: true,
             provider: Some("Vercel".into()),
-            model: Some(Model::Glm53),
+            model: Some(Model::Oai(nanocodex::Model::Glm53)),
             effort: Some(ReasoningEffort::Low),
         });
         let composer = app.root(PaneId::Main).unwrap().composer();
         assert!(composer.auto_routing());
-        assert_eq!(composer.model(), Model::Glm53);
+        assert_eq!(composer.model(), Model::Oai(nanocodex::Model::Glm53));
         assert_eq!(composer.effort(), ReasoningEffort::Low);
         // A late update for an absent pane cannot replace the visible route.
         app.update(AppEvent::RoutingHydrated {
             pane: PaneId::Fork(99),
             enabled: true,
             provider: Some("OpenRouter".into()),
-            model: Some(Model::Sol),
+            model: Some(Model::Oai(nanocodex::Model::Sol)),
             effort: Some(ReasoningEffort::High),
         });
         assert_eq!(
             app.root(PaneId::Main).unwrap().composer().model(),
-            Model::Glm53
+            Model::Oai(nanocodex::Model::Glm53)
         );
     }
 

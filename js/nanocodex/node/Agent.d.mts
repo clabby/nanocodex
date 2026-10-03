@@ -2,6 +2,7 @@ import type {
   AgentLifecycle,
   AgentOptions,
   CodeEvaluator,
+  CodeEffectJournal,
   DefaultAgent,
   DurabilityStore,
   McpServers,
@@ -18,6 +19,7 @@ type ToolExposureOptions =
   | { mcp: McpServers; toolMode?: "code" | undefined };
 
 /** Creates a Node-hosted Rust/WASM Agent. */
+export function create(options: import('../runtime/claude.mjs').Options & { harness: 'claude' }): Promise<import('../runtime/claude.mjs').Agent>;
 export function create(options: create.ManagedOptions): Promise<AgentLifecycle>;
 export function create(options: create.Options): Promise<create.ReturnType>;
 export declare namespace create {
@@ -27,6 +29,8 @@ export declare namespace create {
   }>;
   type Options = AgentOptions & ToolExposureOptions & {
     codeEvaluator?: CodeEvaluator | undefined;
+    /** Opt-in durable direct-tool and nested Code Mode receipts for safe cold recovery. */
+    codeEffectJournal?: CodeEffectJournal | undefined;
     /** Caller-owned rooted filesystem mounted through standard workspace tools. */
     filesystem?: Workspace | undefined;
     module?: unknown;

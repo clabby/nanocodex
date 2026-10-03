@@ -1,3 +1,5 @@
+import { tryExecuteBinaryCommand } from "./shell-binary.mjs";
+import { createSearchCommands } from "./shell-search.mjs";
 import { namedTool } from "./namedTool.mjs";
 import {
   EXEC_COMMAND_PARAMETERS,
@@ -10,55 +12,28 @@ const OUTPUT_TRUNCATION_NOTICE = "\n[output truncated by exec_command]";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-// The host owns resources and cancellation. Interpreter ceilings must not
-// turn otherwise valid commands, repositories, or data files into errors.
-// Just Bash's bounded builders require safe integers, so use JavaScript's
-// largest exact integer instead of Infinity for effectively unbounded work.
-const PRACTICALLY_UNBOUNDED = Number.MAX_SAFE_INTEGER;
-const UNLIMITED_EXECUTION_LIMITS = Object.freeze({
-  maxSourceBytes: PRACTICALLY_UNBOUNDED,
-  maxExecDepth: PRACTICALLY_UNBOUNDED,
-  maxCallDepth: PRACTICALLY_UNBOUNDED,
-  maxCommandCount: PRACTICALLY_UNBOUNDED,
-  maxLoopIterations: PRACTICALLY_UNBOUNDED,
-  maxAwkIterations: PRACTICALLY_UNBOUNDED,
-  maxSedIterations: PRACTICALLY_UNBOUNDED,
-  maxJqIterations: PRACTICALLY_UNBOUNDED,
-  maxQueryTokens: PRACTICALLY_UNBOUNDED,
-  maxQueryDepth: PRACTICALLY_UNBOUNDED,
-  maxQueryElements: PRACTICALLY_UNBOUNDED,
-  maxAwkParserTokens: PRACTICALLY_UNBOUNDED,
-  maxAwkParserDepth: PRACTICALLY_UNBOUNDED,
-  maxAwkParserOperations: PRACTICALLY_UNBOUNDED,
-  maxCsvRows: PRACTICALLY_UNBOUNDED,
-  maxCsvCells: PRACTICALLY_UNBOUNDED,
-  maxWorkUnits: PRACTICALLY_UNBOUNDED,
-  maxTraversalEntries: PRACTICALLY_UNBOUNDED,
-  maxTraversalDepth: PRACTICALLY_UNBOUNDED,
-  maxTraversalWork: PRACTICALLY_UNBOUNDED,
-  maxLiveBytes: PRACTICALLY_UNBOUNDED,
-  maxInputBytes: PRACTICALLY_UNBOUNDED,
-  maxFileSystemBytes: PRACTICALLY_UNBOUNDED,
-  maxDatabaseBytes: PRACTICALLY_UNBOUNDED,
-  maxDatabaseResultBytes: PRACTICALLY_UNBOUNDED,
-  maxArchiveBytes: PRACTICALLY_UNBOUNDED,
-  maxArchiveCompressedBytes: PRACTICALLY_UNBOUNDED,
-  maxArchiveEntryBytes: PRACTICALLY_UNBOUNDED,
-  maxArchiveEntries: PRACTICALLY_UNBOUNDED,
-  maxWorkerMessageBytes: PRACTICALLY_UNBOUNDED,
-  maxExecutionTimeMs: PRACTICALLY_UNBOUNDED,
-  maxSqliteTimeoutMs: PRACTICALLY_UNBOUNDED,
-  maxPythonTimeoutMs: PRACTICALLY_UNBOUNDED,
-  maxJsTimeoutMs: PRACTICALLY_UNBOUNDED,
-  maxGlobOperations: PRACTICALLY_UNBOUNDED,
-  maxStringLength: PRACTICALLY_UNBOUNDED,
-  maxArrayElements: PRACTICALLY_UNBOUNDED,
-  maxHeredocSize: PRACTICALLY_UNBOUNDED,
-  maxSubstitutionDepth: PRACTICALLY_UNBOUNDED,
-  maxBraceExpansionResults: PRACTICALLY_UNBOUNDED,
-  maxOutputSize: PRACTICALLY_UNBOUNDED,
-  maxFileDescriptors: PRACTICALLY_UNBOUNDED,
-  maxSourceDepth: PRACTICALLY_UNBOUNDED,
+// Resource ceilings are defense in depth, not a timer-based CPU sandbox.
+// Optimized commands yield inside their loops; synchronous fallback work is
+// admitted before it enters the bundled interpreter's regex engine.
+const DEFAULT_EXECUTION_LIMITS = Object.freeze({
+  maxSourceBytes: 1024 * 1024, maxExecDepth: 64, maxCallDepth: 64,
+  maxCommandCount: 10_000, maxLoopIterations: 100_000,
+  maxAwkIterations: 100_000, maxSedIterations: 100_000, maxJqIterations: 1_000_000,
+  maxQueryTokens: 100_000, maxQueryDepth: 256, maxQueryElements: 100_000,
+  maxAwkParserTokens: 100_000, maxAwkParserDepth: 128, maxAwkParserOperations: 1_000_000,
+  maxCsvRows: 100_000, maxCsvCells: 1_000_000, maxWorkUnits: 1_000_000,
+  maxTraversalEntries: 100_000, maxTraversalDepth: 256, maxTraversalWork: 1_000_000,
+  maxLiveBytes: 48 * 1024 * 1024, maxInputBytes: 32 * 1024 * 1024,
+  maxFileSystemBytes: 256 * 1024 * 1024, maxDatabaseBytes: 16 * 1024 * 1024,
+  maxDatabaseResultBytes: 16 * 1024 * 1024, maxArchiveBytes: 32 * 1024 * 1024,
+  maxArchiveCompressedBytes: 32 * 1024 * 1024, maxArchiveEntryBytes: 32 * 1024 * 1024,
+  maxArchiveEntries: 100_000, maxWorkerMessageBytes: 16 * 1024 * 1024,
+  maxExecutionTimeMs: 30_000, maxSqliteTimeoutMs: 10_000,
+  maxPythonTimeoutMs: 10_000, maxJsTimeoutMs: 10_000, maxGlobOperations: 100_000,
+  maxStringLength: 16 * 1024 * 1024, maxArrayElements: 100_000,
+  maxHeredocSize: 1024 * 1024, maxSubstitutionDepth: 64,
+  maxBraceExpansionResults: 10_000, maxOutputSize: 4 * 1024 * 1024,
+  maxFileDescriptors: 128, maxSourceDepth: 32,
 });
 
 const DEFAULT_INTERPRETER_SPECIFIER = "just-bash/browser";
@@ -79,7 +54,7 @@ export async function justBash(options) {
   validateWorkspace(options.filesystem);
   const executionTimeoutMs = positiveInteger(
     options.executionTimeoutMs,
-    undefined,
+    DEFAULT_EXECUTION_LIMITS.maxExecutionTimeMs,
     "executionTimeoutMs",
   );
   const maxEntries = options.maxEntries === undefined
@@ -88,13 +63,14 @@ export async function justBash(options) {
     MAX_OUTPUT_TOKENS,
     positiveInteger(options.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, "maxOutputTokens"),
   );
-  const shellFilesystem = new WorkspaceShellFileSystem(options.filesystem, maxEntries);
+  const shellFilesystem = new WorkspaceShellFileSystem(options.filesystem, maxEntries, options.executionLimits?.maxInputBytes ?? DEFAULT_EXECUTION_LIMITS.maxInputBytes);
   // Shared workspaces refresh before every command. Opening here duplicates
   // the first refresh and puts a remote storage listing on chat-only startup.
   if (!options.refreshFilesystemBeforeExec) await shellFilesystem.open();
   const filesystem = shellFilesystem.workspace();
   const runtime = await createJustBashRuntime({
     filesystem: shellFilesystem,
+    binaryIO: options.binaryIO,
     lazyInitialize: options.lazyInitialize === true,
     loadInterpreter: options.loadInterpreter,
     cwd: filesystem.root,
@@ -114,7 +90,7 @@ export async function justBash(options) {
     aroundExecute: options.refreshFilesystemBeforeExec
       ? async ({ execute, signal }) => {
         signal.throwIfAborted();
-        await shellFilesystem.open();
+        await shellFilesystem.open(signal);
         signal.throwIfAborted();
         return execute();
       }
@@ -123,6 +99,7 @@ export async function justBash(options) {
     defaultMaxOutputTokens: maxOutputTokens,
     maxOutputTokens,
     executionLimits: {
+      ...options.executionLimits,
       ...(executionTimeoutMs === undefined ? {} : { maxExecutionTimeMs: executionTimeoutMs }),
       ...(maxEntries === undefined ? {} : { maxTraversalEntries: maxEntries }),
     },
@@ -145,7 +122,7 @@ export async function createJustBashRuntime(options) {
   const cwd = normalizeRoot(requiredString(options.cwd, "cwd"));
   const executionTimeoutMs = positiveInteger(
     options.executionTimeoutMs,
-    undefined,
+    DEFAULT_EXECUTION_LIMITS.maxExecutionTimeMs,
     "executionTimeoutMs",
   );
   const defaultMaxOutputTokens = positiveInteger(
@@ -161,7 +138,7 @@ export async function createJustBashRuntime(options) {
   if (defaultMaxOutputTokens > maxOutputTokens) {
     throw new RangeError("defaultMaxOutputTokens cannot exceed maxOutputTokens");
   }
-  const executionLimits = Object.freeze({ ...UNLIMITED_EXECUTION_LIMITS, ...options.executionLimits });
+  const executionLimits = Object.freeze({ ...DEFAULT_EXECUTION_LIMITS, ...options.executionLimits });
   // Do not evaluate just-bash/browser on chat-only managed turns. Initialization
   // is shared across concurrent first commands; the existing execution tail
   // still serializes refresh + command execution after initialization.
@@ -170,15 +147,16 @@ export async function createJustBashRuntime(options) {
   let bash;
   let registeredCommands;
   let initialization;
-  const initialize = () => {
-    if (initialization) return initialization;
+  const initialize = (signal) => {
+    if (initialization) return awaitInitialization(initialization, signal);
     const attempt = (async () => {
     const { Bash, defineCommand } = await (options.loadInterpreter?.() ?? import(DEFAULT_INTERPRETER_SPECIFIER));
+    if (initialization !== attempt) return undefined;
     const customCommands = typeof options.customCommands === "function"
       ? await options.customCommands({ defineCommand })
       : options.customCommands;
-    registeredCommands = customCommands;
-    bash = new Bash({
+    if (initialization !== attempt) return undefined;
+    const loaded = new Bash({
       cwd,
       env: options.env,
       fs: options.filesystem,
@@ -187,7 +165,7 @@ export async function createJustBashRuntime(options) {
         : options.network === false || options.network === undefined
           ? {}
           : { network: options.network }),
-      ...(customCommands === undefined ? {} : { customCommands: [...customCommands] }),
+      customCommands: [...createSearchCommands({ Bash }), ...customCommands ?? []],
       executionLimitProfile: "normal",
       // Allocation builders require safe integer capacities, even for tiny output.
       executionLimits: {
@@ -196,13 +174,24 @@ export async function createJustBashRuntime(options) {
         maxStringLength: Math.min(executionLimits.maxStringLength, Number.MAX_SAFE_INTEGER),
       },
     });
-    return bash;
+    // An abandoned loader must never publish into a later initialization.
+    if (initialization === attempt) {
+      registeredCommands = customCommands;
+      bash = loaded;
+    }
+    return loaded;
     })();
     initialization = attempt;
     // A failed first import/build must not poison all later shell calls.
     void attempt.catch(() => { if (initialization === attempt) initialization = undefined; });
-    return attempt;
+    return awaitInitialization(attempt, signal);
   };
+  function awaitInitialization(attempt, signal) {
+    return abortable(attempt, signal).catch((error) => {
+      if (signal?.aborted && initialization === attempt) initialization = undefined;
+      throw error;
+    });
+  }
   if (!options.lazyInitialize || typeof options.customCommands === "function") await initialize();
   const descriptor = describeRuntime({
     commands: bash ? [...bash.commands.keys()] : [
@@ -232,7 +221,7 @@ export async function createJustBashRuntime(options) {
       const execute = async () => {
         const startedAt = now();
         return executeCommand({
-          bash: await initialize(),
+          initialize,
           startedAt,
           input,
           root: cwd,
@@ -241,6 +230,10 @@ export async function createJustBashRuntime(options) {
           defaultMaxOutputTokens,
           maxOutputTokens,
           aroundExecute: options.aroundExecute,
+          filesystem: options.filesystem,
+          binaryIO: options.binaryIO,
+          executionLimits,
+          binaryEnabled: () => !registeredCommands?.some((command) => command.name === "cat" || command.name === "sha256sum"),
           outputTruncationNotice: options.outputTruncationNotice,
           retainNoticeWithinLimit: options.retainNoticeWithinLimit,
         });
@@ -255,7 +248,7 @@ export async function createJustBashRuntime(options) {
 }
 
 async function executeCommand({
-  bash,
+  initialize,
   startedAt,
   input,
   root,
@@ -264,6 +257,10 @@ async function executeCommand({
   defaultMaxOutputTokens,
   maxOutputTokens,
   aroundExecute,
+  filesystem,
+  binaryIO,
+  executionLimits,
+  binaryEnabled,
   outputTruncationNotice = OUTPUT_TRUNCATION_NOTICE,
   retainNoticeWithinLimit = true,
 }) {
@@ -297,10 +294,22 @@ async function executeCommand({
   );
   let result;
   try {
-    const execute = () => bash.exec(input.cmd, { cwd: workdir, signal: deadline.signal });
+    // Import and remote metadata are asynchronous host boundaries. Cancellation
+    // can release their waiter; synchronous interpreter work still needs admission.
+    const bash = await initialize(deadline.signal);
+    const execute = async () => {
+      const binary = binaryEnabled() ? await tryExecuteBinaryCommand({
+        bash, filesystem, command: input.cmd, cwd: workdir, root,
+        signal: deadline.signal, binaryIO, executionLimits,
+      }) : undefined;
+      return binary ?? bash.exec(input.cmd, { cwd: workdir, signal: deadline.signal });
+    };
     result = typeof aroundExecute === "function"
       ? await aroundExecute({ execute, signal: deadline.signal })
       : await execute();
+  } catch (error) {
+    if (!deadline.signal.aborted) throw error;
+    result = { stdout: "", stderr: "bash: execution aborted\n", exitCode: 124 };
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener("abort", abort);
@@ -338,7 +347,7 @@ function describeRuntime({
     customCommands: Object.freeze(customCommandNames.sort()),
     cwd,
     limits: Object.freeze(Object.fromEntries(Object.entries(executionLimits).filter(
-      ([, value]) => Number.isFinite(value) && value !== PRACTICALLY_UNBOUNDED,
+      ([, value]) => Number.isFinite(value) && value !== Number.MAX_SAFE_INTEGER,
     ))),
     network: Object.freeze({
       enabled: networkEnabled,
@@ -372,25 +381,27 @@ class WorkspaceShellFileSystem {
   #source;
   #root;
   #maxEntries;
+  #maxReadBytes;
   #entries = new Map();
   #children = new Map();
   #sortedPaths;
   #opened = false;
   #opening;
 
-  constructor(workspace, maxEntries) {
+  constructor(workspace, maxEntries, maxReadBytes) {
     this.#source = workspace;
     this.#root = normalizeRoot(workspace.root);
     this.#maxEntries = maxEntries;
+    this.#maxReadBytes = maxReadBytes;
     this.#set(this.#root, directoryEntry());
   }
 
-  async open() {
-    if (this.#opening) return this.#opening;
-    const opening = this.#refresh();
+  async open(signal) {
+    if (this.#opening) return abortable(this.#opening, signal);
+    const opening = this.#refresh(signal);
     this.#opening = opening;
     try {
-      await opening;
+      await abortable(opening, signal);
     } finally {
       if (this.#opening === opening) this.#opening = undefined;
     }
@@ -400,8 +411,9 @@ class WorkspaceShellFileSystem {
     if (!this.#opened || this.#opening) await this.open();
   }
 
-  async #refresh() {
-    const entries = await this.#source.list(".", { recursive: true, ...(this.#maxEntries === undefined ? {} : { maxEntries: this.#maxEntries }) });
+  async #refresh(signal) {
+    const entries = await abortable(this.#source.list(".", { recursive: true, ...(this.#maxEntries === undefined ? {} : { maxEntries: this.#maxEntries }) }), signal);
+    signal?.throwIfAborted();
     this.#entries.clear();
     this.#children.clear();
     this.#sortedPaths = undefined;
@@ -463,6 +475,7 @@ class WorkspaceShellFileSystem {
     if (absolute === "/dev/null") return new Uint8Array();
     const entry = this.#require(absolute);
     if (entry.kind !== "file") throw fsError("EISDIR", `${absolute} is a directory`);
+    if (entry.size > this.#maxReadBytes) throw fsError("EFBIG", `file exceeds shell input ceiling (${this.#maxReadBytes} bytes); use a native Hand for larger files`);
     return this.#source.readFile(absolute);
   }
 
@@ -837,9 +850,23 @@ function requiredString(value, name) {
 }
 
 function fsError(code, message) {
-  return Object.assign(new Error(message), { code });
+  // just-bash filesystem safety helpers inspect errno text, not only .code.
+  // Preserve both so a missing destination is provable, without treating
+  // permission/unsupported errors as absence or bypassing identity guards.
+  return Object.assign(new Error(`${code}: ${message}`), { code });
 }
 
 function now() {
   return globalThis.performance?.now?.() ?? Date.now();
+}
+
+// Only asynchronous host operations use this race. It cannot preempt CPU work.
+function abortable(promise, signal) {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const aborted = () => reject(signal.reason ?? new Error("execution aborted"));
+    signal.addEventListener("abort", aborted, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+  });
 }

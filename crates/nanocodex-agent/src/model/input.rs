@@ -4,7 +4,7 @@ use nanocodex_oai_api::{
         ContentItem, FunctionOutputBody, FunctionOutputContent, MessageRole, ResponseItem,
     },
 };
-use nanocodex_tools::contract::{ToolOutputBody, ToolOutputContent};
+use nanocodex_oai_tools::contract::{ToolOutputBody, ToolOutputContent};
 use serde_json::Value;
 
 use super::context::ContextSnapshot;
@@ -160,7 +160,7 @@ fn function_output(output: ToolOutputBody) -> FunctionOutputBody {
 mod tests {
     use super::*;
     use nanocodex_oai_api::{ImageDetail, PromptMessage};
-    use nanocodex_tools::contract::ToolOutputContent;
+    use nanocodex_oai_tools::contract::ToolOutputContent;
     use serde_json::json;
 
     #[test]

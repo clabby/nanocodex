@@ -181,7 +181,7 @@ func TestHostBroadcastStopDoesNotBlockViewerInput(t *testing.T) {
 	hostDone := make(chan error, 1)
 	go func() {
 		hostDone <- serveWayland(ctx, hostConfig{Origin: server.URL, CredentialFile: credential,
-			MachineID: "broadcast-test", Name: "Broadcast test", Width: 640, Height: 360,
+			MachineID: "cf:broadcast-test", Name: "Broadcast test", Width: 640, Height: 360,
 			Frames: true, quiet: true, capture: capture, broadcast: backend})
 	}()
 	t.Cleanup(func() {
@@ -346,7 +346,7 @@ func TestHostBroadcastExitCancelsBeforeBlockedPeerCleanup(t *testing.T) {
 	go func() {
 		defer close(hostExited)
 		hostErr = serveWayland(ctx, hostConfig{Origin: server.URL, CredentialFile: credential,
-			MachineID: "broadcast-exit-test", Name: "Broadcast exit test", Width: 640, Height: 360,
+			MachineID: "cf:broadcast-exit-test", Name: "Broadcast exit test", Width: 640, Height: 360,
 			Frames: true, quiet: true, capture: &waymoteCapture{input: input, done: make(chan struct{})}, broadcast: backend})
 	}()
 	t.Cleanup(func() {

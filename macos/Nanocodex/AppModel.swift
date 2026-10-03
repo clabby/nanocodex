@@ -112,6 +112,11 @@ final class AppModel: ObservableObject {
     private(set) var remotePhoneHost = RemoteMacHost()
     @Published var editingHand: Hand?
     @Published var settings = AgentSettings()
+    @Published private(set) var modelCatalog: ModelCatalog?
+    @Published private(set) var modelCatalogLoading = false
+    @Published private(set) var modelCatalogError: String?
+    private var modelCatalogRequest = UUID()
+
     @Published var selectedHandForLogs: Hand?
     @Published private(set) var phoneSignInActive = false
     @Published private(set) var phoneSignInStartedConnected = false
@@ -130,6 +135,8 @@ final class AppModel: ObservableObject {
     private let isolatedSession: Bool
     private var currentCredential: AccountKeychain.Credential? {
         didSet {
+            invalidateModelCatalog()
+            if currentCredential != nil { Task { await refreshModelCatalog() } }
             showingScheduledJobs = false
             meetingLibrary.reset()
             resetRemoteSharing()
@@ -157,9 +164,75 @@ final class AppModel: ObservableObject {
 
     @Published var showingScheduledJobs = false
 
+    private let modelConnectionConfiguration: URLSessionConfiguration
+
     func schedulesClient() throws -> ManagedClient {
         guard let credential = currentCredential else { throw APIError.invalidCredential }
-        return ManagedClient(credential: try .init(origin: credential.baseUrl, apiKey: credential.apiKey))
+        // Provider auth and model availability must not be persisted or served
+        // from a stale HTTP cache. Only presentation endpoints use snapshots.
+        let configuration = (modelConnectionConfiguration.copy() as? URLSessionConfiguration) ?? .ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return ManagedClient(credential: try .init(origin: credential.baseUrl, apiKey: credential.apiKey), configuration: configuration)
+    }
+
+    private func invalidateModelCatalog() {
+        modelCatalogRequest = UUID()
+        modelCatalog = nil; modelCatalogLoading = false; modelCatalogError = nil
+    }
+
+    func refreshModelCatalog() async {
+        let request = UUID(), epoch = generation
+        modelCatalogRequest = request
+        modelCatalog = nil; modelCatalogError = nil; modelCatalogLoading = true
+        defer { if epoch == generation, request == modelCatalogRequest { modelCatalogLoading = false } }
+        do {
+            let client = try schedulesClient(); defer { client.close() }
+            let received = try await client.modelCatalog()
+            guard epoch == generation, request == modelCatalogRequest else { return }
+            try Task.checkCancellation()
+            modelCatalog = received
+            if received.models.isEmpty { modelCatalogError = "Connect a model provider in Settings to start a conversation." }
+            reconcileDraftModels(received)
+        } catch {
+            guard epoch == generation, request == modelCatalogRequest else { return }
+            modelCatalogError = "Models could not be loaded. Refresh to try again."
+        }
+    }
+
+    // Catalog requests may finish before the runtime restores a saved layout.
+    // Reconcile both arrivals so stale unsent provider defaults cannot win the race.
+    private func reconcileDraftModels(_ received: ModelCatalog) {
+        // Normalize unsent drafts only. Retained history keeps its exact settings.
+        for index in tabs.indices where tabs[index].threadId == nil {
+            var draft = tabs[index].draftSettings ?? AgentSettings()
+            // A retained selection is intent, not an availability grant. Never
+            // reroute an unsent prompt to another provider during an outage.
+            if !draft.model.isEmpty {
+                if let choice = received.models.first(where: { $0.id == draft.model }) {
+                    draft.selectModel(choice); tabs[index].draftSettings = draft
+                }
+                continue
+            }
+            if let choice = received.models.first(where: { $0.id == received.defaultModel }) {
+                draft.selectModel(choice); tabs[index].draftSettings = draft
+            }
+        }
+        settings = settingsForTab(activeTabID)
+    }
+
+    func availableModel(_ id: String) -> ModelChoice? { modelCatalog?.models.first { $0.id == id } }
+    private func validSettings(_ value: AgentSettings) -> Bool {
+        guard let choice = availableModel(value.model) else { return false }
+        return choice.efforts.contains(value.thinking) && choice.reasoningModes.contains(value.reasoning_mode)
+            && (!value.fast_mode || choice.fastMode)
+    }
+    private func defaultDraftSettings() -> AgentSettings {
+        var value = AgentSettings()
+        if let choice = modelCatalog?.models.first(where: { $0.id == modelCatalog?.defaultModel }) { value.selectModel(choice) }
+        return value
     }
 
     func attachmentPreview(_ attachment: MessageAttachment, agentID: String) async throws -> Data {
@@ -236,9 +309,28 @@ final class AppModel: ObservableObject {
         return (snapshot(id)?.activeTurns ?? []).filter { !queued.contains($0) }
     }
     func isBusy(_ id: String? = nil) -> Bool { pendingMessages(id).contains { busyMessages.contains($0.id) } }
+    /// Managed Claude chats currently accept text only. Check the requested pane,
+    /// including retained conversations, before admitting any voice session.
+    func supportsVoice(_ id: String? = nil) -> Bool {
+        !settingsForTab(id ?? activeTabID).model.hasPrefix("claude-")
+    }
+    func modelSettingsLocked(_ id: String? = nil) -> Bool {
+        guard let threadID = tab(id)?.threadId else { return false }
+        return snapshot(id)?.hasAcceptedTurn == true
+            || (state.threads.first { $0.id == threadID }?.turnCount ?? 0) > 0
+            || snapshot(id)?.events.contains { !$0.data["model_route"]["model"].string.isEmpty } == true
+    }
+    func effortSettingsLocked(_ id: String? = nil) -> Bool {
+        modelSettingsLocked(id) && settingsForTab(id ?? activeTabID).model.hasPrefix("claude-")
+    }
+    private func permitsSettingsChange(_ next: AgentSettings, tabID: String) -> Bool {
+        let previous = settingsForTab(tabID)
+        if modelSettingsLocked(tabID), next.model != previous.model || next.reasoning_mode != previous.reasoning_mode { return false }
+        return !effortSettingsLocked(tabID) || next.thinking == previous.thinking
+    }
     func canSend(_ id: String? = nil) -> Bool {
         let ready = tab(id)?.threadId.map { snapshots[$0] != nil && threadErrors[$0] == nil } ?? true
-        return state.connected && !accountTransition && ready && preparingVoiceTabID != (id ?? activeTabID) && !isBusy(id) && !pendingMessages(id).contains { $0.phase == .failed }
+        return state.connected && !accountTransition && validSettings(settingsForTab(id ?? activeTabID)) && ready && preparingVoiceTabID != (id ?? activeTabID) && !isBusy(id) && !pendingMessages(id).contains { $0.phase == .failed }
     }
     func displayedTranscript(_ id: String? = nil) -> [MessageEntry] {
         let queued = pendingMessages(id)
@@ -262,7 +354,7 @@ final class AppModel: ObservableObject {
     func working(_ id: String? = nil) -> Bool { running(id) || pendingMessages(id).contains { $0.phase != .failed } }
     func hasDraft(_ id: String? = nil) -> Bool { !(tab(id)?.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }
     func handsForTab(_ id: String? = nil) -> [Hand] { connectedHands.filter { $0.agentId == nil || $0.agentId == tab(id)?.threadId } }
-    func settingsForTab(_ id: String) -> AgentSettings { snapshot(id)?.settings ?? tab(id)?.draftSettings ?? AgentSettings() }
+    func settingsForTab(_ id: String) -> AgentSettings { snapshot(id)?.settings ?? tab(id)?.draftSettings ?? defaultDraftSettings() }
     func update(for tab: WorkspaceTab) -> WorkspaceUpdate {
         let snapshot = tab.threadId.flatMap { snapshots[$0] }
         let events = tab.threadId.flatMap { reviewEvents[$0] } ?? snapshot?.events ?? []
@@ -484,7 +576,9 @@ final class AppModel: ObservableObject {
     var selectableHands: [Hand] { connectedHands.filter { $0.agentId == nil || $0.agentId == activeTab?.threadId } }
     var showsOnboarding: Bool { !state.connected || (phoneSignInActive && !phoneSignInStartedConnected) }
 
-    init(runtimeDirectory: String? = nil, backgroundPreferences: UserDefaults? = nil, remoteService: RemoteService? = nil) {
+    init(runtimeDirectory: String? = nil, backgroundPreferences: UserDefaults? = nil, remoteService: RemoteService? = nil,
+         modelConnectionConfiguration: URLSessionConfiguration = .ephemeral) {
+        self.modelConnectionConfiguration = (modelConnectionConfiguration.copy() as? URLSessionConfiguration) ?? .ephemeral
         self.remoteService = remoteService
         runtime = RuntimeClient(dataDirectory: runtimeDirectory)
         isolatedSession = runtimeDirectory != nil || ProcessInfo.processInfo.environment["NANOCODEX_DESKTOP_DATA"] != nil || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
@@ -561,6 +655,7 @@ final class AppModel: ObservableObject {
             workspaceMode = layout.workspaceMode == "tiles" && tiledTabIDs.count > 1 ? "tiles" : "single"; paneWidth = layout.paneWidth ?? 0
             pending = (layout.pendingMessages ?? []).map { value in var restored = value; restored.restore(); return restored }
             restoredLayout = true
+            if let modelCatalog { reconcileDraftModels(modelCatalog) }
         }
         if (!wasConnected || accountChanged), next.connected {
             connectDefaultHand()
@@ -569,6 +664,7 @@ final class AppModel: ObservableObject {
             Task { await restoreObservers() }
         }
         if !next.connected {
+            invalidateModelCatalog()
             defaultHandConnection?.cancel(); defaultHandConnection = nil
             accountHandDiscovery?.cancel(); accountHandDiscovery = nil
         }
@@ -785,10 +881,14 @@ final class AppModel: ObservableObject {
     }
 
     func voiceConfiguration(tabID: String) async throws -> VoiceConfiguration {
+        guard supportsVoice(tabID) else {
+            throw RuntimeFailure(message: "Voice is unavailable for Claude chats. Send a text message instead.")
+        }
         guard current(generation), let credential = currentCredential, let requested = tab(tabID),
               let url = URL(string: credential.baseUrl) else {
             throw RuntimeFailure(message: "Connect your account to start voice.")
         }
+        guard validSettings(settingsForTab(tabID)) else { throw RuntimeFailure(message: "Load available models before starting voice.") }
         let epoch = generation
         preparingVoiceTabID = tabID
         defer { if preparingVoiceTabID == tabID { preparingVoiceTabID = nil } }
@@ -823,7 +923,10 @@ final class AppModel: ObservableObject {
             try await saveQueue()
             guard current(epoch) else { return }
             if message.agentID == nil {
-                let thread: AgentThread = try await runtime.call("createThread", [try .encoded(message.settings ?? AgentSettings())])
+                guard let capturedSettings = message.settings, validSettings(capturedSettings) else {
+                    throw RuntimeFailure(message: "This message’s model is unavailable. Refresh models before retrying.")
+                }
+                let thread: AgentThread = try await runtime.call("createThread", [try .encoded(capturedSettings)])
                 guard current(epoch) else { return }
                 message.agentID = thread.id
                 changePending(requestID) { $0.agentID = thread.id }
@@ -943,6 +1046,7 @@ final class AppModel: ObservableObject {
     func changeSettings(tabID: String?, _ change: (inout AgentSettings) -> Void) {
         let id = tabID ?? activeTabID
         var copy = settingsForTab(id); change(&copy)
+        guard permitsSettingsChange(copy, tabID: id), validSettings(copy) else { return }
         updateTab(tabID: id) { $0.draftSettings = copy }
         if let threadID = tab(id)?.threadId { snapshots[threadID]?.settings = copy }
         if id == activeTabID { settings = copy }
@@ -955,6 +1059,10 @@ final class AppModel: ObservableObject {
     func updateSettings() {
         guard let id = activeTab?.threadId else { return }
         let copy = settings
+        guard permitsSettingsChange(copy, tabID: activeTabID), validSettings(copy) else {
+            settings = settingsForTab(activeTabID)
+            return
+        }
         Task {
             do { let _: AgentSettings = try await runtime.call("settings", [.object(["agentId": .string(id), "settings": try .encoded(copy)])]) }
             catch { self.error = error.localizedDescription }
@@ -964,6 +1072,7 @@ final class AppModel: ObservableObject {
         let id = activeTab?.threadId
         do {
             apply(try await runtime.call("refresh", as: DesktopState.self)); error = nil
+            await refreshModelCatalog()
             if let id, threadErrors[id] != nil { await observe(id) }
         }
         catch { self.error = error.localizedDescription }
@@ -1063,6 +1172,7 @@ final class AppModel: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
     private func resetAccount() {
+        invalidateModelCatalog()
         meetingLibrary.reset()
         voice.stop(); voice.clearHistory(); preparingVoiceTabID = nil
         accountHandDiscovery?.cancel(); accountHandDiscovery = nil

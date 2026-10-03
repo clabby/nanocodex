@@ -1,3 +1,4 @@
+import type { ShellBinaryIO } from "./shell-binary.mjs";
 import type { NamedTool, Workspace } from "./types.mjs";
 
 export type JustBashFetch = (
@@ -81,7 +82,10 @@ export function justBash(options: {
   lazyInitialize?: boolean | undefined;
   /** Host-specific standalone module loader; defaults to the package entry. */
   loadInterpreter?: (() => Promise<Pick<typeof import("just-bash/browser"), "Bash" | "defineCommand">>) | undefined;
+  binaryIO?: ShellBinaryIO | undefined;
   executionTimeoutMs?: number | undefined;
+  /** Finite resource ceilings; overrides must match the host memory envelope. */
+  executionLimits?: Readonly<Record<string, number>> | undefined;
   maxEntries?: number | undefined;
   maxOutputTokens?: number | undefined;
   network?: false | JustBashNetworkOptions | undefined;

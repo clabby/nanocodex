@@ -38,7 +38,7 @@ const TURN_STATE_READ_TIMEOUT_MS = 2_000;
 const ALLOWED_OPTIONS = new Set(["apiKey", "baseUrl", "fetch", "toolsTransport", "requestOrigin"]);
 const CREATE_SETTINGS = new Set(["model", "thinking", "reasoningMode", "fastMode"]);
 const SETTINGS_PATCH = CREATE_SETTINGS;
-const MODELS = new Set(["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra", "@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"]);
+const MODELS = new Set(["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra", "@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro", "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-5-5", "claude-opus-5-5"]);
 const THINKING = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
 const REASONING_MODES = new Set(["standard", "pro"]);
 const eventEncoder = new TextEncoder();
@@ -168,6 +168,7 @@ function managedCreateOptions(options) {
   if (settings.model === "gpt-6-astra" && settings.reasoningMode === "pro") {
     throw new TypeError("GPT-6 Astra does not support pro reasoning mode");
   }
+  if (settings.model.startsWith("claude-") && (!["low", "medium", "high"].includes(settings.thinking) || settings.reasoningMode !== "standard" || settings.fastMode)) throw new TypeError("unsupported Claude settings");
   return {
     clientOptions,
     creationKey,
@@ -311,6 +312,9 @@ function agentHandle(client, id, summary, retainedEventStream) {
       return agentHandle(client, childId);
     },
     // Activation is explicit: passive event/history readers never warm a model.
+    compact: (options = {}) => client.json(`${agentPath(id)}/compact`, {
+      method: "POST", signal: options.signal,
+    }).then(() => undefined),
     prepare: (options = {}) => client.json(`${agentPath(id)}/prepare`, {
       method: "POST", ...(options.signal === undefined ? {} : { signal: options.signal }),
     }).then(() => undefined),
@@ -461,6 +465,7 @@ function managedSettings(value) {
     || !REASONING_MODES.has(value.reasoning_mode) || typeof value.fast_mode !== "boolean"
     || (["@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"].includes(value.model) && (!(value.model === "kimi-k3" ? ["low", "high"] : ["low", "medium", "high"]).includes(value.thinking) || value.reasoning_mode === "pro"))
     || (["gpt-6-astra", "gpt-6.1-sol"].includes(value.model) && value.thinking === "none")
+    || (value.model.startsWith("claude-") && (!["low", "medium", "high"].includes(value.thinking) || value.reasoning_mode !== "standard" || value.fast_mode))
     || (value.model === "gpt-6-astra" && value.reasoning_mode === "pro")
   ) {
     throw new ManagedError("invalid_response", "managed agent settings are malformed");

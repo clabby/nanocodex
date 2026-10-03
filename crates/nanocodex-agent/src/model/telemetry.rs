@@ -9,7 +9,7 @@ use web_time::Instant;
 
 use crate::usage::TurnUsage;
 
-use nanocodex_tools::contract::ToolOutputBody;
+use nanocodex_oai_tools::contract::ToolOutputBody;
 
 #[derive(Serialize)]
 pub(super) struct ModelCallStarted<'a> {

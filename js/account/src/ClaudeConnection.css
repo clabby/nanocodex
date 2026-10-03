@@ -1,0 +1,44 @@
+.claude-connection-details,
+.claude-private-field,
+.claude-connection-failure { display: grid; gap: 10px; min-width: 0; }
+.claude-connection-details p,
+.claude-connection-failure p { margin: 0; }
+.claude-private-field { gap: 6px; }
+.claude-private-field label { font-size: 12px; color: var(--text-muted); }
+.claude-private-field input {
+  box-sizing: border-box; width: 100%; min-width: 0; min-height: 40px;
+  padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: 8px;
+  background: transparent; color: inherit; font: inherit;
+}
+.claude-connection-details > button,
+.claude-connection-failure > button { justify-self: start; }
+
+/* This card is also rendered in the compact account popover, outside the
+   account-inline/connect-wizard style scopes. Keep both variants readable. */
+#claude-connection > .connection-card {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+#claude-connection .connection-card-copy { display: grid; min-width: 0; gap: 5px; }
+#claude-connection .connection-card-copy strong { font-size: 14px; font-weight: 500; }
+#claude-connection .connection-card-copy > span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+#claude-connection .connection-card-action {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+#claude-connection > .connection-card:hover:not(:disabled),
+#claude-connection > .connection-card:focus-visible { border-color: var(--text); }

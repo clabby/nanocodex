@@ -44,7 +44,7 @@ use crate::{
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
-use nanocodex::Model;
+use nanocodex_managed::ManagedModel as Model;
 use nanocodex_subagents::{AgentId, AgentStatus, AgentUpdate, MessageSender};
 use ratatui::{
     Frame,
@@ -436,6 +436,7 @@ pub(crate) enum DraftReset {
 pub(crate) struct RootNode {
     transcript: Node<Transcript>,
     composer: Node<Composer>,
+    model_catalog: Vec<nanocodex_managed::AvailableModel>,
     queue: Node<MessageQueue>,
     workspace: PathBuf,
     overlay: Option<Overlay>,
@@ -519,6 +520,7 @@ impl RootNode {
         subagents.set_workspace(workspace);
         Self {
             transcript: Node::new(transcript),
+            model_catalog: Vec::new(),
             composer: Node::new(Composer::new(workspace, thinking)),
             queue: Node::new(MessageQueue::default()),
             workspace: workspace.to_path_buf(),
@@ -614,7 +616,17 @@ impl RootNode {
                         render: RenderRequest::None,
                     };
                 }
-                if (draft.starts_with('/') && draft != "/id") || draft.starts_with('!') {
+                // Route private-command intent to the explicit Managed2 denial,
+                // never to a model prompt or a password-capable legacy panel.
+                let private_command =
+                    draft
+                        .strip_prefix("/secure-input")
+                        .is_some_and(|remaining| {
+                            remaining.is_empty() || remaining.starts_with(char::is_whitespace)
+                        });
+                if (draft.starts_with('/') && draft != "/id" && !private_command)
+                    || draft.starts_with('!')
+                {
                     self.notification = Some(Notification::plain(
                         "Managed2 accepts text, /id, and /exit only.".to_owned(),
                         Color::Yellow,
@@ -633,6 +645,7 @@ impl RootNode {
         let mut root = Self::new(workspace, thinking);
         root.transcript = Node::new(self.transcript.component().fork_snapshot());
         root.set_fast_mode(self.composer.component().fast_mode());
+        root.set_model_catalog(self.model_catalog.clone());
         root.set_model(self.composer.component().model());
         root.set_reasoning_modes(
             self.composer.component().reasoning_mode(),
@@ -676,6 +689,10 @@ impl RootNode {
             .composer
             .component_mut()
             .update(ComposerEvent::SetFastMode(enabled));
+    }
+
+    pub(crate) fn set_model_catalog(&mut self, catalog: Vec<nanocodex_managed::AvailableModel>) {
+        self.model_catalog = catalog;
     }
 
     pub(crate) fn set_model(&mut self, model: Model) {
@@ -725,7 +742,9 @@ impl RootNode {
         let theme_mode = self.theme_mode;
         let max_subagents = self.subagents.max_subagents();
         let next_session_list = self.next_session_list;
+        let model_catalog = std::mem::take(&mut self.model_catalog);
         *self = Self::new(workspace, thinking);
+        self.model_catalog = model_catalog;
         self.next_session_list = next_session_list;
         self.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
         self.discarded_draft = discarded_draft;
@@ -2087,6 +2106,10 @@ impl RootNode {
                 && self.queue.component().is_empty(),
             fork: self.can_fork(),
             fast_mode: self.composer.component().fast_mode(),
+            fast_mode_available: self.composer.component().model().supports_fast_mode(),
+            effort: self.thread == ThreadState::New
+                || self.composer.component().model().oai().is_some(),
+            voice_input: self.composer.component().model().oai().is_some(),
             model: self.thread == ThreadState::New && !self.composer.component().auto_routing(),
             auto_route: self.thread == ThreadState::New
                 && !self.has_active_turns()
@@ -2188,6 +2211,13 @@ impl RootNode {
             Some(ActionsEffect::Trigger(Action::FastMode)) => {
                 self.overlay = None;
                 let enabled = !self.composer.component().fast_mode();
+                if enabled && !self.composer.component().model().supports_fast_mode() {
+                    self.notification = Some(Notification::plain(
+                        "Fast mode is unavailable for this model".into(),
+                        Color::Red,
+                    ));
+                    return ComponentUpdate::render(RenderRequest::Immediate);
+                }
                 self.set_fast_mode(enabled);
                 return ComponentUpdate {
                     effects: vec![RootEffect::SetFastMode(enabled)],
@@ -2325,6 +2355,14 @@ impl RootNode {
     }
 
     fn open_effort(&mut self) -> ComponentUpdate<RootEffect> {
+        if self.thread != ThreadState::New && self.composer.component().model().oai().is_none() {
+            self.notification = Some(Notification::plain(
+                "Claude effort is fixed after the first prompt; start a new session".into(),
+                Color::Red,
+            ));
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
+
         if self.composer.component().auto_routing() {
             return self.routing_settings_locked();
         }
@@ -2348,6 +2386,7 @@ impl RootNode {
         }
         self.overlay = Some(Overlay::Model(Node::new(ModelSelector::new(
             self.composer.component().model(),
+            self.model_catalog.clone(),
         ))));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -2790,6 +2829,14 @@ impl RootNode {
     }
 
     fn apply_effort(&mut self, effort: ReasoningEffort, pro: bool) -> ComponentUpdate<RootEffect> {
+        if self.thread != ThreadState::New && self.composer.component().model().oai().is_none() {
+            self.notification = Some(Notification::plain(
+                "Claude effort is fixed after the first prompt; start a new session".into(),
+                Color::Red,
+            ));
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
+
         if self.composer.component().auto_routing() {
             return self.routing_settings_locked();
         }
@@ -2798,6 +2845,26 @@ impl RootNode {
         } else {
             ReasoningMode::Standard
         };
+        let model = self.composer.component().model();
+        let thinking = match effort {
+            ReasoningEffort::Low => nanocodex::Thinking::Low,
+            ReasoningEffort::Medium => nanocodex::Thinking::Medium,
+            ReasoningEffort::High => nanocodex::Thinking::High,
+            ReasoningEffort::Xhigh => nanocodex::Thinking::Xhigh,
+            ReasoningEffort::Max => nanocodex::Thinking::Max,
+        };
+        let mode = if pro {
+            nanocodex::ReasoningMode::Pro
+        } else {
+            nanocodex::ReasoningMode::Standard
+        };
+        if !model.supports_thinking(thinking) || !model.supports_reasoning_mode(mode) {
+            self.notification = Some(Notification::plain(
+                "This model does not support the requested effort or Pro mode".into(),
+                Color::Red,
+            ));
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
         let previous_reasoning_mode = self.preferred_reasoning_mode;
         self.preferred_reasoning_mode = reasoning_mode;
         if reasoning_mode != previous_reasoning_mode {
@@ -2848,6 +2915,13 @@ impl RootNode {
     }
 
     fn apply_model(&mut self, model: Model) -> ComponentUpdate<RootEffect> {
+        if !self.model_catalog.iter().any(|entry| entry.id == model) {
+            self.notification = Some(Notification::plain(
+                "Model is not available in the account catalog".into(),
+                Color::Red,
+            ));
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
         if self.composer.component().auto_routing() {
             return self.routing_settings_locked();
         }
@@ -4585,9 +4659,9 @@ fn is_file_query_character(character: char) -> bool {
 
 fn model_name(model: Model) -> &'static str {
     match model {
-        Model::Luna => "Luna",
-        Model::Sol => "Sol",
-        Model::Astra => "Astra",
+        Model::Oai(nanocodex::Model::Luna) => "Luna",
+        Model::Oai(nanocodex::Model::Sol) => "Sol",
+        Model::Oai(nanocodex::Model::Astra) => "Astra",
         _ => model.as_str(),
     }
 }
@@ -5042,10 +5116,8 @@ mod live_control_tests {
     use crate::config::{ReasoningEffort, ReasoningMode};
     use crate::tui::transcript::{LocalEvent, TranscriptRecord, TurnId};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use nanocodex::{
-        Model,
-        agent::events::{AgentEvent, AgentEventKind},
-    };
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocodex_managed::ManagedModel as Model;
     use serde_json::{json, value::to_raw_value};
     use std::{path::Path, sync::Arc};
 
@@ -5168,7 +5240,7 @@ mod live_control_tests {
                 reasoning_mode: ReasoningMode::Standard,
                 preferred_reasoning_mode: ReasoningMode::Standard,
                 fast_mode: false,
-                model: Model::Sol,
+                model: Model::Oai(nanocodex::Model::Sol),
                 skills: Arc::from([]),
             });
             assert!(root.interactive);
@@ -5670,7 +5742,7 @@ mod live_control_tests {
         root.update(RootEvent::SettingsHydrated {
             effort: ReasoningEffort::Medium,
             fast_mode: false,
-            model: Model::Sol,
+            model: Model::Oai(nanocodex::Model::Sol),
         });
         assert!(root.interactive);
         assert!(matches!(
@@ -5681,7 +5753,7 @@ mod live_control_tests {
 
     #[test]
     fn autoroute_locks_model_and_effort_commands_while_pending_and_resolved() {
-        for model in [None, Some(Model::Glm53)] {
+        for model in [None, Some(Model::Oai(nanocodex::Model::Glm53))] {
             for command in [
                 "/model",
                 "/model sol",
@@ -5728,11 +5800,14 @@ mod live_control_tests {
             root.update(RootEvent::RoutingHydrated {
                 enabled: true,
                 provider: Some("Vercel".into()),
-                model: Some(Model::Glm53),
+                model: Some(Model::Oai(nanocodex::Model::Glm53)),
                 effort: Some(ReasoningEffort::Low),
             });
             assert!(root.overlay.is_none());
-            assert_eq!(root.composer.component().model(), Model::Glm53);
+            assert_eq!(
+                root.composer.component().model(),
+                Model::Oai(nanocodex::Model::Glm53)
+            );
             root.reset_session(
                 Path::new("/workspace"),
                 ReasoningEffort::Medium,
@@ -5747,50 +5822,20 @@ mod live_control_tests {
             root.update(RootEvent::RoutingHydrated {
                 enabled: true,
                 provider: Some("OpenRouter".into()),
-                model: Some(Model::Sol),
+                model: Some(Model::Oai(nanocodex::Model::Sol)),
                 effort: Some(ReasoningEffort::High),
             });
             root.update(RootEvent::SettingsHydrated {
                 effort: ReasoningEffort::Medium,
-                model: Model::Astra,
+                model: Model::Oai(nanocodex::Model::Astra),
                 fast_mode: false,
             });
-            assert_eq!(root.composer.component().model(), Model::Sol);
+            assert_eq!(
+                root.composer.component().model(),
+                Model::Oai(nanocodex::Model::Sol)
+            );
             assert_eq!(root.composer.component().effort(), ReasoningEffort::High);
         }
-    }
-
-    #[test]
-    fn slash_model_command_routes_as_a_hosted_setting_instead_of_a_prompt() {
-        let mut root = root_with_draft("/model sol");
-
-        let update = root.update(key(KeyCode::Enter));
-
-        assert!(matches!(
-            update.effects.as_slice(),
-            [RootEffect::SetModel(Model::Sol)]
-        ));
-        assert!(matches!(root.thread, super::ThreadState::New));
-        assert!(root.composer.component().draft().is_empty());
-        assert_eq!(root.in_flight_turns, 0);
-    }
-
-    #[test]
-    fn slash_action_overlay_routes_direct_model_command() {
-        let mut root = root_with_draft("");
-        let _ = root.update(key(KeyCode::Char('/')));
-        for character in "model sol".chars() {
-            let _ = root.update(key(KeyCode::Char(character)));
-        }
-
-        let update = root.update(key(KeyCode::Enter));
-
-        assert!(matches!(
-            update.effects.as_slice(),
-            [RootEffect::SetModel(Model::Sol)]
-        ));
-        assert!(matches!(root.thread, super::ThreadState::New));
-        assert_eq!(root.in_flight_turns, 0);
     }
 
     #[test]
@@ -6429,7 +6474,7 @@ mod live_control_tests {
                 RootEvent::SettingsHydrated {
                     effort: ReasoningEffort::High,
                     fast_mode: false,
-                    model: Model::Astra,
+                    model: Model::Oai(nanocodex::Model::Astra),
                 },
                 RootEvent::ManagedActiveTurns(0),
                 RootEvent::ManagedActiveTurns(1),
@@ -6463,7 +6508,7 @@ mod live_control_tests {
                     reasoning_mode: ReasoningMode::Standard,
                     preferred_reasoning_mode: ReasoningMode::Standard,
                     fast_mode: false,
-                    model: Model::Astra,
+                    model: Model::Oai(nanocodex::Model::Astra),
                     skills: Arc::from([]),
                 });
                 assert!(!root.resuming_session);
@@ -6711,7 +6756,7 @@ mod live_control_tests {
             || RootEvent::SettingsHydrated {
                 effort: ReasoningEffort::High,
                 fast_mode: false,
-                model: Model::Astra,
+                model: Model::Oai(nanocodex::Model::Astra),
             },
         ];
         for state in 0..4 {
@@ -6783,7 +6828,7 @@ mod live_control_tests {
             root.update(RootEvent::SettingsHydrated {
                 effort: ReasoningEffort::High,
                 fast_mode: false,
-                model: Model::Astra,
+                model: Model::Oai(nanocodex::Model::Astra),
             });
             let record = TranscriptRecord::from_agent(
                 1,

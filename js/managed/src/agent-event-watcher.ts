@@ -40,7 +40,8 @@ const REPLAY_EVENTS = new Set([
 
 type ManagedAgentEventListeners = Readonly<{
   replay(event: AgentEvent, agentId: number | undefined): void;
-  observe(event: AgentEvent): void;
+  observe(event: AgentEvent, agentId?: number): void;
+  dispose?(): void;
 }>;
 
 /** Splits the Rust-owned agent family into replay state and transport telemetry. */
@@ -52,11 +53,23 @@ export function watchManagedAgentFamilyEvents(
   const onEvent = events.onEvent as unknown as (
     listener: InternalEventListener,
   ) => () => void;
+  let disposed = false;
+  const observe = (event: AgentEvent, agentId?: number) => {
+    try { listeners.observe(event, agentId); }
+    catch { /* Passive observations cannot affect replay or runtime execution. */ }
+  };
   onEvent((event, _encodedLength, _encodedEvent, agentId) => {
+    if (disposed) return;
     // Managed agents disable raw API events at their Rust producer before
     // serialization. Keep this guard for older or external event sources.
     if (REPLAY_EVENTS.has(event.type)) {
-      listeners.replay(event, agentId);
+      try { listeners.replay(event, agentId); }
+      finally {
+        if (event.type === "tool.call" || event.type === "tool.result"
+          || event.type.startsWith("model.call.") || event.type.startsWith("model.compaction.")) {
+          observe(event, agentId);
+        }
+      }
       return;
     }
     const progress = transportProgress(event);
@@ -65,10 +78,23 @@ export function watchManagedAgentFamilyEvents(
     // bodies. Cloudflare traces retain the request path; never copy payloads
     // into either replay storage or application logs.
     if (event.type !== "api.event") {
-      listeners.observe(event);
+      observe(event, agentId);
     }
   });
-  return events;
+  if (!listeners.dispose) return events;
+  return {
+    onEvent: listener => events.onEvent(listener),
+    [Symbol.asyncIterator]: () => events[Symbol.asyncIterator](),
+    off() {
+      if (disposed) return;
+      disposed = true;
+      try { events.off(); }
+      finally {
+        try { listeners.dispose?.(); }
+        catch { /* Cleanup cannot change runtime shutdown. */ }
+      }
+    },
+  };
 }
 
 /** Client status uses a bounded projection, never raw provider errors or URLs. */

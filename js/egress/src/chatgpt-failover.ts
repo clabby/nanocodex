@@ -32,6 +32,7 @@ export function chatGptFailoverSocket(
   headers: Headers,
   switchAccount: (resetAt: number) => Promise<boolean>,
   ctx?: Pick<ExecutionContext, "waitUntil">,
+  canSwitch = true,
 ): Response {
   const upstream = upstreamResponse.webSocket;
   if (!upstream) throw new Error("ChatGPT WebSocket upgrade missing");
@@ -78,15 +79,21 @@ export function chatGptFailoverSocket(
           || frame.type === "response.completed" || frame.type === "response.incomplete";
         const resetAt = terminal ? chatGptLimitReset(frame) : undefined;
         if (resetAt !== undefined) {
-          const switched = await switchAccount(resetAt);
-          if (closed) return;
-          if (switched && pending === 1 && !outputStarted) {
-            server.send(JSON.stringify({ type: "error", error: {
-              type: "server_error", code: "server_error", retry_after: 0,
-              message: "ChatGPT account switched after reaching its subscription limit. Reconnect and retry with full history.",
-            } }));
-            close(1012, "ChatGPT account switched");
-            return;
+          // Bookkeeping must not hide a provider error or its subsequent close.
+          // Only an eligible full-history retry needs the switch decision first.
+          const reporting = Promise.resolve().then(() => switchAccount(resetAt)).catch(() => false);
+          ctx?.waitUntil(reporting);
+          if (canSwitch && pending === 1 && !outputStarted) {
+            const switched = await reporting;
+            if (closed) return;
+            if (switched) {
+              server.send(JSON.stringify({ type: "error", error: {
+                type: "server_error", code: "server_error", retry_after: 0,
+                message: "ChatGPT account switched after reaching its subscription limit. Reconnect and retry with full history.",
+              } }));
+              close(1012, "ChatGPT account switched");
+              return;
+            }
           }
         }
         if (terminal) pending = Math.max(0, pending - 1);

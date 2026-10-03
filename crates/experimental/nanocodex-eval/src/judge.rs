@@ -19,7 +19,7 @@ use axum::{
 use flate2::read::GzDecoder;
 use nanocodex_agent::NanocodexBuilder;
 use nanocodex_oai_api::Model;
-use nanocodex_tools::Tools;
+use nanocodex_oai_tools::Tools;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
@@ -96,7 +96,7 @@ pub enum JudgeRuntimeError {
     Listener(#[from] std::io::Error),
     /// The deliberately empty verifier tool registry could not be built.
     #[error("judge runtime tool policy failed: {0}")]
-    Tools(#[from] nanocodex_tools::ToolsBuildError),
+    Tools(#[from] nanocodex_oai_tools::ToolsBuildError),
 }
 
 impl JudgeRuntime {

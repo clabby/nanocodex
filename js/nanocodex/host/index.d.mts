@@ -14,6 +14,9 @@ export type {
   ChatGptSubscriptionStore,
   CodeEvaluator,
   CodeEvaluatorEnvironment,
+  CodeEffectContext,
+  CodeEffectReceipt,
+  CodeEffectJournal,
   CostStatus,
   DefaultAgent,
   EstimatedUsdCost,
@@ -60,3 +63,5 @@ export type {
   BrowserWebSocketConnection,
   BrowserWebSocketRequest,
 } from "../browser/host.mjs";
+
+export * as Claude from "./Claude.mjs";

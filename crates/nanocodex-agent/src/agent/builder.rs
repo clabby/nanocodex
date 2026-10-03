@@ -50,6 +50,8 @@ pub(super) struct CodexCompatibility {
     pub(super) context: ContextSourceConfig,
     pub(super) execution: ExecutionConfig,
     pub(super) before_compaction: Option<Arc<dyn execution::BeforeCompaction>>,
+    pub(super) spawn_factory: Option<Arc<dyn backend::AgentFactory>>,
+    pub(super) host_context: Option<Arc<str>>,
 }
 
 impl<F> NanocodexBuilder<F> {
@@ -69,6 +71,45 @@ impl<F> NanocodexBuilder<F> {
     #[must_use]
     pub fn before_compaction(mut self, hook: impl execution::BeforeCompaction + 'static) -> Self {
         self.codex.before_compaction = Some(Arc::new(hook));
+        self
+    }
+
+    /// Restores a native residency checkpoint through this approved Responses recipe.
+    pub fn restore_runtime(mut self, snapshot: ChildSnapshot) -> Result<Self> {
+        let ChildSnapshot::Codex(snapshot) = snapshot else {
+            return Err(NanocodexError::InvalidRequest(
+                "Codex builder requires a Responses checkpoint".into(),
+            ));
+        };
+        snapshot.validate()?;
+        self = self
+            .model(snapshot.model)
+            .thinking(snapshot.thinking)
+            .fast_mode(snapshot.fast_mode);
+        self.session_id = Some(snapshot.session_id.parse().map_err(|error| {
+            NanocodexError::InvalidSessionSnapshot(format!("invalid child session: {error}"))
+        })?);
+        self.resume = snapshot.conversation;
+        if snapshot.stateless_http {
+            self.config.responses_transport = ResponsesTransport::Https;
+            self.config.responses_history = ResponsesHistory::FullReplay;
+            self.config.store_responses = false;
+            self.config.websocket_warmup = false;
+        }
+        Ok(self)
+    }
+
+    /// Retains embedding-private context in this agent's tool runtime.
+    #[must_use]
+    pub fn host_context(mut self, context: Option<Arc<str>>) -> Self {
+        self.codex.host_context = context;
+        self
+    }
+
+    /// Configures embedding-owned native child construction across harness families.
+    #[must_use]
+    pub fn spawn_factory(mut self, factory: Arc<dyn backend::AgentFactory>) -> Self {
+        self.codex.spawn_factory = Some(factory);
         self
     }
 

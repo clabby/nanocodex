@@ -38,10 +38,10 @@ use nanocodex_oai_api::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
-use tokio::sync::{RwLock, watch};
+use tokio::sync::watch;
 use tower::Service;
 use tracing::{Instrument, info, info_span};
-use web_time::Instant;
+use web_time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
     CompactionCompleted, CompactionFailed, CompactionStarted, ModelCallCompleted, ModelCallFailed,
@@ -61,7 +61,7 @@ use crate::{
     prompt_cache::ModelPromptCache,
     usage::TurnUsage,
 };
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     __private::model_contract as model_tool_contract,
     ToolContext, Tools,
     code_mode::{CodeModeExecution, CodeModeObserver, CodeModeUpdate},
@@ -82,6 +82,8 @@ pub(crate) struct ModelRun<S> {
     client: ResponsesClient<S>,
     transport_stats: Arc<TransportStats>,
     started_at: Instant,
+    operation_started_at: Option<Duration>,
+    elapsed_before_attempt: Duration,
     stats: RunStats,
     transport_baseline: TransportStatsSnapshot,
     session: Option<ModelSessionState>,
@@ -281,6 +283,8 @@ impl<S> ModelRun<S> {
             client,
             transport_stats,
             started_at: Instant::now(),
+            operation_started_at: None,
+            elapsed_before_attempt: Duration::ZERO,
             stats: RunStats::default(),
             transport_baseline: TransportStatsSnapshot::default(),
             session: None,
@@ -353,6 +357,8 @@ impl<S> ModelRun<S> {
             client,
             transport_stats,
             started_at: Instant::now(),
+            operation_started_at: None,
+            elapsed_before_attempt: Duration::ZERO,
             stats: RunStats::default(),
             transport_baseline: TransportStatsSnapshot::default(),
             session: Some(ModelSessionState {

@@ -1,8 +1,17 @@
 import { Challenge, Credential, Mcp } from "mppx";
 import { describe, expect, it, vi } from "vitest";
-// @ts-expect-error exercising the internal JS MCP runtime in an integration test
 import { createMcpRuntime } from "../../nanocodex/runtime/mcp-runtime.mjs";
+import { mcpPayment } from "nanocodex/tempo";
+import type { ToolContext } from "nanocodex";
 import { mercatorMcpPayment } from "../src/mercator-mcp-payment";
+const context: ToolContext = { callId: "synthetic-call", parentCallId: "", sessionId: "synthetic-session", model: "claude-sonnet-4-6", signal: new AbortController().signal };
+function tool(runtime: Awaited<ReturnType<typeof createMcpRuntime>>, name: string) {
+  const value = runtime.resolve(name); if (!value) throw Error("fixture tool missing " + name); return value;
+}
+function content(result: unknown) {
+  if (!result || typeof result !== "object" || !("value" in result)) throw Error("invalid fixture tool result");
+  const value = result.value as { content: Array<{ text: string }> }; return value.content[0]?.text ?? "";
+}
 const plan = { nodes: [{ id: "one", serviceId: "synthetic", method: "GET", path: "/lookup" }] };
 const args = { idempotency_key: "synthetic-key-123", plan, approved_total: "0.05" };
 const challenge = Challenge.from({ id: "synthetic-mcp-challenge", method: "tempo", intent: "charge", realm: "mercator.sh",
@@ -24,14 +33,14 @@ describe("default Mercator MCP wallet payment", () => {
       expect(JSON.parse(String(init.body))).toMatchObject({ ...args, challenge: { id: challenge.id } });
       return Response.json({ credential: Credential.serialize({ challenge, payload: { type: "transaction", signature: "0xsynthetic" } }) });
     }) };
-    const payment = mercatorMcpPayment(broker as never, "owner", () => {});
+    const payment = mcpPayment(mercatorMcpPayment(broker as never, "owner", () => {}));
     const runtime = await createMcpRuntime({ mercator: { client, payment } });
     try {
       await runtime.settled();
-      expect((await runtime.resolve("mcp__mercator__quote_plan").handler({ plan })).value.content[0].text).toContain("totalAmount");
+      expect(content(await tool(runtime, "mcp__mercator__quote_plan").handler({ plan }, context))).toContain("totalAmount");
       expect(broker.fetch).not.toHaveBeenCalled();
-      const result = await runtime.resolve("mcp__mercator__create_job").handler(args, { signal: new AbortController().signal, callId: "call-1" });
-      expect(result.value.content[0].text).toBe("job created");
+      const result = await tool(runtime, "mcp__mercator__create_job").handler(args, context);
+      expect(content(result)).toBe("job created");
       expect(calls.map(c => c.name)).toEqual(["quote_plan", "quote_plan", "create_job", "create_job"]);
       expect(broker.fetch).toHaveBeenCalledTimes(1);
     } finally { await runtime.close(); }
@@ -42,9 +51,9 @@ describe("default Mercator MCP wallet payment", () => {
     const broker = { fetch: vi.fn(async () => Response.json({})) };
     const runtime = await createMcpRuntime({ mercator: { client: {
       async listTools() { return { tools: [{ name: "create_job", inputSchema: { type: "object" } }] }; }, callTool,
-    }, payment: mercatorMcpPayment(broker as never, "owner", () => {}) } });
+    }, payment: mcpPayment(mercatorMcpPayment(broker as never, "owner", () => {})) } });
     try { await runtime.settled();
-      await expect(runtime.resolve("mcp__mercator__create_job").handler(args)).rejects.toThrow(/quote/);
+      await expect(tool(runtime, "mcp__mercator__create_job").handler(args, context)).rejects.toThrow(/quote/);
       expect(callTool).toHaveBeenCalledTimes(1);
       expect(callTool.mock.calls[0][0].name).toBe("quote_plan");
       expect(broker.fetch).not.toHaveBeenCalled();
@@ -55,9 +64,9 @@ describe("default Mercator MCP wallet payment", () => {
     const broker = { fetch: vi.fn(async () => Response.json({})) };
     const runtime = await createMcpRuntime({ mercator: { client: {
       async listTools() { return { tools: [{ name: "create_job", inputSchema: { type: "object" } }] }; }, callTool,
-    }, payment: mercatorMcpPayment(broker as never, "owner", () => { throw Error("forbidden"); }) } });
+    }, payment: mcpPayment(mercatorMcpPayment(broker as never, "owner", () => { throw Error("forbidden"); })) } });
     try { await runtime.settled();
-      await expect(runtime.resolve("mcp__mercator__create_job").handler(args)).rejects.toThrow("forbidden");
+      await expect(tool(runtime, "mcp__mercator__create_job").handler(args, context)).rejects.toThrow("forbidden");
       expect(callTool).not.toHaveBeenCalled(); expect(broker.fetch).not.toHaveBeenCalled();
     } finally { await runtime.close(); }
   });
@@ -68,11 +77,11 @@ describe("default Mercator MCP wallet payment", () => {
         return { content: [], _meta: { [Mcp.paymentRequiredMetaKey]: { challenges: [challenge] } } };
       } };
     const broker = { fetch: vi.fn(async () => new Response(null, { status: 404 })) };
-    const runtime = await createMcpRuntime({ mercator: { client, payment: mercatorMcpPayment(broker as never, "owner", () => {}) } });
+    const runtime = await createMcpRuntime({ mercator: { client, payment: mcpPayment(mercatorMcpPayment(broker as never, "owner", () => {})) } });
     try { await runtime.settled();
-      await expect(runtime.resolve("mcp__mercator__get_job").handler({ job_id: "test" })).rejects.toThrow();
+      await expect(tool(runtime, "mcp__mercator__get_job").handler({ job_id: "test" }, context)).rejects.toThrow();
       expect(broker.fetch).not.toHaveBeenCalled();
-      await expect(runtime.resolve("mcp__mercator__create_job").handler(args)).rejects.toThrow(/wallet is not configured/);
+      await expect(tool(runtime, "mcp__mercator__create_job").handler(args, context)).rejects.toThrow(/wallet is not configured/);
       expect(broker.fetch).toHaveBeenCalledTimes(1);
     } finally { await runtime.close(); }
   });

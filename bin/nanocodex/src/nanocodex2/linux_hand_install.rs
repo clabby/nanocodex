@@ -19,6 +19,19 @@ use tokio::process::Command;
 const ROOT: &str = "/opt/nanocodex";
 const STATE: &str = "/srv/nanocodex";
 const SERVICE: &str = "nanocodex-hand.service";
+// Native headless screens are video-only. Provision their encoder alongside
+// display/input prerequisites; users must not repair a fresh install over SSH.
+const DEBIAN_DESKTOP_PACKAGES: &[&str] = &[
+    "ca-certificates",
+    "libpulse0",
+    "libxkbcommon0",
+    "xvfb",
+    "openbox",
+    "xterm",
+    "xauth",
+    "fonts-dejavu-core",
+    "ffmpeg",
+];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -243,53 +256,255 @@ fn safe_directory(path: &Path) -> Result<()> {
     }
 }
 
-async fn install_dependencies() -> Result<()> {
-    if !Command::new("apt-get")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|status| status.success())
-    {
-        bail!("automatic dependency installation currently supports Debian and Ubuntu");
+// Omarchy uses Arch's package database, not Debian package names. Do not
+// infer support merely from an unrelated package-manager binary on PATH.
+const ARCH_DESKTOP_PACKAGES: &[&str] = &[
+    "ca-certificates",
+    "libpulse",
+    "libxkbcommon",
+    "xorg-server-xvfb",
+    "openbox",
+    "xterm",
+    "xorg-xauth",
+    "ttf-dejavu",
+    "ffmpeg",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackageManager {
+    Apt,
+    Pacman,
+}
+
+impl PackageManager {
+    fn detect(os_release: &str) -> Result<Self> {
+        // os-release is data, never a script to source. ID_LIKE alone does not
+        // opt an untested derivative into automatic root-side installation.
+        let id = os_release.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("ID=")
+                .map(|value| value.trim().trim_matches(['\"', '\'']))
+        });
+        match id {
+            Some("debian" | "ubuntu") => Ok(Self::Apt),
+            Some("arch" | "omarchy") => Ok(Self::Pacman),
+            _ => bail!(
+                "automatic dependency installation supports Debian, Ubuntu, Arch Linux and Omarchy only"
+            ),
+        }
     }
-    let packages = [
-        "ca-certificates",
-        "libpulse0",
-        "libxkbcommon0",
-        "xvfb",
-        "openbox",
-        "xterm",
-        "xauth",
-        "fonts-dejavu-core",
-    ];
+
+    fn packages(self) -> &'static [&'static str] {
+        match self {
+            Self::Apt => DEBIAN_DESKTOP_PACKAGES,
+            Self::Pacman => ARCH_DESKTOP_PACKAGES,
+        }
+    }
+
+    fn probes(self) -> Vec<DependencyCommand> {
+        match self {
+            Self::Apt => vec![
+                DependencyCommand::new("apt-get", &["--version"]),
+                DependencyCommand::new("dpkg-query", &["--version"]),
+            ],
+            Self::Pacman => vec![DependencyCommand::new("pacman", &["--version"])],
+        }
+    }
+
+    fn query(self, package: &'static str) -> DependencyCommand {
+        match self {
+            Self::Apt => DependencyCommand::new("dpkg-query", &["-W", "-f=${Status}", package]),
+            Self::Pacman => DependencyCommand::new("pacman", &["-Q", package]),
+        }
+    }
+
+    fn installed(self, success: bool, stdout: &[u8]) -> bool {
+        success && (self == Self::Pacman || stdout == b"install ok installed")
+    }
+
+    fn install_plan(self, missing: &[&'static str]) -> Vec<DependencyCommand> {
+        if missing.is_empty() {
+            return Vec::new();
+        }
+        match self {
+            Self::Apt => {
+                let mut update = DependencyCommand::new("apt-get", &["update"]);
+                update.env.push(("DEBIAN_FRONTEND", "noninteractive"));
+                let mut install = DependencyCommand::new(
+                    "apt-get",
+                    &["install", "-y", "--no-install-recommends"],
+                );
+                install.args.extend_from_slice(missing);
+                install.env.extend([
+                    ("DEBIAN_FRONTEND", "noninteractive"),
+                    ("NEEDRESTART_MODE", "l"),
+                ]);
+                vec![update, install]
+            }
+            Self::Pacman => {
+                // Install from the EXISTING sync database only. pacman(8)
+                // defines -y as refresh and -u as system upgrade; neither is
+                // authorized by Hand setup. Never retry with -Sy or -Syu.
+                let mut install =
+                    DependencyCommand::new("pacman", &["-S", "--noconfirm", "--needed"]);
+                install.args.extend_from_slice(missing);
+                vec![install]
+            }
+        }
+    }
+
+    fn install_failure_context(self, missing: &[&str]) -> String {
+        match self {
+            Self::Apt => "could not install desktop dependencies".into(),
+            Self::Pacman => format!(
+                "Arch/Omarchy dependency installation failed against the existing sync database; no database refresh or host-wide upgrade was attempted. If the database is stale or dependencies conflict, have an administrator explicitly approve and run `pacman -Syu --needed {}`, then rerun Hand setup. The installer will not retry or refresh automatically",
+                missing.join(" ")
+            ),
+        }
+    }
+}
+
+// Pure command plans permit fixture tests without package installs, sudo,
+// service changes or writes to system paths. Execution stays root-side only.
+#[derive(Debug, PartialEq, Eq)]
+struct DependencyCommand {
+    program: &'static str,
+    args: Vec<&'static str>,
+    env: Vec<(&'static str, &'static str)>,
+}
+
+impl DependencyCommand {
+    fn new(program: &'static str, args: &[&'static str]) -> Self {
+        Self {
+            program,
+            args: args.to_vec(),
+            env: Vec::new(),
+        }
+    }
+
+    fn command(&self) -> Command {
+        self.command_at(Path::new(self.program))
+    }
+
+    fn command_at(&self, program: &Path) -> Command {
+        let mut command = Command::new(program);
+        command
+            .args(&self.args)
+            .envs(self.env.iter().copied())
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        command
+    }
+}
+
+async fn install_dependencies() -> Result<()> {
+    let os_release =
+        fs::read_to_string("/etc/os-release").context("could not detect the Linux distribution")?;
+    let manager = PackageManager::detect(&os_release)?;
+    for probe in manager.probes() {
+        checked(
+            probe.command().stdout(Stdio::null()).stderr(Stdio::null()),
+            "verify the distribution package manager",
+        )
+        .await?;
+    }
     let mut missing = Vec::new();
-    for package in packages {
-        let output = Command::new("dpkg-query")
-            .args(["-W", "-f=${Status}", package])
+    for &package in manager.packages() {
+        let output = manager
+            .query(package)
+            .command()
             .output()
-            .await?;
-        if !output.status.success() || output.stdout != b"install ok installed" {
+            .await
+            .context("could not query desktop dependencies")?;
+        if !manager.installed(output.status.success(), &output.stdout) {
             missing.push(package);
         }
     }
-    if missing.is_empty() {
-        return Ok(());
+    if !missing.is_empty() {
+        let plan = manager.install_plan(&missing);
+        eprintln!("Installing Linux desktop dependencies…");
+        if manager == PackageManager::Pacman {
+            eprintln!(
+                "Using the existing Arch/Omarchy sync database without refreshing it or upgrading the host."
+            );
+        }
+        for step in plan {
+            checked(&mut step.command(), "install desktop dependencies")
+                .await
+                .with_context(|| manager.install_failure_context(&missing))?;
+        }
     }
-    eprintln!("Installing Linux desktop dependencies…");
-    let mut update = Command::new("apt-get");
-    update
-        .arg("update")
-        .env("DEBIAN_FRONTEND", "noninteractive");
-    checked(&mut update, "update package metadata").await?;
-    let mut install = Command::new("apt-get");
-    install
-        .args(["install", "-y", "--no-install-recommends"])
-        .args(missing)
-        .env("DEBIAN_FRONTEND", "noninteractive")
-        .env("NEEDRESTART_MODE", "l");
-    checked(&mut install, "install desktop dependencies").await
+    // Even an already-installed ffmpeg can be a custom build without x264.
+    // Validate before creating users, credentials or starting the Hand service.
+    verify_ffmpeg().await
+}
+
+fn ffmpeg_has_capability(table: &[u8], name: &str, flag: char) -> bool {
+    String::from_utf8_lossy(table).lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        match (fields.next(), fields.next()) {
+            (Some(flags), Some(entry)) => flags.contains(flag) && entry == name,
+            _ => false,
+        }
+    })
+}
+
+fn ffmpeg_smoke_plan() -> DependencyCommand {
+    DependencyCommand::new(
+        "ffmpeg",
+        &[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=size=64x64:rate=1",
+            "-frames:v",
+            "1",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "h264",
+            "pipe:1",
+        ],
+    )
+}
+
+async fn verify_ffmpeg() -> Result<()> {
+    verify_ffmpeg_at(Path::new("ffmpeg")).await
+}
+
+async fn verify_ffmpeg_at(program: &Path) -> Result<()> {
+    for (table, name, flag) in [("-encoders", "libx264", 'V'), ("-devices", "x11grab", 'D')] {
+        let mut command =
+            DependencyCommand::new("ffmpeg", &["-hide_banner", table]).command_at(program);
+        let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+            .await
+            .context("ffmpeg capability query timed out")?
+            .context("could not verify ffmpeg capabilities")?;
+        if !output.status.success() || !ffmpeg_has_capability(&output.stdout, name, flag) {
+            bail!(
+                "ffmpeg lacks required {name} capability; install a full distribution ffmpeg build"
+            );
+        }
+    }
+    let mut command = ffmpeg_smoke_plan().command_at(program);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        checked(&mut command, "verify ffmpeg H.264 encoding"),
+    )
+    .await
+    .context("ffmpeg H.264 encoding verification timed out")?
 }
 
 async fn ensure_user() -> Result<()> {
@@ -465,20 +680,40 @@ async fn wait_ready(request: &Request, machine: &str) -> Result<()> {
     while Instant::now() < deadline {
         let hands = account_get(&client, request, "/v1/account/hands").await;
         let screens = account_get(&client, request, "/v1/account/hands/screens").await;
-        if let (Ok(hands), Ok(screens)) = (hands, screens) {
-            let hand_ready = hands["data"]
-                .as_array()
-                .is_some_and(|hands| hands.iter().any(|hand| hand["id"] == machine));
-            let screen_ready = screens["surfaces"].as_array().is_some_and(|screens| {
-                screens.iter().any(|screen| screen["machine_id"] == machine)
-            });
-            if hand_ready && screen_ready {
-                return Ok(());
-            }
+        if let (Ok(hands), Ok(screens)) = (hands, screens)
+            && catalog_ready(&hands, &screens, machine)
+        {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    bail!("the service started but its Hand and desktop did not appear in the account catalog")
+    bail!(
+        "the service started but its Hand and controllable video desktop did not appear in the account catalog"
+    )
+}
+
+fn catalog_ready(hands: &Value, screens: &Value, machine: &str) -> bool {
+    // /v1/account/hands already filters offline machines server-side. Do not
+    // invent an `online` field or accept a screen without its attached Hand.
+    let hand_ready = hands["data"]
+        .as_array()
+        .is_some_and(|hands| hands.iter().any(|hand| hand["id"] == machine));
+    let screen_ready = screens["surfaces"].as_array().is_some_and(|screens| {
+        screens.iter().any(|screen| {
+            screen["machine_id"] == machine
+                && screen["id"] == "desktop"
+                && screen["kind"] == "desktop"
+                && screen["controllable"] == true
+                && ["width", "height"].iter().all(|key| {
+                    screen[key].as_u64().is_some_and(|size| (1..=16384).contains(&size))
+                })
+                // WebRTC is the existing catalog default (no transport field),
+                // not a literal `webrtc` value. Frame catalogs are not ready.
+                && screen.get("transport").is_none()
+                && screen.get("frame_window").is_none()
+        })
+    });
+    hand_ready && screen_ready
 }
 
 async fn account_get(client: &reqwest::Client, request: &Request, path: &str) -> Result<Value> {
@@ -518,11 +753,295 @@ mod tests {
         }
     }
 
+    fn ready_catalogs() -> (Value, Value) {
+        (
+            json!({"data": [{"id": "fixture"}]}),
+            json!({"surfaces": [{"machine_id": "fixture", "id": "desktop",
+                "kind": "desktop", "controllable": true, "width": 1920, "height": 1080}]}),
+        )
+    }
+
+    #[test]
+    fn headless_dependencies_include_the_required_video_encoder() {
+        for package in [
+            "xvfb",
+            "openbox",
+            "xterm",
+            "xauth",
+            "fonts-dejavu-core",
+            "ffmpeg",
+        ] {
+            assert!(
+                DEBIAN_DESKTOP_PACKAGES.contains(&package),
+                "missing {package}"
+            );
+        }
+    }
+
+    #[test]
+    fn distro_detection_is_explicit_and_does_not_source_os_release() {
+        for fixture in [
+            "ID=debian\n",
+            "NAME=Ubuntu\nID=\"ubuntu\"\n",
+            "ID='ubuntu'\n",
+        ] {
+            assert_eq!(
+                PackageManager::detect(fixture).unwrap(),
+                PackageManager::Apt
+            );
+        }
+        for fixture in [
+            "ID=arch\n",
+            "ID=\"arch\"\nNAME=Omarchy\n",
+            "ID=omarchy\nID_LIKE=arch\n",
+        ] {
+            assert_eq!(
+                PackageManager::detect(fixture).unwrap(),
+                PackageManager::Pacman
+            );
+        }
+        for fixture in [
+            "",
+            "ID=fedora\n",
+            "ID=manjaro\nID_LIKE=arch\n",
+            "ID_LIKE=debian\n",
+            "ID=$(echo arch)\n",
+        ] {
+            assert!(PackageManager::detect(fixture).is_err(), "{fixture}");
+        }
+    }
+
+    #[test]
+    fn arch_has_distribution_specific_headless_dependencies() {
+        for package in [
+            "ca-certificates",
+            "libpulse",
+            "libxkbcommon",
+            "xorg-server-xvfb",
+            "openbox",
+            "xterm",
+            "xorg-xauth",
+            "ttf-dejavu",
+            "ffmpeg",
+        ] {
+            assert!(
+                PackageManager::Pacman.packages().contains(&package),
+                "{package}"
+            );
+        }
+        for debian_only in [
+            "libpulse0",
+            "libxkbcommon0",
+            "xvfb",
+            "xauth",
+            "fonts-dejavu-core",
+        ] {
+            assert!(!PackageManager::Pacman.packages().contains(&debian_only));
+        }
+    }
+
+    #[test]
+    fn fixture_package_queries_distinguish_installed_and_missing() {
+        let apt = PackageManager::Apt;
+        assert_eq!(
+            apt.query("ffmpeg"),
+            DependencyCommand::new("dpkg-query", &["-W", "-f=${Status}", "ffmpeg"])
+        );
+        assert!(apt.installed(true, b"install ok installed"));
+        assert!(!apt.installed(true, b"deinstall ok config-files"));
+        assert!(!apt.installed(false, b"install ok installed"));
+        let arch = PackageManager::Pacman;
+        assert_eq!(
+            arch.query("ffmpeg"),
+            DependencyCommand::new("pacman", &["-Q", "ffmpeg"])
+        );
+        assert!(arch.installed(true, b"ffmpeg 8.0-1\n"));
+        assert!(!arch.installed(false, b""));
+        assert_eq!(
+            apt.probes()
+                .iter()
+                .map(|step| step.program)
+                .collect::<Vec<_>>(),
+            ["apt-get", "dpkg-query"]
+        );
+        assert_eq!(
+            arch.probes(),
+            [DependencyCommand::new("pacman", &["--version"])]
+        );
+    }
+
+    #[test]
+    fn arch_install_plan_uses_existing_database_without_refresh_or_system_upgrade() {
+        let steps = PackageManager::Pacman.install_plan(&["ffmpeg", "xorg-server-xvfb"]);
+        assert_eq!(
+            steps,
+            [DependencyCommand::new(
+                "pacman",
+                &[
+                    "-S",
+                    "--noconfirm",
+                    "--needed",
+                    "ffmpeg",
+                    "xorg-server-xvfb"
+                ]
+            )]
+        );
+        for forbidden in [
+            "-Sy",
+            "-Syu",
+            "-Su",
+            "--refresh",
+            "--sysupgrade",
+            "--ignore",
+            "--nodeps",
+        ] {
+            assert!(!steps[0].args.contains(&forbidden));
+        }
+        assert!(PackageManager::Pacman.install_plan(&[]).is_empty());
+        assert!(PackageManager::Apt.install_plan(&[]).is_empty());
+    }
+
+    #[test]
+    fn arch_install_failure_requires_administrator_upgrade_approval_without_retry() {
+        let diagnostic =
+            PackageManager::Pacman.install_failure_context(&["ffmpeg", "xorg-server-xvfb"]);
+        assert!(diagnostic.contains("existing sync database"));
+        assert!(diagnostic.contains("no database refresh or host-wide upgrade was attempted"));
+        assert!(diagnostic.contains("explicitly approve"));
+        assert!(diagnostic.contains("pacman -Syu --needed ffmpeg xorg-server-xvfb"));
+        assert!(diagnostic.contains("rerun Hand setup"));
+        assert!(diagnostic.contains("will not retry or refresh automatically"));
+    }
+
+    #[test]
+    fn debian_plan_installs_only_missing_packages_noninteractively_without_sudo() {
+        let steps = PackageManager::Apt.install_plan(&["ffmpeg"]);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].program, "apt-get");
+        assert_eq!(steps[0].args, ["update"]);
+        assert_eq!(
+            steps[1].args,
+            ["install", "-y", "--no-install-recommends", "ffmpeg"]
+        );
+        for step in &steps {
+            assert!(step.env.contains(&("DEBIAN_FRONTEND", "noninteractive")));
+            assert_ne!(step.program, "sudo");
+        }
+        assert!(steps[1].env.contains(&("NEEDRESTART_MODE", "l")));
+    }
+
+    #[test]
+    fn ffmpeg_fixtures_require_exact_video_encoder_and_capture_device() {
+        assert!(ffmpeg_has_capability(
+            b"Encoders:\n V....D libx264 libx264 H.264 / AVC\n",
+            "libx264",
+            'V'
+        ));
+        for fixture in [
+            " A..... libx264 wrong media type\n",
+            " V..... libx264rgb not the encoder used\n",
+            " V..... h264 description mentions libx264\n",
+            "",
+            " V..... = Video\n",
+        ] {
+            assert!(!ffmpeg_has_capability(fixture.as_bytes(), "libx264", 'V'));
+        }
+        assert!(ffmpeg_has_capability(
+            b" D  x11grab X11 screen capture\n",
+            "x11grab",
+            'D'
+        ));
+        assert!(!ffmpeg_has_capability(
+            b" E  x11grab output only\n",
+            "x11grab",
+            'D'
+        ));
+        let smoke = ffmpeg_smoke_plan();
+        assert!(
+            smoke
+                .args
+                .windows(2)
+                .any(|pair| pair == ["-c:v", "libx264"])
+        );
+        assert_eq!(smoke.args.last(), Some(&"pipe:1"));
+        assert!(smoke.args.contains(&"-nostdin"));
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_fixture_command_checks_queries_and_actual_encoding() {
+        // Only private temporary fixtures execute. No OS packages or service
+        // changes and no PATH mutation, allowing concurrent tests safely.
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = dir.path().join("ffmpeg-fixture");
+        for (encoders, devices, encode_status, expected) in [
+            ("V....D libx264 H264", "D x11grab capture", 0, true),
+            ("V....D libx264rgb H264", "D x11grab capture", 0, false),
+            ("V....D libx264 H264", "E x11grab output", 0, false),
+            ("V....D libx264 H264", "D x11grab capture", 1, false),
+        ] {
+            fs::write(&fixture, format!("#!/bin/sh\ncase \"$2\" in\n-encoders) printf '%s\\n' '{encoders}';;\n-devices) printf '%s\\n' '{devices}';;\n*) exit {encode_status};;\nesac\n")).unwrap();
+            fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(verify_ffmpeg_at(&fixture).await.is_ok(), expected);
+        }
+    }
+
+    #[test]
+    fn readiness_accepts_the_actual_default_webrtc_catalog_without_online_field() {
+        let (hands, screens) = ready_catalogs();
+        assert!(hands["data"][0].get("online").is_none());
+        assert!(screens["surfaces"][0].get("transport").is_none());
+        assert!(catalog_ready(&hands, &screens, "fixture"));
+    }
+
+    #[test]
+    fn readiness_rejects_frame_catalogs_and_foreign_or_unusable_surfaces() {
+        let (hands, valid) = ready_catalogs();
+        for (key, value) in [
+            ("transport", json!("frames-v1")),
+            ("transport", json!("webrtc")),
+            ("transport", Value::Null),
+            ("frame_window", json!(1)),
+            ("machine_id", json!("other")),
+            ("id", json!("phone")),
+            ("kind", json!("window")),
+            ("controllable", json!(false)),
+            ("width", json!(0)),
+            ("height", json!(16385)),
+            ("width", json!("1920")),
+        ] {
+            let mut screens = valid.clone();
+            screens["surfaces"][0][key] = value;
+            assert!(
+                !catalog_ready(&hands, &screens, "fixture"),
+                "accepted {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_requires_both_the_connected_hand_and_its_video_desktop() {
+        let (hands, screens) = ready_catalogs();
+        assert!(!catalog_ready(&json!({"data": []}), &screens, "fixture"));
+        assert!(!catalog_ready(
+            &json!({"data": [{"id": "other"}]}),
+            &screens,
+            "fixture"
+        ));
+        assert!(!catalog_ready(&hands, &json!({"surfaces": []}), "fixture"));
+        assert!(!catalog_ready(&Value::Null, &screens, "fixture"));
+        assert!(!catalog_ready(&hands, &Value::Null, "fixture"));
+    }
+
     #[test]
     fn service_runs_only_the_activated_native_binary() {
         let unit = service_unit();
         assert!(unit.contains("ExecStart=/opt/nanocodex/current/nanocodex2 hand"));
         assert!(!unit.contains("python"));
         assert!(!unit.contains("bash"));
+        assert!(unit.contains("User=nanocodex\nGroup=nanocodex"));
+        assert!(unit.contains("UMask=0077"));
+        assert!(!unit.contains("sudo"));
+        assert!(!unit.contains("NANOCODEX_DESKTOP_TARGET"));
+        assert!(!unit.contains("ncx_live_"));
     }
 }

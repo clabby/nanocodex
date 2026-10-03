@@ -2,7 +2,7 @@
 use futures_util::{SinkExt, StreamExt};
 use image::DynamicImage;
 use nanocodex_managed::ManagedClient;
-use nanocodex_tools::attachment::AttachmentTarget;
+use nanocodex_oai_tools::attachment::AttachmentTarget;
 use ratatui::layout::Size;
 use ratatui_image::picker::Picker;
 use serde::Deserialize;

@@ -13,14 +13,25 @@ impl SpawnRoute {
     pub(crate) fn validate(&self, requested: SpawnOptions) -> std::io::Result<()> {
         let model = self
             .options
-            .selected_model()
+            .selected_harness_model()
             .ok_or_else(|| std::io::Error::other("subagent route must select a model"))?;
         let thinking = self
             .options
             .selected_thinking()
             .ok_or_else(|| std::io::Error::other("subagent route must select thinking"))?;
+        self.options
+            .validate_harness()
+            .map_err(std::io::Error::other)?;
         if requested
-            .selected_model()
+            .selected_harness()
+            .is_some_and(|family| family != model.family())
+        {
+            return Err(std::io::Error::other(
+                "subagent route conflicts with explicit harness",
+            ));
+        }
+        if requested
+            .selected_harness_model()
             .is_some_and(|value| value != model)
             || requested
                 .selected_thinking()
@@ -55,8 +66,14 @@ impl SpawnDecision {
             Self::Routed(route) => route.validate(requested),
             Self::Native { reference } => {
                 if reference.trim().is_empty()
-                    || requested.selected_model().is_some_and(|model| {
-                        !matches!(model, Model::Astra | Model::Sol | Model::Luna)
+                    || requested.selected_harness_model().is_some_and(|model| {
+                        !matches!(
+                            model,
+                            nanocodex_agent::HarnessModel::Claude(_)
+                                | nanocodex_agent::HarnessModel::Codex(
+                                    Model::Astra | Model::Sol | Model::Luna
+                                )
+                        )
                     })
                 {
                     return Err(std::io::Error::other("invalid native subagent choice"));
@@ -138,8 +155,8 @@ mod tests {
         ] {
             assert!(native.validate(requested).is_ok());
             assert_eq!(
-                native.options(requested).selected_model(),
-                requested.selected_model()
+                native.options(requested).selected_harness_model(),
+                requested.selected_harness_model()
             );
             assert_eq!(
                 native.options(requested).selected_thinking(),

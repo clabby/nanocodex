@@ -49,11 +49,14 @@ public struct TodoMailThread: Identifiable, Equatable, Sendable {
     public let connectionID: String
     public let subject: String
     public let messages: [TodoMailMessage]
+    public let peopleContext: TodoPeopleContext?
     public init(_ json: JSON) throws {
         guard !json["id"].string.isEmpty, case .array = json["messages"] else { throw APIError.invalidResponse }
         id = json["id"].string; connectionID = json["connection_id"].string
         messages = try json["messages"].array.map(TodoMailMessage.init)
         subject = json["subject"].string.isEmpty ? (messages.first?.subject ?? "") : json["subject"].string
+        if case .array = json["people"] { peopleContext = TodoPeopleContext(json) }
+        else { peopleContext = nil }
     }
 }
 
@@ -130,9 +133,41 @@ public extension ManagedClient {
     var todoMailStorageScope: String {
         SHA256.hash(data: Data((credential.origin + "\n" + credential.apiKey).utf8)).map { String(format: "%02x", $0) }.joined()
     }
+    /// Retained body for immediate reading only, not draft/send authority.
+    func cachedTodoMailThread(connectionID: String, threadID: String) async -> TodoMailThread? {
+        guard let id = try? Self.mailPathComponent(threadID),
+              let response = await cachedJSON(path: "/v1/todo/mail/threads/" + id + Self.mailQuery(["connection_id": connectionID])),
+              let thread = try? TodoMailThread(response["thread"]), thread.id == threadID, thread.connectionID == connectionID else { return nil }
+        return thread
+    }
+    /// Bounded read-only lookahead. Existing snapshots are reused; opening a
+    /// reader still refreshes live authority. At most two requests are in flight
+    /// and at most three neighbors are admitted per window.
+    func prefetchTodoMailThreads(_ threads: [TodoMailThreadSummary]) async {
+        var seen = Set<String>()
+        let bounded = Array(threads.filter { seen.insert($0.connectionID + ":" + $0.id).inserted }.prefix(3))
+        await withTaskGroup(of: Void.self) { group in
+            var next = 0
+            func admit(_ thread: TodoMailThreadSummary) {
+                group.addTask {
+                    guard !Task.isCancelled else { return }
+                    if await self.cachedTodoMailThread(connectionID: thread.connectionID, threadID: thread.id) != nil { return }
+                    guard !Task.isCancelled else { return }
+                    _ = try? await self.todoMailThread(connectionID: thread.connectionID, threadID: thread.id)
+                }
+            }
+            while next < min(2, bounded.count) { admit(bounded[next]); next += 1 }
+            while await group.next() != nil {
+                if Task.isCancelled { group.cancelAll(); break }
+                if next < bounded.count { admit(bounded[next]); next += 1 }
+            }
+        }
+    }
     func todoMailThread(connectionID: String, threadID: String) async throws -> TodoMailThread {
         let response = try await json(path: "/v1/todo/mail/threads/" + Self.mailPathComponent(threadID) + Self.mailQuery(["connection_id": connectionID]))
-        return try TodoMailThread(response["thread"])
+        let thread = try TodoMailThread(response["thread"])
+        guard thread.id == threadID, thread.connectionID == connectionID else { throw APIError.invalidResponse }
+        return thread
     }
     func todoMailDraft(id: String) async throws -> TodoMailDraft {
         try TodoMailDraft(await json(path: "/v1/todo/mail/drafts/" + Self.mailPathComponent(id))["draft"])

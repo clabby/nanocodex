@@ -734,7 +734,7 @@ mod tests {
         append_create_settings(
             &mut endpoint,
             AgentSettings {
-                model: Model::Astra,
+                model: Model::Astra.into(),
                 thinking: Thinking::Max,
                 reasoning_mode: ReasoningMode::Standard,
                 fast_mode: true,

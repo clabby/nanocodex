@@ -20,7 +20,7 @@ use nanocodex_oai_api::{
     responses::{ContentItem, MessageRole, ResponseItem, Usage, WarmupResponse},
     tower::{GenerationOutput, ResponsePipelineStats, ResponsesAttemptKind, ResponsesOutput},
 };
-use nanocodex_tools::{ToolContext, ToolDefinition, ToolOutput, runtime::DynamicToolProvider};
+use nanocodex_oai_tools::{ToolContext, ToolDefinition, ToolOutput, runtime::DynamicToolProvider};
 use serde_json::Value;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
@@ -105,7 +105,7 @@ impl DynamicToolProvider for StartProbe {
         self.0.store(true, Ordering::Release);
     }
 
-    fn direct_tools(&self) -> Vec<Arc<dyn nanocodex_tools::Tool>> {
+    fn direct_tools(&self) -> Vec<Arc<dyn nanocodex_oai_tools::Tool>> {
         Vec::new()
     }
 

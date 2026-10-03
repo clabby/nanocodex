@@ -1,3 +1,4 @@
+import { browserLoginIdentity } from "./browser-login";
 import { PrivateBrowserNoActiveTouch, isBrowserVaultOrigin, type BrowserVaultIdentity, type PrivateBrowserCdp } from "./browser-vault";
 
 export type BrowserVaultTakeoverAction =
@@ -64,6 +65,7 @@ export async function privateVaultTakeover(
   cdp: Pick<PrivateBrowserCdp, "send"> & Partial<Pick<PrivateBrowserCdp, "attachTarget">>, identity: BrowserVaultIdentity, action: BrowserVaultTakeoverAction,
   touch: BrowserVaultTouchState = {},
   restoreViewport = false,
+  allowedOrigins?: readonly string[],
 ): Promise<BrowserVaultTakeoverResult> {
   let sid: string | undefined;
   try {
@@ -77,7 +79,7 @@ export async function privateVaultTakeover(
     const sameOrigin = (value: unknown) => {
       if (typeof value !== "string") throw new Error();
       const url = new URL(value);
-      if (url.protocol !== "https:" || url.origin !== identity.expected_origin || url.username || url.password) throw new Error();
+      if (url.protocol !== "https:" || !(allowedOrigins ?? [identity.expected_origin]).includes(url.origin) || url.username || url.password) throw new Error();
     };
     const checkTarget = async () => {
       const { targetInfo } = await cdp.send("Target.getTargetInfo", { targetId: identity.target_id });
@@ -90,6 +92,7 @@ export async function privateVaultTakeover(
     sid = attached.sessionId;
     let frameId = "";
     const check = async () => {
+      if (allowedOrigins) await browserLoginIdentity(cdp as PrivateBrowserCdp, identity, allowedOrigins);
       await checkTarget();
       const tree = await cdp.send("Page.getFrameTree", {}, sid);
       const frame = tree?.frameTree?.frame;

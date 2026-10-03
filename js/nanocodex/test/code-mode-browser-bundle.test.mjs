@@ -7,7 +7,7 @@ import { createCodeRuntime } from '../runtime/code-runtime.mjs';
 import { createWorkerEvaluator } from '../runtime/worker-evaluator.mjs';
 import { NodeWebWorker } from './support/node-web-worker.mjs';
 
-const oracle = JSON.parse(await readFile(new URL('../../../crates/nanocodex-tools/src/code_mode/native-behavior.json', import.meta.url)));
+const oracle = JSON.parse(await readFile(new URL('../../../crates/nanocodex-oai-tools/src/code_mode/native-behavior.json', import.meta.url)));
 for (const keepNames of [false, true]) {
   test(`browser-target minified Worker preserves upstream helpers and tool failures (keepNames=${keepNames})`, async () => {
     const bundle = await build({

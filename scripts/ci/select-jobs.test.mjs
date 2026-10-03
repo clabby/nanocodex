@@ -15,7 +15,7 @@ const only = (...on) => Object.fromEntries(families.map(name => [name, on.includ
 const everything = only(...families);
 
 // A miniature workspace with the real job-root package names:
-// nanocodex2-bin -> nanocodex-vm -> nanocodex-oai-api, plus a leaf crate.
+// Hand/VM consumers of OpenAI tools, independent Claude consumers, and a leaf.
 function workspace(t) {
   const cwd = mkdtempSync(join(tmpdir(), "ci-selector-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
@@ -29,12 +29,17 @@ function workspace(t) {
       + Object.entries(deps).map(([dep, path]) => `${dep} = { path = "${path}" }\n`).join(""));
     write(`${dir}/src/lib.rs`);
   };
-  write("Cargo.toml", `[workspace]\nresolver = "2"\nmembers = ["crates/*", "bin/*"]\n`);
+  write("Cargo.toml", `[workspace]\nresolver = "2"\nmembers = ["crates/*", "crates/nanocodex-oai-tools/macros", "bin/*"]\n`);
   crate("crates/oai-api", "nanocodex-oai-api");
-  crate("crates/vm", "nanocodex-vm", { "nanocodex-oai-api": "../oai-api" });
+  crate("crates/nanocodex-oai-tools/macros", "nanocodex-oai-tools-macros");
+  crate("crates/nanocodex-oai-tools", "nanocodex-oai-tools", { "nanocodex-oai-tools-macros": "macros" });
+  crate("crates/nanocodex-claude-tools", "nanocodex-claude-tools");
+  crate("crates/nanocodex-claude", "nanocodex-claude", { "nanocodex-claude-tools": "../nanocodex-claude-tools" });
+  crate("crates/vm", "nanocodex-vm", { "nanocodex-oai-api": "../oai-api", "nanocodex-oai-tools": "../nanocodex-oai-tools" });
   crate("crates/phone", "nanocodex-phone");
   crate("bin/nanocodex2", "nanocodex2-bin", { "nanocodex-vm": "../../crates/vm" });
   write("README.md");
+  execFileSync("cargo", ["generate-lockfile", "--offline"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
   git("init", "-q");
   git("config", "user.name", "CI selector test");
   git("config", "user.email", "ci@example.invalid");
@@ -78,6 +83,26 @@ test("changed crates select only the jobs in their reverse-dependency closure", 
   assert.equal(shared.raw.tests, "false", "tests stay paused unless the owner switch is on");
 });
 
+test("provider split retains Rust ownership of the unchanged npm Code Mode asset", t => {
+  const w = workspace(t);
+  w.write("js/nanocodex-tools/runtime/code-tools.mjs", "export const changed = true;\n");
+  const asset = w.select("push", { before: w.initial, after: w.commit() });
+  for (const family of ["hands", "windows", "vm", "rust", "rust_extra", "apps", "bindings", "preview", "wasm", "policy"]) {
+    assert.equal(asset.jobs[family], true, family);
+  }
+  assert.equal(asset.raw.packages, "nanocodex-oai-tools nanocodex-vm nanocodex2-bin");
+  const before = w.git("rev-parse", "HEAD");
+  w.write("crates/nanocodex-claude-tools/src/lib.rs", "// independent Claude adapters\n");
+  const claude = w.select("push", { before, after: w.commit() });
+  assert.deepEqual(claude.jobs, only("rust", "rust_extra", "policy"));
+  assert.equal(claude.raw.packages, "nanocodex-claude nanocodex-claude-tools");
+  const macroBefore = w.git("rev-parse", "HEAD");
+  w.write("crates/nanocodex-oai-tools/macros/src/lib.rs", "// renamed procedural macro\n");
+  const macro = w.select("push", { before: macroBefore, after: w.commit() });
+  assert.deepEqual(macro.jobs, only("hands", "windows", "vm", "rust", "rust_extra", "policy"));
+  assert.equal(macro.raw.packages, "nanocodex-oai-tools nanocodex-oai-tools-macros nanocodex-vm nanocodex2-bin");
+});
+
 test("workspace-wide inputs, deleted crates, and unknown paths fail open", t => {
   const w = workspace(t);
   for (const path of ["Cargo.lock", ".github/workflows/ci.yml", "scripts/ci/select-jobs.mjs", "crates/gone/src/lib.rs", "unknown.txt"]) {
@@ -95,7 +120,7 @@ test("PRs diff against the merge base; drafts keep only the fast lane", t => {
   w.write("crates/vm/src/lib.rs", "// feature\n");
   const head = w.commit();
   w.git("checkout", "-q", "-b", "base", w.initial);
-  w.write("Cargo.lock", "# base-only change must not leak into the PR diff\n");
+  w.write("Cargo.lock", readFileSync(join(w.cwd, "Cargo.lock"), "utf8") + "# base-only change must not leak into the PR diff\n");
   const base = w.commit();
   const pr = draft => ({ pull_request: { draft, base: { sha: base }, head: { sha: head } } });
   const ready = w.select("pull_request", pr(false));

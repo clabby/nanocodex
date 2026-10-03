@@ -17,7 +17,7 @@ import tempfile
 
 PIN = '36430b36881cf5c289cb48e671cfc9e8b542ae7b'
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = ROOT / 'crates/nanocodex-tools/tests/fixtures/codex-parity/shared-tools.json'
+FIXTURE = ROOT / 'crates/nanocodex-oai-tools/tests/fixtures/codex-parity/shared-tools.json'
 
 def raw(source, name):
     match = re.search(r'const ' + name + r': &str = r(#*)"(.*?)"\1;', source, re.S)
@@ -152,14 +152,14 @@ else:
     assert json.loads(FIXTURE.read_text()) == fixture, 'upstream fixture drift'
 
 for local, remote in [
-    ('crates/nanocodex-tools/src/apply_patch/apply_patch.lark', 'core/assets/tools/apply_patch.lark'),
-    ('crates/nanocodex-tools/src/image_generation/imagegen_description.md', 'ext/image-generation/imagegen_description.md'),
+    ('crates/nanocodex-oai-tools/src/apply_patch/apply_patch.lark', 'core/assets/tools/apply_patch.lark'),
+    ('crates/nanocodex-oai-tools/src/image_generation/imagegen_description.md', 'ext/image-generation/imagegen_description.md'),
 ]:
     assert (ROOT / local).read_bytes() == (u / remote).read_bytes(), local
 print(f'PASS: upstream {PIN}; compiled tool constructors, patch grammar, imagegen description')
 
 # The renderer is a direct port: permit only import/module-path adaptation.
-renderer = (ROOT / 'crates/nanocodex-tools/src/code_mode/schema_types.rs').read_text()
+renderer = (ROOT / 'crates/nanocodex-oai-tools/src/code_mode/schema_types.rs').read_text()
 renderer = renderer.removeprefix(f'// Ported from openai/codex {PIN}.\n')
 renderer = renderer.replace('use super::normalize_identifier as normalize_code_mode_identifier;',
                             'use crate::description::normalize_code_mode_identifier;')

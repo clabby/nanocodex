@@ -227,7 +227,8 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.contains("not installed"));
-            assert!(error.contains("scripts/install-hand-service.py"));
+            assert!(error.contains("nanocodex hand install"));
+            assert!(!error.contains("scripts/install-hand-service.py"));
         }
     }
     #[tokio::test]

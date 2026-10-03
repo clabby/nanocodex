@@ -5,17 +5,23 @@ description: Make Code Mode the default, then add typed Rust, hosted, or deferre
 
 # Tools and Code Mode
 
+This page describes the OpenAI Responses tool runtime. Claude uses the separate
+`nanocodex-claude-tools` crate and native Claude schemas; it does not receive
+Codex Code Mode, `apply_patch`, or Responses tool-search declarations. See the
+[Claude runtime guide](https://github.com/gakonst/nanocodex/blob/master/docs/CLAUDE_RUNTIME.md)
+for explicit Claude host capabilities.
+
 Code Mode is the default tool surface. The model composes typed tools through
 `exec` instead of receiving every registered schema as a direct model tool.
 `wait`, deferred search, and deliberately direct tools remain alongside it when
-configured. `nanocodex-tools` owns that runtime, typed caller tools, standard
+configured. `nanocodex-oai-tools` owns that runtime, typed caller tools, standard
 workspace tools, web and image tools, MCP transports, and deferred tool search
 without importing the agent crate.
 
 ## Define a Rust tool
 
 ```rust
-use nanocodex_tools::{Tools, tool};
+use nanocodex_oai_tools::{Tools, tool};
 
 #[tool(
     name = "deployment_region",
@@ -27,7 +33,7 @@ async fn deployment_region(service: String) -> Result<String, std::io::Error> {
 }
 
 let tools = Tools::builder().tool(deployment_region).build()?;
-# Ok::<(), nanocodex_tools::ToolsBuildError>(())
+# Ok::<(), nanocodex_oai_tools::ToolsBuildError>(())
 ```
 
 Implement `Tool` directly when execution needs `ToolContext`, freeform input,
@@ -52,7 +58,7 @@ separate provider policy used by MCP and other dynamic catalogs.
 
 Native Code Mode uses the owned runtime. Browser and other JavaScript hosts use
 the portable `embedded::CodeModeHost` boundary while preserving the same nested
-tool contract. See the [tools guide](https://github.com/gakonst/nanocodex/blob/master/crates/nanocodex-tools/README.md).
+tool contract. See the [tools guide](https://github.com/gakonst/nanocodex/blob/master/crates/nanocodex-oai-tools/README.md).
 
 ## Workspace tools
 
@@ -65,7 +71,7 @@ artifact separation, not a second implementation.
 ## MCP without an up-front catalog
 
 ```rust
-use nanocodex_tools::{Tools, mcp::{Mcp, McpServer}};
+use nanocodex_oai_tools::{Tools, mcp::{Mcp, McpServer}};
 
 let mcp = Mcp::builder()
     .server("company_docs", McpServer::stdio("company-docs-mcp").arg("--readonly"))

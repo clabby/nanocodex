@@ -1,3 +1,4 @@
+import { readTodoPeople, todoSenderEmail, type TodoPeopleContext } from "./todo-crm-context";
 import { Buffer } from "node:buffer";
 import { suggestTodoMailReply, type TodoMailSuggestionAI } from "./todo-mail-suggest";
 import { browserEgressSubject } from "./browser-egress";
@@ -193,11 +194,25 @@ export function assertTodoMailSourceApplicable(thread: any, sourceID: string): v
 }
 
 /** Called only behind the account route's principal/origin gate in UserAccount. */
-export async function handleTodoMail(request: Request, storage: DurableObjectStorage, binding: Fetcher | undefined, ownerID: string, ai?: TodoMailSuggestionAI): Promise<Response> {
+export async function handleTodoMail(request: Request, storage: DurableObjectStorage, binding: Fetcher | undefined, ownerID: string, ai?: TodoMailSuggestionAI, crm?: D1Database): Promise<Response> {
   try {
     if (!binding) return fail("connector_unavailable", 503);
     const url = new URL(request.url), path = url.pathname, params = url.searchParams;
     if (!["GET", "POST"].includes(request.method)) return fail("method_not_allowed", 405);
+    // Read-only local context: no model or external CRM sync on an inbox GET.
+    // Repeated senders share only this request's promise, never a cross-account cache.
+    const crmContexts = new Map<string, Promise<TodoPeopleContext>>();
+    const people = (senders: string[]) => {
+      const emails = [...new Set(senders.flatMap(todoSenderEmail))].sort();
+      const key = JSON.stringify(emails);
+      let context = crmContexts.get(key);
+      if (!context) { context = readTodoPeople(crm, ownerID, emails); crmContexts.set(key, context); }
+      return context;
+    };
+    const summaryWithPeople = async (thread: any, connectionID: string, fallback: any = {}) => {
+      const summary = threadSummary(thread, connectionID, fallback);
+      return { ...summary, ...await people([summary.from]) };
+    };
     const statuses = async () => {
       const response = await binding.fetch(`https://broker.internal/users/${encodeURIComponent(ownerID)}/connectors`);
       if (!response.ok) return fail("connector_unavailable", 503);
@@ -233,7 +248,7 @@ export async function handleTodoMail(request: Request, storage: DurableObjectSto
       const list = await provider(target.href, connectionID);
       const threads = await parallel<any, unknown>((list.threads ?? []).slice(0, 25), async entry => {
         const thread = await provider(`${gmail}threads/${id(entry.id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, connectionID);
-        return threadSummary(thread, connectionID, entry);
+        return summaryWithPeople(thread, connectionID, entry);
       });
       return json({ threads, next_page_token: list.nextPageToken ?? null });
     }
@@ -244,11 +259,11 @@ export async function handleTodoMail(request: Request, storage: DurableObjectSto
       if (!["full", "metadata"].includes(format)) fail("invalid_format");
       if (format === "metadata") {
         const thread = await provider(gmail + "threads/" + id(threadPath[1]) + "?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date", connectionID);
-        return json({ summary: threadSummary(thread, connectionID) });
+        return json({ summary: await summaryWithPeople(thread, connectionID) });
       }
       const thread = await provider(`${gmail}threads/${id(threadPath[1])}?format=full`, connectionID), messages = [];
       for (const raw of thread.messages ?? []) messages.push(await message(raw, connectionID, provider));
-      return json({ thread: { id: thread.id, connection_id: connectionID, subject: messages.at(-1)?.subject ?? "", messages } });
+      return json({ thread: { id: thread.id, connection_id: connectionID, subject: messages.at(-1)?.subject ?? "", messages, ...await people(messages.map(m => m.from)) } });
     }
     const attachment = /^\/todo\/mail\/messages\/([A-Za-z0-9_-]+)\/attachments\/([A-Za-z0-9_-]+)$/.exec(path);
     if (attachment && request.method === "GET") {

@@ -359,16 +359,44 @@ fn read_registration(path: &Path) -> io::Result<Registration> {
     Ok(serde_json::from_reader(file)?)
 }
 
-pub fn list() -> io::Result<Vec<Registration>> {
+pub async fn list() -> io::Result<Vec<Registration>> {
     let directory = prepare_registry()?;
     let mut values = Vec::new();
+    let mut probes = tokio::task::JoinSet::new();
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         if entry.path().extension().and_then(|v| v.to_str()) != Some("json") {
             continue;
         }
         if let Ok(mut value) = read_registration(&entry.path()) {
-            value.auth_token.clear();
+            // An abrupt exit leaves both the registration and socket inode
+            // behind. Neither their presence nor a potentially recycled PID
+            // proves there is still a listener. Bound pending connects without
+            // deleting registrations that may only be temporarily unavailable.
+            if probes.len() == 8
+                && let Some(Ok(Some(value))) = probes.join_next().await
+            {
+                values.push(value);
+            }
+            probes.spawn(async move {
+                let socket = tokio::time::timeout(
+                    Duration::from_millis(250),
+                    UnixStream::connect(&value.socket_path),
+                )
+                .await
+                .ok()?
+                .ok()?;
+                if socket.peer_cred().ok()?.uid() != unsafe { libc::geteuid() } {
+                    return None;
+                }
+                // Drop the probe without authenticating or issuing commands.
+                value.auth_token.clear();
+                Some(value)
+            });
+        }
+    }
+    while let Some(result) = probes.join_next().await {
+        if let Ok(Some(value)) = result {
             values.push(value);
         }
     }

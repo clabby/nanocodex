@@ -5,6 +5,12 @@ description: Add typed application capabilities without moving the agent loop ou
 
 # Rust tools, Code Mode, and MCP
 
+This page describes the OpenAI Responses tool runtime. Claude uses the separate
+`nanocodex-claude-tools` crate and native Claude schemas; it does not receive
+Codex Code Mode, `apply_patch`, or Responses tool-search declarations. See the
+[Claude runtime guide](https://github.com/gakonst/nanocodex/blob/master/docs/CLAUDE_RUNTIME.md)
+for explicit Claude host capabilities.
+
 Register application tools on the agent you own. The `#[tool]` macro derives
 the input and output contracts from an async Rust function. `Tools::builder()`
 returns `ToolsBuilder`, which selects the compiled handlers for this runtime.
@@ -61,9 +67,9 @@ let tools = Tools::builder().provider(mcp).build()?;
 MCP discovery starts with the owning tool runtime. Deferred schemas stay out of
 the initial model prefix, are found through `tool_search`, and become available
 under canonical server/tool names in Code Mode. Native MCP is part of
-`nanocodex-tools`; it is not another agent runtime.
+`nanocodex-oai-tools`; it is not another agent runtime.
 
 Run the [custom tool](https://github.com/gakonst/nanocodex/blob/master/examples/custom_tool.rs)
 and [MCP](https://github.com/gakonst/nanocodex/blob/master/examples/mcp.rs)
-examples, then read the [tools crate guide](https://github.com/gakonst/nanocodex/blob/master/crates/nanocodex-tools/README.md)
+examples, then read the [tools crate guide](https://github.com/gakonst/nanocodex/blob/master/crates/nanocodex-oai-tools/README.md)
 for exposure, hosted Code Mode, and lower-level contracts.

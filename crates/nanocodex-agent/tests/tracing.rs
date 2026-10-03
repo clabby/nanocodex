@@ -22,7 +22,7 @@ use nanocodex_oai_api::{
     responses::{Usage, WarmupResponse},
     tower::{CodeCall, CodeCallKind, GenerationOutput, ResponsePipelineStats, ResponsesOutput},
 };
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, contract::async_trait,
 };
 use serde_json::json;

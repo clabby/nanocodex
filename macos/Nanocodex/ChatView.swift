@@ -604,7 +604,7 @@ struct ComposerView: View {
         ComposerResponseControls(model: model, tabID: paneID ?? model.activeTabID,
                                  hasDraft: model.hasDraft(paneID), canSend: model.canSend(paneID),
                                  running: model.running(paneID), canStop: !model.controllableTurns(paneID).isEmpty,
-                                 connected: model.state.connected).equatable()
+                                 connected: model.state.connected, voiceSupported: model.supportsVoice(paneID)).equatable()
     }
 }
 
@@ -618,15 +618,17 @@ private struct ComposerResponseControls: View, Equatable {
     let running: Bool
     let canStop: Bool
     let connected: Bool
+    let voiceSupported: Bool
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.model === rhs.model && lhs.tabID == rhs.tabID && lhs.hasDraft == rhs.hasDraft
             && lhs.canSend == rhs.canSend && lhs.running == rhs.running
-            && lhs.canStop == rhs.canStop && lhs.connected == rhs.connected
+            && lhs.canStop == rhs.canStop && lhs.connected == rhs.connected && lhs.voiceSupported == rhs.voiceSupported
     }
     var body: some View {
         HStack(spacing: 8) {
             NanocodexVoiceControl(session: model.voice) { try await model.voiceConfiguration(tabID: tabID) }
-                .disabled(!connected)
+                .disabled(!connected || !voiceSupported)
+                .help(voiceSupported ? "Start voice" : "Claude chats support text only; voice is unavailable.")
             if canStop {
                 Button { Task { await model.cancel(tabID: tabID) } } label: {
                     Image(systemName: "stop.fill").font(.system(size: 12)).frame(width: 16, height: 16)
@@ -689,32 +691,43 @@ struct PendingMessagesView: View {
 struct ModelMenu: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.workspaceTabID) private var paneID
+    private var selected: AgentSettings { model.settingsForTab(paneID ?? model.activeTabID) }
+    private var choice: ModelChoice? { model.availableModel(selected.model) }
+    private var locked: Bool { model.modelSettingsLocked(paneID) }
     var body: some View {
         Menu {
-            Picker("Model", selection: Binding(get: { model.settingsForTab(paneID ?? model.activeTabID).model }, set: { let value = $0; model.changeSettings(tabID: paneID) { $0.selectModel(value) } })) {
-                Text("GPT-6 Astra").tag("gpt-6-astra")
-                Text("GPT-6.1 Sol").tag("gpt-6.1-sol")
-                Text("GPT-6 Luna").tag("gpt-6-luna")
-            }.disabled(model.snapshot(paneID)?.hasAcceptedTurn == true)
-            Picker("Reasoning", selection: Binding(get: { model.settingsForTab(paneID ?? model.activeTabID).thinking }, set: { let value = $0; model.changeSettings(tabID: paneID) { $0.thinking = value } })) {
-                Text("None").tag("none").disabled(!model.settingsForTab(paneID ?? model.activeTabID).supportsNoReasoning)
-                Text("Low").tag("low")
-                Text("Medium").tag("medium")
-                Text("High").tag("high")
-                Text("Extra high").tag("xhigh")
-                Text("Max").tag("max")
+            if let catalog = model.modelCatalog, !catalog.models.isEmpty {
+                Picker("Model", selection: Binding(get: { selected.model }, set: { value in
+                    if let next = model.availableModel(value) { model.changeSettings(tabID: paneID) { $0.selectModel(next) } }
+                })) {
+                    ForEach(catalog.models) { Text($0.name).tag($0.id) }
+                }.disabled(locked).accessibilityIdentifier("model-choice")
+                if let choice {
+                    Picker("Reasoning", selection: Binding(get: { selected.thinking }, set: { value in model.changeSettings(tabID: paneID) { $0.thinking = value } })) {
+                        ForEach(choice.efforts, id: \.self) { Text(ModelChoice.effortName($0)).tag($0) }
+                    }.disabled(model.effortSettingsLocked(paneID))
+                    if model.effortSettingsLocked(paneID) { Text("Claude effort is fixed for this thread. Start a new thread to change it.") }
+                    if choice.reasoningModes.contains("pro") {
+                        Toggle("Pro reasoning", isOn: Binding(get: { selected.reasoning_mode == "pro" }, set: { value in model.changeSettings(tabID: paneID) { $0.reasoning_mode = value ? "pro" : "standard" } })).disabled(locked)
+                    }
+                    if choice.fastMode {
+                        Toggle("Fast mode", isOn: Binding(get: { selected.fast_mode }, set: { value in model.changeSettings(tabID: paneID) { $0.fast_mode = value } }))
+                    }
+                } else { Text("This model is unavailable. Choose an available model in a new thread.") }
+                if locked { Text("Start a new thread to change the model or Pro.") }
+            } else {
+                Text(model.modelCatalogLoading ? "Loading models…" : model.modelCatalogError ?? "No models available")
+                if !selected.model.isEmpty { Text("Selected model unavailable. Your draft is preserved; reconnect its provider or choose another model.") }
             }
             Divider()
-            Toggle("Pro reasoning", isOn: Binding(get: { model.settingsForTab(paneID ?? model.activeTabID).reasoning_mode == "pro" }, set: { let value = $0; model.changeSettings(tabID: paneID) { $0.reasoning_mode = value ? "pro" : "standard" } }))
-                .disabled(!model.settingsForTab(paneID ?? model.activeTabID).supportsProReasoning || model.snapshot(paneID)?.hasAcceptedTurn == true)
-            Toggle("Fast mode", isOn: Binding(get: { model.settingsForTab(paneID ?? model.activeTabID).fast_mode }, set: { let value = $0; model.changeSettings(tabID: paneID) { $0.fast_mode = value } }))
-            if model.snapshot(paneID)?.hasAcceptedTurn == true {
-                Divider()
-                Text("Start a new thread to change the model or Pro.")
-            }
+            Button("Refresh models") { Task { await model.refreshModelCatalog() } }.disabled(model.modelCatalogLoading)
+            Button("Provider settings…") { model.showingSettings = true }
         } label: {
-            HStack(spacing: 5) { Text("\(model.settingsForTab(paneID ?? model.activeTabID).modelName) · \(model.settingsForTab(paneID ?? model.activeTabID).thinking.capitalized)"); if model.settingsForTab(paneID ?? model.activeTabID).fast_mode { Image(systemName: "bolt.fill") } }.font(.system(size: 13)).foregroundStyle(.secondary).padding(.vertical, 8)
-        }.menuStyle(.borderlessButton).fixedSize().help("Model and thinking settings")
+            HStack(spacing: 5) {
+                Text(model.modelCatalog == nil ? (model.modelCatalogLoading ? "Loading models…" : "Models unavailable") : "\(choice?.name ?? selected.modelName) · \(ModelChoice.effortName(selected.thinking))")
+                if choice?.fastMode == true && selected.fast_mode { Image(systemName: "bolt.fill") }
+            }.font(.system(size: 13)).foregroundStyle(.secondary).padding(.vertical, 8)
+        }.menuStyle(.borderlessButton).fixedSize().help("Model and thinking settings").accessibilityIdentifier("model-menu")
     }
 }
 

@@ -588,3 +588,5 @@
     height: auto;
   }
 }
+
+.managed-input-capability { font-size: 12px; color: var(--text-secondary); white-space: normal; }

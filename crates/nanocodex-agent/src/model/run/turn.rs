@@ -6,6 +6,12 @@ where
     S::Error: Into<nanocodex_oai_api::ResponseError>,
     S::Future: AgentSend,
 {
+    fn start_timing(&mut self) {
+        self.started_at = Instant::now();
+        self.operation_started_at = SystemTime::now().duration_since(UNIX_EPOCH).ok();
+        self.elapsed_before_attempt = Duration::ZERO;
+    }
+
     pub(crate) async fn compact(
         &mut self,
         requested_workspace: Option<Arc<str>>,
@@ -42,7 +48,7 @@ where
         self.execution_steps = execution_steps;
         self.thinking = thinking;
         self.fast_mode = fast_mode;
-        self.started_at = Instant::now();
+        self.start_timing();
         self.stats = RunStats::default();
         self.transport_baseline = self.transport_stats.snapshot();
         let restored = self
@@ -146,7 +152,7 @@ where
     ) -> Result<()> {
         self.thinking = thinking;
         self.fast_mode = fast_mode;
-        self.started_at = Instant::now();
+        self.start_timing();
         self.stats = RunStats::default();
         self.events.emit(
             AgentEventKind::RunStarted,
@@ -203,7 +209,7 @@ where
         }
         self.thinking = thinking;
         self.fast_mode = fast_mode;
-        self.started_at = Instant::now();
+        self.start_timing();
         self.stats = RunStats::default();
         self.events.emit(
             AgentEventKind::RunStarted,
@@ -242,7 +248,7 @@ where
         self.instruction_revision = task.instruction_revision();
         self.thinking = thinking;
         self.fast_mode = fast_mode;
-        self.started_at = Instant::now();
+        self.start_timing();
         self.stats = RunStats::default();
         if let Some(tools) = &self.active_tools {
             tools.begin_turn();
@@ -378,7 +384,8 @@ where
             kind,
             terminal_payload(
                 status,
-                self.started_at.elapsed(),
+                self.elapsed_before_attempt
+                    .saturating_add(self.started_at.elapsed()),
                 &self.config,
                 self.model,
                 self.thinking,

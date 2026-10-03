@@ -1,6 +1,7 @@
+import { createCodeEffectIdentity } from "../runtime/code-effect-identity.mjs";
 import { createBeforeCompaction } from "../runtime/before-compaction.mjs";
 import { createResponsesHttp, responsesHttpHeaders } from "../runtime/responses-http.mjs";
-import { createCodeRuntime, toolResult } from "../runtime/code-runtime.mjs";
+import { createCodeRuntime, toolResult, traceToolInvocation } from "../runtime/code-runtime.mjs";
 import {
   toolRouterBrand,
   toolRouterRuntime,
@@ -9,6 +10,7 @@ import {
 import { utf8ByteLength } from "../runtime/utf8.mjs";
 import { createWorkerEvaluator } from "../runtime/worker-evaluator.mjs";
 import { openHostManagedWebSocket } from "./hostManagedWebSocket.mjs";
+import { createSocketObservations } from "./socket-observations.mjs";
 
 const DEFAULT_MAX_QUEUED_MESSAGES = 4_096;
 const DEFAULT_MAX_QUEUED_BYTES = 32 * 1024 * 1024;
@@ -19,10 +21,20 @@ const MPP_CLIENT_PROTOCOL_ERROR_CLOSE_CODE = 3008;
 const WEBSOCKET_OPEN = 1;
 
 export function createBrowserHost(options = {}) {
+  const internalRuntime = options[Symbol.for("nanocodex.browser.internalRuntime")];
+  if (internalRuntime !== undefined
+    && (!internalRuntime || typeof internalRuntime !== "object" || Array.isArray(internalRuntime))) {
+    throw new TypeError("browser host internal runtime options must be an object");
+  }
+  const traceTool = internalRuntime?.traceTool;
+  if (traceTool !== undefined && typeof traceTool !== "function") {
+    throw new TypeError("browser host tool tracing hook must be a function");
+  }
   const onSocketTiming = options.onSocketTiming;
   if (onSocketTiming !== undefined && typeof onSocketTiming !== "function") {
     throw new TypeError("host socket timing hook must be a function");
   }
+  const socketObservations = createSocketObservations(options.onSocketEvent);
   const preservation = createBeforeCompaction(options.beforeCompaction);
   const toolMode = options.toolMode ?? "code";
   if (toolMode !== "code" && toolMode !== "direct") {
@@ -76,8 +88,12 @@ export function createBrowserHost(options = {}) {
       : () => Promise.reject(new Error(
           "browser Code Mode requires a child Worker or an explicit codeEvaluator",
         )));
+  const effectIdentity = createCodeEffectIdentity(options.codeEffectJournal);
   const code = createCodeRuntime(options.tools, {
+    traceTool,
     evaluate: codeEvaluator,
+    effectJournal: options.codeEffectJournal,
+    effectIdentity: options.codeEffectJournal ? effectIdentity.resolve : undefined,
     subagentSessions: options.subagentSessions,
   });
   const toolProviders = options.toolProviders ?? [];
@@ -192,12 +208,22 @@ export function createBrowserHost(options = {}) {
       if (preconnected !== undefined) await closePreconnected();
       ownership = openOwned(() => createWebSocket(endpoint, sessionId, request));
     }
-    const opened = await ownership.promise;
-    const { socket, ...handshake } = normalizeWebSocketConnection(opened);
+    let connection;
+    const observation = socketObservations?.connect(sessionId, () => ({
+      queued_message_count: connection?.queue.length ?? 0,
+      socket_delivered_message_count: connection?.timing?.metrics.delivered_message_count ?? 0,
+      socket_queue_residence_max_ms: connection?.timing?.metrics.queue_residence_max_ms ?? 0,
+      buffered_send_bytes: connection?.socket.bufferedAmount ?? 0,
+    }));
+    let normalized;
+    try { normalized = normalizeWebSocketConnection(await ownership.promise); }
+    catch (error) { observation?.error(); observation?.close(undefined, false); throw error; }
+    const { socket, ...handshake } = normalized;
     return new Promise((resolve, reject) => {
       let settled = false;
-      const connection = {
+      connection = {
         socket,
+        observation,
         timing: socketTiming(),
         queue: [],
         queuedBytes: 0,
@@ -209,6 +235,7 @@ export function createBrowserHost(options = {}) {
         if (settled) return;
         settled = true;
         connectingConnections.delete(connection);
+        observation?.close(undefined, false);
         finishSocketTiming(connection);
         reject(error);
       };
@@ -228,6 +255,7 @@ export function createBrowserHost(options = {}) {
         delete connection.reject;
         const handle = nextHandle++;
         connections.set(handle, connection);
+        observation?.connected(handshake);
         resolve(JSON.stringify({
           handle,
           status: handshake.status ?? 101,
@@ -244,6 +272,7 @@ export function createBrowserHost(options = {}) {
           : { kind: "binary" });
       });
       socket.addEventListener("close", (event) => {
+        observation?.close(event, connection.intentionallyClosed);
         connection.wakeSend?.();
         if (!settled) {
           rejectConnection(new Error(`WebSocket closed during connection with code ${event.code}`));
@@ -252,6 +281,7 @@ export function createBrowserHost(options = {}) {
         }
       });
       socket.addEventListener("error", () => {
+        observation?.error();
         if (!settled) {
           rejectConnection(new Error("WebSocket connection failed"));
         } else {
@@ -329,6 +359,8 @@ export function createBrowserHost(options = {}) {
         error: "concurrent WebSocket sends are unsupported" });
     }
     connection.sending = true;
+    let sent = false;
+    connection.observation?.sendStarted();
     try {
       if (connection.managed) {
         connection.socket.send(JSON.stringify({ mpp: "message", data: message }));
@@ -363,6 +395,8 @@ export function createBrowserHost(options = {}) {
       }
       if (closed()) return closedResult();
       connection.socket.send(message);
+      sent = true;
+      connection.observation?.sent();
       return JSON.stringify({ ok: true });
     } catch (error) {
       return JSON.stringify({
@@ -371,6 +405,8 @@ export function createBrowserHost(options = {}) {
         error: error instanceof Error ? error.message : String(error),
       });
     } finally {
+      // A send that did not reach socket.send must not leave a waiting timer.
+      if (!sent) connection.observation?.sendFailed();
       connection.sending = false;
     }
   }
@@ -406,6 +442,7 @@ export function createBrowserHost(options = {}) {
     if (!connection) return;
     connections.delete(handle);
     connection.intentionallyClosed = true;
+    connection.observation?.close(undefined, true);
     connection.wakeSend?.();
     connection.waiter?.({ kind: "closed", detail: "by the WASM runtime" });
     finishSocketTiming(connection);
@@ -422,11 +459,13 @@ export function createBrowserHost(options = {}) {
     if (timing && dataMessage) {
       timing.metrics.message_count += 1;
       // Only the exact metadata event can produce diagnostics; deltas stay opaque.
-      if (message.kind === "text" && timing.provider.size < 32) {
+      connection.observation?.message(message.kind === "text" ? message.text : undefined);
+      if (message.kind === "text" && (timing.provider.size < 32 || connection.observation)) {
         const metadata = providerSocketTiming(message.text);
         if (metadata) {
+          connection.observation?.provider(metadata);
           const key = metadata.response_id ?? timing.provider.size;
-          if (!timing.provider.has(key)) timing.provider.set(key, metadata);
+          if (timing.provider.size < 32 && !timing.provider.has(key)) timing.provider.set(key, metadata);
         }
       }
     }
@@ -461,7 +500,7 @@ export function createBrowserHost(options = {}) {
 
   // No counters, timestamps, metadata parsing or observations without the internal hook.
   function socketTiming() {
-    return onSocketTiming === undefined ? undefined : {
+    return onSocketTiming === undefined && socketObservations === undefined ? undefined : {
       metrics: {
         message_count: 0,
         delivered_message_count: 0,
@@ -479,6 +518,7 @@ export function createBrowserHost(options = {}) {
     // Finalize owned consumption, not the remote close event: buffered frames may
     // still be drained after that event. Clear first for reentrant close/dispose.
     connection.timing = undefined;
+    if (onSocketTiming === undefined) return;
     const metrics = timing.metrics;
     try {
       const result = onSocketTiming({
@@ -513,7 +553,7 @@ export function createBrowserHost(options = {}) {
       }
       for (const handle of [...connections.keys()]) cleanup(() => close(handle));
       cleanup(() => closePreconnected(disposalError));
-      cleanup(() => code.reset());
+      cleanup(() => { effectIdentity.reset(); return code.reset(); });
       cleanup(() => mcpInstalled?.then(() => {}));
       cleanup(() => toolsLifecycle?.close());
       cleanup(() => options.onDispose?.());
@@ -612,8 +652,15 @@ export function createBrowserHost(options = {}) {
     next,
     close,
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-    executeCode: code.executeCodeObserved,
-    waitCode: code.waitCodeObserved,
+    executeCode: traceTool === undefined ? code.executeCodeObserved
+      : (source, sessionId = "default", callId = "exec", model = "unknown", turnId) =>
+        traceToolInvocation(traceTool, "exec", {
+          sessionId, callId, ...(turnId == null ? {} : { turnId }),
+        }, () => code.executeCodeObserved(source, sessionId, callId, model, turnId)),
+    waitCode: traceTool === undefined ? code.waitCodeObserved
+      : (input, sessionId = "default", callId = "wait") =>
+        traceToolInvocation(traceTool, "wait", { sessionId, callId },
+          () => code.waitCodeObserved(input, sessionId, callId)),
     beginCodeTurn: code.beginTurn,
     cancelCodeTurn: code.cancelTurn,
     preemptCode: code.preempt,
@@ -655,9 +702,9 @@ export function createBrowserHost(options = {}) {
     },
     toolMode: () => toolMode,
     toolDefinitions: code.toolDefinitions,
-    releaseSession: code.releaseSession,
-    emitEvent: onEvent,
-    reset: code.reset,
+    releaseSession: (sessionId) => { effectIdentity.release(sessionId); socketObservations?.release(sessionId); return code.releaseSession(sessionId); },
+    emitEvent: (event, ...args) => { effectIdentity.observe(event); socketObservations?.runtime(event); return onEvent(event, ...args); },
+    reset: () => { effectIdentity.reset(); return code.reset(); },
     dispose,
   });
 }

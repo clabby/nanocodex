@@ -1,6 +1,7 @@
-const MAX_CONCURRENT_CALLS = 128;
-const CANCELLATION_MESSAGE = "tool execution was cancelled";
 const TOOL_RESULT = Symbol.for("nanocodex.toolResult");
+// Only factory-owned maps have immutable resolver entries. A provider may change
+// definitions OR handlers without changing object identity, so it is never cached.
+const toolMapSources = new WeakSet();
 export const toolRouterBrand = Symbol.for("nanocodex.toolRouter");
 export const toolRouterRuntime = Symbol("nanocodex.toolRouterRuntime");
 export const toolRuntimeLifecycle = Symbol("nanocodex.toolRuntimeLifecycle");
@@ -21,13 +22,11 @@ const TOOL_SEARCH_DEFINITION = deepFreeze({
   },
 });
 
-/** Deterministic routing and admission boundary shared by direct and Code Mode calls. */
+/** Deterministic routing and per-call snapshots shared by direct and Code Mode calls. */
 export class ToolRouter {
   #sources = new Map();
-  #admissions = new AdmissionGate();
-  #execution = new AsyncReadWriteGate();
-  #permits = new AsyncSemaphore(MAX_CONCURRENT_CALLS);
   #reset;
+  #mapEntries = new WeakMap();
 
   constructor(sources = []) {
     for (const source of sources) this.addSource(source);
@@ -65,46 +64,23 @@ export class ToolRouter {
 
   async attachSource(source) {
     const normalized = normalizeSource({ ...source, kind: "attached", mode: "attached-over-cloud" });
-    const release = await this.#admissions.write();
-    try {
-      if (this.#sources.has(normalized.id)) {
-        throw new Error(`tool source is already configured: ${normalized.id}`);
-      }
-      this.#sources.set(normalized.id, normalized);
-      try { this.#buildSnapshot(); } catch (error) {
-        this.#sources.delete(normalized.id);
-        throw error;
-      }
-    } finally {
-      release();
+    if (this.#sources.has(normalized.id)) {
+      throw new Error(`tool source is already configured: ${normalized.id}`);
+    }
+    this.#sources.set(normalized.id, normalized);
+    try { this.#buildSnapshot(); } catch (error) {
+      this.#sources.delete(normalized.id);
+      throw error;
     }
   }
 
   async detachSource(id) {
-    const release = await this.#admissions.write();
-    try { return this.#sources.delete(id); } finally { release(); }
+    return this.#sources.delete(id);
   }
 
   async admit(signal) {
-    const release = await this.#admissions.read(signal);
-    try {
-      const built = this.#buildSnapshot();
-      let closed = false;
-      return Object.freeze({
-        definitions: built.definitions,
-        tools: built.tools,
-        catalog: (provider = "javascript") => catalogSnapshot(built, provider),
-        invoke: (name, input, context) => this.#invoke(built, name, input, context),
-        release: () => {
-          if (closed) return;
-          closed = true;
-          release();
-        },
-      });
-    } catch (error) {
-      release();
-      throw error;
-    }
+    signal?.throwIfAborted?.();
+    return this.snapshot();
   }
 
   snapshot() {
@@ -113,7 +89,7 @@ export class ToolRouter {
       definitions: built.definitions,
       tools: built.tools,
       catalog: (provider = "javascript") => catalogSnapshot(built, provider),
-      invoke: (name, input, context) => this.#invoke(built, name, input, context),
+      invoke: (name, input, context, observe) => this.#invoke(built, name, input, context, observe),
       release() {},
     });
   }
@@ -189,8 +165,21 @@ export class ToolRouter {
     const searches = [];
     const sources = [...this.#sources.values()].sort((a, b) => a.id.localeCompare(b.id));
     for (const source of sources) {
-      const definitions = jsonSnapshot(source.definitions(), `tool source ${source.id} definitions`);
+      // Keep reading and serializing the public array: callers can mutate it.
+      // Reuse only factory-owned contract work when its exact JSON is unchanged.
+      let encoded;
+      try { encoded = JSON.stringify(source.definitions()); }
+      catch (error) { throw new TypeError(`tool source ${source.id} definitions must be JSON-serializable`, { cause: error }); }
+      const cached = toolMapSources.has(source) ? this.#mapEntries.get(source) : undefined;
+      if (cached && cached.encoded === encoded) {
+        entries.push(...cached.entries);
+        continue;
+      }
+      let definitions;
+      try { definitions = JSON.parse(encoded); }
+      catch (error) { throw new TypeError(`tool source ${source.id} definitions must be JSON-serializable`, { cause: error }); }
       if (!Array.isArray(definitions)) throw new TypeError(`tool source ${source.id} definitions() must return an array`);
+      const sourceEntries = [];
       for (const [sourceIndex, raw] of definitions.entries()) {
         if (raw?.type === "tool_search") {
           if (typeof source.search === "function") searches.push({ source, search: source.search });
@@ -204,7 +193,7 @@ export class ToolRouter {
         const tool = source.resolve(definition.name);
         if (!tool) throw new Error(`tool source ${source.id} cannot resolve ${definition.name}`);
         const resolved = normalizeResolvedTool(definition.name, tool, candidate);
-        entries.push({
+        sourceEntries.push({
           definition,
           fingerprint: callableContractFingerprint(exactDefinition),
           normalizedName: normalizeToolName(definition.name),
@@ -213,6 +202,8 @@ export class ToolRouter {
           tool: resolved,
         });
       }
+      entries.push(...sourceEntries);
+      if (toolMapSources.has(source)) this.#mapEntries.set(source, { encoded, entries: sourceEntries });
     }
     entries.sort(compareEntries);
     const selected = new Map();
@@ -260,20 +251,16 @@ export class ToolRouter {
     });
   }
 
-  async #invoke(snapshot, name, input, context = {}) {
+  async #invoke(snapshot, name, input, context = {}, observe) {
     const tool = snapshot.tools.get(name);
     if (!tool) throw new Error(`unknown application tool: ${name}`);
     const signal = context.signal ?? new AbortController().signal;
     signal.throwIfAborted?.();
-    const releasePermit = await this.#permits.acquire(signal);
-    let releaseExecution;
-    try {
-      releaseExecution = await this.#execution.acquire(tool.parallelSafe, signal);
-      return await tool.handler(input, context);
-    } finally {
-      releaseExecution?.();
-      releasePermit();
-    }
+    // Trusted attachment diagnostics are separate from the tool context. A
+    // callback receives only fixed local boundaries and cannot change execution.
+    try { observe?.("execution_started"); } catch {}
+    try { return await tool.handler(input, context); }
+    finally { try { observe?.("execution_finished"); } catch {} }
   }
 }
 
@@ -326,13 +313,15 @@ export function toolMapSource(id, configuration = {}, options = {}) {
       releaseSession: typeof value.releaseSession === "function" ? value.releaseSession : undefined,
     }));
   }
-  return Object.freeze({
+  const source = Object.freeze({
     id,
     kind: options.kind ?? "cloud",
     mode: options.mode ?? "union",
     definitions: () => definitions,
     resolve: (name) => tools.get(name),
   });
+  toolMapSources.add(source);
+  return source;
 }
 
 export function providerSource(id, provider, options = {}) {
@@ -561,7 +550,9 @@ function normalizeSource(source) {
   }
   const mode = source.mode ?? "union";
   if (mode !== "union" && mode !== "attached-over-cloud") throw new TypeError(`unknown tool source mode: ${mode}`);
-  return Object.freeze({ ...source, id: source.id.trim(), kind: source.kind ?? "union", mode });
+  const normalized = Object.freeze({ ...source, id: source.id.trim(), kind: source.kind ?? "union", mode });
+  if (toolMapSources.has(source)) toolMapSources.add(normalized);
+  return normalized;
 }
 
 function normalizeDefinition(definition, source) {
@@ -648,83 +639,3 @@ function deepFreeze(value) {
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
 }
-
-class AdmissionGate {
-  readers = 0;
-  writer = false;
-  queue = [];
-  read(signal) { return this.#acquire("read", signal); }
-  write(signal = new AbortController().signal) { return this.#acquire("write", signal); }
-  #acquire(kind, signal) {
-    if (signal?.aborted) return Promise.reject(signal.reason ?? new Error(CANCELLATION_MESSAGE));
-    if (!this.writer && this.queue.length === 0 && (kind === "read" || this.readers === 0)) {
-      if (kind === "read") this.readers++; else this.writer = true;
-      return Promise.resolve(once(() => this.#release(kind)));
-    }
-    return new Promise((resolve, reject) => {
-      const waiter = { kind, resolve, reject, signal };
-      waiter.abort = () => {
-        const index = this.queue.indexOf(waiter);
-        if (index >= 0) this.queue.splice(index, 1);
-        reject(signal.reason ?? new Error(CANCELLATION_MESSAGE));
-      };
-      signal?.addEventListener("abort", waiter.abort, { once: true });
-      this.queue.push(waiter);
-    });
-  }
-  #release(kind) {
-    if (kind === "read") this.readers--; else this.writer = false;
-    this.#drain();
-  }
-  #drain() {
-    if (this.writer || this.readers) return;
-    const first = this.queue[0];
-    if (!first) return;
-    if (first.kind === "write") {
-      this.queue.shift(); first.signal?.removeEventListener("abort", first.abort); this.writer = true;
-      first.resolve(once(() => this.#release("write"))); return;
-    }
-    while (this.queue[0]?.kind === "read") {
-      const waiter = this.queue.shift(); waiter.signal?.removeEventListener("abort", waiter.abort); this.readers++;
-      waiter.resolve(once(() => this.#release("read")));
-    }
-  }
-}
-
-class AsyncSemaphore {
-  constructor(permits) { this.permits = permits; this.waiters = []; }
-  acquire(signal) {
-    if (signal.aborted) return Promise.reject(signal.reason);
-    if (this.permits > 0 && this.waiters.length === 0) { this.permits--; return Promise.resolve(once(() => this.release())); }
-    return new Promise((resolve, reject) => {
-      const waiter = { resolve, reject, signal };
-      waiter.abort = () => { const index = this.waiters.indexOf(waiter); if (index >= 0) this.waiters.splice(index, 1); reject(signal.reason); };
-      signal.addEventListener("abort", waiter.abort, { once: true }); this.waiters.push(waiter);
-    });
-  }
-  release() {
-    while (this.waiters.length) { const waiter = this.waiters.shift(); waiter.signal.removeEventListener("abort", waiter.abort); if (waiter.signal.aborted) continue; waiter.resolve(once(() => this.release())); return; }
-    this.permits++;
-  }
-}
-
-class AsyncReadWriteGate {
-  readers = 0; writer = false; waiters = [];
-  acquire(safe, signal) {
-    if (signal.aborted) return Promise.reject(signal.reason);
-    if (!this.writer && this.waiters.length === 0 && (safe || this.readers === 0)) return Promise.resolve(this.#grant(safe));
-    return new Promise((resolve, reject) => {
-      const waiter = { safe, signal, resolve, reject };
-      waiter.abort = () => { const index = this.waiters.indexOf(waiter); if (index >= 0) this.waiters.splice(index, 1); reject(signal.reason); };
-      signal.addEventListener("abort", waiter.abort, { once: true }); this.waiters.push(waiter);
-    });
-  }
-  #grant(safe) { if (safe) this.readers++; else this.writer = true; return once(() => { if (safe) this.readers--; else this.writer = false; this.#drain(); }); }
-  #drain() {
-    if (this.writer || this.readers || !this.waiters.length) return;
-    if (!this.waiters[0].safe) { const waiter = this.waiters.shift(); waiter.signal.removeEventListener("abort", waiter.abort); waiter.resolve(this.#grant(false)); return; }
-    while (this.waiters[0]?.safe && !this.writer) { const waiter = this.waiters.shift(); waiter.signal.removeEventListener("abort", waiter.abort); waiter.resolve(this.#grant(true)); }
-  }
-}
-
-function once(callback) { let called = false; return () => { if (called) return; called = true; callback(); }; }

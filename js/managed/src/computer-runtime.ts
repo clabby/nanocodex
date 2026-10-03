@@ -71,6 +71,9 @@ export async function createManagedComputerRuntime(options: Readonly<{
       filesystem,
       refreshFilesystemBeforeExec: options.filesystem !== undefined,
       lazyInitialize: true,
+      // Cooperative hot-loop deadlines plus finite fallback admission; not a
+      // promise race pretending to preempt synchronous interpreter execution.
+      executionTimeoutMs: 30_000,
       // Wrangler uploads this prebundled ES module independently; only shell
       // calls evaluate it, not chat-only Durable Object activations.
       loadInterpreter: () => import("./just-bash-lazy.mjs"),

@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
 
 #[cfg(feature = "tools")]
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tools,
     attachment::{AttachmentMachine, AttachmentMetadata},
 };
@@ -64,6 +64,7 @@ struct FixtureInner {
     create_bodies: Mutex<Vec<Value>>,
     settings: Mutex<Value>,
     operations: Mutex<Vec<&'static str>>,
+    #[cfg(feature = "tools")]
     catalogs: Mutex<Vec<Value>>,
     changed: Notify,
     steer_entered: Notify,
@@ -100,6 +101,7 @@ impl Fixture {
                 create_bodies: Mutex::new(Vec::new()),
                 settings: Mutex::new(default_settings()),
                 operations: Mutex::new(Vec::new()),
+                #[cfg(feature = "tools")]
                 catalogs: Mutex::new(Vec::new()),
                 changed: Notify::new(),
                 steer_entered: Notify::new(),
@@ -156,6 +158,83 @@ impl Fixture {
             changed.await;
         }
     }
+}
+
+#[tokio::test]
+async fn claude_native_create_route_prompt_and_retained_reopen_journey() {
+    use nanocodex_managed::{ManagedModel, RouteProvider};
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let api_key = format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43));
+        let fixture = Fixture::new(&api_key);
+        let app = Router::new()
+            .route("/v1/models", get(|headers: HeaderMap| async move {
+                assert_eq!(headers["authorization"], format!("Bearer ncx_live_{}_{}", "a".repeat(12), "b".repeat(43)));
+                Json(json!({"object":"list","data":[{"id":"claude-sonnet-4-6","name":"Claude Sonnet 4.6","provider":"claude","thinking":["low","medium","high"],"reasoning_modes":["standard"],"fast_mode":false}],"default_model":"claude-sonnet-4-6"}))
+            }))
+            .route("/v1/agents", post(create_agent))
+            .route("/v1/agents/{agent_id}", get(agent_state))
+            .route("/v1/agents/{agent_id}/compact", post(|State(fixture): State<Fixture>, headers: HeaderMap, body: Bytes| async move {
+                assert_eq!(headers["authorization"], fixture.inner.authorization);
+                assert!(body.is_empty());
+                assert!(!headers.contains_key("idempotency-key"));
+                lock(&fixture.inner.create_bodies).push(json!({"journey":"compacted"}));
+                Json(json!({"compacted":true}))
+            }))
+            .route("/v1/agents/{agent_id}/settings", patch(update_settings))
+            .route("/v1/agents/{agent_id}/events", get(events))
+            .route("/v1/agents/{agent_id}/turns", post(submit_turn))
+            .with_state(fixture.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ManagedClient::new(format!("http://{address}"), ManagedApiKey::parse(api_key).unwrap()).unwrap();
+        for model in [ManagedModel::ClaudeSonnet46, ManagedModel::ClaudeOpus46, ManagedModel::ClaudeSonnet55, ManagedModel::ClaudeOpus55] {
+            let settings = AgentSettings::new(model);
+            let receipt = client.create_with_settings(settings).await.unwrap();
+            assert_eq!(receipt.agent_id, AGENT_ID);
+            assert_eq!(client.state(AGENT_ID).await.unwrap().settings, settings);
+            for invalid in [
+                AgentSettings { thinking: Thinking::Max, ..settings },
+                AgentSettings { reasoning_mode: ReasoningMode::Pro, ..settings },
+                AgentSettings { fast_mode: true, ..settings },
+            ] {
+                assert!(matches!(client.create_with_settings(invalid).await, Err(ManagedError::Configuration(_))));
+            }
+        }
+        for model in [Model::Glm53, Model::Kimi, Model::Mimo] {
+            assert!(!ManagedModel::from(model).supports_fast_mode());
+            let invalid = AgentSettings { fast_mode: true, ..AgentSettings::new(model) };
+            assert!(matches!(client.create_with_settings(invalid).await, Err(ManagedError::Configuration(_))));
+        }
+        assert_eq!(lock(&fixture.inner.create_bodies).len(), 4, "unsupported effort/pro/fast and legacy third-party fast never reaches transport");
+        let (agent, _events) = Nanocodex::builder(Managed::create(client.clone())).build().await.unwrap();
+        // Driver replay starts at the retained server cursor, not an OAI fallback.
+        fixture.wait_for_event_cursor("44").await;
+        assert_eq!(client.state(AGENT_ID).await.unwrap().settings.model, ManagedModel::ClaudeSonnet46);
+        let route = client.routing_status(AGENT_ID).await.unwrap().route.unwrap();
+        assert_eq!(route.backend, RouteProvider::Claude);
+        assert_eq!(route.model, ManagedModel::ClaudeSonnet46);
+        // Preserve the existing native Responses setter API; generic HTTP setter
+        // can subsequently select a Claude model without coercing the identity.
+        agent.set_model(Model::Luna).await.unwrap();
+        assert_eq!(client.set_model(AGENT_ID, ManagedModel::ClaudeSonnet46).await.unwrap().model, ManagedModel::ClaudeSonnet46);
+        agent.set_thinking(Thinking::High).await.unwrap();
+        let turn = agent.prompt(PromptRequest::new("live prompt").request_id(ACTIVE_REQUEST_ID)).await.unwrap();
+        fixture.send_event(accepted_event(45, ACTIVE_REQUEST_ID, "live prompt")).await;
+        fixture.send_event(nested_event(46, ROOT_SOURCE_REQUEST_ID, None, "assistant.message", json!({"text":"Native Claude completed"}))).await;
+        fixture.send_event(nested_event(47, ROOT_SOURCE_REQUEST_ID, None, "run.completed", json!({"status":"completed"}))).await;
+        fixture.send_event(completed_event(48, ACTIVE_REQUEST_ID, "Native Claude completed")).await;
+        let result = turn.result().await.unwrap();
+        assert_eq!(result.final_message(), "Native Claude completed");
+        agent.compact().await.unwrap();
+        assert_eq!(lock(&fixture.inner.create_bodies).last(), Some(&json!({"journey":"compacted"})));
+        agent.disconnect().await.unwrap();
+        let (reopened, _events) = Nanocodex::builder(Managed::open(client.clone(), AGENT_ID)).build().await.unwrap();
+        assert_eq!(client.state(AGENT_ID).await.unwrap().settings.model, ManagedModel::ClaudeSonnet46);
+        reopened.disconnect().await.unwrap();
+        println!("JOURNEY Native Rust zero-config generic builder selects authoritative Claude-only default; 4 explicit Claude identities create/read; unsupported max/pro/fast blocked pretransport; Claude route hydrated; legacy OAI setter preserved; Claude selected via generic setter; prompt completed over HTTP+SSE; compact completed through common native handle with empty authenticated POST; retained agent reopened without an OAI fallback.");
+        server.abort();
+    }).await.expect("native Claude lifecycle should remain bounded");
 }
 
 #[tokio::test]
@@ -434,10 +513,18 @@ async fn public_managed_lifecycle_threads_attachment_metadata() {
                 .await
                 .unwrap();
         fixture.wait_for_catalog().await;
+        let catalog = lock(&fixture.inner.catalogs)[0].clone();
+        let runtime_id = catalog["runtime_id"]
+            .as_str()
+            .expect("catalog must identify the host process runtime");
+        let runtime_uuid =
+            uuid::Uuid::parse_str(runtime_id).expect("runtime identity must be a UUID");
+        assert_eq!(runtime_uuid.hyphenated().to_string(), runtime_id);
         assert_eq!(
-            lock(&fixture.inner.catalogs)[0],
+            catalog,
             json!({
                 "type": "catalog",
+                "runtime_id": runtime_id,
                 "tools": [],
                 "attachment_id": "machine-public-1",
                 "capabilities": ["turn_metadata"],
@@ -500,7 +587,7 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         let (observed_sender, mut observed_events) = mpsc::unbounded_channel();
         let (agent, mut events): (Nanocodex, AgentEvents) = Nanocodex::builder(
             Managed::create(client.clone()).with_settings(AgentSettings {
-                model: Model::Sol,
+                model: Model::Sol.into(),
                 thinking: Thinking::Medium,
                 reasoning_mode: ReasoningMode::Pro,
                 fast_mode: true,
@@ -786,7 +873,7 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
                 .contains("agent state latest event cursor is invalid")
         );
         let mut invalid_settings_state = state.clone();
-        invalid_settings_state.settings.model = Model::Astra;
+        invalid_settings_state.settings.model = Model::Astra.into();
         invalid_settings_state.settings.thinking = Thinking::None;
         let invalid_open: nanocodex_agent::Result<(Nanocodex, AgentEvents)> = Nanocodex::builder(
             Managed::open_from_state(client.clone(), AGENT_ID, invalid_settings_state),
@@ -967,6 +1054,12 @@ async fn agent_state(
     };
     let mut state = agent_state_json(AGENT_ID, latest_event_cursor);
     state["settings"] = lock(&fixture.inner.settings).clone();
+    if state["settings"]["model"]
+        .as_str()
+        .is_some_and(|model| model.starts_with("claude-"))
+    {
+        state["model_route"] = json!({"backend":"claude","model":state["settings"]["model"],"thinking":state["settings"]["thinking"]});
+    }
     json_response(StatusCode::OK, state)
 }
 

@@ -2,15 +2,6 @@
 set -eu
 
 if [ "$(uname -s)" = "Darwin" ]; then
-    if command -v brew >/dev/null 2>&1; then
-        brew_bin="$(command -v brew)"
-    elif [ -x /opt/homebrew/bin/brew ]; then
-        brew_bin=/opt/homebrew/bin/brew
-    else
-        brew_bin=/usr/local/bin/brew
-    fi
-    PATH="$("$brew_bin" --prefix lld)/bin:$PATH"
-    export PATH
     case " $* " in
         *" -c "*)
             exec /usr/bin/clang \
@@ -19,9 +10,35 @@ if [ "$(uname -s)" = "Darwin" ]; then
                 "$@"
             ;;
         *)
+            # Source updates also run on hosts with installed tools but no brew.
+            lld_bin=
+            for candidate in "$(command -v ld.lld || true)" \
+                /opt/homebrew/opt/lld/bin/ld.lld /usr/local/opt/lld/bin/ld.lld \
+                /opt/homebrew/opt/llvm/bin/ld.lld /usr/local/opt/llvm/bin/ld.lld; do
+                if [ -x "$candidate" ]; then
+                    lld_bin="$candidate"
+                    break
+                fi
+            done
+            if [ -z "$lld_bin" ]; then
+                for brew_bin in "$(command -v brew || true)" \
+                    /opt/homebrew/bin/brew /usr/local/bin/brew; do
+                    if [ -x "$brew_bin" ]; then
+                        prefix="$("$brew_bin" --prefix lld 2>/dev/null)" || continue
+                        if [ -x "$prefix/bin/ld.lld" ]; then
+                            lld_bin="$prefix/bin/ld.lld"
+                            break
+                        fi
+                    fi
+                done
+            fi
+            if [ -z "$lld_bin" ]; then
+                echo "aarch64 musl linker: ld.lld not found; install lld (brew install lld) or put ld.lld on PATH" >&2
+                exit 1
+            fi
             exec /usr/bin/clang \
                 -target aarch64-linux-gnu \
-                -fuse-ld=lld \
+                "-fuse-ld=$lld_bin" \
                 -Wno-unused-command-line-argument \
                 -Wl,-strip-debug \
                 "$@"

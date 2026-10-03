@@ -16,7 +16,7 @@ use crate::{
     tui::{format::sanitize_terminal_text_inline, theme::Theme, transcript::TranscriptRecord},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use nanocodex::Model;
+use nanocodex_managed::ManagedModel as Model;
 use nanocodex_subagents::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageSender};
 use ratatui::{
     Frame,
@@ -483,7 +483,7 @@ impl SubagentTree {
         let title = format!(
             "{} · {} · #{}",
             node.descriptor.role,
-            model_name(Model::Sol),
+            model_name(Model::Oai(nanocodex::Model::Sol)),
             node.descriptor.id
         );
         let keys: &[(&str, &str)] = if node.transcript.component().expandables_focused() {
@@ -492,7 +492,10 @@ impl SubagentTree {
             &TRANSCRIPT_KEYS
         };
         let layout = Floating::new(&title, area.width, area.height, keys)
-            .colors(theme.border(), theme.model(Model::Sol))
+            .colors(
+                theme.border(),
+                theme.model(Model::Oai(nanocodex::Model::Sol)),
+            )
             .render(frame, area, theme);
         node.transcript.render(frame, layout.body, theme);
     }
@@ -725,9 +728,9 @@ impl SubagentTree {
                 )),
                 Span::styled("    Model  ", Style::default().fg(theme.muted())),
                 Span::styled(
-                    model_name(Model::Sol),
+                    model_name(Model::Oai(nanocodex::Model::Sol)),
                     Style::default()
-                        .fg(theme.model(Model::Sol))
+                        .fg(theme.model(Model::Oai(nanocodex::Model::Sol)))
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
@@ -1107,9 +1110,9 @@ fn unix_time_ms() -> u64 {
 
 fn model_name(model: Model) -> &'static str {
     match model {
-        Model::Luna => "Luna",
-        Model::Sol => "Sol",
-        Model::Astra => "Astra",
+        Model::Oai(nanocodex::Model::Luna) => "Luna",
+        Model::Oai(nanocodex::Model::Sol) => "Sol",
+        Model::Oai(nanocodex::Model::Astra) => "Astra",
         _ => model.as_str(),
     }
 }

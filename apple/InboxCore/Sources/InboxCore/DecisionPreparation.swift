@@ -52,7 +52,7 @@ public extension TodoDecision {
     }
 }
 
-public struct TodoPreparationSource: Equatable, Sendable {
+public struct TodoPreparationSource: Codable, Equatable, Sendable {
     public let kind: String
     public let reference: String
     public let detail: String
@@ -71,5 +71,55 @@ public extension ManagedClient {
             "version": .number(Double(version)), "text": .string(instructions),
             "operation_id": .string(operationID.uuidString.lowercased())
         ]), idempotencyKey: operationID.uuidString.lowercased())
+    }
+}
+
+/// Identity links come from the deterministic account CRM registry, never from
+/// generated prose. Cached links are context, not fresh approval authority.
+public struct TodoLinkedPerson: Identifiable, Codable, Equatable, Sendable {
+    public var id: String { recordID }
+    public let recordID: String
+    public let name: String
+    public let email: String
+    public let title: String
+    public let company: String
+    public let summary: String
+    public let match: String
+    public let sources: [TodoPreparationSource]
+    public let timeline: [TodoPersonTimelineEntry]
+    public let relationships: [String]
+    public init?(_ json: JSON) {
+        let record = json["record_id"].string, match = json["match"].string
+        guard !record.isEmpty, ["exact_email", "exact_alias"].contains(match),
+              json["sources"].array.contains(where: { $0["kind"].string == "crm_record" && $0["reference"].string == record }) else { return nil }
+        recordID = record; self.match = match
+        name = json["name"].string; email = json["email"].string
+        title = json["title"].string; company = json["company"].string; summary = json["summary"].string
+        sources = json["sources"].array.prefix(8).map(TodoPreparationSource.init)
+        timeline = json["timeline"].array.prefix(3).map(TodoPersonTimelineEntry.init)
+        relationships = json["relationships"].array.prefix(3).map { $0["description"].string.isEmpty ? $0["type"].string + ($0["role"].string.isEmpty ? "" : " · " + $0["role"].string) : $0["description"].string }
+    }
+}
+public struct TodoPersonTimelineEntry: Codable, Equatable, Sendable {
+    public let text: String
+    public let occurredAt: String
+    public let timestampBasis: String
+    public let sources: [TodoPreparationSource]
+    public init(_ json: JSON) { text = json["text"].string; occurredAt = json["occurred_at"].string; timestampBasis = json["timestamp_basis"].string; sources = json["sources"].array.map(TodoPreparationSource.init) }
+}
+public struct TodoPeopleContext: Codable, Equatable, Sendable {
+    public let people: [TodoLinkedPerson]
+    public let status: String
+    public let coverageReasons: [String]
+    public let checkedAt: String
+    public init(_ json: JSON) {
+        people = json["people"].array.prefix(6).compactMap(TodoLinkedPerson.init)
+        status = json["people_status"].string.isEmpty ? "unknown" : json["people_status"].string
+        coverageReasons = json["people_coverage"]["reasons"].array.prefix(8).map(\.string)
+        checkedAt = json["people_coverage"]["checked_at"].string
+    }
+    public var referenceSnapshot: JSON {
+        guard let data = try? JSONEncoder().encode(self), let value = try? JSONDecoder().decode(JSON.self, from: data) else { return .null }
+        return value
     }
 }

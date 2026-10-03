@@ -26,6 +26,8 @@ struct CurrentExecution {
     model_id_prefix: Option<String>,
     store_responses: bool,
     stats: RunStats,
+    #[serde(default)]
+    operation_started_at: Option<Duration>,
     usage_reported: bool,
     usage_cost: Option<nanocodex_oai_api::pricing::EstimatedUsdCost>,
     warmup_reported: bool,
@@ -125,6 +127,16 @@ where
         saved.stats.warmup_usage.reported = saved.warmup_reported;
         saved.stats.warmup_usage.estimated_cost = saved.warmup_cost;
         self.stats = saved.stats;
+        if let Some(origin) = saved.operation_started_at {
+            // Compare attempt starts, then use the live monotonic timer. This
+            // includes receipt replay and downtime without adding overlapping
+            // model/tool counters or losing work after the last checkpoint.
+            self.elapsed_before_attempt = self
+                .operation_started_at
+                .and_then(|started_at| started_at.checked_sub(origin))
+                .unwrap_or_default();
+            self.operation_started_at = Some(origin);
+        }
         self.tool_call_indices = saved.tool_call_indices;
         self.active_tools
             .as_ref()
@@ -197,6 +209,7 @@ where
             model_id_prefix: self.config.model_id_prefix.as_deref().map(str::to_owned),
             store_responses: self.config.store_responses,
             stats: self.stats.clone(),
+            operation_started_at: self.operation_started_at,
             usage_reported: self.stats.usage.reported,
             usage_cost: self.stats.usage.estimated_cost.clone(),
             warmup_reported: self.stats.warmup_usage.reported,
@@ -246,6 +259,7 @@ mod tests {
             model_id_prefix: None,
             store_responses: false,
             stats: RunStats::default(),
+            operation_started_at: None,
             usage_reported: false,
             usage_cost: None,
             warmup_reported: false,
