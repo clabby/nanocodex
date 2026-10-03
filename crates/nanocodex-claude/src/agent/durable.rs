@@ -294,9 +294,10 @@ impl State {
         } else {
             ContentBlock::tool_result_content(
                 id,
-                ToolResultContent::Text(format!(
-                    "Tool {name} is not available in the recovered host; no handler was invoked."
-                )),
+                ToolResultContent::Text(
+                    "Tool is not available in the admitted catalog or current host; no handler was invoked. Use an available tool."
+                        .into(),
+                ),
                 true,
             )
         };

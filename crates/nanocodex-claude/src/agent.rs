@@ -2548,24 +2548,17 @@ impl State {
                                     "Claude reused an admitted tool_use id",
                                 ));
                             }
-                            // A recovered host can attach additional handlers, but that
-                            // must not enlarge this operation's admitted catalog.
-                            let definition = cursor
-                                .template
-                                .tools
-                                .iter()
-                                .find_map(|tool| match tool {
+                            // The frozen catalog owns dispatch eligibility, including
+                            // when recovery attaches new handlers. Unknown calls get
+                            // paired errors through the ordinary tool receipt path.
+                            let definition =
+                                cursor.template.tools.iter().find_map(|tool| match tool {
                                     ClaudeToolSpec::Client(tool) if tool.name == *name => {
                                         Some(tool)
                                     }
                                     _ => None,
-                                })
-                                .ok_or_else(|| {
-                                    provider_error(format!(
-                                        "Claude tool {name} is outside the admitted catalog"
-                                    ))
-                                })?;
-                            if definition.defer_loading
+                                });
+                            if definition.is_some_and(|tool| tool.defer_loading)
                                 && !discovered.contains(name)
                                 && !server_discovered.contains(name.as_str())
                             {
@@ -2573,12 +2566,7 @@ impl State {
                                     "Claude used deferred tool before discovery",
                                 ));
                             }
-                            let handler = self.handlers.get(name);
-                            if self.policy.is_none() && handler.is_none() {
-                                return Err(provider_error(format!(
-                                    "unregistered Claude tool {name}"
-                                )));
-                            }
+                            let handler = definition.and_then(|_| self.handlers.get(name));
                             tool_calls.push((id, name, input, handler));
                         }
                         ContentBlock::Thinking { .. }
@@ -2608,7 +2596,7 @@ impl State {
                 Err(error) => {
                     if has_server_effects || unfinished_server_turn_start(&pending).is_some() {
                         // The complete response itself is invalid for replay
-                        // (for example an unregistered client call after a
+                        // (for example duplicate client call IDs after a
                         // server effect). Retain it as data, not an unpaired
                         // assistant tool message or a fabricated client result.
                         const EVIDENCE_LIMIT: usize = 64 * 1024;

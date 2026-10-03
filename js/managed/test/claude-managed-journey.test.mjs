@@ -69,7 +69,7 @@ function sse(block, stop, id) {
 }
 test('Managed native Claude and mixed-family public delegation, account gates, cancellation and recovery', {timeout:240_000}, async () => {
   await mkdir(evidence,{recursive:true});
-  const trace = [], upstream = [], providerErrors = []; let calls=0, summaries=0, writes=0, taskWrites=0, canonicalWrites=0, codexWrites=0, nestedWrites=0, allowResponses=false, sidebarCalls=0, holds=0, responsesAttempts=0, catalogOutage=false, catalogUnsupportedOnly=false, retainedTaskId, mf;
+  const trace = [], upstream = [], providerErrors = [], deniedCalls = []; let calls=0, summaries=0, writes=0, taskWrites=0, canonicalWrites=0, codexWrites=0, nestedWrites=0, allowResponses=false, sidebarCalls=0, holds=0, responsesAttempts=0, catalogOutage=false, catalogUnsupportedOnly=false, retainedTaskId, mf;
   const providerImpl = async request => {
     const url = new URL(request.url);
     if (url.origin === 'https://api.openai.com' || url.origin === 'https://chatgpt.com') {
@@ -189,6 +189,21 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
       const unavailableChild = encodedHistory.includes('Try unavailable canonical child');
       const disabledChild = encodedHistory.includes('Try disabled canonical child');
       const use = (name, input) => sse({type:'tool_use',id:`canonical-${name}-${calls}`,name,input},'tool_use',`message-${calls}`);
+      if (encodedHistory.includes('Try forbidden Write')) assert.deepEqual(names,[],'empty native catalog stays empty after denial');
+      if (encodedHistory.includes('Try forbidden Read')) assert.deepEqual(names,['Write'],'native allowlist stays exact after denial');
+      if (disabledChild) assert.equal(names.includes('spawn_agent'),false,'disabled delegation stays absent after denial');
+      if (result && (result.tool_use_id.startsWith('denied-') || disabledChild)) {
+        const toolUses=body.messages.at(-2).content.filter(block=>block.type==='tool_use');
+        assert.equal(toolUses.length,1,'one denied call precedes its result');
+        assert.deepEqual(latest.content.filter(block=>block.type==='tool_result').map(block=>block.tool_use_id),[toolUses[0].id],'denial is paired with the exact tool_use_id');
+        assert.equal(names.includes(toolUses[0].name.replace(/^_/,'')),false,'denied tool remains outside the frozen catalog');
+        assert.equal(result.is_error,true,'unadmitted call returns an error to the model');
+        assert.equal(typeof result.content,'string');
+        assert.ok(result.content.length>0 && result.content.length<=1024,'denial has a bounded explanation');
+        assert.match(result.content,/no handler was invoked/,'denial reports that no tool handler ran');
+        deniedCalls.push({tool_use_id:result.tool_use_id,name:toolUses[0].name,is_error:result.is_error});
+        return sse({type:'text',text:`CLAUDE_TOOL_DONE_DENIED_${calls}`},'end_turn',`message-${calls}`);
+      }
       if (encodedHistory.includes('NESTED_CLAUDE_PARENT')) {
         assert.equal(body.model,'claude-opus-4-6','middle generation uses the native Claude provider');
         const toolsUsed=body.messages.flatMap(message=>Array.isArray(message.content)?message.content.filter(block=>block.type==='tool_use').map(block=>block.name.replace(/^_/,'')):[]);
@@ -229,7 +244,8 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
         return sse({type:'text',text:'CLAUDE_TOOL_DONE_CANONICAL_CHILD'},'end_turn',`message-${calls}`);
       }
       if(result) {
-        assert.equal(result.is_error??false, result.tool_use_id.startsWith('denied-'), 'only adversarial unregistered calls fail');
+        assert.equal(result.is_error??false,false,'admitted native tools succeed');
+        if (JSON.stringify(body.messages.at(-3)?.content).includes('Check denied file')) assert.match(JSON.stringify(result.content),/NO_UNAUTHORIZED_FILE/,'denied Write has no filesystem effect');
         return sse({type:'text',text:`CLAUDE_TOOL_DONE_${calls}`},'end_turn',`message-${calls}`);
       }
       const prompt = JSON.stringify(latest.content);
@@ -237,7 +253,6 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
         summaries++; return sse({type:'text',text:'NATIVE_SUMMARY durable proof already written; never repeat Write'},'end_turn',`summary-${calls}`);
       }
       if(prompt.includes('Try forbidden Read')) {
-        assert.deepEqual(names,['Write'],'the final native catalog is the exact requested allowlist');
         return sse({type:'tool_use',id:`denied-read-${calls}`,name:'Read',input:{file_path:'/brain/proof.txt'}},'tool_use',`message-${calls}`);
       }
       if(!names.length) return sse({type:'tool_use',id:`denied-${calls}`,name:'Write',input:{file_path:'/brain/denied.txt',content:'MUST_NOT_EXIST'}},'tool_use',`message-${calls}`);
@@ -354,10 +369,10 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
     await turn(agent,'Read durable proof after summary','journey-after-summary');
     assert.equal(writes,1,'compaction/reopen never repeats prior effect');
     const noTools=(await call('/v1/agents','POST',{configuration:{tools:[]}},201)).agent_id;
-    assert.match(JSON.stringify(await turn(noTools,'Try forbidden Write','journey-no-tools','failed')),/outside the admitted catalog/);
+    await turn(noTools,'Try forbidden Write','journey-no-tools');
     await turn(agent,'Check denied file','journey-denied-file');
     const onlyWrite=(await call('/v1/agents','POST',{configuration:{tools:['Write']}},201)).agent_id;
-    assert.match(JSON.stringify(await turn(onlyWrite,'Try forbidden Read','journey-write-only','failed')),/outside the admitted catalog/);
+    await turn(onlyWrite,'Try forbidden Read','journey-write-only');
     const unavailable=(await call('/v1/agents','POST',{configuration:{tools:['TaskOutput']}},201)).agent_id;
     const beforeUnavailable=calls;
     assert.match(JSON.stringify(await turn(unavailable,'Unavailable native capability must fail','journey-unavailable','failed')),/unavailable Claude capability/);
@@ -375,8 +390,9 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
     await turn(unavailableCanonical,'Try unavailable canonical child','journey-canonical-unavailable');
     assert.equal(canonicalWrites,1,'unavailable model never reaches child tools');
     const disabledCanonical=(await call('/v1/agents','POST',{configuration:{multi_agent:{enabled:false}}},201)).agent_id;
-    assert.match(JSON.stringify(await turn(disabledCanonical,'Try disabled canonical child','journey-canonical-disabled','failed')),/outside the admitted catalog/);
+    await turn(disabledCanonical,'Try disabled canonical child','journey-canonical-disabled');
     assert.equal(canonicalWrites,1,'disabled child never executes');
+    assert.deepEqual(deniedCalls.map(call=>call.name),['_Write','_Read','_spawn_agent'],'all three unadmitted calls return paired errors and finish normally');
     const childHistory=await call(`/v1/agents/${childAgent}/events/history?after=0&limit=256`);
     assert.match(JSON.stringify(childHistory),/Task/);assert.match(JSON.stringify(childHistory),/CLAUDE_NATIVE_CHILD_PROOF/);
     retainedTaskId=childHistory.data.find(row=>row.event?.type==='tool.result'&&row.event.payload.tool==='Task').event.payload.structured_result.task_id;

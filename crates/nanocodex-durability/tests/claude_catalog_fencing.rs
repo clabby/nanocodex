@@ -128,4 +128,17 @@ async fn reopened_pending_turn_cannot_dispatch_a_tool_outside_its_frozen_catalog
         observed, 0,
         "a recovered frozen catalog cannot authorize a newly attached host tool"
     );
+    assert_eq!(outcome.unwrap().final_message(), "done");
+    assert_eq!(log.len(), 3);
+    assert!(log[2]["tools"].as_array().is_none_or(Vec::is_empty));
+    assert_eq!(log[2]["messages"][1]["content"][0]["id"], "new-effect");
+    let denial = &log[2]["messages"][2]["content"][0];
+    assert_eq!(denial["tool_use_id"], "new-effect");
+    assert_eq!(denial["is_error"], true);
+    assert!(
+        denial["content"]
+            .as_str()
+            .unwrap()
+            .contains("no handler was invoked")
+    );
 }
