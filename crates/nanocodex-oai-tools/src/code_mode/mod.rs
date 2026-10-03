@@ -571,7 +571,11 @@ fn observer_yield_timeout(yield_time: Duration) -> Duration {
 }
 
 impl CodeModeControl {
-    pub(super) async fn terminate_turn(&self, turn_id: u64) {
+    pub(super) async fn terminate_turn(
+        &self,
+        turn_id: u64,
+        mut observer: Option<&mut dyn CodeModeObserver>,
+    ) {
         #[cfg(test)]
         self.admission_attempts.add_permits(1);
         let _admission = self.admission.lock().await;
@@ -593,11 +597,18 @@ impl CodeModeControl {
             cell.request_terminate();
         }
         for cell in cells {
-            cell.join().await;
+            if let Some(observer) = observer.as_mut() {
+                cell.join_and_observe(*observer).await;
+            } else {
+                cell.join().await;
+            }
         }
     }
 
-    pub(super) async fn terminate_all(&self) -> CodeModeQuiescence {
+    pub(super) async fn terminate_all(
+        &self,
+        mut observer: Option<&mut dyn CodeModeObserver>,
+    ) -> CodeModeQuiescence {
         #[cfg(test)]
         self.admission_attempts.add_permits(1);
         let admission = Arc::clone(&self.admission).lock_owned().await;
@@ -612,7 +623,11 @@ impl CodeModeControl {
             cell.request_terminate();
         }
         for cell in cells {
-            cell.join().await;
+            if let Some(observer) = observer.as_mut() {
+                cell.join_and_observe(*observer).await;
+            } else {
+                cell.join().await;
+            }
         }
 
         let mut shared_host = self.host.lock().await;
@@ -815,6 +830,22 @@ impl LiveCell {
                 let _ = terminate.send(());
             }
         }
+    }
+
+    async fn join_and_observe(&self, observer: &mut dyn CodeModeObserver) {
+        self.join().await;
+        // Observation owns the queue cursor; an active observer releases its
+        // lease before cancellation delivers only the remaining updates.
+        let observation = Arc::clone(&self.observation).lock_owned().await;
+        let _ = observe_cell(
+            self,
+            observation,
+            Instant::now(),
+            ObservationMode::Terminate,
+            None,
+            observer,
+        )
+        .await;
     }
 
     async fn join(&self) {
