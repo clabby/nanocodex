@@ -103,7 +103,7 @@ export async function browserTakeover(intake: VaultIntake, action: BrowserTakeov
     if (["finish", "cancel", "approve"].includes(action.action)) throw new Error("Invalid login receipt");
   }
   if (action.action === "finish" && v?.status === "finished" && Object.keys(v).length === 1) return { status: "finished" };
-  if (action.action === "finish" || v?.status !== "active" || Object.keys(v).some(key => !["status", "image", "width", "height", "keyboard", "inputs", ...(intake.operation === "browser_login" ? ["origin"] : [])].includes(key)) || typeof v.image !== "string" || v.image.length > 16 * 1024 * 1024 || !/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/.test(v.image) || typeof v.width !== "number" || typeof v.height !== "number" || !Number.isInteger(v.width) || !Number.isInteger(v.height) || v.width < 1 || v.height < 1 || v.width > 16384 || v.height > 16384) throw new Error("Invalid takeover frame");
+  if (action.action === "finish" || v?.status !== "active" || Object.keys(v).some(key => !["status", "image", "width", "height", "keyboard", "inputs", "native_form", ...(intake.operation === "browser_login" ? ["origin"] : [])].includes(key)) || typeof v.image !== "string" || v.image.length > 16 * 1024 * 1024 || !/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/.test(v.image) || typeof v.width !== "number" || typeof v.height !== "number" || !Number.isInteger(v.width) || !Number.isInteger(v.height) || v.width < 1 || v.height < 1 || v.width > 16384 || v.height > 16384) throw new Error("Invalid takeover frame");
   if (v.origin !== undefined && (typeof v.origin !== "string" || !intake.allowed_origins?.includes(v.origin))) throw new Error("Unapproved login site");
   const keyboard = (value: unknown, region = false): boolean => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -112,5 +112,20 @@ export async function browserTakeover(intake: VaultIntake, action: BrowserTakeov
   };
   if (v.keyboard !== undefined && !keyboard(v.keyboard)) throw new Error("Invalid keyboard hint");
   if (v.inputs !== undefined && (!Array.isArray(v.inputs) || v.inputs.length > 32 || !v.inputs.every(r => keyboard(r, true) && ["x", "y", "width", "height"].every(k => typeof r[k] === "number" && Number.isFinite(r[k]) && r[k] >= 0 && r[k] <= 1) && r.width > 0 && r.height > 0 && r.x + r.width <= 1.000001 && r.y + r.height <= 1.000001))) throw new Error("Invalid input regions");
+  // Native clients use this optional descriptor. Validate and discard it here so
+  // the existing screenshot controls remain compatible with newer servers.
+  if (v.native_form !== undefined) {
+    const form = v.native_form as Record<string, unknown>;
+    if (!form || typeof form !== "object" || Array.isArray(form)
+      || Object.keys(form).some(k => !["document_id", "fields"].includes(k))
+      || typeof form.document_id !== "string" || !/^[0-9a-f-]{36}$/.test(form.document_id)
+      || !Array.isArray(form.fields) || form.fields.length < 1 || form.fields.length > 32
+      || !form.fields.every(f => f && typeof f === "object" && !Array.isArray(f)
+        && Object.keys(f).every(k => ["ref", "label", "type", "multiline"].includes(k))
+        && typeof f.ref === "string" && /^[0-9a-f-]{36}$/.test(f.ref)
+        && typeof f.label === "string" && f.label.length <= 160 && !/[\u0000-\u001f\u007f]/.test(f.label)
+        && keyboard({type:f.type,multiline:f.multiline}))
+      || new Set(form.fields.map(f => f.ref)).size !== form.fields.length) throw new Error("Invalid native form");
+  }
   return { status: "active", image: v.image, width: v.width, height: v.height, ...(typeof v.origin === "string" ? {origin:v.origin} : {}), ...(v.keyboard === undefined ? {} : { keyboard: v.keyboard as BrowserKeyboard }), ...(v.inputs === undefined ? {} : { inputs: v.inputs as BrowserInputRegion[] }) };
 }
