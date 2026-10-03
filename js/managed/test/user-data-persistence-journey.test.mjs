@@ -33,7 +33,7 @@ export default { async fetch(request, env) {
 
 test("personal storage over account HTTP: real API keys, tenant isolation and durable restart", { timeout: 90_000 }, async () => {
   const trace = [];
-  const output = new URL("../../../output/user-data-318/", import.meta.url);
+  const output = new URL("../../../output/user-data/", import.meta.url);
   const persistence = fileURLToPath(new URL("store-" + crypto.randomUUID(), output));
   const bundled = await build({
     stdin: { contents: source, resolveDir: fileURLToPath(new URL("..", import.meta.url)) },

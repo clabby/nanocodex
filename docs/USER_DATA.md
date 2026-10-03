@@ -167,7 +167,7 @@ Run `pnpm --dir js/nanocodex-tools build`, then
 through the Worker HTTP handler into real local Durable Object SQLite and R2. The Workers tests substitute only external identity enrollment. A second journey
 uses the real account proxy and locally issued API keys over HTTP, then restarts
 workerd with persisted SQLite/R2 stores to verify data, version, and credential
-survival. Logs and `output/user-data-318/persistence-http-trace.json` retain the
+survival. Logs and `output/user-data/persistence-http-trace.json` retain the
 expected/observed HTTP results. Narrow internal hooks inject missing/corrupt R2
 bytes and advance cleanup deadlines because these failures are not public actions.
 Production credential enrollment, abrupt process crashes, R2 outages, and live
