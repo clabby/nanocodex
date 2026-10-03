@@ -1197,7 +1197,11 @@ mod tests {
             let mut url = target.endpoint().clone();
             url.set_scheme("ws").unwrap();
             url.set_path(&format!("{}/host", url.path()));
-            url.to_string()
+            let mut request = url.to_string().into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("authorization", "Bearer test-token".parse().unwrap());
+            request
         })
         .await
         .unwrap();
