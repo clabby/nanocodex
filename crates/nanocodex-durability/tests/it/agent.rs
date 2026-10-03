@@ -473,10 +473,10 @@ struct RecordedHiddenTool {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-#[nanocodex_tools::contract::async_trait]
+#[nanocodex_oai_tools::contract::async_trait]
 impl nanocodex_agent::Tool for CountingDurableTool {
-    fn definition(&self) -> nanocodex_tools::ToolDefinition {
-        nanocodex_tools::ToolDefinition::function(
+    fn definition(&self) -> nanocodex_oai_tools::ToolDefinition {
+        nanocodex_oai_tools::ToolDefinition::function(
             "count_once",
             "Increment a test-side effect exactly once.",
             json!({
@@ -489,18 +489,18 @@ impl nanocodex_agent::Tool for CountingDurableTool {
 
     async fn execute(
         &self,
-        _input: nanocodex_tools::ToolInput,
-        _context: nanocodex_tools::ToolContext<'_>,
-    ) -> nanocodex_tools::ToolResult {
+        _input: nanocodex_oai_tools::ToolInput,
+        _context: nanocodex_oai_tools::ToolContext<'_>,
+    ) -> nanocodex_oai_tools::ToolResult {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(nanocodex_tools::ToolOutput::text("counted"))
+        Ok(nanocodex_oai_tools::ToolOutput::text("counted"))
     }
 }
 
-#[nanocodex_tools::contract::async_trait]
+#[nanocodex_oai_tools::contract::async_trait]
 impl nanocodex_agent::Tool for BlockingDurableTool {
-    fn definition(&self) -> nanocodex_tools::ToolDefinition {
-        nanocodex_tools::ToolDefinition::function(
+    fn definition(&self) -> nanocodex_oai_tools::ToolDefinition {
+        nanocodex_oai_tools::ToolDefinition::function(
             "count_once",
             "Block until the durable operation is cancelled.",
             json!({
@@ -513,18 +513,18 @@ impl nanocodex_agent::Tool for BlockingDurableTool {
 
     async fn execute(
         &self,
-        _input: nanocodex_tools::ToolInput,
-        _context: nanocodex_tools::ToolContext<'_>,
-    ) -> nanocodex_tools::ToolResult {
+        _input: nanocodex_oai_tools::ToolInput,
+        _context: nanocodex_oai_tools::ToolContext<'_>,
+    ) -> nanocodex_oai_tools::ToolResult {
         self.started.notify_one();
         std::future::pending().await
     }
 }
 
-#[nanocodex_tools::contract::async_trait]
+#[nanocodex_oai_tools::contract::async_trait]
 impl nanocodex_agent::Tool for RecordedHiddenTool {
-    fn definition(&self) -> nanocodex_tools::ToolDefinition {
-        nanocodex_tools::ToolDefinition::function(
+    fn definition(&self) -> nanocodex_oai_tools::ToolDefinition {
+        nanocodex_oai_tools::ToolDefinition::function(
             "recorded_hidden_tool",
             "Return one result whose replay must not depend on the current tool catalog.",
             json!({
@@ -537,11 +537,11 @@ impl nanocodex_agent::Tool for RecordedHiddenTool {
 
     async fn execute(
         &self,
-        _input: nanocodex_tools::ToolInput,
-        _context: nanocodex_tools::ToolContext<'_>,
-    ) -> nanocodex_tools::ToolResult {
+        _input: nanocodex_oai_tools::ToolInput,
+        _context: nanocodex_oai_tools::ToolContext<'_>,
+    ) -> nanocodex_oai_tools::ToolResult {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(nanocodex_tools::ToolOutput::from_json(
+        Ok(nanocodex_oai_tools::ToolOutput::from_json(
             json!({
                 "receipt": "durably recorded"
             }),

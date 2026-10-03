@@ -7,7 +7,7 @@ use std::{
     sync::OnceLock,
 };
 
-use nanocodex_tools::attachment::{AttachmentMachine, AttachmentMetadata};
+use nanocodex_oai_tools::attachment::{AttachmentMachine, AttachmentMetadata};
 use serde::Deserialize;
 
 pub(crate) const MACHINE_CAPABILITIES: [&str; 5] =

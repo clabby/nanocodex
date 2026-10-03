@@ -1,3 +1,4 @@
+import { initializeTodoDispositions, todoDispositionSnapshot, writeTodoDisposition, type TodoDispositionContext } from "./todo-dispositions";
 import { enqueueTodoPreparation, initializeTodoPreparation, preparationView, scheduleTodoPreparation } from "./todo-preparation";
 import { initializeGmailDecisionTraces, readGmailDecisionTraces, recentGmailTodoTraces } from "./gmail-firehose-traces";
 import { durablePlacementOptions } from "nanocodex/cloudflare/durable-placement";
@@ -69,11 +70,12 @@ export function initializeTodoInbox(storage: DurableObjectStorage): void {
   for (const column of ["source_connection_id", "source_thread_id", "source_message_id"]) {
     if (!columns.has(column)) storage.sql.exec(`ALTER TABLE todo_decisions ADD COLUMN ${column} TEXT`);
   }
+  initializeTodoDispositions(storage);
   initializeGmailDecisionTraces(storage);
   initializeTodoPreparation(storage);
 }
 
-export async function handleTodoInbox(request: Request, storage: DurableObjectStorage): Promise<Response> {
+export async function handleTodoInbox(request: Request, storage: DurableObjectStorage, dispositionContext?: TodoDispositionContext): Promise<Response> {
   const url = new URL(request.url), path = url.pathname;
   if (request.method === "HEAD") return reply({ error: "invalid_request" }, 400);
   if (path === "/todo/traces" && request.method === "GET") return readGmailDecisionTraces(storage, url.searchParams);
@@ -86,8 +88,12 @@ export async function handleTodoInbox(request: Request, storage: DurableObjectSt
     const open = storage.sql.exec<DecisionView>(`SELECT ${projection} FROM todo_decisions WHERE status IN ('needs_you','preparing') ORDER BY created_at DESC LIMIT 200`).toArray();
     const activity = storage.sql.exec<DecisionView>(`SELECT ${projection} FROM todo_decisions WHERE status NOT IN ('needs_you','preparing') ORDER BY created_at DESC LIMIT 200`).toArray();
     const decisions = [...open, ...activity].map(({ choices, ...rest }) => ({ ...rest, choices: JSON.parse(choices) as Choice[], preparation: preparationView(storage, "decision", rest.id) }));
-    return reply({ source_coverage: unknownSourceCoverage(), items, decisions, traces: recentGmailTodoTraces(storage),
+    return reply({ ...todoDispositionSnapshot(storage), source_coverage: unknownSourceCoverage(), items, decisions, traces: recentGmailTodoTraces(storage),
       feed_bounds: { traces: "recent", trace_limit: 100 } });
+  }
+  if (path === "/todo/snooze" && request.method === "POST") {
+    const input = await boundedBody(request);
+    return input ? writeTodoDisposition(input, storage, dispositionContext) : reply({ error: "invalid_json" }, 400);
   }
   if (path === "/todo" && request.method === "POST") {
     const input = await boundedBody(request);
@@ -233,7 +239,7 @@ export async function routeTodoRequest(request: Request, env: Pick<AccountAuthEn
   const sourceHealth = url.pathname === "/v1/todo/source-health";
   if (sourceHealth && request.method !== "GET") return reply({ error: "method_not_allowed" }, 405);
   const mailOrSchedule = /^\/v1\/todo\/(?:schedule|mail\/(?:accounts|threads(?:\/[A-Za-z0-9_-]+(?:\/modify)?)?|drafts(?:\/[0-9a-fA-F-]{36})?|send|suggest|messages\/[A-Za-z0-9_-]+\/attachments\/[A-Za-z0-9_-]+))$/.test(url.pathname);
-  if (!sourceHealth && !mailOrSchedule && (!/^\/v1\/todo(?:$|\/traces$|\/items\/[0-9a-f-]{36}(?:\/prepare)?$|\/decisions\/[0-9a-f-]{36}(?:\/(?:respond|prepare))?$)/i.test(url.pathname)
+  if (!sourceHealth && !mailOrSchedule && (!/^\/v1\/todo(?:$|\/snooze$|\/traces$|\/items\/[0-9a-f-]{36}(?:\/prepare)?$|\/decisions\/[0-9a-f-]{36}(?:\/(?:respond|prepare))?$)/i.test(url.pathname)
     || url.search && url.pathname !== "/v1/todo/traces")) return reply({ error: "not_found" }, 404);
   const path = url.pathname.slice(3);
   return env.NANOCODEX_USERS.getByName(principal.userId, durablePlacementOptions(env.trustedClientIngressColo)).fetch(

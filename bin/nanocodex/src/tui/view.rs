@@ -8,7 +8,7 @@ use ratatui::{
 use std::time::Instant;
 
 use super::{
-    app::{App, Conversation, MODEL_OPTIONS, PaneId, ReasoningPicker, STANDARD_THINKING_OPTIONS},
+    app::{App, Conversation, PaneId, ReasoningPicker},
     composer::ComposerLayout,
     transcript::InlineEdit,
 };
@@ -47,7 +47,8 @@ fn render_model_picker(frame: &mut Frame<'_>, app: &App) {
         return;
     };
     let area = frame.area();
-    let popup_height = 9.min(area.height);
+    let options = app.model_options();
+    let popup_height = (options.len() as u16 + 6).min(area.height);
     let popup_width = area.width.min(64);
     let popup = Rect::new(
         area.x + area.width.saturating_sub(popup_width) / 2,
@@ -64,7 +65,7 @@ fn render_model_picker(frame: &mut Frame<'_>, app: &App) {
         ),
         Line::default(),
     ];
-    for (index, (model, label)) in MODEL_OPTIONS.iter().enumerate() {
+    for (index, (model, label)) in options.iter().enumerate() {
         let current = if *model == app.model() {
             " (current)"
         } else {
@@ -148,6 +149,7 @@ fn render_reasoning_picker(frame: &mut Frame<'_>, app: &App) {
         return;
     };
     let area = frame.area();
+    let options = app.reasoning_options();
     let popup_height = match picker {
         ReasoningPicker::Standard { .. } => 9,
         ReasoningPicker::Advanced => 7,
@@ -170,9 +172,7 @@ fn render_reasoning_picker(frame: &mut Frame<'_>, app: &App) {
                 Style::default().add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::default());
-            for (index, (thinking, label, description)) in
-                STANDARD_THINKING_OPTIONS.iter().enumerate()
-            {
+            for (index, (thinking, label, description)) in options.iter().enumerate() {
                 let mut label = (*label).to_owned();
                 if *thinking == app.model().default_thinking() {
                     label.push_str(" (default)");
@@ -187,12 +187,14 @@ fn render_reasoning_picker(frame: &mut Frame<'_>, app: &App) {
                     description,
                 ));
             }
-            lines.push(reasoning_option_line(
-                selected == STANDARD_THINKING_OPTIONS.len(),
-                STANDARD_THINKING_OPTIONS.len() + 1,
-                "More reasoning…",
-                "Max consumes usage limits faster",
-            ));
+            if app.model().supports_thinking(nanocodex::Thinking::Max) {
+                lines.push(reasoning_option_line(
+                    selected == options.len(),
+                    options.len() + 1,
+                    "More reasoning…",
+                    "Max consumes usage limits faster",
+                ));
+            }
         }
         ReasoningPicker::Advanced => {
             lines.push(Line::styled(

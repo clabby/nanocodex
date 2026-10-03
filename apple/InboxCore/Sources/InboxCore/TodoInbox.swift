@@ -17,6 +17,7 @@ public struct TodoCapture: Identifiable, Equatable, Sendable {
     public let preparationContext: String
     public let preparationScope: String
     public let preparationSources: [TodoPreparationSource]
+    public let peopleContext: TodoPeopleContext
 
     public init(_ json: JSON) throws {
         guard !json["id"].string.isEmpty, !json["body"].string.isEmpty,
@@ -33,6 +34,7 @@ public struct TodoCapture: Identifiable, Equatable, Sendable {
         preparationContext = json["preparation"]["context"].string
         preparationScope = json["preparation"]["scope"].string
         preparationSources = json["preparation"]["sources"].array.map(TodoPreparationSource.init)
+        peopleContext = TodoPeopleContext(json["preparation"])
     }
 }
 
@@ -64,6 +66,7 @@ public struct TodoDecision: Identifiable, Equatable, Sendable {
     public let preparationContext: String
     public let preparationScope: String
     public let preparationSources: [TodoPreparationSource]
+    public let peopleContext: TodoPeopleContext
     public let recommendation: String
     public let proposal: String
     public let preparationUpdatedAt: String
@@ -91,6 +94,7 @@ public struct TodoDecision: Identifiable, Equatable, Sendable {
         preparationContext = json["preparation"]["context"].string
         preparationScope = json["preparation"]["scope"].string
         preparationSources = json["preparation"]["sources"].array.map(TodoPreparationSource.init)
+        peopleContext = TodoPeopleContext(json["preparation"])
         recommendation = json["preparation"]["recommendation"].string
         proposal = json["preparation"]["proposal"].string
         preparationUpdatedAt = json["preparation"]["updated_at"].string
@@ -173,6 +177,8 @@ public struct TodoFeed: Equatable, Sendable {
 }
 
 public struct TodoSnapshot: Equatable, Sendable {
+    public let dispositions: [TodoDisposition]
+    public let dispositionsComplete: Bool
     public let captures: [TodoCapture]
     public let decisions: [TodoDecision]
     public let traces: [TodoTrace]
@@ -180,6 +186,8 @@ public struct TodoSnapshot: Equatable, Sendable {
         TodoFeed(captures: captures, decisions: decisions, traces: traces, filter: filter)
     }
     public init(_ json: JSON) throws {
+        dispositions = try json["dispositions"].array.map(TodoDisposition.init)
+        dispositionsComplete = json["disposition_coverage"]["complete"].bool
         guard case .array(let items) = json["items"], case .array(let decisions) = json["decisions"] else { throw APIError.invalidResponse }
         captures = try items.map(TodoCapture.init)
         self.decisions = try decisions.map(TodoDecision.init)

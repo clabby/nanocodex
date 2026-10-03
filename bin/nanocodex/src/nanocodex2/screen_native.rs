@@ -2,7 +2,7 @@
 use super::screen_publisher::{ScreenBackend, ScreenPublisher};
 use clap::Args;
 use nanocodex_managed::{ManagedClient, ManagedError};
-use nanocodex_tools::attachment::{AttachmentMachine, AttachmentTarget};
+use nanocodex_oai_tools::attachment::{AttachmentMachine, AttachmentTarget};
 use std::path::{Path, PathBuf};
 
 #[derive(Args)]
@@ -64,6 +64,10 @@ impl DesktopChild {
 #[cfg(target_os = "linux")]
 impl Drop for DesktopChild {
     fn drop(&mut self) {
+        // Do not signal a reaped child's PID: it may now belong to someone else.
+        if !matches!(self.0.try_wait(), Ok(None)) {
+            return;
+        }
         self.terminate();
         // The helper installs SIGTERM before starting infrastructure. Let its
         // cancellation guard reap Xvfb, the window manager and terminal tree.
@@ -144,11 +148,12 @@ impl NativeScreen {
         }
         #[cfg(target_os = "linux")]
         {
-            if std::env::var("NANOCODEX_SCREEN_BACKEND").as_deref() == Ok("wayland")
-                || (std::env::var("NANOCODEX_SCREEN_BACKEND").is_err()
-                    && std::env::var_os("WAYLAND_DISPLAY").is_some())
+            if let super::screen_linux_session::Selection::Wayland(session) =
+                super::screen_linux_session::select()?
             {
-                let wayland = super::screen_wayland::Platform::start().await?;
+                // Once selected, Wayland startup/recovery errors remain errors;
+                // never silently substitute an unrelated private desktop.
+                let wayland = super::screen_wayland::Platform::start(session).await?;
                 let (recorder, backend) =
                     super::hand_recording::attach(recording_root, None, wayland.backend()).await;
                 let publisher = match ScreenPublisher::start(
@@ -244,8 +249,17 @@ impl NativeScreen {
     }
     #[cfg(target_os = "linux")]
     fn spawn_desktop(workspace: &Path, runtime: &Path) -> Result<DesktopChild, ManagedError> {
-        let mut command =
-            tokio::process::Command::new(std::env::current_exe().map_err(configuration)?);
+        #[cfg(not(test))]
+        let executable = std::env::current_exe().map_err(configuration)?;
+        // A Rust test executable cannot dispatch __hand-desktop. Opt-in Linux
+        // integration tests supply the separately built companion, never a host
+        // service command or an executable fetched from a broker response.
+        #[cfg(test)]
+        let executable = match std::env::var_os("NANOCODEX_TEST_NATIVE_SCREEN_BINARY") {
+            Some(path) => PathBuf::from(path),
+            None => std::env::current_exe().map_err(configuration)?,
+        };
+        let mut command = tokio::process::Command::new(executable);
         command
             .arg("__hand-desktop")
             .arg("--workspace")
@@ -302,6 +316,10 @@ impl NativeScreen {
         Ok(())
     }
     async fn maintain_capture(&mut self) -> Result<bool, ManagedError> {
+        // A replacement fence is terminal even if capture also needs repair.
+        if self.is_finished() {
+            return Ok(false);
+        }
         #[cfg(target_os = "linux")]
         {
             if let Some(wayland) = self.wayland.as_mut() {
@@ -309,19 +327,63 @@ impl NativeScreen {
                     wayland.restart().await?;
                     return Ok(true);
                 }
-            } else if match self.desktop.as_mut() {
-                Some(desktop) => desktop.0.try_wait().map_err(configuration)?.is_some(),
-                None => true,
-            } {
-                self.desktop = Some(Self::spawn_desktop(&self.workspace, &self.runtime)?);
-                if let Err(error) = self.wait_desktop().await {
-                    drop(self.desktop.take());
-                    return Err(error);
+            } else {
+                let running = match self.desktop.as_mut() {
+                    Some(desktop) => desktop.0.try_wait().map_err(configuration)?.is_none(),
+                    None => false,
+                };
+                // Existing X11 connections can survive an unlinked socket while
+                // fresh encoder connections fail. Child liveness is not health.
+                let reachable = if running {
+                    let runtime = self.runtime.clone();
+                    tokio::task::spawn_blocking(move || {
+                        nanocodex_vm::desktop::display_socket_available(&runtime)
+                    })
+                    .await
+                    .map_err(configuration)?
+                    .map_err(configuration)?
+                } else {
+                    false
+                };
+                if !reachable {
+                    // Stop/reap only our helper before reusing its runtime. Its
+                    // IPC shutdown releases held input and its compositor tree.
+                    self.stop_owned_desktop().await?;
+                    if self.is_finished() {
+                        return Ok(false);
+                    }
+                    self.desktop = Some(Self::spawn_desktop(&self.workspace, &self.runtime)?);
+                    if let Err(error) = self.wait_desktop().await {
+                        drop(self.desktop.take());
+                        return Err(error);
+                    }
+                    return Ok(true);
                 }
-                return Ok(true);
             }
         }
         Ok(false)
+    }
+    #[cfg(target_os = "linux")]
+    async fn stop_owned_desktop(&mut self) -> Result<(), ManagedError> {
+        if let Some(mut desktop) = self.desktop.take()
+            && desktop.0.try_wait().map_err(configuration)?.is_none()
+        {
+            let _ = desktop_request(
+                self.runtime.clone(),
+                serde_json::json!({"action":"shutdown"}),
+            )
+            .await;
+            desktop.terminate();
+            match tokio::time::timeout(std::time::Duration::from_secs(10), desktop.0.wait()).await {
+                Ok(result) => {
+                    result.map_err(configuration)?;
+                }
+                Err(_) => {
+                    desktop.0.kill().await.map_err(configuration)?;
+                }
+            }
+        }
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     pub(crate) async fn refresh(&self, target: &AttachmentTarget) -> Result<(), ManagedError> {
@@ -349,20 +411,7 @@ impl NativeScreen {
             if let Some(wayland) = self.wayland.take() {
                 wayland.shutdown().await;
             }
-            if let Some(mut desktop) = self.desktop.take() {
-                let _ = desktop_request(
-                    self.runtime.clone(),
-                    serde_json::json!({"action":"shutdown"}),
-                )
-                .await;
-                desktop.terminate();
-                if tokio::time::timeout(std::time::Duration::from_secs(10), desktop.0.wait())
-                    .await
-                    .is_err()
-                {
-                    let _ = desktop.0.kill().await;
-                }
-            }
+            self.stop_owned_desktop().await?;
         }
         result
     }
@@ -453,9 +502,12 @@ fn native_command() -> super::screen_broadcast::Source {
     std::sync::Arc::new(|| {
         Box::pin(async {
             use std::process::Stdio;
+            // Native Hands may start without Homebrew in PATH, just like the
+            // recorder. Use its packaged/PATH/standard-install discovery.
+            let ffmpeg = super::voice_recording::audio_program("ffmpeg");
             // Resolve AVFoundation's screen device explicitly; camera indices vary
             // with attached cameras. Never fall back to a camera or microphone.
-            let devices = tokio::process::Command::new("ffmpeg")
+            let devices = tokio::process::Command::new(&ffmpeg)
                 .args([
                     "-hide_banner",
                     "-f",
@@ -491,7 +543,7 @@ fn native_command() -> super::screen_broadcast::Source {
             let scale = format!("scale={}:{}", settings.width, settings.height);
             let bitrate = format!("{}k", settings.bitrate_kbps);
             let buffer = format!("{}k", settings.bitrate_kbps / 30);
-            let mut command = std::process::Command::new("ffmpeg");
+            let mut command = std::process::Command::new(ffmpeg);
             command.args([
                 "-hide_banner",
                 "-loglevel",
@@ -685,4 +737,258 @@ fn native_raw_frames(max_width: usize, max_height: usize) -> super::screen_broad
 #[cfg(target_os = "macos")]
 fn native_video() -> super::screen_video::VideoSource {
     preview(native_command())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod recovery_integration_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use std::{os::unix::fs::MetadataExt, process::Stdio, time::Duration};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn assert_fresh_native_h264(runtime: &Path) {
+        let command = nanocodex_vm::desktop::video_command(runtime).unwrap();
+        let mut args: Vec<_> = command.get_args().map(|arg| arg.to_os_string()).collect();
+        args.pop();
+        args.extend(["-frames:v".into(), "2".into(), "pipe:1".into()]);
+        let output = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::process::Command::new(command.get_program())
+                .args(args)
+                .envs(command.get_envs().filter_map(|(k, v)| v.map(|v| (k, v))))
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(output.status.success(), "native X11 encoder failed");
+        assert!(!output.stdout.is_empty());
+        // Decode actual fresh X11 H.264, not a JPEG observation or a fixture packet.
+        let mut decoder = tokio::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "h264",
+                "-i",
+                "pipe:0",
+                "-frames:v",
+                "2",
+                "-f",
+                "null",
+                "-",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut input = decoder.stdin.take().unwrap();
+        input.write_all(&output.stdout).await.unwrap();
+        drop(input);
+        let decoded = tokio::time::timeout(Duration::from_secs(30), decoder.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "fresh native H.264 did not decode"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated Linux Xvfb/openbox/xterm/FFmpeg and NANOCODEX_TEST_NATIVE_SCREEN_BINARY built from the fixed allocator"]
+    async fn linux_missing_display_socket_restarts_owned_helper_and_keeps_webrtc() {
+        let executable = PathBuf::from(
+            std::env::var_os("NANOCODEX_TEST_NATIVE_SCREEN_BINARY")
+                .expect("set the absolute separately built test companion path"),
+        );
+        assert!(executable.is_absolute() && executable.is_file());
+        let workspace = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("desktop");
+        let desktop = NativeScreen::spawn_desktop(workspace.path(), &runtime).unwrap();
+        let mut screen = NativeScreen {
+            publisher: None,
+            desktop: Some(desktop),
+            wayland: None,
+            runtime: runtime.clone(),
+            _desktop_directory: Some(directory),
+            workspace: workspace.path().to_owned(),
+        };
+        screen.wait_desktop().await.unwrap();
+        assert_fresh_native_h264(&runtime).await;
+        let helper_pid = screen.desktop.as_ref().unwrap().0.id().unwrap();
+        let display = std::fs::read_to_string(runtime.join("display")).unwrap();
+        let number: u16 = display.strip_prefix(':').unwrap().parse().unwrap();
+        assert!(
+            number >= 100,
+            "refuse to touch any legacy/production display such as X0"
+        );
+        let x_pid: u32 = std::fs::read_to_string(format!("/tmp/.X{number}-lock"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let status = std::fs::read_to_string(format!("/proc/{x_pid}/status")).unwrap();
+        let parent = status
+            .lines()
+            .find_map(|line| line.strip_prefix("PPid:"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert_eq!(
+            parent, helper_pid,
+            "only our isolated helper's Xvfb may be disrupted"
+        );
+
+        // Dummy loopback broker: authentic media is captured by the real helper;
+        // no remote account, human viewer/control or microphone is involved.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (catalogs, mut published) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let broker = tokio::spawn(async move {
+            let mut stopped = stopped;
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = stopped.changed() => break,
+                    accepted = listener.accept() => {
+                        let (mut stream, _) = accepted.unwrap();
+                        let catalogs = catalogs.clone();
+                        connections.spawn(async move {
+                            let mut prefix = [0; 4096];
+                            let n = loop {
+                                let n = stream.peek(&mut prefix).await.unwrap();
+                                if n == 0 { return; }
+                                if n >= 4 { break n; }
+                                tokio::time::sleep(Duration::from_millis(1)).await;
+                            };
+                            if prefix[..n].starts_with(b"GET ") {
+                                let mut wire = tokio_tungstenite::accept_async(stream).await.unwrap();
+                                wire.send(Message::Text(json!({"type":"ready","connection_id":"isolated"}).to_string().into())).await.unwrap();
+                                while let Some(Ok(Message::Text(text))) = wire.next().await {
+                                    let value: Value = serde_json::from_str(&text).unwrap();
+                                    if value["type"] == "catalog" {
+                                        catalogs.send(value).unwrap();
+                                        wire.send(Message::Text(json!({"type":"published","generation":"isolated"}).to_string().into())).await.unwrap();
+                                    }
+                                }
+                            } else {
+                                let mut request = [0; 4096];
+                                let _ = stream.read(&mut request).await;
+                                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"iceServers\":[]}").await.unwrap();
+                            }
+                        });
+                    }
+                }
+            }
+            connections.shutdown().await;
+        });
+        let target = AttachmentTarget::new(
+            format!("ws://{address}/v1/account/tool-host"),
+            "isolated-test-token",
+        )
+        .unwrap();
+        let machine = AttachmentMachine::new(
+            "isolated-recovery",
+            "Isolated recovery",
+            workspace.path().to_str().unwrap(),
+            ["screen"],
+        )
+        .unwrap();
+        let backend_runtime = runtime.clone();
+        let backend: ScreenBackend = std::sync::Arc::new(move |input| {
+            let runtime = backend_runtime.clone();
+            Box::pin(async move { desktop_request(runtime, input).await })
+        });
+        screen.publisher = Some(
+            ScreenPublisher::start(
+                &target,
+                &machine,
+                backend,
+                Some(native_video(runtime.clone())),
+                None,
+                None,
+                super::super::observation_providers::Registry::local(),
+            )
+            .await
+            .unwrap(),
+        );
+        let publisher = screen.publisher.as_ref().unwrap() as *const ScreenPublisher;
+        let first = tokio::time::timeout(Duration::from_secs(30), published.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first["surfaces"][0].get("transport").is_none());
+        assert!(first["surfaces"][0].get("frame_window").is_none());
+
+        let socket = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
+        let metadata = std::fs::symlink_metadata(&socket).unwrap();
+        use std::os::unix::fs::FileTypeExt;
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.uid(), nix::unistd::getuid().as_raw());
+        assert!(
+            screen
+                .desktop
+                .as_mut()
+                .unwrap()
+                .0
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_file(&socket).unwrap(); // ONLY the verified isolated helper socket (>= X100).
+        assert!(!nanocodex_vm::desktop::display_socket_available(&runtime).unwrap());
+        assert!(
+            screen
+                .desktop
+                .as_mut()
+                .unwrap()
+                .0
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            desktop_request(runtime.clone(), json!({"action":"observe"}))
+                .await
+                .unwrap()["status"],
+            "ok",
+            "retained X11 capture must still work while fresh encoder connection fails"
+        );
+        assert!(nanocodex_vm::desktop::video_command(&runtime).is_err());
+        assert!(screen.maintain_capture().await.unwrap());
+        assert!(std::ptr::eq(publisher, screen.publisher.as_ref().unwrap()));
+        let new_pid = screen.desktop.as_ref().unwrap().0.id().unwrap();
+        assert_ne!(new_pid, helper_pid);
+        assert!(
+            !PathBuf::from(format!("/proc/{helper_pid}")).exists(),
+            "old helper must be reaped before replacement"
+        );
+        assert!(
+            !PathBuf::from(format!("/proc/{x_pid}")).exists(),
+            "old owned Xvfb must be stopped"
+        );
+        assert!(nanocodex_vm::desktop::display_socket_available(&runtime).unwrap());
+        assert_fresh_native_h264(&runtime).await;
+        let recovered = tokio::time::timeout(Duration::from_secs(30), published.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            recovered["surfaces"][0].get("transport").is_none(),
+            "recovery must remain WebRTC"
+        );
+        assert!(recovered["surfaces"][0].get("frame_window").is_none());
+        screen.shutdown().await.unwrap();
+        stop.send(true).unwrap();
+        broker.await.unwrap();
+    }
 }

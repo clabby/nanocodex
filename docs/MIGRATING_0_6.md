@@ -19,7 +19,7 @@ Python, HTTP API, and application migrations are outside this guide.
 | `Nanocodex::prompt()` | `impl Into<Prompt>` | `impl Into<PromptRequest>`; strings and `Prompt` still work |
 | `Nanocodex::builder()` | Generic over a Responses service factory | Generic over `BuilderBackend`; ordinary `builder(openai)` still works |
 | Default model / reasoning | `Model::Sol` / `Thinking::High` | `Model::Astra` / `Thinking::Low`; pin both for old defaults |
-| Embedded tool host | `nanocodex_tools::hosted` | `nanocodex_tools::embedded`; shared `Tools` recipe |
+| Embedded tool host | `nanocodex_tools::hosted` | `nanocodex_oai_tools::embedded`; shared `Tools` recipe |
 | Code Mode execution / wait | `CodeModeExecution` | `Result<CodeModeExecution, CodeModeHostError>` |
 | Code Mode result literal | No cell metadata | Add `cell: None`, or describe the observed cell |
 | Billing uncertainty | Counter and service-error accessor | Removed; retain actual reported usage and cost availability |
@@ -57,7 +57,7 @@ For applications that used `default-features = false`, select features explicitl
 | `nanocodex/realtime` | Realtime client; also enables `openai` |
 | `nanocodex-agent/openai` | Enabled by default; disabling it leaves the common lifecycle contracts |
 | `nanocodex-oai-api/events` | Event contracts without the complete client; `client` includes it |
-| `nanocodex-tools/attachment` | Native attached tool execution without the complete native runtime |
+| `nanocodex-oai-tools/attachment` | Native attached tool execution without the complete native runtime |
 
 Code importing local builders, `AgentHandle`, rollout APIs, or provider-specific
 errors from a no-default-features build must enable `openai`. The lower-level
@@ -67,7 +67,40 @@ without that feature.
 Sources: [facade features](../crates/nanocodex/Cargo.toml),
 [agent features](../crates/nanocodex-agent/Cargo.toml),
 [OAI features](../crates/nanocodex-oai-api/Cargo.toml),
-[tool features](../crates/nanocodex-tools/Cargo.toml).
+[tool features](../crates/nanocodex-oai-tools/Cargo.toml).
+
+### Provider-isolated Rust tool crates (current source)
+
+The former Rust `nanocodex-tools` package is now `nanocodex-oai-tools` and its
+macro implementation is `nanocodex-oai-tools-macros`. Update direct Cargo
+package names, path dependencies and Rust imports from `nanocodex_tools` to
+`nanocodex_oai_tools`. OpenAI runtime features (`attachment`,
+`workspace-runtime`, `code-mode`, `mcp`, `native`) keep their meaning.
+
+Claude adapters have moved to the independent `nanocodex-claude-tools` crate;
+import them through `nanocodex_claude_tools`, not the OpenAI tool runtime.
+`nanocodex-claude/tools` is the canonical registration feature;
+`nanocodex-claude/workspace-files` remains a compatibility alias for `tools`.
+For the facade, select `nanocodex/oai-tools` or `nanocodex/claude-tools`
+explicitly. The legacy facade `tools` feature still selects OpenAI tools.
+
+```toml
+# Independent provider adapters; no CLI is required.
+nanocodex-oai-tools = { version = "0.6", default-features = false, features = ["code-mode"] }
+nanocodex-claude-tools = "0.6"
+nanocodex-claude = { version = "0.6", features = ["tools"] }
+```
+
+Claude host implementations now accept `HostContext` and return Claude-native
+`ToolOutput`/`ToolContent`; do not pass Responses `ToolContext` or output media.
+Claude MCP hosts implement `ClaudeMcpProvider` with native definitions and
+outputs rather than the OpenAI `DynamicToolProvider`. Preserve session, turn
+and call identity, errors, structured results and supported media when migrating.
+Host authority, sandboxing, task durability and remote transport remain explicit.
+
+This isolates the **tool crates**, not every transitive dependency of the Claude
+agent backend: its common lifecycle still comes from `nanocodex-agent`.
+JavaScript/npm `nanocodex-tools`, its imports and pnpm filters are unchanged.
 
 ## 2. Agent handles, prompts, and completed turns
 
@@ -238,7 +271,7 @@ Sources: [model/defaults](../crates/nanocodex-oai-api/src/lib.rs),
 
 ```rust,ignore
 // 0.6: host bridges use the same tool recipe as native callers.
-use nanocodex_tools::{Tools, embedded::bind_host};
+use nanocodex_oai_tools::{Tools, embedded::bind_host};
 let tools = Tools::builder().without_defaults().build()?;
 let tools = bind_host(tools, application_host);
 ```
@@ -294,12 +327,12 @@ paid-call preparation and commit/rollback handling. The underlying RMCP
 dependency moves from 1.8 to 3.0; consumers that also use RMCP directly must
 align their integration types.
 
-Sources: [embedded host](../crates/nanocodex-tools/src/embedded/mod.rs),
-[Code Mode results](../crates/nanocodex-tools/src/embedded/types.rs),
-[runtime](../crates/nanocodex-tools/src/runtime/execution.rs),
-[tool selection](../crates/nanocodex-tools/src/runtime/selection.rs),
-[MCP](../crates/nanocodex-tools/src/mcp/mod.rs),
-[OAuth store](../crates/nanocodex-tools/src/mcp/oauth.rs).
+Sources: [embedded host](../crates/nanocodex-oai-tools/src/embedded/mod.rs),
+[Code Mode results](../crates/nanocodex-oai-tools/src/embedded/types.rs),
+[runtime](../crates/nanocodex-oai-tools/src/runtime/execution.rs),
+[tool selection](../crates/nanocodex-oai-tools/src/runtime/selection.rs),
+[MCP](../crates/nanocodex-oai-tools/src/mcp/mod.rs),
+[OAuth store](../crates/nanocodex-oai-tools/src/mcp/oauth.rs).
 
 ## 5. Low-level Responses and events
 
@@ -415,7 +448,7 @@ provides the Hand protocol. These are optional integrations; a local Rust
 embedding can adopt the rest of 0.6 independently.
 
 See [managed client](../crates/nanocodex-managed/README.md) and
-[tool attachments](../crates/nanocodex-tools/README.md).
+[tool attachments](../crates/nanocodex-oai-tools/README.md).
 
 ## 7. Browser, egress, VM, and voice
 

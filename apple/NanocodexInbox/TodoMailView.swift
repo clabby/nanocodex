@@ -8,14 +8,18 @@ import QuickLook
 struct TodoMailThreadView: View {
     @StateObject private var store: TodoMailSession
     private let replyMessageID: String?
+    private let inboxModel: InboxModel?
+    private let onChat: () -> Void
+    private let inboxItemID: String?
+    @State private var assistant: InboxAIRequest?
     @State private var expanded: Set<String> = []
     @State private var composing = false
     @State private var previewURL: URL?
     @State private var downloading: String?
     @State private var attachmentError: String?
 
-    init(client: ManagedClient?, connectionID: String, threadID: String, replyMessageID: String? = nil, fixture: TodoMailThread? = nil) {
-        self.replyMessageID = replyMessageID
+    init(client: ManagedClient?, inboxModel: InboxModel? = nil, onChat: @escaping () -> Void = {}, inboxItemID: String? = nil, connectionID: String, threadID: String, replyMessageID: String? = nil, fixture: TodoMailThread? = nil) {
+        self.replyMessageID = replyMessageID; self.inboxModel = inboxModel; self.onChat = onChat; self.inboxItemID = inboxItemID
         _store = StateObject(wrappedValue: TodoMailSession(client: client, connectionID: connectionID, threadID: threadID, fixture: fixture))
     }
     var body: some View {
@@ -25,6 +29,8 @@ struct TodoMailThreadView: View {
                     Text(thread.subject.isEmpty ? "No subject" : thread.subject)
                         .font(.system(size: 27, weight: .bold)).tracking(-0.7)
                         .textSelection(.enabled).accessibilityIdentifier("mail-thread-subject")
+                    if let model = inboxModel, let context = thread.peopleContext { InboxPeopleView(model: model, context: context) }
+                    if let status = store.readingStatus { Text(status).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("mail-cached-status") }
                     HStack {
                         Text("\(thread.messages.count) messages").font(.caption).foregroundStyle(.secondary)
                         Spacer()
@@ -71,6 +77,9 @@ struct TodoMailThreadView: View {
                     draftButton(.reply, symbol: "arrowshape.turn.up.left", message: message)
                     draftButton(.replyAll, symbol: "arrowshape.turn.up.left.2", message: message)
                     draftButton(.forward, symbol: "arrowshape.turn.up.right", message: message)
+                    if inboxModel != nil, let thread = store.thread {
+                        InboxMailAIMenu { text in assistant = InboxAIRequest(id: inboxItemID ?? "mail:" + thread.connectionID + ":" + thread.id, context: mailAIContext(thread: thread, draft: store.draft, itemID: inboxItemID), instructions: text) }
+                    }
                 }.padding(.horizontal, 16).padding(.vertical, 10).background(.ultraThinMaterial)
             }
         }
@@ -79,7 +88,8 @@ struct TodoMailThreadView: View {
             if let last = store.thread?.messages.first(where: { $0.id == replyMessageID }) ?? store.thread?.messages.last { expanded.insert(last.id) }
         }
         .refreshable { await store.load() }
-        .sheet(isPresented: $composing) { TodoMailEditor(store: store) }
+        .sheet(isPresented: $composing) { TodoMailEditor(store: store, inboxModel: inboxModel, onChat: onChat) }
+        .sheet(item: $assistant) { request in if let model = inboxModel { InboxAIRequestView(model: model, request: request, onChat: onChat) } }
         .quickLookPreview($previewURL)
         .onChange(of: previewURL) { previous, current in
             if let previous, previous != current { try? FileManager.default.removeItem(at: previous.deletingLastPathComponent()) }
@@ -88,7 +98,7 @@ struct TodoMailThreadView: View {
     private func draftButton(_ mode: TodoMailDraftMode, symbol: String, message: TodoMailMessage) -> some View {
         Button { composing = store.begin(mode: mode, message: message) } label: {
             Label(mode.title, systemImage: symbol).font(.caption.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 44)
-        }.buttonStyle(.bordered).tint(mode == .reply ? .orange : .secondary)
+        }.buttonStyle(.bordered)
             .disabled(!store.canBegin)
             .accessibilityIdentifier("mail-\(mode.rawValue)")
     }
@@ -165,11 +175,14 @@ struct TodoMailThreadView: View {
 
 struct TodoMailComposeView: View {
     @StateObject private var store: TodoMailSession
-    init(client: ManagedClient?, connectionID: String, draftID: String? = nil, fixture: Bool = false) {
+    private let inboxModel: InboxModel?
+    private let onChat: () -> Void
+    init(client: ManagedClient?, inboxModel: InboxModel? = nil, onChat: @escaping () -> Void = {}, connectionID: String, draftID: String? = nil, fixture: Bool = false) {
+        self.inboxModel = inboxModel; self.onChat = onChat
         _store = StateObject(wrappedValue: TodoMailSession(client: client, connectionID: connectionID, draftID: draftID, fixtureMode: fixture))
     }
     var body: some View {
-        TodoMailEditor(store: store).task {
+        TodoMailEditor(store: store, inboxModel: inboxModel, onChat: onChat).task {
             await store.load()
             if store.draft == nil || store.draft?.status == "sent" { store.begin(mode: .compose) }
         }
@@ -178,6 +191,9 @@ struct TodoMailComposeView: View {
 
 private struct TodoMailEditor: View {
     @ObservedObject var store: TodoMailSession
+    var inboxModel: InboxModel? = nil
+    var onChat: () -> Void = {}
+    @State private var assistant: InboxAIRequest?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var reloadConfirmation = false
@@ -281,10 +297,21 @@ private struct TodoMailEditor: View {
                 .confirmationDialog("Replace this device’s edits with the server draft?", isPresented: $reloadConfirmation, titleVisibility: .visible) {
                     Button("Reload server draft", role: .destructive) { Task { await store.reloadServerDraft() } }
                 }
+                .safeAreaInset(edge: .bottom) {
+                    if inboxModel != nil, let draft = store.draft {
+                        HStack {
+                            Text("Prepare or improve this draft").font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            InboxMailAIMenu { text in assistant = InboxAIRequest(id: "draft:" + draft.id, context: mailAIContext(thread: store.thread, draft: draft), instructions: text) }
+                                .disabled(store.sending || draft.isLocked)
+                        }.padding(.horizontal, 18).background(.regularMaterial)
+                    }
+                }
+                .sheet(item: $assistant) { request in if let model = inboxModel { InboxAIRequestView(model: model, request: request, onChat: onChat) } }
                 .interactiveDismissDisabled(store.sending)
                 .onChange(of: scenePhase) { _, phase in if phase != .active { Task { await store.flush() } } }
                 .onDisappear { Task { await store.flush() } }
-        }.tint(.orange).accessibilityIdentifier("mail-draft-editor")
+        }.accessibilityIdentifier("mail-draft-editor")
     }
     private func recipientField(_ title: String, keyPath: WritableKeyPath<TodoMailDraft, [String]>) -> some View {
         VStack(spacing: 0) {
@@ -396,5 +423,38 @@ struct PreparedDecisionMailView: View {
             .task { await store.load() }
             .onChange(of: store.sending) { _, value in busy = value }
             .onDisappear { Task { await store.waitForRecovery() } }
+    }
+}
+
+/// Source-qualified, bounded snapshots let preparation fetch the originals;
+/// quoted message content is not authority to execute anything.
+private func mailAIContext(thread: TodoMailThread?, draft: TodoMailDraft?, itemID: String? = nil) -> JSON {
+    var fields: [String: JSON] = ["coverage": .string("Retained mail/draft snapshot; verify current conversation and CRM identity. This is preparation only.")]
+    if let thread {
+        fields["item_id"] = .string(itemID ?? "mail:" + thread.connectionID + ":" + thread.id)
+        fields["title"] = .string(thread.subject); fields["connection_id"] = .string(thread.connectionID); fields["thread_id"] = .string(thread.id)
+        fields["crm"] = thread.peopleContext?.referenceSnapshot ?? .null
+        fields["messages"] = .array(thread.messages.suffix(3).map { .object([
+            "message_id": .string($0.id), "from": .string($0.from), "to": .string($0.to), "subject": .string($0.subject),
+            "body_excerpt": .string(String($0.bodyText.prefix(4000))), "body_truncated": .bool($0.bodyTruncated || $0.bodyText.count > 4000)
+        ]) })
+    }
+    if let draft {
+        if itemID == nil { fields["item_id"] = .string("draft:" + draft.id) }
+        fields["title"] = .string(draft.subject.isEmpty ? "Unfinished draft" : draft.subject)
+        fields["draft"] = .object(["id": .string(draft.id), "connection_id": .string(draft.connectionID), "version": .number(Double(draft.version)), "to": .array(draft.to.map(JSON.string)), "subject": .string(draft.subject), "body": .string(String(draft.bodyText.prefix(8000))), "status": .string(draft.status)])
+    }
+    return .object(fields)
+}
+private struct InboxMailAIMenu: View {
+    let prepare: (String) -> Void
+    var body: some View {
+        Menu {
+            Button("Brief me") { prepare("Brief me on this conversation, what needs a response, and verified CRM context. Flag missing or stale facts.") }
+            Button("Draft reply") { prepare("Prepare an editable reply using the current source conversation and verified CRM people. Preserve any existing draft text; do not send.") }
+            Button("Prepare next steps") { prepare("Prepare complete next steps for my review using the current conversation and linked CRM context. Do not execute external actions.") }
+            Button("Ask something else") { prepare("") }
+        } label: { Image(systemName: "sparkles").frame(width: 44, height: 44) }
+            .accessibilityLabel("AI actions for this email").accessibilityIdentifier("mail-ai-actions")
     }
 }

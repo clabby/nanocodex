@@ -12,7 +12,7 @@ export default defineConfig(async () => ({
   })],
   test: {
     include: ["test/**/*.test.ts"],
-    exclude: ["test/prompt-apps.test.ts", "test/jev-reliability.test.ts", "test/router-telemetry.test.ts", "test/provider-probe-schedule.test.ts", "test/provider-probe-slots.test.ts", "test/provider-telemetry-routing.test.ts", "test/thread-model-routing.test.ts"],
+    exclude: ["test/prompt-apps.test.ts", "test/jev-reliability.test.ts", "test/router-telemetry.test.ts", "test/provider-probe-schedule.test.ts", "test/provider-probe-slots.test.ts", "test/provider-telemetry-routing.test.ts", "test/thread-model-routing.test.ts", "test/account-hosted-tools.test.ts", "test/hosted-tools-broker.test.ts", "test/hosted-tools-protocol.test.ts"],
     // Bundle cron-parser's CommonJS/Luxon boundary as Wrangler does in production.
     deps: { optimizer: { ssr: { enabled: true, include: ["cron-parser"] } } },
   },

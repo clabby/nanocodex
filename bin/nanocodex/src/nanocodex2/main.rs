@@ -29,6 +29,8 @@ mod installation;
 mod launcher;
 #[cfg(any(target_os = "linux", test))]
 mod linux_hand_install;
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+mod linux_hand_update;
 mod managed2;
 mod native_hand;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -40,8 +42,12 @@ mod screen_broadcast;
 #[cfg(target_os = "linux")]
 mod screen_gamepad;
 #[cfg(target_os = "linux")]
+mod screen_helpers;
+#[cfg(target_os = "linux")]
 mod screen_host;
 mod screen_ice;
+#[cfg(target_os = "linux")]
+mod screen_linux_session;
 #[cfg(target_os = "macos")]
 mod screen_macos;
 mod screen_native;
@@ -97,7 +103,7 @@ use nanocodex_managed::{
     AgentSettings, AgentState, EventCursor, Managed, ManagedClient, ManagedError, ManagedEvent,
     PromptInput, validate_vm_factory_name,
 };
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tools, WorkspaceTools,
     attachment::{Attachment, AttachmentMetadata, AttachmentTarget},
     mcp::{Mcp, McpServer},
@@ -155,6 +161,10 @@ enum Command {
     #[cfg(any(target_os = "linux", test))]
     #[command(name = "__install-hand", hide = true)]
     InstallHand,
+    /// Update an existing native Linux Hand without enrollment or factory migration.
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    #[command(name = "__update-hand", hide = true)]
+    UpdateHand,
     /// Share an existing Wayland session through the shared Rust publisher.
     #[cfg(target_os = "linux")]
     #[command(name = "wayland-host", hide = true)]
@@ -722,6 +732,8 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::HandDesktop(command)) => return screen_native::serve_desktop(command).await,
         #[cfg(any(target_os = "linux", test))]
         Some(Command::InstallHand) => return linux_hand_install::run().await,
+        #[cfg(any(target_os = "linux", target_os = "macos", test))]
+        Some(Command::UpdateHand) => return linux_hand_update::run().await,
         Some(Command::Hand(command)) if command.rootfs.is_none() && command.docker.is_none() => {
             return native_hand::serve_hand(command).await;
         }
@@ -792,10 +804,12 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::HandDesktop(_)) => unreachable!("handled before managed client setup"),
         #[cfg(any(target_os = "linux", test))]
         Some(Command::InstallHand) => unreachable!("handled before managed client setup"),
+        #[cfg(any(target_os = "linux", target_os = "macos", test))]
+        Some(Command::UpdateHand) => unreachable!("handled before managed client setup"),
         Some(Command::Host(_)) => unreachable!("handled before managed client setup"),
         Some(Command::New(settings)) => {
             let account = settings.chatgpt_account.clone();
-            let settings = settings.resolve();
+            let settings = settings.resolve_for_account(&client).await?;
             let receipt = match account {
                 Some(account) => {
                     client
@@ -1110,7 +1124,11 @@ fn supported_agent_page_origin(url: &Url) -> bool {
 async fn run_turn(client: &ManagedClient, command: Run) -> Result<(), ManagedError> {
     let created = command.agent.is_none();
     let account = command.settings.chatgpt_account.clone();
-    let settings = command.settings.resolve();
+    let settings = if command.agent.is_none() || account.is_some() {
+        command.settings.resolve_for_account(client).await?
+    } else {
+        command.settings.resolve()
+    };
     let requested_agent = match account {
         Some(account) => Some(
             client
@@ -1160,14 +1178,14 @@ async fn open_workspace_agent_from(
     state: Option<AgentState>,
     event_observer: Option<tokio::sync::mpsc::UnboundedSender<ManagedEvent>>,
 ) -> Result<(Nanocodex, AgentEvents, String, std::path::PathBuf), ManagedError> {
-    open_workspace_agent_with_settings(
-        client,
-        agent_id,
-        state,
-        control::InitialSettings::default().resolve(),
-        event_observer,
-    )
-    .await
+    let settings = if agent_id.is_none() {
+        control::InitialSettings::default()
+            .resolve_for_account(client)
+            .await?
+    } else {
+        control::InitialSettings::default().resolve()
+    };
+    open_workspace_agent_with_settings(client, agent_id, state, settings, event_observer).await
 }
 
 async fn open_workspace_agent_with_settings(

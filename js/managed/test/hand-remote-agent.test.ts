@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { AccountHostedTools, AccountHostedToolsProvider } from "../src/account-hosted-tools";
 import { screenAction, screenResult } from "../src/hand-remote-agent";
-import { createNamespaceExecutionRuntime } from "../src/namespace-tools";
+import { createNamespaceExecutionRuntime, machineMountRoot } from "../src/namespace-tools";
 import { CUA_JS_NAME, CUA_RESET_NAME } from "nanocodex-computer/contract";
 
 const owner = "11111111-1111-4111-8111-111111111193";
@@ -22,10 +22,23 @@ function next(socket: WebSocket): Promise<any> {
   });
 }
 async function host(machine: string, recording: boolean | Record<string, unknown> = false, controllable = true) {
+  const publicationSurface = machine.startsWith("cf:") ? { ...surface, kind: "desktop" } : { ...surface, transport: undefined };
   const stub = namespace().getByName(owner);
-  const response = await stub.fetch("https://account-tools.internal/hands/host", { headers: { "x-nanocodex-owner-id": owner, upgrade: "websocket" } });
+  let endpoint = "https://account-tools.internal/hands/host";
+  const publisherHeaders: Record<string, string> = { ...{ "x-nanocodex-owner-id": owner }, upgrade: "websocket" };
+  if (machine.startsWith("cf:")) {
+    const id = crypto.randomUUID();
+    const enrollment = await stub.fetch("https://account-tools.internal/sandbox-hand-hosts/" + id, {
+      method: "PUT", headers: { "x-nanocodex-owner-id": owner }, body: JSON.stringify({ name: machine, machine_id: machine }),
+    });
+    expect(enrollment.status).toBe(201);
+    const receipt = await enrollment.json<{ credential: string }>();
+    publisherHeaders.authorization = "Bearer " + receipt.credential;
+    endpoint = "https://account-tools.internal/hand-hosts/" + id + "/hands/host";
+  }
+  const response = await stub.fetch(endpoint, { headers: publisherHeaders });
   const socket = response.webSocket!, ready = next(socket); socket.accept(); const state = await ready;
-  const published = next(socket); socket.send(JSON.stringify({ type: "catalog", machine_id: machine, machine_name: machine, surfaces: [{ ...surface, controllable, ...(typeof recording === "object" ? { recording: recording.available, recordingCapabilities: recording } : recording ? { recording } : {}) }] })); await published;
+  const published = next(socket); socket.send(JSON.stringify({ type: "catalog", machine_id: machine, machine_name: machine, surfaces: [{ ...publicationSurface, controllable, ...(typeof recording === "object" ? { recording: recording.available, recordingCapabilities: recording } : recording ? { recording } : {}) }] })); await published;
   const snapshot = await stub.fetch("https://account-tools.internal/snapshot", { method: "POST", body: JSON.stringify({ owner_id: owner }) });
   const catalog: any = await snapshot.json();
   const tool = catalog.tools.find((tool: any) => tool.route_token.includes(machine));
@@ -33,11 +46,12 @@ async function host(machine: string, recording: boolean | Record<string, unknown
 }
 describe("agent screen protocol", () => {
   it("discovers native CUA and joins the viewer on a live Hand, preserving grants and reconnect fences", async () => {
-    const connected = await host("wayland-computer");
+    const connected = await host("cf:wayland-computer");
     let allowed = true;
     const provider = new AccountHostedToolsProvider(namespace(), owner, () => allowed);
     await provider.refresh();
-    const machine = provider.screenMachines().find(machine => machine.id === "wayland-computer")!;
+    const machine = provider.screenMachines().find(machine => machine.id === "cf:wayland-computer")!;
+    const workdir = machineMountRoot(machine.id);
     expect(machine.capabilities).toEqual(["computer", "screen"]);
     expect(provider.machineOnline(machine.id)).toBe(true);
     const runtime = createNamespaceExecutionRuntime(() => [machine], () => undefined, undefined,
@@ -48,7 +62,7 @@ describe("agent screen protocol", () => {
     const reset = runtime.tools[CUA_RESET_NAME]!;
     // Workdir-only discovery is the agent's first operation, not a direct
     // invocation of the internal screen adapter that bypasses its contract.
-    expect(await cua.handler({ workdir: "/wayland-computer" }, context)).toMatchObject({
+    expect(await cua.handler({ workdir }, context)).toMatchObject({
       definitions: [
         { name: CUA_JS_NAME, description: expect.stringContaining("Native screen control fallback"),
           parameters: { required: ["action"], properties: { action: { enum: expect.arrayContaining(["observe", "click"]) } } } },
@@ -75,14 +89,14 @@ describe("agent screen protocol", () => {
     expect(await viewerFrame).toEqual({ type: "frame", jpeg: "/9j/2Q==", width: 1, height: 1 });
     const requested = next(connected.socket);
     const selector = { app: "Example", window: "Window" };
-    const pending = cua.handler({ workdir: "/wayland-computer", action: "observe", context: selector }, context);
+    const pending = cua.handler({ workdir, action: "observe", context: selector }, context);
     const request = await requested;
     expect(request).toMatchObject({ type: "agent_call", surface_id: "desktop", input: { action: "observe", context: selector } });
     connected.socket.send(JSON.stringify({ type: "agent_result", request_id: request.request_id, status: "ok", jpeg: "/9j/2Q==", width: 1, height: 1, observation }));
     expect(await pending).toMatchObject({ success: true,
       structuredResult: { status: "ok", image_url: "data:image/jpeg;base64,/9j/2Q==", detail: "original", observation } });
     const clicked = next(connected.socket);
-    const click = cua.handler({ workdir: "/wayland-computer", action: "click", x: 0.5, y: 0.5 },
+    const click = cua.handler({ workdir, action: "click", x: 0.5, y: 0.5 },
       { ...context, callId: "screen-click" });
     const clickRequest = await clicked;
     expect(clickRequest).toMatchObject({ type: "agent_call", surface_id: "desktop",
@@ -92,17 +106,17 @@ describe("agent screen protocol", () => {
     expect(await click).toMatchObject({ success: true, structuredResult: { status: "ok" } });
     allowed = false;
     expect(provider.screenTool(machine.id)).toBeUndefined();
-    expect(await cua.handler({ workdir: "/wayland-computer", action: "click", x: 0.5, y: 0.5 }, context))
+    expect(await cua.handler({ workdir, action: "click", x: 0.5, y: 0.5 }, context))
       .toMatchObject({ success: false, structuredResult: { status: "unavailable" } });
     allowed = true;
     const replacement = await host(machine.id);
     await provider.refresh();
-    expect(await cua.handler({ workdir: "/wayland-computer", action: "click", x: 0.5, y: 0.5 }, context))
+    expect(await cua.handler({ workdir, action: "click", x: 0.5, y: 0.5 }, context))
       .toMatchObject({ success: false, structuredResult: { status: "unavailable" } });
     const freshContext = { ...context, parentCallId: "replacement-cell", callId: "replacement-discover" };
-    expect(await cua.handler({ workdir: "/wayland-computer" }, freshContext)).toHaveProperty("definitions");
+    expect(await cua.handler({ workdir }, freshContext)).toHaveProperty("definitions");
     const released = next(replacement.socket);
-    const release = reset.handler({ workdir: "/wayland-computer" }, { ...freshContext, callId: "replacement-release" });
+    const release = reset.handler({ workdir }, { ...freshContext, callId: "replacement-release" });
     const releaseRequest = await released;
     replacement.socket.send(JSON.stringify({ type: "agent_result", request_id: releaseRequest.request_id, status: "ok" }));
     expect(await release).toMatchObject({ success: true });

@@ -72,7 +72,8 @@ fn emit_linked_worktree_ref_reruns() {
                 "--git-path",
                 &reference,
             ],
-        ) {
+        ) && PathBuf::from(&path).is_file()
+        {
             println!("cargo:rerun-if-changed={path}");
         }
     }

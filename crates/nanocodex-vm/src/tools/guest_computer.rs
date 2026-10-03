@@ -36,7 +36,8 @@ impl GuestComputer {
 
     pub(super) async fn catalog(
         &self,
-    ) -> Result<Vec<nanocodex_computer::ProviderTool>, nanocodex_tools::contract::ToolError> {
+    ) -> Result<Vec<nanocodex_computer::ProviderTool>, nanocodex_oai_tools::contract::ToolError>
+    {
         // A guest without an installed provider still supplies shell and files.
         // A configured provider that fails discovery returns its real error.
         if ComputerConfig::discover().is_none() {
@@ -47,7 +48,7 @@ impl GuestComputer {
 
     pub(super) async fn tools(
         &self,
-    ) -> Result<&ComputerTools, nanocodex_tools::contract::ToolError> {
+    ) -> Result<&ComputerTools, nanocodex_oai_tools::contract::ToolError> {
         #[cfg(all(feature = "desktop", target_os = "linux"))]
         self.ensure_desktop().await?;
         self.tools
@@ -86,7 +87,7 @@ impl GuestComputer {
     }
 
     #[cfg(all(feature = "desktop", target_os = "linux"))]
-    async fn ensure_desktop(&self) -> Result<(), nanocodex_tools::contract::ToolError> {
+    async fn ensure_desktop(&self) -> Result<(), nanocodex_oai_tools::contract::ToolError> {
         use std::time::{Duration, Instant};
         let mut owned = self.desktop.lock().await;
         let ready = PathBuf::from(DESKTOP_RUNTIME).join("ready");

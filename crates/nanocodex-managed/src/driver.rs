@@ -68,6 +68,7 @@ pub(crate) enum Command {
         bool,
         tokio::sync::oneshot::Sender<nanocodex_agent::Result<()>>,
     ),
+    Compact(tokio::sync::oneshot::Sender<nanocodex_agent::Result<()>>),
     Shutdown,
 }
 
@@ -262,7 +263,8 @@ impl LifecycleBackend for ManagedAgent {
     }
 
     fn compact(&self) -> BackendFuture<nanocodex_agent::Result<()>> {
-        unsupported("compact")
+        let commands = self.commands.clone();
+        Box::pin(async move { Self::request(commands, Command::Compact).await })
     }
 
     fn append_developer_message(
@@ -474,6 +476,9 @@ where
                     }
                     Some(Command::SetFastMode(enabled, result)) => {
                         drop(result.send(self.set_fast_mode(enabled).await));
+                    }
+                    Some(Command::Compact(result)) => {
+                        drop(result.send(self.compact().await));
                     }
                     Some(Command::Shutdown) => break self.shutdown_active().await,
                     None => break Ok(()),
@@ -723,6 +728,18 @@ where
             }
         }
         Ok(())
+    }
+
+    async fn compact(&mut self) -> nanocodex_agent::Result<()> {
+        match self
+            .call_with_events(ManagedRequest::Compact {
+                agent_id: self.agent_id.clone(),
+            })
+            .await?
+        {
+            ManagedResponse::Compacted => Ok(()),
+            _ => Err(unexpected_response()),
+        }
     }
 
     async fn set_thinking(&mut self, thinking: Thinking) -> nanocodex_agent::Result<()> {

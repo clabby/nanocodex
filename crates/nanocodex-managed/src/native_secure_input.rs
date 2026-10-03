@@ -438,7 +438,7 @@ pub struct NativeSecureInputReceipt {
 }
 impl NativeSecureInputReceipt {
     /// Bounded local description of the outcome.
-    pub fn message(&self) -> &'static str {
+    pub const fn message(&self) -> &'static str {
         self.status.message()
     }
     fn parse(
@@ -604,7 +604,7 @@ impl ManagedClient {
     }
 }
 
-fn invalid() -> ManagedError {
+const fn invalid() -> ManagedError {
     ManagedError::InvalidResponse("native secure input unavailable")
 }
 fn now() -> u64 {

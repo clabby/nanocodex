@@ -29,6 +29,15 @@ final class PersistentReadCache: @unchecked Sendable {
         let endpoint = String(path.split(separator: "?", maxSplits: 1).first ?? "")
         if ["/v1/agents", "/v1/todo", "/v1/todo/schedule", "/v1/crm", "/v1/connectors", "/v1/connectors/catalog", "/v1/connectors/mcp-connections"].contains(endpoint) { return true }
         if endpoint.hasPrefix("/v1/crm/") { return true }
+        // Mail snapshots are presentation only. Draft/status/decision/attachment
+        // reads are deliberately excluded: disk never grants approval authority.
+        if endpoint == "/v1/todo/mail/accounts" { return true }
+        if endpoint == "/v1/todo/mail/threads" || (endpoint.hasPrefix("/v1/todo/mail/threads/") && endpoint.split(separator: "/").count == 5) {
+            guard let components = URLComponents(string: path),
+                  let connection = components.queryItems?.first(where: { $0.name == "connection_id" })?.value,
+                  !connection.isEmpty else { return false }
+            return true
+        }
         let parts = endpoint.split(separator: "/")
         return parts.count >= 4 && parts[0] == "v1" && parts[1] == "agents"
             && ((parts.count == 4 && parts[3] == "triggers")
@@ -38,6 +47,10 @@ final class PersistentReadCache: @unchecked Sendable {
         let endpoint = path.split(separator: "?", maxSplits: 1).first ?? ""
         let parts = endpoint.split(separator: "/")
         guard parts.count >= 2 else { return "unknown" }
+        if parts.count >= 4, parts[1] == "todo", parts[2] == "mail" {
+            if parts[3] == "accounts" { return "todo-mail-accounts" }
+            return parts.count == 4 ? "todo-mail-list" : "todo-mail-thread"
+        }
         if parts[1] == "agents" {
             guard parts.count > 2 else { return "agents-roster" }
             return "agent-" + digest(String(parts[2])) + (parts.count > 3 && parts[3] == "triggers" ? "-triggers" : "-history")
@@ -59,6 +72,12 @@ final class PersistentReadCache: @unchecked Sendable {
             } else if parts.count >= 4 && parts[3] == "triggers" {
                 prefixes = ["agent-" + Self.digest(String(parts[2])) + "-triggers-"]
             } else { return } // Sending/preparing a turn preserves saved history.
+        } else if parts.count >= 4, parts[1] == "todo", parts[2] == "mail" {
+            // Conservatively evict every query/page after archive, undo or send.
+            // Generation fences older reads so relaunch cannot restore pre-write
+            // inbox membership. Draft autosaves need not evict retained bodies.
+            if parts[3] == "drafts" || parts[3] == "suggest" { return }
+            prefixes = ["todo-mail-list-", "todo-mail-thread-"]
         } else if ["crm", "todo", "connectors"].contains(parts[1]) {
             prefixes = [String(parts[1]) + "-"]
         } else { return }

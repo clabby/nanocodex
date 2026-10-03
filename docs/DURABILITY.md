@@ -145,6 +145,27 @@ terminal. Otherwise a streaming consumer can exit on a failed attempt while its
 server continues the same durable turn, disconnecting resources it still needs.
 This rule belongs to the Rust driver, before any WASM or host event projection.
 
+Terminal `duration_ns` and `duration_ms` measure the same logical operation as
+the retained model and tool counters. Elapsed time starts when execution first
+begins and includes interruption and recovery downtime. A persisted Unix-clock
+origin carries elapsed time across runtime reconstruction; each live attempt
+uses a monotonic clock. Model and tool counters can overlap or describe replayed
+effects, so their sum is not an elapsed-time clock. Exact receipt replay returns
+the committed result and usage without executing the operation again; its
+synthetic terminal currently reports zero execution duration and counters.
+
+Older execution continuations without a clock origin still recover with their
+retained counters. Their elapsed basis starts at the first upgraded attempt;
+pre-upgrade elapsed time cannot be reconstructed. Clock changes between attempts
+can affect the recovered interval; a backwards interval is clamped to zero.
+
+Run `node --test js/nanocodex/test/durability-timing.test.mjs` after building WASM
+to exercise cold-process recovery through the public Agent API, real WebSockets,
+SQLite persistence and a native marker effect. Set `NANOCODEX_TIMING_EVIDENCE` to
+an ignored `output/` directory to retain commands, events, SQLite state and timing
+summaries. Set `NANOCODEX_TIMING_LEGACY_WASM` to a pre-upgrade WASM binary to also
+exercise recovery of a checkpoint written by that older runtime.
+
 ## Provider portability
 
 The JavaScript memory, SQLite, Cloudflare Durable Object SQLite, and PostgreSQL

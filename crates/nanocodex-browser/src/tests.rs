@@ -4,7 +4,7 @@ use std::{
 };
 
 use eyre::{Result, eyre};
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     ToolContext, Tools,
     contract::{DEFAULT_TOOL_OUTPUT_TOKENS, ToolOutputBody, ToolOutputContent},
     runtime::ToolRuntime,
@@ -848,7 +848,7 @@ async fn code_mode_description_bounds_browser_action_schema() -> Result<()> {
     let specs = runtime.model_specs("test-session");
     let description = specs
         .first()
-        .map(nanocodex_tools::ToolDefinition::description)
+        .map(nanocodex_oai_tools::ToolDefinition::description)
         .ok_or_else(|| eyre!("missing Code Mode tool definition"))?;
     assert!(
         description.len() <= 128 * 1024,

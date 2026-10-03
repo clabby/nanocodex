@@ -61,7 +61,7 @@ func TestHostPreservesReplacementCloseFromBroker(t *testing.T) {
 			// authenticated WebSocket and publisher cancellation loop only.
 			capture := &waymoteCapture{input: discardedHostInput{}, done: make(chan struct{})}
 			err := serveWayland(ctx, hostConfig{Origin: server.URL, CredentialFile: credential,
-				MachineID: "replacement-test", Name: "Replacement test", Width: 640, Height: 360,
+				MachineID: "cf:replacement-test", Name: "Replacement test", Width: 640, Height: 360,
 				Frames: true, quiet: true, capture: capture})
 			if !errors.Is(err, errRemoteHostReplaced) {
 				t.Fatalf("publisher lost terminal broker close: %v", err)

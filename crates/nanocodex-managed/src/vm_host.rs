@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt, time::Duration};
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use nanocodex_tools::attachment::AttachmentTarget;
+use nanocodex_oai_tools::attachment::AttachmentTarget;
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,

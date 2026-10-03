@@ -27,7 +27,7 @@ pub(crate) async fn run_managed2(agent: Option<String>) -> Result<(), ManagedErr
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut root = RootNode::new(&workspace, ReasoningEffort::Low);
     root.set_managed2_preview();
-    root.set_model(Model::Sol);
+    root.set_model(Model::Sol.into());
     let mut app = AppNode::new(Theme::default(), workspace, root);
     let mut terminal = TerminalSession::enter().await.map_err(terminal_error)?;
     let mut input = EventStream::new();

@@ -6,7 +6,7 @@ import { dirname, posix } from 'node:path';
 import { fingerprintInputs as fingerprintWasm } from '../../js/nanocodex-vite/scripts/wasm-output-cache.mjs';
 
 export const workerSpecs = Object.fromEntries([
-  ['egress', 'js/egress', 'nanocodex-egress-service', false],
+  ['egress', 'js/egress', 'nanocodex-egress-service', true],
   ['x', 'js/x-api', '@nanocodex/x-api', false],
   ['media', 'js/media', 'nanocodex-media-service', false],
   ['managed', 'js/managed', 'nanocodex-managed-service', true],
@@ -20,7 +20,7 @@ export const workerSpecs = Object.fromEntries([
 ].map(([name, directory, pkg, needsWasm]) => [name, { directory, package: pkg, needsWasm }]));
 
 const buildTargets = {
-  egress: ['nanocodex-tools'], x: ['nanocodex-tools'], media: ['nanocodex-tools'],
+  egress: ['nanocodex-tools', 'nanocodex'], x: ['nanocodex-tools'], media: ['nanocodex-tools'],
   managed: ['nanocodex-tools', 'nanocodex-connect-protocol', 'nanocodex'], email: [],
   dialog: ['nanocodex-connect-protocol', 'nanocodex-connect-ui', '@nanocodex/connect-dialog'],
   'connect-api': ['nanocodex-tools', 'nanocodex-connect-protocol', '@nanocodex/connect-api'],

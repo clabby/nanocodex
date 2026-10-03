@@ -3,7 +3,7 @@ use nanocodex_observability::{
     LogOutput, ObservabilityError, ObservabilityGuard, ObservabilityOutputArgs,
 };
 
-const DEFAULT_FILTER: &str = "warn,nanocodex2=info,nanocodex_tools::attachment=info";
+const DEFAULT_FILTER: &str = "warn,nanocodex2=info,nanocodex_oai_tools::attachment=info";
 
 #[derive(Args)]
 pub(crate) struct HandObservabilityArgs {

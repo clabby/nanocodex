@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { SELF } from "cloudflare:test";
+import { createExecutionContext, SELF, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { handleEgress, type EgressEnv } from "../src/egress";
 
@@ -83,13 +83,15 @@ describe("ChatGPT subscription failover", () => {
     });
     const request = socketRequest(subject);
     request.headers.set("x-nanocodex-chatgpt-account-id", "account-a");
-    const response = await handleEgress(request, directEnv, undefined, upstream as typeof fetch);
+    const ctx = createExecutionContext();
+    const response = await handleEgress(request, directEnv, ctx, upstream as typeof fetch);
     const socket = response.webSocket!;
     socket.accept();
     const rejected = message(socket);
     socket.send(JSON.stringify({ type: "response.create", input: [] }));
     expect(await rejected).toMatchObject({ type: "error", error: { code: "usage_limit_reached" } });
     socket.close();
+    await waitOnExecutionContext(ctx);
   });
 
   it("does not rotate on an ordinary 429 or a denied request", async () => {
@@ -169,7 +171,8 @@ describe("ChatGPT subscription failover", () => {
       });
       return new Response(null, { status: 101, webSocket: client });
     });
-    const response = await handleEgress(socketRequest(subject), directEnv, undefined, upstream as typeof fetch);
+    const ctx = createExecutionContext();
+    const response = await handleEgress(socketRequest(subject), directEnv, ctx, upstream as typeof fetch);
     const socket = response.webSocket!;
     socket.accept();
     const frames: unknown[] = [];
@@ -181,6 +184,7 @@ describe("ChatGPT subscription failover", () => {
     await ended;
     expect(frames[1]).toMatchObject({ type: "error", error: { code: "usage_limit_reached" } });
     socket.close();
+    await waitOnExecutionContext(ctx);
   });
 });
 

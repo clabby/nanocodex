@@ -32,7 +32,7 @@ use std::{
     os::{
         fd::AsFd,
         unix::{
-            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
             process::CommandExt,
         },
@@ -263,12 +263,12 @@ impl Drop for Runtime {
     }
 }
 
-struct Children(Vec<Child>, bool);
+struct Children(Vec<Child>, bool, Option<File>);
 impl Children {
     fn new() -> Result<Self> {
         let previous = prctl::get_child_subreaper()?;
         prctl::set_child_subreaper(true)?;
-        Ok(Self(Vec::new(), previous))
+        Ok(Self(Vec::new(), previous, None))
     }
     fn spawn(&mut self, command: &mut Command) -> Result<usize> {
         let child = command
@@ -359,6 +359,65 @@ fn auth_record(cookie: &[u8]) -> Vec<u8> {
     record
 }
 
+fn reserve_display() -> Result<(u16, File)> {
+    let directory = PathBuf::from(format!("/tmp/nanocodex-x11-{}", getuid().as_raw()));
+    match fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(&directory)?;
+    if !metadata.is_dir() || metadata.uid() != getuid().as_raw() || metadata.mode() & 0o077 != 0 {
+        return Err(invalid(
+            "X11 display leases require an owned private directory",
+        ));
+    }
+    reserve_display_in(&directory, Path::new("/tmp"), 100..=59999)
+}
+fn reserve_display_in(
+    directory: &Path,
+    temporary: &Path,
+    numbers: impl IntoIterator<Item = u16>,
+) -> Result<(u16, File)> {
+    for number in numbers {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(directory.join(number.to_string()))?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != getuid().as_raw()
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err(invalid("invalid X11 display lease"));
+        }
+        if file.try_lock().is_err() {
+            continue;
+        }
+        // Never delete stale or live X11 paths belonging to another server.
+        let occupied = [
+            temporary.join(format!(".X{number}-lock")),
+            temporary.join(format!(".X11-unix/X{number}")),
+        ]
+        .iter()
+        .try_fold(false, |occupied, path| -> io::Result<bool> {
+            match fs::symlink_metadata(path) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(occupied),
+                Err(error) => Err(error),
+            }
+        })?;
+        if !occupied {
+            return Ok((number, file));
+        }
+    }
+    Err(invalid("no unoccupied X11 display available"))
+}
+
 fn start_x(
     runtime: &mut Runtime,
     children: &mut Children,
@@ -368,11 +427,15 @@ fn start_x(
     File::open("/dev/urandom")?.read_exact(&mut cookie)?;
     runtime.write_private("Xauthority", &auth_record(&cookie))?;
     runtime.auth = true;
+    // -displayfd without the abstract listener can unlink another live Xvfb's
+    // pathname and reuse its display. Use an explicit display: Xvfb then takes
+    // its normal PID lock, while our retained per-user lease serializes helpers.
+    let (number, lease) = reserve_display()?;
+    children.2 = Some(lease);
     let index = children.spawn(
         Command::new("Xvfb")
+            .arg(format!(":{number}"))
             .args([
-                "-displayfd",
-                "1",
                 "-screen",
                 "0",
                 &format!("{WIDTH}x{HEIGHT}x24"),
@@ -381,7 +444,6 @@ fn start_x(
                 "-nolisten",
                 "local",
                 "-noreset",
-                // This owned virtual display has no physical monitor to save.
                 "-s",
                 "0",
                 "+extension",
@@ -389,43 +451,36 @@ fn start_x(
                 "-auth",
             ])
             .arg(runtime.path.join("Xauthority"))
-            .stdout(Stdio::piped()),
+            .stdout(Stdio::null()),
     )?;
-    let stdout = children.0[index]
-        .stdout
-        .as_mut()
-        .ok_or_else(|| invalid("Xvfb display pipe unavailable"))?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut number = Vec::new();
-    loop {
+    let socket = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
+    let stream = loop {
         if stop.load(Ordering::Acquire) {
             return Err(invalid("desktop cancelled"));
+        }
+        if children.0[index].try_wait()?.is_some() {
+            return Err(invalid("Xvfb exited before its display became ready"));
         }
         if Instant::now() >= deadline {
             return Err(timed_out().into());
         }
-        let mut descriptors = [PollFd::new(stdout.as_fd(), PollFlags::POLLIN)];
-        if poll(&mut descriptors, 100u16)? == 0 {
-            continue;
+        if owned_socket_available(&socket)? {
+            match UnixStream::connect(&socket) {
+                Ok(stream) => break stream,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
-        let mut byte = [0];
-        if stdout.read(&mut byte)? == 0 {
-            return Err(invalid("Xvfb exited before publishing a display"));
-        }
-        if byte[0] == b'\n' {
-            break;
-        }
-        if !byte[0].is_ascii_digit() || number.len() >= 5 {
-            return Err(invalid("invalid Xvfb display number"));
-        }
-        number.push(byte[0]);
-    }
-    let number: u16 = std::str::from_utf8(&number)?.parse()?;
-    // Xvfb's filesystem socket is owner-only; the abstract transport and TCP
-    // are disabled. The random cookie additionally isolates same-host displays.
-    let socket = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
+        thread::sleep(Duration::from_millis(20));
+    };
+    // TCP and abstract sockets stay disabled; preserve owner-only pathname
+    // access and independent per-display MIT-MAGIC-COOKIE authorization.
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-    let stream = UnixStream::connect(socket)?;
     let stream = TimedStream::new(stream)?;
     let connection = RustConnection::connect_to_stream_with_auth_info(
         stream,
@@ -1150,16 +1205,43 @@ fn keep_virtual_display_awake(connection: &RustConnection<TimedStream>) -> Resul
     Ok(())
 }
 
-/// Continuous X11 capture runs separately from the serialized input owner.
-/// The encoder has no account credentials, no audio input, and no frame queue.
-pub fn video_command(runtime: &Path) -> Result<Command> {
+/// A live Xvfb may retain existing connections after its pathname socket is
+/// unlinked. New encoders cannot connect in that state. The supervisor repairs
+/// only its owned desktop; it must not follow a replacement symlink or touch
+/// another user's socket, nor enable Xvfb's disabled abstract listener.
+pub fn display_socket_available(runtime: &Path) -> Result<bool> {
+    let display = desktop_display(runtime)?;
+    owned_socket_available(Path::new(&format!("/tmp/.X11-unix/X{}", &display[1..])))
+}
+fn desktop_display(runtime: &Path) -> Result<String> {
     let display = fs::read_to_string(runtime.join("display"))?;
     if !display.starts_with(':')
+        || display.len() < 2
         || display.len() > 6
         || !display[1..].bytes().all(|b| b.is_ascii_digit())
     {
         return Err(invalid("invalid desktop display"));
     }
+    Ok(display)
+}
+fn owned_socket_available(socket: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(socket) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_socket() || metadata.uid() != getuid().as_raw() {
+        return Err(invalid(
+            "desktop display socket is not an owned Unix socket",
+        ));
+    }
+    Ok(true)
+}
+
+/// Continuous X11 capture runs separately from the serialized input owner.
+/// The encoder has no account credentials, no audio input, and no frame queue.
+pub fn video_command(runtime: &Path) -> Result<Command> {
+    let display = desktop_display(runtime)?;
     // Read the live root geometry, including retained desktops created by older
     // versions. Never claim quality by upscaling a smaller framebuffer.
     let authority = fs::read(runtime.join("Xauthority"))?;
@@ -1264,6 +1346,74 @@ mod tests {
     use super::*;
     use x11rb::protocol::screensaver::{ConnectionExt as _, State};
     #[test]
+    fn display_leases_skip_locked_or_preexisting_servers() {
+        let directory = tempfile::tempdir().unwrap();
+        let locks = directory.path().join("leases");
+        let temporary = directory.path().join("tmp");
+        fs::create_dir_all(&locks).unwrap();
+        fs::create_dir_all(temporary.join(".X11-unix")).unwrap();
+        fs::write(temporary.join(".X100-lock"), b"existing-server").unwrap();
+        let _server = UnixListener::bind(temporary.join(".X11-unix/X101")).unwrap();
+        let (one, lease) = reserve_display_in(&locks, &temporary, 100..=104).unwrap();
+        let (two, other) = reserve_display_in(&locks, &temporary, 100..=104).unwrap();
+        assert_eq!((one, two), (102, 103));
+        assert_eq!(
+            fs::read(temporary.join(".X100-lock")).unwrap(),
+            b"existing-server"
+        );
+        assert!(UnixStream::connect(temporary.join(".X11-unix/X101")).is_ok());
+        drop(lease);
+        assert_eq!(
+            reserve_display_in(&locks, &temporary, 100..=104).unwrap().0,
+            102
+        );
+        drop(other);
+    }
+    #[test]
+    fn display_leases_reject_symlink_lock_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        fs::write(&target, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&target, directory.path().join("100")).unwrap();
+        assert!(reserve_display_in(directory.path(), directory.path(), 100..=100).is_err());
+        assert_eq!(fs::read(target).unwrap(), b"untouched");
+    }
+
+    #[test]
+    fn display_socket_probe_detects_unlinked_live_listener() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("X0");
+        let _listener = UnixListener::bind(&path).unwrap();
+        assert!(owned_socket_available(&path).unwrap());
+        fs::remove_file(&path).unwrap();
+        assert!(!owned_socket_available(&path).unwrap());
+    }
+    #[test]
+    fn display_socket_probe_rejects_replacement_files_and_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("X0");
+        fs::write(&path, b"replacement").unwrap();
+        assert!(owned_socket_available(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        fs::remove_file(&path).unwrap();
+        let target = directory.path().join("owned-socket");
+        let _listener = UnixListener::bind(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(owned_socket_available(&path).is_err());
+        assert!(UnixStream::connect(&target).is_ok());
+    }
+    #[test]
+    fn desktop_display_rejects_nonlocal_or_empty_display() {
+        let directory = tempfile::tempdir().unwrap();
+        for display in [":", ":0.0", "host:0", ":000000", ":0\n"] {
+            fs::write(directory.path().join("display"), display).unwrap();
+            assert!(desktop_display(directory.path()).is_err());
+        }
+        fs::write(directory.path().join("display"), ":99").unwrap();
+        assert_eq!(desktop_display(directory.path()).unwrap(), ":99");
+    }
+
+    #[test]
     fn auth_cookie_has_correct_xauthority_wire_format() {
         let record = auth_record(&[7; 32]);
         assert_eq!(&record[..8], &[255, 255, 0, 0, 0, 0, 0, 18]);
@@ -1311,6 +1461,47 @@ mod tests {
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(Runtime::claim(directory.path()).is_err());
     }
+    #[test]
+    #[ignore = "requires isolated Xvfb on Linux"]
+    fn live_concurrent_desktops_preserve_socket_endpoints() {
+        let one = tempfile::tempdir().unwrap();
+        let two = tempfile::tempdir().unwrap();
+        fs::set_permissions(one.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(two.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let mut first = Runtime::claim(one.path()).unwrap();
+        let mut first_children = Children::new().unwrap();
+        let (_connection, first_display) =
+            start_x(&mut first, &mut first_children, &AtomicBool::new(false)).unwrap();
+        first
+            .write_private("display", first_display.as_bytes())
+            .unwrap();
+        let path = format!("/tmp/.X11-unix/X{}", &first_display[1..]);
+        let original_inode = fs::metadata(&path).unwrap().ino();
+        let mut second = Runtime::claim(two.path()).unwrap();
+        let mut second_children = Children::new().unwrap();
+        let (_, second_display) =
+            start_x(&mut second, &mut second_children, &AtomicBool::new(false)).unwrap();
+        second
+            .write_private("display", second_display.as_bytes())
+            .unwrap();
+        assert_ne!(
+            first_display, second_display,
+            "a second desktop reused a live display"
+        );
+        assert!(display_socket_available(first.path.as_path()).unwrap());
+        assert!(display_socket_available(second.path.as_path()).unwrap());
+        drop(second_children);
+        drop(second);
+        assert_eq!(
+            fs::metadata(&path).unwrap().ino(),
+            original_inode,
+            "another helper replaced the first socket"
+        );
+        assert!(display_socket_available(first.path.as_path()).unwrap());
+        video_command(first.path.as_path()).unwrap();
+        drop(first_children);
+    }
+
     #[test]
     #[ignore = "requires an isolated Xvfb on Linux"]
     fn live_virtual_display_stays_awake_after_idle() {

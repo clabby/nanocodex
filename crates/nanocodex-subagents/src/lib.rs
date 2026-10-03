@@ -39,3 +39,6 @@ pub const DEFAULT_MAX_SUBAGENTS: usize = usize::MAX;
 /// returns to this bound. Their topology, status, and last output remain
 /// inspectable.
 pub const DEFAULT_MAX_RESIDENT_SUBAGENTS: usize = 16;
+
+#[cfg(feature = "claude")]
+pub use tools::install_claude_tools;

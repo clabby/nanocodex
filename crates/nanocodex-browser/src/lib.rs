@@ -20,7 +20,7 @@ use std::{
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use nanocodex_oai_api::ImageDetail;
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult,
     contract::ToolOutputContent,
     runtime::{DynamicToolProvider, schema_for},

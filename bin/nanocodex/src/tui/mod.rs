@@ -38,7 +38,8 @@ use crossterm::event::{
 use eyre::{Result, WrapErr};
 use futures_util::StreamExt;
 use nanocodex::{
-    AgentEvents, Model, Nanocodex, NanocodexError, OpenAi, Thinking, TurnControl, TurnResult,
+    AgentEvents, HarnessModel, Nanocodex, NanocodexError, OpenAi, Thinking, TurnControl,
+    TurnResult,
     agent::{
         events::{AgentEvent, TimedAgentEvent},
         rollout::DurableSession,
@@ -204,7 +205,7 @@ enum WorkerCommand {
         enabled: bool,
     },
     SetModel {
-        model: Model,
+        model: HarnessModel,
     },
     SetThinking {
         thinking: Thinking,
@@ -336,7 +337,7 @@ enum WorkerEvent {
         error: String,
     },
     ModelChanged {
-        model: Model,
+        model: HarnessModel,
     },
     ModelChangeFailed {
         error: String,
@@ -736,7 +737,7 @@ enum Submission {
     Fast(Option<bool>),
     AutoRoute,
     ModelPicker,
-    Model(Model),
+    Model(HarnessModel),
     ReasoningPicker,
     Thinking(Thinking),
     Voice(VoiceControl),
@@ -774,7 +775,9 @@ pub(crate) async fn run_observed(
     resume: Option<DurableSession>,
     observability: Option<crate::observability::ObservabilityArgs>,
 ) -> Result<()> {
-    let resumed_model = resume.as_ref().map(DurableSession::model);
+    let resumed_model = resume
+        .as_ref()
+        .map(|session| HarnessModel::from(session.model()));
     let first_frame = crate::startup_timing::Stage::new("tui_first_frame");
     let initial_thinking = config.thinking();
     let initial_fast_mode = config.fast_mode();
@@ -783,7 +786,7 @@ pub(crate) async fn run_observed(
         .map(|session| PathBuf::from(session.workspace()))
         .unwrap_or_else(|| config.cwd().to_path_buf());
     let mut app = App::new(cwd)
-        .with_model(resumed_model.unwrap_or_default())
+        .with_model(resumed_model.unwrap_or(config.harness_model()?))
         .with_thinking(initial_thinking)
         .with_fast_mode(initial_fast_mode);
     app.voice.mute_key = config.voice_mute_key.clone();
@@ -1980,8 +1983,8 @@ impl AgentWorker {
         drop(self.updates.send(update));
     }
 
-    async fn set_model(&mut self, model: Model) {
-        let update = match self.main.agent.set_model(model).await {
+    async fn set_model(&mut self, model: HarnessModel) {
+        let update = match self.main.agent.set_harness_model(model).await {
             Ok(()) => WorkerEvent::ModelChanged { model },
             Err(error) => WorkerEvent::ModelChangeFailed {
                 error: error.to_string(),
@@ -3812,11 +3815,13 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
                 return Submission::ModelPicker;
             };
             if settings.next().is_some() {
-                return Submission::InvalidCommand("Usage: /model [astra|sol|luna]".to_owned());
+                return Submission::InvalidCommand(
+                    "Usage: /model [model ID within the current harness]".to_owned(),
+                );
             }
             return match argument.parse() {
                 Ok(model) => Submission::Model(model),
-                Err(error) => Submission::InvalidCommand(error),
+                Err(error) => Submission::InvalidCommand(error.to_owned()),
             };
         }
         Some("/effort" | "/reasoning" | "/thinking") => {
@@ -3948,7 +3953,7 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use futures_util::{SinkExt, StreamExt};
     use nanocodex::{
-        Model, Nanocodex, OpenAi, Thinking,
+        HarnessModel, Model, Nanocodex, OpenAi, Thinking,
         agent::events::AgentEventKind,
         oai::{__private::EventSink, PromptInput},
     };
@@ -4224,7 +4229,7 @@ mod tests {
         assert_eq!(classify_submission("/model"), Submission::ModelPicker);
         assert_eq!(
             classify_submission("/model astra"),
-            Submission::Model(Model::Astra)
+            Submission::Model(Model::Astra.into())
         );
         for alias in ["/effort", "/reasoning", "/thinking"] {
             assert_eq!(classify_submission(alias), Submission::ReasoningPicker);
@@ -4565,7 +4570,7 @@ mod tests {
         assert!(matches!(
             worker.try_recv(),
             Ok(WorkerCommand::SetModel {
-                model: Model::Astra
+                model: HarnessModel::Codex(Model::Astra)
             })
         ));
     }

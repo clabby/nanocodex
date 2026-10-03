@@ -154,7 +154,7 @@ describe("cwd-root namespace execution", () => {
     await expect(runtime.tools[CUA_JS_NAME]!.handler({ workdir: "/missing", code: "1" }, context())).rejects.toThrow();
   });
 
-  it("runs two Hands concurrently through QuickJS Code Mode and orders JS/reset per Hand", async () => {
+  it("dispatches JS/reset concurrently through QuickJS Code Mode on the same Hand", async () => {
     const events: string[] = [];
     let active = 0;
     let peak = 0;
@@ -185,12 +185,12 @@ describe("cwd-root namespace execution", () => {
       `, "parallel-session", "parallel-cell"));
       expect(result.success, result.output).toBe(true);
       expect(peak).toBe(2);
-      expect(events.indexOf("one:reset")).toBeGreaterThan(events.indexOf("one:end"));
+      expect(events.indexOf("one:reset")).toBeLessThan(events.indexOf("one:end"));
       expect(result.nested_calls.map((call: any) => call.input.workdir)).toEqual(["/one", "/two", "/alias-one"]);
     } finally { clearTimeout(timer); code.reset(); }
   });
 
-  it("does not dispatch cancelled queued calls or poison later calls on that Hand", async () => {
+  it("rejects cancellation before dispatch and lets later calls finish while the Hand is active", async () => {
     let release!: () => void;
     const blocker = new Promise<void>(resolve => { release = resolve; });
     const execute = vi.fn().mockImplementationOnce(() => blocker).mockResolvedValue({});
@@ -200,16 +200,16 @@ describe("cwd-root namespace execution", () => {
     );
     const first = runtime.tools[CUA_JS_NAME]!.handler({ workdir: "/one", code: "first" }, context());
     const abort = new AbortController();
-    const queued = runtime.tools[CUA_RESET_NAME]!.handler({ workdir: "/one" }, { ...context(), signal: abort.signal });
-    const rejected = expect(queued).rejects.toThrow();
     abort.abort();
+    const cancelled = runtime.tools[CUA_RESET_NAME]!.handler({ workdir: "/one" }, { ...context(), signal: abort.signal });
+    const rejected = expect(cancelled).rejects.toThrow();
     // The cancelled caller must settle before the unrelated active call ends.
     await rejected;
     const last = runtime.tools[CUA_JS_NAME]!.handler({ workdir: "/one", code: "last" }, context());
-    await Promise.resolve();
-    expect(execute).toHaveBeenCalledTimes(1);
+    await last;
+    expect(execute).toHaveBeenCalledTimes(2);
     release();
-    await first; await last;
+    await first;
     expect(execute).toHaveBeenCalledTimes(2);
     expect(execute).toHaveBeenLastCalledWith({ code: "last" }, expect.anything());
   });

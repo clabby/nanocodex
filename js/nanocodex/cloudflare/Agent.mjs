@@ -410,6 +410,13 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
     && typeof internalRuntime.onSocketTiming !== "function") {
     throw new TypeError("Cloudflare Agent socket timing hook must be a function");
   }
+  if (internalRuntime?.traceTool !== undefined && typeof internalRuntime.traceTool !== "function") {
+    throw new TypeError("Cloudflare Agent tool tracing hook must be a function");
+  }
+  if (internalRuntime?.onSocketEvent !== undefined
+    && typeof internalRuntime.onSocketEvent !== "function") {
+    throw new TypeError("Cloudflare Agent socket event hook must be a function");
+  }
   if (internalRuntime?.onResponseCreateSent !== undefined
     && typeof internalRuntime.onResponseCreateSent !== "function") {
     throw new TypeError("Cloudflare Agent response.create sent hook must be a function");
@@ -486,6 +493,71 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
     }
   }
   const { sessionId, stateId } = durableIdentity(context.storage, durabilityId);
+  if (internalConfiguration?.model?.startsWith("claude-")) {
+    if (forkResume !== undefined || internalRuntime?.workersAi || internalRuntime?.gateway) {
+      throw new Error("Claude requires its native checkpoint and subscription transport");
+    }
+    if (typeof internalRuntime?.claude?.create !== "function") {
+      throw new Error("Claude subscription transport is unavailable; refusing Responses fallback");
+    }
+    // Claude owns canonical Messages state; never open or reinterpret it as Codex.
+    // Its durable session identity is the state identity, not a separate transport ID.
+    context.storage.sql.exec("UPDATE nanocodex_cloudflare_agent SET session_id = ? WHERE singleton = 1", stateId);
+    const reservation = prepareCloudflareAgentSession(stateId, subject);
+    let claude;
+    try {
+      const codexEndpoint = internalRuntime.codex === undefined ? undefined
+        : cloudflareEgress({ binding: scopeCloudflareEgress(egress, subject) });
+      const harnesses = codexEndpoint === undefined ? internalRuntime.harnesses : {
+        ...internalRuntime.harnesses,
+        codex: { ...internalRuntime.codex, transport: Transport.hostManaged({
+          ...codexEndpoint, stateless: true, websocketPreconnect: false,
+          async createResponse(url, id, request) {
+            const profile = await internalRuntime.inferenceForSession(request.threadId ?? id);
+            const body = JSON.parse(request.body);
+            if (profile?.native !== true || !["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(body.model)) {
+              throw new Error("Alternate Codex inference requires an authorized native child route");
+            }
+            return codexEndpoint.createResponse(url, id, request);
+          },
+        }) },
+      };
+      claude = await internalRuntime.claude.create({
+        [CLOUDFLARE_SESSION_RESERVATION]: reservation,
+        [Symbol.for("nanocodex.browser.internalRuntime")]: {
+          subagentSessions: cloudflareSubagentSessions(reservation, internalRuntime?.subagentLifecycle),
+          subagentRouting: internalRuntime?.subagentRouting,
+          toolProviders: internalRuntime?.toolProviders,
+        },
+        harnesses,
+        model: internalConfiguration.model, thinking: internalConfiguration.thinking,
+        instructions: agentOptions.instructions ?? agentOptions.additionalInstructions,
+        tools: agentOptions.tools, module, durability, durabilityId: stateId,
+        terminalReceiptRetention: agentOptions.terminalReceiptRetention,
+      });
+      if (eventSocket) {
+        const watcher = claude.events.watch();
+        const off = watcher.onEvent(event => eventSocket.publish(event));
+        observeAgentRelease(claude, () => { off(); watcher.off(); });
+      }
+      const exposed = claude.extend(owned => ({
+        events: { connect: request => eventSocket?.connect(request) ?? Response.json({ error: "event_persistence_caller_owned" }, { status: 409 }) },
+        turn: { ...owned.turn, route: () => { throw new Error("Claude voice steering is not supported"); } },
+      }));
+      const active = {};
+      lifecycle.active = active;
+      observeAgentRelease(exposed, () => {
+        if (lifecycle.active === active) lifecycle.active = undefined;
+        releaseAgentSession(reservation);
+      });
+      commitCloudflareAgentSession(reservation);
+      return exposed;
+    } catch (error) {
+      await claude?.session.shutdown().catch(() => {});
+      releaseAgentSession(reservation);
+      throw error;
+    }
+  }
   if (resumeDigest !== undefined) {
     context.storage.sql.exec(
       "INSERT OR IGNORE INTO nanocodex_cloudflare_fork_resume(singleton,state_id,digest) VALUES (1,?,?)",
@@ -612,6 +684,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
   try {
     agent = await hostAgent.create({
       ...agentOptions,
+      harnesses: internalRuntime?.harnesses,
       ...(internalConfiguration === undefined ? {} : {
         model: internalConfiguration.model,
         thinking: internalConfiguration.thinking,
@@ -623,6 +696,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
       toolMode: internalRuntime?.toolMode ?? "direct",
       codeEvaluator: internalRuntime?.codeEvaluator,
       [Symbol.for("nanocodex.browser.internalRuntime")]: {
+        traceTool: internalRuntime?.traceTool,
         codeEffectJournal: internalRuntime?.codeEffectJournal,
         toolProviders: internalRuntime?.toolProviders,
         subagentsEnabled: internalRuntime?.subagentsEnabled,
@@ -630,6 +704,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
         subagentSessions,
         subagentRouting: internalRuntime?.subagentRouting,
         onSocketTiming: internalRuntime?.onSocketTiming,
+        onSocketEvent: internalRuntime?.onSocketEvent,
         promptCacheKey: internalRuntime?.promptCacheKey,
         [CLOUDFLARE_SESSION_RESERVATION]: sessionReservation,
       },
@@ -826,13 +901,14 @@ function validateInternalConfiguration(configuration) {
       "reasoning_mode",
       "fast_mode",
     ].includes(key))
-    || !["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra", "@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"]
+    || !["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra", "@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro", "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-5-5", "claude-opus-5-5"]
       .includes(configuration.model)
     || !["none", "low", "medium", "high", "xhigh", "max"].includes(configuration.thinking)
     || !["standard", "pro"].includes(configuration.reasoning_mode)
     || typeof configuration.fast_mode !== "boolean"
     || (["@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"].includes(configuration.model)
       && (!(configuration.model === "kimi-k3" ? ["low", "high"] : ["low", "medium", "high"]).includes(configuration.thinking) || configuration.reasoning_mode !== "standard"))
+    || (configuration.model.startsWith("claude-") && (!["low", "medium", "high"].includes(configuration.thinking) || configuration.reasoning_mode !== "standard" || configuration.fast_mode))
     || (["gpt-6-astra", "gpt-6.1-sol"].includes(configuration.model) && configuration.thinking === "none")) {
     throw new TypeError("Cloudflare Agent internal configuration is invalid");
   }

@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use nanocodex_agent::AgentEvents;
-use nanocodex_tools::{
+use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, contract::async_trait,
 };
 use tokio::sync::{Barrier, Semaphore};
@@ -40,7 +40,7 @@ impl Tool for OrderedProbe {
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
-        true
+        !self.blocks
     }
 
     async fn execute(&self, _input: ToolInput, _context: ToolContext<'_>) -> ToolResult {
@@ -146,6 +146,7 @@ async fn parallel_results_emit_on_completion_but_enter_history_in_provider_order
         assert_eq!(input[0]["output"], "first-ok");
         assert_eq!(input[1]["call_id"], "call-second");
         assert_eq!(input[1]["output"], "second-ok");
+        eprintln!("Provider-order outputs after overlapping execution: {continuation}");
         send_final(&mut socket, "resp-final").await
     });
 
@@ -204,6 +205,8 @@ async fn parallel_results_emit_on_completion_but_enter_history_in_provider_order
         "batch wall {wall} must not sum overlapping call durations"
     );
 
+    eprintln!("Concurrent completion events: second={second}; first={first}; terminal={terminal}");
+
     timeout(std::time::Duration::from_secs(5), server)
         .await
         .map_err(|_| eyre!("mock Responses server did not finish"))???;
@@ -249,6 +252,9 @@ async fn cancellation_keeps_completed_siblings_and_aborts_only_pending_calls() -
         );
         assert_eq!(outputs[1]["call_id"], "call-second");
         assert_eq!(outputs[1]["output"], "second-ok");
+        eprintln!(
+            "Recovery after cancellation retains call identity and completed sibling: {outputs:?}"
+        );
         send_final(&mut replacement, "resp-final").await
     });
 
@@ -294,6 +300,8 @@ async fn cancellation_keeps_completed_siblings_and_aborts_only_pending_calls() -
         "{aborted}"
     );
 
+    eprintln!("Cancellation events: completed={completed}; aborted={aborted}");
+
     assert_eq!(
         agent
             .prompt("Continue after cancellation.")
@@ -319,24 +327,25 @@ async fn cancellation_keeps_completed_siblings_and_aborts_only_pending_calls() -
     Ok(())
 }
 
-struct ExclusionState {
-    active_safe: AtomicUsize,
-    unsafe_active: AtomicBool,
-    overlap: AtomicBool,
+struct ProviderProbeState {
+    rendezvous: Barrier,
+    busy: AtomicBool,
+    active: AtomicUsize,
+    maximum: AtomicUsize,
 }
 
-struct ExclusionProbe {
+struct ProviderProbe {
     name: &'static str,
     parallel_safe: bool,
-    state: Arc<ExclusionState>,
+    state: Arc<ProviderProbeState>,
 }
 
 #[async_trait]
-impl Tool for ExclusionProbe {
+impl Tool for ProviderProbe {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             self.name,
-            "Checks the top-level parallel safety gate.",
+            "A provider that reports resource conflicts during execution.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -350,34 +359,26 @@ impl Tool for ExclusionProbe {
     }
 
     async fn execute(&self, _input: ToolInput, _context: ToolContext<'_>) -> ToolResult {
-        if self.parallel_safe {
-            if self.state.unsafe_active.load(Ordering::SeqCst) {
-                self.state.overlap.store(true, Ordering::SeqCst);
-            }
-            self.state.active_safe.fetch_add(1, Ordering::SeqCst);
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            if self.state.unsafe_active.load(Ordering::SeqCst) {
-                self.state.overlap.store(true, Ordering::SeqCst);
-            }
-            self.state.active_safe.fetch_sub(1, Ordering::SeqCst);
+        let conflict = !self.parallel_safe && self.state.busy.swap(true, Ordering::SeqCst);
+        let active = self.state.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.state.maximum.fetch_max(active, Ordering::SeqCst);
+        self.state.rendezvous.wait().await;
+        let output = if conflict {
+            ToolOutput::error("provider resource busy: concurrent execution rejected")
         } else {
-            if self.state.unsafe_active.swap(true, Ordering::SeqCst)
-                || self.state.active_safe.load(Ordering::SeqCst) != 0
-            {
-                self.state.overlap.store(true, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            if !self.parallel_safe {
+                self.state.busy.store(false, Ordering::SeqCst);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if self.state.active_safe.load(Ordering::SeqCst) != 0 {
-                self.state.overlap.store(true, Ordering::SeqCst);
-            }
-            self.state.unsafe_active.store(false, Ordering::SeqCst);
-        }
-        Ok(ToolOutput::text(self.name))
+            ToolOutput::text(self.name)
+        };
+        self.state.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(output)
     }
 }
 
 #[tokio::test]
-async fn unsafe_tool_calls_exclude_parallel_safe_siblings() -> Result<()> {
+async fn tool_metadata_does_not_gate_dispatch_and_provider_errors_reach_the_model() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {
@@ -391,9 +392,9 @@ async fn unsafe_tool_calls_exclude_parallel_safe_siblings() -> Result<()> {
             completed_response(
                 "resp-tools",
                 &[
-                    namespaced_call("safe-first", "safe_first"),
-                    namespaced_call("unsafe", "unsafe"),
-                    namespaced_call("safe-second", "safe_second"),
+                    namespaced_call("provider-first", "first"),
+                    namespaced_call("provider-second", "second"),
+                    namespaced_call("parallel", "parallel"),
                 ],
             ),
         )
@@ -407,35 +408,58 @@ async fn unsafe_tool_calls_exclude_parallel_safe_siblings() -> Result<()> {
                 .iter()
                 .map(|item| item["call_id"].as_str().unwrap_or_default())
                 .collect::<Vec<_>>(),
-            ["safe-first", "unsafe", "safe-second"]
+            ["provider-first", "provider-second", "parallel"]
         );
+        assert_eq!(input[2]["output"], "provider__parallel");
+        let provider_outputs = input[..2]
+            .iter()
+            .map(|item| item["output"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            provider_outputs
+                .iter()
+                .filter(|output| output.contains("provider resource busy"))
+                .count(),
+            1,
+            "{continuation}"
+        );
+        assert_eq!(
+            provider_outputs
+                .iter()
+                .filter(|output| output.starts_with("provider__"))
+                .count(),
+            1,
+            "{continuation}"
+        );
+        eprintln!("Provider-order continuation with runtime conflict: {continuation}");
         send_final(&mut socket, "resp-final").await
     });
 
-    let state = Arc::new(ExclusionState {
-        active_safe: AtomicUsize::new(0),
-        unsafe_active: AtomicBool::new(false),
-        overlap: AtomicBool::new(false),
+    let state = Arc::new(ProviderProbeState {
+        rendezvous: Barrier::new(3),
+        busy: AtomicBool::new(false),
+        active: AtomicUsize::new(0),
+        maximum: AtomicUsize::new(0),
     });
     let tools = Tools::builder()
         .without_defaults()
-        .tool(ExclusionProbe {
-            name: "gate__safe_first",
-            parallel_safe: true,
-            state: Arc::clone(&state),
-        })
-        .tool(ExclusionProbe {
-            name: "gate__unsafe",
+        .tool(ProviderProbe {
+            name: "provider__first",
             parallel_safe: false,
             state: Arc::clone(&state),
         })
-        .tool(ExclusionProbe {
-            name: "gate__safe_second",
+        .tool(ProviderProbe {
+            name: "provider__second",
+            parallel_safe: false,
+            state: Arc::clone(&state),
+        })
+        .tool(ProviderProbe {
+            name: "provider__parallel",
             parallel_safe: true,
             state: Arc::clone(&state),
         })
         .build()?;
-    let workspace = temporary_workspace("parallel-exclusion")?;
+    let workspace = temporary_workspace("parallel-provider-conflict")?;
     let openai = OpenAi::builder("test-key")
         .websocket_url(&endpoint)
         .build()?;
@@ -445,26 +469,58 @@ async fn unsafe_tool_calls_exclude_parallel_safe_siblings() -> Result<()> {
         .session_id(test_session_id())
         .tools(tools)
         .build()?;
+    let turn = agent
+        .prompt("Run both provider calls and their sibling.")
+        .await?;
     assert_eq!(
-        agent
-            .prompt("Run the exclusion probes.")
-            .await?
-            .result()
-            .await?
+        timeout(std::time::Duration::from_secs(5), turn.result())
+            .await
+            .map_err(|_| eyre!("tool metadata prevented concurrent dispatch"))??
             .final_message(),
         "done"
     );
-    assert!(!state.overlap.load(Ordering::SeqCst));
+    assert_eq!(state.maximum.load(Ordering::SeqCst), 3);
+    let mut results = Vec::new();
+    for _ in 0..3 {
+        results.push(next_tool_result(&mut events).await?);
+    }
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result["status"] == "failed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result["status"] == "completed")
+            .count(),
+        2
+    );
+    let failed = results
+        .iter()
+        .find(|result| result["status"] == "failed")
+        .unwrap();
+    assert!(failed["call_id"] == "provider-first" || failed["call_id"] == "provider-second");
+    assert!(
+        failed["result"]
+            .as_str()
+            .is_some_and(|output| output.contains("provider resource busy"))
+    );
     let terminal = next_run_completed(&mut events).await?;
     let work = terminal["tool_work_duration_ns"]
         .as_u64()
-        .ok_or_else(|| eyre!("serial tool work duration was missing"))?;
+        .ok_or_else(|| eyre!("parallel tool work duration was missing"))?;
     let wall = terminal["tool_wall_duration_ns"]
         .as_u64()
-        .ok_or_else(|| eyre!("serial tool wall duration was missing"))?;
+        .ok_or_else(|| eyre!("parallel tool wall duration was missing"))?;
     assert!(
-        work <= wall,
-        "serial handler work {work} must fit inside batch wall {wall}"
+        work > wall,
+        "overlapping handler work {work} should exceed batch wall {wall}"
+    );
+    eprintln!(
+        "Concurrent provider results (maximum active = 3): {results:?}; terminal: {terminal}"
     );
 
     timeout(std::time::Duration::from_secs(5), server)
@@ -480,7 +536,7 @@ fn namespaced_call(call_id: &str, name: &str) -> Value {
     json!({
         "type": "function_call",
         "call_id": call_id,
-        "namespace": "gate__",
+        "namespace": "provider__",
         "name": name,
         "arguments": "{}"
     })

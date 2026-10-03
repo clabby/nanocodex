@@ -514,7 +514,7 @@ fn raw(json: String) -> AgentResult<Box<RawValue>> {
     RawValue::from_string(json).map_err(NanocodexError::ExecutionPayload)
 }
 
-fn agent_error(error: Error) -> NanocodexError {
+pub(crate) fn agent_error(error: Error) -> NanocodexError {
     if matches!(error, Error::SteerQueueFull) {
         return NanocodexError::SteerQueueFull;
     }

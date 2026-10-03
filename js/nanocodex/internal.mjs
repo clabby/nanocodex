@@ -110,6 +110,14 @@ export async function routePrompt(agent, options) {
   return raw === undefined ? undefined : createTurn(raw, agent);
 }
 
+/** Internal host lifecycle identity; accepted() retains its public durable-only contract. */
+export function getTurnHostId(turn) {
+  const state = turnState(turn);
+  return typeof state.raw.hostTurnId === "function"
+    ? Promise.resolve(state.raw.hostTurnId())
+    : awaitTurnAcceptance(turn);
+}
+
 export function getTurnResult(turn) {
   const state = turnState(turn);
   if (!state.result) {
@@ -352,6 +360,7 @@ export function toWasmConfig(options = {}) {
   copy(config, "durability_host_id", options.durabilityHostId);
   copy(config, "terminal_receipt_retention", options.terminalReceiptRetention);
   copy(config, "subagents", options.subagents);
+  copy(config, "claude_harness", options.claudeHarness);
   copy(config, "host_definition_id", options.hostDefinitionId);
   copy(config, "before_compaction", options.beforeCompaction);
   return config;
@@ -464,6 +473,12 @@ export function releaseDefinitionHost(id) {
 }
 
 const hostBridge = Object.freeze({
+  claudeAuth(hostDefinitionId) {
+    return requiredDefinitionHost(hostDefinitionId).claudeAuthHeaders();
+  },
+  executeClaudeTool(hostDefinitionId, name, input, sessionId, callId, model, turnId) {
+    return requiredDefinitionHost(hostDefinitionId).executeClaudeTool(name, input, sessionId, callId, model, turnId);
+  },
   httpOpen(endpoint, apiKey, accountId, fedramp, sessionId, threadId, turnState, body) {
     const host = requiredSessionHost(threadId);
     if (typeof host.httpOpen !== "function") {

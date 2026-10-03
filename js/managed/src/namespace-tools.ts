@@ -147,7 +147,10 @@ export function createNamespaceExecutionRuntime(
   resolveScreenTool: ScreenToolResolver = () => undefined,
   authorizationKey: (context: ToolContext) => string = () => "account",
   processStorage?: NamespaceProcessStorage,
+  threadId?: string,
 ): NamespaceExecutionRuntime {
+  const correlation = (context: ToolContext) => ({ thread_id: threadId, session_id: context.sessionId,
+    turn_id: context.turnId, parent_call_id: context.parentCallId });
   const brain = Object.freeze({
     mountId: "mount:brain",
     root: "/brain",
@@ -156,7 +159,6 @@ export function createNamespaceExecutionRuntime(
   }) satisfies MountedHand;
   const cells = new Map<string, AuthorizedCellBinding>();
   const sessions = new Map<number, ProcessBinding>();
-  const computerQueues = new Map<string, Promise<unknown>>();
 
   const cell = (context: ToolContext, filter?: NamespaceCaptureFilter): AuthorizedCellBinding => {
     // Direct tools have an empty parentCallId. Pin those to their own call,
@@ -208,14 +210,14 @@ export function createNamespaceExecutionRuntime(
     try {
       binding = cell(context);
       route = routeNamespaceCwd(binding.scope, canonicalCwd(binding, workdir), "namespace.discover");
-      observeHandCall("namespace.route", name, routeStarted, "ok", context.callId);
+      observeHandCall("namespace.route", name, routeStarted, "ok", context.callId, correlation(context));
     } catch (error) {
-      observeHandCall("namespace.route", name, routeStarted, "unavailable", context.callId);
+      observeHandCall("namespace.route", name, routeStarted, "unavailable", context.callId, correlation(context));
       throw error;
     }
     const hand = binding.hands.get(route.mount.mountId);
     if (!hand?.cua || !hand.cuaReset) {
-      observeHandCall("namespace.invoke", name, routeStarted, "unavailable", context.callId);
+      observeHandCall("namespace.invoke", name, routeStarted, "unavailable", context.callId, correlation(context));
       throw new Error(`namespace mount ${route.mount.root} has no CUA runtime or controllable native screen. Use environment to find a CUA-capable Hand.`);
     }
     const providerInput = without(value, "workdir");
@@ -235,50 +237,39 @@ export function createNamespaceExecutionRuntime(
         tools: [CUA_JS_NAME, CUA_RESET_NAME], definitions,
         browser_selection: "For providers exposing cua.createBrowserTab, browser display names are not necessarily accepted identifiers. OpenAI's provider accepts lowercase family aliases (for example 'brave', not 'Brave Browser') or exact discovered browser IDs. Reuse an ID from current provider state; when browser/profile selection is ambiguous, inspect the provider's browser inventory first and match the requested instance. Do not guess IDs or silently retry a browser action with a different target.",
         native_app_recovery: "For native macOS providers exposing cua.getApp, app selection may launch only in the background. If its initial observation stalls, follow any required js_reset, then use supported CUA and an observed app launcher (for example its item in Finder) to open the intended app normally before selecting it again. After a transient menu or window closes, cgWindowNotFound can mean the bound window is gone; select the same app again and inspect fresh state. Do not replay input actions, modify permissions, or switch automation backends to recover.",
-        routing: "Add the Hand workdir to each provider call. Nanocodex consumes workdir for routing and forwards all other arguments unchanged. Use Promise.all for different Hands; JS and reset on the same Hand are ordered." };
+        routing: "Add the Hand workdir to each provider call. Nanocodex consumes workdir for routing and forwards all other arguments unchanged. Calls dispatch immediately; use the provider’s contract and errors to handle concurrent JS and reset calls." };
     }
     const tool = name === CUA_JS_NAME ? hand.cua : hand.cuaReset;
-    // The router allows concurrency across Hands. Each session/Hand has one
-    // queue shared by JS and reset, independent of every other Hand's queue.
-    const key = `${context.sessionId}\u0000${hand.mountId}`;
-    const previous = computerQueues.get(key) ?? Promise.resolve();
-    const queuedAt = performance.now();
-    const pending = previous.catch(() => {}).then(async () => {
-      observeHandCall("namespace.cua.queue", name, queuedAt, "ok", context.callId);
-      context.signal.throwIfAborted();
+    context.signal.throwIfAborted();
+    const pending = (async () => {
       const invokedAt = performance.now();
       try {
         const result = await tool.handler(providerInput, context);
-        observeHandCall("namespace.invoke", name, invokedAt, toolOutcome(result), context.callId);
+        observeHandCall("namespace.invoke", name, invokedAt, toolOutcome(result), context.callId, correlation(context));
         return result;
       } catch (error) {
-        observeHandCall("namespace.invoke", name, invokedAt, context.signal.aborted ? "cancelled" : "failed", context.callId);
+        observeHandCall("namespace.invoke", name, invokedAt, context.signal.aborted ? "cancelled" : "failed", context.callId, correlation(context));
         throw error;
       }
-    });
-    computerQueues.set(key, pending);
-    const cleanup = () => { if (computerQueues.get(key) === pending) computerQueues.delete(key); };
-    // Cancellation releases the caller promptly, but the queue entry remains
-    // until its predecessor settles so later calls cannot overtake active work.
-    void pending.then(cleanup, cleanup);
+    })();
     return await new Promise((resolve, reject) => {
       const abort = () => reject(context.signal.reason ?? new Error("CUA call cancelled"));
+      void pending.then(resolve, reject).finally(() => context.signal.removeEventListener("abort", abort));
       if (context.signal.aborted) { abort(); return; }
       context.signal.addEventListener("abort", abort, { once: true });
-      void pending.then(resolve, reject).finally(() => context.signal.removeEventListener("abort", abort));
     });
   };
 
   const tools: ToolMap = {
     [CUA_JS_NAME]: {
-      description: "Use a Hand's CUA provider. Set workdir on every call, just like exec_command. First call with only {workdir} to read that Hand's exact descriptions and schemas without executing an action; then add those provider arguments alongside workdir. OpenAI CUA is preferred when attached; VM, Cloudflare, and native Hands can fall back to their controllable screen action contract. Nanocodex strips only workdir before forwarding. Use Promise.all for different workdirs in Code Mode; calls to the same Hand are ordered. /brain has no desktop.",
+      description: "Use a Hand's CUA provider. Set workdir on every call, just like exec_command. First call with only {workdir} to read that Hand's exact descriptions and schemas without executing an action; then add those provider arguments alongside workdir. OpenAI CUA is preferred when attached; VM, Cloudflare, and native Hands can fall back to their controllable screen action contract. Nanocodex strips only workdir before forwarding. Calls dispatch immediately; follow the provider’s contract for concurrent calls. /brain has no desktop.",
       parameters: computerParameters,
       supportsParallelToolCalls: true,
       handler: (input, context) => computerCall(CUA_JS_NAME, input, context),
       releaseSession, dispose,
     },
     [CUA_RESET_NAME]: {
-      description: "Reset the CUA provider on the Hand selected by this call's workdir. Read its reset contract using mcp__cua_repl__js({workdir}) first. Pass provider reset arguments alongside workdir; only workdir is consumed by Nanocodex. A workdir-only reset forwards {}. JS and reset calls to the same Hand are ordered; other Hands run independently.",
+      description: "Reset the CUA provider on the Hand selected by this call's workdir. Read its reset contract using mcp__cua_repl__js({workdir}) first. Pass provider reset arguments alongside workdir; only workdir is consumed by Nanocodex. A workdir-only reset forwards {}. Calls dispatch immediately; follow the provider’s contract for concurrent JS and reset calls.",
       parameters: computerParameters,
       supportsParallelToolCalls: true,
       handler: (input, context) => computerCall(CUA_RESET_NAME, input, context),
@@ -306,14 +297,14 @@ export function createNamespaceExecutionRuntime(
         try {
           binding = cell(context);
           route = routeNamespaceCwd(binding.scope, canonicalCwd(binding, workdir));
-          observeHandCall("namespace.route", "exec_command", routedAt, "ok", context.callId);
+          observeHandCall("namespace.route", "exec_command", routedAt, "ok", context.callId, correlation(context));
         } catch (error) {
-          observeHandCall("namespace.route", "exec_command", routedAt, "unavailable", context.callId);
+          observeHandCall("namespace.route", "exec_command", routedAt, "unavailable", context.callId, correlation(context));
           throw error;
         }
         const hand = binding.hands.get(route.mount.mountId);
         if (hand?.exec === undefined) {
-          observeHandCall("namespace.invoke", "exec_command", routedAt, "unavailable", context.callId);
+          observeHandCall("namespace.invoke", "exec_command", routedAt, "unavailable", context.callId, correlation(context));
           throw new Error(`namespace mount ${route.mount.root} is not executable`);
         }
         const invokedAt = performance.now();
@@ -323,9 +314,9 @@ export function createNamespaceExecutionRuntime(
             ...without(value, "workdir"),
             workdir: nativeWorkdir(hand.workspace, route.relativePath),
           }, context);
-          observeHandCall("namespace.invoke", "exec_command", invokedAt, toolOutcome(result), context.callId);
+          observeHandCall("namespace.invoke", "exec_command", invokedAt, toolOutcome(result), context.callId, correlation(context));
         } catch (error) {
-          observeHandCall("namespace.invoke", "exec_command", invokedAt, context.signal.aborted ? "cancelled" : "failed", context.callId);
+          observeHandCall("namespace.invoke", "exec_command", invokedAt, context.signal.aborted ? "cancelled" : "failed", context.callId, correlation(context));
           throw error;
         }
         const structured = executionResult(result);

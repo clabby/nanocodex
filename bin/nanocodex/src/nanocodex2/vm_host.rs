@@ -31,7 +31,7 @@ mod supported {
         ManagedClient, ManagedError, VmHostAllocationState, VmHostCommand, VmHostConnection,
         VmHostScope, VmShape, connect_system_vm_host,
     };
-    use nanocodex_tools::attachment::{
+    use nanocodex_oai_tools::attachment::{
         Attachment, AttachmentError, AttachmentMetadata, AttachmentTarget,
     };
     use serde::{Deserialize, Serialize};
@@ -1706,8 +1706,8 @@ mod supported {
     }
 
     async fn connect_vm_tools(
-        tools: nanocodex_tools::Tools,
-        machine: nanocodex_tools::attachment::AttachmentMachine,
+        tools: nanocodex_oai_tools::Tools,
+        machine: nanocodex_oai_tools::attachment::AttachmentMachine,
         target: AttachmentTarget,
     ) -> Result<Attachment, VmHostError> {
         let connector = tools
@@ -2926,7 +2926,7 @@ mod supported {
                     .unwrap();
                 let _ = socket.next().await;
             });
-            let tools = nanocodex_tools::Tools::builder()
+            let tools = nanocodex_oai_tools::Tools::builder()
                 .without_defaults()
                 .build()
                 .unwrap();

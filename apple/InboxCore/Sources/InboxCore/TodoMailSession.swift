@@ -12,6 +12,13 @@ public final class TodoMailSession: ObservableObject {
     @Published public private(set) var receiptSnapshot: TodoMailDraft?
     @Published public private(set) var preparedAuthorityVerified = false
     @Published public private(set) var loading = false
+    @Published public private(set) var readingFromCache = false
+    /// Body snapshots are readable while live draft/account checks are pending.
+    /// This flag is never restored from cache or recovery.
+    @Published public private(set) var liveReadVerified = false
+    public var readingStatus: String? {
+        readingFromCache ? (loading ? "Saved conversation · checking current state…" : "Saved conversation · refresh unavailable") : nil
+    }
     @Published public private(set) var saving = false
     @Published public private(set) var sending = false
     @Published public private(set) var suggesting = false
@@ -79,17 +86,17 @@ public final class TodoMailSession: ObservableObject {
         }
     }
     public var hasLockedReceipt: Bool { receiptSnapshot?.isLocked == true }
-    public var canBegin: Bool { loaded && !loading && !hasLockedReceipt && (draft?.isLocked != true || draft?.status == "sent") }
+    public var canBegin: Bool { loaded && liveReadVerified && !loading && !hasLockedReceipt && (draft?.isLocked != true || draft?.status == "sent") }
     public var senderAddress: String { accountEmail }
     public var canSend: Bool {
         guard let draft else { return false }
-        return loaded && !accountEmail.isEmpty && !loading && !sending && !saving && !suggesting && !conflicted && !draft.isLocked && !hasLockedReceipt && !localPersistenceFailed
+        return loaded && liveReadVerified && !accountEmail.isEmpty && !loading && !sending && !saving && !suggesting && !conflicted && !draft.isLocked && !hasLockedReceipt && !localPersistenceFailed
             && (preparedReview == nil || (preparedAuthorityVerified && !dirty))
             && !draft.to.filter({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }).isEmpty
     }
     public var canSuggest: Bool {
         guard let draft else { return false }
-        return loaded && !loading && !suggesting && !sending && !draft.isLocked && !hasLockedReceipt && !conflicted && draft.bodyText.isEmpty
+        return loaded && liveReadVerified && !loading && !suggesting && !sending && !draft.isLocked && !hasLockedReceipt && !conflicted && draft.bodyText.isEmpty
             && (draft.mode == .reply || draft.mode == .replyAll)
             && draft.threadID != nil && draft.replyMessageID != nil
     }
@@ -119,7 +126,16 @@ public final class TodoMailSession: ObservableObject {
     }
     public func load() async {
         guard !loading else { return }
-        loading = true; defer { loading = false }
+        loading = true; liveReadVerified = false; error = nil
+        defer { loading = false }
+        // Restore the body before recovery/network checks. Never mark loaded or
+        // verify prepared authority from disk; retained content is reading only.
+        if !fixtureMode, thread == nil, let client, let threadID,
+           let saved = await client.cachedTodoMailThread(connectionID: connectionID, threadID: threadID) {
+            guard !Task.isCancelled else { return }
+            thread = saved; readingFromCache = true
+        }
+        guard !Task.isCancelled else { return }
         if !recovered {
             recovered = true
             let url = recoveryURL
@@ -127,6 +143,7 @@ public final class TodoMailSession: ObservableObject {
                 guard let data = try? Data(contentsOf: url) else { return nil }
                 return try? JSONDecoder().decode(Recovery.self, from: data)
             }.value
+            guard !Task.isCancelled else { recovered = false; return }
             if let recovery, recovery.draft.connectionID == connectionID,
                draft == nil || draft?.id == recovery.draft.id {
                 draft = recovery.draft; dirty = recovery.dirty; sendOperation = recovery.sendOperation; receiptSnapshot = recovery.receiptSnapshot
@@ -137,12 +154,13 @@ public final class TodoMailSession: ObservableObject {
                 } else if draft?.status == "sending" { draft?.status = "unknown" }
             }
         }
-        if fixtureMode { accountEmail = "alex@example.com"; loaded = true; preparedAuthorityVerified = true; return }
+        if fixtureMode { accountEmail = "alex@example.com"; loaded = true; liveReadVerified = true; preparedAuthorityVerified = true; return }
         guard let client else { error = "Connect your account to open this message."; return }
         preparedAuthorityVerified = false
         do {
             if let preparedDecision {
                 let current = try await client.todoDecision(id: preparedDecision.id)
+                guard !Task.isCancelled else { return }
                 guard let acknowledgedPreparedDraft,
                       TodoDecisionApproval.matches(reviewed: preparedDecision, current: current, acknowledgedDraft: acknowledgedPreparedDraft) else {
                     conflicted = true
@@ -153,26 +171,32 @@ public final class TodoMailSession: ObservableObject {
                 error = "Fresh decision context is unavailable. Approval is blocked."
                 return
             }
+            async let sender = client.todoMailAccountEmail(connectionID: connectionID)
             if let threadID {
-                thread = try await client.todoMailThread(connectionID: connectionID, threadID: threadID)
-
+                let fresh = try await client.todoMailThread(connectionID: connectionID, threadID: threadID)
+                guard !Task.isCancelled else { return }
+                thread = fresh; readingFromCache = false
             }
-            accountEmail = (try? await client.todoMailAccountEmail(connectionID: connectionID)) ?? ""
-            if !loaded {
-                let remote: TodoMailDraft?
-                if let id = initialDraftID ?? draft?.id {
-                    do { remote = try await client.todoMailDraft(id: id) }
-                    catch APIError.http(404) where draft?.version == 0 { remote = nil }
-                } else if let threadID {
-                    remote = try await client.todoMailDrafts(connectionID: connectionID, threadID: threadID)
-                        .first(where: { $0.threadID == threadID && $0.status != "sent" })
-                } else { remote = nil }
-                if let remote { mergeRemote(remote) }
-                loaded = true
-            }
+            let remote: TodoMailDraft?
+            if let id = initialDraftID ?? draft?.id {
+                do { remote = try await client.todoMailDraft(id: id) }
+                catch APIError.http(404) where draft?.version == 0 { remote = nil }
+            } else if let threadID {
+                remote = try await client.todoMailDrafts(connectionID: connectionID, threadID: threadID)
+                    .first(where: { $0.threadID == threadID && $0.status != "sent" })
+            } else { remote = nil }
+            guard !Task.isCancelled else { return }
+            let freshAddress = try await sender
+            guard !Task.isCancelled else { return }
+            accountEmail = freshAddress
+            if let remote { mergeRemote(remote) }
+            loaded = true; liveReadVerified = true
             preparedAuthorityVerified = preparedDecision != nil && !conflicted
             if dirty && !conflicted && draft?.isLocked != true { scheduleSave() }
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            guard !Task.isCancelled else { return }
+            self.error = (thread != nil ? "Conversation retained. Current account/draft state could not be verified. " : "") + error.localizedDescription
+        }
     }
     @discardableResult public func begin(mode: TodoMailDraftMode, message: TodoMailMessage? = nil) -> Bool {
         guard canBegin else { return false }

@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use nanocodex_tools::{ToolContext, workspace_runtime::WorkspaceToolRuntime};
+use nanocodex_oai_tools::{ToolContext, workspace_runtime::WorkspaceToolRuntime};
 use nix::{
     errno::Errno,
     sys::signal::{Signal, killpg},
@@ -399,7 +399,7 @@ async fn execute_request(
             let context = guest_tool_context(&request.context);
             let execution = match request.tool {
                 super::protocol::GuestTool::Computer { name } => {
-                    use nanocodex_tools::Tool as _;
+                    use nanocodex_oai_tools::Tool as _;
                     let computer = match memory.computer.tools().await {
                         Ok(computer) => computer,
                         Err(error) => {
@@ -417,7 +417,7 @@ async fn execute_request(
                     };
                     match tool.execute(request.input.into(), context).await {
                         Ok(output) => output,
-                        Err(error) => nanocodex_tools::ToolOutput::error(error.to_string()),
+                        Err(error) => nanocodex_oai_tools::ToolOutput::error(error.to_string()),
                     }
                 }
                 super::protocol::GuestTool::Standard(tool) => {
@@ -1026,7 +1026,7 @@ mod tests {
         time::{Duration, Instant, UNIX_EPOCH},
     };
 
-    use nanocodex_tools::{ToolInput, contract::ToolOutputBody, standard::StandardTool};
+    use nanocodex_oai_tools::{ToolInput, contract::ToolOutputBody, standard::StandardTool};
     use nix::sys::signal::Signal;
     use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
     use serde_json::{json, value::to_raw_value};

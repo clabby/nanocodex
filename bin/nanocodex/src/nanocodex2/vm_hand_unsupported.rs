@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use nanocodex_managed::ManagedError;
-use nanocodex_tools::{Tools, attachment::AttachmentMachine};
+use nanocodex_oai_tools::{Tools, attachment::AttachmentMachine};
 
 use super::Hand;
 pub(crate) use super::vm_hand_config::VmHandConfig;
@@ -40,7 +40,7 @@ impl VmHand {
 
     pub(crate) async fn start_desktop(
         &mut self,
-        _target: &nanocodex_tools::attachment::AttachmentTarget,
+        _target: &nanocodex_oai_tools::attachment::AttachmentTarget,
     ) -> Result<(), ManagedError> {
         Err(unsupported())
     }

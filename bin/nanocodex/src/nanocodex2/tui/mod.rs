@@ -60,7 +60,8 @@ use nanocodex::Model;
 use nanocodex_agent::{Nanocodex, NanocodexError, PromptRequest, Turn, TurnControl, TurnResult};
 use nanocodex_managed::{
     AgentList, AgentSettings, AgentState, EventCursor, EventHistoryPage, ManagedClient,
-    ManagedError, ManagedEvent, ManagedEventData, ReasoningMode as ManagedReasoningMode, Thinking,
+    ManagedError, ManagedEvent, ManagedEventData, ManagedModel,
+    ReasoningMode as ManagedReasoningMode, Thinking,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -435,6 +436,7 @@ const HISTORY_PAGE_SIZE: u16 = 256;
 
 #[derive(Clone)]
 enum RetryTarget {
+    Default,
     Create(AgentSettings),
     Agent(String),
 }
@@ -552,6 +554,7 @@ struct DriverRuntime {
     next_shell: u64,
     controls: HashMap<TurnId, TurnControl>,
     local_managed_turns: HashMap<TurnId, String>,
+    local_terminal_turns: HashSet<TurnId>,
     submitted_turns: HashSet<String>,
     detached_submissions: HashSet<String>,
     unacknowledged_inputs: HashMap<TurnId, (PaneId, String, Submission)>,
@@ -765,6 +768,31 @@ async fn clone_elevenlabs_voice(name: String, path: PathBuf) -> Result<String, S
 }
 
 impl DriverRuntime {
+    fn active_managed_turn_ids(&self) -> Vec<&str> {
+        // Attached turns and locally controlled turns are counted separately by
+        // the UI, but control clients need the complete durable active set.
+        let mut ids = self
+            .managed_active_turns
+            .ids
+            .iter()
+            .map(String::as_str)
+            .chain(
+                self.local_managed_turns
+                    .iter()
+                    .filter_map(|(local, managed)| {
+                        (!self.local_terminal_turns.contains(local)
+                            && (self.controls.contains_key(local)
+                                || (self.admitting.contains(local)
+                                    && self.confirmed_requests.contains(managed))))
+                        .then_some(managed.as_str())
+                    }),
+            )
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     fn voice_status(&self) -> Option<crate::voice_state::Status> {
         if let Some(panel) = &self.clone_panel {
             return Some(crate::voice_state::Status {
@@ -1097,6 +1125,7 @@ impl DriverRuntime {
                 ))
             });
             self.local_managed_turns.clear();
+            self.local_terminal_turns.clear();
             self.managed_active_turns = ManagedActiveTurns::default();
             self.history_generation = self.history_generation.wrapping_add(1);
             self.history_loads = JoinSet::new();
@@ -1498,15 +1527,30 @@ impl DriverRuntime {
             self.retry_target = Some(target.clone());
         }
         let client = self.client.clone();
+        let resolve_default = matches!(target, RetryTarget::Default);
         let (agent_id, settings) = match target {
+            RetryTarget::Default => (None, AgentSettings::default()),
             RetryTarget::Create(settings) => (None, settings),
             RetryTarget::Agent(agent_id) => (Some(agent_id), AgentSettings::default()),
         };
         self.connection.spawn(async move {
-            ConnectionResult::Agent {
-                purpose,
-                result: connect_agent(client, agent_id, settings).await,
-            }
+            let result = if resolve_default {
+                // Availability determines the actual creation policy. Never send
+                // the temporary loading view's local defaults to the server.
+                match super::control::InitialSettings::default()
+                    .resolve_for_account(&client)
+                    .await
+                {
+                    Ok(settings) => connect_agent(client, None, settings).await,
+                    Err(error) => Err(ConnectionFailure {
+                        error,
+                        retry: RetryTarget::Default,
+                    }),
+                }
+            } else {
+                connect_agent(client, agent_id, settings).await
+            };
+            ConnectionResult::Agent { purpose, result }
         });
     }
 
@@ -1529,6 +1573,7 @@ impl DriverRuntime {
         self.admitting.clear();
         self.cancel_after_admission.clear();
         self.local_managed_turns.clear();
+        self.local_terminal_turns.clear();
         self.unacknowledged_inputs.clear();
         self.confirmed_requests.clear();
         self.waiting_steers.clear();
@@ -1573,6 +1618,7 @@ impl DriverRuntime {
         self.routing_updates = JoinSet::new();
         self.managed_active_turns = ManagedActiveTurns::default();
         self.local_managed_turns.clear();
+        self.local_terminal_turns.clear();
         self.submitted_turns.clear();
         self.detached_submissions.clear();
         self.unacknowledged_inputs.clear();
@@ -1888,11 +1934,10 @@ async fn run_inner(
         .map_err(|error| ManagedError::Configuration(error.to_string()))?
         .workspace()
         .to_path_buf();
-    let initial_settings = if matches!(attach, Some(Some(_))) {
-        AgentSettings::default()
-    } else {
-        new_agent_settings()
-    };
+    // Paint an editable loading shell before discovery. New creation resolves
+    // its authoritative policy in the connection task; attach hydrates retained
+    // settings in connect_agent, where failures already have retry semantics.
+    let initial_settings = AgentSettings::default();
     let initial_effort = effort_from_thinking(initial_settings.thinking);
     let initial_reasoning_mode = reasoning_mode_from_managed(initial_settings.reasoning_mode);
     let mut root = RootNode::new(&workspace, initial_effort);
@@ -1942,6 +1987,7 @@ async fn run_inner(
         next_shell: 1,
         controls: HashMap::new(),
         local_managed_turns: HashMap::new(),
+        local_terminal_turns: HashSet::new(),
         submitted_turns: HashSet::new(),
         detached_submissions: HashSet::new(),
         unacknowledged_inputs: HashMap::new(),
@@ -1994,6 +2040,12 @@ async fn run_inner(
         session_search_tasks: HashMap::new(),
         retry_target: None,
     };
+    // An attached session is not send-ready until retained state and history
+    // hydrate. Mark that before the first frame so input cannot race a false
+    // idle footer while startup is still connecting.
+    if matches!(attach, Some(Some(_))) {
+        app.update(AppEvent::AgentConnecting(PaneId::Main));
+    }
     // Put the complete interface on screen before any managed request starts.
     terminal
         .draw(|frame| {
@@ -2005,6 +2057,9 @@ async fn run_inner(
         .map_err(terminal_error)?;
     scheduler.presented(Instant::now());
     drop(first_frame);
+    let mut catalog_setup = JoinSet::new();
+    let catalog_client = client.clone();
+    catalog_setup.spawn(async move { catalog_client.models().await });
     // An updater can hold reload's coordination lock. Keep registration owned,
     // but wait off the input loop so it becomes available after contention clears.
     // Dropping the JoinSet also drops any uncollected registration and its lease.
@@ -2038,10 +2093,7 @@ async fn run_inner(
             runtime.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Agent(agent_id));
         }
         None => {
-            runtime.spawn_connection(
-                ConnectionPurpose::Startup,
-                RetryTarget::Create(initial_settings),
-            );
+            runtime.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Default);
         }
     }
     let mut clone_tick = tokio::time::interval(std::time::Duration::from_millis(200));
@@ -2117,6 +2169,7 @@ async fn run_inner(
                 .extend(runtime.submitted_turns.drain());
             runtime.confirmed_requests.clear();
             runtime.local_managed_turns.clear();
+            runtime.local_terminal_turns.clear();
             request_render(
                 app.update(AppEvent::SettingsHydrated {
                     pane: PaneId::Main,
@@ -2204,6 +2257,24 @@ async fn run_inner(
         {
             panel.start_if_ready();
         }
+        // A voice request queued during attach must be checked again after
+        // retained provider settings arrive, before any media/API session starts.
+        if runtime.agent.is_some()
+            && runtime.settings.model.oai().is_none()
+            && let Some(pending) = runtime.pending_voice.take()
+        {
+            request_render(
+                app.update(AppEvent::NotifyError {
+                    pane: pending.pane,
+                    error: "Claude currently supports text only; voice input is unavailable".into(),
+                }),
+                &mut scheduler,
+            );
+            request_render(
+                app.update(AppEvent::VoiceStatus(runtime.voice_status())),
+                &mut scheduler,
+            );
+        }
         if let Some(pending) = runtime.take_ready_voice() {
             match crate::voice::Session::start_with_settings(
                 runtime.client.clone(),
@@ -2276,6 +2347,19 @@ async fn run_inner(
                     None => {}
                 }
             }
+            result = catalog_setup.join_next(), if !catalog_setup.is_empty() => {
+                match result {
+                    Some(Ok(Ok(catalog))) => {
+                        if let Some(root) = app.root_mut(PaneId::Main) {
+                            root.set_model_catalog(catalog.data);
+                        }
+                        scheduler.request_immediate(Instant::now());
+                    }
+                    Some(Ok(Err(error))) => tracing::warn!(%error, "managed catalog unavailable"),
+                    Some(Err(error)) => tracing::warn!(%error, "managed catalog discovery failed"),
+                    None => {}
+                }
+            }
             result = presentation_setup.join_next(), if !presentation_setup.is_empty() => {
                 if let Some(Ok(Some(scheme))) = result {
                     request_render(app.update(AppEvent::SystemThemeChanged(scheme)), &mut scheduler);
@@ -2296,6 +2380,10 @@ async fn run_inner(
                 if let Ok((command, result, settings, session)) = result {
                     if session == runtime.agent_id && let Some(settings) = settings {
                         runtime.settings = settings;
+                        if command.request.params["settings"]["model"].is_string() && let Some(root) = app.root_mut(PaneId::Main) {
+                            let mode = reasoning_mode_from_managed(settings.reasoning_mode);
+                            root.set_reasoning_modes(mode, mode);
+                        }
                         request_render(app.update(AppEvent::SettingsHydrated {pane:PaneId::Main,
                             effort:effort_from_thinking(settings.thinking),fast_mode:settings.fast_mode,model:settings.model}), &mut scheduler);
                     }
@@ -2316,6 +2404,7 @@ async fn run_inner(
                 {
                     runtime.routing_enabled = status.enabled;
                     runtime.routing_resolved = status.route.is_some();
+
                     let (provider, model, effort) = status.route.map_or((None, None, None), |route| {
                         runtime.settings.model = route.model;
                         runtime.settings.thinking = route.thinking;
@@ -2552,6 +2641,7 @@ async fn run_inner(
                                         (managed_id == id).then_some(*local_id)
                                     })
                                 {
+                                    runtime.local_terminal_turns.insert(local_id);
                                     runtime.cancellation_fences.local_terminal(local_id);
                                 }
                             }
@@ -3101,6 +3191,10 @@ async fn run_inner(
                         match outcome {
                             Ok(settings) => {
                                 runtime.settings = settings;
+                                if matches!(mutation, SettingsMutation::Complete(_)) && let Some(root) = app.root_mut(pane) {
+                                    let mode = reasoning_mode_from_managed(settings.reasoning_mode);
+                                    root.set_reasoning_modes(mode, mode);
+                                }
                                 if matches!(mutation, SettingsMutation::AutoRoute) {
                                     runtime.routing_generation = runtime.routing_generation.wrapping_add(1);
                                     runtime.routing_updates = JoinSet::new();
@@ -3208,6 +3302,7 @@ async fn run_inner(
                         }
                         Err(error) => {
                             runtime.local_managed_turns.remove(&id);
+                            runtime.local_terminal_turns.remove(&id);
                             let record = runtime.local_record(LocalEvent::WorkerTurnFinished {
                                 id,
                                 error: Some(error.to_string()),
@@ -3256,6 +3351,7 @@ async fn run_inner(
                     }
                     runtime.controls.remove(&id);
                     runtime.local_managed_turns.remove(&id);
+                    runtime.local_terminal_turns.remove(&id);
                     runtime.cancellation_fences.local_terminal(id);
                     let error = outcome.err().map(|error| error.to_string());
                     let record = runtime.local_record(LocalEvent::WorkerTurnFinished { id, error })?;
@@ -3716,6 +3812,14 @@ async fn apply_update(
                         unreachable!("workspace commands are handled by AppNode")
                     }
                     RootEffect::Voice(command) => {
+                        if matches!(runtime.retry_target, Some(RetryTarget::Default)) {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "Wait for managed model availability before using voice input".into() }), &mut effects, scheduler);
+                            continue;
+                        }
+                        if runtime.settings.model.oai().is_none() {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "Claude currently supports text only; voice input is unavailable".into() }), &mut effects, scheduler);
+                            continue;
+                        }
                         let persistent = matches!(command, crate::voice::Command::Help | crate::voice::Command::ListProvider(crate::voice::Provider::Chatgpt));
                         let outcome = runtime.voice_command(pane, command);
                         absorb(
@@ -4515,12 +4619,38 @@ async fn apply_update(
                     RootEffect::AutoRoute => runtime.enable_autoroute(pane),
                     RootEffect::SetModel(model) => {
                         let root = app.root(pane).expect("model-selection pane must exist");
+                        // Recheck availability at the public account boundary. Normalize
+                        // only capabilities unsupported by the newly selected provider.
+                        let catalog = match runtime.client.models().await {
+                            Ok(catalog) => catalog,
+                            Err(error) => {
+                                request_render(app.update(AppEvent::SettingsHydrated { pane, effort: effort_from_thinking(runtime.settings.thinking), fast_mode: runtime.settings.fast_mode, model: runtime.settings.model }), scheduler);
+                                absorb(app.update(AppEvent::NotifyError { pane, error: error.to_string() }), &mut effects, scheduler);
+                                continue;
+                            }
+                        };
+                        let Some(entry) = catalog.data.iter().find(|entry| entry.id == model) else {
+                            request_render(app.update(AppEvent::SettingsHydrated { pane, effort: effort_from_thinking(runtime.settings.thinking), fast_mode: runtime.settings.fast_mode, model: runtime.settings.model }), scheduler);
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "Model is no longer available to this account".into() }), &mut effects, scheduler);
+                            continue;
+                        };
+                        let thinking = thinking_from_effort(root.composer().effort());
+                        let thinking = if entry.thinking.contains(&thinking) { thinking } else {
+                            model.default_thinking()
+                        };
+                        let preferred_mode = managed_reasoning_mode(root.preferred_reasoning_mode());
                         let requested = AgentSettings {
                             model,
-                            thinking: thinking_from_effort(root.composer().effort()),
-                            reasoning_mode: managed_reasoning_mode(root.preferred_reasoning_mode()),
-                            fast_mode: root.composer().fast_mode(),
+                            thinking,
+                            reasoning_mode: if entry.reasoning_modes.contains(&preferred_mode) { preferred_mode } else { nanocodex::ReasoningMode::Standard },
+                            fast_mode: root.composer().fast_mode() && entry.fast_mode,
                         };
+                        if !entry.thinking.contains(&requested.thinking) || !entry.reasoning_modes.contains(&requested.reasoning_mode) {
+                            request_render(app.update(AppEvent::SettingsHydrated { pane, effort: effort_from_thinking(runtime.settings.thinking), fast_mode: runtime.settings.fast_mode, model: runtime.settings.model }), scheduler);
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "Model catalog has no compatible text settings".into() }), &mut effects, scheduler);
+                            continue;
+                        }
+                        if let Some(root) = app.root_mut(pane) { root.set_model_catalog(catalog.data); }
                         if runtime.agent.is_none() {
                             runtime.settings = requested;
                             runtime.pending_settings = Some(requested);
@@ -4548,6 +4678,10 @@ async fn apply_update(
                         runtime.queue_settings(pane, SettingsMutation::Thinking(thinking));
                     }
                     RootEffect::SetFastMode(enabled) => {
+                        if enabled && !runtime.settings.model.supports_fast_mode() {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "Fast mode is unavailable for this model".into() }), &mut effects, scheduler);
+                            continue;
+                        }
                         if runtime.agent.is_none() {
                             runtime.settings.fast_mode = enabled;
                             runtime.pending_settings = Some(runtime.settings);
@@ -4961,7 +5095,7 @@ mod tests {
     #[test]
     fn new_threads_do_not_inherit_a_routed_provider_model_or_effort() {
         let routed = AgentSettings {
-            model: nanocodex::Model::Glm53,
+            model: nanocodex::Model::Glm53.into(),
             thinking: nanocodex_managed::Thinking::High,
             ..AgentSettings::default()
         };
@@ -4970,7 +5104,7 @@ mod tests {
             new_agent_settings()
         );
         let manual = AgentSettings {
-            model: nanocodex::Model::Sol,
+            model: nanocodex::Model::Sol.into(),
             ..AgentSettings::default()
         };
         assert_eq!(super::fresh_thread_settings(false, manual), manual);
@@ -5255,6 +5389,7 @@ mod tests {
             next_shell: 1,
             controls: HashMap::new(),
             local_managed_turns: HashMap::new(),
+            local_terminal_turns: HashSet::new(),
             submitted_turns: HashSet::new(),
             detached_submissions: HashSet::new(),
             unacknowledged_inputs: HashMap::new(),

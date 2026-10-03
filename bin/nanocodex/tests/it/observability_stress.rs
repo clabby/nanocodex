@@ -40,7 +40,7 @@ async fn retained_turns_and_hostile_tools_preserve_trace_topology() -> Result<()
     let server = tokio::spawn(serve_responses(listener, turns, parallel_calls));
     let workspace = temporary_workspace()?;
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crates/nanocodex-tools/tests/fixtures/mcp-stdio-server.mjs");
+        .join("../../crates/nanocodex-oai-tools/tests/fixtures/mcp-stdio-server.mjs");
     let process_timeout = Duration::from_secs(
         u64::try_from(turns)
             .unwrap_or(u64::MAX)
@@ -187,7 +187,7 @@ fn subagent_stress_command(
         .arg("--log-filter")
         .arg("warn")
         .arg("--otel-filter")
-        .arg("warn,nanocodex=info,nanocodex_oai_api=info,nanocodex_tools=info")
+        .arg("warn,nanocodex=info,nanocodex_oai_api=info,nanocodex_oai_tools=info")
         .arg("--otel-endpoint")
         .arg(otlp_endpoint)
         .arg("--otel-environment")
@@ -301,7 +301,7 @@ fn stress_command(
     if let Some(endpoint) = otlp_endpoint {
         command
             .arg("--otel-filter")
-            .arg("warn,nanocodex=info,nanocodex_oai_api=info,nanocodex_tools=info")
+            .arg("warn,nanocodex=info,nanocodex_oai_api=info,nanocodex_oai_tools=info")
             .arg("--otel-endpoint")
             .arg(endpoint)
             .arg("--otel-environment")

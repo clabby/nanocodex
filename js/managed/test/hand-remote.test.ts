@@ -17,9 +17,21 @@ function next(socket: WebSocket): Promise<any> {
     socket.addEventListener("message", receive);
   });
 }
-async function host(machine: string, owner = A, surfaces: (typeof surface & { broadcast?: boolean })[] = [surface]) {
+async function host(machine: string, owner = A, surfaces: (typeof surface & { broadcast?: boolean; agent_tools?: boolean })[] = [surface]) {
   const stub = namespace().getByName(owner);
-  const response = await stub.fetch("https://account-tools.internal/hands/host", { headers: { ...headers(owner), upgrade: "websocket" } });
+  let endpoint = "https://account-tools.internal/hands/host";
+  const publisherHeaders: Record<string, string> = { ...headers(owner), upgrade: "websocket" };
+  if (machine.startsWith("cf:")) {
+    const id = crypto.randomUUID();
+    const enrollment = await stub.fetch("https://account-tools.internal/sandbox-hand-hosts/" + id, {
+      method: "PUT", headers: headers(owner), body: JSON.stringify({ name: machine, machine_id: machine }),
+    });
+    expect(enrollment.status).toBe(201);
+    const receipt = await enrollment.json<{ credential: string }>();
+    publisherHeaders.authorization = "Bearer " + receipt.credential;
+    endpoint = "https://account-tools.internal/hand-hosts/" + id + "/hands/host";
+  }
+  const response = await stub.fetch(endpoint, { headers: publisherHeaders });
   expect(response.status).toBe(101);
   const socket = response.webSocket!;
   const ready = next(socket); socket.accept();
@@ -65,13 +77,42 @@ function messages(socket: WebSocket) {
 const frameSurface = { ...surface, width: 1280, height: 720, transport: "frames-v1" };
 const windowSurface = { ...frameSurface, frame_window: 6 };
 const frame = { type: "frame", jpeg: "/9j/AAAA", width: 1280, height: 720 };
-const framesHost = (machine = "sandbox", owner = crypto.randomUUID()) => host(machine, owner, [frameSurface]);
+const framesHost = (machine = "sandbox", owner = crypto.randomUUID()) => host(machine.startsWith("cf:") ? machine : "cf:" + machine, owner, [frameSurface]);
 async function requestFrame(publisher: Awaited<ReturnType<typeof host>>, viewer: Awaited<ReturnType<typeof view>>) {
   const request = next(publisher.socket); viewer.socket.send(JSON.stringify({ type: "frame_request" }));
   expect(await request).toEqual({ type: "frame_request", viewer_id: viewer.state.connection_id });
 }
 
 describe("interactive hand signaling on a real Durable Object", () => {
+  it.each(["mac:test", "server:test", "vm:test", "phone:test", "cf:", "cf:forged"])("rejects native or invalid frame-only catalog %s", async machine => {
+    const owner = crypto.randomUUID(), stub = namespace().getByName(owner);
+    const response = await stub.fetch("https://account-tools.internal/hands/host", { headers: { ...headers(owner), upgrade: "websocket" } });
+    const socket = response.webSocket!, ready = next(socket); socket.accept(); await ready;
+    try {
+      const disconnected = closed(socket);
+      socket.send(JSON.stringify({ type: "catalog", machine_id: machine, machine_name: machine, surfaces: [frameSurface] }));
+      expect((await disconnected).code).toBe(1008);
+      expect(await (await stub.fetch("https://account-tools.internal/hands/screens", { headers: headers(owner) })).json()).toEqual({ surfaces: [] });
+    } finally { socket.close(); }
+  });
+
+  it("fences legacy native frames on viewer admission without disabling agent discovery", async () => {
+    const publisher = await host("server:legacy", crypto.randomUUID(), [{ ...surface, agent_tools: true }]);
+    try {
+      // Simulate a hibernated attachment from the previous broker version.
+      await runInDurableObject(publisher.stub, (_instance, state) => {
+        const socket = state.getWebSockets("hand-remote")[0]!;
+        const attachment = socket.deserializeAttachment();
+        attachment.surfaces[0].transport = "frames-v1"; socket.serializeAttachment(attachment);
+      });
+      const query = new URLSearchParams({ machine_id: publisher.machine, surface_id: surface.id, generation: publisher.state.generation });
+      const rejected = await publisher.stub.fetch("https://account-tools.internal/hands/view?" + query, { headers: { ...headers(publisher.owner), upgrade: "websocket" } });
+      expect(rejected.status).toBe(409); expect(await rejected.json()).toEqual({ error: "native_video_required" });
+      expect(await (await publisher.stub.fetch("https://account-tools.internal/hands/screens", { headers: headers(publisher.owner) })).json()).toEqual({ surfaces: [] });
+      const snapshot = await publisher.stub.fetch("https://account-tools.internal/snapshot", { method: "POST", body: JSON.stringify({ owner_id: publisher.owner }) });
+      expect((await snapshot.json<any>()).tools.some((tool: any) => tool.route_token.includes(publisher.machine))).toBe(true);
+    } finally { publisher.socket.close(); }
+  });
   it("preserves device inventory while the account publishes remote screens", async () => {
     const owner = crypto.randomUUID();
     const { socket, state } = await host("remote-only", owner);
@@ -201,7 +242,7 @@ describe("interactive hand signaling on a real Durable Object", () => {
 
 describe("pull-based hand frames on a real Durable Object", () => {
   it("selects transport per surface and retains authenticated connection leases", async () => {
-    const publisher = await host("mixed", crypto.randomUUID(), [frameSurface, { ...surface, id: "webrtc" }]);
+    const publisher = await host("cf:mixed", crypto.randomUUID(), [frameSurface, { ...surface, id: "webrtc" }]);
     const viewer = await view(publisher), rtc = await view(publisher, "webrtc");
     try {
       const catalog = await publisher.stub.fetch("https://account-tools.internal/hands/screens", { headers: headers(publisher.owner) });
@@ -465,7 +506,7 @@ describe("pull-based hand frames on a real Durable Object", () => {
 
 describe("bounded frame windows", () => {
   it("starts the bounded stream during viewer upgrade without another viewer message", async () => {
-    const publisher = await host("initial-window", crypto.randomUUID(), [windowSurface]);
+    const publisher = await host("cf:initial-window", crypto.randomUUID(), [windowSurface]);
     const joined = new Promise<any[]>(resolve => {
       const events: any[] = [];
       const receive = (event: MessageEvent) => {
@@ -491,7 +532,7 @@ describe("bounded frame windows", () => {
   });
 
   it("relays six credits once, accounts for every image, and fences over-delivery", async () => {
-    const publisher = await host("window-host", crypto.randomUUID(), [windowSurface]);
+    const publisher = await host("cf:window-host", crypto.randomUUID(), [windowSurface]);
     const viewer = await view(publisher);
     try {
       const requested = next(publisher.socket);
@@ -509,7 +550,7 @@ describe("bounded frame windows", () => {
   });
 
   it("does not grant more than the advertised window", async () => {
-    const publisher = await host("window-limit", crypto.randomUUID(), [windowSurface]);
+    const publisher = await host("cf:window-limit", crypto.randomUUID(), [windowSurface]);
     const viewer = await view(publisher);
     try {
       const requested = next(publisher.socket);

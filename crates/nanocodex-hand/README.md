@@ -8,12 +8,13 @@ Still-image sizing, JPEG encoding and transport limits share a Rust core between
 
 Windows uses native, bounded GDI JPEG capture and Win32 input in the signed-in user's desktop. The background Windows service launches and supervises the Hand worker in that user's interactive session because Session 0 cannot access the desktop. Locked and elevated secure desktops are not controlled by an ordinary user process.
 
-The shared video publisher can use FFmpeg's `gdigrab` input and software H.264 at 60 Hz. Put `ffmpeg.exe` beside `nanocodex2.exe` or on PATH. If that encoder is unavailable, native JPEG capture still works without an additional executable. Run `cargo run -p nanocodex-hand --example capture_latency` from the signed-in desktop to verify native capture.
+The shared video publisher requires FFmpeg's `gdigrab` input and software H.264 at 60 Hz. Put `ffmpeg.exe` beside `nanocodex2.exe` or on PATH; normal Windows releases bundle it. Encoder failure is reported, never replaced by JPEG live viewing. Native bounded JPEGs remain available for agent-requested observations, independently of live media. Run `cargo run -p nanocodex-hand --example capture_latency` from the signed-in desktop to verify observation capture; this does not verify live video.
 
-For a deployment behind nested NAT without a TURN relay, set
-`NANOCODEX_SCREEN_TRANSPORT=frames-v1` on that Hand to use authenticated WebSocket
-JPEG frames and input instead of WebRTC. The default remains 60 fps video when
-an encoder is available. This setting applies to the shared Rust screen publisher on Linux and Windows; macOS requires WebRTC.
+Native Linux, macOS and Windows live viewing uses WebRTC H.264 only.
+`NANOCODEX_SCREEN_TRANSPORT=frames-v1` is rejected on native Hands; it is not a
+NAT workaround. Restricted Cloudflare sandboxes have a separate explicitly
+selected HTTPS-frame transport. NAT/ICE failure must be visible, not hidden by
+switching native viewers to screenshot streaming.
 
 For port-preserving NAT, `NANOCODEX_VIDEO_ADVERTISE_IP` advertises a reachable
 host IP while keeping sockets bound to the guest's private interface. Pair it

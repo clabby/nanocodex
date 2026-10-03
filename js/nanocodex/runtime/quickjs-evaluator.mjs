@@ -88,11 +88,15 @@ async function evaluate(quickJs, source, environment, options) {
       logger?.(...values);
     });
 
-    const setup = guestSource(
-      source,
-      Object.keys(environment.tools),
-      environment.toolDefinitions,
-    );
+    // Catalogs discovered mid-thread can be large. Transfer them as JSON data,
+    // not object-literal source requiring an AST for every schema property.
+    // Each fresh context still receives its exact admitted catalog.
+    const catalogJson = JSON.stringify(environment.toolDefinitions);
+    if (catalogJson !== undefined) {
+      vm.newString(catalogJson).consume(handle =>
+        vm.setProp(vm.global, "__nanocodex_catalog", handle));
+    }
+    const setup = guestSource(source, Object.keys(environment.tools));
     const started = await vm.evalCodeAsync(setup, "nanocodex-code-mode.js");
     const promise = unwrap(vm, started);
     try {
@@ -165,7 +169,7 @@ function formatQuickJsError(error) {
   }
 }
 
-function guestSource(source, toolNames, toolDefinitions) {
+function guestSource(source, toolNames) {
   return `
 const __nanocodex_exit = Symbol("exit");
 ${guestValueHelpers()}
@@ -192,7 +196,7 @@ const tools = (${createCodeTools.toString()})(
   ${JSON.stringify(toolNames)},
   (name, input) => __nanocodex_call_tool(name, JSON.stringify(input ?? null)).then(__nanocodex_decode),
 );
-const ALL_TOOLS = Object.freeze(${JSON.stringify(toolDefinitions)});
+const ALL_TOOLS = Object.freeze(typeof __nanocodex_catalog === "undefined" ? undefined : JSON.parse(__nanocodex_catalog));
 const text = (value) => __nanocodex_emit("text", JSON.stringify(__nanocodex_stringify(value)));
 const image = (value, detail) => {
   const item = normalizeImage(value, detail);

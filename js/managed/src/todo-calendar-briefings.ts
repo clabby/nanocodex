@@ -1,3 +1,4 @@
+import { emptyTodoPeople, readTodoPeople, type TodoPeopleContext } from "./todo-crm-context";
 /** Compact, deterministic preparation from imported account-private sources.
  * Strings are untrusted evidence, never instructions. This reader has no model,
  * network, sync, note-collection, or outbound-action dependencies.
@@ -20,7 +21,7 @@ export type TodoCalendarBriefing = {
   source: { kind: "calendar"; connection_id: string; calendar_id: string; event_id: string; url: string | null; source_updated: string | null };
   description: TodoCalendarSnippet | null;
   notes: TodoCalendarSnippet[];
-  attendees: { person_id: string | null; name: string | null; email: string | null; response_status: string | null; context: TodoCalendarSnippet[] }[];
+  attendees: ({ person_id: string | null; name: string | null; email: string | null; response_status: string | null; context: TodoCalendarSnippet[] } & TodoPeopleContext)[];
   coverage: { limited: true; reasons: string[] };
 };
 export type TodoCalendarBriefingError = {
@@ -67,17 +68,24 @@ export async function readTodoCalendarBriefings(db: D1Database | undefined, owne
     FROM crm_meetings WHERE owner_id=? AND start_ms>=? AND start_ms<? AND status!='cancelled' AND self_declined=0 ORDER BY start_ms,id LIMIT 11`, ownerID, now, now + 14 * DAY);
   if (!meetings.length) return result;
   const selected = meetings.slice(0, 10), meetingIDs = JSON.stringify(selected.map(m => m.id));
-  // Existing person_id is not sufficient: a later profile edit or ambiguous
-  // alias must not attach the wrong person's private preparation context.
+  // Re-resolve current exact identities, not historical attendee person_id.
   const attendees = await read<Attendee>("attendees", `WITH bounded AS (
     SELECT *,row_number() OVER (PARTITION BY meeting_id ORDER BY ordinal) AS rn FROM crm_meeting_attendees
     WHERE owner_id=?1 AND meeting_id IN (SELECT value FROM json_each(?2))
-  ) SELECT meeting_id,email,name,response_status,CASE WHEN person_id IS NOT NULL AND email IS NOT NULL
-    AND (SELECT count(*) FROM crm_records r WHERE r.owner_id=?1 AND r.kind='person' AND
-      (lower(trim(r.email))=lower(trim(b.email)) OR EXISTS (SELECT 1 FROM crm_identities i WHERE i.owner_id=r.owner_id AND i.record_id=r.id AND i.kind='email' AND i.normalized=lower(trim(b.email)))))=1
-    AND EXISTS (SELECT 1 FROM crm_records r WHERE r.owner_id=?1 AND r.id=b.person_id AND r.kind='person' AND
-      (lower(trim(r.email))=lower(trim(b.email)) OR EXISTS (SELECT 1 FROM crm_identities i WHERE i.owner_id=r.owner_id AND i.record_id=r.id AND i.kind='email' AND i.normalized=lower(trim(b.email)))))
-    THEN person_id ELSE NULL END AS person_id FROM bounded b WHERE rn<=7 ORDER BY meeting_id,rn`, ownerID, meetingIDs);
+  ) SELECT meeting_id,email,name,response_status,NULL AS person_id FROM bounded WHERE rn<=7 ORDER BY meeting_id,rn`, ownerID, meetingIDs);
+  const emails = [...new Set(selected.flatMap(m => attendees.filter(a => a.meeting_id === m.id).slice(0, 6).flatMap(a => a.email ? [a.email.trim().toLowerCase()] : [])))];
+  const peopleByEmail = new Map<string, TodoPeopleContext>();
+  for (let offset = 0; offset < emails.length; offset += 6) {
+    const batch = await readTodoPeople(db, ownerID, emails.slice(offset, offset + 6));
+    for (const resolution of batch.people_coverage.resolutions) {
+      const context: TodoPeopleContext = { people: batch.people.filter(p => p.record_id === resolution.record_id).map(person => ({ ...person, email: resolution.email,
+          match: person.sources.some(source => source.kind === "crm_identity" && source.detail?.startsWith(`Exact alias: ${resolution.email}`)) ? "exact_alias" : "exact_email" })),
+        people_status: batch.people_coverage.reasons.some(r => /could not be read|unavailable|exceeded/.test(r)) ? "partial" : resolution.status === "unavailable" ? "partial" : resolution.status,
+        people_coverage: { ...batch.people_coverage, resolutions: [resolution] } };
+      peopleByEmail.set(resolution.email, context);
+    }
+  }
+  for (const attendee of attendees) attendee.person_id = peopleByEmail.get(attendee.email?.trim().toLowerCase() ?? "")?.people[0]?.record_id ?? null;
   const shownAttendees = selected.flatMap(m => attendees.filter(a => a.meeting_id === m.id).slice(0, 6));
   const personIDs = JSON.stringify([...new Set(shownAttendees.flatMap(a => a.person_id ? [a.person_id] : []))]);
   const [notes, research, email, meetingNotes] = await Promise.all([
@@ -123,7 +131,7 @@ export async function readTodoCalendarBriefings(db: D1Database | undefined, owne
           }
           for (const n of email.filter(n => n.record_id === a.person_id)) context.push({ text: compact(n.body) ?? "", source: { kind: "email_metadata", reference: n.id, url: safeURL(n.source_url), updated_at: n.received_ms, connection_id: n.connection_id, message_id: n.message_id } });
         }
-        return { person_id: a.person_id, name: compact(a.name, 160), email: compact(a.email, 254), response_status: a.response_status, context };
+        return { ...(peopleByEmail.get(a.email?.trim().toLowerCase() ?? "") ?? emptyTodoPeople()), person_id: a.person_id, name: compact(a.name, 160), email: compact(a.email, 254), response_status: a.response_status, context };
       }),
       coverage: { limited: true, reasons },
     });

@@ -40,6 +40,38 @@ and review the oracle rather than silently updating expected outputs.
 - Names exposed by `ALL_TOOLS` reflect the admitted catalog. A standalone host
   tool need not be a callable nested tool. No missing name can expand authority.
 
+## Warm discovery and admission
+
+Every Code Mode cell pins its tool catalog and handlers at admission. Dynamic
+providers are enumerated and resolved again for each new admission; a newly
+published catalog or replaced handler is visible to the next cell, not to an
+already-running cell.
+
+QuickJS transfers the admitted `ALL_TOOLS` catalog as JSON data into each fresh
+context instead of compiling schema object literals as guest source. Metadata is
+parsed independently per cell: schema keys and descriptions remain data, guest
+edits do not persist, and omitted definitions remain undefined. The outer catalog
+is frozen as before. This changes neither callable bindings nor authorization,
+journal decisions, cancellation or once-only effect receipts.
+
+Factory-owned `toolMapSource` entries can reuse contract normalization within
+one router when the complete definition-array JSON is unchanged. The public
+array is still read and serialized every time, so array edits and contract
+collisions are not hidden. This cache contains schema/handler-map preparation,
+not Hand authorization, grants, leases, effect decisions or receipts. Provider
+sources are never eligible, including providers that return identical schema
+bytes while replacing their handlers.
+
+`js/managed/test/code-mode-warm-latency-journey.test.mjs` measures a running
+managed thread after `tool_search`, through actual WASM/QuickJS, SQLite, public
+HTTP, reverse Hand WebSocket and native shell calls. It separates first capture,
+subsequent-cell capture and already-admitted warm nested awaits. The external
+model and authentication seed are synthetic; timings are local rather than WAN.
+`js/nanocodex/test/tool-discovery-warm-journey.test.mjs` covers catalog/handler
+replacement, mutable factory arrays, pinned cells and collision rollback through
+actual QuickJS cells and application-defined disk effects. Catalog CPU gains
+must not be presented as established end-to-end or steady nested-call gains.
+
 ## Explicit Nanocodex extensions
 
 Codex installs known functions on a plain tools object. Nanocodex adds a guarded
@@ -77,15 +109,16 @@ storage, multimodal helpers and generated browser bundles.
 ```sh
 node --test js/nanocodex/test/code-{runtime,mode-parity,mode-upstream,tools-conformance,mode-lifecycle-parity}.test.mjs
 node --test js/nanocodex/test/{quickjs-evaluator,worker-evaluator,quickjs-bundle,code-mode-browser-bundle,browser-compiler-worker}.test.mjs
-cargo test -p nanocodex-tools --lib code_mode
+cargo test -p nanocodex-oai-tools --lib code_mode
 ```
 
 These tests establish the covered cases, not complete V8 equivalence. Engine
 resource limits, global-object details, native audio decoding, dynamic imports,
 and immediate notification injection into an active model turn have separate
 compatibility boundaries. Browser Worker transport tests are not a claim of a
-live browser deployment test. Hand executor capacity/admission is a separate
-host scheduling issue; this change does not relax parallel-safety restrictions.
+live browser deployment test. Calls dispatch concurrently regardless of
+parallel-safety metadata. Await dependencies explicitly and handle conflicts
+returned by providers.
 
 The portable evaluators still execute source inside an async-function wrapper,
 whereas Codex uses a V8 ES module. For example, a top-level `return` is accepted

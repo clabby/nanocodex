@@ -1,0 +1,14 @@
+[
+  {
+    "session_id": "429684d6-26ec-43a0-83c0-8c0d6b9a8a30",
+    "wire": "{\"max_tokens\":16,\"messages\":[{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"role\":\"user\"}],\"metadata\":{\"user_id\":\"{\\\"device_id\\\":\\\"9d8faf5be4acc0aa3fe6eaad10f237831e4b8505c631b7eb1465457edfba1ec9\\\",\\\"session_id\\\":\\\"429684d6-26ec-43a0-83c0-8c0d6b9a8a30\\\",\\\"account_uuid\\\":\\\"11111111-1111-4111-8111-111111111111\\\"}\"},\"model\":\"synthetic\",\"stream\":false,\"system\":[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=2.1.280.d7b; cc_entrypoint=cli; cch=59fd9;\"},{\"type\":\"text\",\"text\":\"You are Claude Code, Anthropic's official CLI for Claude.\",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":\"Caller cch=00000 🦀\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tools\":[{\"description\":\"fixture\",\"input_schema\":{\"type\":\"object\"},\"name\":\"__private\"}]}"
+  },
+  {
+    "session_id": "429684d6-26ec-43a0-83c0-8c0d6b9a8a30",
+    "wire": "{\"max_tokens\":16,\"messages\":[{\"content\":[{\"type\":\"text\",\"text\":\"0123😀6🚀89abcdefghij🦀\"}],\"role\":\"user\"}],\"metadata\":{\"user_id\":\"{\\\"device_id\\\":\\\"9d8faf5be4acc0aa3fe6eaad10f237831e4b8505c631b7eb1465457edfba1ec9\\\",\\\"session_id\\\":\\\"429684d6-26ec-43a0-83c0-8c0d6b9a8a30\\\",\\\"account_uuid\\\":\\\"11111111-1111-4111-8111-111111111111\\\"}\"},\"model\":\"synthetic\",\"stream\":false,\"system\":[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=2.1.280.a7e; cc_entrypoint=cli; cch=28d7f;\"},{\"type\":\"text\",\"text\":\"You are Claude Code, Anthropic's official CLI for Claude.\",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":\"Caller cch=00000 🦀\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tools\":[{\"description\":\"fixture\",\"input_schema\":{\"type\":\"object\"},\"name\":\"__private\"}]}"
+  },
+  {
+    "session_id": "429684d6-26ec-43a0-83c0-8c0d6b9a8a30",
+    "wire": "{\"max_tokens\":16,\"messages\":[{\"content\":[{\"type\":\"text\",\"text\":\"Ελληνικά user cch=00000 x-anthropic-billing-header: cc_version=example;\"}],\"role\":\"user\"}],\"metadata\":{\"user_id\":\"{\\\"device_id\\\":\\\"9d8faf5be4acc0aa3fe6eaad10f237831e4b8505c631b7eb1465457edfba1ec9\\\",\\\"session_id\\\":\\\"429684d6-26ec-43a0-83c0-8c0d6b9a8a30\\\",\\\"account_uuid\\\":\\\"11111111-1111-4111-8111-111111111111\\\"}\"},\"model\":\"synthetic\",\"stream\":false,\"system\":[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=2.1.280.779; cc_entrypoint=cli; cch=ffb96;\"},{\"type\":\"text\",\"text\":\"You are Claude Code, Anthropic's official CLI for Claude.\",\"cache_control\":{\"type\":\"ephemeral\"}},{\"type\":\"text\",\"text\":\"Caller cch=00000 🦀\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"tools\":[{\"description\":\"fixture\",\"input_schema\":{\"type\":\"object\"},\"name\":\"__private\"}]}"
+  }
+]

@@ -16,12 +16,12 @@ use nanocodex_oai_api::{
         ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
     },
 };
+use nanocodex_oai_tools::Tools;
 use nanocodex_subagents::{
     AgentId, AgentMessage, AgentStatus, AgentTask, AgentUpdate, MessageDeliveryState,
     MessageDisposition, MessagePurpose, Registry, ScopedAgentUpdate, SubagentControl, channel,
     install_tools, start_agent,
 };
-use nanocodex_tools::Tools;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tower::Service;

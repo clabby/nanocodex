@@ -20,7 +20,9 @@ import type { SubagentToolContext } from "nanocodex-tools";
 import { isUserId } from "./account-auth";
 import { fetchResponseWithDeadline } from "./deadline";
 import { HostedToolsBroker } from "./hosted-tools-broker";
-import { observeHandCall } from "./hand-call-observation";
+import { observeHandCall, observeHandSummary } from "./hand-call-observation";
+import { annotateToolSpan, traceToolInvocation } from "./tool-tracing";
+import { DiagnosticJournal, diagnosticScope } from "./diagnostic-journal";
 
 const OWNER_ASSERTION = "x-nanocodex-owner-id";
 const TOOL_RESULT = Symbol.for("nanocodex.toolResult");
@@ -61,6 +63,7 @@ type InvocationRequest = Readonly<{
   name: string;
   input: unknown;
   session_id: string;
+  thread_id?: string;
   turn_id?: string;
   call_id: string;
   model?: string;
@@ -94,19 +97,53 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
   readonly #broker: HostedToolsBroker;
   readonly #remote: HandRemoteBroker;
   readonly #handHosts: HandHosts;
+  readonly #diagnostics: DiagnosticJournal;
+  #ownerId: string | undefined;
 
   constructor(ctx: DurableObjectState, env: AccountHostedToolsEnv) {
     super(ctx, env);
+    // Ownership is immutable; a new instance reloads it after eviction/restart.
+    this.#ownerId = ctx.storage.kv.get<string>("owner_id");
+    this.#diagnostics = new DiagnosticJournal(ctx.storage, "hand.broker");
     this.#broker = new HostedToolsBroker(ctx, { resumeRetainedSockets: true,
-      onCallTiming: (timing) => console.info({ type: "hand.call.broker", ...timing }),
+      onCallObservation: (observation) => {
+        try { annotateToolSpan({ "nanocodex.thread_id": observation.thread_id,
+          "nanocodex.runtime_session_id": observation.session_id,
+          "nanocodex.tool_call_id": observation.source_call_id,
+          "nanocodex.transport_call_id": observation.transport_call_id,
+          "nanocodex.hand_id": observation.hand_id,
+          "nanocodex.connection_id": observation.connection_id,
+          "nanocodex.host_connection_id": observation.host_connection_id,
+          "nanocodex.host_runtime_id": observation.host_runtime_id,
+          "nanocodex.lease_id": observation.lease_id,
+          "nanocodex.connection_generation": observation.connection_generation,
+          "nanocodex.runtime_generation": observation.runtime_generation,
+          "nanocodex.hand.host_stage": observation.host_stage,
+          "nanocodex.hand.reason_code": observation.reason_code,
+          "nanocodex.hand.stage": observation.stage, "nanocodex.hand.roundtrip_ms": observation.roundtrip_ms,
+          "nanocodex.hand.execution_ms": observation.host_timing?.execution_ms }); }
+        catch { /* Span annotation must not suppress the correlated log. */ }
+        const record = { type: "hand.call.broker", ...observation };
+        this.#diagnostics.record(record);
+        console.info(record);
+      },
+      onConnectionObservation: observation => {
+        const record = { type: "hand.connection", ...observation };
+        this.#diagnostics.record(record);
+        console.info(record);
+      },
     });
-    this.#remote = new HandRemoteBroker(ctx);
+    this.#remote = new HandRemoteBroker(ctx, observation => {
+      const record = { type: "hand.remote", ...observation };
+      this.#diagnostics.record(record);
+      try { console.info(record); } catch { /* Remote diagnostics cannot change a socket outcome. */ }
+    });
     this.#handHosts = new HandHosts(ctx.storage, this.#remote);
   }
 
   /** Discovery returns only its public projection in one RPC reply. */
   async listMachines(ownerId: string) {
-    if (!isUserId(ownerId) || !await this.#owns(ownerId)) return [];
+    if (!isUserId(ownerId) || !this.#owns(ownerId)) return [];
     const machines = this.#broker.machines();
     const roots = new HandPaths(this.ctx.storage).assign(machines);
     return machines.filter(machine => this.#broker.machineOnline(machine.id))
@@ -114,11 +151,30 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
   }
 
   async fetch(request: Request): Promise<Response> {
+    return diagnosticScope(this.#diagnostics, () => this.#fetchRequest(request));
+  }
+
+  async #fetchRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/diagnostics") {
+      if (request.method !== "GET") return Response.json({ error: "method_not_allowed" }, { status: 405 });
+      const ownerId = request.headers.get(OWNER_ASSERTION);
+      if (!isUserId(ownerId) || !this.#owns(ownerId)) return Response.json({ error: "not_found" }, { status: 404 });
+      const thread = url.searchParams.get("thread_id"), after = url.searchParams.get("after") ?? "0", limit = url.searchParams.get("limit") ?? "256";
+      if (!thread || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(thread)
+        || [...url.searchParams.keys()].some(key => !["thread_id", "after", "limit"].includes(key) || url.searchParams.getAll(key).length !== 1)
+        || !/^(0|[1-9][0-9]*)$/.test(after) || !/^[1-9][0-9]*$/.test(limit)
+        || !Number.isSafeInteger(Number(after)) || !Number.isSafeInteger(Number(limit)) || Number(limit) > 1_024)
+        return Response.json({ error: "invalid_diagnostics_page" }, { status: 400 });
+      return Response.json({ ...this.#diagnostics.page(thread, Number(after), Number(limit), true),
+        connections: this.#broker.connectionDiagnostics(),
+        remote_connections: this.#remote.connectionDiagnostics(),
+      }, { headers: { "cache-control": "no-store" } });
+    }
     const sandboxHost = url.pathname.match(/^\/sandbox-hand-hosts\/([^/]+)$/);
     if (sandboxHost) {
       const ownerId = request.headers.get(OWNER_ASSERTION);
-      if (url.search || !isUserId(ownerId) || !await this.#claim(ownerId)) return Response.json({ error: "not_found" }, { status: 404 });
+      if (url.search || !isUserId(ownerId) || !this.#claim(ownerId)) return Response.json({ error: "not_found" }, { status: 404 });
       if (request.method === "DELETE") return this.#handHosts.manage(request, sandboxHost[1]);
       if (request.method !== "PUT") return Response.json({ error: "invalid_request" }, { status: 400 });
       let body;
@@ -131,7 +187,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     const setup = url.pathname.match(/^\/hand-host-setups\/([^/]+)$/);
     if (setup) {
       const ownerId = request.headers.get(OWNER_ASSERTION);
-      if (url.search || !isUserId(ownerId) || !await this.#claim(ownerId)) return Response.json({ error: "not_found" }, { status: 404 });
+      if (url.search || !isUserId(ownerId) || !this.#claim(ownerId)) return Response.json({ error: "not_found" }, { status: 404 });
       return this.#handHosts.setupLock(request, setup[1]!);
     }
     if (url.pathname === "/hand-hosts" || url.pathname.startsWith("/hand-hosts/")) {
@@ -139,7 +195,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       if (!isUserId(ownerId)) return Response.json({ error: "not_found" }, { status: 404 });
       const publisher = url.pathname.match(/^\/hand-hosts\/([^/]+)\/hands\/(host|ice|renew)$/);
       if (publisher) {
-        if (url.search || !await this.#owns(ownerId)) return Response.json({ error: "not_found" }, { status: 404 });
+        if (url.search || !this.#owns(ownerId)) return Response.json({ error: "not_found" }, { status: 404 });
         const scope = await this.#handHosts.authorize(request, publisher[1]!);
         if (!scope) return Response.json({ error: "unauthorized" }, { status: 401 });
         const endpoint = publisher[2]!;
@@ -158,12 +214,12 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
         return this.#remote.fetch(new Request("https://account-tools.internal/hands/host", request), scope);
       }
       const management = url.pathname.match(/^\/hand-hosts(?:\/([^/]+))?$/);
-      if (!management || !await this.#claim(ownerId)) return Response.json({ error: "not_found" }, { status: 404 });
+      if (!management || !this.#claim(ownerId)) return Response.json({ error: "not_found" }, { status: 404 });
       return this.#handHosts.manage(request, management[1]);
     }
     if (url.pathname === "/hands" || url.pathname.startsWith("/hands/")) {
       const ownerId = request.headers.get(OWNER_ASSERTION);
-      if (!isUserId(ownerId) || !await this.#claim(ownerId)) {
+      if (!isUserId(ownerId) || !this.#claim(ownerId)) {
         return Response.json({ error: "not_found" }, { status: 404 });
       }
       let vm: RemoteVMPublisher | undefined;
@@ -201,7 +257,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     if (url.pathname === "/hosted-tool-stats") {
       if (request.method !== "GET" || url.search) return Response.json({ error: "invalid_request" }, { status: 400 });
       const ownerId = request.headers.get(OWNER_ASSERTION);
-      if (!isUserId(ownerId) || !await this.#claim(ownerId)) {
+      if (!isUserId(ownerId) || !this.#claim(ownerId)) {
         return Response.json({ error: "not_found" }, { status: 404 });
       }
       const to = Date.now();
@@ -266,21 +322,21 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
         return new Response("Expected WebSocket upgrade", { status: 426 });
       }
       const ownerId = request.headers.get(OWNER_ASSERTION);
-      if (!isUserId(ownerId) || !await this.#claim(ownerId)) {
+      if (!isUserId(ownerId) || !this.#claim(ownerId)) {
         return Response.json({ error: "not_found" }, { status: 404 });
       }
       return this.#broker.upgrade(ownerId);
     }
     if (request.method === "POST" && url.pathname === "/snapshot") {
       const ownerId = await ownerFromBody(request);
-      if (!ownerId || !await this.#owns(ownerId)) {
+      if (!ownerId || !this.#owns(ownerId)) {
         return Response.json({ error: "not_found" }, { status: 404 });
       }
-      const provider = this.#broker.provider();
+      const catalog = this.#broker.catalogSnapshot();
       return Response.json({
-        screens: this.#remote.list().filter(target => target.agent_tools),
-        tools: [...provider.definitions().flatMap((definition) => {
-          const tool = provider.resolve(definition.name) as RoutedHostedTool | undefined;
+        screens: this.#remote.list(true).filter(target => target.agent_tools),
+        tools: [...catalog.definitions().flatMap((definition) => {
+          const tool = catalog.resolve(definition.name) as RoutedHostedTool | undefined;
           return tool?.routeToken === undefined ? [] : [{
             definition,
             parallel_safe: tool.parallelSafe,
@@ -291,11 +347,11 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
             route_token: tool.routeToken,
           } satisfies AccountHostedTool];
         }), ...this.#remote.tools()],
-        machines: this.#broker.machines().map((machine) => ({
+        machines: catalog.machines().map(({ machine, online }) => ({
           machine,
-          online: this.#broker.machineOnline(machine.id),
+          online,
           tools: HOSTED_MACHINE_TOOL_NAMES.flatMap((name) => {
-            const tool = this.#broker.machineTool(machine.id, name);
+            const tool = catalog.machineTool(machine.id, name);
             return tool?.routeToken === undefined ? [] : [{
               name,
               parallel_safe: tool.parallelSafe,
@@ -313,48 +369,66 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       let invocation: InvocationRequest;
       try { invocation = await request.json<InvocationRequest>(); }
       catch { return Response.json({ error: "invalid_request" }, { status: 400 }); }
-      if (!isUserId(invocation.owner_id) || !await this.#owns(invocation.owner_id)
+      const decodedAt = performance.now();
+      if (!isUserId(invocation.owner_id) || !this.#owns(invocation.owner_id)
         || typeof invocation.name !== "string" || typeof invocation.session_id !== "string"
         || typeof invocation.call_id !== "string" || typeof invocation.route_token !== "string") {
         return Response.json({ error: "not_found" }, { status: 404 });
       }
+      if (invocation.thread_id !== undefined && (typeof invocation.thread_id !== "string"
+        || !/^[A-Za-z0-9_./:-]{1,128}$/.test(invocation.thread_id))) {
+        return Response.json({ error: "invalid_request" }, { status: 400 });
+      }
+      const correlation = { session_id: invocation.session_id, thread_id: invocation.thread_id,
+        source_call_id: invocation.call_id, turn_id: invocation.turn_id };
       const ownedAt = performance.now();
-      observeHandCall("account.ownership", invocation.name, startedAt, "ok", invocation.call_id);
-      if (invocation.machine_id === undefined) {
-        const remote = await this.#remote.invoke(invocation.name, invocation.route_token,
-          invocation.input, invocation.session_id, request.signal);
+      observeHandCall("account.decode_input", invocation.name, startedAt, "ok", invocation.call_id, correlation, decodedAt);
+      observeHandCall("account.ownership", invocation.name, decodedAt, "ok", invocation.call_id, correlation, ownedAt);
+      if (invocation.machine_id === undefined && invocation.route_token.startsWith("screen:v1:")) {
+        const remote = await traceToolInvocation("hand.account.invoke", invocation.thread_id, invocation.name, {
+          sessionId: invocation.session_id, callId: invocation.call_id, turnId: invocation.turn_id,
+        }, () => this.#remote.invoke(invocation.name, invocation.route_token,
+          invocation.input, invocation.session_id, request.signal,
+          { threadId: invocation.thread_id, callId: invocation.call_id, turnId: invocation.turn_id }));
         if (remote) return remote;
       }
+      const catalog = this.#broker.catalogSnapshot();
       const machineName = HOSTED_MACHINE_TOOL_NAMES.find((name) => name === invocation.name);
       const tool = invocation.machine_id === undefined
-        ? this.#broker.provider().resolve(invocation.name)
+        ? catalog.resolve(invocation.name)
         : machineName === undefined
           ? undefined
-          : this.#broker.machineTool(invocation.machine_id, machineName);
+          : catalog.machineTool(invocation.machine_id, machineName);
       if (!tool) {
-        observeHandCall("account.resolve", invocation.name, ownedAt, "unavailable", invocation.call_id);
+        observeHandCall("account.resolve", invocation.name, ownedAt, "unavailable", invocation.call_id, correlation);
         return Response.json({ error: "tool_unavailable" }, { status: 404 });
       }
       if (tool.routeToken !== invocation.route_token) {
-        observeHandCall("account.resolve", invocation.name, ownedAt, "unavailable", invocation.call_id);
+        observeHandCall("account.resolve", invocation.name, ownedAt, "unavailable", invocation.call_id, correlation);
         return Response.json({ error: "stale_catalog" }, { status: 409 });
       }
       // Capture the process owner's route before invoking. Exec can wait while
       // a replacement host publishes, and the caller may have refreshed an old
       // command route before admission. Its original snapshot is insufficient.
       const processRoute = invocation.machine_id !== undefined && invocation.name === "exec_command"
-        ? this.#broker.machineTool(invocation.machine_id, "write_stdin")?.routeToken : undefined;
+        ? catalog.machineTool(invocation.machine_id, "write_stdin")?.routeToken : undefined;
       const resolvedAt = performance.now();
-      observeHandCall("account.resolve", invocation.name, ownedAt, "ok", invocation.call_id);
+      observeHandCall("account.resolve", invocation.name, ownedAt, "ok", invocation.call_id, correlation);
       let result;
-      try { result = await tool.handler(invocation.input, {
+      try { result = await traceToolInvocation("hand.account.invoke", invocation.thread_id, invocation.name, {
+        sessionId: invocation.session_id, callId: invocation.call_id, turnId: invocation.turn_id,
+      }, () => tool.handler(invocation.input, {
         sessionId: invocation.session_id,
+        ...(invocation.thread_id === undefined ? {} : { threadId: invocation.thread_id }),
         ...(invocation.turn_id === undefined ? {} : { turnId: invocation.turn_id }),
         callId: invocation.call_id,
         model: invocation.model,
         signal: request.signal,
-      }); } catch (error) {
-        observeHandCall("account.handler", invocation.name, resolvedAt, request.signal.aborted ? "cancelled" : "failed", invocation.call_id);
+      })); } catch (error) {
+        observeHandCall("account.handler", invocation.name, resolvedAt, request.signal.aborted ? "cancelled" : "failed", invocation.call_id, correlation);
+        observeHandSummary("hand.call.account", invocation.name, correlation, { input_decode_ms: decodedAt - startedAt, ownership_ms: ownedAt - decodedAt,
+          resolve_ms: resolvedAt - ownedAt, handler_ms: performance.now() - resolvedAt, total_ms: performance.now() - startedAt },
+          request.signal.aborted ? "cancelled" : "failed");
         throw error;
       }
       const branded = result as Record<PropertyKey, unknown>;
@@ -362,10 +436,12 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       observeHandCall("account.handler", invocation.name, resolvedAt, branded.success === true ? "ok"
         : branded[HOSTED_TOOLS_PRE_ADMISSION_UNAVAILABLE] === true ? "unavailable"
         : failureStatus === "ambiguous" ? "ambiguous"
-        : failureStatus === "unavailable" ? "unavailable" : "failed", invocation.call_id);
-      console.info({ type: "hand.call.account", session_id: invocation.session_id, source_call_id: invocation.call_id,
-        ownership_ms: ownedAt - startedAt, resolve_ms: resolvedAt - ownedAt,
-        handler_ms: performance.now() - resolvedAt, total_ms: performance.now() - startedAt });
+        : failureStatus === "unavailable" ? "unavailable" : failureStatus === "cancelled" ? "cancelled" : "failed", invocation.call_id, correlation);
+      observeHandSummary("hand.call.account", invocation.name, correlation, {
+        input_decode_ms: decodedAt - startedAt, ownership_ms: ownedAt - decodedAt, resolve_ms: resolvedAt - ownedAt,
+        handler_ms: performance.now() - resolvedAt, total_ms: performance.now() - startedAt },
+        branded.success === true ? "ok" : failureStatus === "ambiguous" ? "ambiguous"
+          : failureStatus === "unavailable" ? "unavailable" : failureStatus === "cancelled" ? "cancelled" : "failed");
       return Response.json({
         output: branded.output,
         structured_result: branded.structuredResult,
@@ -391,27 +467,32 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
   }
 
   webSocketClose(socket: WebSocket, code: number, reason: string): void {
-    if (this.#remote.owns(socket)) { this.#remote.close(socket); return; }
-    console.warn({ type: "hand.socket.closed", code, reason: reason.slice(0, 123),
+    if (this.#remote.owns(socket)) { this.#remote.close(socket, undefined, "websocket_closed", code); return; }
+    console.warn({ type: "hand.socket.closed", code,
       pending: this.#broker.hasPendingCalls() });
     this.#broker.webSocketClose(socket, code, reason);
   }
 
   webSocketError(socket: WebSocket): void {
-    if (this.#remote.owns(socket)) { this.#remote.close(socket); return; }
+    if (this.#remote.owns(socket)) { this.#remote.close(socket, undefined, "websocket_error"); return; }
     console.warn({ type: "hand.socket.error", pending: this.#broker.hasPendingCalls() });
     this.#broker.webSocketError(socket);
   }
 
-  async #claim(ownerId: string): Promise<boolean> {
-    const retained = await this.ctx.storage.get<string>("owner_id");
-    if (retained !== undefined) return retained === ownerId;
-    await this.ctx.storage.put("owner_id", ownerId);
-    return true;
+  #claim(ownerId: string): boolean {
+    if (this.#ownerId !== undefined) return this.#ownerId === ownerId;
+    const retained = this.ctx.storage.transactionSync(() => {
+      const retained = this.ctx.storage.kv.get<string>("owner_id");
+      if (retained !== undefined) return retained;
+      this.ctx.storage.kv.put("owner_id", ownerId);
+      return ownerId;
+    });
+    this.#ownerId = retained;
+    return retained === ownerId;
   }
 
-  async #owns(ownerId: string): Promise<boolean> {
-    return await this.ctx.storage.get<string>("owner_id") === ownerId;
+  #owns(ownerId: string): boolean {
+    return this.#ownerId === ownerId;
   }
 }
 
@@ -420,6 +501,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
   readonly sourceId = "account-hands";
   readonly #namespace: DurableObjectNamespace<AccountHostedTools>;
   readonly #ownerId: string;
+  readonly #threadId: string | undefined;
   readonly #allowed: (context?: AuthorizationContext) => boolean;
   #definitions: readonly HostedToolsCodeDefinition[] = [];
   #candidates: readonly HostedToolsCatalogCandidate[] = [];
@@ -440,9 +522,11 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     namespace: DurableObjectNamespace<AccountHostedTools>,
     ownerId: string,
     allowed: (context?: AuthorizationContext) => boolean,
+    threadId?: string,
   ) {
     this.#namespace = namespace;
     this.#ownerId = ownerId;
+    this.#threadId = threadId;
     this.#allowed = allowed;
   }
 
@@ -666,8 +750,36 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     machineId?: string,
     routePolicy: "refresh" | "fixed" | "screen" = "refresh",
   ): Promise<unknown> {
+    const started = performance.now();
+    const timing: { fetch_ms?: number; decode_ms?: number } = {};
+    let outcome: "ok" | "failed" | "unavailable" | "ambiguous" | "cancelled" = "failed";
+    try {
+      const result = await traceToolInvocation("hand.provider.invoke", this.#threadId, name, context,
+        () => this.#invokeAccount(name, routeToken, input, context, machineId, routePolicy, timing));
+      const branded = result as Record<PropertyKey, unknown>;
+      const status = (branded.structuredResult as { status?: unknown } | null)?.status;
+      outcome = branded.success === true ? "ok" : status === "ambiguous" ? "ambiguous"
+        : status === "unavailable" ? "unavailable" : status === "cancelled" ? "cancelled" : "failed";
+      return result;
+    } finally {
+      observeHandSummary("hand.call.provider", name, { session_id: context.sessionId,
+        thread_id: this.#threadId, source_call_id: context.callId, turn_id: context.turnId },
+        { ...timing, total_ms: performance.now() - started }, outcome === "failed" && context.signal?.aborted ? "cancelled" : outcome);
+    }
+  }
+
+  async #invokeAccount(
+    name: string,
+    routeToken: string,
+    input: unknown,
+    context: InvocationContext,
+    machineId?: string,
+    routePolicy: "refresh" | "fixed" | "screen" = "refresh",
+    timing: { fetch_ms?: number; decode_ms?: number } = {},
+  ): Promise<unknown> {
+    const correlation = { session_id: context.sessionId, thread_id: this.#threadId, turn_id: context.turnId };
     const failed = (message: string, status: "ambiguous" | "unavailable", preAdmission = false): unknown => {
-      observeHandCall("account.fetch", name, startedAt, status, context.callId);
+      observeHandCall("account.fetch", name, startedAt, status, context.callId, correlation);
       return failedToolResult(message, status, preAdmission);
     };
     const startedAt = performance.now();
@@ -684,6 +796,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
           name,
           input,
           session_id: context.sessionId,
+          ...(this.#threadId === undefined ? {} : { thread_id: this.#threadId }),
           ...(context.turnId === undefined ? {} : { turn_id: context.turnId }),
           call_id: context.callId,
           model: context.model,
@@ -693,10 +806,12 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
         signal: context.signal,
       });
     } catch {
+      timing.fetch_ms = performance.now() - startedAt;
       return failed("Hand connection failed after possible dispatch; execution outcome is unknown. The command was not resent.", "ambiguous");
     }
     const responseAt = performance.now();
-    if (response.ok) observeHandCall("account.fetch", name, startedAt, "ok", context.callId);
+    timing.fetch_ms = responseAt - startedAt;
+    if (response.ok) observeHandCall("account.fetch", name, startedAt, "ok", context.callId, correlation);
     if (!response.ok) {
       try { await response.body?.cancel(); } catch { /* No call was admitted for 404/409. */ }
       const preAdmission = response.status === 404 || response.status === 409;
@@ -746,14 +861,16 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
         throw new Error("invalid account hand result");
       }
     } catch {
-      observeHandCall("account.decode", name, responseAt, "ambiguous", context.callId);
+      observeHandCall("account.decode", name, responseAt, "ambiguous", context.callId, correlation);
       return failed("Hand response could not be decoded; execution outcome is unknown. The command was not resent.", "ambiguous");
+    } finally {
+      timing.decode_ms = performance.now() - responseAt;
     }
     const structuredStatus = result.structured_result && typeof result.structured_result === "object"
       ? (result.structured_result as { status?: unknown }).status : undefined;
     observeHandCall("account.decode", name, responseAt, result.pre_admission_unavailable === true ? "unavailable"
       : result.success ? "ok" : structuredStatus === "ambiguous" ? "ambiguous"
-      : structuredStatus === "unavailable" ? "unavailable" : "failed", context.callId);
+      : structuredStatus === "unavailable" ? "unavailable" : structuredStatus === "cancelled" ? "cancelled" : "failed", context.callId, correlation);
     if (machineId !== undefined && result.pre_admission_unavailable === true) {
       // The broker checked its call ledger: this invocation was never admitted.
       // Let the agent recover the hand instead of indefinitely replaying the turn.
@@ -766,8 +883,6 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
         true,
       );
     }
-    console.info({ type: "hand.call.provider", session_id: context.sessionId, source_call_id: context.callId,
-      fetch_ms: responseAt - startedAt, decode_ms: performance.now() - responseAt, total_ms: performance.now() - startedAt });
     const branded = {
       [TOOL_RESULT]: true,
       output: result.output,
