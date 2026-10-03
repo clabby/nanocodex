@@ -201,8 +201,8 @@ impl HostTransport for JavaScriptResponsesHost {
         Box::pin(async move {
             // JS timers overflow beyond signed 32-bit milliseconds. Round up
             // submillisecond advice and split long waits rather than retry early.
-            let mut milliseconds =
-                duration.as_millis() + u128::from(duration.subsec_nanos() % 1_000_000 != 0);
+            let mut milliseconds = duration.as_millis()
+                + u128::from(!duration.subsec_nanos().is_multiple_of(1_000_000));
             while milliseconds > 0 {
                 let chunk = milliseconds.min(i32::MAX as u128) as u32;
                 let Ok(promise) = host_sleep(session_id, chunk) else {
