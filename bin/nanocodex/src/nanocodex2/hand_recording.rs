@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -23,6 +23,7 @@ struct State {
     // cannot acknowledge while a preceding sample can still be persisted.
     gate: Mutex<()>,
     stop: AtomicBool,
+    capture_epoch: AtomicU64,
     capture: Mutex<Value>,
     desktop_runtime: Option<PathBuf>,
 }
@@ -63,6 +64,7 @@ impl Recorder {
             store: Store::open(data).map_err(|e| anyhow::anyhow!(e.to_string()))?,
             gate: Mutex::new(()),
             stop: AtomicBool::new(false),
+            capture_epoch: AtomicU64::new(0),
             capture: Mutex::new(json!({"state":"idle"})),
             desktop_runtime,
         });
@@ -188,6 +190,11 @@ async fn dispatch(state: Arc<State>, mut input: Value) -> Value {
         let operation = input["operation"].as_str().unwrap_or("").to_owned();
         match state.store.request(input) {
             Ok(mut response)=>{
+                // A pause/resume pair may finish between sampler ticks. Invalidate
+                // native input queues even when the sampler never sees paused state.
+                if matches!(operation.as_str(), "pause" | "resume") {
+                    state.capture_epoch.fetch_add(1, Ordering::AcqRel);
+                }
                 if matches!(operation.as_str(), "start" | "pause" | "resume" | "stop") {
                     match response["state"].as_str() {
                         Some("recording") => {
@@ -306,6 +313,7 @@ fn retain_sample(state: &State, id: &str, result: Result<Value, nanocodex_hand::
 fn sample_loop(state: Arc<State>) {
     let mut observer = None;
     let mut previous_id = String::new();
+    let mut previous_epoch = 0;
     let mut previous_focus = None;
     let mut previous_suppression = String::new();
     let mut last_pointer = None;
@@ -319,9 +327,11 @@ fn sample_loop(state: Arc<State>) {
             }
             match state.store.active_config() {
                 Ok(Some((id, scope))) => {
-                    if id != previous_id {
+                    let epoch = state.capture_epoch.load(Ordering::Acquire);
+                    if id != previous_id || epoch != previous_epoch {
                         observer = None;
                         previous_id = id.clone();
+                        previous_epoch = epoch;
                         previous_focus = None;
                         previous_suppression.clear();
                         last_pointer = None;

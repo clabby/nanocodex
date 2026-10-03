@@ -86,6 +86,11 @@ impl Drop for ControlGuard {
 }
 
 pub(crate) fn validate_root(root: &Path, create: bool) -> Result<PathBuf> {
+    // Inherited Windows ACLs do not establish owner-private evidence storage.
+    // Reject before creating directories; native screen access remains available.
+    if cfg!(windows) {
+        bail!("private_recording_storage_unavailable");
+    }
     let root = if root.is_absolute() {
         root.to_owned()
     } else {

@@ -59,6 +59,18 @@ with tempfile.TemporaryDirectory(prefix='nc-recording-') as directory:
         assert ok({'operation':'status','id':rid})['event_count']==count
         ok({'operation':'resume','id':rid});time.sleep(.3);xdo('click',1)
         wait_for(lambda:ok({'operation':'status','id':rid})['event_count']>count)
+        # A pause/resume pair can finish between observer ticks. Native events
+        # queued during that short pause must not leak into resumed evidence.
+        def scroll_count():
+            events=ok({'operation':'read','id':rid,'limit':200})['events']
+            return sum(e['evidence'].get('event',{}).get('kind')=='scroll' for e in events)
+        before_scroll=scroll_count()
+        for _ in range(12):
+            ok({'operation':'pause','id':rid})
+            xdo('click','--delay',0,5)
+            ok({'operation':'resume','id':rid})
+            time.sleep(.15)
+        assert scroll_count()==before_scroll, 'paused native mouse events leaked after rapid resume'
         # Switching to an excluded app must produce no content or identity for it.
         launch(['xterm','-T','EXCLUDED_SECRET_TITLE','-geometry','55x15+300+250','-e','/bin/cat'],env,'excluded')
         excluded=wait_for(lambda:xdo('search','--name','EXCLUDED_SECRET_TITLE').splitlines()[-1])
@@ -85,7 +97,7 @@ with tempfile.TemporaryDirectory(prefix='nc-recording-') as directory:
         ok({'operation':'delete','id':liveid});ok({'operation':'delete','id':rid})
         assert ok({'operation':'list'})['recordings']==[]
         assert not list((recordings/'data').glob('rec_*'))
-        (output/'result.json').write_text(json.dumps({'passed':True,'binary':binary,'journeys':['native_mouse_and_focus','no_typed_content','pause_fence','scope_exclusion','export_bounds','crash_recovery','deletion']},indent=2))
+        (output/'result.json').write_text(json.dumps({'passed':True,'binary':binary,'journeys':['native_mouse_and_focus','no_typed_content','pause_fence','rapid_pause_resume_queue_exclusion','scope_exclusion','export_bounds','crash_recovery','deletion']},indent=2))
         print('PASS: native capture, local controls, privacy, pause/resume, crash recovery and deletion')
     finally:
         (output/'control-trace.json').write_text(json.dumps(trace,indent=2))

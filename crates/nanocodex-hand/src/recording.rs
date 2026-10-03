@@ -278,6 +278,11 @@ pub struct Store {
 }
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+        // Unix modes below cannot establish Windows ACL privacy. Fail closed
+        // for direct store consumers as well as the native recording service.
+        if cfg!(windows) {
+            return Err("private recording storage unavailable on Windows".into());
+        }
         let root = path.as_ref().to_path_buf();
         private_dir(&root)?;
         let lock_path = root.join("store.lock");

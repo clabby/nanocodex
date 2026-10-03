@@ -42,8 +42,9 @@ example, substitute the observed window ID below:
 ```
 
 Every subsequent control uses the returned recording ID. Local IPC is a
-private Unix socket with owner checks, or a local Windows named pipe. It is
-independent of account authorization and does not expose a network listener.
+private Unix socket with owner checks. It is independent of account authorization and does not expose a network listener.
+Windows recording is unavailable until owner-private storage ACLs can be verified;
+recording requests fail before creating files. Native screen access remains available.
 
 ## Remote controls
 
@@ -106,8 +107,9 @@ and unobscured. Its optional AT-SPI helper is read-only and does not collect tex
 values. Wayland global observation is unavailable; an Xwayland connection is not
 accepted as proof of the compositor's foreground.
 
-macOS and Windows use native foreground and sensitive-input APIs. Mouse polling
-on these platforms can miss transitions between samples; unsupported scroll and
+The macOS and Windows observer adapters use native foreground and sensitive-input APIs.
+The Windows adapter is not exposed through recording while private storage is
+unavailable. Mouse polling on these platforms can miss transitions between samples; unsupported scroll and
 frame capabilities are reported explicitly. Runtime permissions are preserved,
 not bypassed. Check the returned capability and capture diagnostics on the actual
 Hand before relying on a workflow trace.
@@ -132,8 +134,8 @@ python3 scripts/tests/hand-recording-e2e.py /absolute/path/to/nanocodex2
 
 It requires Xvfb, openbox, xterm and xdotool and creates an isolated desktop. It
 exercises controls, actual native input, scope exclusions, pause fencing,
-export bounds, crash recovery and deletion. Platform-specific build checks do
-not establish native permission behavior or live capture on another OS.
+export bounds, rapid pause/resume input exclusion, crash recovery and deletion.
+Platform-specific build checks do not establish native permission behavior or live capture on another OS.
 
 A second synthetic journey checks real GTK accessibility roles, window-sized
 JPEG capture, password-field suppression and recovery:
