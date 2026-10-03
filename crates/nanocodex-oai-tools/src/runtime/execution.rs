@@ -421,18 +421,36 @@ impl ToolRuntimeControl {
     #[doc(hidden)]
     pub async fn cancel_turn(&self) {
         let turn_id = self.current_turn.load(Ordering::Acquire);
+        self.code_mode.terminate_turn(turn_id, None).await;
+    }
+
+    /// Cancels turn-owned producers and delivers their remaining nested-tool updates.
+    /// Updates already delivered to an execution or wait observer are not repeated.
+    /// Active execution/wait futures must be driven concurrently or dropped before
+    /// awaiting this method: draining waits for their exclusive observation lease.
+    pub async fn cancel_turn_with_updates(&self, observer: &mut dyn CodeModeObserver) {
+        let turn_id = self.current_turn.load(Ordering::Acquire);
         // Shell sessions are owned by this runtime once spawned, not by the
         // turn that launched or observed them. Full runtime cancellation below
         // remains their explicit cleanup boundary.
-        self.code_mode.terminate_turn(turn_id).await;
+        self.code_mode.terminate_turn(turn_id, Some(observer)).await;
     }
 
     #[doc(hidden)]
     pub async fn cancel(&self) {
+        let _code_mode_quiescence = self.code_mode.terminate_all(None).await;
+        self.sessions.terminate_all().await;
+    }
+
+    /// Cancels all producers, delivers remaining nested-tool updates, then drains shells.
+    /// Producer admission stays closed until shell cleanup finishes.
+    /// Active execution/wait futures must be driven concurrently or dropped before
+    /// awaiting this method: draining waits for their exclusive observation lease.
+    pub async fn cancel_with_updates(&self, observer: &mut dyn CodeModeObserver) {
         // Code Mode cells can still be inside a nested exec_command. Quiesce
         // and join every producer before draining the session-owned shells so
         // no late registration can escape the shutdown boundary.
-        let _code_mode_quiescence = self.code_mode.terminate_all().await;
+        let _code_mode_quiescence = self.code_mode.terminate_all(Some(observer)).await;
         self.sessions.terminate_all().await;
     }
 }
