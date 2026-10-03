@@ -18,7 +18,8 @@ use std::{
 #[derive(Clone, Copy)]
 enum Fault {
     Completed,
-    RejectedClient,
+    MalformedClient,
+    UnknownClient,
     Truncated,
     Cancelled,
 }
@@ -96,9 +97,12 @@ async fn fixture(
                 // the client receives the terminal event or interruption.
                 counter.fetch_add(1, Ordering::SeqCst);
                 match fault {
-                    Fault::RejectedClient => {
+                    Fault::MalformedClient | Fault::UnknownClient => {
                         let mut blocks = completed_blocks();
-                        blocks.push(json!({"type":"text","text":"large provider explanation ".repeat(4_000)}));
+                        if matches!(fault, Fault::MalformedClient) {
+                            blocks.push(json!({"type":"text","text":"large provider explanation ".repeat(4_000)}));
+                            blocks.push(json!({"type":"tool_use","id":"client-not-dispatched","name":"unregistered","input":{}}));
+                        }
                         blocks.push(json!({"type":"tool_use","id":"client-not-dispatched","name":"unregistered","input":{}}));
                         ([("content-type", "text/event-stream")], completed(blocks, "tool_use")).into_response()
                     }
@@ -258,8 +262,8 @@ async fn cancelled_server_stream_retains_unknown_outcome() {
 }
 
 #[tokio::test]
-async fn rejected_client_call_retains_prior_server_effect_as_recovery_data() {
-    let (client, log, effects, server) = fixture(Fault::RejectedClient).await;
+async fn malformed_client_call_retains_prior_server_effect_as_recovery_data() {
+    let (client, log, effects, server) = fixture(Fault::MalformedClient).await;
     let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
         .server_tool(ServerToolDefinition::code_execution_current())
         .build()
@@ -310,5 +314,44 @@ async fn rejected_client_call_retains_prior_server_effect_as_recovery_data() {
         "malformed mixed response must not be replayed as an unpaired assistant tool call"
     );
     assert_eq!(effects.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn unknown_client_call_pairs_error_without_repeating_server_effect() {
+    let (client, log, effects, server) = fixture(Fault::UnknownClient).await;
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .server_tool(ServerToolDefinition::code_execution_current())
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("perform one server effect")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "recovered"
+    );
+    let log = log.lock().unwrap().clone();
+    assert_eq!(log.len(), 2);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    assert_eq!(log[1]["container"], "recovery-container");
+    let assistant = log[1]["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(assistant[..3], completed_blocks());
+    assert_eq!(assistant[3]["id"], "client-not-dispatched");
+    let denial = &log[1]["messages"][2]["content"][0];
+    assert_eq!(denial["tool_use_id"], "client-not-dispatched");
+    assert_eq!(denial["is_error"], true);
+    assert!(
+        denial["content"]
+            .as_str()
+            .unwrap()
+            .contains("no handler was invoked")
+    );
+    eprintln!("server effects=1; continuation retains signed server blocks; denial={denial}");
+    agent.shutdown().await.unwrap();
     server.abort();
 }

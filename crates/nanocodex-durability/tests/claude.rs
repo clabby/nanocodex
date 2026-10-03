@@ -540,6 +540,128 @@ enum CompactionJourney {
     ExhaustionAfterRecovery,
 }
 
+async fn denied_tool_recovery(fail_at: Option<usize>, after_commit: bool) -> (usize, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let writes = Arc::new(AtomicUsize::new(0));
+    let response_write = Arc::new(AtomicUsize::new(usize::MAX));
+    let (client, requests, server) = server({
+        let writes = writes.clone();
+        let response_write = response_write.clone();
+        move |_, request| {
+            response_write.fetch_min(writes.load(Ordering::SeqCst), Ordering::SeqCst);
+            if request["messages"].as_array().unwrap().iter().any(|message| {
+                message["content"].as_array().unwrap().iter().any(|block| block["type"] == "tool_result")
+            }) {
+                sse(text("denial retained"), "end_turn", 10)
+            } else {
+                sse(vec![json!({"type":"tool_use","id":"denied-plan","name":"update_plan","input":{}})], "tool_use", 10)
+            }
+        }
+    }).await;
+    let request = || PromptRequest::new("use only admitted tools").request_id("denied-turn");
+    let state = DurableSession::open(
+        FaultStore {
+            inner: SqliteStore::open(&path).unwrap(),
+            writes: writes.clone(),
+            fail_at,
+            after_commit,
+            fail_when_armed: None,
+        },
+        "claude-synthetic",
+    )
+    .await
+    .unwrap();
+    let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+        .durability(state)
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+    let first = agent.prompt(request()).await.unwrap().result().await;
+    if fail_at.is_some() {
+        assert!(
+            first.is_err(),
+            "write {fail_at:?}/{after_commit} must interrupt the driver"
+        );
+    } else {
+        assert_eq!(first.unwrap().final_message(), "denial retained");
+    }
+    let total_writes = writes.load(Ordering::SeqCst);
+    let _ = agent.shutdown().await;
+    drop((agent, events));
+
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counter = effects.clone();
+    let (agent, events) = Nanocodex::builder(Claude::new(client, "changed-model"))
+        .tool(
+            ToolDefinition {
+                name: "update_plan".into(),
+                ..tool()
+            },
+            move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("newly attached effect".into()) }
+            },
+        )
+        .durability(reopen(&path).await)
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt(request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "denial retained"
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        0,
+        "reopen cannot authorize the denied call at {fail_at:?}/{after_commit}"
+    );
+    let log = requests.lock().unwrap().clone();
+    for request in &log {
+        assert!(request["tools"].as_array().is_none_or(Vec::is_empty));
+        assert_eq!(request["model"], "test");
+    }
+    let receipt = &log.last().unwrap()["messages"][2]["content"][0];
+    assert_eq!(receipt["tool_use_id"], "denied-plan");
+    assert_eq!(receipt["is_error"], true);
+    assert!(
+        receipt["content"]
+            .as_str()
+            .unwrap()
+            .contains("no handler was invoked")
+    );
+    eprintln!(
+        "denied tool recovery cut={fail_at:?}; after_commit={after_commit}; requests={}; effects=0; receipt={receipt}",
+        log.len()
+    );
+    agent.shutdown().await.unwrap();
+    drop((agent, events));
+    server.abort();
+    (response_write.load(Ordering::SeqCst), total_writes)
+}
+
+#[tokio::test]
+async fn denied_tool_stays_denied_across_every_recovery_write() {
+    let (response_write, total_writes) = denied_tool_recovery(None, false).await;
+    // The provider response starts after the original catalog is durable.
+    // Cover both sides of every write through denial receipt and terminal commit.
+    for after_commit in [false, true] {
+        for ordinal in response_write..total_writes {
+            denied_tool_recovery(Some(ordinal), after_commit).await;
+        }
+    }
+}
+
 async fn transaction_recovery(
     fail_at: Option<usize>,
     after_commit: bool,
