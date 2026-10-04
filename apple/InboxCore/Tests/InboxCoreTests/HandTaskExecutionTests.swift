@@ -37,6 +37,45 @@ final class HandTaskExecutionTests: XCTestCase {
         XCTAssertEqual(requests.values, ["/v1/agents/agent/turns", "/v1/agents/agent/turns/turn"])
     }
 
+    func testBackgroundTransitionKeepsGrantedWorkAndExpiresOnlyUngrantedObservation() async throws {
+        let requests = RequestLog()
+        let fixture = try HTTPFixture { request in
+            requests.append(request.path)
+            return .init(body: #"{"state":"accepted"}"#)
+        }
+        defer { fixture.close() }
+        let client = ManagedClient(credential: try AccountCredential(origin: fixture.origin, apiKey: fixtureKey),
+                                   configuration: fixture.configuration)
+        defer { client.close() }
+        let admitted = expectation(description: "both foreground turns admitted")
+        admitted.expectedFulfillmentCount = 2
+        let gate = CompletionGate()
+        let owner = HandTaskExecution(changed: {}, failed: { XCTFail($0) })
+        let granted = owner.start(id: "granted", title: "Phone work", runtimeProvided: true) { _ in
+            _ = try await client.command(.init(agentID: "agent", input: "use phone", kind: .followUp, requestID: "granted"))
+            admitted.fulfill()
+            return await gate.wait()
+        }
+        let ungranted = owner.start(id: "ungranted", title: "Cloud work") { _ in
+            _ = try await client.command(.init(agentID: "agent", input: "cloud task", kind: .followUp, requestID: "ungranted"))
+            admitted.fulfill()
+            try await Task.sleep(for: .seconds(60))
+            return "unexpected"
+        }
+        await fulfillment(of: [admitted], timeout: 3)
+        // The same transition runs when UIApplication's short lease expires.
+        owner.suspendWithoutRuntime()
+        XCTAssertTrue(owner.hasBackgroundRuntime, "A granted task must keep the Hand eligible after lock")
+        do { _ = try await ungranted.value; XCTFail("ungranted observation survived expiration") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        await gate.finish()
+        let result = try await granted.value
+        XCTAssertEqual(result, "late result")
+        XCTAssertFalse(owner.hasBackgroundRuntime, "Completion releases the last background owner")
+        XCTAssertEqual(requests.values, ["/v1/agents/agent/turns", "/v1/agents/agent/turns"],
+                       "Local suspension must not cancel or resubmit either cloud turn")
+    }
+
     func testLiveRemoteTurnSurvivesObservationExpiryAndClientClose() async throws {
         let env = ProcessInfo.processInfo.environment
         guard env["NANOCODEX_OBSERVER_LIVE"] == "1" else {

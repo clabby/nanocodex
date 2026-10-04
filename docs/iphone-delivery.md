@@ -147,3 +147,27 @@ installation. Its automatic `--deploy` remains disabled pending complete remote
 asset reconciliation. Follow the guide's manual publication prerequisites and
 verify the installed build on the intended phone; preserve the entire immutable
 feed history.
+
+## Hand work while the phone is locked
+
+With the device Hand enabled, sending or retrying a chat task while the app is
+active requests iOS 26 continued-processing time. A message steering a running
+turn observes that existing turn without submitting it again. The Hand remains
+connected while at least one task has granted runtime, including after screen
+lock. Progress comes from actual turn events, and completion releases runtime.
+
+If continued runtime is unavailable, the Hand uses the short background window
+provided by iOS; the system expiration handler ends that window. Expiration
+stops local observation and disconnects the Hand when no other runtime remains.
+It does not cancel the cloud turn. Opening the app reconnects the Hand. Idle
+phones have only system-scheduled refresh windows; this is not an always-on
+service, and force-quitting ends background execution. Tools needing foreground
+permission prompts or protected resources may still require unlocking.
+
+Physical-device verification: on iOS 26, enable the Hand and send a task that
+reads a workspace file after a delay exceeding 30 seconds. Lock the phone after
+sending; confirm system progress and a successful remote tool result. Repeat
+with overlapping tasks, finish one, and verify the second still has access.
+Finally let background time expire and reopen: the Hand should reconnect without
+resubmitting or cancelling the accepted cloud turn. Simulator and package tests
+do not establish a real device's runtime grant or locked-state availability.

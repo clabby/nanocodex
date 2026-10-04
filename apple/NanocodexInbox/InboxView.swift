@@ -864,7 +864,7 @@ struct InboxView: View {
                     Label(model.deviceHandStatus, systemImage: "hand.raised")
                         .accessibilityIdentifier("device-hand-status")
                     Text("Connects automatically to your account unless disabled. Agents can work with workspace files and query captured messages when capture is enabled.").font(.caption).foregroundStyle(.secondary)
-                    Text("Tasks you start can keep this Hand connected in the background on iOS 26 or later. iOS shows progress and lets you stop the task. When idle, this phone connects only during brief background windows or while Nanocodex is open. Force-quitting ends background work.").font(.caption).foregroundStyle(.secondary)
+                    Text("Chat tasks you start while Nanocodex is open can keep this Hand connected after you lock the phone on iOS 26 or later. iOS shows progress and can end background time. When idle, this phone connects only during brief background windows or while Nanocodex is open. Force-quitting ends background work.").font(.caption).foregroundStyle(.secondary)
                     if let error = model.handBackgroundError { Text(error).font(.caption).foregroundStyle(.secondary) }
                 }
                 NativeAppUpdateSection(updater: appUpdates)
