@@ -24,6 +24,7 @@ if (childCase) {
   for (const [name, description] of [
     ["semantics", "literal and bounded-dot searches preserve actual Just Bash semantics"],
     ["fallback", "unsupported flags and regexes preserve upstream errors and output"],
+    ["smartCase", "lowercase rg literals scan cooperatively and preserve Unicode smart-case"],
     ["oneMiB", "1 MiB bounded searches yield to timers and preserve results"],
     ["thirteenMiB", "13 MiB bounded searches yield to timers and recover with echo"],
     ["cancellation", "large search cancellation and deadlines leave the shell usable"],
@@ -166,6 +167,50 @@ async function semantics() {
   await compare(shells, "fgrep -o '.{0,4}MARK.{0,3}' hits.txt");
   for (const cmd of ["rg -o foo smart-case.txt", "rg -F -o foo smart-case.txt", "rg -o Foo smart-case.txt", "grep -o foo smart-case.txt", "grep -F -o foo smart-case.txt"]) await compare(shells, cmd);
   assert.deepEqual(shells.mismatches, [], "upstream semantic mismatches");
+}
+
+async function smartCase() {
+  const shells = await pair({
+    "case.txt": "foo FOO fOo Foo\nnone\n",
+    "unicode-case.txt": "foo FOO\nİi ıI kKK sSſ σΣς éÉ ßẞ 𐐀𐐨\nK\nſ\nς\nİ\n",
+    "report{5000}.txt": "alpha\n",
+  });
+  for (const pattern of ["foo", "Foo", "i", "k", "s", "σ", "é", "É", "ß", "𐐨"]) {
+    for (const flags of ["-on", "-Fon", "-n", "-vn", "-l", "-q"]) {
+      await compare(shells, `rg ${flags} ${quote(pattern)} case.txt unicode-case.txt`);
+    }
+  }
+  await compare(shells, "printf 'FOO foo\\n' | rg -on foo");
+  await compare(shells, "sed 's/alpha/delta/' 'report{5000}.txt'");
+  await compare(shells, "awk '/alpha/ {print}' 'report{5000}.txt'");
+  // One long line crosses scanning windows; preserve original matched casing.
+  const text = "x".repeat(65534) + "fOo" + "x".repeat(1024 * 1024) + "FOO\n";
+  await shells.runtime.filesystem.writeFile("large-case.txt", text);
+  await shells.baseline.fs.writeFile("/workspace/large-case.txt", text);
+  trace({ fixture: "large-case.txt", bytes: text.length, generation: "x^65534 + fOo + x^1048576 + FOO + newline" });
+  for (const cmd of ["rg -on foo large-case.txt", "rg -Fon foo large-case.txt", "rg -on '.{0,2}foo.{0,2}' large-case.txt", "rg -on Foo large-case.txt", "rg -o missing large-case.txt"]) {
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 0);
+    try { await compare(shells, cmd); } finally { clearInterval(timer); }
+    trace({ cmd, timerTicks: ticks });
+    assert.ok(ticks > 1, "large literal matching must yield repeatedly");
+  }
+  assert.deepEqual(shells.mismatches, [], "smart-case and stream filename mismatches");
+  // Unicode still uses the upstream matcher and its conservative admission.
+  // Do not silently relax that budget merely to accelerate ASCII literals.
+  await shells.runtime.filesystem.writeFile("large-unicode.txt", text + "İ\n");
+  const refused = publicResult(await shells.runtime.tool.handler({ cmd: "rg -o foo large-unicode.txt" }, context()));
+  trace({ cmd: "rg -o foo large-unicode.txt", observed: refused, expected: "Unicode fallback retains admission" });
+  assert.equal(refused.exit_code, 126);
+  assert.match(refused.output, /admission/);
+  const cancellation = new AbortController();
+  const running = shells.runtime.tool.handler({ cmd: "rg -o foo large-case.txt" }, context(cancellation.signal));
+  const timer = setTimeout(() => cancellation.abort(new Error("cancel ASCII scan")), 1);
+  const cancelled = await running;
+  clearTimeout(timer);
+  trace({ cmd: "rg -o foo large-case.txt", cancelled });
+  assert.equal(cancelled.exit_code, 124);
+  await recovery(shells.runtime);
 }
 
 async function fallback() {
@@ -526,6 +571,6 @@ function memoryWorkspace() {
 
 // Hoisted via a function rather than a const so direct child execution works.
 function getJourneys() {
-  return { semantics, fallback, oneMiB: () => largeScan(1024 * 1024),
+  return { semantics, fallback, smartCase, oneMiB: () => largeScan(1024 * 1024),
     thirteenMiB: () => largeScan(13 * 1024 * 1024), cancellation, admission, hostBoundary, publicFixture, sourceBudget, fatalAdmission, streamRegex, streamSemantics };
 }

@@ -22,14 +22,16 @@ export function createSearchCommands({ Bash }) {
           if (path === "-") continue;
           try { if ((await ctx.fs.stat(ctx.fs.resolvePath(ctx.cwd, path))).isDirectory) directoryInput = true; } catch {}
         }
-        // Upstream rg has smart-case defaults. Unicode folding can change
-        // offsets; delegate lowercase cased literals rather than approximate it.
-        const smartCase = name === "rg" && template && template.literal.toLowerCase() === template.literal
-          && template.literal.toUpperCase() !== template.literal;
-        if (template && !smartCase && !directoryInput && (parsed.files.length > 0 || ctx.stdin.length > 0 || name !== "rg")) {
-          return await search(name, parsed, template, ctx);
+        const fallback = () => boundedCommand(command, name, args, ctx, { paths: patternFilePaths(args, ctx) });
+        // Upstream smart-case checks ASCII capitals in the original pattern.
+        // Fold ASCII literals cooperatively, but leave Unicode case folding and
+        // upstream's Unicode prefilter semantics with the original command.
+        const smartCase = name === "rg" && template && !/[A-Z]/.test(parsed.pattern);
+        const asciiCase = smartCase && /^[\x00-\x7f]*$/.test(template.literal);
+        if (template && (!smartCase || asciiCase) && !directoryInput && (parsed.files.length > 0 || ctx.stdin.length > 0 || name !== "rg")) {
+          return await search(name, parsed, template, ctx, asciiCase ? fallback : undefined);
         }
-        return await boundedCommand(command, name, args, ctx, { paths: patternFilePaths(args, ctx) });
+        return await fallback();
       } catch (error) {
         if (error?.fatalSearchAdmission) throw error;
         if (error?.shellLimit) return refusal(ctx, name, error.message.replace(`${name}: `, ""));
@@ -69,7 +71,10 @@ async function boundedCommand(command, name, args, ctx, plan) {
   if (sourceBytes > 8192) return refusal(ctx, name, "synchronous regex/script compilation admission; use a native Hand");
   const policy = name === "sed" || name === "awk" ? programPolicy(name, programs, plan) : {};
   if (policy.uncertain) return refusal(ctx, name, "uncertain dynamic regex admission; use a native Hand");
-  const cost = policy.safe ? 1 : Math.max(fallbackCost(args), fallbackCost(programs));
+  // Stream programs are already isolated from operands and options above.
+  // A filename such as report{5000}.txt is not regex source.
+  const cost = policy.safe ? 1 : name === "sed" || name === "awk"
+    ? fallbackCost(programs) : Math.max(fallbackCost(args), fallbackCost(programs));
   if (cost >= FALLBACK_WORK) return refusal(ctx, name, "synchronous regex compilation/work admission; simplify the pattern or use a native Hand");
   const cap = Math.min(ctx.limits.maxInputBytes, Math.max(1, Math.floor((policy.safe ? ctx.limits.maxInputBytes : FALLBACK_WORK) / cost)));
   const reason = () => `synchronous regex input/work admission (${cap} bytes); use a native Hand`;
@@ -185,7 +190,7 @@ function parseTemplate(pattern, mode) {
   return { literal, before, after };
 }
 
-async function search(name, parsed, template, ctx) {
+async function search(name, parsed, template, ctx, unicodeFallback) {
   let files = parsed.files.length ? parsed.files : ["-"];
   const diagnostic = name === "fgrep" || name === "egrep" ? "grep" : name;
   if (name === "rg") {
@@ -223,6 +228,14 @@ async function search(name, parsed, template, ctx) {
       errors += `${diagnostic}: ${file}: No such file or directory\n`; continue;
     }
     if (name === "rg" && text.includes("\0")) continue;
+    // Do not lowercase an unbounded string or change Unicode match offsets.
+    // Returning the original command also preserves its whole-line prefilter.
+    if (unicodeFallback) {
+      for (let offset = 0; offset < text.length; offset += CHUNK) {
+        if (/[^\x00-\x7f]/.test(text.slice(offset, offset + CHUNK))) return await unicodeFallback();
+        await checkpoint(ctx, Math.ceil(CHUNK / 64));
+      }
+    }
     let selected = 0, lineNumber = 0, position = 0, lastYield = 0;
     while (position < text.length) {
       // Finding a newline and literals in bounded windows keeps timers responsive
@@ -237,7 +250,7 @@ async function search(name, parsed, template, ctx) {
       }
       const line = text.slice(position, lineEnd);
       lineNumber++;
-      let first = await nextLiteral(line, template.literal, 0, ctx);
+      let first = await nextLiteral(line, template.literal, 0, ctx, line.length, !!unicodeFallback);
       const matches = first >= 0;
       if (matches !== parsed.invert) {
         selected++; any = true;
@@ -251,7 +264,7 @@ async function search(name, parsed, template, ctx) {
               const prefixEnd = forwards(line, start, template.before);
               let chosen = first;
               for (;;) {
-                const next = await nextLiteral(line, template.literal, chosen + 1, ctx, prefixEnd);
+                const next = await nextLiteral(line, template.literal, chosen + 1, ctx, prefixEnd, !!unicodeFallback);
                 if (next < 0 || next > prefixEnd) break;
                 chosen = next;
                 if ((chosen - lastYield) >= CHUNK) { await checkpoint(ctx); lastYield = chosen; }
@@ -259,7 +272,7 @@ async function search(name, parsed, template, ctx) {
               const end = forwards(line, chosen + template.literal.length, template.after);
               append(`${prefix}${line.slice(start, end)}\n`);
               from = end;
-              first = await nextLiteral(line, template.literal, from, ctx);
+              first = await nextLiteral(line, template.literal, from, ctx, line.length, !!unicodeFallback);
             }
           } else if (!parsed.only) append(`${prefix}${line}\n`);
         }
@@ -275,11 +288,12 @@ async function search(name, parsed, template, ctx) {
   return { stdout: output.join(""), stderr: errors, exitCode: errors ? 2 : any ? 0 : 1 };
 }
 
-async function nextLiteral(line, literal, from, ctx, maxStart = line.length) {
+async function nextLiteral(line, literal, from, ctx, maxStart = line.length, ignoreAsciiCase = false) {
   const boundary = Math.min(line.length, maxStart + literal.length);
   for (let offset = from; offset <= maxStart; offset += CHUNK) {
     const end = Math.min(boundary, offset + CHUNK + literal.length - 1);
-    const found = line.slice(offset, end).indexOf(literal);
+    const window = line.slice(offset, end);
+    const found = (ignoreAsciiCase ? window.toLowerCase() : window).indexOf(literal);
     if (found >= 0) return offset + found;
     if (end === boundary) return -1;
     await checkpoint(ctx, Math.ceil(CHUNK / 64));

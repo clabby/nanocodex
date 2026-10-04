@@ -15,6 +15,28 @@ test("ordinary sequence commands work with host-managed interpreter limits", asy
     Array.from({ length: 12 }, (_, index) => `tick${index + 1}\n`).join(""));
 });
 
+test("ordinary file commands preserve literal text through write, search, edit, and reopen", async (t) => {
+  const workspace = memoryWorkspace();
+  const runtime = await justBash({ filesystem: workspace });
+  const literal = "price=$42; substitution=$(touch unexpected); ticks=`touch unexpected-too`; path=C:\\notes";
+  const run = async (shell, cmd, expected, exit = 0) => {
+    const observed = await shell.tool.handler({ cmd }, context());
+    assert.equal(observed.exit_code, exit, observed.output);
+    assert.equal(observed.output, expected);
+    t.diagnostic(JSON.stringify({ cmd, expected, observed }));
+  };
+  await run(runtime, "mkdir -p notes\ncat > notes/example.txt <<'TEXT'\nheading\n" + literal + "\nstatus=old\nTEXT", "");
+  await run(runtime, "cat notes/example.txt", "heading\n" + literal + "\nstatus=old\n");
+  await run(runtime, "sed -n '2,3p' notes/example.txt", literal + "\nstatus=old\n");
+  await run(runtime, "rg --files notes", "notes/example.txt\n");
+  await run(runtime, "rg -n -F 'status=old' notes", "notes/example.txt:3:status=old\n");
+  await run(runtime, "sed -i 's/status=old/status=new/g' notes/example.txt", "");
+  const reopened = await justBash({ filesystem: workspace });
+  await run(reopened, "cat notes/example.txt", "heading\n" + literal + "\nstatus=new\n");
+  await run(reopened, "rg -n -F 'status=old' notes", "", 1);
+  await run(reopened, "rg --files", "notes/example.txt\n");
+});
+
 test("buffer compatibility preserves host overrides without disabling other resource ceilings", async () => {
   for (const executionLimits of [
     { maxOutputSize: 8 },

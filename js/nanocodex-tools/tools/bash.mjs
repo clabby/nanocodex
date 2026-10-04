@@ -214,7 +214,7 @@ export async function createJustBashRuntime(options) {
     ...(options.supportsParallelToolCalls === undefined
       ? {}
       : { supportsParallelToolCalls: options.supportsParallelToolCalls }),
-    description: "Runs a shell command, returning output or a session ID for ongoing interaction.",
+    description: "Run a one-shot Bash command in the persistent virtual workspace and return its output and exit code. Use cat or sed to read files, rg to search, and quoted heredocs to write multiline text. No native process, PTY, or process session.",
     parameters: EXEC_COMMAND_PARAMETERS,
     outputSchema: EXECUTION_OUTPUT_SCHEMA,
     handler(input, context) {
@@ -364,7 +364,17 @@ function defaultInstructions(descriptor) {
     ? `HTTP is available through the host-owned ${descriptor.network.mode} fetch boundary.`
     : "Network commands are unavailable.";
   return `You have an in-process Bash interpreter and a persistent virtual filesystem rooted at ${descriptor.cwd}.
-Use exec_command for shell work. When the user requests an explicit shell operation that maps directly to an
+Use exec_command with ordinary shell commands directly:
+- Read whole files with cat; read a line range with sed -n '20,80p' FILE; use head or tail for a short preview.
+- Find files with rg --files and search contents with rg -n 'PATTERN' PATH. Use rg -F for literal text.
+- Edit existing text with sed -i 's/old/new/g' FILE; use cp and mv for copies and renames.
+- Write multiline text with a quoted heredoc (cat > FILE <<'EOF', literal body, then EOF on its own line).
+  Choose a delimiter absent from the body. A quoted delimiter preserves dollar signs, backticks, and backslashes.
+- Use printf when formatted output or exact bytes without a trailing newline are needed. Do not build file
+  readers, line-by-line file writers, or decorative output separators out of printf/echo loops.
+Use these commands without a capability probe. bat is not bundled; use cat or sed here. An attached native
+Hand has its own installed commands; this command list applies only to the in-process workspace.
+When the user requests an explicit shell operation that maps directly to an
 available command, call exec_command immediately and once with the complete command. Do not inspect the runtime,
 account, or workspace, search for another tool, or split the operation into exploratory calls before trying it.
 For an ordinary clone request, use exactly gh repo clone OWNER/REPO DESTINATION or git clone URL DESTINATION.
