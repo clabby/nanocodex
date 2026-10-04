@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { claudeProvider } from "./test/claude-provider.fixture.mjs";
 import { SPOTIFY_SCOPES, SPOTIFY_LOOPBACK_CLIENT_ID } from "./src/connectors/music";
 import { gitProvider } from "../test-fixtures/git-provider.mjs";
@@ -70,6 +71,7 @@ export class ChatGptEgress {
 `;
 
 export default defineConfig({
+  resolve: { alias: { "@whiskeysockets/baileys": fileURLToPath(new URL("./src/whatsapp-generated/baileys.js", import.meta.url).href) } },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.broker.jsonc" },

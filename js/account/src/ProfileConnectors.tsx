@@ -1,3 +1,4 @@
+import { WhatsAppConnection } from "./WhatsAppConnection";
 import { useAccountQuery } from "./useAccountQuery";
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -566,6 +567,7 @@ export function ProfileConnectors({
         <>
           <AccountConnectionGrid>
             {children}
+            <WhatsAppConnection key={accountId} accountId={accountId} requiresLogin />
             {connectorDefinitions.map((definition) => (
               <AccountConnectionCard
                 action="Connect"
@@ -585,6 +587,7 @@ export function ProfileConnectors({
     return (
       <div className="profile-connectors connection-grid profile-connectors--locked">
         {children}
+        <WhatsAppConnection key={accountId} accountId={accountId} requiresLogin />
         {connectorDefinitions.map((definition) => <button
           className="connection-card connector-row"
           disabled
@@ -608,6 +611,7 @@ export function ProfileConnectors({
       <>
         <AccountConnectionGrid>
           {children}
+          <WhatsAppConnection key={accountId} accountId={accountId} />
           {connectors ? connectorDefinitions.map((definition) => {
             const view = connectorProviderView(connectors, definition);
             return <Fragment key={definition.provider}>
@@ -680,6 +684,7 @@ export function ProfileConnectors({
   return (
     <div className="profile-connectors connection-grid">
       {children}
+      <WhatsAppConnection key={accountId} accountId={accountId} />
       {result ? (
         <p className={`connector-result connector-result--${result.result}`} role="status">
           {connectorResultMessage(result)}

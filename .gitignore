@@ -82,3 +82,7 @@ __pycache__/
 
 # Materialized by third_party/codex-voice/patches/webrtc-sys/prepare.py
 third_party/codex-voice/vendor/
+
+# Deterministic Workers Baileys bundle and pinned upstream scalar WASM.
+js/egress/src/whatsapp-generated/
+js/egress/output/

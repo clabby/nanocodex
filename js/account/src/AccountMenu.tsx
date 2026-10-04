@@ -55,7 +55,7 @@ function AccountMenuContent({ inline }: { inline: boolean }) {
   const refreshSession = session.refresh;
   const accountId = session.account?.id;
   const accountPersistent = session.account?.persistent === true;
-  const [open, setOpen] = useState(() => inline || new URL(window.location.href).searchParams.has("connector_result"));
+  const [open, setOpen] = useState(() => inline || new URL(window.location.href).searchParams.has("connector_result") || new URL(window.location.href).searchParams.get("connect") === "whatsapp");
   const walletFunding = useWalletFunding(inline || open);
   const [keyOperationError, setKeyError] = useState<string | null>(null);
   const [keyOperation, setKeyOperation] = useState<string | null>(null);
