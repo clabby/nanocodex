@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { CrmError } from "./crm";
+import { crmSearchMatcher, crmExpandedSearch } from "./crm-search";
 
 export type CrmGraphOperation = "search" | "get" | "save" | "delete" | "links" | "link_save" | "link_delete" | "neighbors" | "path" | "timeline";
 type Input = Record<string, unknown>;
@@ -128,8 +129,28 @@ export async function crmGraphRequest(db:D1Database,owner:string,operation:CrmGr
    const values:(string|number)[]=[owner],where=["owner_id=?"];
    if(q!==null){where.push("(instr(lower(text),lower(?))>0 OR instr(lower(metadata),lower(?))>0)");values.push(q,q);}
    if(c){where.push("id>?");values.push(id(c.id));}
-   const rows=(await session.prepare(`SELECT id,text,metadata,created_at,updated_at FROM crm_nodes WHERE ${where.join(" AND ")} ORDER BY id LIMIT ?`).bind(...values,limit+1).all<Row>()).results;
-   const page=rows.slice(0,limit);return {nodes:page.map(node),next_cursor:rows.length>limit?encode(scope,{id:page.at(-1)!.id}):null};
+   if(q===null){
+    const rows=(await session.prepare(`SELECT id,text,metadata,created_at,updated_at FROM crm_nodes WHERE ${where.join(" AND ")} ORDER BY id LIMIT ?`).bind(...values,limit+1).all<Row>()).results;
+    const page=rows.slice(0,limit);return {nodes:page.map(node),next_cursor:rows.length>limit?encode(scope,{id:page.at(-1)!.id}):null};
+   }
+   type TextRow={id:string;text:string};
+   const exact=(await session.prepare(`SELECT id,text FROM crm_nodes WHERE ${where.join(" AND ")} ORDER BY id LIMIT ?`).bind(...values,limit+1).all<TextRow>()).results;
+   const matches=crmSearchMatcher(q),boundary=c?id(c.id):null;
+   // Expand source-managed record names only. Freeform text and metadata keep
+   // their SQL search; reading every graph document would penalize large graphs.
+   const rows=await crmExpandedSearch({exact,size:limit,batchSize:1000,matches:(row:TextRow)=>matches(row.text),compare:(a,b)=>compareIds(a.id,b.id),
+    read:async(after,through,count)=>{
+     const conditions=["r.owner_id=?"],bindings:(string|number)[]=[owner],afterId=after?.id??boundary;
+     if(afterId!==null){conditions.push("g.id>?");bindings.push(afterId);}
+     if(through){conditions.push("g.id<=?");bindings.push(through.id);}
+     // Keep records outermost: g.id is derived from r.id, so reversing the
+     // join would scan every record for each graph document.
+     return (await session.prepare(`SELECT g.id,r.name AS text FROM crm_records r CROSS JOIN crm_nodes g ON g.owner_id=r.owner_id AND g.id='legacy:crm_records:'||json_array(r.id) WHERE ${conditions.join(" AND ")} ORDER BY g.id LIMIT ?`).bind(...bindings,count).all<TextRow>()).results;
+    },
+   });
+   const page=rows.slice(0,limit);
+   const nodes=page.length?(await session.prepare("SELECT id,text,metadata,created_at,updated_at FROM crm_nodes WHERE owner_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY id").bind(owner,JSON.stringify(page.map(row=>row.id))).all<Row>()).results:[];
+   return {nodes:nodes.map(node),next_cursor:rows.length>limit?encode(scope,{id:page.at(-1)!.id}):null};
   }
   if(operation==="links") {
    const key=id(args.id);await read(key);const limit=integer(args.limit,50,100),scope=cursorScope(owner,operation,[key]),c=decode(args.cursor,scope);

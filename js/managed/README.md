@@ -861,6 +861,33 @@ production proxy/router/storage run intact.
 `NANOCODEX_CRM` is a `D1Database` owned by this Worker. CRM records belong to
 persistent private accounts; sessions use the account identity to reach the same
 records. Multiplayer agents and Connect grants do not receive CRM access.
+CRM record names are searchable with Greek or Latin spelling, independent of
+case, tonos, dialytika, or composed/decomposed accents. In a synthetic example, `Giannis`,
+`Yiannis`, and `Chalkidis` find `Γιάννης Χαλκίδης`; `xalkidis` and
+`khalkidis` are also accepted. This is query-time normalization: saved names,
+identities, and source evidence are unchanged. The online CRM screen uses the
+same `/v1/crm` search as `crm_search`; it needs only a managed Worker rollout,
+with no schema migration, backfill, or client release. Offline client filtering
+is unchanged.
+
+`crm_graph` also expands names on source-managed record nodes. Freeform graph
+text/metadata and other record fields retain their existing literal substring
+search. `%`, `_`, `*`, `?`, brackets, and backslashes remain literal in all queries.
+Normalization is intended for common Greek names, not arbitrary phonetic or typo
+matching. Exact SQL matches and normalized name matches are deduplicated before
+pagination, retaining account/filter-scoped cursors. Name expansion reads narrow
+ID/name candidates in batches of 1,000; existing exact-result lookahead bounds
+that scan when possible. A missing query still scans the account's record names,
+so large-account latency should be checked before rollout. It never scans graph
+documents or aggregates notes into a database string.
+
+Run `pnpm --filter nanocodex-managed-service run test:crm-search` after building
+the managed runtime prerequisites to exercise authenticated HTTP, managed tools,
+D1, pagination, updates, account isolation, and a 2,000-record/10,000-node fixture.
+Each run writes its request/event transcript, timings, and runtime log under
+`output/crm-greek-search/`. A live authorized smoke test remains required before
+production rollout.
+
 The agent tools are `crm_search`, `crm_get`, `crm_save`, `crm_save_note`,
 `crm_delete`, and `crm_delete_note`. They save people and companies, link people
 to companies, and retain dated notes with optional source URLs. Search/list and

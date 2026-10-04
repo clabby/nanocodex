@@ -1,3 +1,5 @@
+import { crmSearchMatcher, crmExpandedSearch } from "./crm-search";
+
 /** Account-private CRM persistence. The caller supplies the authenticated owner
  * and a stable, host-generated create ID for retrying the same invocation. */
 export type CrmOperation = "search" | "get" | "save" | "delete" | "save_note" | "delete_note";
@@ -145,6 +147,7 @@ export async function crmRequest(db: D1Database, ownerId: string, operation: Crm
         if (filterKind) { conditions.push("r.kind = ?"); values.push(filterKind); }
         if (tag) { conditions.push("EXISTS (SELECT 1 FROM json_each(r.tags) WHERE value = ?)"); values.push(tag); }
         if (companyId) { conditions.push(`coalesce(r.company_id,${sourcedCompanyId}) = ?`); values.push(companyId); }
+        const nameConditions = [...conditions], nameValues = [...values];
         if (q) {
           // instr treats %, _ and backslashes literally; no LIKE metacharacters.
           conditions.push(`(instr(lower(r.name), lower(?)) > 0 OR instr(lower(coalesce(r.email,'')), lower(?)) > 0
@@ -168,9 +171,37 @@ export async function crmRequest(db: D1Database, ownerId: string, operation: Crm
           values.push(q, q, q, q, q, q, ownerId, q, q, ownerId, q, q, q, q, q, q, q, q, q, q, q, q);
         }
         if (cursor) { conditions.push("(r.created_at > ? OR (r.created_at = ? AND r.id > ?))"); values.push(cursor.at, cursor.at, cursor.id); }
-        const result = await session.prepare(`SELECT ${effectiveColumns} ${effectiveJoin} WHERE ${conditions.join(" AND ")} ORDER BY r.created_at, r.id LIMIT ?`).bind(...values, size + 1).all<EffectiveRecordRow>();
-        const resultPage = page(result.results, size, queryScope);
-        return { records: resultPage.items.map(record), next_cursor: resultPage.next_cursor };
+        if (!q) {
+          const result = await session.prepare(`SELECT ${effectiveColumns} ${effectiveJoin} WHERE ${conditions.join(" AND ")} ORDER BY r.created_at, r.id LIMIT ?`).bind(...values, size + 1).all<EffectiveRecordRow>();
+          const resultPage = page(result.results, size, queryScope);
+          return { records: resultPage.items.map(record), next_cursor: resultPage.next_cursor };
+        }
+        type NameRow = { id: string; name: string; created_at: number };
+        const exact = (await session.prepare(`SELECT r.id,r.name,r.created_at ${effectiveJoin}
+          WHERE ${conditions.join(" AND ")} ORDER BY r.created_at,r.id LIMIT ?`).bind(...values, size + 1).all<NameRow>()).results;
+        const matches = crmSearchMatcher(q);
+        const rows = await crmExpandedSearch({ exact, size, batchSize: 1000, matches: (row: NameRow) => matches(row.name),
+          compare: (a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+          read: async (after, through, count) => {
+            const where = [...nameConditions], bindings = [...nameValues];
+            const boundary = after ?? (cursor ? { created_at: cursor.at, id: cursor.id } : undefined);
+            if (boundary) {
+              where.push("(r.created_at > ? OR (r.created_at = ? AND r.id > ?))");
+              bindings.push(boundary.created_at, boundary.created_at, boundary.id);
+            }
+            if (through) {
+              where.push("(r.created_at < ? OR (r.created_at = ? AND r.id <= ?))");
+              bindings.push(through.created_at, through.created_at, through.id);
+            }
+            return (await session.prepare(`SELECT r.id,r.name,r.created_at ${effectiveJoin}
+              WHERE ${where.join(" AND ")} ORDER BY r.created_at,r.id LIMIT ?`).bind(...bindings, count).all<NameRow>()).results;
+          },
+        });
+        const resultPage = page(rows, size, queryScope);
+        const records = rows.length ? (await session.prepare(`SELECT ${effectiveColumns} ${effectiveJoin}
+          WHERE r.owner_id=? AND r.id IN (SELECT value FROM json_each(?)) ORDER BY r.created_at,r.id`)
+          .bind(ownerId, JSON.stringify(resultPage.items.map(row => row.id))).all<EffectiveRecordRow>()).results : [];
+        return { records: records.map(record), next_cursor: resultPage.next_cursor };
       }
       case "get": {
         const args = object(input, ["id", "notes_limit", "notes_cursor", "timeline_limit", "timeline_cursor"]);

@@ -32,7 +32,7 @@ export function crmTools(options: {
   };
   const createId = (context: ToolContext, operation: string) => createHash("sha256").update(JSON.stringify([context.sessionId, context.callId, operation])).digest("hex");
   const definitions: { operation: CrmOperation; description: string; required: string[]; properties: Record<string, unknown> }[] = [
-    { operation: "search", description: "Search or list saved people and companies, including their notes and sourced research. q is a literal substring; kind, tag, and company_id filter results. Results persist across conversations. Returns bounded pages and next_cursor.", required: [], properties: {
+    { operation: "search", description: "Search or list saved people and companies, including their notes and sourced research. q matches literal substrings; names also ignore case/diacritics and accept Greek or Latin spellings; kind, tag, and company_id filter results. Results persist across conversations. Returns bounded pages and next_cursor.", required: [], properties: {
       q: { type: "string", maxLength: 512 }, kind, tag: { type: "string", maxLength: 64 }, company_id: id, limit: page, cursor,
     } },
     { operation: "get", description: "Read a person or company, dated notes, and its chronological interaction timeline. Use notes_cursor and timeline_cursor to continue their independent pages.", required: ["id"], properties: { id, notes_limit: page, notes_cursor: cursor, timeline_limit: page, timeline_cursor: cursor } },
@@ -81,7 +81,7 @@ export function crmTools(options: {
   const graphId = { type: "string", minLength: 1, maxLength: 8192, description: "Opaque node ID returned by crm_graph or graph_node_id on a legacy CRM record." };
   tools.push({
     name: "crm_graph",
-    description: "Search, read, save or delete untyped text/metadata nodes; connect them with unlabeled undirected links; inspect neighbors, dated context, or a bounded connecting path. No entity or relationship type is required. Put relationship meaning in a small statement node linked to its participants. Existing source-managed nodes must be edited using their originating CRM tools. Links indicate connectivity, never an inferred personal relationship. Private to this account; unavailable through Connect grants.",
+    description: "Search, read, save or delete untyped text/metadata nodes. Source-managed record names also ignore case/diacritics and accept Greek/Latin spellings; connect them with unlabeled undirected links; inspect neighbors, dated context, or a bounded connecting path. No entity or relationship type is required. Put relationship meaning in a small statement node linked to its participants. Existing source-managed nodes must be edited using their originating CRM tools. Links indicate connectivity, never an inferred personal relationship. Private to this account; unavailable through Connect grants.",
     parameters: { type: "object", additionalProperties: false, required: ["operation"], properties: {
       operation: { type: "string", enum: ["search", "get", "save", "delete", "links", "link_save", "link_delete", "neighbors", "path", "timeline"] },
       id: graphId, from_id: graphId, to_id: graphId,
