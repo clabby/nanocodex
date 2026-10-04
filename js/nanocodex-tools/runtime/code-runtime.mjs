@@ -116,7 +116,8 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       );
     } catch (error) {
       if (error?.code === "host_interrupted") throw error;
-      return encodeToolOutput(errorMessage(error), false, null);
+      return encodeToolOutput(errorMessage(error), false, error?.code === "CODE_EFFECT_UNKNOWN"
+        ? { error: errorMessage(error), code: error.code, outcome: "unknown" } : null);
     } finally {
       activeExecutions.delete(execution);
     }
@@ -126,6 +127,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     const { sessionId, callId, controller } = execution;
     const journal = extras.effectJournal;
     function interrupt(cause) {
+      if (cause?.code === "CODE_EFFECT_UNKNOWN") throw cause;
       const error = Object.assign(new Error("Application tool effect journal interrupted", { cause }),
         { code: "host_interrupted" });
       execution.interruption = error;
@@ -164,10 +166,10 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         }
         if (receipt.outputJsonRef === "structured_result") receipt.output = JSON.stringify(receipt.structured_result);
         if (receipt.structuredResultRef === "output") receipt.structured_result = receipt.output;
-      } catch (cause) { interrupt(cause); }
+      } catch (cause) { interrupt(effectUnknown(cause)); }
       return encodeToolOutput(receipt.output, receipt.success, receipt.structured_result, receipt.metadata);
     }
-    if (decision?.status !== "execute") interrupt(new Error("invalid direct effect admission"));
+    if (decision?.status !== "execute") interrupt(effectUnknown(new Error("invalid direct effect admission")));
     let result, receipt;
     try {
       controller.signal.throwIfAborted();
@@ -264,6 +266,15 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     let nextJournalCallId = 1;
     const journal = extras.effectJournal;
     let canonicalIdentity;
+    let cellContext;
+    function journalFailure(cause) {
+      const error = cause?.code === "CODE_EFFECT_UNKNOWN" ? cause
+        : Object.assign(new Error("Code Mode effect journal interrupted", { cause }), { code: "host_interrupted" });
+      if (error.code === "host_interrupted") execution.interruption = error;
+      else execution.recoveryFailure = error;
+      controller.abort(error);
+      throw error;
+    }
     function closePendingCalls() {
       // Guest completion still ends the cell immediately, as in Codex. Host
       // receipts outlive guest promises: every observed start needs a terminal
@@ -362,13 +373,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
           }
           catch (error) { interrupt(error); }
         }
-        function interrupt(cause) {
-          const error = Object.assign(new Error("Code Mode effect journal interrupted", { cause }),
-            { code: "host_interrupted" });
-          execution.interruption = error;
-          controller.abort(error);
-          throw error;
-        }
+        function interrupt(cause) { journalFailure(cause); }
         let decision;
         if (journal) {
           try { decision = await journal.begin(effectContext); }
@@ -397,7 +402,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
                 || (receipt.thrown && (receipt.success || !validEffectFailure(receipt.failure)))) {
                 throw new Error("invalid nested effect receipt");
               }
-            } catch (cause) { interrupt(cause); }
+            } catch (cause) { interrupt(effectUnknown(cause)); }
             if (receipt.outputJsonRef === "structured_result") receipt.output = JSON.stringify(receipt.structured_result);
             if (receipt.structuredResultRef === "output") receipt.structured_result = receipt.output;
             if (receipt.valueRef) receipt.value = receipt[receipt.valueRef];
@@ -408,7 +413,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
             if (!receipt.success) throw value;
             return value;
           }
-          if (decision?.status !== "execute") interrupt(new Error("invalid nested effect admission"));
+          if (decision?.status !== "execute") interrupt(effectUnknown(new Error("invalid nested effect admission")));
         }
         function retainedFailure(error) {
           try { return effectFailure(error); }
@@ -565,6 +570,23 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     }
 
     try {
+      if (journal?.beginCell || journal?.commitStore) {
+        try {
+          if (!journal.beginCell || !journal.commitStore) throw effectUnknown(new Error("incomplete durable cell store protocol"));
+          canonicalIdentity ??= Promise.resolve(extras.effectIdentity?.(sessionId, parentCallId, turnId, controller.signal) ?? {});
+          cellContext = { ...await canonicalIdentity, sessionId, parentCallId, callId: parentCallId,
+            name: "code-cell", source, input: null, ...(turnId == null ? {} : { turnId }) };
+          const entries = await journal.beginCell(cellContext);
+          let snapshot;
+          try {
+            snapshot = boundedEffectSnapshot(entries, "cell starting store");
+            if (!Array.isArray(snapshot) || snapshot.some(entry => !Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string")
+              || new Set(snapshot.map(entry => entry[0])).size !== snapshot.length) throw new Error("invalid cell store snapshot");
+          } catch (cause) { throw effectUnknown(cause); }
+          stored.clear();
+          for (const [key, value] of snapshot) stored.set(key, value);
+        } catch (cause) { journalFailure(cause); }
+      }
       try {
         await abortableEvaluation((async () => {
           try {
@@ -616,16 +638,31 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     } finally {
       closePendingCalls();
       finished = true;
-      if (!controller.signal.aborted) {
-        // Failed scripts are completed results too. Merge only the write set;
-        // concurrent cells must not replace each other's unrelated writes.
-        for (const [key, value] of storedWrites) sessionStore.set(key, value);
-        if (cell) cell.finished = true;
-      }
+      const commitWrites = !controller.signal.aborted;
+      // End the isolate lifetime before asynchronous durability acknowledgement:
+      // timers/detached continuations cannot mutate an already captured delta.
       controller.abort(new Error(CANCELLATION_MESSAGE));
       for (const timer of timers.values()) clearTimeout(timer);
-      admission.release();
-      activeExecutions.delete(execution);
+      try {
+        if (commitWrites) {
+          // Failed scripts are completed results too. The durable adapter merges
+          // a delta once, never replacing newer writes on a completed-cell replay.
+          if (cellContext) {
+            try { await journal.commitStore(cellContext, boundedEffectSnapshot([...storedWrites], "cell store writes")); }
+            catch (cause) { journalFailure(cause); }
+          }
+          for (const [key, value] of storedWrites) sessionStore.set(key, value);
+          if (cell) cell.finished = true;
+        }
+      } catch (error) {
+        if (error?.code !== "CODE_EFFECT_UNKNOWN") throw error;
+        return JSON.stringify({ output: `Script failed\nOutput:\n${errorMessage(error)}`, success: false, nested_calls: nestedCalls });
+      } finally {
+        controller.abort(new Error(CANCELLATION_MESSAGE));
+        for (const timer of timers.values()) clearTimeout(timer);
+        admission.release();
+        activeExecutions.delete(execution);
+      }
     }
   }
 
@@ -1194,6 +1231,11 @@ function boundedEffectSnapshot(value, label) {
     }
     return JSON.parse(encoded);
   } catch (cause) {
-    throw new TypeError(`${label} must be JSON-serializable within the 8 MiB receipt limit; execution outcome unknown`, { cause });
+    throw effectUnknown(new TypeError(`${label} must be JSON-serializable within the 8 MiB receipt limit; execution outcome unknown`, { cause }));
   }
+}
+
+function effectUnknown(cause) {
+  return Object.assign(new Error(`Code Mode recovery failed: ${errorMessage(cause)}; execution outcome unknown`, { cause }),
+    { code: "CODE_EFFECT_UNKNOWN", outcome: "unknown" });
 }

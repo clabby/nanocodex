@@ -592,3 +592,30 @@ test("parallel nested calls coalesce asynchronous identity admission before disp
     assert.deepEqual(contexts.map(context => [context.operationId, context.modelCallIndex, context.callId]), [["parallel-op", 7, "outer/code-1"], ["parallel-op", 7, "outer/code-2"]]);
   } finally { runtime.reset(); }
 });
+
+test("cell completion stops guest timers before a delayed durable store acknowledgement", async () => {
+  const committing = deferred();
+  const release = deferred();
+  const committed = [];
+  const notifications = [];
+  const runtime = createCodeRuntime({}, { effectJournal: {
+    async begin() { throw new Error("no effects expected"); },
+    async complete() { throw new Error("no effects expected"); },
+    async beginCell() { return committed; },
+    async commitStore(_context, writes) {
+      committing.resolve();
+      await release.promise;
+      committed.splice(0, committed.length, ...writes);
+    },
+  } });
+  const execution = runtime.executeCode('store("value", 1); setTimeout(() => { store("value", 2); notify("late guest callback"); }, 0);',
+    "delayed-store", "first", update => notifications.push(update));
+  await withDeadline(committing.promise, 1000, "store commit not reached");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  release.resolve();
+  assert.equal(JSON.parse(await execution).success, true);
+  assert.deepEqual(committed, [["value", 1]]);
+  assert.deepEqual(notifications, []);
+  const read = JSON.parse(await runtime.executeCode('text(load("value"));', "delayed-store", "read"));
+  assert.ok(JSON.stringify(read.output).includes('"text":"1"'));
+});

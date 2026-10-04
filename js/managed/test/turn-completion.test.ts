@@ -159,12 +159,12 @@ describe("materializeTurnResolution", () => {
     const error = Object.assign(new Error("Account hand discovery interrupted"), { code: "host_interrupted" });
     const turn = { result: async () => { throw error; } } as unknown as Turn;
     await expect(materializeTurnResolution("interrupted", turn)).resolves.toEqual({
-      kind: "retry", error: error.message, reopenAgent: true,
+      kind: "retry", error: "host_interrupted: runtime interrupted before durable settlement (causes: host_interrupted). Automatic recovery is bounded; original operation identity and receipts are retained.", reopenAgent: true, interrupted: true,
     });
     expect(classifyTurnFailure("interrupted", new Error("admission failed", { cause: error })))
-      .toEqual({ kind: "retry", error: error.message, reopenAgent: true });
+      .toEqual({ kind: "retry", error: "host_interrupted: runtime interrupted before durable settlement (causes: host_interrupted). Automatic recovery is bounded; original operation identity and receipts are retained.", reopenAgent: true, interrupted: true });
     expect(classifyTurnFailure("interrupted", new Error("transport failed", { cause: error })))
-      .toEqual({ kind: "retry", error: error.message, reopenAgent: true });
+      .toEqual({ kind: "retry", error: "host_interrupted: runtime interrupted before durable settlement (causes: host_interrupted). Automatic recovery is bounded; original operation identity and receipts are retained.", reopenAgent: true, interrupted: true });
     expect(classifyTurnFailure("committed", Object.assign(new Error("turn failed", { cause: error }), {
       code: "failed",
     }))).toMatchObject({ kind: "terminal", terminal: { type: "turn_failed" } });

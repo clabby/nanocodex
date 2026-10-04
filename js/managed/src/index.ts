@@ -8204,7 +8204,8 @@ export class DurableAgentSession extends DurableComputerObject {
     }
     row = latest;
     // Arm before asynchronous construction/admission. Abrupt loss skips catch.
-    // Live admissions coalesce above; only a fresh owner consumes this lease.
+    // Live admissions coalesce above. A fresh owner or caught host interruption
+    // consumes the lease until a new durable result proves forward progress.
     if (row.state !== "cancelling" && this.#recoverySafety.begin(row.id)) {
       if (row.may_have_inner_operation === 0) {
         return this.#commitManagedMessage(row.id, { type: "turn_failed", id: row.id,
@@ -11521,7 +11522,7 @@ export class DurableAgentSession extends DurableComputerObject {
       row?.state === "cancelling",
       resolution,
       source,
-    ));
+    ), undefined, resolution.kind === "retry" && resolution.interrupted === true);
   }
 
   #reconcilePendingOperation(id: string): void {
@@ -11561,7 +11562,7 @@ export class DurableAgentSession extends DurableComputerObject {
     return this.#commitManagedMessage(id, terminal);
   }
 
-  #commitManagedMessage(id: string, requested: ManagedTurnTransition, terminalEvent?: AgentEvent): ManagedTurnRow {
+  #commitManagedMessage(id: string, requested: ManagedTurnTransition, terminalEvent?: AgentEvent, interrupted = false): ManagedTurnRow {
     // Control admission can settle before the turn completion observer. Make
     // the exhausted/unknown outcome authoritative on both paths atomically.
     if (requested.type === "turn_cancelled" && this.#recoverySafety.stopped(id)) {
@@ -11569,7 +11570,10 @@ export class DurableAgentSession extends DurableComputerObject {
     }
     let nested: DurableEvent<StreamMessage> | undefined;
     const { committed, event } = this.ctx.storage.transactionSync(() => {
-      this.#recoverySafety.settle(id);
+      // Caught host interruptions leave the original operation unsettled, just
+      // like owner loss. Clearing this lease would admit an infinite poison loop.
+      // Explicit transient admission failures still release their lease.
+      if (!interrupted) this.#recoverySafety.settle(id);
       // Control commands have no model run to emit the backend terminal event.
       // Retain it atomically before the outer receipt, including on recovery.
       if (terminalEvent && !isTerminalState(this.#managedTurn(id)!.state)) {

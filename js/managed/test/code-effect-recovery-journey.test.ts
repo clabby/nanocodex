@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, it } from "vitest";
 import type { DurableAgentSession } from "../src/index";
-import type { AgentEvent } from "nanocodex";
+import type { AgentEvent, CodeEvaluatorEnvironment } from "nanocodex";
 import { createManagedCodeEffectJournal, ManagedRecoverySafety } from "../src/managed-recovery-safety";
 import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
 import { durabilityRevision } from "nanocodex/durability";
@@ -92,7 +92,7 @@ it("fences the exact legacy parent after >512 noise/archive deletion and retains
     const legacy = JSON.parse(await make().executeCode(source, "fixture-session", "owned-cell"));
     expect(legacy.success).toBe(false);
     expect(legacy.output).toContain("outcome unknown");
-    expect(legacy.nested_calls[0].call_id).toBe("owned-cell/code-1");
+    expect(legacy.nested_calls).toEqual([]);
     expect(writes).toBe(0);
     expect(ctx.storage.sql.exec("SELECT * FROM managed_code_effect_legacy_parents").toArray())
       .toEqual([{ session_id: "fixture-session", parent_call_id: JSON.stringify(["original", 1, "owned-cell"]), state_id: "fixture-root", step_key: "tool-1-owned-cell", scope_version: 2 }]);
@@ -100,7 +100,7 @@ it("fences the exact legacy parent after >512 noise/archive deletion and retains
     ctx.storage.sql.exec("DELETE FROM nanocodex_durable_states");
     const repeated = JSON.parse(await make().executeCode(source, "fixture-session", "owned-cell"));
     expect(repeated.output).toContain("outcome unknown");
-    expect(ctx.storage.sql.exec("SELECT state FROM managed_code_effects WHERE call_id='owned-cell/code-2'").one()).toEqual({ state: "pending" });
+    expect(ctx.storage.sql.exec("SELECT state FROM managed_code_effects WHERE call_id='owned-cell/code-2'").toArray()).toEqual([]);
     const nextOperation = JSON.parse(await make("next-operation").executeCode(source, "fixture-session", "owned-cell"));
     expect(nextOperation.success).toBe(true);
     const nextIndex = JSON.parse(await make("original", 2).executeCode(source, "fixture-session", "owned-cell"));
@@ -247,7 +247,7 @@ it("treats provider call ID reuse as fresh across original operations/model ordi
     const partialScope = createCodeRuntime(tools, {
       evaluate: managedCodeEvaluator(), effectJournal: createManagedCodeEffectJournal(ctx.storage), effectIdentity: () => ({ operationId: "original" }),
     });
-    await expect(partialScope.executeCode(firstSource, "fixture-session", "call0")).rejects.toThrow("journal interrupted");
+    expect(JSON.parse(await partialScope.executeCode(firstSource, "fixture-session", "call0")).output).toContain("outcome unknown");
     expect(writes).toBe(3);
     const direct = JSON.parse(await make("original", 3).executeTool("write", JSON.stringify({ value: "direct receipt" }), "fixture-session", "call0", "unknown", "projection-c"));
     const directReplay = JSON.parse(await make("original", 3).executeTool("write", JSON.stringify({ value: "direct receipt" }), "fixture-session", "call0", "unknown", "projection-d"));
@@ -366,6 +366,118 @@ it("replenishes recovery only for a new model ordinal's real receipt, not a repl
     expect(admissions).toEqual([false, false, false]);
     expect(ctx.storage.sql.exec("SELECT * FROM managed_recovery_call_indices").toArray()).toEqual([]);
     console.log("MODEL_ORDINAL_RECOVERY_PROGRESS_JOURNEY", JSON.stringify({ writes, replay, nextIndex, admissions }));
+    await ctx.storage.deleteAlarm();
+  });
+}, 30_000);
+
+it("pins a pending cell's starting store and merges completed writes exactly once across owner loss", async () => {
+  await runInDurableObject(sessions().getByName(crypto.randomUUID()), async (_instance, ctx) => {
+    let calls = 0;
+    const tools = { read: { handler: async (input: unknown) => { calls++; return input; } } };
+    const make = (journal = createManagedCodeEffectJournal(ctx.storage)) => createCodeRuntime(tools, {
+      evaluate: managedCodeEvaluator(), effectJournal: journal, effectIdentity: effectScope(),
+    });
+    const initial = make();
+    expect(JSON.parse(await initial.executeCode('store("seed", 41);', "store-session", "seed")).success).toBe(true);
+    const journal = createManagedCodeEffectJournal(ctx.storage);
+    let interrupted = false;
+    const source = 'text(await tools.read({value: load("seed")})); store("seed", load("seed") + 1); text(await tools.read({value: load("seed")}));';
+    const lost = make({ ...journal, async begin(context) {
+      if (context.callId.endsWith("/code-2") && !interrupted) { interrupted = true; throw new Error("fixture storage transport unavailable before intent"); }
+      return journal.begin(context);
+    } });
+    await expect(lost.executeCode(source, "store-session", "pending")).rejects.toMatchObject({ code: "host_interrupted" });
+    expect(calls).toBe(1);
+    const recovered = make();
+    // A different completed cell may advance shared state while the older cell
+    // still needs its own immutable starting state to replay its effect inputs.
+    expect(JSON.parse(await recovered.executeCode('store("other", "kept");', "store-session", "other")).success).toBe(true);
+    const result = JSON.parse(await recovered.executeCode(source, "store-session", "pending"));
+    expect(result.success).toBe(true);
+    expect(result.nested_calls.map((call: { structured_result: unknown }) => call.structured_result)).toEqual([{ value: 41 }, { value: 42 }]);
+    expect(calls).toBe(2);
+    expect(JSON.parse(await recovered.executeCode('store("seed", 99);', "store-session", "newer")).success).toBe(true);
+    const replay = JSON.parse(await make().executeCode(source, "store-session", "pending"));
+    expect(replay.success).toBe(true);
+    const latest = JSON.parse(await make().executeCode('text([load("seed"), load("other")]);', "store-session", "latest"));
+    expect(latest.output).toContainEqual({ type: "input_text", text: '[99,"kept"]' });
+    const isolated = JSON.parse(await make().executeCode('text(load("seed") === undefined);', "other-session", "latest"));
+    expect(isolated.output).toContainEqual({ type: "input_text", text: "true" });
+    expect(calls).toBe(2);
+    console.log("STORE_OWNER_REPLAY_JOURNEY", JSON.stringify({ calls, result, replay, latest, isolated }));
+    await ctx.storage.deleteAlarm();
+  });
+}, 30_000);
+
+it.each(["input-conflict", "invalid-receipt", "missing-store", "corrupt-store"])("settles %s as unknown without repeating effects or host interruption", async kind => {
+  await runInDurableObject(sessions().getByName(crypto.randomUUID()), async (_instance, ctx) => {
+    let calls = 0;
+    const tools = { write: { handler: async () => { calls++; return "accepted"; } } };
+    const make = () => createCodeRuntime(tools, { evaluate: managedCodeEvaluator(), effectJournal: createManagedCodeEffectJournal(ctx.storage), effectIdentity: effectScope() });
+    const source = 'text(await tools.write({ value: 1 }));';
+    expect(JSON.parse(await make().executeCode(source, "store-session", "same")).success).toBe(true);
+    if (kind === "invalid-receipt") ctx.storage.sql.exec("UPDATE managed_code_effect_receipt_chunks SET receipt_json='{}'");
+    if (kind === "missing-store") ctx.storage.sql.exec("DELETE FROM managed_code_cells");
+    if (kind === "corrupt-store") ctx.storage.sql.exec("UPDATE managed_code_store_chunks SET value_json='{broken'");
+    const result = JSON.parse(await make().executeCode(kind === "input-conflict" ? source.replace("value: 1", "value: 2") : source, "store-session", "same"));
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("outcome unknown");
+    expect(calls).toBe(1);
+    console.log("STORE_TERMINAL_UNKNOWN_JOURNEY", JSON.stringify({ kind, calls, result }));
+    await ctx.storage.deleteAlarm();
+  });
+}, 30_000);
+
+it("merges concurrent cell writes, retains failed-script writes, and rejects an oversized store without losing earlier state", async () => {
+  await runInDurableObject(sessions().getByName(crypto.randomUUID()), async (_instance, ctx) => {
+    let release!: () => void;
+    let entered!: () => void;
+    const starting = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const evaluate = managedCodeEvaluator();
+    // Delay one cell after its durable starting snapshot but before entering
+    // QuickJS. The shipped evaluator serializes guests; overlapping snapshot
+    // lifetimes still must merge their independent writes correctly.
+    const make = () => createCodeRuntime({}, { evaluate: async (source: string, environment: CodeEvaluatorEnvironment) => {
+      if (source === 'store("a", 1);') { entered(); await gate; }
+      return evaluate(source, environment);
+    }, effectJournal: createManagedCodeEffectJournal(ctx.storage), effectIdentity: effectScope() });
+    const runtime = make();
+    const a = runtime.executeCode('store("a", 1);', "concurrent", "a");
+    await starting;
+    const b = JSON.parse(await runtime.executeCode('store("b", 2);', "concurrent", "b"));
+    expect(b.success).toBe(true);
+    release();
+    expect(JSON.parse(await a).success).toBe(true);
+    const failed = JSON.parse(await runtime.executeCode('store("failed", 3); throw new Error("ordinary failure");', "concurrent", "failed"));
+    expect(failed.success).toBe(false);
+    const tooLarge = JSON.parse(await runtime.executeCode('store("large", "x".repeat(9 * 1024 * 1024));', "concurrent", "large"));
+    expect(tooLarge.success).toBe(false);
+    expect(tooLarge.output).toContain("outcome unknown");
+    const latest = JSON.parse(await make().executeCode('text([load("a"), load("b"), load("failed"), load("large") === undefined]);', "concurrent", "read"));
+    expect(latest.output).toContainEqual({ type: "input_text", text: '[1,2,3,true]' });
+    console.log("STORE_MERGE_AND_BOUNDS_JOURNEY", JSON.stringify({ failed, tooLarge, latest }));
+    await ctx.storage.deleteAlarm();
+  });
+}, 30_000);
+
+it.each(["unmigrated", "effect-journal-v2"])("fences %s legacy cells before missing store data can skip their original effects", async migration => {
+  await runInDurableObject(sessions().getByName(crypto.randomUUID()), async (_instance, ctx) => {
+    await seedLegacyHead(ctx.storage);
+    // Earlier deployed versions already recorded v2, before cell snapshots
+    // existed. The pending head may have no nested intent to reveal the loss.
+    if (migration === "effect-journal-v2") ctx.storage.sql.exec("INSERT INTO managed_code_effect_migration VALUES (1, 2)");
+    let calls = 0;
+    const runtime = createCodeRuntime({ write: { handler: async () => { calls++; return "accepted"; } } }, {
+      evaluate: managedCodeEvaluator(), effectJournal: createManagedCodeEffectJournal(ctx.storage), effectIdentity: effectScope(),
+    });
+    const result = JSON.parse(await runtime.executeCode('if (load("seed")) await tools.write({}); store("seed", 1);', "fixture-session", "owned-cell"));
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("outcome unknown");
+    expect(result.nested_calls).toEqual([]);
+    expect(calls).toBe(0);
+    expect(ctx.storage.sql.exec("SELECT * FROM managed_code_cells").toArray()).toEqual([]);
+    console.log("LEGACY_STORE_BRANCH_JOURNEY", JSON.stringify({ calls, result }));
     await ctx.storage.deleteAlarm();
   });
 }, 30_000);

@@ -8,7 +8,7 @@ export type TurnTerminal = Extract<ServerMessage, {
 
 export type TurnResolution =
   | Readonly<{ kind: "terminal"; terminal: TurnTerminal; reopenAgent: false }>
-  | Readonly<{ kind: "retry"; error: string; reopenAgent: boolean; blockedBy?: string }>;
+  | Readonly<{ kind: "retry"; error: string; reopenAgent: boolean; blockedBy?: string; interrupted?: true }>;
 
 export type ManagedTurnTransition = TurnTerminal | Extract<ServerMessage, {
   type: "turn_cancelling" | "turn_retryable";
@@ -110,7 +110,8 @@ export async function materializeTurnResolution(
 }
 
 export function classifyTurnFailure(id: string, error: unknown): TurnResolution {
-  const selected = selectFailure(errorTree(error));
+  const failures = errorTree(error);
+  const selected = selectFailure(failures);
   if (selected.code === "cancelled"
     || (selected.code === undefined && /\bturn was cancelled\b/i.test(selected.message))) {
     return {
@@ -120,12 +121,16 @@ export function classifyTurnFailure(id: string, error: unknown): TurnResolution 
     };
   }
   if (isRetryable(selected)) {
+    // Wrappers select the recovery action, but cannot erase an unsettled host
+    // interruption or expose its raw cause through a higher-priority message.
+    const interrupted = failures.some(failure => failure.code === "host_interrupted");
     return {
       kind: "retry",
-      error: selected.message,
+      error: interrupted ? interruptionDiagnostic(failures) : selected.message,
+      ...(interrupted ? { interrupted: true as const } : {}),
       ...(selected.blockedBy === undefined ? {} : { blockedBy: selected.blockedBy }),
       reopenAgent: selected.code === "reopen_required"
-        || selected.code === "host_interrupted"
+        || interrupted
         || /\bagent (?:has been |was |is )?(?:already )?disposed\b/i.test(selected.message),
     };
   }
@@ -137,6 +142,21 @@ export function classifyTurnFailure(id: string, error: unknown): TurnResolution 
 }
 
 type ClassifiedError = Readonly<{ code: string | undefined; message: string; blockedBy?: string }>;
+
+// Error messages/causes can contain tool arguments or upstream response bodies.
+// Expose only known classifications at this recovery boundary, never raw causes.
+function interruptionDiagnostic(failures: readonly ClassifiedError[]): string {
+  const codes = new Set(["host_interrupted", "CODE_EFFECT_UNKNOWN", "code_effect_identity_conflict",
+    "reopen_required", "retryable", "ECONNRESET", "ETIMEDOUT", "ERR_WORKER_OUT_OF_MEMORY"]);
+  const causes = [...new Set(failures.flatMap(failure => {
+    if (failure.code && codes.has(failure.code)) return [failure.code];
+    if (/effect identity\/input conflict/i.test(failure.message)) return ["code_effect_identity_conflict"];
+    if (/journal owner was fenced/i.test(failure.message)) return ["code_effect_owner_fenced"];
+    if (/effect receipt is incomplete/i.test(failure.message)) return ["code_effect_receipt_incomplete"];
+    return [];
+  }))];
+  return `host_interrupted: runtime interrupted before durable settlement (causes: ${causes.join(", ")}). Automatic recovery is bounded; original operation identity and receipts are retained.`;
+}
 
 function errorTree(root: unknown): ClassifiedError[] {
   const failures: ClassifiedError[] = [];

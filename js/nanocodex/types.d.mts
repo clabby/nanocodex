@@ -570,6 +570,17 @@ export type CodeEffectReceipt = Readonly<{
  * A recovered intent without an outcome is unknown, never permission to execute again.
  * Keys must scope [sessionId, operationId ?? "", modelCallIndex ?? 0, parentCallId, callId]; validate identity/input and fence concurrent runtime generations. */
 export type CodeEffectJournal = Readonly<{
+  /** Optional durable cell store protocol; provide both methods together.
+   * Context uses name="code-cell", callId=parentCallId, input=null. beginCell
+   * pins and returns immutable starting entries before evaluation. commitStore
+   * merges only writes, once per canonical cell identity (including failed scripts).
+   * Replaying an older committed cell must never overwrite newer session writes.
+   * Entries are JSON snapshots, bounded to 8 MiB/32,768 nodes. Missing legacy
+   * state must fail closed if prior effects make the starting state unprovable.
+   * Deterministic conflicts/corruption throw code="CODE_EFFECT_UNKNOWN";
+   * unclassified transport/storage exceptions remain retryable interruptions. */
+  beginCell?(context: CodeEffectContext): Promise<readonly (readonly [string, unknown])[]>;
+  commitStore?(context: CodeEffectContext, writes: readonly (readonly [string, unknown])[]): Promise<void>;
   begin(context: CodeEffectContext): Promise<
     | { status: "execute" }
     | { status: "replay"; receipt: CodeEffectReceipt }

@@ -3,8 +3,8 @@ import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare
 import { createHash } from "node:crypto";
 import { inputChunks } from "./managed-turn-input";
 
-// Caught transient retries aren't owner loss. This independent budget counts
-// admissions whose dispatch lease wasn't settled and ignores projected run IDs.
+// Ordinary transient retries aren't owner loss. Abrupt loss and caught host
+// interruptions retain this lease until durable progress; projected IDs do not.
 const MAX_MANAGED_ABRUPT_ATTEMPTS = 3;
 export const MANAGED_RECOVERY_UNKNOWN = "MANAGED_RECOVERY_EXHAUSTED: repeated runtime loss while recovering the same unfinished operation; execution outcome unknown. Automatic replay was stopped; original operation identity and receipts were retained. Inspect retained tool receipts or external state before retrying any effect with its original operation identity.";
 
@@ -120,6 +120,16 @@ export function createManagedCodeEffectJournal(storage: DurableObjectStorage): C
     effect_key TEXT NOT NULL, chunk_index INTEGER NOT NULL, receipt_json TEXT NOT NULL,
     PRIMARY KEY (effect_key, chunk_index)
   )`);
+  storage.sql.exec(`CREATE TABLE IF NOT EXISTS managed_code_cells (
+    cell_key TEXT PRIMARY KEY, source_hash TEXT NOT NULL, writes_hash TEXT, session_id TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS managed_code_store_blobs (
+    blob_key TEXT PRIMARY KEY, chunks INTEGER NOT NULL, bytes INTEGER NOT NULL, hash TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS managed_code_store_chunks (
+    blob_key TEXT NOT NULL, chunk_index INTEGER NOT NULL, value_json TEXT NOT NULL,
+    PRIMARY KEY (blob_key, chunk_index)
+  )`);
   // Preserve older live schemas without assigning their unscoped receipts to
   // a guessed operation. Old three-tuple keys remain conservative unknowns.
   addScopeColumns(storage, "managed_code_effects", [
@@ -143,14 +153,14 @@ export function createManagedCodeEffectJournal(storage: DurableObjectStorage): C
   const identity = (context: CodeEffectContext) => {
     if (![context.sessionId, context.parentCallId, context.callId, context.name, context.source]
       .every(value => typeof value === "string" && value.length > 0)) {
-      throw new Error("Code Mode effect journal requires original call identity");
+      throw codeEffectUnknown("Code Mode effect journal requires original call identity");
     }
     const operation = context.operationId ?? "";
     const index = context.modelCallIndex ?? 0;
     if ((context.operationId === undefined) !== (context.modelCallIndex === undefined)
       || (context.operationId !== undefined && (typeof operation !== "string" || !operation))
       || (context.modelCallIndex !== undefined && (!Number.isSafeInteger(index) || index < 1))) {
-      throw new Error("Effect journal requires a stable operation/model identity; outcome unknown");
+      throw codeEffectUnknown("Effect journal requires a stable operation/model identity");
     }
     const key = JSON.stringify([context.sessionId, operation, index, context.parentCallId, context.callId]);
     const oldKey = JSON.stringify([context.sessionId, context.parentCallId, context.callId]);
@@ -162,30 +172,7 @@ export function createManagedCodeEffectJournal(storage: DurableObjectStorage): C
   const read = (key: string) => storage.sql.exec<Effect>(
     "SELECT input_hash, state, generation, receipt_chunks, scope_version FROM managed_code_effects WHERE effect_key = ?", key,
   ).toArray()[0];
-  return {
-    async begin(context) {
-      const { key, hash, oldKey, parentScope, operation, index } = identity(context);
-      const result = storage.transactionSync(() => {
-        assertOwner();
-        const existing = read(key);
-        if (existing) {
-          if (existing.scope_version !== 2) return { status: "unknown" as const };
-          if (existing.input_hash !== hash) throw new Error("Code Mode effect identity/input conflict; outcome unknown");
-          if (existing.state !== "completed") return { status: "unknown" as const };
-          const chunks = storage.sql.exec<{ chunk_index: number; receipt_json: string }>(
-            "SELECT chunk_index, receipt_json FROM managed_code_effect_receipt_chunks WHERE effect_key = ? ORDER BY chunk_index", key,
-          ).toArray();
-          if (chunks.length !== existing.receipt_chunks || chunks.some((chunk, index) => chunk.chunk_index !== index)) {
-            throw new Error("Code Mode effect receipt is incomplete; outcome unknown");
-          }
-          return { status: "replay" as const, receipt: JSON.parse(chunks.map(chunk => chunk.receipt_json).join("")) as CodeEffectReceipt };
-        }
-        if (read(oldKey)) return { status: "unknown" as const };
-        if ((!operation || !index) && storage.sql.exec(`SELECT 1 FROM managed_code_effects
-          WHERE session_id = ? AND parent_call_id = ? AND scope_version = 2
-            AND (operation_id <> '' OR model_call_index <> 0) LIMIT 1`,
-          context.sessionId, context.parentCallId).toArray().length) return { status: "unknown" as const };
-        const legacy = storage.sql.exec(`SELECT 1 FROM managed_code_effect_legacy_parents
+  const hasLegacyScope = (context: CodeEffectContext, parentScope: string, operation: string, index: number): boolean => storage.sql.exec(`SELECT 1 FROM managed_code_effect_legacy_parents
           WHERE session_id IN (?, '') AND (
             (scope_version = 2 AND parent_call_id = ?) OR
             (scope_version = 1 AND parent_call_id = ?) OR
@@ -194,6 +181,171 @@ export function createManagedCodeEffectJournal(storage: DurableObjectStorage): C
           WHERE session_id IN (?, '') LIMIT 1`,
           context.sessionId, parentScope, context.parentCallId,
           !operation || !index ? 1 : 0, context.parentCallId, context.sessionId).toArray().length > 0;
+  const digest = (text: string) => createHash("sha256").update(text).digest("hex");
+  const cellIdentity = (context: CodeEffectContext) => {
+    const scope = identity(context);
+    return { ...scope, cellKey: JSON.stringify([context.sessionId, scope.operation, scope.index, context.parentCallId]) };
+  };
+  type Entries = readonly (readonly [string, unknown])[];
+  const encodeEntries = (entries: Entries): string => {
+    let nodes = 0;
+    let budget = 8 * 1024 * 1024;
+    let encoded: string;
+    try {
+      encoded = JSON.stringify(entries, (key, value: unknown) => {
+        if (++nodes > 32768 || typeof value === "function" || typeof value === "symbol"
+          || typeof value === "bigint" || value === undefined
+          || (typeof value === "number" && !Number.isFinite(value))) throw new Error("invalid store value");
+        budget -= key.length * 3 + 4;
+        if (typeof value === "string") {
+          if (value.length > budget) throw new Error("store too large");
+          budget -= new TextEncoder().encode(JSON.stringify(value)).byteLength;
+        } else budget -= 24;
+        if (budget < 0) throw new Error("store too large");
+        return value;
+      });
+      if (!Array.isArray(entries) || entries.some(entry => !Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string")
+        || new Set(entries.map(entry => entry[0])).size !== entries.length
+        || new TextEncoder().encode(encoded).byteLength > 8 * 1024 * 1024) throw new Error("invalid store entries");
+    } catch { throw codeEffectUnknown("Code Mode store snapshot is invalid or exceeds 8 MiB/32768 entries"); }
+    return encoded;
+  };
+  const readEntries = (key: string, required: boolean): Entries => {
+    const metadata = storage.sql.exec<{ chunks: number; bytes: number; hash: string }>(
+      "SELECT chunks, bytes, hash FROM managed_code_store_blobs WHERE blob_key = ?", key,
+    ).toArray()[0];
+    if (!metadata) {
+      const orphaned = storage.sql.exec("SELECT 1 FROM managed_code_store_chunks WHERE blob_key = ? LIMIT 1", key).toArray().length;
+      const committedSession = key.startsWith("session:") && storage.sql.exec(
+        "SELECT 1 FROM managed_code_cells WHERE session_id = ? AND writes_hash IS NOT NULL LIMIT 1", key.slice(8),
+      ).toArray().length;
+      if (required || orphaned || committedSession) throw codeEffectUnknown("Code Mode starting store snapshot is missing");
+      return [];
+    }
+    // Inspect lengths before hydrating chunks, including damaged metadata.
+    const bounds = storage.sql.exec<{ count: number; bytes: number }>(
+      "SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(value_json AS BLOB))), 0) AS bytes FROM managed_code_store_chunks WHERE blob_key = ?", key,
+    ).one();
+    if (!Number.isSafeInteger(metadata.chunks) || metadata.chunks < 1 || metadata.chunks > 256
+      || bounds.count !== metadata.chunks || bounds.bytes !== metadata.bytes || bounds.bytes > 8 * 1024 * 1024) {
+      throw codeEffectUnknown("Code Mode store snapshot is incomplete or exceeds bounds");
+    }
+    const chunks = storage.sql.exec<{ chunk_index: number; value_json: string }>(
+      "SELECT chunk_index, value_json FROM managed_code_store_chunks WHERE blob_key = ? ORDER BY chunk_index", key,
+    ).toArray();
+    if (chunks.some((chunk, index) => chunk.chunk_index !== index)) throw codeEffectUnknown("Code Mode store snapshot chunks are incomplete");
+    const encoded = chunks.map(chunk => chunk.value_json).join("");
+    if (digest(encoded) !== metadata.hash) throw codeEffectUnknown("Code Mode store snapshot is corrupt");
+    let entries: Entries;
+    try { entries = JSON.parse(encoded) as Entries; }
+    catch { throw codeEffectUnknown("Code Mode store snapshot is corrupt"); }
+    encodeEntries(entries);
+    return entries;
+  };
+  const writeEntries = (key: string, entries: Entries) => {
+    const encoded = encodeEntries(entries);
+    storage.sql.exec("DELETE FROM managed_code_store_chunks WHERE blob_key = ?", key);
+    let count = 0;
+    for (const chunk of inputChunks(encoded)) storage.sql.exec(
+      "INSERT INTO managed_code_store_chunks VALUES (?, ?, ?)", key, count++, chunk);
+    storage.sql.exec(`INSERT INTO managed_code_store_blobs VALUES (?, ?, ?, ?)
+      ON CONFLICT(blob_key) DO UPDATE SET chunks=excluded.chunks, bytes=excluded.bytes, hash=excluded.hash`,
+    key, count, new TextEncoder().encode(encoded).byteLength, digest(encoded));
+  };
+  return {
+    async beginCell(context) {
+      const { cellKey, hash, operation, index, parentScope } = cellIdentity(context);
+      const entries = storage.transactionSync(() => {
+        assertOwner();
+        if (hasLegacyScope(context, parentScope, operation, index)) {
+          throw codeEffectUnknown("Code Mode legacy cell has no provable starting store");
+        }
+        const existing = storage.sql.exec<{ source_hash: string }>(
+          "SELECT source_hash FROM managed_code_cells WHERE cell_key = ?", cellKey,
+        ).toArray()[0];
+        if (existing) {
+          if (existing.source_hash !== hash) throw codeEffectUnknown("Code Mode cell identity/source conflict");
+          return readEntries("cell:" + cellKey, true);
+        }
+        if (storage.sql.exec("SELECT 1 FROM managed_code_store_blobs WHERE blob_key = ?", "cell:" + cellKey).toArray().length) {
+          throw codeEffectUnknown("Code Mode cell store identity is missing");
+        }
+        // Never guess a fresh starting store for an already dispatched legacy
+        // cell, even when every nested receipt happens to be available.
+        if (storage.sql.exec(`SELECT 1 FROM managed_code_effects WHERE session_id = ? AND parent_call_id = ?
+          AND ((operation_id = ? AND model_call_index = ?) OR scope_version <> 2) LIMIT 1`,
+        context.sessionId, context.parentCallId, operation, index).toArray().length) {
+          throw codeEffectUnknown("Code Mode legacy cell has no retained starting store snapshot");
+        }
+        const starting = readEntries("session:" + context.sessionId, false);
+        writeEntries("cell:" + cellKey, starting);
+        storage.sql.exec("INSERT INTO managed_code_cells VALUES (?, ?, NULL, ?)", cellKey, hash, context.sessionId);
+        return starting;
+      });
+      await storage.sync();
+      assertOwner();
+      return entries;
+    },
+    async commitStore(context, writes) {
+      const { cellKey, hash } = cellIdentity(context);
+      const writesHash = digest(encodeEntries(writes));
+      storage.transactionSync(() => {
+        assertOwner();
+        const existing = storage.sql.exec<{ source_hash: string; writes_hash: string | null }>(
+          "SELECT source_hash, writes_hash FROM managed_code_cells WHERE cell_key = ?", cellKey,
+        ).toArray()[0];
+        if (!existing || existing.source_hash !== hash) throw codeEffectUnknown("Code Mode cell store lost its original intent");
+        if (existing.writes_hash !== null) {
+          if (existing.writes_hash !== writesHash) throw codeEffectUnknown("Code Mode replay store writes conflict");
+          return; // Replay must not overwrite a newer cell's committed writes.
+        }
+        const merged = new Map(readEntries("session:" + context.sessionId, false));
+        for (const [key, value] of writes) merged.set(key, value);
+        writeEntries("session:" + context.sessionId, [...merged]);
+        storage.sql.exec("UPDATE managed_code_cells SET writes_hash = ? WHERE cell_key = ?", writesHash, cellKey);
+      });
+      await storage.sync();
+      assertOwner();
+    },
+    async begin(context) {
+      const { key, hash, oldKey, parentScope, operation, index } = identity(context);
+      const result = storage.transactionSync(() => {
+        assertOwner();
+        const existing = read(key);
+        if (existing) {
+          if (existing.scope_version !== 2) return { status: "unknown" as const };
+          if (existing.input_hash !== hash) throw codeEffectUnknown("Code Mode effect identity/input conflict");
+          if (existing.state !== "completed") return { status: "unknown" as const };
+          const bounds = storage.sql.exec<{ count: number; bytes: number }>(
+            "SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(receipt_json AS BLOB))), 0) AS bytes FROM managed_code_effect_receipt_chunks WHERE effect_key = ?", key,
+          ).one();
+          if (!Number.isSafeInteger(existing.receipt_chunks) || !existing.receipt_chunks || existing.receipt_chunks > 256
+            || bounds.count !== existing.receipt_chunks || bounds.bytes > 8 * 1024 * 1024) {
+            throw codeEffectUnknown("Code Mode effect receipt is incomplete or exceeds bounds");
+          }
+          const chunks = storage.sql.exec<{ chunk_index: number; receipt_json: string }>(
+            "SELECT chunk_index, receipt_json FROM managed_code_effect_receipt_chunks WHERE effect_key = ? ORDER BY chunk_index", key,
+          ).toArray();
+          if (chunks.length !== existing.receipt_chunks || chunks.some((chunk, index) => chunk.chunk_index !== index)) {
+            throw codeEffectUnknown("Code Mode effect receipt is incomplete");
+          }
+          let receipt: CodeEffectReceipt;
+          try { receipt = JSON.parse(chunks.map(chunk => chunk.receipt_json).join("")) as CodeEffectReceipt; }
+          catch { throw codeEffectUnknown("Code Mode effect receipt is corrupt"); }
+          return { status: "replay" as const, receipt };
+        }
+        // A completed cell cannot gain a new effect ordinal during replay
+        // (for example through a random/clock-dependent branch).
+        if (storage.sql.exec("SELECT 1 FROM managed_code_cells WHERE cell_key = ? AND writes_hash IS NOT NULL",
+          JSON.stringify([context.sessionId, operation, index, context.parentCallId])).toArray().length) {
+          return { status: "unknown" as const };
+        }
+        if (read(oldKey)) return { status: "unknown" as const };
+        if ((!operation || !index) && storage.sql.exec(`SELECT 1 FROM managed_code_effects
+          WHERE session_id = ? AND parent_call_id = ? AND scope_version = 2
+            AND (operation_id <> '' OR model_call_index <> 0) LIMIT 1`,
+          context.sessionId, context.parentCallId).toArray().length) return { status: "unknown" as const };
+        const legacy = hasLegacyScope(context, parentScope, operation, index);
         storage.sql.exec(`INSERT INTO managed_code_effects
           (effect_key, session_id, turn_id, parent_call_id, call_id, name, input_hash, generation, state, created_at, operation_id, model_call_index, scope_version)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, 2)`,
@@ -214,13 +366,13 @@ export function createManagedCodeEffectJournal(storage: DurableObjectStorage): C
       // this storage boundary as well, including imported/custom adapters.
       if (encoded.length > 8 * 1024 * 1024
         || new TextEncoder().encode(encoded).byteLength > 8 * 1024 * 1024) {
-        throw new Error("Code Mode effect receipt exceeds 8 MiB; outcome unknown");
+        throw codeEffectUnknown("Code Mode effect receipt exceeds 8 MiB");
       }
       storage.transactionSync(() => {
         assertOwner();
         const existing = read(key);
         if (!existing || existing.scope_version !== 2 || existing.input_hash !== hash || existing.generation !== generation || existing.state !== "pending") {
-          throw new Error("Code Mode effect completion lost its original intent; outcome unknown");
+          throw codeEffectUnknown("Code Mode effect completion lost its original intent");
         }
         let count = 0;
         for (const chunk of inputChunks(encoded)) storage.sql.exec(`INSERT INTO managed_code_effect_receipt_chunks
@@ -262,8 +414,11 @@ function snapshotLegacyCodeParents(storage: DurableObjectStorage): void {
     const migrated = storage.sql.exec<{ version: number }>(
       "SELECT version FROM managed_code_effect_migration WHERE singleton = 1",
     ).toArray()[0];
-    if (migrated?.version === 2) return;
-    if (migrated && migrated.version !== 1) {
+    // v2 predates durable cell stores. Re-snapshot its pending heads once: a
+    // cell interrupted before its first nested effect has no journal row that
+    // could otherwise reveal its missing starting state during replay.
+    if (migrated?.version === 3) return;
+    if (migrated && migrated.version !== 1 && migrated.version !== 2) {
       block("", "unsupported effect migration version; outcome unknown");
       return;
     }
@@ -385,7 +540,7 @@ function snapshotLegacyCodeParents(storage: DurableObjectStorage): void {
     } catch {
       block("", "legacy durability head or session lineage unreadable or exceeds migration budget; outcome unknown");
     }
-    storage.sql.exec("INSERT INTO managed_code_effect_migration VALUES (1, 2) ON CONFLICT(singleton) DO UPDATE SET version = 2");
+    storage.sql.exec("INSERT INTO managed_code_effect_migration VALUES (1, 3) ON CONFLICT(singleton) DO UPDATE SET version = 3");
   });
 }
 
@@ -399,4 +554,8 @@ function addScopeColumns(storage: DurableObjectStorage, table: string, columns: 
   for (const [name, definition] of columns) {
     if (!existing.has(name)) storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
   }
+}
+
+function codeEffectUnknown(message: string): Error & { code: string; outcome: string } {
+  return Object.assign(new Error(`${message}; execution outcome unknown`), { code: "CODE_EFFECT_UNKNOWN", outcome: "unknown" });
 }

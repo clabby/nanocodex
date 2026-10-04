@@ -123,8 +123,17 @@ async function journey(t, { sdk = 'node', journal = true, source, expected, over
       assert.equal(unknowns.length, 1, 'discarded invocation has exactly one terminal telemetry receipt');
       assert.equal(unknowns[0].event.payload.status, 'failed');
       assert.equal(unknowns[0].event.payload.structured_result.outcome, 'unknown');
-    } else await until(message => message.owner === owner && message.type === (oversized || lostAcknowledgement || lostAdmissionAcknowledgement ? 'failure' : 'dispatch')
-      && (oversized || lostAcknowledgement || lostAdmissionAcknowledgement || message.kind === (cancellation ? 'abortable' : 'poison')));
+    } else if (oversized) {
+      const settledRequest = await reader.next();
+      trace.push({ owner, type: 'terminal-unknown-model-request', request: settledRequest });
+      const output = settledRequest.input.find(item => item.call_id === (direct ? 'owned-tool' : 'owned-cell')
+        && item.type === (direct ? 'function_call_output' : 'custom_tool_call_output'));
+      assert.ok(output, 'deterministically invalid receipt settles through the real SDK transport');
+      assert.match(JSON.stringify(output.output), /outcome unknown/);
+      assert.doesNotMatch(JSON.stringify(output.output), /journal interrupted|CAUGHT_AND_RETRIED/);
+      assert.equal(messages.filter(message => message.type === 'failure').length, 0);
+    } else await until(message => message.owner === owner && message.type === (lostAcknowledgement || lostAdmissionAcknowledgement ? 'failure' : 'dispatch')
+      && (lostAcknowledgement || lostAdmissionAcknowledgement || message.kind === (cancellation ? 'abortable' : 'poison')));
     if (cancellation) {
       worker.postMessage({ action: 'cancel' });
       const failure = await until(message => message.owner === owner && message.type === 'failure');
@@ -141,7 +150,7 @@ async function journey(t, { sdk = 'node', journal = true, source, expected, over
       t.diagnostic('Public turn.cancel() unblocked follow-on; cancelled dispatched intent remains unknown, guest retry never dispatched.');
       return;
     }
-    if (oversized || lostAcknowledgement || lostAdmissionAcknowledgement) assert.match(messages.find(m => m.owner === owner && m.type === 'failure').error.message, /journal interrupted/);
+    if (lostAcknowledgement || lostAdmissionAcknowledgement) assert.match(messages.find(m => m.owner === owner && m.type === 'failure').error.message, /journal interrupted/);
     // No shutdown, disposal, cancellation or final tool receipt. This is owner loss.
     await worker.terminate();
     trace.push({ owner, type: 'abrupt-terminate' });
@@ -270,9 +279,9 @@ async function journey(t, { sdk = 'node', journal = true, source, expected, over
         assert.ok(Buffer.byteLength(JSON.stringify(receipt)) < 8 * 1024 * 1024);
         t.diagnostic(JSON.stringify({ directMediaBytes: bytes.length, receiptBytes: Buffer.byteLength(JSON.stringify(receipt)) }));
       }
-      const directResult = trace.find(entry => entry.owner === owner && entry.type === 'event'
+      const directResult = trace.find(entry => entry.owner === (oversized ? 1 : owner) && entry.type === 'event'
         && entry.event.type === 'tool.result' && entry.event.payload.call_id === 'owned-tool');
-      assert.ok(directResult, 'recovered direct result is publicly observable');
+      assert.ok(directResult, 'settled direct result is publicly observable (terminal faults settle before owner loss)');
       if (!lostAcknowledgement) {
         assert.equal(directResult.event.payload.status, 'failed');
         assert.equal(directResult.event.payload.structured_result.outcome, 'unknown');
