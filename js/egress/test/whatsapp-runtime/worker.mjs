@@ -1,11 +1,72 @@
 import { restoreAuthBuffers } from '../../src/whatsapp-adapters/auth-buffers.ts';
 import { inflate, deflateSync } from 'node:zlib';
 import { promisify } from 'node:util';
-import makeWASocket, { Browsers, Curve, aesEncryptGCM, aesDecryptGCM, aesEncryptCTR, aesDecryptCTR, aesEncrypt, aesDecrypt, hkdf, md5, initAuthCreds, proto } from '../../src/whatsapp-generated/baileys.js';
+import makeWASocket, { Browsers, DEFAULT_CONNECTION_CONFIG, generateSignalPubKey, Curve, aesEncryptGCM, aesDecryptGCM, aesEncryptCTR, aesDecryptCTR, aesEncrypt, aesDecrypt, hkdf, md5, initAuthCreds, proto } from '../../src/whatsapp-generated/baileys.js';
 import WorkersWebSocket from '../../src/whatsapp-adapters/workers-ws.js';
 import { Buffer } from 'node:buffer';
 const logger = { level:'silent', child(){return this}, trace(){},debug(){},info(){},warn(){},error(){},fatal(){} };
 function assert(value, label) { if (!value) throw new Error(label); }
+// The real Signal lifecycle needs authenticated traffic, so exercise its maintained
+// repository with two synthetic peers in workerd. Only auth storage is in memory;
+// session establishment, encryption, decryption and rollover use the shipped bundle.
+async function verifySignalRolloverPrivacy() {
+  const makeAuth = () => {
+    const data = new Map();
+    return { creds: initAuthCreds(), keys: {
+      async get(type, ids) {
+        return Object.fromEntries(ids.filter(id => data.has(type + ':' + id)).map(id => [id, data.get(type + ':' + id)]));
+      },
+      async set(updates) {
+        for (const [type, entries] of Object.entries(updates)) for (const [id, value] of Object.entries(entries)) {
+          if (value === null) data.delete(type + ':' + id);
+          else data.set(type + ':' + id, value);
+        }
+      },
+      async transaction(work) { return await work(); },
+    } };
+  };
+  const aliceAuth = makeAuth(), bobAuth = makeAuth();
+  const alice = DEFAULT_CONNECTION_CONFIG.makeSignalRepository(aliceAuth, logger);
+  const bob = DEFAULT_CONNECTION_CONFIG.makeSignalRepository(bobAuth, logger);
+  const aliceJid = '15550000001@s.whatsapp.net', bobJid = '15550000002@s.whatsapp.net';
+  const methods = ['log', 'info', 'warn', 'error', 'debug', 'trace', 'dir', 'table'];
+  const originals = methods.map(method => console[method]);
+  let consoleCalls = 0;
+  // Never retain or print logged arguments, even on regression failure.
+  for (const method of methods) console[method] = () => { consoleCalls++; };
+  try {
+    let previousAliceKey, previousBobKey;
+    for (let round = 0; round < 2; round++) {
+      await alice.injectE2ESession({ jid: bobJid, session: {
+        registrationId: bobAuth.creds.registrationId,
+        identityKey: generateSignalPubKey(bobAuth.creds.signedIdentityKey.public),
+        signedPreKey: {
+          keyId: bobAuth.creds.signedPreKey.keyId,
+          publicKey: generateSignalPubKey(bobAuth.creds.signedPreKey.keyPair.public),
+          signature: bobAuth.creds.signedPreKey.signature,
+        },
+      } });
+      const plaintext = Buffer.from('synthetic Signal rollover ' + round);
+      const encrypted = await alice.encryptMessage({ jid: bobJid, data: plaintext });
+      assert(encrypted.type === 'pkmsg', 'Signal prekey session establishment');
+      const decrypted = await bob.decryptMessage({ jid: aliceJid, ...encrypted });
+      assert(Buffer.from(decrypted).equals(plaintext), 'Signal rollover message roundtrip');
+      const aliceInfo = await alice.getSessionInfo(bobJid), bobInfo = await bob.getSessionInfo(aliceJid);
+      assert(aliceInfo && bobInfo, 'Signal peer sessions established');
+      if (round) {
+        assert(!Buffer.from(aliceInfo.baseKey).equals(previousAliceKey), 'Signal outgoing session replaced');
+        assert(!Buffer.from(bobInfo.baseKey).equals(previousBobKey), 'Signal incoming session replaced');
+      }
+      previousAliceKey = Buffer.from(aliceInfo.baseKey);
+      previousBobKey = Buffer.from(bobInfo.baseKey);
+    }
+  } finally {
+    try { alice.close(); bob.close(); }
+    finally { methods.forEach((method, index) => { console[method] = originals[index]; }); }
+  }
+  assert(consoleCalls === 0, 'Signal rollover must emit no console calls; observed ' + consoleCalls);
+}
+
 export default {
   async fetch(request, env) {
     const checks = [];
@@ -38,6 +99,7 @@ export default {
       const creds=initAuthCreds(); assert(creds.noiseKey.private.length===32 && !creds.registered,'creds'); checks.push('auth-creds-in-memory-only');
       const encoded=proto.Message.encode({conversation:'local-test'}).finish();
       assert(proto.Message.decode(encoded).conversation==='local-test','protobuf'); checks.push('protobuf-roundtrip');
+      await verifySignalRolloverPrivacy(); checks.push('signal-session-rollover-roundtrip-no-console');
       if (new URL(request.url).pathname === '/upstream') {
         const labels = new Set(['connected to WA', 'handshake recv from WA', 'not logged in, attempting registration...', 'Noise handler transitioned to Transport state', 'error in validating connection', 'connection errored', 'connection closed']);
         const record = (...args) => {

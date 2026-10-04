@@ -14,8 +14,14 @@ libsignal's false signature-verification result instead of accepting it.
 Upgrading either package requires reviewing these checks and repeating the
 real workerd crypto and WebSocket journey.
 
-The WebSocket adapter uses Workers fetch upgrades. Protocol logging is silent;
-media transformation dependencies fail closed. The runtime only projects
+The WebSocket adapter uses Workers fetch upgrades. Protocol logging is silent.
+Preparation drops direct console calls throughout the protocol dependency bundle,
+including libsignal session lifecycle diagnostics that otherwise print private
+ratchet and root keys despite the silent pino logger. This applies only to the
+generated protocol bundle; broker diagnostics remain available. Its transitive
+`debug` dependency is also replaced with a no-op logger, preventing media metadata
+diagnostics from reaching stderr even when debugging is enabled in the environment. Media
+transformation dependencies fail closed. The runtime only projects
 received data and exposes pairing, close, logout, and keyed history requests.
 Authentication persistence belongs to the external encrypted account store.
 
@@ -34,7 +40,13 @@ node js/egress/test/whatsapp-runtime/node-upstream.mjs
 ```
 
 The default journey uses an actual local binary WebSocket echo service and
-actual workerd. `--upstream` also performs an anonymous WhatsApp Noise handshake
+actual workerd. It also establishes Signal sessions between two synthetic peers,
+encrypts/decrypts messages, replaces both outgoing and incoming sessions, and
+asserts that the shipped protocol bundle makes zero console calls. Console
+arguments are never retained or printed by this check. This narrow integration
+uses in-memory auth storage because the anonymous upstream handshake cannot
+exercise authenticated Signal lifecycle transitions; it requires no real account
+or phone linking. `--upstream` also performs an anonymous WhatsApp Noise handshake
 and verifies pairing-ready. It never requests a phone number, registers a
 linked device, or emits QR/code/credentials. The optional Node command is an
 upstream comparison. Diagnostics are bounded to known protocol labels, frame

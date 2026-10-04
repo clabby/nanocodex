@@ -22,8 +22,25 @@ await mkdir(generated, { recursive: true });
 await writeFile(resolve(generated, 'bridge.wasm'), wasm);
 await writeFile(resolve(generated, 'bridge.js'), `import staticBridgeModule from './bridge.wasm';\n` + source.slice(0, start) + 'initSync({ module: staticBridgeModule });\nvar __wasmSimdActive = false;' + source.slice(end + marker.length));
 await build({ entryPoints: [fileURLToPath(import.meta.resolve('@whiskeysockets/baileys'))], bundle: true, format: 'esm', platform: 'node', target: 'es2022', mainFields: ['module', 'main'], outfile: resolve(generated, 'baileys.js'),
+  // libsignal writes complete session keys directly to console, bypassing pino.
+  // Strip those calls only from this protocol bundle, preserving broker diagnostics.
+  drop: ['console'],
   external: [...builtinModules, ...builtinModules.map(x => 'node:' + x)],
   alias: { pino: resolve(root, 'src/whatsapp-adapters/silent-logger.js'), ws: resolve(root, 'src/whatsapp-adapters/workers-ws.js'), 'whatsapp-rust-bridge': resolve(generated, 'bridge.js'), ...Object.fromEntries(['jimp', 'sharp', 'audio-decode', 'link-preview-js'].map(x => [x, resolve(root, 'src/whatsapp-adapters/unsupported-media.js')])) },
-  plugins: [verifySignaturePlugin, { name: 'static-wasm', setup(build) { build.onResolve({ filter: /\.wasm$/ }, () => ({ path: './bridge.wasm', external: true })); } }],
+  plugins: [{ name: 'silent-protocol-debug', setup(build) {
+    // debug bypasses console through stderr and can be enabled by environment.
+    // Resolve it only inside this bundle; never change process-wide logging.
+    build.onResolve({ filter: /^debug$/ }, () => ({ path: 'debug', namespace: 'silent-protocol-debug' }));
+    build.onLoad({ filter: /.*/, namespace: 'silent-protocol-debug' }, () => ({ loader: 'js', contents: `
+      const noop = () => {};
+      function createDebug(namespace) {
+        return Object.assign(() => {}, { namespace, enabled: false, log: noop, destroy: noop,
+          extend: suffix => createDebug(namespace + ':' + suffix) });
+      }
+      Object.assign(createDebug, { enable: noop, disable: () => '', enabled: () => false,
+        log: noop, formatters: {}, debug: createDebug, default: createDebug });
+      module.exports = createDebug;
+    ` }));
+  } }, verifySignaturePlugin, { name: 'static-wasm', setup(build) { build.onResolve({ filter: /\.wasm$/ }, () => ({ path: './bridge.wasm', external: true })); } }],
   banner: { js: 'import { Buffer } from "node:buffer"; import { createRequire as __workersCreateRequire } from "node:module"; const require = __workersCreateRequire("/worker.js");' },
 });
