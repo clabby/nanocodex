@@ -195,7 +195,7 @@ async fn retained_tool_suffix_survives_compaction_failed_followup_and_recovery()
     );
     let continuation = log[2]["messages"].as_array().unwrap();
     assert_eq!(continuation.len(), 3);
-    assert_eq!(continuation[1]["content"], json!(pending_round()));
+    assert_eq!(continuation[1]["content"], json!(&pending_round()[1..]));
     assert_eq!(continuation[2]["content"][0]["tool_use_id"], "effect-a");
     assert_eq!(continuation[2]["content"][1]["tool_use_id"], "effect-b");
     assert_eq!(continuation[2]["content"][0]["content"], json!(returned));
@@ -429,7 +429,10 @@ async fn rejected_tool_summary_keeps_completed_effects_for_manual_recovery() {
     let log = requests.lock().unwrap();
     assert_eq!(log.len(), 4);
     assert_eq!(log[1]["messages"], log[2]["messages"]);
-    assert_eq!(log[3]["messages"][1]["content"], json!(pending_round()));
+    assert_eq!(
+        log[3]["messages"][1]["content"],
+        json!(&pending_round()[1..])
+    );
     assert_eq!(log[3]["messages"][2]["content"][1]["content"], "committed");
     assert_eq!(
         effects.load(Ordering::SeqCst),
@@ -669,8 +672,9 @@ async fn incremental_server_pauses_retain_the_whole_turn_during_compaction() {
     let log = requests.lock().unwrap();
     assert_eq!(log.len(), 4);
     assert!(!log[2]["messages"].to_string().contains("incremental-fetch"));
-    assert_eq!(log[3]["messages"][1]["content"], json!(first));
-    assert_eq!(log[3]["messages"][2]["content"], json!(second));
+    assert_eq!(log[1]["messages"][1]["content"], json!(first));
+    assert_eq!(log[3]["messages"][1]["content"], json!(&first[1..]));
+    assert_eq!(log[3]["messages"][2]["content"], json!(&second[..1]));
     assert_eq!(log[3]["messages"].as_array().unwrap().len(), 3);
     server.abort();
 }
@@ -863,7 +867,7 @@ async fn end_turn_without_prior_server_result_fails_and_recovers_as_data() {
 }
 
 #[tokio::test]
-async fn context_exhaustion_retains_signed_output_and_completed_effects() {
+async fn context_exhaustion_retains_output_and_completed_effects() {
     let exhausted = vec![
         json!({"type":"thinking","thinking":"partial reasoning","signature":"signed-exhaustion"}),
         json!({"type":"server_tool_use","id":"completed-fetch","name":"web_fetch","input":{"url":"https://example.org"}}),
@@ -932,12 +936,15 @@ async fn context_exhaustion_retains_signed_output_and_completed_effects() {
     assert_eq!(log[3]["thinking"], json!({"type":"disabled"}));
     assert_eq!(log[3]["max_tokens"], 4096);
     assert!(!log[3]["messages"].to_string().contains("completed-fetch"));
-    assert_eq!(log[4]["messages"][1]["content"], json!(pending_round()));
+    assert_eq!(
+        log[4]["messages"][1]["content"],
+        json!(&pending_round()[1..])
+    );
     assert_eq!(
         log[4]["messages"][2]["content"][0]["content"],
         "committed receipt"
     );
-    assert_eq!(log[4]["messages"][3]["content"], json!(exhausted));
+    assert_eq!(log[4]["messages"][3]["content"], json!(&exhausted[1..]));
     assert_eq!(log[4]["messages"][4]["role"], "user");
     assert_eq!(log[4]["max_tokens"], 128_000);
     assert_eq!(log[4]["thinking"], log[0]["thinking"]);

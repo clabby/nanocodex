@@ -73,7 +73,9 @@ try {
     assert.deepEqual(requests[index].tools.map(tool=>tool.name),['effect']);
   }
   for(const index of [2,5]) {
-    assert.deepEqual(requests[index].messages[1].content,firstBlocks,'signed/opaque/native payload survives real browser compaction');
+    assert.deepEqual(requests[index].messages[1].content,
+      firstBlocks.filter(block=>block.type!=='thinking'&&block.type!=='redacted_thinking'),
+      'summary replacement removes prefix-bound thinking and preserves every other block exactly');
     assert.equal(requests[index].messages.at(-1).content[0].content[0].text,'BROWSER_EFFECT_RECEIPT');
   }
   assert.deepEqual(errors,[]);

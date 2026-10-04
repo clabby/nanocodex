@@ -127,7 +127,10 @@ for (const [target, subscription] of [["node",false], ["browser",false], ["node"
       await assert.rejects(run(agent, "perform one synthetic effect", "first"), /synthetic followup failure/);
       assert.equal(effects, 1);
       assert.equal(requests.length, 3, "automatic compaction executed a real SSE summary request");
-      assert.deepEqual(requests[2].body.messages[1].content, subscription ? signed.map(block => block.type === "tool_use" ? {...block,name: "_" + block.name} : block) : signed);
+      const retained = signed.filter(block => block.type !== "thinking" && block.type !== "redacted_thinking");
+      assert.deepEqual(requests[2].body.messages[1].content,
+        subscription ? retained.map(block => block.type === "tool_use" ? {...block,name: "_" + block.name} : block) : retained,
+        "summary replacement removes prefix-bound thinking and preserves every other block exactly");
       assert.deepEqual(requests[2].body.messages[2].content[0].content, receipt);
       assert.equal(requests[2].body.messages[2].content[0].tool_use_id, "effect-once");
       assert.deepEqual(requests[0].body.cache_control, { type: "ephemeral", ttl: "1h" });
