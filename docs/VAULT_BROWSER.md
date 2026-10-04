@@ -1,4 +1,4 @@
-# Secure Vault intake and website approval
+# Secure Vault intake and use
 
 `request_vault_intake` renders an inline card in managed web and iPhone/iPad chat.
 The card opens a client-owned form. Login passwords, API keys, card values,
@@ -7,19 +7,45 @@ endpoint, never as conversation or tool arguments. Only an allowlisted saved
 receipt is sent back into the original conversation. Closing the form or changing
 accounts discards its input. Unknown save outcomes are not automatically retried.
 
-For an existing login without a website binding, request
-`{ operation: "authorize_origin", kind: "login", vault_id, origin }`.
-The form retrieves the actual saved item's name, displays the exact HTTPS website,
-and updates only `browser_origin`; the user does not reenter the password. Approval
-replaces the prior website binding. There are no wildcard or subdomain grants.
-Legacy entries remain usable for their existing HTTP Vault operations, but private
-browser login requires website approval.
+Saving an item makes it available for the account owner's requested tasks. The
+agent selects the appropriate saved item and destination without asking for a
+second permission. It asks only if that choice is ambiguous. Saving credentials
+does not authorize unrelated actions, purchases, messages or account changes;
+external page content cannot authorize or redirect credential use.
+
+A login's optional `browser_origin` is a website hint. New and existing entries
+work without it, and a task may select another HTTPS destination without editing
+the item. Each private browser remains pinned to its selected login, target and
+exact HTTPS origin; filling and continuation reject mismatches. The former
+`authorize_origin` intake is no longer offered. Replayed legacy tool calls return
+`not_required`, and updated clients do not surface old approval cards.
 
 Account-session mutations retain same-origin protection. Native Vault forms use
 persistent account API keys with `agents:write` and `tools:use`; Connect grants,
-anonymous accounts and read-only keys cannot mutate Vault. Website approval and
-Vault resolution use the current account's broker. The browser-only materialization
+anonymous accounts and read-only keys cannot mutate Vault. Vault metadata edits and
+login resolution use the current account's broker. The browser-only materialization
 RPC is reachable through the managed service binding, never model HTTP egress.
+
+## Local verification
+
+With workspace dependencies, `nanocodex-tools`, and the verified Nanocodex WASM
+package built, run `pnpm --filter nanocodex-egress-service run prepare:whatsapp`
+for the broker's generated dependency. Then run these Chromium journeys:
+
+```sh
+CHROME_PATH=/path/to/chrome pnpm --filter nanocodex-egress-service run test:vault-browser
+CHROME_PATH=/path/to/chrome pnpm --filter nanocodex-web run test:vault
+```
+
+The broker journey uses real encrypted workerd Vault storage and private browser
+tools with synthetic credentials and a local HTTPS merchant. It verifies direct
+login with no website hint, a different stored hint, account/type isolation,
+redirect refusal before fill, session binding, and denial through model egress.
+Its fixture supplies caller identity and the local browser transport; it does
+not exercise live account authentication. The UI journey uses the production
+React components with fixture HTTP responses to verify create, secret-free saved
+receipts, legacy card retirement, and verification input. Per-run evidence stays
+under ignored `output/vault-browser-journey/` and `output/vault-client/`.
 
 ## Hosted browser
 
@@ -42,13 +68,13 @@ Chromium also exposes a separate retained private browser. It uses the existing
 Vault, redacted snapshots, secure challenge and phone takeover infrastructure;
 there are no merchant-specific action names or booking selectors in this path.
 
-1. Call `browser_vault_open` with a public HTTPS `url` and the explicitly
-   user-authorized named `vault_id`. The origin must match the saved website
-   approval. This returns `target_id` and `expected_origin`, not a provider
-   connection or browser session URL. Opening does not sign in. Reopening resumes
+1. Call `browser_vault_open` with a public HTTPS `url` and the saved `vault_id`
+   appropriate to the user’s task. No saved website approval is needed. This
+   returns `target_id` and `expected_origin`, not a provider connection or
+   browser session URL. Opening does not sign in. Reopening resumes
    the existing private browser without navigating or submitting login again.
 2. Use `browser_vault_status` and `browser_vault_fill` with a stable
-   `operation_id` UUID for the approved login.
+   `operation_id` UUID for the selected login.
    Continue with `browser_vault_snapshot`. Submission is not proof of sign-in.
 3. `browser_vault_action` supports same-origin navigation, visible button/link
    clicks, ordinary text fields, select choices and checkboxes/radios. Controls
@@ -91,15 +117,17 @@ session. The waitlist tool activates only its standalone no-payment action and
 retains its exact-class duplicate fence. Use the general session for other
 user-authorized workflows.
 
-Deploy the managed Worker to apply the binding and tool changes.
+Deploy the egress broker before the managed Worker to apply direct saved-login
+resolution and the updated tools. Deploy the account app and update native clients
+for the revised Vault copy and retired legacy approval cards.
 Deployments without a browser binding can still serve ordinary agent turns.
 
 The legacy `cloudflare` and `browserbase` providers also expose these private
 flows when explicitly selected. Chromium defaults to a separate retained private
 companion so ordinary browsing keeps the unmodified upstream API.
 
-For an explicitly authorized named Vault login, use `browser_vault_status` and
-`browser_vault_fill` with the exact approved HTTPS origin. Credential entry
+For a saved Vault login appropriate to the user’s task, use `browser_vault_status`
+and `browser_vault_fill` with the private session’s selected HTTPS origin. Credential entry
 isolates the session from ordinary browser inspection. Continue through redacted
 `browser_vault_snapshot` and constrained `browser_vault_action` calls. Submission
 alone does not prove successful sign-in.

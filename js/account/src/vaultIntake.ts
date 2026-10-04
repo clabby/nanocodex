@@ -1,7 +1,7 @@
 import type { ToolActivity } from "nanocodex-react/agent";
 import { decodeVaultEntries, type VaultEntryKind } from "./vaultEntries.ts";
 
-export type VaultIntake = Readonly<{ operation: "create" | "authorize_origin" | "browser_verification" | "browser_takeover" | "browser_login"; request_id?: string; allowed_origins?: readonly string[]; vault_id?: string; challenge_id?: string; agent_id?: string; kind: VaultEntryKind; name?: string; origin?: string }>;
+export type VaultIntake = Readonly<{ operation: "create" | "browser_verification" | "browser_takeover" | "browser_login"; request_id?: string; allowed_origins?: readonly string[]; vault_id?: string; challenge_id?: string; agent_id?: string; kind: VaultEntryKind; name?: string; origin?: string }>;
 export function decodeVaultIntake(tool: ToolActivity): VaultIntake | undefined {
   if (["request_browser_login", "request_browser_login_input"].includes(tool.name.split(".").at(-1) ?? "") && tool.status === "completed" && tool.output) {
     try {
@@ -44,9 +44,10 @@ export function decodeVaultIntake(tool: ToolActivity): VaultIntake | undefined {
     || Object.keys(record).some(key => !["type", "status", "operation", "vault_id", "kind", "name", "origin", "challenge_id", "agent_id"].includes(key))
     || (record.name !== undefined && (typeof record.name !== "string" || !record.name.trim() || record.name.length > 120 || /[\u0000-\u001f\u007f]/.test(record.name)))) return;
   const operation = record.operation ?? "create";
-  if (operation !== "create" && operation !== "authorize_origin" && operation !== "browser_verification") return;
+  // Legacy website-approval requests no longer require an input form.
+  if (operation !== "create" && operation !== "browser_verification") return;
   if (operation === "create" && record.vault_id !== undefined) return;
-  if ((operation === "authorize_origin" || operation === "browser_verification") && (record.kind !== "login" || typeof record.vault_id !== "string" || !/^[A-Za-z0-9_-]{22,64}$/.test(record.vault_id) || record.origin === undefined)) return;
+  if (operation === "browser_verification" && (record.kind !== "login" || typeof record.vault_id !== "string" || !/^[A-Za-z0-9_-]{22,64}$/.test(record.vault_id) || record.origin === undefined)) return;
   if (operation === "browser_verification") {
     if (typeof record.challenge_id !== "string" || !/^[A-Za-z0-9_-]{22,256}$/.test(record.challenge_id)
       || typeof record.agent_id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(record.agent_id)) return;

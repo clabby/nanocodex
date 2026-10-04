@@ -10,19 +10,20 @@ test('all intake kinds decode and secret-bearing outputs fail closed', () => {
     assert.equal(decodeVaultIntake(request({ kind, password: 'secret' })), undefined);
   }
 });
-test('origin authorization requires login, opaque reference and exact HTTPS origin', () => {
-  const valid = { operation: 'authorize_origin', kind: 'login', vault_id: id, origin: 'https://example.com' };
-  assert.equal(decodeVaultIntake(request(valid))?.operation, 'authorize_origin');
-  for (const patch of [{ vault_id: 'bad' }, { kind: 'card' }, { origin: undefined }, { origin: 'http://example.com' }, { origin: 'https://example.com/' }, { origin: 'https://user:pass@example.com' }, { operation: 'unknown' }]) {
-    assert.equal(decodeVaultIntake(request({ ...valid, ...patch })), undefined);
-  }
+test('legacy website approval requests no longer present an intake form', () => {
+  const legacy = { operation: 'authorize_origin', kind: 'login', vault_id: id, origin: 'https://example.com' };
+  assert.equal(decodeVaultIntake(request(legacy)), undefined);
+  assert.equal(decodeVaultIntake(request({ ...legacy, status: 'not_required' })), undefined);
 });
-test('receipts whitelist metadata and bind approval to the requested item and origin', () => {
-  const intake = { operation: 'authorize_origin' as const, kind: 'login' as const, vault_id: id, origin: 'https://example.com' };
-  const entry = { id, kind: 'login', name: 'Actual name', created_at: 1, browser_origin: intake.origin, password: 'secret', token: 'secret' };
-  const receipt = JSON.parse(vaultIntakeReceipt(entry, intake));
-  assert.deepEqual(receipt, { type: 'vault_intake_receipt', operation: 'authorize_origin', status: 'saved', id, kind: 'login', name: 'Actual name', browser_origin: intake.origin });
-  for (const patch of [{ id: 'b'.repeat(22) }, { kind: 'card' }, { browser_origin: undefined }, { browser_origin: 'https://other.com' }]) assert.throws(() => vaultIntakeReceipt({ ...entry, ...patch }, intake));
+test('saved receipts whitelist metadata and preserve the optional website hint', () => {
+  const intake = { operation: 'create' as const, kind: 'login' as const };
+  const entry = { id, kind: 'login', name: 'Actual name', created_at: 1, password: 'secret', token: 'secret' };
+  assert.deepEqual(JSON.parse(vaultIntakeReceipt(entry, intake)), {
+    type: 'vault_intake_receipt', operation: 'create', status: 'saved', id, kind: 'login', name: 'Actual name',
+  });
+  const website = 'https://example.com';
+  assert.equal(JSON.parse(vaultIntakeReceipt({ ...entry, browser_origin: website }, { ...intake, origin: website })).browser_origin, website);
+  for (const patch of [{ kind: 'card' }, { browser_origin: 'https://user:pass@example.com' }]) assert.throws(() => vaultIntakeReceipt({ ...entry, ...patch }, intake));
 });
 test('browser verification hints are bound and secret-free', () => {
   const valid = { operation: 'browser_verification', kind: 'login', vault_id: id, origin: 'https://example.com', challenge_id: id, agent_id: 'agent_1' };

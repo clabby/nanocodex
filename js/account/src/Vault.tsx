@@ -293,7 +293,7 @@ export function VaultEntryDialog({
         <form autoComplete="off" onSubmit={submit}>
           <div className="vault-dialog-fields">
             <VaultField autoComplete="off" defaultValue={name} inputRef={firstInputRef} label="Name" maxLength={120} name="name" placeholder={namePlaceholder(kind)} required />
-            {kind === "login" ? <VaultField autoComplete="off" defaultValue={origin} label="Approve website origin (optional)" maxLength={2048} name="browser_origin" placeholder="https://example.com" type="url" /> : null}
+            {kind === "login" ? <VaultField autoComplete="off" defaultValue={origin} label="Website (optional)" maxLength={2048} name="browser_origin" placeholder="https://example.com" type="url" /> : null}
             {fieldsForKind(kind)}
           </div>
           <footer>

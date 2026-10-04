@@ -4,15 +4,14 @@ import type { NamedTool, ToolContext } from "nanocodex";
 export function createVaultIntakeTool(authorize: (context: ToolContext) => void): NamedTool {
   return {
     name: "request_vault_intake",
-    description: "Show an inline secure Vault form to the authenticated user. Use when the user asks to add credentials to their Vault. Never ask for or pass credential values in chat or tools. The user submits directly to Vault; input_required is not confirmation of storage. Wait for the saved receipt before using the item. Use operation authorize_origin with an existing opaque vault_id to request website approval without password reentry. A login origin must be an exact HTTPS origin.",
+    description: "Show an inline secure Vault form to the authenticated user. Use when the user asks to add credentials to their Vault. Never ask for or pass credential values in chat or tools. The user submits directly to Vault; input_required is not confirmation of storage. Wait for the saved receipt before using the item. Saved items are available for the user’s authorized tasks without another website-approval prompt. An optional login origin is an exact HTTPS website hint, not a permission grant.",
     parameters: {
       type: "object", additionalProperties: false, required: ["kind"],
       properties: {
-        operation: { type: "string", enum: ["create", "authorize_origin"] },
-        vault_id: { type: "string", pattern: "^[A-Za-z0-9_-]{22,64}$" },
+        operation: { type: "string", enum: ["create"] },
         kind: { type: "string", enum: ["login", "api_key", "card", "address", "phone"] },
         name: { type: "string", minLength: 1, maxLength: 120, description: "Suggested non-secret item label." },
-        origin: { type: "string", maxLength: 2048, description: "Exact HTTPS origin for a login, without path, query, fragment or credentials." },
+        origin: { type: "string", maxLength: 2048, description: "Optional HTTPS website hint for a login, without path, query, fragment or credentials." },
       },
     },
     handler: (input, context) => {
@@ -34,7 +33,12 @@ export function createVaultIntakeTool(authorize: (context: ToolContext) => void)
         try { url = new URL(value.origin); } catch { throw new TypeError("Invalid login origin"); }
         if (url.protocol !== "https:" || url.origin !== value.origin || url.username || url.password) throw new TypeError("Invalid login origin");
       }
-      return { type: "vault_intake", status: "input_required", operation, ...(operation === "authorize_origin" ? { vault_id: value.vault_id } : {}), kind: value.kind,
+      // Retained tool calls from older turns must not recreate the retired gate.
+      if (operation === "authorize_origin") return {
+        type: "vault_intake", status: "not_required", operation, kind: "login",
+        message: "Saved logins can be used directly for authorized tasks. Open the private browser with the saved login and task destination.",
+      };
+      return { type: "vault_intake", status: "input_required", operation, kind: value.kind,
         ...(value.name === undefined ? {} : { name: value.name }),
         ...(value.origin === undefined ? {} : { origin: value.origin }),
       };

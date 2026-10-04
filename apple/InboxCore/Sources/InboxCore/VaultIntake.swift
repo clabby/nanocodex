@@ -95,13 +95,14 @@ public struct VaultIntake: Codable, Equatable, Sendable {
                       origin == "https://" + host + (url.port.map { ":" + String($0) } ?? "") else { return nil }
             }
             let operation = value["operation"].string
-            guard operation.isEmpty || operation == "create" || operation == "authorize_origin" || operation == "browser_verification" else { return nil }
+            // Legacy website-approval requests no longer require an input form.
+            guard operation.isEmpty || operation == "create" || operation == "browser_verification" else { return nil }
             let vaultID = value["vault_id"].string
-            if operation == "authorize_origin" || operation == "browser_verification" {
+            if operation == "browser_verification" {
                 guard value["kind"].string == "login", !origin.isEmpty,
                       vaultID.range(of: #"^[A-Za-z0-9_-]{22,64}$"#, options: .regularExpression) != nil else { return nil }
             }
-            guard (operation == "authorize_origin" || operation == "browser_verification" || vaultID.isEmpty), origin.isEmpty || value["kind"].string == "login" else { return nil }
+            guard (operation == "browser_verification" || vaultID.isEmpty), origin.isEmpty || value["kind"].string == "login" else { return nil }
             let challengeID = value["challenge_id"].string
             let agentID = value["agent_id"].string
             if operation == "browser_verification" {
@@ -132,22 +133,6 @@ public struct VaultIntakeReceipt: Equatable, Sendable {
 }
 
 extension ManagedClient {
-    public func vaultLoginMetadata(id: String) async throws -> VaultIntakeReceipt {
-        guard id.range(of: #"^[A-Za-z0-9_-]{22,64}$"#, options: .regularExpression) != nil else { throw APIError.invalidResponse }
-        let response = try await vaultIntakeJSON(path: "/v1/credentials")
-        guard case .array(let entries) = response["vault"],
-              let item = entries.first(where: { $0["id"].string == id && $0["kind"].string == "login" }),
-              !item["name"].string.isEmpty, item["name"].string.utf8.count <= 120 else { throw APIError.invalidResponse }
-        return .init(id: id, kind: "login", name: item["name"].string)
-    }
-    public func authorizeVaultOrigin(id: String, origin: String, name: String) async throws -> VaultIntakeReceipt {
-        guard VaultIntake.parse(.object(["type": .string("vault_intake"), "status": .string("input_required"),
-            "kind": .string("login"), "operation": .string("authorize_origin"), "vault_id": .string(id), "origin": .string(origin)])) != nil else { throw APIError.invalidResponse }
-        let response = try await vaultIntakeJSON(path: "/v1/credentials/vault/login/" + id + "/origin", method: "PUT",
-            body: .object(["browser_origin": .string(origin)]))
-        guard response["id"].string == id, response["kind"].string == "login", response["browser_origin"].string == origin else { throw APIError.invalidResponse }
-        return .init(id: id, kind: "login", name: name)
-    }
     public func saveVaultItem(kind: String, values: [String: String], configuration: URLSessionConfiguration = .ephemeral) async throws -> VaultIntakeReceipt {
         guard ["login", "api_key", "card", "address", "phone"].contains(kind) else { throw APIError.invalidResponse }
         let response = try await vaultIntakeJSON(path: "/v1/credentials/vault/" + kind, method: "POST",

@@ -44,11 +44,16 @@ final class VaultIntakeTests: XCTestCase {
         XCTAssertNil(intake.vaultIntake)
     }
 
-    func testAuthorizationRequiresExistingIDAndOrigin() {
-        var value: [String: JSON] = ["type": .string("vault_intake"), "status": .string("input_required"), "kind": .string("login"), "operation": .string("authorize_origin"), "origin": .string("https://example.com")]
-        XCTAssertNil(VaultIntake.parse(.object(value)))
-        value["vault_id"] = .string(String(repeating: "a", count: 22))
-        XCTAssertEqual(VaultIntake.parse(.object(value))?.operation, "authorize_origin")
+    func testLegacyWebsiteApprovalDoesNotPresentSecureForm() {
+        var value: [String: JSON] = ["type": .string("vault_intake"), "status": .string("input_required"),
+            "kind": .string("login"), "operation": .string("authorize_origin"),
+            "vault_id": .string(String(repeating: "a", count: 22)), "origin": .string("https://example.com")]
+        var tool = ToolPresentation(name: "request_vault_intake", arguments: .null)
+        tool.finish(.object(value))
+        XCTAssertNil(tool.vaultIntake)
+        value["status"] = .string("not_required")
+        tool.finish(.object(value))
+        XCTAssertNil(tool.vaultIntake)
     }
 
     func testSecretSubmissionUsesDirectAPIAndReceiptIgnoresServerName() async throws {

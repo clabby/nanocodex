@@ -1938,18 +1938,6 @@ final class InboxModel: ObservableObject {
         pending.append(message); busy.insert(intake.agentID); persist()
         Task { await submit(message, epoch: account) }
     }
-    func vaultLoginMetadata(id: String, account: UUID) async throws -> VaultIntakeReceipt {
-        guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
-        let item = try await client.vaultLoginMetadata(id: id)
-        guard generation == account, !Task.isCancelled else { throw APIError.invalidCredential }
-        return item
-    }
-    func authorizeVaultOrigin(id: String, origin: String, name: String, account: UUID) async throws -> VaultIntakeReceipt {
-        guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
-        let receipt = try await client.authorizeVaultOrigin(id: id, origin: origin, name: name)
-        guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
-        return receipt
-    }
     func saveVaultItem(kind: String, values: [String: String], account: UUID) async throws -> VaultIntakeReceipt {
         guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
         let receipt = try await client.saveVaultItem(kind: kind, values: values)

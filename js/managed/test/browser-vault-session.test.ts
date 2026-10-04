@@ -158,7 +158,7 @@ describe("private touch cancellation error classification", () => {
     const { privateVaultTakeover } = await import("../src/browser-vault-takeover");
     const touch = { active: false, uncertain: true };
     expect((await privateVaultTakeover(cdp, identity, { action: "observe" }, touch)).status).toBe("active");
-    expect(touch).toEqual({ active: false, uncertain: false });
+    expect(touch).toMatchObject({ active: false, uncertain: false });
     cdp.close();
   });
   it.each([

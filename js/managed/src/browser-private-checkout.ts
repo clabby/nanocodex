@@ -5,8 +5,8 @@ import type { BrowserVaultResolver } from "./browser-vault";
 /** Fills a login and activates its sign-in control once, then reads fixed
  * checkout capabilities. It does not activate booking, payment, registration,
  * password-reset or consent controls. Merchant sign-in can have side effects.
- * The caller must obtain explicit authority to use the named saved Vault item.
- * The resolver must enforce the Vault item's exact approved HTTPS origin. */
+ * The caller selects the saved Vault item for the user’s authorized task.
+ * The resolver enforces account ownership; this browser enforces its HTTPS origin. */
 export type PrivateCheckoutInput = Readonly<{
   vault_id: string;
   url: string;
@@ -249,7 +249,7 @@ export async function runPrivateCheckout<T = never>(options: Readonly<{
     if (!loginWorld) { result={status:"unavailable",reason:"unsupported_login",login_attempted:false}; }
     else {
       stage="vault";
-      // Trusted internal RPC verifies that origin is approved for this saved ID.
+      // Trusted internal RPC resolves this owner’s saved login; the browser checks its selected origin.
       credentials = await options.resolveVaultLogin({vault_id:input.vault_id,expected_origin:origin,target_id:target.targetId,
         username_selector:selectors[0],password_selector:selectors[1],submit:true}, options.context);
       check();

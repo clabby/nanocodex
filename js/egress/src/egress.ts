@@ -522,9 +522,10 @@ async function handleMeasuredEgressWithOwner(
         || !validBrowserOrigin(body.expected_origin)) return jsonError(400, "invalid_request");
       const owner = await resolveSubject(env, subject);
       const entry = await resolveVaultEntry(env, owner, body.vault_id);
-      if (entry.kind !== "login" || entry.browser_origin !== body.expected_origin) {
-        return jsonError(403, "vault_browser_origin_not_approved");
-      }
+      // Saving a login makes it available to this owner's authorized tasks.
+      // browser_origin is a website hint, not a second permission grant. The
+      // private browser pins and checks the selected HTTPS origin before fill.
+      if (entry.kind !== "login") return jsonError(403, "vault_browser_denied");
       return Response.json({ username: entry.username, password: entry.password }, {
         headers: { "cache-control": "no-store" },
       });

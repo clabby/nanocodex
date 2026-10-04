@@ -15,7 +15,8 @@
     "deploy:broker": "wrangler deploy --env=\"\" --config wrangler.broker.jsonc",
     "prepare:whatsapp": "node scripts/prepare-whatsapp.mjs",
     "test:whatsapp-runtime": "node test/whatsapp-runtime/run.mjs",
-    "test:whatsapp": "node --test test/whatsapp-account.node.test.mjs test/whatsapp-broker.node.test.mjs && npm run test:whatsapp-runtime"
+    "test:whatsapp": "node --test test/whatsapp-account.node.test.mjs test/whatsapp-broker.node.test.mjs && npm run test:whatsapp-runtime",
+    "test:vault-browser": "node test/vault-browser-journey.mjs"
   },
   "dependencies": {
     "accounts": "0.17.0",
