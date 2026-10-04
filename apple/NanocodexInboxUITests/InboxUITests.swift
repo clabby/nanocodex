@@ -4113,6 +4113,45 @@ final class InboxUITests: XCTestCase {
         capture(app, "streaming-preserves-reading-position")
     }
 
+    func testQuickDragDuringStreamingKeepsTheChosenPosition() {
+        let app = launch(["NANOCODEX_DEMO_STREAMING_GROWTH": "1",
+                          "NANOCODEX_DEMO_STREAM_INTERVAL_MS": "350"])
+        selectInbox(app)
+        let conversation = app.descendants(matching: .any)["conversation"].firstMatch
+        let early = conversation.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Stream paragraph 12.")).firstMatch
+        XCTAssertTrue(early.waitForExistence(timeout: 15))
+        let completion = conversation.staticTexts["Streaming response complete."]
+        // Release quickly while paragraphs keep arriving and changing row height.
+        // This exercises the deferred metrics/idle race, including deceleration.
+        let start = conversation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+        let end = conversation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
+        start.press(forDuration: 0.01, thenDragTo: end)
+        let latest = app.buttons["latest-messages"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        XCTAssertFalse(completion.exists, "The reader must leave the live tail before streaming finishes")
+        // Stop inertia with a stationary touch, then capture the visible paragraph.
+        conversation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        guard let paragraph = conversation.staticTexts.allElementsBoundByIndex.first(where: {
+            $0.isHittable && $0.label.hasPrefix("Stream paragraph ")
+                && $0.frame.minY > conversation.frame.minY + 100
+                && $0.frame.maxY < conversation.frame.maxY - 160
+        }) else { return XCTFail("Expected a visible earlier paragraph after dragging") }
+        let label = paragraph.label, y = paragraph.frame.minY
+        let moved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let current = conversation.staticTexts[label]
+            return !current.isHittable || abs(current.frame.minY - y) > 4
+        }, object: nil)
+        moved.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 3), .completed,
+                       "Streaming must not pull the reader back after a quick drag")
+        XCTAssertTrue(latest.isHittable)
+        latest.tap()
+        let followed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"), object: completion)
+        XCTAssertEqual(XCTWaiter.wait(for: [followed], timeout: 30), .completed)
+        gone(latest)
+        capture(app, "quick-streaming-drag-and-resume")
+    }
+
     func testLiveTailFollowsUpdatesAndOffersCompactJumpAfterReadingHistory() {
         let app = launch(["NANOCODEX_DEMO_STREAMING_GROWTH": "1"]); selectInbox(app)
         let conversation = app.descendants(matching: .any)["conversation"].firstMatch
