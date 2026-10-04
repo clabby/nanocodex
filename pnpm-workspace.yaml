@@ -8,9 +8,11 @@ overrides:
 
 allowBuilds:
   "@mongodb-js/zstd": true
+  "@whiskeysockets/baileys": false
   core-js-pure: false
   esbuild: true
   node-liblzma: false
+  protobufjs: false
   workerd: true
 
 minimumReleaseAgeExclude:
