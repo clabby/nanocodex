@@ -37,7 +37,10 @@ export async function readTodoSourceHealth(request:Request,binding:Fetcher|undef
         const error=data.lastError==null?null:data.lastError==="gmail_or_wake_retry"?"gmail_or_wake_retry":"unrecognized_provider_error";
         const renewal=data.renewalError==null?null:data.renewalError==="gmail_watch_retry"?"gmail_watch_retry":"unrecognized_provider_error";
         return {status:"partial",health:Number(data.expiration)<=Date.now()?"expired":error||renewal?"retrying":data.pending?"pending":"configured",
-          enabled:true,pending:data.pending,expiration:data.expiration,error:error??renewal,scope};
+          enabled:true,archive_non_actionable:data.archive_non_actionable===true,
+          last_push_at:typeof data.lastPushAt==="number" && Number.isSafeInteger(data.lastPushAt)?data.lastPushAt:null,
+          last_history_at:typeof data.lastHistoryAt==="number" && Number.isSafeInteger(data.lastHistoryAt)?data.lastHistoryAt:null,
+          pending:data.pending,expiration:data.expiration,error:error??renewal,scope};
       });
     return json(result);
   } catch {return json(unknown("source_health_unavailable"));}

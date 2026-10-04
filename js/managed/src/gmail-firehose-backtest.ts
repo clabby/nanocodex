@@ -1,4 +1,5 @@
-import { classifyReplyRequest, GMAIL_DECISION_POLICY } from "./gmail-firehose-decisions";
+import { classifyInboxCleanup } from "./gmail-firehose-cleanup";
+import { classifyReplyRequest, classifyActionReviewRequest, classifyBookingRequest, gmailActionReviewCategory, gmailBookingCandidate, GMAIL_ACTION_REVIEW_POLICY, GMAIL_BOOKING_REVIEW_POLICY, GMAIL_DECISION_POLICY } from "./gmail-firehose-decisions";
 import type { RoutingAi } from "./thread-model-routing";
 import type { Principal } from "./account-auth";
 
@@ -15,13 +16,13 @@ export function enabledGmailDecisionOwner(env: {NANOCODEX_FIREHOSE_DECISIONS_OWN
 }
 const thresholds = [0.65, 0.75, 0.85, 0.9, 0.95] as const;
 const reply = (data: unknown, status = 200) => Response.json(data,{status,headers:{"cache-control":"no-store"}});
-type Sample = {id:string;expected:"reply"|"no_reply";from:string;subject:string;body:string};
+type Sample = {id:string;expected:"reply"|"no_reply"|"action_review"|"archive"|"keep";from:string;subject:string;body:string};
 function validSample(value: unknown): value is Sample {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const sample = value as Record<string,unknown>;
   return Object.keys(sample).sort().join(",") === "body,expected,from,id,subject"
     && typeof sample.id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(sample.id)
-    && (sample.expected === "reply" || sample.expected === "no_reply")
+    && (sample.expected === "reply" || sample.expected === "no_reply" || sample.expected === "action_review" || sample.expected === "archive" || sample.expected === "keep")
     && typeof sample.from === "string" && sample.from.length > 0 && sample.from.length <= 256
     && typeof sample.subject === "string" && sample.subject.length <= 256
     && typeof sample.body === "string" && sample.body.trim().length > 0
@@ -54,17 +55,33 @@ export async function routeGmailDecisionBacktest(request: Request, ai: RoutingAi
   if (request.method !== "POST" || url.search) return reply({error:"invalid_request"},400);
   if (!ai) return reply({error:"jev_unavailable"},503);
   const raw = await boundedJson(request);
-  if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).join(",") !== "samples")
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).some(key=>!["samples","lane"].includes(key)))
     return reply({error:"invalid_fixtures"},400);
+  const lane = (raw as {lane?:unknown}).lane ?? "reply";
+  if (lane !== "reply" && lane !== "auto" && lane !== "cleanup") return reply({error:"invalid_fixtures"},400);
   const samples = (raw as {samples?:unknown}).samples;
   if (!Array.isArray(samples) || !samples.length || samples.length > 5 || !samples.every(validSample)
-    || new Set(samples.map(sample => sample.id)).size !== samples.length)
+    || new Set(samples.map(sample => sample.id)).size !== samples.length
+    || lane === "reply" && samples.some(sample=>!["reply","no_reply"].includes(sample.expected))
+    || lane === "auto" && samples.some(sample=>!["reply","no_reply","action_review"].includes(sample.expected))
+    || lane === "cleanup" && samples.some(sample=>!["archive","keep"].includes(sample.expected)))
     return reply({error:"invalid_fixtures"},400);
+  if(lane === "cleanup") {
+    const rows=[];
+    for(const sample of samples as Sample[]) {
+      try {rows.push({id:sample.id,expected:sample.expected,...await classifyInboxCleanup(ai,[{from:sample.from,subject:sample.subject,body_text:sample.body}])});}
+      catch {rows.push({id:sample.id,expected:sample.expected,outcome:"unavailable",choice:null,confidence:null});}
+    }
+    return reply({lane,policy_version:"gmail-inbox-cleanup-v1",rows,metrics:{correct:rows.filter(r=>r.outcome===r.expected).length,incorrect:rows.filter(r=>r.outcome!=="unavailable" && r.outcome!==r.expected).length,abstained:rows.filter(r=>r.outcome==="unavailable").length},note:"Read-only fixtures, no mail modified. Complete production threads and watch opt-in are additionally required before archiving."});
+  }
   const rows = [];
   for (const sample of samples as Sample[]) {
-    const result = await classifyReplyRequest(ai,{id:sample.id,status:"ok",
-      headers:{from:sample.from,subject:sample.subject},body:sample.body});
-    rows.push({id:sample.id,expected:sample.expected,choice:result.choice,outcome:result.outcome,
+    const message = {id:sample.id,status:"ok",headers:{from:sample.from,subject:sample.subject},body:sample.body};
+    const booking = lane === "auto" && gmailBookingCandidate(message);
+    const action = lane === "auto" && !booking && gmailActionReviewCategory(message);
+    const result = booking ? await classifyBookingRequest(ai,message) : action ? await classifyActionReviewRequest(ai,message) : await classifyReplyRequest(ai,message);
+    const policy = booking ? GMAIL_BOOKING_REVIEW_POLICY : action ? GMAIL_ACTION_REVIEW_POLICY : GMAIL_DECISION_POLICY;
+    rows.push({policy_version:policy,id:sample.id,expected:sample.expected,choice:result.choice,outcome:result.outcome,
       reason:result.reason,classifier_outcome:result.classifier_outcome,confidence:result.confidence,
       reply_probability:result.reply_probability,duration_ms:result.duration_ms});
   }
@@ -80,6 +97,6 @@ export async function routeGmailDecisionBacktest(request: Request, ai: RoutingAi
     }
     byThreshold[String(threshold)] = metrics;
   }
-  return reply({policy_version:GMAIL_DECISION_POLICY,model:"typesafe/jev",rows,thresholds:byThreshold,
+  return reply({lane,policy_version:lane === "auto" ? "gmail-production-lanes-v1" : GMAIL_DECISION_POLICY,model:"typesafe/jev",rows,...(lane === "reply" ? {thresholds:byThreshold} : {metrics:{correct:rows.filter(row=>row.outcome===row.expected).length,incorrect:rows.filter(row=>row.outcome!=="unavailable" && row.outcome!==row.expected).length,abstained:rows.filter(row=>row.outcome==="unavailable").length}}),
     note:"User-supplied labels are independent ground truth; Jev confidence is not calibrated accuracy. No fixtures are stored."});
 }

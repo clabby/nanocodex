@@ -183,7 +183,11 @@ async function message(raw: any, connectionID: string, provider: Provider) {
 /** Labels/read state are not content; applicability is checked separately. */
 export async function todoMailContextFingerprint(thread: {id:string;connection_id:string;messages:any[]}): Promise<string> {
   const content = JSON.stringify({id:thread.id, connection_id:thread.connection_id, messages:thread.messages.map(message =>
-    Object.fromEntries(["id", "thread_id", "from", "to", "cc", "bcc", "reply_to", "subject", "date", "message_id", "body_text", "body_truncated", "attachments"].map(key => [key, message[key]])))});
+    Object.fromEntries(["id", "thread_id", "from", "to", "cc", "bcc", "reply_to", "subject", "date", "message_id", "body_text", "body_truncated", "attachments"].map(key => [key, key === "attachments" && Array.isArray(message.attachments)
+      // Gmail refreshes attachment fetch IDs between reads of the same immutable
+      // message. They are transport locators, not source-content identity.
+      ? message.attachments.map((attachment:any) => ({filename:attachment.filename,mime_type:attachment.mime_type,size:attachment.size}))
+      : message[key]])))});
   return Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content))).toString("hex");
 }
 export function assertTodoMailSourceApplicable(thread: any, sourceID: string): void {
@@ -313,7 +317,7 @@ export async function handleTodoMail(request: Request, storage: DurableObjectSto
           }
         } catch (e) { errors.push({ ...task, error: e instanceof Failure ? e.code : "provider_unavailable" }); }
       });
-      events.sort((a, b) => a.start.localeCompare(b.start)); return json({ events, partial: errors.length > 0, errors, from, to });
+      events.sort((a, b) => a.start.localeCompare(b.start)); return json({ events, calendars_checked: Math.min(tasks.length,40), partial: errors.length > 0, errors, from, to });
     }
     if (request.method !== "POST") return fail("not_found", 404);
     if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") return fail("invalid_content_type", 415);

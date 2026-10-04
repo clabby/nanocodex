@@ -160,6 +160,7 @@ struct NativeConversationTranscript: UIViewRepresentable {
         private var reportedFrames: [String: CGRect]?
         private var reportedMetrics: NativeConversationScrollMetrics?
         private var applying = false
+        private var userScrollRevision: UInt64 = 0
         private var queuedUpdate: NativeConversationTranscript?
         #if DEBUG
         private let configuredCells = NSHashTable<UICollectionViewCell>.weakObjects()
@@ -220,7 +221,7 @@ struct NativeConversationTranscript: UIViewRepresentable {
                 viewport = .following
             }
             parent = next
-            chatLayout.keepContentOffsetAtBottomOnBatchUpdates = next.followsLatest
+            updateBottomAnchoring()
             parent.proxy.scroll = { [weak self] id, offset in
                 self?.requestScroll(id, offset: offset)
             }
@@ -230,7 +231,16 @@ struct NativeConversationTranscript: UIViewRepresentable {
             let insetChanged = view.contentInset.top != next.topInset || view.contentInset.bottom != next.bottomInset
             let structural = ids != newIDs
             let contentChanged = next.rows.contains { hostedRows[$0.id]?.revision != $0.revision }
-            if structural { retainSurvivingReadingPoint(in: Set(newIDs)) }
+            if structural {
+                // A gesture can settle after its last scrolling callback. Keep
+                // the currently visible position when history is prepended,
+                // rather than restoring an earlier overscroll/bounce offset.
+                if case .reading = viewport,
+                   !view.isTracking, !view.isDragging, !view.isDecelerating {
+                    captureReadingPoint()
+                }
+                retainSurvivingReadingPoint(in: Set(newIDs))
+            }
             // Commit row models at the data source transaction boundary, keeping
             // cell providers and layout delegates on the same snapshot.
             let commitRows = { [self] in
@@ -262,14 +272,23 @@ struct NativeConversationTranscript: UIViewRepresentable {
             snapshot.appendSections([0])
             snapshot.appendItems(newIDs)
             applying = true
+            let scrollRevision = userScrollRevision
             dataSource.apply(snapshot, animatingDifferences: false, commitAlongsideUpdates: commitRows) { [weak self] in
                 guard let self else { return }
-                self.applying = false
                 self.view?.layoutIfNeeded()
-                switch self.viewport {
-                case let .reading(id, offset), let .target(id, offset, false):
-                    self.restore(id, offset: offset)
-                default: break
+                self.applying = false
+                // A snapshot may finish after the reader has started another
+                // swipe. Never restore its old anchor into an active gesture.
+                if scrollRevision != self.userScrollRevision {
+                    // The swipe may already have ended while the snapshot was
+                    // applying. Adopt its current point, not the pre-update one.
+                    if case .reading = self.viewport { self.captureReadingPoint() }
+                } else if !self.isUserScrolling {
+                    switch self.viewport {
+                    case let .reading(id, offset), let .target(id, offset, false):
+                        self.restore(id, offset: offset)
+                    default: break
+                    }
                 }
                 self.layoutFinished()
                 if let update = self.queuedUpdate {
@@ -279,8 +298,24 @@ struct NativeConversationTranscript: UIViewRepresentable {
             }
         }
 
+        private var isUserScrolling: Bool {
+            guard let view else { return false }
+            return view.isTracking || view.isDragging || view.isDecelerating
+        }
+
+        private func updateBottomAnchoring() {
+            // Native gesture intent takes effect before SwiftUI publishes its
+            // next update. A streaming snapshot must not pin a drag to the tail.
+            if case .following = viewport {
+                chatLayout.keepContentOffsetAtBottomOnBatchUpdates = !isUserScrolling
+            } else {
+                chatLayout.keepContentOffsetAtBottomOnBatchUpdates = false
+            }
+        }
+
         private func requestFollowLatest(animated: Bool) {
             viewport = .following
+            updateBottomAnchoring()
             guard animated, let view, !applying, !correcting else { layoutFinished(); return }
             correcting = true
             let moved = setOffset(view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom,
@@ -292,6 +327,7 @@ struct NativeConversationTranscript: UIViewRepresentable {
 
         private func requestScroll(_ id: String, offset: CGFloat) {
             viewport = .target(id: id, offset: offset, pending: true)
+            updateBottomAnchoring()
             layoutFinished()
         }
 
@@ -360,6 +396,7 @@ struct NativeConversationTranscript: UIViewRepresentable {
 
         private func captureReadingPoint() {
             if let point = visibleReadingPoint() { viewport = .reading(id: point.id, offset: point.offset) }
+            updateBottomAnchoring()
         }
 
         private func retainSurvivingReadingPoint(in survivors: Set<String>) {
@@ -419,6 +456,9 @@ struct NativeConversationTranscript: UIViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self, let view = self.view else { return }
                 self.reporting = false
+                // Completion reports the settled snapshot; transient frames can
+                // otherwise overwrite the reader's saved position mid-update.
+                guard !self.applying, !self.correcting else { return }
                 var frames: [String: CGRect] = [:]
                 for path in view.indexPathsForVisibleItems {
                     guard let id = self.dataSource.itemIdentifier(for: path),
@@ -433,12 +473,17 @@ struct NativeConversationTranscript: UIViewRepresentable {
                     self.reportedFrames = frames
                     self.parent.onFrames(frames)
                 }
-                let metrics = NativeConversationScrollMetrics(contentOffset: view.contentOffset, contentSize: view.contentSize,
-                                                                containerSize: view.bounds.size, contentInsets: view.adjustedContentInset)
-                if self.reportedMetrics != metrics {
-                    self.reportedMetrics = metrics
-                    self.parent.onMetrics(metrics)
-                }
+                self.reportMetrics()
+            }
+        }
+
+        private func reportMetrics() {
+            guard let view else { return }
+            let metrics = NativeConversationScrollMetrics(contentOffset: view.contentOffset, contentSize: view.contentSize,
+                                                          containerSize: view.bounds.size, contentInsets: view.adjustedContentInset)
+            if reportedMetrics != metrics {
+                reportedMetrics = metrics
+                parent.onMetrics(metrics)
             }
         }
 
@@ -461,6 +506,7 @@ struct NativeConversationTranscript: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            if !correcting, scrollView.isDragging || scrollView.isDecelerating { userScrollRevision &+= 1 }
             if scrollView.isDragging { transition(.interacting) }
             if !correcting, !applying {
                 if scrollView.isTracking || scrollView.isDragging {
@@ -476,13 +522,23 @@ struct NativeConversationTranscript: UIViewRepresentable {
             reportSoon()
         }
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            userScrollRevision &+= 1
             captureReadingPoint()
             transition(.tracking)
         }
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            // Flush while the phase still describes the drag. The coalesced
+            // layout report may otherwise arrive after idle has resumed following
+            // using stale atLatest geometry, snapping a quick swipe to the bottom.
+            reportMetrics()
             transition(decelerate ? .decelerating : .idle)
+            updateBottomAnchoring()
         }
-        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { transition(.idle) }
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            reportMetrics()
+            transition(.idle)
+            updateBottomAnchoring()
+        }
         func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
             transition(.idle)
             layoutFinished()

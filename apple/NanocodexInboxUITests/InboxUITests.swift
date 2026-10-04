@@ -2,6 +2,78 @@ import XCTest
 import UIKit
 
 final class InboxUITests: XCTestCase {
+    func testNativeBrowserResponsesWaitForActiveAndBackgroundCancels() {
+        for outcome in ["success", "failure", "background"] {
+            let app = launchNativeBrowserForm(arguments: ["--browser-native-form-inactive-response"]
+                + (outcome == "failure" ? ["--browser-native-form-fill-fails"] : []))
+            enterNativeBrowserFields(app)
+            revealNativeFill(app).tap()
+            let delivered = app.staticTexts["native-fixture-inactive-responses"]
+            let inactive = expectation(for: NSPredicate(format: "label == 'Responses delivered inactive: 1'"), evaluatedWith: delivered)
+            wait(for: [inactive], timeout: 5)
+            XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 1 · Site submits: 0 · Handoffs: 0")
+            capture(app, "native-response-inactive-" + outcome)
+            if outcome == "background" { app.buttons["Fixture background"].tap() }
+            app.buttons["Fixture active"].tap()
+            if outcome == "success" {
+                XCTAssertTrue(app.buttons["Open native browser form"].waitForExistence(timeout: 5))
+                XCTAssertEqual(app.staticTexts["native-fixture-sequence"].label, "fill_fields → finish")
+                XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 1 · Site submits: 0 · Handoffs: 1")
+            } else {
+                let message = outcome == "background" ? "Private view paused. Refresh to continue."
+                    : "Couldn’t confirm the action. Refresh before continuing."
+                XCTAssertTrue(app.staticTexts[message].waitForExistence(timeout: 5))
+                XCTAssertFalse(app.secureTextFields["Password"].exists)
+                let actions = app.staticTexts["native-fixture-actions"]
+                let retry = expectation(for: NSPredicate(format: "label != 'Fills: 1 · Site submits: 0 · Handoffs: 0'"), evaluatedWith: actions)
+                retry.isInverted = true
+                wait(for: [retry], timeout: 2)
+                XCTAssertTrue(app.buttons["Refresh"].isEnabled, "Discarding a response must release busy state")
+                app.buttons["Refresh"].tap()
+                XCTAssertTrue(app.secureTextFields["Password"].waitForExistence(timeout: 5))
+                XCTAssertFalse(app.buttons["browser-native-fill"].isEnabled, "Recovery must not reuse private drafts")
+            }
+            capture(app, "native-response-resumed-" + outcome)
+            app.terminate()
+        }
+    }
+
+    func testNativeBrowserInactiveDraftsAndLoginCheckResume() {
+        let app = launchNativeBrowserForm(arguments: ["--browser-native-form-inactive-response"])
+        enterNativeBrowserFields(app)
+        app.buttons["Fixture inactive"].tap()
+        app.buttons["Fixture active"].tap()
+        XCTAssertEqual(app.textFields["Email"].value as? String, "synthetic@example.com")
+        revealNativeFill(app).tap()
+        let delivered = app.staticTexts["native-fixture-inactive-responses"]
+        let inactive = expectation(for: NSPredicate(format: "label == 'Responses delivered inactive: 1'"), evaluatedWith: delivered)
+        wait(for: [inactive], timeout: 5)
+        app.buttons["Fixture active"].tap()
+        XCTAssertTrue(app.buttons["Open native browser form"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["native-fixture-filled"].exists, "Both drafts must survive transient inactivity")
+        app.terminate()
+
+        app.launchArguments = ["--browser-native-form-ui-fixture", "--browser-native-form-inactive-response", "--browser-native-form-login"]
+        app.launch()
+        let open = app.buttons["Open native browser form"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10)); open.tap()
+        let checked = expectation(for: NSPredicate(format: "label == 'Responses delivered inactive: 1'"),
+                                  evaluatedWith: app.staticTexts["native-fixture-inactive-responses"])
+        wait(for: [checked], timeout: 5)
+        XCTAssertEqual(app.staticTexts["native-fixture-observations"].label, "Observations: 0")
+        app.buttons["Fixture active"].tap()
+        XCTAssertTrue(app.textFields["Email"].waitForExistence(timeout: 5), "Resuming the consent check must start observation")
+        enterNativeBrowserFields(app)
+        revealNativeFill(app).tap()
+        let filled = expectation(for: NSPredicate(format: "label == 'Responses delivered inactive: 2'"),
+                                 evaluatedWith: app.staticTexts["native-fixture-inactive-responses"])
+        wait(for: [filled], timeout: 5)
+        app.buttons["Fixture active"].tap()
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["native-fixture-sequence"].label, "fill_fields → finish")
+        capture(app, "native-login-inactive-response-handed-back")
+    }
+
     func testNativeBrowserFormFallsBackToLegacyBackendOnce() {
         let app = XCUIApplication()
         app.launchArguments = ["--browser-native-form-ui-fixture", "--browser-native-form-legacy"]
@@ -9,37 +81,173 @@ final class InboxUITests: XCTestCase {
         let open = app.buttons["Open native browser form"]
         XCTAssertTrue(open.waitForExistence(timeout: 10))
         open.tap()
+        let showWebsite = app.buttons["browser-show-website"]
+        XCTAssertTrue(showWebsite.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["browser-private-viewport"].firstMatch.exists)
+        showWebsite.tap()
         let viewport = app.descendants(matching: .any)["browser-private-viewport"].firstMatch
         XCTAssertTrue(viewport.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts.matching(identifier: "native-fixture-observations").count, 1)
         let observationCount = app.staticTexts["native-fixture-observations"]
         let observed = expectation(for: NSPredicate(format: "label BEGINSWITH 'Observations: ' AND label != 'Observations: 0'"), evaluatedWith: observationCount)
         wait(for: [observed], timeout: 5)
-        XCTAssertEqual(app.staticTexts["native-fixture-probes"].label, "Capability probes: 1")
+        XCTAssertEqual(app.staticTexts["native-fixture-probes"].label, "Capability probes: 3")
         XCTAssertFalse(app.textFields["Email"].exists)
         let observations = app.staticTexts["native-fixture-observations"]
         let before = observations.label
         app.buttons["Refresh"].tap()
         let refreshed = expectation(for: NSPredicate(format: "label != %@", before), evaluatedWith: observations)
         wait(for: [refreshed], timeout: 5)
-        XCTAssertEqual(app.staticTexts["native-fixture-probes"].label, "Capability probes: 1", "Legacy mode must survive refresh and polling")
-        XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 0 · Site submits: 0")
+        XCTAssertEqual(app.staticTexts["native-fixture-probes"].label, "Capability probes: 3", "Legacy mode must survive refresh and polling")
+        XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 0 · Site submits: 0 · Handoffs: 0")
         XCTAssertFalse(app.staticTexts["Couldn’t confirm the action. Refresh before continuing."].exists)
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = "legacy-browser-capability-fallback"; attachment.lifetime = .keepAlways
         add(attachment)
-        app.buttons["Done"].tap()
+        app.buttons["Hand back"].tap()
         XCTAssertTrue(open.waitForExistence(timeout: 5))
     }
 
-    func testNativeBrowserFormFillsOnceThenRequiresWebsiteSubmit() {
+    func testNativeBrowserCodeUsesSameFillAndHandoffJourney() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--browser-native-form-ui-fixture", "--browser-native-form-otp"]
+        app.launch()
+        let open = app.buttons["Open native browser form"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10))
+        open.tap()
+        let code = app.textFields["Verification code"]
+        XCTAssertTrue(code.waitForExistence(timeout: 5))
+        code.tap(); code.typeText("123456")
+        XCTAssertFalse(app.descendants(matching: .any)["browser-private-viewport"].firstMatch.exists)
+        revealNativeFill(app).tap()
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["native-fixture-sequence"].label, "fill_fields → finish")
+        XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 1 · Site submits: 0 · Handoffs: 1")
+    }
+
+    func testNativeBrowserFormKeepsNativeFieldsWhenOnlyHintsAreUnsupported() {
+        for (argument, probes) in [("--browser-native-form-no-hints", 3), ("--browser-native-form-no-controls", 2)] {
+            let app = launchNativeBrowserForm(arguments: [argument])
+            XCTAssertEqual(app.staticTexts["native-fixture-probes"].label, "Capability probes: \(probes)")
+            XCTAssertFalse(app.descendants(matching: .any)["browser-private-viewport"].firstMatch.exists)
+            enterNativeBrowserFields(app)
+            revealNativeFill(app).tap()
+            XCTAssertTrue(app.buttons["Open native browser form"].waitForExistence(timeout: 5))
+            XCTAssertEqual(app.staticTexts["native-fixture-sequence"].label, "fill_fields → finish")
+            app.terminate()
+        }
+    }
+
+    func testAgentSelectedNativeChoicesNotesAndCheckboxFillTogether() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--browser-native-form-ui-fixture", "--browser-native-form-mixed"]
+        app.launch()
+        let open = app.buttons["Open native browser form"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10)); open.tap()
+        XCTAssertTrue(app.staticTexts["Complete the profile fields on this page."].waitForExistence(timeout: 5))
+        app.buttons["Sheet Grabber"].swipeUp()
+        let choice = app.buttons["browser-native-choice:Country"]
+        for _ in 0..<5 {
+            if choice.isHittable { break }
+            app.collectionViews.firstMatch.swipeUp()
+        }
+        choice.tap()
+        app.buttons["Greece"].tap()
+        let toggle = app.switches["browser-native-check:Send updates"]
+        for _ in 0..<5 {
+            if toggle.isHittable { break }
+            app.collectionViews.firstMatch.swipeUp()
+        }
+        XCTAssertEqual(toggle.value as? String, "0")
+        // A SwiftUI Toggle exposes the entire labelled row as a switch. Tap
+        // the trailing native control, then verify the actual changed value.
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertEqual(toggle.value as? String, "1")
+        let notes = app.textViews["Notes"]
+        for _ in 0..<5 {
+            if notes.isHittable { break }
+            app.collectionViews.firstMatch.swipeDown()
+        }
+        notes.tap(); notes.typeText("Line one\nLine two")
+        XCTAssertEqual(notes.value as? String, "Line one\nLine two")
+        XCTAssertFalse(app.descendants(matching: .any)["browser-private-viewport"].firstMatch.exists)
+        revealNativeFill(app).tap()
+        XCTAssertTrue(open.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["native-fixture-filled"].exists)
+        XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 1 · Site submits: 0 · Handoffs: 1")
+        XCTAssertEqual(app.staticTexts["native-fixture-sequence"].label, "fill_fields → finish")
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "agent-selected-native-profile-handed-back"; attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testNativeCheckboxOnlyConfirmsDisplayedStateWithoutToggling() {
+        for rerenders in [false, true] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--browser-native-form-ui-fixture", "--browser-native-form-checkbox"]
+                + (rerenders ? ["--browser-native-form-after-fill-stale"] : [])
+            app.launch()
+            let open = app.buttons["Open native browser form"]
+            XCTAssertTrue(open.waitForExistence(timeout: 10)); open.tap()
+            XCTAssertTrue(app.switches["browser-native-check:Keep preference"].waitForExistence(timeout: 5))
+            XCTAssertEqual(app.switches["browser-native-check:Keep preference"].value as? String, "1")
+            revealNativeFill(app).tap()
+            XCTAssertTrue(open.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.staticTexts["native-fixture-filled"].exists)
+            XCTAssertEqual(app.staticTexts["native-fixture-sequence"].label, "fill_fields → finish")
+            XCTAssertEqual(app.staticTexts["native-fixture-outcome"].label, "Input outcome: finished")
+            app.terminate()
+        }
+    }
+
+    func testStaleNativeSelectionHandsBackWithoutFillAndRetriesOnlyHandoff() {
+        for failsOnce in [false, true] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--browser-native-form-ui-fixture", "--browser-native-form-stale"]
+                + (failsOnce ? ["--browser-native-form-finish-fails"] : [])
+            app.launch()
+            let open = app.buttons["Open native browser form"]
+            XCTAssertTrue(open.waitForExistence(timeout: 10)); open.tap()
+            if failsOnce {
+                let retry = app.buttons["browser-stale-handback"]
+                XCTAssertTrue(retry.waitForExistence(timeout: 5))
+                let enabled = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: retry)
+                wait(for: [enabled], timeout: 5)
+                XCTAssertEqual(app.staticTexts["native-fixture-outcome"].label, "Input outcome: none")
+                XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 0 · Site submits: 0 · Handoffs: 1")
+                let sequence = app.staticTexts["native-fixture-sequence"]
+                let automaticRetry = expectation(for: NSPredicate(format: "label != %@", sequence.label), evaluatedWith: sequence)
+                automaticRetry.isInverted = true
+                wait(for: [automaticRetry], timeout: 2)
+                retry.tap()
+            }
+            XCTAssertTrue(open.waitForExistence(timeout: 5))
+            XCTAssertEqual(app.staticTexts["native-fixture-outcome"].label, "Input outcome: page_changed")
+            XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 0 · Site submits: 0 · Handoffs: \(failsOnce ? 2 : 1)")
+            XCTAssertEqual(app.staticTexts["native-fixture-sequence"].label, failsOnce ? "finish → finish" : "finish")
+            XCTAssertFalse(app.descendants(matching: .any)["browser-private-viewport"].firstMatch.exists)
+            let attachment = XCTAttachment(screenshot: app.screenshot())
+            attachment.name = failsOnce ? "stale-native-selection-retry" : "stale-native-selection-auto-handoff"
+            attachment.lifetime = .keepAlways; add(attachment)
+            app.terminate()
+        }
+    }
+
+    func testNativeBrowserFormFillsOnceAndHandsBackWithoutWebsiteSubmit() {
         let app = launchNativeBrowserForm()
         let email = app.textFields["Email"]
         let password = app.secureTextFields["Password"]
         email.tap(); email.typeText("discarded@example.com")
         password.tap(); password.typeText("discarded-password")
+        let observationsBeforeBackground = app.staticTexts["native-fixture-observations"].label
         XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
         app.activate()
+        dismissNativePasswordSavePrompt(app)
         XCTAssertTrue(app.staticTexts["Private view paused. Refresh to continue."].waitForExistence(timeout: 5))
+        XCTAssertFalse(password.exists, "Backgrounding must remove the private form until explicit refresh")
+        XCTAssertEqual(app.staticTexts["native-fixture-observations"].label, observationsBeforeBackground,
+                       "Returning to the app must not resume browser observation automatically")
         app.buttons["Refresh"].tap()
         XCTAssertTrue(email.waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["browser-native-fill"].isEnabled, "Backgrounding must discard all drafts")
@@ -52,18 +260,59 @@ final class InboxUITests: XCTestCase {
         polling.isInverted = true
         wait(for: [polling], timeout: 2)
         revealNativeFill(app).tap()
-        XCTAssertTrue(app.staticTexts["native-fixture-filled"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Fills: 1 · Site submits: 0"].exists)
-        XCTAssertFalse(password.exists)
-        let viewport = app.descendants(matching: .any)["browser-private-viewport"].firstMatch
-        XCTAssertTrue(viewport.waitForExistence(timeout: 5))
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = "native-fields-filled-before-website-submit"; attachment.lifetime = .keepAlways
-        add(attachment)
-        viewport.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        XCTAssertTrue(app.staticTexts["Fills: 1 · Site submits: 1"].waitForExistence(timeout: 5))
-        app.buttons["Done"].tap()
         XCTAssertTrue(app.buttons["Open native browser form"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["native-fixture-filled"].exists)
+        XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 1 · Site submits: 0 · Handoffs: 1")
+        XCTAssertEqual(app.staticTexts["native-fixture-sequence"].label, "fill_fields → finish")
+        XCTAssertFalse(password.exists)
+        XCTAssertFalse(app.descendants(matching: .any)["browser-private-viewport"].firstMatch.exists)
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "native-fields-filled-and-handed-back"; attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testNativeBrowserFormHandoffFailureDoesNotRepeatFill() {
+        let app = launchNativeBrowserForm(arguments: ["--browser-native-form-finish-fails"])
+        enterNativeBrowserFields(app)
+        revealNativeFill(app).tap()
+        let retry = app.buttons["browser-native-handback"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Fields were filled, but handoff wasn’t confirmed. Hand back again to continue without refilling."].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 1 · Site submits: 0 · Handoffs: 1")
+        XCTAssertFalse(app.secureTextFields["Password"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["browser-private-viewport"].firstMatch.exists)
+        let sequence = app.staticTexts["native-fixture-sequence"]
+        let automaticRetry = expectation(for: NSPredicate(format: "label != %@", sequence.label), evaluatedWith: sequence)
+        automaticRetry.isInverted = true
+        wait(for: [automaticRetry], timeout: 2)
+        retry.tap()
+        XCTAssertTrue(app.buttons["Open native browser form"].waitForExistence(timeout: 5))
+        XCTAssertEqual(sequence.label, "fill_fields → finish → finish")
+        XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 1 · Site submits: 0 · Handoffs: 2")
+    }
+
+    func testNativeBrowserFormWebsiteFallbackIsExplicitAndClearsDrafts() {
+        let app = launchNativeBrowserForm()
+        enterNativeBrowserFields(app)
+        let showWebsite = app.buttons["browser-show-website"]
+        for _ in 0..<4 {
+            if showWebsite.isHittable { break }
+            app.collectionViews.firstMatch.swipeUp()
+        }
+        showWebsite.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser-private-viewport"].firstMatch.waitForExistence(timeout: 5))
+        dismissNativePasswordSavePrompt(app)
+        let fields = app.buttons["Fields"]
+        let ready = expectation(for: NSPredicate(format: "enabled == true AND hittable == true"), evaluatedWith: fields)
+        wait(for: [ready], timeout: 5)
+        fields.tap()
+        let password = app.secureTextFields["Password"]
+        XCTAssertTrue(password.waitForExistence(timeout: 5))
+        XCTAssertTrue(["", "Email"].contains(app.textFields["Email"].value as? String ?? ""))
+        XCTAssertTrue(["", "Password"].contains(password.value as? String ?? ""))
+        XCTAssertFalse(app.descendants(matching: .any)["browser-private-viewport"].firstMatch.exists)
+        XCTAssertFalse(app.buttons["browser-native-fill"].isEnabled)
+        XCTAssertEqual(app.staticTexts["native-fixture-actions"].label, "Fills: 0 · Site submits: 0 · Handoffs: 0")
     }
 
     func testNativeBrowserFormFailureClearsDraftsWithoutRetry() {
@@ -73,7 +322,7 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Couldn’t confirm the action. Refresh before continuing."].waitForExistence(timeout: 5))
         XCTAssertFalse(app.secureTextFields["Password"].exists)
         let actions = app.staticTexts["native-fixture-actions"]
-        XCTAssertEqual(actions.label, "Fills: 1 · Site submits: 0")
+        XCTAssertEqual(actions.label, "Fills: 1 · Site submits: 0 · Handoffs: 0")
         let retry = expectation(for: NSPredicate(format: "label != %@", actions.label), evaluatedWith: actions)
         retry.isInverted = true
         wait(for: [retry], timeout: 2)
@@ -93,7 +342,25 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(open.waitForExistence(timeout: 10))
         open.tap()
         XCTAssertTrue(app.textFields["Email"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts.matching(identifier: "native-fixture-actions").count, 1,
+                       "Only the presented sheet should expose fixture evidence")
         return app
+    }
+    private func dismissNativePasswordSavePrompt(_ app: XCUIApplication) {
+        // Removing password fields can present iOS's save prompt. Dismiss the
+        // system interruption explicitly so the next tap reaches the sheet.
+        for owner in [app, XCUIApplication(bundleIdentifier: "com.apple.springboard")] {
+            // iOS 26 exposes this system panel as a Sheet; older versions use
+            // Alert. Match only that named prompt, never arbitrary interruptions.
+            for prompt in [owner.sheets["Save Password?"], owner.alerts["Save Password?"]] {
+                if prompt.waitForExistence(timeout: 2) {
+                    prompt.buttons["Not Now"].tap()
+                    let dismissed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: prompt)
+                    wait(for: [dismissed], timeout: 5)
+                    return
+                }
+            }
+        }
     }
     private func enterNativeBrowserFields(_ app: XCUIApplication) {
         let email = app.textFields["Email"]
@@ -540,6 +807,38 @@ final class InboxUITests: XCTestCase {
             XCTAssertEqual(selector.frame.midX, idleCenter, accuracy: 1)
             tab.tap(); gone(app.keyboards.firstMatch)
         }
+    }
+
+    func testHeaderControlsRespondOutsideTheirIcons() {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        let drawer = app.descendants(matching: .any)["conversation-list"].firstMatch
+        // Tap transparent label space, away from the centered SF Symbol.
+        func tapCorner(_ identifier: String) {
+            let button = app.buttons[identifier]
+            XCTAssertTrue(button.waitForExistence(timeout: 5), identifier)
+            XCTAssertGreaterThanOrEqual(button.frame.width, 44 - 0.01, identifier)
+            XCTAssertGreaterThanOrEqual(button.frame.height, 44 - 0.01, identifier)
+            button.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: 5, dy: 5)).tap()
+        }
+        tapCorner("conversation-drawer-open")
+        XCTAssertTrue(drawer.waitForExistence(timeout: 5))
+        tapCorner("conversation-drawer-close")
+        gone(drawer)
+        tapCorner("running-agents")
+        XCTAssertTrue(drawer.waitForExistence(timeout: 5))
+        tapCorner("conversation-drawer-close")
+        gone(drawer)
+        tapCorner("new-conversation")
+        XCTAssertEqual(self.selectedConversationTab(app).label, "New agent")
+        tapCorner("conversation-drawer-open")
+        XCTAssertTrue(drawer.waitForExistence(timeout: 5))
+        tapCorner("drawer-new-conversation")
+        gone(drawer)
+        XCTAssertEqual(self.selectedConversationTab(app).label, "New agent")
+        tapCorner("app-menu")
+        XCTAssertTrue(app.buttons["inbox-scheduled-jobs"].waitForExistence(timeout: 5))
+        capture(app, "header-controls-corner-taps")
     }
 
     // Failures: compressed touch targets, truncated controls, landscape safe-area
@@ -4081,6 +4380,45 @@ final class InboxUITests: XCTestCase {
         capture(app, "streaming-preserves-reading-position")
     }
 
+    func testQuickDragDuringStreamingKeepsTheChosenPosition() {
+        let app = launch(["NANOCODEX_DEMO_STREAMING_GROWTH": "1",
+                          "NANOCODEX_DEMO_STREAM_INTERVAL_MS": "350"])
+        selectInbox(app)
+        let conversation = app.descendants(matching: .any)["conversation"].firstMatch
+        let early = conversation.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Stream paragraph 12.")).firstMatch
+        XCTAssertTrue(early.waitForExistence(timeout: 15))
+        let completion = conversation.staticTexts["Streaming response complete."]
+        // Release quickly while paragraphs keep arriving and changing row height.
+        // This exercises the deferred metrics/idle race, including deceleration.
+        let start = conversation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+        let end = conversation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
+        start.press(forDuration: 0.01, thenDragTo: end)
+        let latest = app.buttons["latest-messages"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        XCTAssertFalse(completion.exists, "The reader must leave the live tail before streaming finishes")
+        // Stop inertia with a stationary touch, then capture the visible paragraph.
+        conversation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        guard let paragraph = conversation.staticTexts.allElementsBoundByIndex.first(where: {
+            $0.isHittable && $0.label.hasPrefix("Stream paragraph ")
+                && $0.frame.minY > conversation.frame.minY + 100
+                && $0.frame.maxY < conversation.frame.maxY - 160
+        }) else { return XCTFail("Expected a visible earlier paragraph after dragging") }
+        let label = paragraph.label, y = paragraph.frame.minY
+        let moved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let current = conversation.staticTexts[label]
+            return !current.isHittable || abs(current.frame.minY - y) > 4
+        }, object: nil)
+        moved.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 3), .completed,
+                       "Streaming must not pull the reader back after a quick drag")
+        XCTAssertTrue(latest.isHittable)
+        latest.tap()
+        let followed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"), object: completion)
+        XCTAssertEqual(XCTWaiter.wait(for: [followed], timeout: 30), .completed)
+        gone(latest)
+        capture(app, "quick-streaming-drag-and-resume")
+    }
+
     func testLiveTailFollowsUpdatesAndOffersCompactJumpAfterReadingHistory() {
         let app = launch(["NANOCODEX_DEMO_STREAMING_GROWTH": "1"]); selectInbox(app)
         let conversation = app.descendants(matching: .any)["conversation"].firstMatch
@@ -4197,17 +4535,23 @@ final class InboxUITests: XCTestCase {
         // catching a transient progress indicator after the request finished.
         XCTAssertTrue(loading.exists || earlier.exists, "Reaching earlier history loads the next page automatically")
         if loading.exists {
-            var visibleAnchor: XCUIElement?
+            var visibleAnchor: (label: String, y: CGFloat)?
             let materialized = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                // Filter in the accessibility query before resolving per-element
-                // attributes. Slow CI snapshots can otherwise exhaust the wait
-                // while pagination changes the unfiltered element indices.
-                visibleAnchor = conversation.staticTexts.matching(
-                    NSPredicate(format: "label BEGINSWITH %@", "Progress note ")
-                ).allElementsBoundByIndex.first {
-                    $0.frame.minY >= conversation.frame.minY && $0.isHittable
-                }
-                return visibleAnchor != nil
+                // Bracket a stable label and finite coordinate with pending
+                // pagination. Re-reading an index-bound element after the
+                // wait can resolve a recycled cell during the prepend.
+                guard loading.exists,
+                      let first = conversation.staticTexts.matching(
+                        NSPredicate(format: "label BEGINSWITH %@", "Progress note ")
+                      ).allElementsBoundByIndex.first(where: {
+                        $0.frame.minY >= conversation.frame.minY && $0.isHittable
+                      }) else { return false }
+                let label = first.label
+                let anchored = conversation.staticTexts[label]
+                let frame = anchored.frame
+                guard frame.minY.isFinite, frame.height > 0, anchored.isHittable, loading.exists else { return false }
+                visibleAnchor = (label, frame.minY)
+                return true
             }, object: nil)
             guard XCTWaiter.wait(for: [materialized], timeout: 10) == .completed,
                   let first = visibleAnchor else {
@@ -4216,7 +4560,7 @@ final class InboxUITests: XCTestCase {
                     + app.staticTexts["conversation-native-scroll-state"].label + "\n" + conversation.debugDescription)
             }
             let firstLabel = first.label
-            let before = first.frame.minY
+            let before = first.y
             gone(loading)
             let retained = conversation.staticTexts[firstLabel]
             XCTAssertTrue(retained.isHittable)
@@ -4276,10 +4620,18 @@ final class InboxUITests: XCTestCase {
         composer(app).tap(); composer(app).typeText("Keep my place")
         let conversation = app.descendants(matching: .any)["conversation"].firstMatch
         scrollVisibleConversation(app, upward: false); scrollVisibleConversation(app, upward: false)
-        let anchor = conversation.staticTexts.allElementsBoundByIndex.first {
-            $0.isHittable && $0.label.hasPrefix("Progress note ") && $0.frame.minY >= conversation.frame.minY
+        let latest = app.buttons["latest-messages"]
+        guard latest.waitForExistence(timeout: 5), latest.isHittable else {
+            return XCTFail("Scroll into earlier history before recording the reading position")
         }
-        XCTAssertNotNil(anchor)
+        let readingTop = max(conversation.frame.minY, app.buttons["conversation-drawer-open"].frame.maxY)
+        let controls = app.buttons["toggle-all-tools"]
+        let readingBottom = min(composer(app).frame.minY, controls.exists ? controls.frame.minY : conversation.frame.maxY)
+        let anchor = conversation.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Progress note "))
+            .allElementsBoundByIndex.first {
+                $0.isHittable && $0.frame.minY >= readingTop && $0.frame.maxY <= readingBottom
+            }
+        XCTAssertNotNil(anchor, "Expected a history row unobscured by the floating header and composer controls")
         guard let anchor else { return }
         let label = anchor.label, y = anchor.frame.minY
         capture(app, "tabs-before-reading-switch")
@@ -5337,9 +5689,14 @@ final class InboxUITests: XCTestCase {
     private func scrollVisibleConversation(_ app: XCUIApplication, upward: Bool) {
         let conversation = app.descendants(matching: .any)["conversation"].firstMatch
         let frame = conversation.frame
-        let top = frame.minY + 36
-        let bottom = min(frame.maxY, composer(app).frame.minY) - 28
-        let height = max(40, bottom - top)
+        // The transcript extends behind the floating header. Starting there
+        // hits the title button instead of moving into earlier history.
+        let top = max(frame.minY, app.buttons["conversation-drawer-open"].frame.maxY) + 16
+        let controls = app.buttons["toggle-all-tools"]
+        let bottom = min(frame.maxY, composer(app).frame.minY,
+                         controls.exists ? controls.frame.minY : frame.maxY) - 28
+        let height = bottom - top
+        guard height > 40 else { return XCTFail("Expected an unobscured transcript region for scrolling") }
         let origin = app.coordinate(withNormalizedOffset: .zero)
         let low = origin.withOffset(CGVector(dx: frame.midX, dy: top + height * 0.85))
         let high = origin.withOffset(CGVector(dx: frame.midX, dy: top + height * 0.15))

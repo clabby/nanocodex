@@ -311,8 +311,10 @@ describe("private browser verification lifecycle", () => {
       return { result: { value: status } };
     });
     const connect = vi.spyOn(PrivateBrowserCdp, "connect").mockResolvedValue({ send, close() {} } as unknown as PrivateBrowserCdp);
+    const storage = { get: async (key: string) => stored.get(key), put: async (key: string, value: unknown) => { stored.set(key, structuredClone(value)); }, delete: async (key: string) => stored.delete(key),
+      transaction: async <T>(run: (tx: DurableObjectStorage) => Promise<T>): Promise<T> => run(storage as unknown as DurableObjectStorage) };
     const create = () => createManagedBrowserRuntime({
-      ctx: { storage: { get: async (key: string) => stored.get(key), put: async (key: string, value: unknown) => { stored.set(key, structuredClone(value)); }, delete: async (key: string) => stored.delete(key) } } as unknown as DurableObjectState,
+      ctx: { storage } as unknown as DurableObjectState,
       env: { MANAGED_BROWSER_PROVIDER: "cloudflare", BROWSER: { fetch: vi.fn() }, LOADER: {} as WorkerLoader }, sessionId: "agent-vault",
       resolveVaultLogin: resolve, authorizeVaultAccess: () => {},
       createRuntime: () => ({ connector: { sessionInfo: async () => ({ sessionId: state.session }), closeSession: async () => {} },

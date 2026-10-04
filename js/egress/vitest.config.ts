@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { claudeProvider } from "./test/claude-provider.fixture.mjs";
 import { SPOTIFY_SCOPES, SPOTIFY_LOOPBACK_CLIENT_ID } from "./src/connectors/music";
 import { gitProvider } from "../test-fixtures/git-provider.mjs";
@@ -70,6 +71,7 @@ export class ChatGptEgress {
 `;
 
 export default defineConfig({
+  resolve: { alias: { "@whiskeysockets/baileys": fileURLToPath(new URL("./src/whatsapp-generated/baileys.js", import.meta.url).href) } },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.broker.jsonc" },
@@ -151,6 +153,26 @@ export default defineConfig({
           if (music === "soundcloud" && url.pathname === "/sign-out") {
             const body = await request.json() as { access_token?: string };
             return new Response(null, { status: body.access_token?.startsWith("music-secret-") ? 204 : 401 });
+          }
+          if (url.hostname === "api.cloudflare.com") {
+            const authorization = request.headers.get("authorization");
+            const accountToken = authorization === "Bearer synthetic-cloudflare-account-token";
+            const expiredToken = authorization === "Bearer synthetic-cloudflare-expired-token";
+            const valid = authorization === "Bearer synthetic-cloudflare-token";
+            if (!valid && !accountToken && !expiredToken) return Response.json({ success: false }, { status: 401 });
+            if (url.pathname.includes("/tokens/verify") && (accountToken || expiredToken)) {
+              if (url.pathname !== `/client/v4/accounts/${"d".repeat(32)}/tokens/verify`) {
+                return Response.json({ success: false }, { status: 401 });
+              }
+              return Response.json({ success: true, result: { id: "e".repeat(32), status: "active",
+                expires_on: expiredToken ? "2000-01-01T00:00:00Z" : null } });
+            }
+            if (url.pathname === "/client/v4/user/tokens/verify") {
+              return Response.json({ success: true, result: { id: "c".repeat(32), status: "active" } });
+            }
+            if (url.searchParams.has("redirect")) return new Response(null, { status: 302, headers: { location: "https://outside.test/" } });
+            if (url.searchParams.has("reflect")) return new Response("synthetic-cloudflare-token");
+            return Response.json({ success: true, result: [{ id: "d".repeat(32), name: "Synthetic account" }] });
           }
           if (url.hostname === "api.spotify.com" || url.hostname === "api.soundcloud.com") {
             const provider = url.hostname === "api.spotify.com" ? "spotify" : "soundcloud";

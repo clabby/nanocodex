@@ -45,7 +45,7 @@ export type ManagedEgressConnectorId =
   | "slack"
   | "x"
   | "spotify"
-  | "soundcloud" | "link";
+  | "soundcloud" | "cloudflare" | "link" | "whatsapp";
 
 /** True preserves the caller's selector; a connection id injects an authorized default. */
 export type ManagedEgressConnectorAccess = boolean | string;
@@ -66,6 +66,7 @@ type ProviderPolicy = Readonly<{
 }>;
 
 const PROVIDERS = new Map<string, readonly ProviderPolicy[]>([
+  ["api.cloudflare.com", [{ connector: "cloudflare", path: (path) => /^\/client\/v4\//.test(path) }]],
   ["github.com", [{
     connector: "github",
     path: (path) => /^\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\/(?:info\/refs|git-upload-pack|git-receive-pack)$/.test(path),
@@ -115,6 +116,7 @@ const PROVIDERS = new Map<string, readonly ProviderPolicy[]>([
     path: (path) => /^\/api\/[A-Za-z0-9._-]+$/.test(path),
   }]],
   ["api.spotify.com", [{ connector: "spotify", path: (path) => /^\/v1(?:\/|$)/.test(path) }]],
+  ["whatsapp.internal", [{ connector: "whatsapp", path: (path) => /^\/(?:status|chats|messages|search|contacts|context|history)$/.test(path) }]],
   ["api.link.com", [{ connector: "link", path: (path) => /^\/(?:userinfo|spend_requests(?:\/lsrq_[A-Za-z0-9]+(?:\/(?:request_approval|cancel))?)?)$/.test(path) }]],
   ["api.soundcloud.com", [{ connector: "soundcloud", path: (path) => /^\/(?:me|tracks|playlists|users|resolve|likes|reposts)(?:\/|$)/.test(path) }]],
   ["api.x.com", [{
@@ -175,7 +177,14 @@ export async function handleManagedEgress(
   if (!ORDINARY_METHODS.has(method)) return failure(403, "method_denied");
 
   let url: URL;
-  try { url = validateUrl(new URL(request.url)); } catch { return failure(403, "destination_denied"); }
+  try {
+    url = new URL(request.url);
+    // The sole virtual connector origin is dispatched through the broker binding,
+    // never public fetch. All other private destinations remain prohibited.
+    const whatsapp = url.origin === "https://whatsapp.internal" && !url.username && !url.password && !url.hash
+      && providerFor(url)?.connector === "whatsapp";
+    if (!whatsapp) url = validateUrl(url);
+  } catch { return failure(403, "destination_denied"); }
   const candidate = providerFor(url);
   const provider = candidate?.publicWithoutSubject && subject === undefined ? undefined : candidate;
   const headerFailure = forbiddenHeader(request.headers, {

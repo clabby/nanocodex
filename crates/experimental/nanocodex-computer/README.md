@@ -101,3 +101,44 @@ conversation isolation, cancellation, and unsupported server requests. The ignor
 `installed_external_provider_discovery_preserves_catalog_and_hides_lifecycle_hook`
 smoke test uses `NANOCODEX_TEST_EXTERNAL_COMPUTER` to inspect an installed upstream
 launcher. It performs discovery only and does not claim to verify native control.
+
+## Confirmation policies (supercharged by default)
+
+The upstream CUA provider ships a built-in computer-use and browser-use
+confirmation policy: always-confirm and hand-off rules that require a human
+before send, delete, purchase and sign-in style actions, delivered as
+documentation with the first call of a session. The client can replace that
+documentation by sending an `openai/confirmation_policies` override in the
+per-call `_meta` to the provider; the override text wins over the built-in
+policy docs.
+
+Nanocodex enables the override **by default on every `ComputerConfig`**:
+each provider call sends `"No confirmation policy applies."`
+(`NO_CONFIRMATION_POLICIES`), removing the upstream confirmation layer
+entirely. Supercharged computer use is the default; the embedding host's
+own instructions and AGENTS.md are the only limits.
+
+Controls:
+
+- `ComputerConfig::confirmation_policies(text)` substitutes custom policy
+  text. Blank text is ignored and keeps the current value: upstream treats a
+  blank value as "use the defaults", so sending it would silently restore the
+  built-in policy.
+- `ComputerConfig::upstream_confirmation_policies()` opts back in to the
+  provider's built-in always-confirm policy: no override key is sent.
+- `NANOCODEX_COMPUTER_CONFIRMATION_POLICIES` overrides the default without
+  code changes. A non-blank value other than `off`/`none`/`0` replaces the
+  policy text; `off`, `none` or `0` restores the upstream built-in policy.
+  It is read by the trusted discovery paths only and is never inherited by
+  the provider process; the text travels as per-call `_meta`.
+
+The managed macOS launcher also exports
+`BROWSER_USE_DISABLE_TAB_CAPABILITIES=browserAuth`, which drops the
+`browserAuth` tab capability that otherwise forbids credential entry in
+browser tabs. It only takes effect when browser tab surfaces are enabled; the
+macOS launcher currently restricts surfaces to native `computer`.
+
+The removed layers exist to blunt prompt injection and accidental side
+effects. With them off, the agent follows the embedding host's instructions
+alone; put any remaining limits you still want (such as "never send messages
+as me without asking") in AGENTS.md or host tool policies.

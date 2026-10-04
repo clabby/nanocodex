@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyReplyRequest, gmailDecisionCandidates, proposeGmailReplyDecisions,
+import { classifyBookingRequest, classifyReplyRequest, gmailDecisionCandidates, proposeGmailReplyDecisions,
   GMAIL_DECISION_POLICY, GMAIL_REPLY_THRESHOLD, GMAIL_ACTION_REVIEW_POLICY, GMAIL_ACTION_REVIEW_THRESHOLD,
   classifyActionReviewRequest, gmailActionReviewCategory, type GmailActionReviewCategory } from "../src/gmail-firehose-decisions";
 import type { RoutingAi } from "../src/thread-model-routing";
@@ -309,5 +309,28 @@ describe("Gmail decisions suppress self-authored and provider SENT mail", () => 
     ].map((from,index)=>({...message,id:`external-${index}`,headers:{...message.headers,from},label_ids:["INBOX"]}));
     expect(gmailDecisionCandidates(envelope(cases))!.messages).toHaveLength(cases.length);
     expect(gmailDecisionCandidates(JSON.stringify({...JSON.parse(envelope([message])),email:"malformed mailbox"}))!.messages).toHaveLength(1);
+  });
+});
+
+it("retries a transient classifier outage without losing or repeating completed message decisions", async () => {
+  let failing=true, calls=0, writes=0;const ledger=new Map<string,string>();const traces:any[]=[];
+  const batch=envelope([message,{...message,id:"second"}]);
+  const ai={run:async()=>{calls++;if(failing&&calls===2)throw Object.assign(new Error("unavailable"),{status:503});return {answers:{action:{choice:"reply_requested",confidence:0.99}}};}};
+  const run=()=>proposeGmailReplyDecisions(batch,ai,{proposeTodoDecision:async()=>{writes++;return {id:crypto.randomUUID()};}},()=>{},
+    {has:key=>ledger.has(key),mark:(key,value)=>{ledger.set(key,value);}},async trace=>{traces.push(trace);});
+  await expect(run()).rejects.toThrow("gmail_classification_retry");expect(writes).toBe(1);expect(ledger.size).toBe(1);
+  failing=false;expect(await run()).toBe(1);expect(writes).toBe(2);expect(ledger.size).toBe(2);
+  expect(await run()).toBe(0);expect(calls).toBe(3);
+  expect(traces.map(t=>t.outcome)).toEqual(["reply","unavailable","reply"]);
+});
+
+describe("booking review confidence", () => {
+  it("admits read-only review at 90% while preserving abstention below it", async () => {
+    for (const confidence of [0.89,0.90,0.91]) {
+      const ai = {run:async()=>({state:"Completed",result:{answers:{action:{choice:"booking_review",confidence,probabilities:{booking_review:confidence,no_action:1-confidence}}}}})} as RoutingAi;
+      const result = await classifyBookingRequest(ai,message);
+      expect(result.outcome).toBe(confidence>=0.90?"action_review":"unavailable");
+      if(result.outcome==="action_review") expect(validGmailDecisionTrace({source_key:"gmail:gmail-booking-review-triage-v1:"+"a".repeat(64),policy_version:"gmail-booking-review-triage-v1",outcome:result.outcome,reason:result.reason,classifier_outcome:"success",confidence,reply_probability:null,duration_ms:1,decision_id:"11111111-1111-4111-8111-111111111111"})).toBe(true);
+    }
   });
 });

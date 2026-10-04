@@ -1,6 +1,6 @@
-# iPhone delivery from a Mac
+# iPhone delivery
 
-The local OTA path builds the `xyz.paradigm.centaur` app with the Mac's Xcode
+The Mac OTA path builds the `xyz.paradigm.centaur` app with the Mac's Xcode
 signing credentials and serves it at
 https://nanocodex-ios-updates.gakonst.workers.dev. The iPhone can download over
 cellular or Wi-Fi; the Mac and phone do not need to share a network. iOS performs
@@ -128,3 +128,22 @@ are separate from successful installation and may require an unlocked phone.
 
 Local signing, direct installation and the signed OTA feed do not require CI.
 The normal nightly CLI/native release workflow is independent of iPhone delivery.
+
+## Build and sign on Linux
+
+A Mac is not required for the [local Linux build and signing path](../apple/xtool/local-release.md).
+Reuse the installed Swift/xtool/Apple SDK and existing private signing directory.
+`bash apple/scripts/release-ios-linux.sh build-unsigned` produces an IPA under
+`output/ios-linux/BUILD/`; this unsigned file cannot be installed on the phone.
+
+Linux can generate a protected private key and public certificate signing request.
+Apple must issue the matching certificate and profiles for the app, share and
+widget extensions, covering the intended iPhone. Generating another local key
+does not issue Apple credentials. A browser login does not authenticate xtool.
+The linked guide describes the required local signing inputs and `build-signed`.
+
+Linux OTA staging checks provisioning and signature integrity, but does not prove
+installation. Its automatic `--deploy` remains disabled pending complete remote
+asset reconciliation. Follow the guide's manual publication prerequisites and
+verify the installed build on the intended phone; preserve the entire immutable
+feed history.

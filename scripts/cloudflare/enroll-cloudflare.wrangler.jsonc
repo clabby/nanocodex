@@ -1,0 +1,7 @@
+{
+  "name": "nanocodex-private-enrollment-client",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false,
+  "send_metrics": false,
+  "services": [{ "binding": "EGRESS", "service": "nanocodex-egress", "remote": true }]
+}

@@ -154,3 +154,57 @@ test('database failures report safe stage and HTTP status without leaking provid
     assert.equal(f.generated.length, 0);
   }
 });
+
+// OAuth cannot be exercised with real credentials in CI. Stub only the external
+// Wrangler subprocess boundary; the release orchestration and config are real.
+test('Wrangler OAuth validates an existing database before pinned migrations and upload', async t => {
+  const f = fixture(t);
+  delete f.options.env.CLOUDFLARE_API_TOKEN;
+  delete f.options.env.CLOUDFLARE_ACCOUNT_ID;
+  f.options.request = () => assert.fail('OAuth must remain owned by Wrangler');
+  const originalRun = f.options.run;
+  f.options.run = async (command, args, settings) => {
+    if (args.includes('list')) {
+      assert.equal(command, 'npx');
+      assert.deepEqual(args, ['wrangler', 'd1', 'list', '--json', '--config', f.config, '--env=']);
+      assert.deepEqual(settings.stdio, ['ignore', 'pipe', 'pipe']);
+      assert.equal(settings.env.CI, 'true');
+      f.events.push({ type: 'list' });
+      return JSON.stringify([f.database]);
+    }
+    return originalRun(command, args, settings);
+  };
+  await deployManaged('deploy', f.options);
+  assert.deepEqual(f.events.map(e => e.type), ['list', 'migrate', 'upload']);
+  assert.equal(f.events[1].effective.d1_databases[0].database_id, f.database.uuid);
+  assert.ok(f.events[1].args.includes('--remote'));
+  assert.ok(f.generated.every(path => !existsSync(path)));
+});
+
+test('Wrangler OAuth rejects missing, ambiguous, malformed, unauthorized and mismatched databases before mutation', async t => {
+  for (const scenario of ['missing', 'ambiguous', 'malformed', 'invalid-id', 'denied', 'mismatch']) {
+    const f = fixture(t);
+    delete f.options.env.CLOUDFLARE_API_TOKEN;
+    if (scenario === 'mismatch') {
+      f.source.d1_databases[0].database_id = '22222222-2222-4222-8222-222222222222';
+      writeFileSync(f.config, JSON.stringify(f.source));
+    }
+    let calls = 0;
+    f.options.run = async (_, args) => {
+      assert.ok(args.includes('list'), 'no migrations or upload on lookup failure');
+      calls++;
+      if (scenario === 'denied') throw Error('synthetic-secret provider details');
+      if (scenario === 'malformed') return 'synthetic-secret invalid JSON';
+      return JSON.stringify(scenario === 'missing' ? [] : scenario === 'ambiguous' ? [f.database, f.database]
+        : [{ ...f.database, ...(scenario === 'invalid-id' ? { uuid: 'synthetic-secret' } : {}) }]);
+    };
+    await assert.rejects(deployManaged('deploy', f.options), error => {
+      assert.match(error.message, /CRM database/);
+      assert.ok(!String(error.stack).includes('synthetic-secret'));
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    assert.equal(calls, 1);
+    assert.equal(f.generated.length, 0);
+  }
+});

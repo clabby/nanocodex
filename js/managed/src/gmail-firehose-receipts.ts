@@ -9,6 +9,7 @@ export function gmailDecisionReceipts(storage: DurableObjectStorage) {
   INSERT INTO gmail_firehose_decision_receipts_v2(source_key,outcome,created_at)
     SELECT source_key,outcome,created_at FROM gmail_firehose_decision_receipts WHERE true ON CONFLICT(source_key) DO NOTHING;`);
   return {
+    outcome: (sourceKey:string) => storage.sql.exec<{outcome:string}>("SELECT outcome FROM gmail_firehose_decision_receipts_v2 WHERE source_key=?",sourceKey).toArray()[0]?.outcome,
     has: (sourceKey:string) => storage.sql.exec("SELECT source_key FROM gmail_firehose_decision_receipts_v2 WHERE source_key=?",sourceKey).toArray().length > 0,
     mark: (sourceKey:string,outcome:"reply" | "action_review" | "no_reply" | "filtered") => {
       storage.sql.exec("INSERT INTO gmail_firehose_decision_receipts_v2(source_key,outcome,created_at) VALUES(?,?,?) ON CONFLICT(source_key) DO NOTHING",sourceKey,outcome,Date.now());

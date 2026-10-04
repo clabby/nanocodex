@@ -131,6 +131,8 @@ const timestamp: Check = value => Number.isSafeInteger(value) && Number(value) >
 const capability = text(64);
 const connection = shape({ id, label: text(512), account_id: text(512), capabilities: list(32, capability) });
 const connector = shape({ connected: value => typeof value === "boolean", connections: list(100, connection) });
+const whatsappConnector = shape({ connected: value => typeof value === "boolean", connections: list(1,
+  shape({ id, label: text(512), capabilities: value => Array.isArray(value) && value.length === 1 && value[0] === "whatsapp" })) });
 const mcp = shape({ id, name: text(512), status: text(64) });
 
 /** Exact schemas prevent new credential-bearing fields from silently becoming cacheable. */
@@ -138,7 +140,7 @@ export function safeMetadata(component: CloudflareAccountMetadataComponent, valu
   if (component === "catalog") {
     return record(value) && exact(value, ["connectors", "mcp_connections"])
       && record(value.connectors) && Object.keys(value.connectors).length <= 32
-      && Object.entries(value.connectors).every(([key, status]) => /^[a-z][a-z0-9_]{0,63}$/.test(key) && connector(status))
+      && Object.entries(value.connectors).every(([key, status]) => /^[a-z][a-z0-9_]{0,63}$/.test(key) && (key === "whatsapp" ? whatsappConnector(status) : connector(status)))
       && list(256, mcp)(value.mcp_connections);
   }
   return list(100, vaultEntry)(value);

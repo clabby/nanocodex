@@ -33,6 +33,7 @@ import {
   GOOGLE_PROVIDER,
   type GoogleCapabilityId,
 } from "./connectors/google";
+import { cloudflareRequestAllowed } from "./connectors/cloudflare";
 import { canonicalConnectorPath } from "./connector-path";
 import {
   McpConnectionOwner,
@@ -68,7 +69,7 @@ const REVOCATION_RETRY_BASE_MS = 30_000;
 const REVOCATION_RETRY_MAX_MS = 60 * 60_000;
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
-const PROVIDER = /^(github|google|slack|x|spotify|soundcloud|link)$/;
+const PROVIDER = /^(github|google|slack|x|spotify|soundcloud|cloudflare|link)$/;
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 
 type ProviderRule = Readonly<{
@@ -79,6 +80,7 @@ type ProviderRule = Readonly<{
 }>;
 
 const PROVIDER_RULES: readonly ProviderRule[] = [
+  { id: "cloudflare", provider: "cloudflare", origin: "https://api.cloudflare.com", paths: [/^\/client\/v4\//] },
   { id: "link", provider: "link", origin: "https://api.link.com", paths: [LINK_PATH] },
   {
     id: "github",
@@ -178,10 +180,11 @@ const PROVIDER_RULES: readonly ProviderRule[] = [
   },
 ];
 
-export type ConnectorId = "github" | GoogleCapabilityId | "slack" | "x" | MusicProviderId | "link";
-export type OAuthProviderId = "github" | "google" | "slack" | "x" | MusicProviderId | "link";
+export type ConnectorId = "github" | GoogleCapabilityId | "slack" | "x" | MusicProviderId | "cloudflare" | "link" | "whatsapp";
+export type OAuthProviderId = "github" | "google" | "slack" | "x" | MusicProviderId | "cloudflare" | "link";
 
 export interface ConnectorBrokerEnv extends McpConnectionBrokerEnv {
+  WHATSAPP_ACCOUNTS?: DurableObjectNamespace;
   SPOTIFY_RATE_LIMITS: DurableObjectNamespace<SpotifyRateLimit>;
   GITHUB_OAUTH_CLIENT_ID?: string;
   GITHUB_OAUTH_CLIENT_SECRET?: string;
@@ -295,7 +298,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
 
   async #catalogMetadata() {
     await this.#pollLink();
-    return { connectors: this.#publicStatus(), ...this.#mcpConnections.publicMetadata() };
+    return { connectors: await this.#publicStatus(), ...this.#mcpConnections.publicMetadata() };
   }
 
   alarm(): Promise<void> {
@@ -336,6 +339,13 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       if (url.origin === "https://mcp-connections.internal") {
         return this.#mcpConnections.fetch(request);
       }
+      if (url.origin === "https://whatsapp.internal") return this.#whatsappData(request, url);
+      if (url.origin === "https://connectors.internal" && (url.pathname === "/v1/whatsapp" || url.pathname.startsWith("/v1/whatsapp/"))) {
+        const target = new URL(request.url);
+        target.hostname = "whatsapp-account.internal";
+        target.pathname = target.pathname.slice("/v1/whatsapp".length) || "/status";
+        return this.#whatsapp().fetch(new Request(target, request));
+      }
       const provider = providerRule(url);
       if (provider) {
         auditAction = "use";
@@ -351,13 +361,13 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       }
       if (request.method === "GET" && url.pathname === "/v1/status") {
         await this.#pollLink();
-        return json({ connectors: this.#publicStatus() }, 200);
+        return json({ connectors: await this.#publicStatus() }, 200);
       }
       if (request.method === "GET" && url.pathname === "/v1/catalog") {
         return json(await this.#catalogMetadata(), 200);
       }
       const match = url.pathname.match(
-        /^\/v1\/(github|google|gmail|gdrive|slack|x|spotify|soundcloud|link)(?:\/(start|callback)|\/connections\/([A-Za-z0-9_-]{43}))?$/,
+        /^\/v1\/(github|google|gmail|gdrive|slack|x|spotify|soundcloud|cloudflare|link)(?:\/(start|callback)|\/connections\/([A-Za-z0-9_-]{43}))?$/,
       );
       const controlId = match?.[1];
       const id = oauthProviderId(controlId);
@@ -375,14 +385,14 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       if (request.method === "POST" && operation === "start") {
         auditAction = "authorize_start";
         auditConnector = id;
-        const result = json(id === "link" ? await this.#startLink() : await this.#start(id, request), 200);
+        const result = json(id === "cloudflare" ? await this.#connectCloudflare(request) : id === "link" ? await this.#startLink() : await this.#start(id, request), 200);
         connectorAudit("authorize_start", "allow", id, { status: 200 });
         return result;
       }
       if (request.method === "POST" && operation === "callback") {
         auditAction = "authorize_callback";
         auditConnector = id;
-        if (id === "link") return jsonError(405, "method_not_allowed");
+        if (id === "link" || id === "cloudflare") return jsonError(405, "method_not_allowed");
         const callback = await this.#callback(id, request);
         connectorAudit("authorize_callback", callback.connected === true ? "allow" : "deny", id, {
           status: 200,
@@ -447,6 +457,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   }
 
   async #proxy(provider: ProviderRule, request: Request, url: URL): Promise<Response> {
+    if (provider.id === "cloudflare" && !cloudflareRequestAllowed(request.method, url)) throw new ConnectorFailure(403, "destination_denied");
     if (provider.id === "link" && !linkRequestAllowed(request.method, url)) throw new ConnectorFailure(403, "destination_denied");
     const archiveRepository = provider.id === "github" && request.method === "GET"
       && url.origin === "https://api.github.com"
@@ -853,7 +864,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       if (!response.ok) throw new ConnectorFailure(503, "connector_revocation_failed");
       return true;
     }
-    if (id === "spotify") return false;
+    if (id === "spotify" || id === "cloudflare") return false;
     if (id === "soundcloud") {
       const response = await providerFetch(buildSoundCloudRevocationRequest(connector.accessToken));
       await response.body?.cancel();
@@ -918,8 +929,8 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       || Boolean(refreshable);
   }
 
-  #publicStatus(): Record<ConnectorId, Record<string, unknown>> {
-    const status = (id: ConnectorId): Record<string, unknown> => {
+  async #publicStatus(): Promise<Record<ConnectorId, Record<string, unknown>>> {
+    const status = (id: Exclude<ConnectorId, "whatsapp">): Record<string, unknown> => {
       const provider = providerForCapability(id);
       const connections = Object.entries(this.#connections(provider))
         .filter(([connectionId, connector]) => CONNECTION_ID.test(connectionId)
@@ -938,6 +949,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       return { connected: connections.length > 0, connections };
     };
     return {
+      cloudflare: status("cloudflare"),
       github: status("github"),
       gmail: status("gmail"),
       gdrive: status("gdrive"),
@@ -952,7 +964,80 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       spotify: status("spotify"),
       soundcloud: status("soundcloud"),
       link: status("link"),
+      whatsapp: await this.#whatsappCatalog(),
     };
+  }
+
+  #whatsapp(): DurableObjectStub {
+    const namespace = this.#env.WHATSAPP_ACCOUNTS;
+    if (!namespace) throw new ConnectorFailure(503, "connector_not_configured");
+    return namespace.get(namespace.idFromName(this.#state.id.toString()));
+  }
+
+  async #whatsappCatalog(): Promise<Record<string, unknown>> {
+    if (!this.#env.WHATSAPP_ACCOUNTS) return { connected: false, connections: [] };
+    try {
+      const response = await this.#whatsapp().fetch("https://whatsapp-account.internal/status");
+      if (!response.ok) return { connected: false, connections: [], unavailable: true };
+      const value = await response.json() as { connected?: boolean; connection_id?: string; label?: string; state?: string };
+      const connected = value.connected === true && typeof value.connection_id === "string" && CONNECTION_ID.test(value.connection_id);
+      return { connected, connections: connected ? [{ id: value.connection_id, label: value.label ?? "WhatsApp", capabilities: ["whatsapp"] }] : [] };
+    } catch {
+      // A provider/session failure must not hide unrelated account connectors.
+      return { connected: false, connections: [], unavailable: true };
+    }
+  }
+
+  async #whatsappData(request: Request, url: URL): Promise<Response> {
+    if (!/^\/(?:status|chats|messages|search|contacts|context|history)$/.test(url.pathname)
+      || (url.pathname === "/history" ? request.method !== "POST" : request.method !== "GET")) return jsonError(403, "destination_denied");
+    const target = new URL(url); target.hostname = "whatsapp-account.internal";
+    const headers = new Headers();
+    const selected = request.headers.get("x-nanocodex-connector-connection");
+    if (selected !== null) {
+      if (!CONNECTION_ID.test(selected)) return jsonError(400, "invalid_connection_id");
+      headers.set("x-nanocodex-connector-connection", selected);
+    }
+    headers.set("content-type", "application/json");
+    return this.#whatsapp().fetch(new Request(target, { method: request.method, headers,
+      ...(request.body === null ? {} : { body: request.body }) }));
+  }
+
+  async #connectCloudflare(request: Request): Promise<Record<string, unknown>> {
+    // Only egress supplies credential material, resolved from this owner's Vault.
+    const body = await readJson(request, MAX_BODY_BYTES);
+    const token = stringField(body, "access_token");
+    if (!token || token.length > 4096 || /\s/.test(token)) throw new ConnectorFailure(400, "invalid_request");
+    const accountId = body?.account_id;
+    if (accountId !== undefined && (typeof accountId !== "string" || !/^[a-f0-9]{32}$/.test(accountId))) {
+      throw new ConnectorFailure(400, "invalid_request");
+    }
+    const verifyPath = accountId === undefined ? "/user/tokens/verify" : `/accounts/${accountId}/tokens/verify`;
+    const response = await providerFetch(new Request(`https://api.cloudflare.com/client/v4${verifyPath}`, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+    }));
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new ConnectorFailure(409, "cloudflare_token_invalid");
+    }
+    const value = await providerJson(response);
+    const result = value.result;
+    if (value.success !== true || !isRecord(result) || result.status !== "active"
+      || typeof result.id !== "string" || !/^[a-f0-9]{32}$/.test(result.id)) {
+      throw new ConnectorFailure(409, "cloudflare_token_invalid");
+    }
+    const expiresAt = result.expires_on == null ? undefined
+      : typeof result.expires_on === "string" ? Date.parse(result.expires_on) : NaN;
+    if (expiresAt !== undefined && (!Number.isFinite(expiresAt) || expiresAt <= Date.now() + EXPIRY_SKEW_MS)) {
+      throw new ConnectorFailure(409, "cloudflare_token_invalid");
+    }
+    const connectionId = this.#connectionIdForIdentity("cloudflare", accountId === undefined ? result.id : `account:${accountId}:${result.id}`);
+    this.#connections("cloudflare")[connectionId] = {
+      accessToken: token, accountId: accountId ?? result.id, label: accountId === undefined ? "Cloudflare API token" : "Cloudflare account API token", scopes: [],
+      connectedAt: Date.now(), ...(expiresAt === undefined ? {} : { expiresAt }),
+    };
+    await this.#persist();
+    return { connected: true, connection_id: connectionId, capabilities: ["cloudflare"] };
   }
 
   async #startLink(): Promise<Record<string, unknown>> {
@@ -1058,7 +1143,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   }
 
   async #start(id: OAuthProviderId, request: Request): Promise<Record<string, unknown>> {
-    if (id === "link") throw new ConnectorFailure(405, "method_not_allowed");
+    if (id === "link" || id === "cloudflare") throw new ConnectorFailure(405, "method_not_allowed");
     const body = await readJson(request, MAX_BODY_BYTES);
     const flow = stringField(body, "flow");
     if (flow && !((id === "spotify" && flow === "ncspot_loopback")
@@ -1454,7 +1539,7 @@ function providerCredentials(
   env: ConnectorBrokerEnv,
   oauthClientId?: string,
 ): { clientId: string; clientSecret: string } {
-  if (id === "link") throw new ConnectorFailure(405, "method_not_allowed");
+  if (id === "link" || id === "cloudflare") throw new ConnectorFailure(405, "method_not_allowed");
   if (oauthClientId !== undefined) {
     if (id !== "spotify" || oauthClientId !== SPOTIFY_LOOPBACK_CLIENT_ID) {
       throw new ConnectorFailure(503, "connector_not_configured");
@@ -1519,6 +1604,7 @@ function capabilitiesFor(provider: OAuthProviderId, scopes: readonly string[]): 
 }
 
 function providerForCapability(id: ConnectorId): OAuthProviderId {
+  if (id === "whatsapp") throw new ConnectorFailure(403, "destination_denied");
   return id.startsWith("g") && id !== "github" ? "google" : id as OAuthProviderId;
 }
 

@@ -48,6 +48,7 @@ import {
 
 export { AgentSubjectDirectory, UserCredentialBroker } from "./broker";
 export { UserConnectorBroker } from "./connector-broker";
+export { WhatsAppAccount } from "./whatsapp-account";
 export { SpotifyRateLimit } from "./spotify-rate-limit";
 export { McpConnectionDirectory } from "./mcp-connection-owner";
 
@@ -100,7 +101,7 @@ const PRIVATE_HOST_SUFFIXES = [
   ".internal", ".invalid", ".local", ".localhost", ".test", ".home.arpa",
 ];
 const VAULT_PROVIDER_HOSTS = new Set([
-  "api.github.com", "api.openai.com", "api.x.com", "api.spotify.com", "api.soundcloud.com", "api.link.com", "chatgpt.com",
+  "api.cloudflare.com", "api.github.com", "api.openai.com", "api.x.com", "api.spotify.com", "api.soundcloud.com", "api.link.com", "chatgpt.com",
   "calendar.googleapis.com", "docs.googleapis.com", "gmail.googleapis.com",
   "people.googleapis.com", "sheets.googleapis.com", "slack.com",
   "slides.googleapis.com", "tasks.googleapis.com", "www.googleapis.com",
@@ -117,7 +118,7 @@ const RELAY_HTTP_ROUTES: Readonly<Record<ModelOperation["id"], string | undefine
 
 type ConnectorOperation = Readonly<{
   id: "github" | "gmail" | "gdrive" | "gcalendar" | "gtasks" | "gdocs"
-    | "gsheets" | "gslides" | "gcontacts" | "slack" | "x" | "spotify" | "soundcloud" | "link";
+    | "gsheets" | "gslides" | "gcontacts" | "slack" | "x" | "spotify" | "soundcloud" | "cloudflare" | "link" | "whatsapp";
   origin: `https://${string}`;
   paths: readonly RegExp[];
 }>;
@@ -135,6 +136,8 @@ type VaultEgressEnvelope = Readonly<{
 }>;
 
 const CONNECTOR_OPERATIONS: readonly ConnectorOperation[] = [
+  { id: "whatsapp", origin: "https://whatsapp.internal", paths: [/^\/(?:status|chats|messages|search|contacts|context|history)$/] },
+  { id: "cloudflare", origin: "https://api.cloudflare.com", paths: [/^\/client\/v4\//] },
   { id: "link", origin: "https://api.link.com", paths: [LINK_PATH] },
   {
     id: "github",
@@ -547,7 +550,10 @@ async function handleMeasuredEgressWithOwner(
   const linkPoll = request.method === "GET"
     && /^\/users\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/connectors\/link$/.test(url.pathname)
     && /^\?attempt=[A-Za-z0-9_-]{43}$/.test(url.search);
-  if (url.search && !linkPoll) return jsonError(403, "destination_denied");
+  const whatsappPairing = request.method === "GET"
+    && /^\/users\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/connectors\/whatsapp\/pairing$/.test(url.pathname)
+    && /^\?operation_id=[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(url.search);
+  if (url.search && !linkPoll && !whatsappPairing) return jsonError(403, "destination_denied");
 
   if (url.pathname.startsWith("/subjects/") || url.pathname.startsWith("/users/")) {
     const response = await handleControl(request, url, env);
@@ -2220,8 +2226,23 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
     return jsonError(405, "method_not_allowed");
   }
 
+  const whatsappMatch = url.pathname.match(/^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/connectors\/whatsapp(?:\/(start|pairing)|\/connections\/([A-Za-z0-9_-]{43}))?$/);
+  if (whatsappMatch) {
+    const [, userId, operation, connectionId] = whatsappMatch;
+    const action = operation ?? (request.method === "POST" ? "start" : undefined);
+    if (!((action === "start" && request.method === "POST")
+      || (action === "pairing" && request.method === "GET")
+      || (!action && !connectionId && request.method === "GET")
+      || (connectionId && request.method === "DELETE"))) return jsonError(405, "method_not_allowed");
+    return connectorBroker(env, userId!).fetch(new Request(
+      `https://connectors.internal/v1/whatsapp${connectionId ? `/connections/${connectionId}` : action ? `/${action}` : ""}${url.search}`,
+      { method: request.method, headers: { "content-type": request.headers.get("content-type") ?? "" },
+        ...(request.body === null ? {} : { body: request.body }) },
+    ));
+  }
+
   const connectorMatch = url.pathname.match(
-    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/connectors(?:\/(github|google|gmail|gdrive|slack|x|spotify|soundcloud|link)(?:\/(callback)|\/connections\/([A-Za-z0-9_-]{43}))?)?$/,
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/connectors(?:\/(github|google|gmail|gdrive|slack|x|spotify|soundcloud|cloudflare|link)(?:\/(callback)|\/connections\/([A-Za-z0-9_-]{43}))?)?$/,
   );
   if (connectorMatch) {
     const userId = connectorMatch[1]!;
@@ -2241,6 +2262,22 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
       || (connector && !callback && !connectionId
         && request.method !== "POST" && request.method !== "DELETE" && !linkPoll)) {
       return jsonError(405, "method_not_allowed");
+    }
+    if (connector === "cloudflare" && request.method === "POST" && !callback && !connectionId) {
+      const body = await readJson(request, MAX_VAULT_BODY_BYTES);
+      if (!isRecord(body) || Object.keys(body).some(key => key !== "vault_id" && key !== "account_id")
+        || typeof body.vault_id !== "string" || !/^[A-Za-z0-9_-]{22,64}$/.test(body.vault_id)
+        || (body.account_id !== undefined && (typeof body.account_id !== "string" || !/^[a-f0-9]{32}$/.test(body.account_id)))) {
+        return jsonError(400, "invalid_request");
+      }
+      let entry: VaultEntry;
+      try { entry = await resolveVaultEntry(env, userId, body.vault_id); }
+      catch (error) { const failure = egressFailure(error); return jsonError(failure.status, failure.code); }
+      if (entry.kind !== "api_key") return jsonError(400, "vault_api_key_required");
+      return connectorBroker(env, userId).fetch(target, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ access_token: entry.api_key, ...(body.account_id === undefined ? {} : { account_id: body.account_id }) }),
+      });
     }
     return connectorBroker(env, userId).fetch(target, {
       method: request.method,
@@ -3305,7 +3342,7 @@ function auditControl(
   const subject = url.pathname.startsWith("/subjects/");
   const tail = user?.[3];
   const connector = user?.[2] === "connectors"
-    ? tail?.match(/^(github|google|gmail|gdrive|slack|x|spotify|soundcloud|link)/)?.[1]
+    ? tail?.match(/^(github|google|gmail|gdrive|slack|x|spotify|soundcloud|cloudflare|link)/)?.[1]
     : undefined;
   const log = status >= 500 ? console.error : status >= 400 ? console.warn : console.info;
   log({
@@ -3331,7 +3368,7 @@ function audit(
   const connector = rule === "github" || rule === "gmail" || rule === "gdrive"
     || rule === "gcalendar" || rule === "gtasks" || rule === "gdocs"
     || rule === "gsheets" || rule === "gslides" || rule === "gcontacts"
-    || rule === "slack" || rule === "x" || rule === "spotify" || rule === "soundcloud" || rule === "link" || rule === "mcp";
+    || rule === "cloudflare" || rule === "slack" || rule === "x" || rule === "spotify" || rule === "soundcloud" || rule === "link" || rule === "whatsapp" || rule === "mcp";
   const log = action === "error" ? console.error : action === "deny" ? console.warn : console.info;
   const safeDetail = {
     ...(rule === "responses" && typeof detail.relay_region === "string" && validatedRelayRegion(detail.relay_region)

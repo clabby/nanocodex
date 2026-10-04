@@ -56,6 +56,18 @@ const config = { userId: "user-test", connectionId: "connection-test", agentId: 
 const notify = { emailAddress: config.email, historyId: "12" };
 
 describe("Gmail push history protocol", () => {
+  it("allows the delivered wake to recheck archive authorization without deadlocking", async () => {
+    const f = fixture();
+    await f.request("/configure", "POST", {...config, archive_non_actionable:true});
+    await f.request("/notify", "POST", notify);
+    f.env.MANAGED_AGENT_OWNERSHIP.fetch = (async () => {
+      expect(await (await f.request("/status")).json()).toMatchObject({enabled:true,archive_non_actionable:true,pending:true});
+      return Response.json({status:"accepted"});
+    }) as typeof f.env.MANAGED_AGENT_OWNERSHIP.fetch;
+    await f.alarmRun();
+    expect(await (await f.request("/status")).json()).toMatchObject({cursor:"12",pending:false});
+  });
+
   it("verifies the real mailbox and uses only the configured topic and connection", async () => {
     const f = fixture();
     expect((await f.request("/configure", "POST", { ...config, email: "other@example.test" })).status).toBe(409);
@@ -112,7 +124,9 @@ describe("Gmail push history protocol", () => {
       f.restart(); f.watchStatus(200); now += 120000;
       await f.alarmRun();
       expect(await (await f.request("/status")).json()).toMatchObject({ renewalError: null });
-      expect(f.alarm).toBeGreaterThan(now + 120000);
+      // The independent five-minute history check may now be due at this boundary.
+      expect(f.alarm).toBeGreaterThanOrEqual(now + 120000);
+      expect(f.alarm).toBeLessThanOrEqual(now + 300000);
     } finally { clock.mockRestore(); }
   });
 
@@ -436,4 +450,16 @@ it.each([false, true])("preserves a legacy durable outbox without relabeling or 
   expect(f.wakes[0]).toMatchObject({ eventId: "gmail-legacy", input });
   expect(f.calls.filter(r => r.url.includes("/messages/"))).toHaveLength(0);
   expect(await (await f.request("/status")).json()).toMatchObject({ cursor: "12", pending: false });
+});
+
+it("changes explicit housekeeping opt-in without resetting history, preserving frozen deliveries",async()=>{
+ const f=fixture();await f.request("/configure","POST",config);
+ await f.request("/notify","POST",notify);f.wakeStatus(409);await f.alarmRun();
+ const frozen=f.wakes[0];
+ expect(JSON.parse(frozen.input as string).archive_non_actionable).toBeUndefined();
+ expect((await f.request("/configure","PUT",{...config,archive_non_actionable:true})).status).toBe(200);
+ expect(await (await f.request("/status")).json()).toMatchObject({cursor:"10",archive_non_actionable:true});
+ f.restart();f.wakeStatus(202);await f.alarmRun();expect(f.wakes[1]).toEqual(frozen);
+ await f.request("/configure","PUT",config);expect(await (await f.request("/status")).json()).toMatchObject({archive_non_actionable:true});
+ await f.request("/configure","PUT",{...config,archive_non_actionable:false});expect(await (await f.request("/status")).json()).toMatchObject({archive_non_actionable:false,cursor:"12"});
 });

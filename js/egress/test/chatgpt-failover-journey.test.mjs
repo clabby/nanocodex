@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { before, test } from "node:test";
@@ -20,6 +20,7 @@ const subject = `managed-session-v1_${"a".repeat(64)}`;
 const createFrame = { type: "response.create", input: [{ type: "message", role: "user",
   content: [{ type: "input_text", text: "synthetic hello" }] }] };
 let gateway;
+let gatewayWasm;
 
 before(async () => {
   await mkdir(output, { recursive: true });
@@ -41,9 +42,21 @@ before(async () => {
     },
     bundle: true, write: false, format: "esm", platform: "node", target: "es2022",
     external: ["cloudflare:*"], logLevel: "warning",
-    alias: { "node-rsa": join(repository, "js/nanocodex/tools/browser/unsupportedNodeRsa.mjs") },
+    alias: {
+      "node-rsa": join(repository, "js/nanocodex/tools/browser/unsupportedNodeRsa.mjs"),
+      "@whiskeysockets/baileys": join(packageDirectory, "src/whatsapp-generated/baileys.js"),
+    },
+    // Retain production static WASM imports as actual workerd compiled modules.
+    plugins: [{ name: "static-wasm", setup(build) {
+      build.onResolve({ filter: /^nanocodex\/wasm$/ }, () => ({ path: "./nanocodex.wasm", external: true }));
+      build.onResolve({ filter: /bridge\.wasm$/ }, () => ({ path: "./bridge.wasm", external: true }));
+    } }],
   });
   gateway = bundle.outputFiles[0].text;
+  gatewayWasm = await Promise.all([
+    ["nanocodex.wasm", join(repository, "js/nanocodex/pkg-web/nanocodex_bg.wasm")],
+    ["bridge.wasm", join(packageDirectory, "src/whatsapp-generated/bridge.wasm")],
+  ].map(async ([name, source]) => ({ type: "CompiledWasm", path: join(output, name), contents: await readFile(source) })));
 });
 
 const broker = `import { WorkerEntrypoint } from 'cloudflare:workers';
@@ -124,9 +137,9 @@ async function fixture(t, { mode = "stalled", partial = false, pinned = false } 
     await gate;
     return Response.json({ available: false });
   };
-  const runtime = { modules: true, compatibilityDate: "2026-07-30", compatibilityFlags: ["nodejs_compat"] };
+  const runtime = { modules: true, compatibilityDate: "2026-07-29", compatibilityFlags: ["nodejs_compat"] };
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [
-    { ...runtime, name: "gateway", script: gateway, serviceBindings: { BROKER: "broker", PROVIDER: "provider" } },
+    { ...runtime, name: "gateway", modules: [{ type: "ESModule", path: join(output, "gateway.js"), contents: gateway }, ...gatewayWasm], serviceBindings: { BROKER: "broker", PROVIDER: "provider" } },
     { ...runtime, name: "broker", script: broker, serviceBindings: { CONTROL: control } },
     { ...runtime, name: "provider", script: provider, serviceBindings: { CONTROL: control } },
   ] }));

@@ -21,7 +21,8 @@
     "build": "tsc --noEmit && vite build && npm run check:docs",
     "deploy": "wrangler deploy --env=\"\" --config dist/nanocodex/wrangler.json",
     "preview": "vite preview",
-    "test:claude-connection": "node scripts/claude-connection-smoke.mjs"
+    "test:claude-connection": "node scripts/claude-connection-smoke.mjs",
+    "test:whatsapp": "node scripts/whatsapp-ui-journey.mjs"
   },
   "portless": {
     "name": "nanocodex",

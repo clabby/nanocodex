@@ -1,4 +1,5 @@
 export const CONNECTOR_CAPABILITY_IDS = [
+  "cloudflare",
   "github",
   "gmail",
   "gdrive",
@@ -13,10 +14,13 @@ export const CONNECTOR_CAPABILITY_IDS = [
   "spotify",
   "soundcloud",
   "link",
+  "whatsapp",
 ] as const;
 
-export const CONNECTOR_PROVIDER_IDS = ["github", "google", "slack", "x", "spotify", "soundcloud", "link"] as const;
+export const CONNECTOR_PROVIDER_IDS = ["cloudflare", "github", "google", "slack", "x", "spotify", "soundcloud", "link", "whatsapp"] as const;
 
+// OAuth/settings-button catalog. Cloudflare enrollment uses the private Vault intake
+// and account_connectors tool; adding an OAuth button would start the wrong flow.
 export const CONNECTOR_PROVIDER_CATALOG = Object.freeze([
   {
     id: "github",
@@ -63,6 +67,8 @@ export const CONNECTOR_PROVIDER_CATALOG = Object.freeze([
     description: "Tracks, playlists, likes, and reposts",
     capabilities: Object.freeze([{ id: "soundcloud", name: "SoundCloud" }]),
   },
+  { id: "whatsapp", name: "WhatsApp", description: "Search and read messages from your linked WhatsApp account",
+    capabilities: Object.freeze([{ id: "whatsapp", name: "WhatsApp" }]) },
   { id: "link", name: "Stripe Link", description: "Request spend approvals in your Link wallet",
     capabilities: Object.freeze([{ id: "link", name: "Stripe Link" }]) },
 ] as const satisfies ReadonlyArray<Readonly<{

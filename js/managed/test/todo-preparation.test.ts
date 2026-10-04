@@ -170,3 +170,76 @@ it("mixed external requests cannot become ready via transformation prefix", asyn
    await runTodoPreparation(storage,{ownerID:"owner",ai:ai(async input=>response({body_text:"",source_references:[input.evidence[0].reference]}))});
    expect(preparationView(storage,"capture",item.id)).toMatchObject({status:"blocked",error:"complete_capture_proposal_unverified"});
  }));
+
+describe("confirmed stay firehose -> durable proposal -> calendar evidence", () => {
+  it("prepares a forwarded stay without an email draft, detects duplicates, and blocks incomplete coverage", async () => withStorage(async storage => {
+    const {proposeGmailReplyDecisions} = await import("../src/gmail-firehose-decisions");
+    const checkIn = "2090-04-10", checkOut = "2090-04-13";
+    const body = `Forwarded confirmation: Pine Hotel booking confirmed. Check-in ${checkIn}. Check-out ${checkOut}. Location: Pine Street.`;
+    let calendarFailure=false, duplicate=false, writes=0, calendarReads=0;
+    const binding={fetch:async(input:Request|string)=>{
+      const r=input instanceof Request?input:new Request(input),p=new URL(r.url).pathname;
+      if(p.startsWith("/subjects/"))return new Response(null,{status:204});
+      if(p.endsWith("/connectors"))return Response.json({connectors:{gmail:{connected:true,connections:[{id:connection,label:"Synthetic",capabilities:["gmail","gcalendar"],scopes:["https://www.googleapis.com/auth/gmail.modify","https://www.googleapis.com/auth/calendar"]}]},gcalendar:{connected:true,connections:[{id:connection,label:"Synthetic",capabilities:["gmail","gcalendar"],scopes:["https://www.googleapis.com/auth/calendar"]}]}}});
+      if(r.method!=="GET"){writes++;throw new Error("unexpected external mutation");}
+      if(p.endsWith("/threads/tfixture"))return Response.json({id:"tfixture",messages:[raw("mfixture",{payload:{...raw().payload,headers:[...raw().payload.headers.filter(h=>h.name!=="Subject"),{name:"Subject",value:"Fwd: Pine Hotel booking confirmed"}],body:{data:btoa(body)}}})]});
+      if(p.endsWith("/profile"))return Response.json({emailAddress:"owner@example.test"});
+      if(p.endsWith("/calendarList"))return Response.json({items:[{id:"primary",summary:"Personal"}]});
+      if(p.endsWith("/events")){calendarReads++;return calendarFailure?new Response(null,{status:503}):Response.json({items:duplicate?[{id:"stay",summary:"Stay at Pine Hotel",start:{date:checkIn},end:{date:checkOut}}]:[]});}
+      throw new Error("unexpected provider request");
+    }} as unknown as Fetcher;
+    const classifier={run:async()=>({state:"Completed",result:{answers:{action:{choice:"booking_review",confidence:0.99,probabilities:{booking_review:0.99,no_action:0.01}}}}})};
+    let decisionID="";
+    const event=JSON.stringify({type:"gmail.history",connectionId:connection,email:"owner@example.test",messages:[{id:"mfixture",threadId:"tfixture",status:"ok",headers:{from:"Companion <companion@example.test>",subject:"Fwd: Pine Hotel booking confirmed"},body}]});
+    const traces:any[]=[];
+    const produce=()=>proposeGmailReplyDecisions(event,classifier,{proposeTodoDecision:async input=>{const d=proposeTodoDecision(storage,input);decisionID=d.id;return d;}},()=>{},gmailDecisionReceipts(storage),async t=>{traces.push(t);});
+    expect(await produce()).toBe(1);expect(await produce()).toBe(0);
+    const extractor={run:async()=>({response:JSON.stringify({property:"Pine Hotel",location:"Pine Street",check_in:checkIn,check_out:checkOut,property_quote:"Pine Hotel",check_in_quote:checkIn,check_out_quote:checkOut})})} as unknown as TodoMailSuggestionAI;
+    await runTodoPreparation(storage,{ownerID:"owner",binding,ai:extractor});
+    const ready=preparationView(storage,"decision",decisionID);
+    expect(ready).toMatchObject({status:"ready",kind:"action_review",draft_id:null});
+    expect(ready.proposal).toContain("Exclusive end (checkout): 2090-04-13");expect(calendarReads).toBe(1);expect(writes).toBe(0);
+    expect(traces[0]).toMatchObject({policy_version:"gmail-booking-review-triage-v1",reason:"booking_review"});
+    expect(storage.sql.exec("SELECT * FROM todo_mail_drafts").toArray()).toHaveLength(0);
+    duplicate=true;enqueueTodoPreparation(storage,"decision",decisionID,1);await runTodoPreparation(storage,{ownerID:"owner",binding,ai:extractor});
+    expect(preparationView(storage,"decision",decisionID).proposal).toContain("Possible existing event");
+    calendarFailure=true;enqueueTodoPreparation(storage,"decision",decisionID,1);await runTodoPreparation(storage,{ownerID:"owner",binding,ai:extractor});
+    expect(preparationView(storage,"decision",decisionID)).toMatchObject({status:"blocked",error:"incomplete_calendar_coverage",draft_id:null});expect(writes).toBe(0);
+  }));
+});
+
+describe("opted-in contextual archive journey",()=>{
+ it.each(["confirmed","unknown","revoked","changed","not_opted_in","action_card"])("archives only reviewed message IDs and never retries an ambiguous write: %s",async scenario=>withStorage(async storage=>{
+  const {cleanupGmailInbox}=await import("../src/gmail-firehose-cleanup");
+  const content="Your payment was received. Receipt only; nothing else is required.";
+  let labels=["INBOX","UNREAD"],writes=0,reads=0,authChecks=0;const traces:any[]=[];
+  const binding={fetch:async(input:Request|string)=>{
+   const r=input instanceof Request?input:new Request(input),path=new URL(r.url).pathname;
+   if(path.startsWith("/subjects/"))return new Response(null,{status:204});
+   if(path.endsWith("/connectors"))return Response.json({connectors:{gmail:{connected:true,connections:[{id:connection,label:"Synthetic",capabilities:["gmail"],scopes:["https://www.googleapis.com/auth/gmail.modify"]}]}}});
+   if(path.endsWith("/threads/tfixture")){reads++;return Response.json({id:"tfixture",messages:[raw("mfixture",{labelIds:labels,payload:{...raw().payload,body:{data:btoa(scenario==="changed"&&reads>1?"Please reply with your decision.":content)}}})]});}
+   if(path.endsWith("/messages/batchModify")){writes++;expect(await r.json()).toEqual({ids:["mfixture"],removeLabelIds:["INBOX"]});if(scenario==="unknown")throw new Error("ambiguous network failure");labels=["UNREAD"];return new Response(null,{status:204});}
+   throw new Error("unexpected provider route");
+  }} as unknown as Fetcher;
+  const input=JSON.stringify({type:"gmail.history",connectionId:connection,email:"owner@example.test",archive_non_actionable:scenario!=="not_opted_in",messages:[{id:"mfixture",threadId:"tfixture",status:"ok",headers:{from:"Service <noreply@example.test>",subject:"Payment receipt"},body:content}]});
+  const deps={ownerID:"owner",storage,binding,authorize:()=>{},archiveAuthorized:async()=>{authChecks++;return scenario!=="revoked"||authChecks===1;},outcome:()=>scenario==="action_card"?"reply":"no_reply",observe:async(t:any)=>{traces.push(t);},ai:{run:async()=>({answers:{action:{choice:"receipt",confidence:0.99,probabilities:{receipt:0.99,completed:0.0025,expired:0.0025,waiting:0.0025,keep:0.0025}}}})}};
+  await cleanupGmailInbox(input,deps);
+  if(scenario==="confirmed"||scenario==="unknown") {
+   expect(writes).toBe(1);await cleanupGmailInbox(input,deps);expect(writes).toBe(1);
+   expect(traces.at(-1)).toMatchObject({outcome:scenario==="confirmed"?"archived":"unavailable",reason:scenario==="confirmed"?"archived_receipt":"archive_unknown"});
+  }else expect(writes).toBe(0);
+  expect(labels).toContain("UNREAD");
+ }));
+});
+
+it("compares attachment content metadata rather than refreshed Gmail fetch IDs",async()=>{
+ const thread={id:"thread",connection_id:connection,messages:[{id:"message",thread_id:"thread",body_text:"Confirmed stay",attachments:[{id:"fetch-token-one",filename:"image.png",mime_type:"image/png",size:120}]}]};
+ const fingerprint=await todoMailContextFingerprint(thread);
+ thread.messages[0]!.attachments[0]!.id="fetch-token-two";
+ expect(await todoMailContextFingerprint(thread)).toBe(fingerprint);
+ thread.messages[0]!.attachments[0]!.size=121;
+ expect(await todoMailContextFingerprint(thread)).not.toBe(fingerprint);
+ thread.messages[0]!.attachments[0]!.size=120;
+ thread.messages[0]!.body_text="Changed stay";
+ expect(await todoMailContextFingerprint(thread)).not.toBe(fingerprint);
+});

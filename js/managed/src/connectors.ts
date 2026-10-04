@@ -87,6 +87,10 @@ export async function routeConnectorRequest(
   env: ConnectorEnv,
   url: URL,
 ): Promise<Response | undefined> {
+  if (url.pathname === "/v1/connectors/whatsapp" || url.pathname.startsWith("/v1/connectors/whatsapp/")) {
+    return routeWhatsAppConnectorRequest(request, env, url);
+  }
+
   if (url.pathname === "/v1/connectors/mobile-complete") {
     if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
     return connectorMobileCompletion(url);
@@ -327,6 +331,17 @@ export async function routeConnectorRequest(
     return env.NANOCODEX.fetch(target, { method: "DELETE" });
   }
 
+  if (provider === "cloudflare") {
+    const body: unknown = await request.json().catch(() => undefined);
+    if (!isRecord(body) || Object.keys(body).some(key => key !== "vault_id" && key !== "account_id")
+      || typeof body.vault_id !== "string" || !/^[A-Za-z0-9_-]{22,64}$/.test(body.vault_id)
+        || (body.account_id !== undefined && (typeof body.account_id !== "string" || !/^[a-f0-9]{32}$/.test(body.account_id)))) {
+      return json({ error: "invalid_request" }, 400);
+    }
+    return env.NANOCODEX.fetch(target, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ vault_id: body.vault_id, ...(body.account_id === undefined ? {} : { account_id: body.account_id }) }),
+    });
+  }
   const returnTo = await decodeReturnTo(request, url);
   if (!returnTo) return json({ error: "invalid_return_to" }, 400);
   const local = routeConnector === "link" ? undefined : localConnectorAuthorization(url.origin, routeConnector, "managed");
@@ -825,4 +840,63 @@ export function canManageNativeConnectors(principal: Principal | undefined): boo
     && (principal.kind === "account_session" || principal.kind === "api_key")
     && principal.role === "owner" && principal.capabilities.includes("api_keys:write")
     && principal.capabilities.includes("tools:use");
+}
+
+
+/** Account UI boundary. Pairing material is never routed through agent connector tools. */
+async function routeWhatsAppConnectorRequest(request: Request, env: ConnectorEnv, url: URL): Promise<Response> {
+  const match = /^\/v1\/connectors\/whatsapp(?:\/(start|pairing)|\/connections\/([A-Za-z0-9_-]{43}))?$/.exec(url.pathname);
+  if (!match) return json({ error: "not_found" }, 404);
+  const [, operation, connectionId] = match;
+  if (!((operation === "start" && request.method === "POST")
+    || (operation === "pairing" && request.method === "GET")
+    || (!operation && !connectionId && request.method === "GET")
+    || (connectionId && request.method === "DELETE"))) return json({ error: "method_not_allowed" }, 405);
+  const principal = await authenticateConnectorManagement(request, env, url);
+  if (!canManageNativeConnectors(principal)) return json({ error: "unauthorized" }, 401);
+  // Browsers omit Origin on same-origin GET fetches. Require Fetch Metadata
+  // plus the account UI's explicit request header for these private reads.
+  const sameOriginRead = request.method === "GET"
+    && (!request.headers.has("origin") || request.headers.get("origin") === url.origin)
+    && request.headers.get("sec-fetch-site") === "same-origin"
+    && request.headers.get("x-nanocodex-request") === "1";
+  const originFailure = sameOriginRead ? undefined : requireSameOriginMutation(request, url, principal!);
+  if (originFailure) return originFailure;
+  if (operation === "pairing") {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(url.searchParams.get("operation_id") ?? "")
+      || [...url.searchParams.keys()].length !== 1) return json({ error: "invalid_request" }, 400);
+  } else if (url.search) return json({ error: "invalid_request" }, 400);
+  let body: string | undefined;
+  if (operation === "start") {
+    const value = await readWhatsAppStart(request);
+    if (!value) return json({ error: "invalid_request" }, 400);
+    body = JSON.stringify(value);
+  }
+  const response = await env.NANOCODEX.fetch(
+    `https://broker.internal/users/${encodeURIComponent(principal!.userId)}/connectors/whatsapp${connectionId ? `/connections/${connectionId}` : operation ? `/${operation}` : ""}${url.search}`,
+    { method: request.method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body }) },
+  );
+  const headers = new Headers({ "content-type": "application/json", "cache-control": "no-store", "pragma": "no-cache", "referrer-policy": "no-referrer" });
+  return new Response(response.body, { status: response.status, headers });
+}
+
+async function readWhatsAppStart(request: Request): Promise<{ operation_id: string; phone: string } | undefined> {
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return;
+  const reader = request.body?.getReader(); if (!reader) return;
+  const chunks: Uint8Array[] = []; let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break;
+      bytes += value.byteLength;
+      if (bytes > 1024) { await reader.cancel(); return; }
+      chunks.push(value);
+    }
+    const input = new Uint8Array(bytes); let offset = 0;
+    for (const chunk of chunks) { input.set(chunk, offset); offset += chunk.byteLength; }
+    const value: unknown = JSON.parse(new TextDecoder().decode(input));
+    if (!isRecord(value) || Object.keys(value).some(key => key !== "operation_id" && key !== "phone")
+      || typeof value.operation_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.operation_id)
+      || typeof value.phone !== "string" || !/^\+[1-9]\d{7,14}$/.test(value.phone)) return;
+    return { operation_id: value.operation_id, phone: value.phone };
+  } catch { return; } finally { reader.releaseLock(); }
 }

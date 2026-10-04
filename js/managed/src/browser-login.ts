@@ -1,12 +1,13 @@
 import { isBrowserVaultOrigin, type BrowserVaultIdentity, type PrivateBrowserCdp } from "./browser-vault";
 
 /** Metadata only. A request ID is an isolation identity, never a Vault reference. */
-export type BrowserLoginRequest = { operationId: string; url: string; allowedOrigins: string[] };
+export type BrowserLoginRequest = { operationId: string; url: string; allowedOrigins: string[]; deferInput?: boolean };
 export function parseBrowserLoginRequest(input: unknown): BrowserLoginRequest {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Invalid browser login request");
   const value = input as Record<string, unknown>;
-  if (Object.keys(value).some(key => !["operation_id", "url", "allowed_origins"].includes(key))
+  if (Object.keys(value).some(key => !["operation_id", "url", "allowed_origins", "defer_input"].includes(key))
     || typeof value.operation_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.operation_id)
+    || (value.defer_input !== undefined && typeof value.defer_input !== "boolean")
     || typeof value.url !== "string" || value.url.length > 4096) throw new Error("Invalid browser login request");
   let url: URL;
   try { url = new URL(value.url); } catch { throw new Error("Browser login requires HTTPS"); }
@@ -14,7 +15,7 @@ export function parseBrowserLoginRequest(input: unknown): BrowserLoginRequest {
   const origins = value.allowed_origins ?? [url.origin];
   if (!Array.isArray(origins) || !origins.length || origins.length > 8 || !origins.every(isBrowserVaultOrigin)
     || !origins.includes(url.origin) || new Set(origins).size !== origins.length) throw new Error("Approve an exact bounded list of HTTPS sites including the initial site");
-  return {operationId:value.operation_id, url:url.href, allowedOrigins:[...origins].sort()};
+  return {operationId:value.operation_id, url:url.href, allowedOrigins:[...origins].sort(),...(value.defer_input !== undefined ? {deferInput:value.defer_input} : {})};
 }
 
 /** Check every loaded frame before input or private observation. Page content cannot

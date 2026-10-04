@@ -147,6 +147,8 @@ jobs:
         # Temporarily disabled: CI tests are paused.
         if: ${{ false }}
         run: bash scripts/ci/apple-package-tests.sh
+      - name: Validate native private-input transport journeys
+        run: swift test --package-path apple/InboxCore --filter 'Browser(NativeForm|Login)Tests'
       # Keep the app build active while simulator journeys are paused.
       - name: Build iPhone app
         run: >-
@@ -197,6 +199,18 @@ jobs:
           # Preserve the full XCTest transcript as evidence while keeping the
           # Actions log focused enough that late-suite failures are not cut off.
           xcodebuild -xctestrun "$xctestrun" -destination "platform=iOS Simulator,id=$device" -parallel-testing-enabled NO -retry-tests-on-failure -test-iterations 2 -test-timeouts-enabled YES -default-test-execution-time-allowance 180 -maximum-test-execution-time-allowance 300 -resultBundlePath apple/build/inbox.xcresult \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testAgentSelectedNativeChoicesNotesAndCheckboxFillTogether \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeCheckboxOnlyConfirmsDisplayedStateWithoutToggling \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testStaleNativeSelectionHandsBackWithoutFillAndRetriesOnlyHandoff \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeBrowserCodeUsesSameFillAndHandoffJourney \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeBrowserResponsesWaitForActiveAndBackgroundCancels \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeBrowserInactiveDraftsAndLoginCheckResume \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeBrowserFormFillsOnceAndHandsBackWithoutWebsiteSubmit \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeBrowserFormHandoffFailureDoesNotRepeatFill \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeBrowserFormFailureClearsDraftsWithoutRetry \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeBrowserFormWebsiteFallbackIsExplicitAndClearsDrafts \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeBrowserFormKeepsNativeFieldsWhenOnlyHintsAreUnsupported \
+            -only-testing:NanocodexInboxUITests/InboxUITests/testNativeBrowserFormFallsBackToLegacyBackendOnce \
             -only-testing:NanocodexInboxUITests/InboxUITests/testMarkdownRendersInConversationAndAfterTabSwitch \
             -only-testing:NanocodexInboxUITests/InboxUITests/testWideTableKeepsTailAboveComposer \
             -only-testing:NanocodexInboxUITests/InboxUITests/testStreamingMarkdownAndToolProgressShareTimeline \

@@ -72,7 +72,7 @@ on:
         required: true
         default: preview
         type: choice
-        options: [preview, production]
+        options: [preview, production, enroll-cloudflare, verify-cloudflare]
       preview_component:
         description: Preview the app against production or only the Connect assets
         type: choice
@@ -83,6 +83,18 @@ on:
         type: choice
         options: [production, isolated]
         default: production
+      enrollment_account_id:
+        description: Cloudflare account ID for account-owned enrollment tokens; omit for user tokens
+        type: string
+        required: false
+      enrollment_owner:
+        description: Explicit account owner UUID (enrollment only)
+        type: string
+        required: false
+      enrollment_operation:
+        description: Stable enrollment UUID; reuse only with identical owner and secret
+        type: string
+        required: false
       validate_images:
         description: Also validate container images independently of Worker uploads
         type: boolean
@@ -94,6 +106,75 @@ env:
   MANAGED_IMAGE_CACHE_EPOCH: ${{ vars.MANAGED_IMAGE_CACHE_EPOCH || '1' }}
 
 jobs:
+  verify-cloudflare:
+    name: verify Cloudflare credential metadata
+    if: >-
+      vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' &&
+      github.event_name == 'workflow_dispatch' && inputs.target == 'verify-cloudflare'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: cloudflare-production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Inspect fixed token metadata
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node scripts/cloudflare/verify-credential.mjs
+
+  enroll-cloudflare:
+    name: enroll existing Cloudflare credential
+    if: >-
+      vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' &&
+      github.event_name == 'workflow_dispatch' && inputs.target == 'enroll-cloudflare' &&
+      inputs.enrollment_owner != '' && inputs.enrollment_operation != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: cloudflare-production
+    concurrency:
+      group: cloudflare-credential-enrollment
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Validate explicit enrollment inputs
+        env:
+          ENROLLMENT_ACCOUNT_ID: ${{ inputs.enrollment_account_id }}
+          ENROLLMENT_OWNER: ${{ inputs.enrollment_owner }}
+          ENROLLMENT_OPERATION: ${{ inputs.enrollment_operation }}
+        run: |
+          node --input-type=module -e '
+            import { validateEnrollment } from "./scripts/cloudflare/enroll-credential.mjs";
+            try { validateEnrollment({owner:process.env.ENROLLMENT_OWNER,operation:process.env.ENROLLMENT_OPERATION,token:"validation-only",accountId:process.env.ENROLLMENT_ACCOUNT_ID || undefined}, true); }
+            catch { console.error("Invalid enrollment inputs"); process.exit(1); }
+          '
+      - name: Install enrollment tooling
+        run: pnpm install --frozen-lockfile --filter nanocodex-egress-service...
+      - name: Enroll through private broker binding
+        env:
+          ENROLLMENT_ACCOUNT_ID: ${{ inputs.enrollment_account_id }}
+          ENROLLMENT_OWNER: ${{ inputs.enrollment_owner }}
+          ENROLLMENT_OPERATION: ${{ inputs.enrollment_operation }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node scripts/cloudflare/enroll-cloudflare.mjs
+
   # Preview builds stay unprivileged. Production builds selected Workers once on its deployment runner.
   worker-build:
     name: build Cloudflare Worker artifacts

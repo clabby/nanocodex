@@ -1,3 +1,4 @@
+import { extractTodoBooking, bookingCalendarWindow, bookingProposal } from "./todo-booking";
 /** Account-local durable work, sharing UserAccount's existing alarm. Reads never run a model. */
 import { bindPreparedTodoMailDraft, handleTodoMail, readTodoMailDraft, todoMailContextFingerprint, assertTodoMailSourceApplicable, type TodoMailDraft } from "./todo-mail";
 import { prepareDecisionProposal, type PreparationEvidence, type PreparationSource } from "./todo-preparation-model";
@@ -111,7 +112,7 @@ function assertJobCurrent(storage: DurableObjectStorage, job: Job): void {
 async function prepareJob(storage: DurableObjectStorage, deps: PreparationDependencies, job: Job, retained: { context: TodoPeopleContext }): Promise<PreparationView> {
   const evidence: PreparationEvidence[] = [];
   let preparationScope = scope;
-  let ownerRequest = "", thread: any, source: any, recipients: string[] = [], fingerprint = "", actionReview = false;
+  let ownerRequest = "", thread: any, source: any, recipients: string[] = [], fingerprint = "", actionReview = false, bookingReview = false;
   if (job.kind === "capture") {
     const capture = storage.sql.exec<{body:string;status:string;version:number}>("SELECT body,status,version FROM todo_captures WHERE id=?", job.target_id).toArray()[0];
     if (!capture || capture.status !== "captured" || capture.version !== job.target_version) throw new Error("stale_preparation");
@@ -154,7 +155,8 @@ async function prepareJob(storage: DurableObjectStorage, deps: PreparationDepend
   } else {
     const decision = storage.sql.exec<any>("SELECT * FROM todo_decisions WHERE id=?", job.target_id).toArray()[0];
     if (!decision || decision.version !== job.target_version || !["needs_you", "preparing"].includes(decision.status)) throw new Error("stale_preparation");
-    actionReview = decision.source_key.startsWith("gmail:gmail-action-review-triage-v1:");
+    bookingReview = decision.source_key.startsWith("gmail:gmail-booking-review-triage-v1:");
+    actionReview = bookingReview || decision.source_key.startsWith("gmail:gmail-action-review-triage-v1:");
     if (!decision.source_connection_id || !decision.source_thread_id || !decision.source_message_id) throw new Error("missing_source_context");
     const result = await mail(deps, storage, `/mail/threads/${encodeURIComponent(decision.source_thread_id)}?connection_id=${encodeURIComponent(decision.source_connection_id)}`);
     thread = result.thread;
@@ -164,13 +166,31 @@ async function prepareJob(storage: DurableObjectStorage, deps: PreparationDepend
     assertJobCurrent(storage, job);
     evidence.push(...todoPeopleEvidence(retained.context));
     if (thread.messages.length > 20 || thread.messages.at(-1)?.id !== source.id) throw new Error("incomplete_source_context");
-    if (thread.messages.some((message: any) => message.body_truncated || !message.body_text || message.body_text.length > 6000 || message.attachments?.length)) throw new Error("incomplete_source_context");
+    if (thread.messages.some((message: any) => message.body_truncated || !message.body_text || message.body_text.length > (bookingReview ? 16000 : 6000) || !bookingReview && message.attachments?.length)) throw new Error("incomplete_source_context");
+    if (bookingReview && thread.messages.reduce((n:number,m:any)=>n+m.body_text.length,0)>24000) throw new Error("incomplete_source_context");
     assertTodoMailSourceApplicable(thread, source.id);
     fingerprint = await todoMailContextFingerprint(thread);
     if (!actionReview) recipients = [singleMailbox(source.reply_to || source.from)];
     ownerRequest = actionReview ? "Prepare a grounded action review of this automated message: explain the required owner judgment, urgency and complete proposed next action based only on supplied evidence. Do not reply, act, follow links, infer successful payment or signature, or claim source authenticity. Block if the actual required action cannot be established." : "Prepare a complete, grounded reply for review. Do not send. If the owner's answer or required facts are unknown, block rather than guess.";
     for (const message of thread.messages) evidence.push({ kind: "email", reference: `gmail:${decision.source_connection_id}:${message.id}`,
       detail: `Email from ${message.from.slice(0, 120)}`, content: JSON.stringify({ from: message.from, to: message.to, subject: message.subject, body: message.body_text }) });
+  }
+  if (bookingReview) {
+    const booking = await extractTodoBooking(deps.ai, evidence);
+    assertJobCurrent(storage, job);
+    const window = bookingCalendarWindow(booking);
+    const params = new URLSearchParams({...window,connection_id:thread.connection_id});
+    const response = await handleTodoMail(new Request(`https://user.internal/todo/schedule?${params}`),storage,deps.binding,deps.ownerID,deps.ai);
+    if (!response.ok) throw new Error("incomplete_calendar_coverage");
+    const schedule = await response.json() as {events:any[];partial:boolean;errors:unknown[];calendars_checked:number};
+    const proposal = bookingProposal(booking,schedule);
+    const latest = await mail(deps,storage,`/mail/threads/${encodeURIComponent(thread.id)}?connection_id=${encodeURIComponent(thread.connection_id)}`);
+    assertTodoMailSourceApplicable(latest.thread,source.id);
+    if(await todoMailContextFingerprint(latest.thread)!==fingerprint) throw new Error("stale_source_context");
+    assertJobCurrent(storage,job);
+    return {...unprepared(),kind:"action_review",status:"ready",...proposal,updated_at:new Date().toISOString(),
+      scope:"Read-only booking proposal and bounded calendar duplicate check. No event creation or invitations.",
+      sources:[...evidence.map(({content:_,...source})=>source),{kind:"calendar",reference:`calendar:${thread.connection_id}:${booking.check_in}:${booking.check_out}`,detail:"Connected calendars checked for overlapping stay events"}]};
   }
   const prepared = await prepareDecisionProposal(deps.ai, { kind: job.kind === "capture" ? "capture" : actionReview ? "action_review" : "email_reply", owner_request: ownerRequest, owner_changes: job.instructions, evidence });
   const result: PreparationView = { ...unprepared(), kind: job.kind === "capture" ? "capture" : actionReview ? "action_review" : "email_reply", status: prepared.status, context: prepared.context, recommendation: prepared.recommendation,
@@ -206,7 +226,7 @@ async function prepareJob(storage: DurableObjectStorage, deps: PreparationDepend
   return result;
 }
 const safeErrors = new Set(["preparation_unavailable", "invalid_preparation", "source_unavailable", "connector_unavailable", "connector_permission_required",
-  "connection_not_found", "not_found", "ambiguous_reply_recipient", "missing_source_context", "incomplete_source_context", "stale_preparation", "stale_source_context"]);
+  "connection_not_found", "not_found", "ambiguous_reply_recipient", "missing_source_context", "incomplete_source_context", "stale_preparation", "stale_source_context", "incomplete_booking_evidence", "incomplete_calendar_coverage"]);
 /** One bounded job per alarm; an interrupted read/model job resumes after its lease, never a send. */
 export async function runTodoPreparation(storage: DurableObjectStorage, deps: PreparationDependencies): Promise<void> {
   backfillTodoPreparation(storage);
@@ -229,7 +249,7 @@ export async function runTodoPreparation(storage: DurableObjectStorage, deps: Pr
   try { result = { ...await prepareJob(storage, deps, job, retained), ...retained.context }; }
   catch (error) {
     const code = error instanceof Error && safeErrors.has(error.message) ? error.message : "preparation_unavailable";
-    result = { ...unprepared(), ...retained.context, status: ["ambiguous_reply_recipient", "missing_source_context", "incomplete_source_context", "stale_preparation", "stale_source_context", "connector_permission_required", "connection_not_found", "not_found"].includes(code) ? "blocked" : "failed", error: code, updated_at: new Date().toISOString() };
+    result = { ...unprepared(), ...retained.context, status: ["incomplete_booking_evidence", "incomplete_calendar_coverage", "ambiguous_reply_recipient", "missing_source_context", "incomplete_source_context", "stale_preparation", "stale_source_context", "connector_permission_required", "connection_not_found", "not_found"].includes(code) ? "blocked" : "failed", error: code, updated_at: new Date().toISOString() };
   }
   storage.transactionSync(() => {
     const current = storage.sql.exec<Job>("SELECT * FROM todo_preparations WHERE kind=? AND target_id=?", job.kind, job.target_id).toArray()[0];
