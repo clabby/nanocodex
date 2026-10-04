@@ -179,9 +179,12 @@ export function ConnectOnboarding({
   const [browserAccountState, setBrowserAccountState] = useState<
     BrowserAccountSession | "reauthentication" | null
   >();
+  const [browserAccountUnavailable, setBrowserAccountUnavailable] = useState(false);
+  const [browserAccountAttempt, setBrowserAccountAttempt] = useState(0);
   const activeConnector = useRef<ConnectorAttempt | undefined>(undefined);
   const activeCeremony = useRef<CeremonyAttempt | undefined>(undefined);
   const currentRequestId = useRef<string | undefined>(undefined);
+  const mounted = useRef(true);
   const providerState = useSyncExternalStore(
     providerStore.subscribe,
     providerStore.getState,
@@ -235,29 +238,39 @@ export function ConnectOnboarding({
       || (request.type !== "walletConnect"
         && (request.type !== "walletRevokeAccessKey" || browserLocalWebAuthn))) return;
     const requestId = request.id;
-    void ensureBrowserSession().then((session) => {
-      if (currentRequestId.current === requestId) setBrowserAccountState(session);
+    let cancelled = false;
+    setBrowserAccountState(undefined);
+    setBrowserAccountUnavailable(false);
+    void readBrowserAccountSession().then((session) => {
+      if (!cancelled && currentRequestId.current === requestId) setBrowserAccountState(session);
     }).catch((error) => {
-      if (currentRequestId.current !== requestId) return;
+      if (cancelled || currentRequestId.current !== requestId) return;
       if (error instanceof BrowserAccountReauthenticationRequiredError) {
         setBrowserAccountState("reauthentication");
         return;
       }
       setBrowserAccountState(null);
+      setBrowserAccountUnavailable(true);
       setFailure({ id: requestId, message: errorMessage(error) });
     });
-  }, [request?.id, request?.type]);
+    return () => { cancelled = true; };
+  }, [request?.id, request?.type, browserAccountAttempt]);
 
-  useEffect(() => () => {
-    const attempt = activeConnector.current;
-    if (attempt) {
-      activeConnector.current = undefined;
-      attempt.abort.abort();
-      if (attempt.expiryTimer !== undefined) window.clearTimeout(attempt.expiryTimer);
-      if (attempt.popupCheck !== undefined) window.clearInterval(attempt.popupCheck);
-      if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
-      if (attempt.popup && !attempt.popup.closed) attempt.popup.close();
-    }
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      activeCeremony.current = undefined;
+      const attempt = activeConnector.current;
+      if (attempt) {
+        activeConnector.current = undefined;
+        attempt.abort.abort();
+        if (attempt.expiryTimer !== undefined) window.clearTimeout(attempt.expiryTimer);
+        if (attempt.popupCheck !== undefined) window.clearInterval(attempt.popupCheck);
+        if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
+        if (attempt.popup && !attempt.popup.closed) attempt.popup.close();
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -449,7 +462,14 @@ export function ConnectOnboarding({
 
   const ceremonyActive = ceremonyRequestId === request.id;
 
+  function requireCurrentRequest(requestId: string) {
+    if (!mounted.current || currentRequestId.current !== requestId) {
+      throw new DOMException("The Connect request is no longer active.", "AbortError");
+    }
+  }
+
   async function completeRequest(result: unknown, requestId: string) {
+    requireCurrentRequest(requestId);
     setSettlingRequestId(requestId);
     try {
       await host.respond(result);
@@ -462,7 +482,7 @@ export function ConnectOnboarding({
 
   async function approve(
     selectedAccount?: WizardAccountSelection,
-    authenticatedSavedAccount = false,
+    authenticatedBrowserAccount = false,
   ) {
     const activeRequest = request;
     if (!activeRequest
@@ -530,10 +550,10 @@ export function ConnectOnboarding({
       const hostedAuthorization = activeRequest.type === "walletConnect"
         && (managedWallet
           || selectedMode === "register"
-          || authenticatedSavedAccount)
+          || authenticatedBrowserAccount)
         && walletConnectContext(activeRequest).resources.includes(hostedAuthorizationResource)
         && !walletConnectContext(activeRequest).resources.includes("urn:nanocodex:mpp:machusd:spend");
-      if (authenticatedSavedAccount && (!hostedAuthorization
+      if (authenticatedBrowserAccount && (!hostedAuthorization
         || selectedMode !== "login"
         || !selectedAccount?.address)) {
         throw new Error("This account requires a fresh SMS sign-in.");
@@ -550,8 +570,21 @@ export function ConnectOnboarding({
       let result: unknown;
       let managedAddress: `0x${string}` | undefined;
       let managedAuthToken: string | undefined;
-      if (authenticatedSavedAccount) {
-        result = { accounts: [{ address: selectedAccount!.address! }] };
+      if (authenticatedBrowserAccount) {
+        // Recheck on consent: an earlier render (or a saved account label) is not
+        // authority after sign-out, expiry, or an account change in another tab.
+        const session = await readBrowserAccountSession();
+        requireCurrentRequest(activeRequest.id);
+        if (!session || activeRequest.type !== "walletConnect"
+          || !reusableBrowserAccount(session, walletConnectContext(activeRequest).resources)) {
+          throw new BrowserAccountReauthenticationRequiredError();
+        }
+        if (session.address !== selectedAccount?.address) {
+          setBrowserAccountState(session);
+          setWizardAccount(undefined);
+          throw new Error("Your signed-in account changed. Review access for this account and approve again.");
+        }
+        result = { accounts: [{ address: session.address }] };
       } else {
         try {
           if (activeRequest.type === "walletConnect"
@@ -629,6 +662,7 @@ export function ConnectOnboarding({
             throw new Error("Accounts did not return the canonical account address.");
           }
           const hosted = await authorizeHostedRegistration(activeRequest, accountAddress);
+          requireCurrentRequest(activeRequest.id);
           const next: PendingApproval = {
             accountAddress,
             apiUrl: connectApiUrl(activeRequest),
@@ -650,7 +684,7 @@ export function ConnectOnboarding({
           };
           setConnectorStatuses(hosted.connectors);
           setMcpConnections(hosted.mcpConnections);
-          if (wizard && approvalReady(next, hosted.connectors, hosted.mcpConnections)) {
+          if ((wizard || authenticatedBrowserAccount) && approvalReady(next, hosted.connectors, hosted.mcpConnections)) {
             await completeRequest(next.result, next.requestId);
             return;
           }
@@ -713,7 +747,12 @@ export function ConnectOnboarding({
       }
       await completeRequest(result, activeRequest.id);
     } catch (error) {
-      if (currentRequestId.current === attempt.requestId) {
+      if (mounted.current && currentRequestId.current === attempt.requestId) {
+        if (error instanceof BrowserAccountReauthenticationRequiredError) {
+          invalidateBrowserSession();
+          setBrowserAccountState("reauthentication");
+          setWizardAccount(undefined);
+        }
         setFailure({ id: activeRequest.id, message: errorMessage(error) });
       }
     } finally {
@@ -831,9 +870,11 @@ export function ConnectOnboarding({
       }),
     });
     const authorized = await authorize.json() as Record<string, unknown>;
+    if (authorize.status === 401) throw new BrowserAccountReauthenticationRequiredError();
     if (!authorize.ok) {
       throw new Error(apiError(authorized, "Unable to authorize this hosted Nanocodex account."));
     }
+    requireCurrentRequest(activeRequest.id);
     const code = opaqueToken(authorized.code, "hosted authorization code");
     const exchange = await fetch(`${connectApiUrl(activeRequest)}/v1/hosted-authorizations`, {
       method: "POST",
@@ -1326,6 +1367,22 @@ export function ConnectOnboarding({
     && approvalReady(pendingApproval, connectorStatuses, mcpConnections);
   const connectionRequest = request.type === "walletConnect" ? walletView(request) : undefined;
   const hostPrincipalRequest = request.type === "walletConnect" && request.hostPrincipalExchange !== undefined;
+  const browserAccount = !hostPrincipalRequest && connectionRequest
+    ? reusableBrowserAccount(browserAccountState, connectionRequest.auth.resources)
+    : undefined;
+  const sessionConsent = browserAccount && !pendingApproval;
+
+  function approveBrowserAccount() {
+    if (!browserAccount) return;
+    const account: AccountSelection = {
+      address: browserAccount.address,
+      current: true,
+      mode: "login",
+      label: shortAddress(browserAccount.address),
+    };
+    setWizardAccount(account);
+    void approve(account, true);
+  }
 
   return (
     <section
@@ -1341,6 +1398,13 @@ export function ConnectOnboarding({
         <>
           <div className={wizard ? "wizard-content" : "dialog-content"}>
             <ConnectionApproval
+              browserAccount={browserAccount}
+              browserAccountUnavailable={browserAccountUnavailable}
+              onRetryBrowserAccount={() => {
+                setFailure(undefined);
+                setBrowserAccountAttempt((attempt) => attempt + 1);
+              }}
+              checkingBrowserAccount={browserAccountState === undefined && !hostPrincipalRequest}
               connectorAction={connectorAction}
               connectorStatuses={connectorStatuses}
               completed={requestCompleted}
@@ -1351,14 +1415,7 @@ export function ConnectOnboarding({
               mcpConnections={mcpConnections}
               onChooseAccount={(account) => {
                 setWizardAccount(account);
-                void approve(
-                  account,
-                  account.authentication !== "sms_otp"
-                    && (wizard
-                      && account.current === true
-                        && browserAccountState !== "reauthentication"
-                        && browserAccountState?.persistent === true),
-                );
+                void approve(account);
               }}
               onCancel={reject}
               onConnectConnector={connectConnector}
@@ -1374,7 +1431,7 @@ export function ConnectOnboarding({
               <p className="dialog-error" role="alert">{failure.message}</p>
             ) : null}
           </div>
-          {requestCompleted || (!pendingApproval && !hostPrincipalRequest) ? null : <div className={wizard ? "wizard-actions" : "dialog-actions"}>
+          {requestCompleted || (!pendingApproval && !hostPrincipalRequest && !sessionConsent) ? null : <div className={wizard ? "wizard-actions" : "dialog-actions"}>
             <button
               type="button"
               disabled={approvalDisabled}
@@ -1382,14 +1439,24 @@ export function ConnectOnboarding({
             >
               Cancel
             </button>
-            {!wizard ? (
+            {sessionConsent ? <button
+              type="button"
+              disabled={approvalDisabled}
+              onClick={() => {
+                invalidateBrowserSession();
+                setBrowserAccountState(null);
+                setWizardAccount(undefined);
+                setFailure(undefined);
+              }}
+            >Use a different account</button> : null}
+            {!wizard || sessionConsent ? (
               <button
                 type="button"
                 disabled={approvalDisabled
                   || connectorAction !== undefined
                   || mcpConnectionAction !== undefined
                   || (pendingApproval !== undefined && !connectedAccessReady)}
-                onClick={pendingApproval ? approveConnectedAccess : () => void approve()}
+                onClick={pendingApproval ? approveConnectedAccess : sessionConsent ? approveBrowserAccount : () => void approve()}
               >
                 Allow access
               </button>
@@ -1467,6 +1534,17 @@ function RevocationApproval({ request }: Readonly<{ request: WalletRequest }>) {
   );
 }
 
+function reusableBrowserAccount(
+  session: BrowserAccountSession | "reauthentication" | null | undefined,
+  resources: readonly string[],
+): (BrowserAccountSession & { address: `0x${string}` }) | undefined {
+  if (browserLocalWebAuthn || !session || session === "reauthentication"
+    || !session.persistent || !session.address
+    || !resources.includes(hostedAuthorizationResource)
+    || resources.includes("urn:nanocodex:mpp:machusd:spend")) return undefined;
+  return { ...session, address: session.address };
+}
+
 function managedRevocationSessionMatches(
   session: BrowserAccountSession | "reauthentication" | null | undefined,
   request: WalletRequest,
@@ -1491,6 +1569,10 @@ type ConnectionView = Omit<Dialog.ConnectionRequest, "auth" | "accessKey"> & Rea
 
 function ConnectionApproval({
   accountAddress,
+  browserAccount,
+  browserAccountUnavailable,
+  onRetryBrowserAccount,
+  checkingBrowserAccount,
   connectorAction,
   connectorStatuses,
   completed,
@@ -1510,6 +1592,10 @@ function ConnectionApproval({
   storedPasskeys,
 }: Readonly<{
   accountAddress?: `0x${string}` | undefined;
+  browserAccount?: BrowserAccountSession | undefined;
+  checkingBrowserAccount: boolean;
+  browserAccountUnavailable: boolean;
+  onRetryBrowserAccount(): void;
   connectorAction?: ConnectorProvider | undefined;
   connectorStatuses?: ConnectorStatuses | undefined;
   completed: boolean;
@@ -1531,6 +1617,10 @@ function ConnectionApproval({
   return (
     <ConnectionWizard
       accountAddress={accountAddress}
+      browserAccount={browserAccount}
+      browserAccountUnavailable={browserAccountUnavailable}
+      onRetryBrowserAccount={onRetryBrowserAccount}
+      checkingBrowserAccount={checkingBrowserAccount}
       appVisibility={appVisibilityPermissions(request.auth.resources)}
       connectorAction={connectorAction}
       connectorStatuses={connectorStatuses}
@@ -1555,6 +1645,10 @@ function ConnectionApproval({
 
 function ConnectionWizard({
   accountAddress,
+  browserAccount,
+  browserAccountUnavailable,
+  onRetryBrowserAccount,
+  checkingBrowserAccount,
   appVisibility,
   connectorAction,
   connectorStatuses,
@@ -1575,6 +1669,10 @@ function ConnectionWizard({
   storedPasskeys,
 }: Readonly<{
   accountAddress?: `0x${string}` | undefined;
+  browserAccount?: BrowserAccountSession | undefined;
+  checkingBrowserAccount: boolean;
+  browserAccountUnavailable: boolean;
+  onRetryBrowserAccount(): void;
   appVisibility: ReturnType<typeof appVisibilityPermissions>;
   connectorAction?: ConnectorProvider | undefined;
   connectorStatuses?: ConnectorStatuses | undefined;
@@ -1594,18 +1692,32 @@ function ConnectionWizard({
   selectedAccount?: WizardAccountSelection | undefined;
   storedPasskeys: readonly StoredPasskey[];
 }>) {
-  const focused = request.focusConnector ? connectorDefinition(request.focusConnector) : undefined;
+  const reviewingBrowserAccount = Boolean(browserAccount);
+  const focused = !reviewingBrowserAccount && request.focusConnector ? connectorDefinition(request.focusConnector) : undefined;
   const focusedProvider = focused ? requiredConnectorProvider(focused.id) : undefined;
   const focusedControl = focusedProvider
     ? connectorControls(request.permission.connectors, connectorStatuses)
       .find((control) => control.provider === focusedProvider)
     : undefined;
-  const focusedMcp = request.focusMcpConnection
+  const focusedMcp = !reviewingBrowserAccount && request.focusMcpConnection
     ? request.mcpConnections.find(({ id }) => id === request.focusMcpConnection)
     : undefined;
   const deferredChatGptImport = request.connectPolicy.chatGptCredentialImport;
   const requester = presentation === "wizard" ? "Nanocodex CLI" : request.app.name;
-  if (!request.hostPrincipalExchange && !connectorStatuses && !accountAddress) {
+  if (!request.hostPrincipalExchange && !connectorStatuses && !accountAddress && !browserAccount) {
+    if (browserAccountUnavailable) {
+      return <div className="wizard-page wizard-account-page">
+        <p>We couldn’t check your account session.</p>
+        <button type="button" onClick={onRetryBrowserAccount} disabled={disabled}>Try again</button>
+        <button type="button" onClick={onCancel} disabled={disabled}>Cancel</button>
+      </div>;
+    }
+    if (checkingBrowserAccount) {
+      return <div className="wizard-page wizard-account-page">
+        <p role="status">Checking your account session…</p>
+        <button type="button" onClick={onCancel} disabled={disabled}>Cancel</button>
+      </div>;
+    }
     return (
       <AccountChooser
         authOrigin={nanocodexOriginFor(request.apiUrl)}
@@ -1626,7 +1738,7 @@ function ConnectionWizard({
     <AccountConnectionSurface
       requester={requester}
       origin={request.app.origin}
-      accountLabel={selectedAccount?.label ?? (accountAddress ? shortAddress(accountAddress) : undefined)}
+      accountLabel={selectedAccount?.label ?? (accountAddress || browserAccount?.address ? shortAddress(accountAddress ?? browserAccount?.address) : undefined)}
       confirmationCode={confirmationCode}
       description={completed && deferredChatGptImport
         ? <DeferredChatGptImportStatus approved />
@@ -1639,13 +1751,13 @@ function ConnectionWizard({
                   ? (focusedProvider === "spotify" || focusedProvider === "soundcloud")
                     ? `Finish connecting ${connectorProviderLabel(focusedProvider)} in the Nanocodex iPhone app, then return here.`
                     : `Continue in ${connectorProviderLabel(requiredConnectorProvider(focused.id))}. You’ll return here when the requested access is connected.`
-                  : request.hostPrincipalExchange ? "Approve with your host identity." : "Continue with SMS verification."
+                  : request.hostPrincipalExchange ? "Approve with your host identity." : browserAccount ? "Review and approve access with your signed-in account." : "Continue with SMS verification."
                 : focusedMcp
                   ? mcpConnections?.find(({ id }) => id === focusedMcp.id)?.status === "connected"
                     ? `${focusedMcp.name} is connected. You can return to ${requester}.`
                     : mcpConnectionAction === focusedMcp.id
                       ? `Continue in ${focusedMcp.name}. You’ll return here when it is connected.`
-                      : request.hostPrincipalExchange ? "Approve with your host identity." : "Continue with SMS verification."
+                      : request.hostPrincipalExchange ? "Approve with your host identity." : browserAccount ? "Review and approve access with your signed-in account." : "Continue with SMS verification."
                 : presentation === "dialog"
                   ? null
                   : `Review ${requester}’s hosted access.`}</>}
@@ -1662,7 +1774,7 @@ function ConnectionWizard({
           title={focusedProvider ? connectorProviderLabel(focusedProvider) : "Account access"}
           titleId="wizard-services-heading"
         >
-          <WizardConnectorList connectorAction={connectorAction} connectorStatuses={connectorStatuses} disabled={disabled} onConnectConnector={onConnectConnector} request={request} />
+          <WizardConnectorList connectorAction={connectorAction} connectorStatuses={connectorStatuses} disabled={disabled} onConnectConnector={onConnectConnector} request={reviewingBrowserAccount ? { ...request, focusConnector: undefined } : request} />
           {connectorAction ? <p className="section-description" role="status">{connectorAction === "spotify" || connectorAction === "soundcloud" ? `Finish connecting ${connectorProviderLabel(connectorAction)} in the Nanocodex app.` : `Finish connecting ${connectorProviderLabel(connectorAction)} in the opened window.`}</p> : null}
           {deviceCode ? (
             <a className="wizard-device-code" href={deviceCode.url} rel="noreferrer" target="_blank">
@@ -1681,8 +1793,8 @@ function ConnectionWizard({
           <McpConnectionList
             action={mcpConnectionAction}
             connections={mcpConnections ?? request.mcpConnections}
-            disabled={disabled}
-            focusedId={request.focusMcpConnection}
+            disabled={disabled || !connectorStatuses}
+            focusedId={reviewingBrowserAccount ? undefined : request.focusMcpConnection}
             onConnect={onConnectMcp}
           />
         </AccountConnectionSection> : null}

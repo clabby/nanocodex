@@ -22,3 +22,22 @@ Appearance journeys verify developer color scheme, accent contrast, font family,
 and corner radius across sign-in and approval on desktop/mobile. An SDK popup
 journey exercises the URL transport through the hosted parser into the real UI.
 Malformed CSS-bearing values fall back to native defaults.
+
+Existing-session journeys use a fixture-only HttpOnly cookie and server-owned
+session states. A persistent session with a canonical address opens app consent
+without SMS in the dialog, SDK popup, and wizard. No authorization POST or host
+approval occurs before Allow access. Coverage includes cancellation, choosing a
+different account, an account change in another tab requiring new consent,
+initial expiry, expiry during approval, unavailable-session retry, anonymous or
+address-less sessions, spending/fresh-auth policy gates, complete permission
+visibility for focused requests, and request replacement during delayed hosted
+authorization/exchange, closing Connect while authorization is pending, and
+React StrictMode effect replay. These run the real public React component against local
+HTTP account endpoints; they do not validate production cookie issuance or the
+production account service. Per-journey synthetic request/receipt JSON,
+screenshots, and Playwright traces are retained under the same ignored output
+directory. Run only these journeys with:
+
+```sh
+pnpm --filter @nanocodex/connect-dialog run test:browser session.spec.ts
+```

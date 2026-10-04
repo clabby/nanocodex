@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 export default defineConfig({
   testDir: ".",
-  testMatch: "modal.spec.ts",
+  testMatch: "*.spec.ts",
   outputDir: "../../../../output/connect-full-page/results",
   reporter: [["list"], ["json", { outputFile: fileURLToPath(new URL("../../../../output/connect-full-page/report.json", import.meta.url)) }]],
   fullyParallel: false,
