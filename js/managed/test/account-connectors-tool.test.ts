@@ -14,6 +14,25 @@ const base = {
 };
 
 describe("managed account connector tool", () => {
+  it("enrolls Cloudflare only by an explicit Vault reference and requires account authority", async () => {
+    const fetch = vi.fn(async () => Response.json({ connected: true, connection_id: A }));
+    const options = { ...base, broker: { fetch } as unknown as Fetcher };
+    expect(await manageAccountConnectors(options, { operation: "connect", connector: "cloudflare" })).toMatchObject({ status: "input_required" });
+    expect(fetch).not.toHaveBeenCalled();
+    const vaultId = "v".repeat(32);
+    expect(await manageAccountConnectors(options, { operation: "connect", connector: "cloudflare", vault_id: vaultId })).toEqual({ ok: true, status: "connected", connector: "cloudflare", connection_id: A });
+    const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain("/connectors/cloudflare");
+    expect(JSON.parse(init.body as string)).toEqual({ vault_id: vaultId });
+    const accountId = "d".repeat(32);
+    expect(await manageAccountConnectors(options, { operation: "connect", connector: "cloudflare", vault_id: vaultId, account_id: accountId })).toMatchObject({ status: "connected" });
+    expect(JSON.parse(String((fetch.mock.calls.at(-1) as unknown as [string, RequestInit])[1].body))).toEqual({ vault_id: vaultId, account_id: accountId });
+    await expect(manageAccountConnectors(options, { operation: "connect", connector: "cloudflare", vault_id: vaultId, account_id: "../user" })).rejects.toThrow();
+    expect(await manageAccountConnectors({ ...options, canManage: () => false }, { operation: "connect", connector: "cloudflare", vault_id: vaultId })).toMatchObject({ status: "forbidden" });
+    await expect(manageAccountConnectors(options, { operation: "connect", connector: "cloudflare", access_token: "synthetic-token" })).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("resolves inventory and control authority from the invoking agent context", async () => {
     const fetch = vi.fn(async () => Response.json(canonicalStatuses()));
     const options = vi.fn((context: ToolContext) => ({

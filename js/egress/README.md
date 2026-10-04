@@ -244,6 +244,43 @@ This coordinates our own traffic, but cannot manage other apps using ncspot's
 registration or increase Spotify's quota.
 
 
+### Cloudflare API token enrollment
+
+Cloudflare runs through the same encrypted connector broker and deferred
+`cloudflare_request` tool as the other account services. It does not need a Hand.
+The connector accepts **user API tokens**; Wrangler OAuth sessions and account API
+tokens are not imported. There is no Wrangler credential export/refresh bridge.
+
+After deploying egress, managed, and Connect API, request secure Vault intake with
+`kind: "api_key"` and name `Cloudflare`. The user enters the token in the private
+form. After the saved receipt, call `account_connectors` with `operation: "connect"`,
+`connector: "cloudflare"`, and that explicitly authorized `vault_id`. Never pass a
+token value to a tool or shell. The owner-authenticated
+`POST /v1/connectors/cloudflare` route likewise accepts only `{vault_id}`. Egress
+resolves it inside the credential boundary, verifies
+[`GET /user/tokens/verify`](https://developers.cloudflare.com/api/resources/user/subresources/tokens/methods/verify/),
+and seals its own connector copy. Public connection metadata identifies the token,
+not a Cloudflare account; `GET /client/v4/accounts` lists accessible accounts.
+
+The allowlist covers account/Worker/D1 listings, Workers telemetry query/keys/values,
+GraphQL analytics, and D1 SQL queries. D1 SQL may write and requires the user's
+requested action. Credential management, secret exports, deployment, and live-tail
+URLs are unavailable. Redirects and reflected credentials remain blocked by the
+shared connector protections. Exact connection IDs and Connect grants apply.
+A Connect app can use an existing approved connection through the server request
+route but cannot enroll a token. Cloudflare has no settings OAuth button or Connect
+dialog provider card in this change; enrollment and discovery use the account tools.
+No external MCP server registration or native-app UI update is included.
+
+Select token permissions for the requested work. In particular, even historical
+telemetry reads require
+[Workers Observability Write](https://developers.cloudflare.com/api/resources/workers/subresources/observability/subresources/telemetry/methods/query/).
+Token verification establishes validity, not authorization for every endpoint.
+Verify `connected: true` and perform the intended read before claiming setup is
+complete. Expired/rejected tokens require private re-enrollment; they are not
+OAuth-refreshed. Disconnect removes the broker copy, preserving the independent
+Vault entry. Revoke the token in Cloudflare separately to invalidate all copies.
+
 ### SoundCloud app registration
 
 SoundCloud uses Authorization Code + PKCE with a confidential app registration.

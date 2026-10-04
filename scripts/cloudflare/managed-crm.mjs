@@ -58,6 +58,25 @@ async function productionDatabase({ env, request, guard }) {
   }
 }
 
+// Wrangler owns OAuth resolution and refresh. Its public CLI returns database
+// metadata only; credentials never enter this process or a generated config.
+async function existingWranglerDatabase({ config, env, run }) {
+  try {
+    const output = await run('npx', ['wrangler', 'd1', 'list', '--json', '--config', config, '--env='], {
+      cwd: dirname(config), env, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8',
+    });
+    const databases = JSON.parse(output);
+    assert.ok(Array.isArray(databases));
+    const matches = databases.filter(db => db?.name === productionName);
+    assert.equal(matches.length, 1);
+    assert.ok(providerIdValid(matches[0].uuid));
+    return matches[0].uuid;
+  } catch {
+    // exec errors include captured output. Do not attach their cause or print it.
+    throw new Error('CRM database validation through Wrangler failed; verify Wrangler authentication and provision the production database explicitly if absent; deployment stopped (no automatic retry)');
+  }
+}
+
 export async function deployManaged(mode, {
   config = 'wrangler.jsonc', env = process.env, request = globalThis.fetch,
   run = (command, args, options) => execFileSync(command, args, options),
@@ -86,7 +105,9 @@ export async function deployManaged(mode, {
   const childEnv = { ...env, CI: 'true', WRANGLER_SEND_METRICS: 'false' };
   let replacement;
   if (mode === 'deploy') {
-    const id = await productionDatabase({ env, request, guard });
+    const id = env.CLOUDFLARE_API_TOKEN
+      ? await productionDatabase({ env, request, guard })
+      : await existingWranglerDatabase({ config, env: childEnv, run });
     assert.ok(!database.database_id || database.database_id === id, 'CRM database ID does not match its production name');
     replacement = { ...database, database_id: id };
   } else {

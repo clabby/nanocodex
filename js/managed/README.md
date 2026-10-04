@@ -1010,8 +1010,13 @@ command and the normal Cloudflare release job run
 `nanocodex-crm-production` in `CLOUDFLARE_ACCOUNT_ID`, creates it only when the
 provider reports it missing, then applies pending migrations with `--remote`
 before uploading the Worker. The deploy token needs D1 edit access in addition
-to the existing Worker/container permissions. Local production deployment also
-requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in the environment.
+to the existing Worker/container permissions. With an environment token, supply
+both `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`. Without that token, local
+production deployments use the existing Wrangler login through `d1 list --json`;
+Wrangler owns credential resolution and refresh. This path requires the named
+production database to exist already. If it is absent, provision it explicitly
+with Wrangler before retrying. Lookup/authentication failures, duplicate names,
+invalid UUIDs and mismatched configured IDs stop before migrations or upload.
 The database UUID is resolved at deployment time and pinned in an ephemeral
 Wrangler config shared by migrations and upload; no production UUID needs to be
 committed. CI checks the current release before each mutation. Failed migration
@@ -1305,7 +1310,7 @@ inspection, immutable turn artifacts and HTTP tool results are documented in
 
 Managed agents discover first-party `github_request`, Google Workspace capability
 `*_request`, `slack_request`, `x_request`, `spotify_request`, and
-`soundcloud_request` tools through the same `tool_search` used by connected MCPs.
+`soundcloud_request`, and `cloudflare_request` tools through the same `tool_search` used by connected MCPs.
 `environment().accounts` advertises tools for connected, grant-visible services;
 `accounts[service].connections` supplies exact account selectors. Each call uses authenticated
 egress with live grant and connection checks, broker-owned token refresh, fixed

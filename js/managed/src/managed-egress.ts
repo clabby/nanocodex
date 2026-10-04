@@ -45,7 +45,7 @@ export type ManagedEgressConnectorId =
   | "slack"
   | "x"
   | "spotify"
-  | "soundcloud" | "link";
+  | "soundcloud" | "cloudflare" | "link";
 
 /** True preserves the caller's selector; a connection id injects an authorized default. */
 export type ManagedEgressConnectorAccess = boolean | string;
@@ -66,6 +66,7 @@ type ProviderPolicy = Readonly<{
 }>;
 
 const PROVIDERS = new Map<string, readonly ProviderPolicy[]>([
+  ["api.cloudflare.com", [{ connector: "cloudflare", path: (path) => /^\/client\/v4\//.test(path) }]],
   ["github.com", [{
     connector: "github",
     path: (path) => /^\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\/(?:info\/refs|git-upload-pack|git-receive-pack)$/.test(path),

@@ -1,4 +1,5 @@
 export const connectorCapabilities = Object.freeze([
+  "cloudflare",
   "github",
   "gmail",
   "gdrive",
@@ -16,7 +17,7 @@ export const connectorCapabilities = Object.freeze([
   "chatgpt",
 ] as const);
 
-export const oauthConnectorProviders = Object.freeze(["github", "google", "slack", "x", "spotify", "soundcloud", "link"] as const);
+export const oauthConnectorProviders = Object.freeze(["cloudflare", "github", "google", "slack", "x", "spotify", "soundcloud", "link"] as const);
 
 export type ConnectorCapability = typeof connectorCapabilities[number];
 export type OAuthConnectorProvider = typeof oauthConnectorProviders[number];
@@ -68,7 +69,7 @@ export function isConnectorConnectionId(value: unknown): value is string {
 }
 
 export function connectorProvider(value: unknown): OAuthConnectorProvider | undefined {
-  if (value === "github" || value === "slack" || value === "x" || value === "spotify" || value === "soundcloud" || value === "link") return value;
+  if (value === "cloudflare" || value === "github" || value === "slack" || value === "x" || value === "spotify" || value === "soundcloud" || value === "link") return value;
   if (typeof value === "string" && [
     "gmail",
     "gdrive",
@@ -83,6 +84,7 @@ export function connectorProvider(value: unknown): OAuthConnectorProvider | unde
 }
 
 export function connectorCapabilityForUrl(url: URL): RoutableConnectorCapability | undefined {
+  if (url.origin === "https://api.cloudflare.com") return "cloudflare";
   if (url.origin === "https://api.github.com" || (url.origin === "https://github.com"
     && /^\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\/(?:info\/refs|git-upload-pack|git-receive-pack)$/.test(url.pathname))) return "github";
   if (url.origin === "https://gmail.googleapis.com") return "gmail";
@@ -111,7 +113,7 @@ export function connectorRequestTarget(
     || !value.startsWith("/") || value.startsWith("//")) {
     throw new ConnectorPolicyFailure(400, "invalid_connector_path", "The connector request path is invalid.");
   }
-  const origin = capability === "github" ? "https://api.github.com"
+  const origin = capability === "cloudflare" ? "https://api.cloudflare.com" : capability === "github" ? "https://api.github.com"
     : capability === "gmail" ? "https://gmail.googleapis.com"
       : capability === "gdrive" || capability === "gcalendar" ? "https://www.googleapis.com"
         : capability === "gtasks" ? "https://tasks.googleapis.com"
@@ -130,7 +132,7 @@ export function connectorRequestTarget(
   const target = new URL(value, origin);
   const canonicalPath = capability === "github"
     || (!target.pathname.includes("\\") && !/%(?:2e|2f|5c|25)/i.test(target.pathname));
-  const pathAllowed = capability === "github"
+  const pathAllowed = (capability === "cloudflare" && /^\/client\/v4\//.test(target.pathname)) || capability === "github"
     || (capability === "gmail" && /^\/gmail\/v1\/users\/me(?:\/|$)/.test(target.pathname))
     || (capability === "gdrive" && /^(?:\/drive\/v3|\/upload\/drive\/v3)(?:\/|$)/.test(target.pathname))
     || (capability === "gcalendar" && /^\/calendar\/v3(?:\/|$)/.test(target.pathname))

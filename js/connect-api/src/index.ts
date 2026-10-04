@@ -800,7 +800,7 @@ export default {
       }
 
       const connectorRoute = url.pathname.match(
-        /^\/v1\/connectors\/(github|google|gmail|gdrive|gcalendar|gtasks|gdocs|gsheets|gslides|gcontacts|slack|x|spotify|soundcloud|link|chatgpt)(?:\/connections\/([A-Za-z0-9_-]{43})|\/([A-Za-z0-9_-]{43}))?$/,
+        /^\/v1\/connectors\/(github|google|gmail|gdrive|gcalendar|gtasks|gdocs|gsheets|gslides|gcontacts|slack|x|spotify|soundcloud|cloudflare|link|chatgpt)(?:\/connections\/([A-Za-z0-9_-]{43})|\/([A-Za-z0-9_-]{43}))?$/,
       );
       if (connectorRoute) {
         const connector = connectorRoute[1]!;
@@ -4557,6 +4557,9 @@ async function startConnector(
       throw new ApiFailure(502, "connector_broker_invalid", "The Link broker returned an invalid authorization URL.");
     }
     return Response.json({ authorization_url: url.href, expires_at: started.expires_at, user_code: started.user_code, attempt: started.attempt });
+  }
+  if (provider === "cloudflare") {
+    throw new ApiFailure(409, "cloudflare_secure_setup_required", "Connect Cloudflare in Nanocodex using secure Vault intake before granting an app access.");
   }
   const requestOrigin = connectApiRequestOrigin(request);
   const dialogOrigin = requiredDialogOrigin(request);

@@ -3,6 +3,14 @@ import type { ConnectorCapabilityId } from "./connector-status";
 
 /** Discovery metadata only; live grants and credentials are enforced by managed egress. */
 export const CONNECTOR_TOOL_CATALOG = {
+  cloudflare: {
+    methods: ["GET", "POST"],
+    docs: "https://developers.cloudflare.com/api/",
+    operations: "GET /client/v4/accounts; GET /client/v4/accounts/ACCOUNT_ID/workers/scripts; POST /client/v4/accounts/ACCOUNT_ID/workers/observability/telemetry/query with the documented query body; POST /client/v4/graphql with {query,variables}; GET /client/v4/accounts/ACCOUNT_ID/d1/database; POST /client/v4/accounts/ACCOUNT_ID/d1/database/DATABASE_ID/query with {sql,params}. D1 SQL can write and requires user authorization. Token management, secret-returning endpoints, deployment and live tail sessions are unavailable. Setup uses account_connectors with an explicitly authorized Vault API-key reference; never supply tokens to tools.",
+    origin: "https://api.cloudflare.com",
+    summary: "Cloudflare Workers logs and traces, GraphQL analytics, account and Worker listings, and D1 queries without a machine.",
+    example: "/client/v4/accounts",
+  },
   link: {
     methods: ["GET", "POST"],
     docs: "https://github.com/stripe/link-cli#spend-request-lifecycle",

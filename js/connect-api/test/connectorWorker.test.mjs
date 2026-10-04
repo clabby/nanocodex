@@ -142,6 +142,28 @@ test("Worker connector execution fences and forwards the exact approved identity
     assert.equal(forwarded.length, count);
   }
 
+  await t.test("Cloudflare hosted app request route requires its exact current grant", async () => {
+    const prior = grant;
+    grant = { ...activeGrant({ cloudflare: [alpha] }), capabilities: ["cloudflare"] };
+    reply = () => Response.json({ success: true, result: [] });
+    const path = "/client/v4/accounts/" + "d".repeat(32) + "/workers/observability/telemetry/query";
+    const body = { dry: true, queryId: "synthetic-query", view: "events" };
+    const response = await worker.fetch(connectorRequest("cloudflare", { path, method: "POST", body }), env, context);
+    assert.equal(response.status, 200);
+    assert.equal(forwarded.at(-1).url, "https://api.cloudflare.com" + path);
+    assert.equal(forwarded.at(-1).headers.get("x-nanocodex-connector-connection"), alpha);
+    assert.equal(forwarded.at(-1).headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
+    assert.deepEqual(await forwarded.at(-1).json(), body);
+    const count = forwarded.length;
+    for (const [fields, expected] of [[{ connection_id: bravo }, 403], [{ path: "//evil.test/" }, 400]]) {
+      assert.equal((await worker.fetch(connectorRequest("cloudflare", { path, ...fields }), env, context)).status, expected);
+    }
+    grant = { ...grant, status: "revoked" };
+    assert((await worker.fetch(connectorRequest("cloudflare", { path }), env, context)).status >= 400);
+    assert.equal(forwarded.length, count);
+    grant = prior;
+  });
+
   // Apps call the same grant-bound broker without fabricating an agent/thread.
   for (const [connector, path] of [["spotify", "/v1/me/playlists?limit=1"], ["soundcloud", "/me/playlists?limit=1"]]) {
     grant = { ...activeGrant({ [connector]: [alpha] }), capabilities: [connector] };
