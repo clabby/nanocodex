@@ -2,7 +2,7 @@
 
 A SwiftSyntax parser, bounded interpreter, and native SwiftUI renderer for generated Swift apps. Source stays Swift from authoring through execution. The host supplies persisted JSON and the asynchronous agent service. See [AUTHORING.md](AUTHORING.md) for the supported source contract and limits.
 
-The package supports iOS 17 and macOS 14. Build with Swift 6.2 or later, matching the pinned SwiftSyntax 602 dependency.
+The native renderer supports iOS 17 and macOS 14. The parser, interpreter, JSON preflight, and journey CLI also run on Linux. Build with Swift 6.2 or later, matching the pinned SwiftSyntax 602 dependency. On Linux the package uses [Swift Crypto](https://github.com/apple/swift-crypto) for SHA-256 and [OpenCombine](https://github.com/OpenCombine/OpenCombine) for observable session state. Their product dependencies are conditional on Linux; Apple targets retain SDK CryptoKit and Combine.
 
 ## Embed an app
 
@@ -28,11 +28,16 @@ Session and view operations run on the main actor. `NativeAppSession.validate(so
 
 ## Run a public journey
 
-From the repository root on macOS:
+From the repository root on macOS or Linux:
 
 ```sh
 swift run --package-path apple/NanocodexApps native-app-journey --help
 swift run --package-path apple/NanocodexApps native-app-journey --self-test
+```
+
+To capture the actual SwiftUI controls, run on macOS with a graphical session:
+
+```sh
 swift run --package-path apple/NanocodexApps native-app-journey --self-test \
   --screenshot output/native-app-journey.png
 ```
@@ -52,7 +57,7 @@ swift run --package-path apple/NanocodexApps native-app-journey \
 
 The example uses the `ReadingTracker` in AUTHORING.md. Repeat `--set NAME JSON` and `--action TITLE` freely: operations execute in the supplied order, against the current rendered controls. A button title must identify exactly one enabled button. `--set` requires a rendered binding; JSON strings need their JSON quotes inside the shell quotes. Arrays and objects are ordinary JSON too. Missing state files use source defaults; malformed existing state fails instead of silently resetting data. Writes are atomic.
 
-`--agent-response` configures the local host's asynchronous external service stub; omitting it causes an explicit error when source calls `Agent.run`. This CLI does not contact a production agent. `--screenshot` uses `NSHostingView<NativeAppView>` and AppKit to save a 900 × 1100 point PNG of actual native controls after all operations. Screenshot rendering requires a macOS graphical session; pixel dimensions follow the display scale. Captures use a light appearance, opaque window background, and the renderer’s neutral native controls for consistent local and CI evidence. Without that flag, journeys assert the public rendered tree without requiring a visible window. Errors exit nonzero.
+`--agent-response` configures the local host's asynchronous external service stub; omitting it causes an explicit error when source calls `Agent.run`. This CLI does not contact a production agent. `--screenshot` uses `NSHostingView<NativeAppView>` and AppKit to save a 900 × 1100 point PNG of actual native controls after all operations. Screenshot rendering requires a macOS graphical session; pixel dimensions follow the display scale. Captures use a light appearance, opaque window background, and the renderer’s neutral native controls for consistent local and CI evidence. Without that flag, journeys assert the public interpreter control tree without requiring a visible window. Linux runs the same interpreter and persistence journeys; it does not render SwiftUI controls or validate their visual appearance. `--screenshot` fails explicitly on Linux. Errors exit nonzero.
 
 Run the independently authored tracker holdouts through the executable:
 

@@ -1,5 +1,9 @@
 import Foundation
+#if os(Linux)
+import Crypto
+#else
 import CryptoKit
+#endif
 
 /// Isolated, bounded execution through the same parser and interpreter as NativeAppView.
 /// A successful result covers only the supplied journey, not every possible user action.

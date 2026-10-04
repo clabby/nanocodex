@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import worker from './worker.mjs';
 const root = path.resolve(process.argv[2] || '../ota-http-test/upload');
-const file = '/builds/1790730578/Nanocodex.ipa';
+let file = '/builds/1790730578/Nanocodex.ipa';
 let canonical = JSON.parse(fs.readFileSync(root + file + '.chunks.json'));
 let size = canonical.size, activeRoot = root;
 const CHUNK=24*1024*1024, BLOCK=1024*1024;
@@ -72,8 +72,31 @@ async function full(){const r=await response();assert.equal(r.status,200);assert
 await test('full exact SHA streamed',full);
 await test('ASSETS absent length headers supported',async()=>{mode.omitLength=true;await full();});
 await test('HEAD complete representation',async()=>{const r=await response({'Range':'bytes=1-5'},'HEAD');assert.equal(r.status,200);assert.equal(r.headers.get('Content-Length'),String(size));assert.equal(r.body,null);});
-for(const [name,range,lo,hi] of [['cross chunk',`bytes=${CHUNK-21}-${CHUNK+37}`,CHUNK-21,CHUNK+37],['suffix','bytes=-32',size-32,size-1],['open end',`bytes=${size-16}-`,size-16,size-1],['clamped',`bytes=${size-5}-${size+100}`,size-5,size-1]]){
+for(const [name,range,lo,hi] of [['cross block',`bytes=${BLOCK-21}-${BLOCK+37}`,BLOCK-21,BLOCK+37],['suffix','bytes=-32',size-32,size-1],['open end',`bytes=${size-16}-`,size-16,size-1],['clamped',`bytes=${size-5}-${size+100}`,size-5,size-1]]){
  await test(name,async()=>{const r=await response({'Range':range});assert.equal(r.status,206);assert.equal(r.headers.get('Content-Range'),`bytes ${lo}-${hi}/${size}`);const data=new Uint8Array(await r.arrayBuffer());assert.equal(data.length,hi-lo+1);const expected=[];for(let pos=lo;pos<=hi;){const i=Math.floor(pos/CHUNK),n=Math.min(hi-pos+1,canonical.chunks[i].size-pos%CHUNK);const fd=fs.openSync(root+canonical.chunks[i].path,'r');const b=Buffer.alloc(n);fs.readSync(fd,b,0,n,pos%CHUNK);fs.closeSync(fd);expected.push(b);pos+=n;}assert.deepEqual(Buffer.from(data),Buffer.concat(expected));});
+}
+// Keep a dedicated multi-chunk fixture: production IPA compression can make the
+// real build smaller than one chunk. That must not remove boundary coverage.
+{
+  const saved = {canonical, size, file};
+  file = '/builds/51/Nanocodex.ipa';
+  canonical = JSON.parse(fs.readFileSync(root + '/builds/51/Nanocodex.ipa.chunks.json'));
+  size = canonical.size;
+  try {
+    assert(canonical.chunks.length > 1, 'The retained 51 MiB fixture must span chunks');
+    await test('multi-chunk full exact SHA streamed', full);
+    await test('range crosses chunk boundary', async()=>{
+      const lo=CHUNK-21, hi=CHUNK+37;
+      const r=await response({'Range':`bytes=${lo}-${hi}`});
+      assert.equal(r.status,206);
+      assert.equal(r.headers.get('Content-Range'),`bytes ${lo}-${hi}/${size}`);
+      const expected=Buffer.concat([
+        fs.readFileSync(root+canonical.chunks[0].path).subarray(lo),
+        fs.readFileSync(root+canonical.chunks[1].path).subarray(0,38)
+      ]);
+      assert.deepEqual(Buffer.from(await r.arrayBuffer()),expected);
+    });
+  } finally {canonical=saved.canonical;size=saved.size;file=saved.file;}
 }
 for(const value of ['bytes=','bytes=-0',`bytes=${size}-`,'bytes=9-2','bytes=0-1,3-4','items=0-1','bytes=9007199254740992-'])await test('invalid range '+value,async()=>{const r=await response({'Range':value});assert.equal(r.status,416);assert.equal(r.headers.get('Content-Range'),`bytes */${size}`);});
 const etag=`"sha256-${canonical.sha256}"`;
