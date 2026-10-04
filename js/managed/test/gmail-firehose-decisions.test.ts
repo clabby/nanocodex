@@ -311,3 +311,15 @@ describe("Gmail decisions suppress self-authored and provider SENT mail", () => 
     expect(gmailDecisionCandidates(JSON.stringify({...JSON.parse(envelope([message])),email:"malformed mailbox"}))!.messages).toHaveLength(1);
   });
 });
+
+it("retries a transient classifier outage without losing or repeating completed message decisions", async () => {
+  let failing=true, calls=0, writes=0;const ledger=new Map<string,string>();const traces:any[]=[];
+  const batch=envelope([message,{...message,id:"second"}]);
+  const ai={run:async()=>{calls++;if(failing&&calls===2)throw Object.assign(new Error("unavailable"),{status:503});return {answers:{action:{choice:"reply_requested",confidence:0.99}}};}};
+  const run=()=>proposeGmailReplyDecisions(batch,ai,{proposeTodoDecision:async()=>{writes++;return {id:crypto.randomUUID()};}},()=>{},
+    {has:key=>ledger.has(key),mark:(key,value)=>{ledger.set(key,value);}},async trace=>{traces.push(trace);});
+  await expect(run()).rejects.toThrow("gmail_classification_retry");expect(writes).toBe(1);expect(ledger.size).toBe(1);
+  failing=false;expect(await run()).toBe(1);expect(writes).toBe(2);expect(ledger.size).toBe(2);
+  expect(await run()).toBe(0);expect(calls).toBe(3);
+  expect(traces.map(t=>t.outcome)).toEqual(["reply","unavailable","reply"]);
+});

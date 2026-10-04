@@ -313,7 +313,7 @@ export async function handleTodoMail(request: Request, storage: DurableObjectSto
           }
         } catch (e) { errors.push({ ...task, error: e instanceof Failure ? e.code : "provider_unavailable" }); }
       });
-      events.sort((a, b) => a.start.localeCompare(b.start)); return json({ events, partial: errors.length > 0, errors, from, to });
+      events.sort((a, b) => a.start.localeCompare(b.start)); return json({ events, calendars_checked: Math.min(tasks.length,40), partial: errors.length > 0, errors, from, to });
     }
     if (request.method !== "POST") return fail("not_found", 404);
     if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") return fail("invalid_content_type", 415);

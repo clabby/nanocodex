@@ -53,3 +53,13 @@ describe("private Gmail decision backtests", () => {
     expect((await routeGmailDecisionBacktest(request([sample("a","reply","x".repeat(9000))]),model,owner as any,"owner"))?.status).toBe(400);
   });
 });
+
+it("auto-lane backtests use production booking eligibility and separately report action outcomes", async () => {
+  const sample={id:"stay",expected:"action_review",from:"friend@example.test",subject:"Fwd: Hotel booking confirmed",body:"Pine Hotel. Check-in December 10, 2090. Check-out December 13, 2090."};
+  const r=await routeGmailDecisionBacktest(new Request("https://example.test/v1/todo/decision-backtest",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({lane:"auto",samples:[sample]})}),
+    {run:async()=>({answers:{action:{choice:"booking_review",confidence:0.99,probabilities:{booking_review:0.99,no_action:0.01}}}})},
+    {kind:"api_key",userId:"owner",capabilities:["agents:write"]} as any,"owner");
+  expect(r.status).toBe(200);const data=await r.json() as any;
+  expect(data.rows[0]).toMatchObject({policy_version:"gmail-booking-review-triage-v1",outcome:"action_review"});
+  expect(data.metrics).toEqual({correct:1,incorrect:0,abstained:0});expect(data.thresholds).toBeUndefined();
+});

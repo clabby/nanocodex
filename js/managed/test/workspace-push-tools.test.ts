@@ -63,3 +63,13 @@ it("validates tool arguments at runtime, including explicit Calendar CRM opt-in"
   ] as const) await expect(f.run(name, input)).rejects.toThrow();
   expect(f.calls).toHaveLength(0);
 });
+
+it("exposes owner-scoped trace/health/backtest requests without permitting caller identity or provider writes",async()=>{
+ const f=fixture();
+ await f.run("gmail_triage",{operation:"status",connection_id:connection});expect(new URL(f.calls[0].request.url).pathname).toBe("/v1/todo/source-health");
+ await f.run("gmail_triage",{operation:"traces",limit:10});expect(f.calls[1].request.method).toBe("GET");
+ const samples=[{id:"done",expected:"archive",from:"sender@example.test",subject:"Completed",body:"All parties have signed."}];
+ await f.run("gmail_triage",{operation:"backtest",lane:"cleanup",samples});expect(await f.calls[2].request.json()).toEqual({samples,lane:"cleanup"});
+ f.set({...full,capabilities:["agents:read","tools:use"]});await expect(f.run("gmail_triage",{operation:"backtest",samples})).rejects.toThrow(/authorization/);
+ await expect(f.run("gmail_triage",{operation:"status",connection_id:connection,owner_id:"other"})).rejects.toThrow();
+});

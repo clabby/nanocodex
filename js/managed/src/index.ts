@@ -1,3 +1,4 @@
+import { cleanupGmailInbox } from "./gmail-firehose-cleanup";
 import { observeClaudeRelease } from "./claude-lifecycle.mjs";
 import { mcpPayment } from "nanocodex/tempo";
 import { Claude } from 'nanocodex/worker';
@@ -4206,6 +4207,17 @@ export class DurableAgentSession extends DurableComputerObject {
         jevGatewayBinding(this.env.AI, this.env.NANOCODEX_JEV_GATEWAY_ID ?? "default"),
         this.env.NANOCODEX_USERS.getByName(wake.userId), () => { assertOwner(epoch); }, gmailDecisionReceipts(this.ctx.storage), trace => this.env.NANOCODEX_USERS.getByName(wake.userId).recordTodoDecisionTrace(trace));
       assertOwner(epoch);
+      await cleanupGmailInbox(wake.input,{ownerID:wake.userId,storage:this.ctx.storage,binding:this.env.NANOCODEX,
+        ai:jevGatewayBinding(this.env.AI,this.env.NANOCODEX_JEV_GATEWAY_ID??"default"),authorize:()=>{assertOwner(epoch);},
+        archiveAuthorized:async()=>{
+          assertOwner(epoch);
+          if(!isRecord(emailEvent) || typeof emailEvent.connectionId!=="string")return false;
+          const r=await this.env.NANOCODEX.fetch(`https://egress.internal/users/${encodeURIComponent(wake.userId)}/gmail-push/${encodeURIComponent(emailEvent.connectionId)}`);
+          if(!r.ok)return false;
+          const status=await r.json() as {enabled?:boolean;agentId?:string;archive_non_actionable?:boolean};
+          assertOwner(epoch);return status.enabled===true && status.agentId===wake.agentId && status.archive_non_actionable===true;
+        },outcome:gmailDecisionReceipts(this.ctx.storage).outcome,observe:trace=>this.env.NANOCODEX_USERS.getByName(wake.userId).recordTodoDecisionTrace(trace)});
+      assertOwner(epoch);
     }
     if (isRecord(emailEvent) && emailEvent.crm === true) {
       if (!this.env.NANOCODEX_CRM) throw new Error("gmail_push_crm_unavailable");
@@ -4540,7 +4552,7 @@ export class DurableAgentSession extends DurableComputerObject {
       if (turnAuthorization.connectGrant) return json({error:"forbidden"},{status:403});
       if (!["GET", "PUT", "DELETE"].includes(request.method)) return json({error:"method_not_allowed"},{status:405});
       const target = `https://egress.internal/users/${encodeURIComponent(session.owner_id)}/gmail-push/${gmailConfig[1]}`;
-      let body: {email:string;crm?:boolean} | undefined;
+      let body: {email:string;crm?:boolean;archive_non_actionable?:boolean} | undefined;
       if (request.method === "PUT") {
         const parsed = await gmailPushConfig(request);
         if (parsed instanceof Response) return parsed;

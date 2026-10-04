@@ -93,7 +93,7 @@ conversations do not block background mail processing.
 
 Work per alarm and the message IDs included in each event are bounded. Renewal
 catches up from the existing cursor; it never replaces an unprocessed cursor with
-the watch result. An hourly backend-only history check recovers missed pushes.
+the watch result. A five-minute backend-only history check recovers missed pushes.
 Each alarm delivers at most one event with up to five new message IDs; remaining
 chunks stay durable for subsequent processing. An expired history cursor produces
 an explicit resynchronization event rather than silently claiming all intervening
@@ -133,3 +133,45 @@ The configured TODO decision producer can classify messages and propose reply
 items; CRM imports require the watch's explicit opt-in. Neither processing path
 sends email. A successful watch configuration or accepted event is not evidence
 that an email response was sent, nor does it guarantee a remote push notification.
+
+## Decision policy and contextual cleanup
+
+The owner-gated decision producer separates personal replies, automated action
+reviews, and confirmed accommodation bookings. A forwarded booking can produce a
+calendar-review proposal. Preparation requires quoted property/dates, reads the
+connected calendars for the stay interval, and flags possible duplicates. Missing
+dates, incomplete calendar coverage, and changed source content block preparation.
+The proposal uses all-day stay dates with checkout as the exclusive end; it does
+not create an event, invite anyone, or draft an email reply.
+
+`gmail_watch enable` also accepts `archive_non_actionable:true` as explicit opt-in
+to contextual inbox cleanup. It defaults off. It can be changed on the existing
+watch without resetting its history cursor; omitting it preserves the setting.
+Only messages with a successful no-action triage receipt are eligible. The cleanup
+policy reads the bounded current thread and requires 0.98 confidence and normalized
+category probability for receipts, explicitly completed exchanges, expired dated
+notices, or waiting on another party. It preserves uncertain/actionable mail.
+It rechecks source content and current opt-in before removing INBOX from the exact
+reviewed message IDs. Read/unread state, other labels, and newer unseen messages
+are preserved. A durable pre-write receipt prevents blind retries after an
+ambiguous response; read-back verification and decision traces expose uncertainty.
+
+Transient Jev and audit failures now keep the broker delivery retryable. Completed
+per-message receipts prevent duplicate proposals when a partially processed event
+is retried. Low-confidence classifications remain visible as abstentions.
+
+`gmail_triage` provides account-scoped `status`, `traces`, and `backtest`. Backtests
+accept up to five labeled samples per call. `lane: auto` uses the production reply,
+automated-action, and booking selection; `lane: cleanup` evaluates the separate
+archiving policy with expected `archive` or `keep`. Fixtures are not persisted and
+this does not train model weights. Only reply-only backtests report historical
+reply-threshold sweeps; action/cleanup results report their actual policy outcomes.
+
+These workflows process new inbox deliveries. Enabling a watch does not replay
+historical inbox mail, and a notice becoming stale later does not itself generate
+a Gmail event. Watch registration proves neither Pub/Sub delivery nor a successful
+Jev decision: inspect cursor progress, retry state and traces separately.
+
+Source health reports the last observed push and successful history-read times
+separately. Backend history recovery runs every five minutes without starting
+chat turns or invoking Jev when there are no new messages.
