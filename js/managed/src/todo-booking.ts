@@ -29,12 +29,15 @@ export async function extractTodoBooking(ai: TodoMailSuggestionAI | undefined, e
     if (!value || Object.keys(value).sort().join(",") !== keys.sort().join(",")
       || keys.some(k=>typeof value[k as keyof Booking] !== "string" || value[k as keyof Booking].length > 300 || /[\u0000-\u001f]/.test(value[k as keyof Booking]))
       || !value.property.trim() || value.property !== value.property_quote || !text.includes(value.property_quote)
-      || value.location && !text.includes(value.location)
       || !day(value.check_in) || !day(value.check_out) || value.check_out <= value.check_in
       || Date.parse(value.check_out)-Date.parse(value.check_in)>90*86400000
       || Date.parse(value.check_out)+86400000 <= Date.now()
       || !text.includes(value.check_in_quote) || !text.includes(value.check_out_quote)
       || !quotedDay(value.check_in_quote,value.check_in) || !quotedDay(value.check_out_quote,value.check_out)) throw new Error("incomplete_booking_evidence");
+    // An optional address that the model inferred or reformatted must not
+    // block otherwise grounded dates/property. Use the verified property name
+    // as the calendar location instead of retaining ungrounded text.
+    if (value.location && !text.includes(value.location)) value.location = "";
     return value;
   } finally {if(timer) clearTimeout(timer);}
 }
