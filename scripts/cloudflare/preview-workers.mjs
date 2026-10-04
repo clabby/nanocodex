@@ -185,7 +185,7 @@ function checkedUrls(urls) {
 // Read-only propagation retries, bounded to 30 seconds per deployed Worker.
 export async function smokePreview(component, origin, { request = globalThis.fetch } = {}) {
   const probes = component === 'account'
-    ? [{ path: '/', statuses: [200], html: true }, { path: '/v1/me', statuses: [401, 403] }, { path: '/v1/credentials', statuses: [401, 403] }]
+    ? [{ path: '/', statuses: [200], html: true }, { path: '/v1/credentials', statuses: [401, 403] }]
     : ['dialog', 'playground'].includes(component)
       ? [{ path: '/', statuses: [200], html: true }]
       : component === 'managed' ? [{ path: '/', statuses: [403] }] : [];

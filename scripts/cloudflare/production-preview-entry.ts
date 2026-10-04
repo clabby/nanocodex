@@ -1,5 +1,6 @@
 /** Branch documents and assets backed by the existing production account service. */
 type PreviewEnv = {
+  ASSETS?: { fetch(request: Request): Promise<Response> };
   NANOCODEX_PREVIEW_PRODUCTION?: { fetch(request: Request): Promise<Response> };
 };
 
@@ -19,7 +20,14 @@ export async function productionPreviewFetch<Env extends PreviewEnv, Context>(
   const backend = !["GET", "HEAD"].includes(request.method)
     || request.headers.has("upgrade")
     || BACKEND_PREFIXES.some(prefix => path === prefix || path.startsWith(prefix + "/"));
-  if (!backend) return appFetch(request, env, context);
+  if (!backend) {
+    const response = await appFetch(request, env, context);
+    if (response.status !== 404 || !env.ASSETS) return response;
+    // Worker-first routing also sees static files and non-navigation document requests.
+    // The asset binding serves them directly without invoking this Worker again.
+    await response.body?.cancel();
+    return env.ASSETS.fetch(request);
+  }
   try {
     if (env.NANOCODEX_PREVIEW_PRODUCTION) {
       // Return the original response, including streams, multiple cookies and upgrades.

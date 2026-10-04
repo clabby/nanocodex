@@ -142,7 +142,7 @@ create storage or run migrations. Parent Worker Preview URLs must be enabled.
 
 Same-revision artifacts, deployment receipts, HTTP serving probes and boundary
 metadata are retained in `output/cloudflare-previews/pr-N/manifest.json` and CI
-artifacts. Account root must return HTML and `/v1/me` must reject unauthenticated
+artifacts. Account root must return HTML and `/v1/credentials` must reject unauthenticated
 requests. These probes verify serving and authentication rejection, not a signed-in
 model turn. Real workerd routing journeys additionally exercise credential
 metadata, authentication failure, mutation origins, streaming and upgrades using

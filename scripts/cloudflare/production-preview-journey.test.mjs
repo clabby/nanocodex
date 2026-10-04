@@ -11,13 +11,13 @@ const entry = `
 import { productionPreviewFetch } from './production-preview-entry.ts';
 export default { fetch(request, env, ctx) {
   const bindings = env.FAIL ? {...env, NANOCODEX_PREVIEW_PRODUCTION: {fetch() {throw new Error('private provider failure')}}} : env;
-  return productionPreviewFetch(request, bindings, ctx, r => new Response('branch:' + new URL(r.url).pathname, {headers:{'content-type':'text/html'}}));
+  return productionPreviewFetch(request, bindings, ctx, r => new URL(r.url).pathname.startsWith('/assets/') || (new URL(r.url).pathname === '/' && !r.headers.get('accept')?.includes('text/html')) ? new Response('app:not_found',{status:404}) : new Response('branch:' + new URL(r.url).pathname, {headers:{'content-type':'text/html'}}));
 }};`;
 const production = `export default { async fetch(request) {
   const url = new URL(request.url);
   if (!['GET','HEAD'].includes(request.method) && request.headers.get('origin') !== url.origin)
     return new Response('forbidden_origin', {status:403});
-  if (url.pathname === '/v1/me' && !request.headers.get('cookie')) return new Response('unauthorized',{status:401});
+  if (url.pathname === '/v1/credentials' && !request.headers.get('cookie')) return new Response('unauthorized',{status:401});
   if (request.headers.get('upgrade') === 'websocket') {
     const pair = new WebSocketPair(); pair[1].accept();
     pair[1].addEventListener('message', event => pair[1].send('production:' + event.data));
@@ -39,18 +39,28 @@ test('branch documents with production service auth, credentials, streams and up
   const common = {modules:true,compatibilityDate:'2026-07-29',compatibilityFlags:['nodejs_compat']};
   const makeOptions = mode => ({workers:[
     {...common,name:'preview',script:bundled.outputFiles[0].text,
-      serviceBindings:mode === 'missing' ? {} : {NANOCODEX_PREVIEW_PRODUCTION:'production'},bindings:{FAIL:mode === 'failed'}},
+      serviceBindings:{ASSETS:'assets',...(mode === 'missing' ? {} : {NANOCODEX_PREVIEW_PRODUCTION:'production'})},bindings:{FAIL:mode === 'failed'}},
     {...common,name:'production',script:production},
+    {...common,name:'assets',script:`export default {fetch(request) {const path = new URL(request.url).pathname; return new Response(request.method === 'HEAD' ? null : 'asset:' + path, {status:path === '/assets/missing.js' ? 404 : 200,headers:{'content-type':path.endsWith('.js') ? 'application/javascript' : 'text/html'}})}}`},
   ]});
   const mf = new Miniflare(makeOptions('working'));
   const trace = [];
   try {
     const origin = (await mf.ready).origin;
-    for (const path of ['/', '/agent', '/connect', '/connect/device', '/connect/vault', '/docs', '/assets/app.js', '/apiary']) {
-      const response = await fetch(origin + path);
+    for (const path of ['/', '/agent', '/connect', '/connect/device', '/connect/vault', '/docs', '/apiary']) {
+      const response = await fetch(origin + path,{headers:{accept:'text/html'}});
       assert.equal(response.status,200); assert.equal(await response.text(),'branch:' + path);
       trace.push({path,route:'branch',status:200});
     }
+    for (const path of ['/', '/assets/app.js']) {
+      const asset = await fetch(origin + path);
+      assert.equal(asset.status,200); assert.equal(await asset.text(),'asset:' + path);
+      trace.push({path,route:'assets after app 404',status:200});
+    }
+    const assetHead = await fetch(origin + '/assets/app.js',{method:'HEAD'});
+    assert.equal(assetHead.status,200); assert.equal(await assetHead.text(),'');
+    assert.equal(assetHead.headers.get('content-type'),'application/javascript');
+    assert.equal((await fetch(origin + '/assets/missing.js')).status,404);
     for (const path of ['/api/health','/v1/credentials','/git/example','/auth','/webauthn/login','/connectors/google/callback',
       '/sandbox-preview/session/index.html','/connect-dialog','/.well-known/urpc/consumer.json']) {
       const response = await fetch(origin + path + '?synthetic=1', {headers:{cookie:'nanocodex_account=synthetic'}});
@@ -63,7 +73,7 @@ test('branch documents with production service auth, credentials, streams and up
     assert.equal(response.status,200); assert.match(response.headers.get('set-cookie'), /HttpOnly; SameSite=Lax/);
     assert.deepEqual(await response.json(), {url:origin + '/v1/auth/sms/verify?synthetic=1',method:'POST',
       origin,cookie:'nanocodex_account=synthetic',authorization:'Bearer synthetic',body:payload});
-    assert.equal((await fetch(origin + '/v1/me')).status,401);
+    assert.equal((await fetch(origin + '/v1/credentials')).status,401);
     assert.equal((await fetch(origin + '/v1/credentials/openai',{method:'PUT',headers:{origin:'https://wrong.invalid'},body:payload})).status,403);
     const mutation = await fetch(origin + '/future-route',{method:'POST',headers:{origin},body:payload});
     assert.equal((await mutation.json()).body,payload);
