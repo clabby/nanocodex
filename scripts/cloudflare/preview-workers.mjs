@@ -3,7 +3,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, relative } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -29,8 +29,8 @@ const fail = message => { throw new Error(message); };
 const secretNames = env => Object.entries(env ?? {}).filter(([, value]) => value?.type === 'secret_text' || value?.type === 'secret_key').map(([name]) => name).sort();
 function readConfig(path) { return require('wrangler').experimental_readRawConfig({ config: path }).rawConfig; }
 
-export function selectComponents(component) {
-  if (!component || component === 'all') return Object.keys(components);
+export function selectComponents(component, backend = 'production') {
+  if (!component || component === 'all') return backend === 'production' ? ['dialog', 'playground', 'account'] : Object.keys(components);
   if (component === 'assets') return ['dialog', 'playground'];
   if (!Object.hasOwn(components, component)) fail('Unknown preview component; use managed, connect-api, dialog, playground, account, or assets');
   return [component];
@@ -55,14 +55,14 @@ export function providerClient({ account, token, request = globalThis.fetch }) {
   };
 }
 
-export async function checkComponent(component, config, { get, name, suppliedNames = [] }) {
+export async function checkComponent(component, config, { get, name, suppliedNames = [], backend = 'isolated' }) {
   const worker = components[component].worker;
   const parent = `workers/workers/${worker}`;
   const [production, base, existing] = await Promise.all([
-    get(`workers/scripts/${worker}/secrets`), get(parent), get(`${parent}/previews/${name}`, { optional: true }),
+    backend === 'production' ? Promise.resolve([]) : get(`workers/scripts/${worker}/secrets`), get(parent), get(`${parent}/previews/${name}`, { optional: true }),
   ]);
   if (!Array.isArray(production)) fail(`Invalid production secret metadata for ${worker}`);
-  const required = production.map(item => item.name).sort();
+  const required = backend === 'production' ? [] : production.map(item => item.name).sort();
   if (required.some(key => Object.hasOwn(config.vars ?? {}, key))) fail(`Production secret name collides with configured plain variables for ${worker}`);
   if (!required.every(safeName)) fail(`Invalid secret name metadata for ${worker}`);
   const baseEnv = base.previews_base_config?.env ?? {};
@@ -75,7 +75,7 @@ export async function checkComponent(component, config, { get, name, suppliedNam
   if (existing) {
     const deployed = await get(`${parent}/previews/${name}/deployments/latest`, { optional: true });
     activeEnv = deployed?.env;
-    const needsBindingMetadata = required.length > 0 || storage.some(([field]) => (config[field]?.length ?? 0) > 0);
+    const needsBindingMetadata = required.length > 0 || backend !== 'production' && storage.some(([field]) => (config[field]?.length ?? 0) > 0);
     if (deployed && !activeEnv && needsBindingMetadata) fail(`Existing Preview binding metadata unavailable for ${worker}`);
     if (deployed && !activeEnv) activeEnv = {};
     if (activeEnv) {
@@ -85,7 +85,7 @@ export async function checkComponent(component, config, { get, name, suppliedNam
     }
   }
   const resources = [];
-  for (const [field, type, property] of storage) {
+  for (const [field, type, property] of backend === 'production' ? [] : storage) {
     for (const binding of config[field] ?? []) {
       const key = binding.binding;
       if (!safeName(key)) fail(`Invalid resource binding name for ${worker}`);
@@ -110,17 +110,25 @@ export async function checkComponent(component, config, { get, name, suppliedNam
   }
   // New storage kinds must receive an explicit policy before becoming preview bindings.
   for (const field of ['queues', 'workflows', 'vectorize', 'hyperdrive', 'analytics_engine_datasets', 'pipelines', 'dispatch_namespaces']) {
-    if (config[field] && JSON.stringify(config[field]) !== '[]') problems.push(`preview policy required for binding category: ${field}`);
+    if (backend !== 'production' && config[field] && JSON.stringify(config[field]) !== '[]') problems.push(`preview policy required for binding category: ${field}`);
   }
   return { component, worker, requiredSecrets: required, missingBaseSecrets: missing, plannedBaseSecretNames: suppliedNames, problems, resources };
 }
 
-export function previewConfig(source, { revision, images = [], bridge } = {}) {
+export function previewConfig(source, { revision, images = [], bridge, backend = 'isolated' } = {}) {
   const config = structuredClone(source);
   delete config.env;
   delete config.$schema;
   // Start explicitly; inherited production routes/cron/queue consumers are never deployed.
   config.previews = {};
+  if (backend === 'production' && source.name === components.account.worker) {
+    // All stateful requests use the existing authenticated production API.
+    // Only the branch's app rendering and assets run in this Preview.
+    if (config.assets) config.assets.run_worker_first = true;
+    config.previews = { vars: { ENVIRONMENT: 'production', NANOCODEX_PREVIEW_REVISION: revision },
+      services: [{ binding: 'NANOCODEX_PREVIEW_PRODUCTION', service: components.account.worker }] };
+    return config;
+  }
   for (const key of copied) if (source[key] !== undefined) config.previews[key] = structuredClone(source[key]);
   config.previews.vars = { ...config.previews.vars, NANOCODEX_PREVIEW_REVISION: revision };
   if (bridge) {
@@ -177,7 +185,7 @@ function checkedUrls(urls) {
 // Read-only propagation retries, bounded to 30 seconds per deployed Worker.
 export async function smokePreview(component, origin, { request = globalThis.fetch } = {}) {
   const probes = component === 'account'
-    ? [{ path: '/', statuses: [200], html: true }, { path: '/v1/me', statuses: [401, 403] }]
+    ? [{ path: '/', statuses: [200], html: true }, { path: '/v1/me', statuses: [401, 403] }, { path: '/v1/credentials', statuses: [401, 403] }]
     : ['dialog', 'playground'].includes(component)
       ? [{ path: '/', statuses: [200], html: true }]
       : component === 'managed' ? [{ path: '/', statuses: [403] }] : [];
@@ -211,7 +219,7 @@ export async function main(args = process.argv.slice(2), { cwd = process.cwd(), 
   const command = args[0] && !args[0].startsWith('--') ? args[0] : 'deploy';
   if (!['deploy', 'check', 'delete'].includes(command)) fail('Expected deploy, check, or delete');
   const { values } = parseArgs({ args: args[0] === command ? args.slice(1) : args, options: {
-    'check-only': { type: 'boolean', default: false }, component: { type: 'string' }, name: { type: 'string' },
+    backend: { type: 'string', default: 'production' }, 'check-only': { type: 'boolean', default: false }, component: { type: 'string' }, name: { type: 'string' },
   } });
   if (command === 'check') values['check-only'] = true;
   const name = values.name ?? env.PREVIEW_NAME;
@@ -222,9 +230,12 @@ export async function main(args = process.argv.slice(2), { cwd = process.cwd(), 
   if (command !== 'delete' && revision !== head) fail('Preview revision does not match checkout HEAD');
   const version = require('wrangler/package.json').version.split('.').map(Number);
   if (version[0] < 4 || (version[0] === 4 && version[1] < 135)) fail('Native Worker Previews require root Wrangler >=4.135.0');
-  const selected = selectComponents(values.component);
+  const backend = values.backend;
+  if (!['production', 'isolated'].includes(backend)) fail('Expected --backend production or isolated');
+  const selected = command === 'delete' && !values.component ? Object.keys(components) : selectComponents(values.component, backend);
+  if (command !== 'delete' && backend === 'production' && selected.some(key => ['managed', 'connect-api'].includes(key))) fail('Managed/Connect API branch code requires --backend isolated');
   // Account/managed must roll together so a rotated bridge key cannot strand one side.
-  if (selected.includes('account') || selected.includes('managed')) {
+  if (backend === 'isolated' && (selected.includes('account') || selected.includes('managed'))) {
     if (!selected.includes('managed')) selected.unshift('managed');
     if (!selected.includes('account')) selected.push('account');
   }
@@ -249,7 +260,7 @@ export async function main(args = process.argv.slice(2), { cwd = process.cwd(), 
     return { name, removed };
   }
   let supplied = {};
-  if (env.NANOCODEX_PREVIEW_BASE_SECRETS_JSON) {
+  if (backend === 'isolated' && env.NANOCODEX_PREVIEW_BASE_SECRETS_JSON) {
     try { supplied = JSON.parse(env.NANOCODEX_PREVIEW_BASE_SECRETS_JSON); } catch { fail('Invalid NANOCODEX_PREVIEW_BASE_SECRETS_JSON; expected worker-name to secret-name/value maps'); }
     if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)) fail('Invalid Preview Base secret seed shape');
   }
@@ -279,9 +290,9 @@ export async function main(args = process.argv.slice(2), { cwd = process.cwd(), 
   const checks = [];
   for (const key of selected) {
     console.log(`Checking Preview Base metadata: ${components[key].worker}`);
-    checks.push(await checkComponent(key, configs[key], { get, name, suppliedNames: values['check-only'] ? Object.keys(supplied[components[key].worker] ?? {}) : [] }));
+    checks.push(await checkComponent(key, configs[key], { get, name, backend, suppliedNames: values['check-only'] ? Object.keys(supplied[components[key].worker] ?? {}) : [] }));
   }
-  const manifest = { schema: 1, name, revision, mode: values['check-only'] ? 'check-only' : 'deploy', checks, deployments: [] };
+  const manifest = { schema: 1, name, revision, backend, credentialBroker: backend === 'production' ? 'existing-production-via-account-service' : 'production-egress', mode: values['check-only'] ? 'check-only' : 'deploy', checks, deployments: [] };
   const output = resolve(cwd, 'output/cloudflare-previews', name);
   mkdirSync(output, { recursive: true });
   const manifestPath = resolve(output, 'manifest.json');
@@ -294,7 +305,7 @@ export async function main(args = process.argv.slice(2), { cwd = process.cwd(), 
   if (problems.length) fail(`Preview preflight blocked before uploads:\n${problems.join('\n')}\nProvision missing Base secrets privately and separate storage explicitly; secret values are never copied from production.`);
   if (values['check-only']) return manifest;
   let bridge;
-  if (selected.includes('account')) {
+  if (backend === 'isolated' && selected.includes('account')) {
     const domain = await get('workers/subdomain');
     if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(domain?.subdomain ?? '')) fail('Invalid Workers subdomain metadata');
     bridge = { account: `https://${name}-${components.account.worker}.${domain.subdomain}.workers.dev`,
@@ -306,15 +317,23 @@ export async function main(args = process.argv.slice(2), { cwd = process.cwd(), 
     if (!existsSync(original)) fail(`Missing built configuration for ${key}; restore same-revision Worker artifacts first`);
     const source = readConfig(original);
     if (source.name !== spec.worker) fail(`Unexpected built Worker identity for ${key}`);
-    const images = source.containers?.length ? await deployedAccountImages(source, { account, token, request }) : [];
+    const images = backend === 'isolated' && source.containers?.length ? await deployedAccountImages(source, { account, token, request }) : [];
     const usesBridge = bridge && ['account', 'managed'].includes(key);
-    const config = previewConfig(source, { revision, images, bridge: usesBridge ? bridge : undefined });
+    const config = previewConfig(source, { revision, images, backend, bridge: usesBridge ? bridge : undefined });
     const generated = resolve(dirname(original), `wrangler.preview-${randomUUID()}.json`);
     const receipt = resolve(output, `wrangler-${randomUUID()}.jsonl`);
+    const entry = backend === 'production' && key === 'account' ? resolve(dirname(original), `preview-entry-${randomUUID()}.mjs`) : undefined;
     try {
+      if (entry) {
+        const appPath = './' + relative(dirname(entry), resolve(dirname(original), source.main));
+        const helperPath = './' + relative(dirname(entry), resolve(cwd, 'scripts/cloudflare/production-preview-entry.ts'));
+        writeFileSync(entry, `import app from ${JSON.stringify(appPath)};\nexport * from ${JSON.stringify(appPath)};\nimport { productionPreviewFetch } from ${JSON.stringify(helperPath)};\nexport default { ...app, fetch(request, env, ctx) { return productionPreviewFetch(request, env, ctx, (r, e, c) => app.fetch(r, e, c)); } };\n`, { flag: 'wx', mode: 0o600 });
+        config.main = './' + relative(dirname(original), entry);
+        config.no_bundle = false;
+      }
       writeFileSync(generated, `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
       console.log(`Deploying native Preview ${name}: ${spec.worker}`);
-      await run(['preview', '--env=', '--config', generated, '--name', name, '--tag', revision, '--message', `PR preview ${revision}`, '--json', ...(usesBridge ? ['--secrets-file', '/dev/stdin'] : [])], {
+      await run(['preview', '--env=', '--config', generated, '--name', name, '--tag', revision, '--message', `PR preview ${revision}`, '--json', ...(backend === 'production' ? ['--ignore-base-config'] : []), ...(usesBridge ? ['--secrets-file', '/dev/stdin'] : [])], {
         secrets: usesBridge ? { NANOCODEX_PREVIEW_BRIDGE_SECRET: bridge.secret } : undefined,
         cwd, env: { ...env, CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token, NANOCODEX_PREVIEW_BASE_SECRETS_JSON: '', CI: 'true', WRANGLER_SEND_METRICS: 'false', WRANGLER_OUTPUT_FILE_PATH: receipt },
       });
@@ -336,6 +355,7 @@ export async function main(args = process.argv.slice(2), { cwd = process.cwd(), 
         `\n- ${spec.worker}: [${name}](${urls[0]}) — deployment \`${result.deployment_id}\`. Unbridged services and foreign DO bindings target production; see manifest boundaries.\n`);
       console.log(`Preview deployed: ${spec.worker} ${urls[0]}`);
     } finally {
+      if (entry) rmSync(entry, { force: true });
       rmSync(generated, { force: true });
       rmSync(receipt, { force: true });
     }

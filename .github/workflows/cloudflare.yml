@@ -68,16 +68,21 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: Upload preview versions or deploy production
+        description: Publish PR previews or deploy production
         required: true
         default: preview
         type: choice
         options: [preview, production]
       preview_component:
-        description: Preview the full application or only the Connect assets
+        description: Preview the app against production or only the Connect assets
         type: choice
         options: [all, assets]
         default: all
+      preview_backend:
+        description: Production backend reuses existing login and credential broker
+        type: choice
+        options: [production, isolated]
+        default: production
       validate_images:
         description: Also validate container images independently of Worker uploads
         type: boolean
@@ -240,6 +245,7 @@ jobs:
       DEPLOY_MESSAGE: GitHub Actions preview ${{ github.sha }}
       PREVIEW_NAME: pr-${{ github.event.pull_request.number || github.run_id }}
       PREVIEW_COMPONENT: ${{ inputs.preview_component == 'assets' && 'assets' || '' }}
+      PREVIEW_BACKEND: ${{ inputs.preview_backend || 'production' }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -265,11 +271,13 @@ jobs:
         run: node scripts/cloudflare/worker-build.mjs restore
       - name: Test authenticated Preview routing
         run: pnpm --filter nanocodex-managed-service run test:preview-bridge
-      - name: Check Preview production-secret availability
+      - name: Test production-backed Preview routing
+        run: node --test scripts/cloudflare/production-preview-journey.test.mjs
+      - name: Check Preview readiness
         env:
           NANOCODEX_PREVIEW_BASE_SECRETS_JSON: ${{ secrets.NANOCODEX_PREVIEW_BASE_SECRETS_JSON }}
         run: |
-          args=(check --name "$PREVIEW_NAME")
+          args=(check --name "$PREVIEW_NAME" --backend "$PREVIEW_BACKEND")
           if [ -n "$PREVIEW_COMPONENT" ]; then args+=(--component "$PREVIEW_COMPONENT"); fi
           node scripts/cloudflare/preview-workers.mjs "${args[@]}"
       # Validate code before publishing actual Preview environments.
@@ -319,7 +327,7 @@ jobs:
         env:
           NANOCODEX_PREVIEW_BASE_SECRETS_JSON: ${{ secrets.NANOCODEX_PREVIEW_BASE_SECRETS_JSON }}
         run: |
-          args=(deploy --name "$PREVIEW_NAME")
+          args=(deploy --name "$PREVIEW_NAME" --backend "$PREVIEW_BACKEND")
           if [ -n "$PREVIEW_COMPONENT" ]; then args+=(--component "$PREVIEW_COMPONENT"); fi
           node scripts/cloudflare/preview-workers.mjs "${args[@]}"
       - name: Retain Preview manifest and readiness report
