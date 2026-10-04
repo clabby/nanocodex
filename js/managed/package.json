@@ -39,7 +39,7 @@
     "test:images": "npm run test:images:node && vitest run --config vitest.images.config.ts",
     "test:recovery": "node --test test/managed-crash-recovery-journey.test.mjs",
     "test:model-pause": "node --test test/model-pause-journey.test.mjs",
-    "test:tool-timing": "node --test test/thread-tool-timing-journey.test.mjs",
+    "test:tool-timing": "node --test test/thread-tool-timing-journey.test.mjs test/just-bash-telemetry-journey.test.mjs",
     "test:hand-reconnect": "node --test test/hand-reconnect-journey.test.mjs",
     "test:hand-owner-restart": "node --test test/hand-owner-restart-journey.test.mjs",
     "test:hand-communication": "node --test test/hand-communication-journey.test.mjs",

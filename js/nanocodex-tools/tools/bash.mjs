@@ -71,6 +71,7 @@ export async function justBash(options) {
   const runtime = await createJustBashRuntime({
     filesystem: shellFilesystem,
     binaryIO: options.binaryIO,
+    onExecution: options.onExecution,
     lazyInitialize: options.lazyInitialize === true,
     loadInterpreter: options.loadInterpreter,
     cwd: filesystem.root,
@@ -218,25 +219,51 @@ export async function createJustBashRuntime(options) {
     parameters: EXEC_COMMAND_PARAMETERS,
     outputSchema: EXECUTION_OUTPUT_SCHEMA,
     handler(input, context) {
+      const admittedAt = now();
+      // Only a bounded first literal token is inspected. No parsing, argument
+      // capture, hashing, or upstream logger (which includes source/output).
+      const command = commandFamily(input);
+      const emit = (event) => {
+        try {
+          const pending = options.onExecution?.(Object.freeze({ command, command_scope: "first_literal", ...event }), context);
+          // Observers are observational, including an accidentally async sink.
+          if (pending && typeof pending.then === "function") void Promise.resolve(pending).catch(() => {});
+        } catch { /* Logging must never alter shell behavior. */ }
+      };
+      emit({ phase: "queued" });
       const execute = async () => {
         const startedAt = now();
-        return executeCommand({
-          initialize,
-          startedAt,
-          input,
-          root: cwd,
-          signal: context?.signal,
-          executionTimeoutMs,
-          defaultMaxOutputTokens,
-          maxOutputTokens,
-          aroundExecute: options.aroundExecute,
-          filesystem: options.filesystem,
-          binaryIO: options.binaryIO,
-          executionLimits,
-          binaryEnabled: () => !registeredCommands?.some((command) => command.name === "cat" || command.name === "sha256sum"),
-          outputTruncationNotice: options.outputTruncationNotice,
-          retainNoticeWithinLimit: options.retainNoticeWithinLimit,
-        });
+        emit({ phase: "started", queue_ms: Math.max(0, startedAt - admittedAt) });
+        let category = "input_validation";
+        try {
+          const result = await executeCommand({
+            initialize,
+            onCategory: (value) => { category = value; },
+            startedAt,
+            input,
+            root: cwd,
+            signal: context?.signal,
+            executionTimeoutMs,
+            defaultMaxOutputTokens,
+            maxOutputTokens,
+            aroundExecute: options.aroundExecute,
+            filesystem: options.filesystem,
+            binaryIO: options.binaryIO,
+            executionLimits,
+            binaryEnabled: () => !registeredCommands?.some((command) => command.name === "cat" || command.name === "sha256sum"),
+            outputTruncationNotice: options.outputTruncationNotice,
+            retainNoticeWithinLimit: options.retainNoticeWithinLimit,
+          });
+          emit({ phase: "finished", status: result.exit_code === 0 ? "success" : "error",
+            exit_code: result.exit_code, category, duration_ms: Math.max(0, now() - startedAt),
+            output_truncated: result.original_token_count !== undefined });
+          return result;
+        } catch (error) {
+          emit({ phase: "finished", status: "error", exit_code: null,
+            category: context?.signal?.aborted ? "cancelled" : category,
+            duration_ms: Math.max(0, now() - startedAt), output_truncated: false });
+          throw error;
+        }
       };
       const result = executionTail.then(execute, execute);
       executionTail = result.then(() => undefined, () => undefined);
@@ -249,6 +276,7 @@ export async function createJustBashRuntime(options) {
 
 async function executeCommand({
   initialize,
+  onCategory,
   startedAt,
   input,
   root,
@@ -284,6 +312,7 @@ async function executeCommand({
     maxOutputTokens,
     positiveInteger(input.max_output_tokens, defaultMaxOutputTokens, "max_output_tokens"),
   );
+  onCategory("exception");
   const deadline = new AbortController();
   const abort = () => deadline.abort(signal?.reason);
   signal?.addEventListener("abort", abort, { once: true });
@@ -308,12 +337,19 @@ async function executeCommand({
       ? await aroundExecute({ execute, signal: deadline.signal })
       : await execute();
   } catch (error) {
-    if (!deadline.signal.aborted) throw error;
+    if (!deadline.signal.aborted) {
+      onCategory(error?.fatalSearchAdmission ? "search_admission"
+        : error?.shellLimit ? "resource_limit" : "exception");
+      throw error;
+    }
     result = { stdout: "", stderr: "bash: execution aborted\n", exitCode: 124 };
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener("abort", abort);
   }
+  onCategory(deadline.signal.aborted
+    ? signal?.aborted ? "cancelled" : "timeout"
+    : resultCategory(result));
   const combined = `${result.stdout}${result.stderr}`;
   const maxCharacters = outputTokens * 4;
   const truncated = combined.length > maxCharacters;
@@ -330,6 +366,28 @@ async function executeCommand({
     exit_code: result.exitCode,
     ...(truncated ? { original_token_count: Math.ceil(combined.length / 4) } : {}),
   };
+}
+
+// Labels are code-owned constants, never arbitrary executable names. Unknown,
+// dynamic, quoted, assignment-prefixed, or long first words remain "other".
+const TELEMETRY_COMMANDS = new Set([...BUILTIN_COMMANDS, "curl", "git", "gh", "ssh", "ffmpeg", "ffprobe", "pdftotext"]);
+function commandFamily(input) {
+  if (typeof input?.cmd !== "string") return "other";
+  const match = /^\s{0,64}([a-z][a-z0-9-]{0,31})(?=\s|[;|&<>]|$)/.exec(input.cmd.slice(0, 128));
+  return match && TELEMETRY_COMMANDS.has(match[1]) ? match[1] : "other";
+}
+
+function resultCategory(result) {
+  if (result.exitCode === 0) return "none";
+  // Inspection stays local and bounded; only the enum is emitted. No error
+  // text or arbitrary error property is passed across the observer boundary.
+  const diagnostic = typeof result.stderr === "string" ? result.stderr.slice(0, 4096) : "";
+  if (/search_admission|synchronous regex.*admission|uncertain dynamic regex admission/.test(diagnostic)) return "search_admission";
+  if (/limit exceeded|exceeded.*limit|resource limit|size limit|maximum.*exceeded|input ceiling|workspace exceeds/i.test(diagnostic)) return "resource_limit";
+  if (result.exitCode === 124) return "timeout";
+  if (result.exitCode === 127) return "command_not_found";
+  if (/syntax error|parse error|unexpected token|unterminated/i.test(diagnostic)) return "syntax";
+  return "command_exit";
 }
 
 function describeRuntime({

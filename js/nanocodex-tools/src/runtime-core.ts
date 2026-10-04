@@ -1,5 +1,5 @@
 import type { ShellBinaryIO } from "../tools/shell-binary.mjs";
-import type { JustBashCustomCommand, JustBashDescriptor } from "../tools/bash.mjs";
+import type { JustBashCustomCommand, JustBashDescriptor, JustBashExecutionObserver } from "../tools/bash.mjs";
 import { justBash } from "../tools/bash.mjs";
 import type { NamedTool, Workspace } from "../tools/types.mjs";
 
@@ -20,6 +20,7 @@ export type ComputerRuntimeOptions = Readonly<{
   loadInterpreter?: (() => Promise<Pick<typeof import("just-bash/browser"), "Bash" | "defineCommand">>) | undefined;
   networkMode: string;
   binaryIO?: ShellBinaryIO | undefined;
+  onExecution?: JustBashExecutionObserver | undefined;
   executionTimeoutMs?: number | undefined;
   executionLimits?: Readonly<Record<string, number>> | undefined;
   maxEntries?: number | undefined;
@@ -58,6 +59,7 @@ export async function createComputerRuntimeWithoutPdf(
     lazyInitialize: options.lazyInitialize,
     loadInterpreter: options.loadInterpreter,
     binaryIO: options.binaryIO,
+    onExecution: options.onExecution,
     executionTimeoutMs: options.executionTimeoutMs,
     executionLimits: options.executionLimits,
     maxEntries: options.maxEntries,

@@ -104,3 +104,8 @@ deployment_sha = "0123456789abcdef0123456789abcdef01234567"
 Add `AND deployment_sha = "..."` or another identity field to narrow any query.
 Cloudflare source maps make exception stacks readable in the dashboard without
 publishing source maps to application clients.
+
+## Embedded shell diagnostics
+
+See [Just Bash execution logs](just-bash-observability.md) for `/brain` exit codes,
+failure categories, call correlation, and queries for command retry sequences.

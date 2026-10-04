@@ -32,6 +32,8 @@ export type { DatasetOptions } from "../tools/dataset.mjs";
 export { justBash } from "../tools/bash.mjs";
 export type {
   JustBashCustomCommand,
+  JustBashExecutionEvent,
+  JustBashExecutionObserver,
   JustBashDescriptor,
   JustBashFetch,
   JustBashNetworkOptions,

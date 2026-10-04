@@ -34,6 +34,7 @@ if (childCase) {
     ["fatalAdmission", "resource refusal survives pipelines and prevents following effects"],
     ["streamRegex", "sed and awk regex/script admission precedes compile and recovers"],
     ["streamSemantics", "sed and awk ordinary text operations retain upstream results"],
+    ["sedAdmission", "numeric sed addresses and literal replacement text retain upstream results"],
     ...(process.env.NANOCODEX_SEARCH_PUBLIC_FIXTURE ? [["publicFixture", "exact public CLI fixture agrees with native rg under independent deadline"]] : []),
   ]) {
     test(description, { timeout: 35_000 }, async (t) => {
@@ -416,6 +417,50 @@ async function streamSemantics() {
   assert.deepEqual(shells.mismatches, [], "sed/awk upstream semantic mismatches");
 }
 
+async function sedAdmission() {
+  const shells = await pair({
+    "input.txt": "alpha 1\nbeta 2\nalpha 3\n",
+    "replace.sed": "s/alpha/(a{65535}){65535}/g\n",
+    "bracket.txt": "/aaaa\n",
+  });
+  // A large data file makes accidental regex admission of numeric addresses
+  // visible. Compare the public handler against the real upstream interpreter.
+  const input = "alpha " + "a".repeat(600_000) + "\nbeta\ngamma\n";
+  await shells.runtime.filesystem.writeFile("large.txt", input);
+  await shells.baseline.fs.writeFile("/workspace/large.txt", input);
+  trace({ fixture: "large.txt", bytes: input.length, generation: "alpha + a^600000 + newline beta newline gamma newline" });
+  for (const cmd of [
+    "sed -n '1,+1p' large.txt | head -c 40",
+    "sed -n '1~2p' large.txt | head -c 40",
+    "sed 's/alpha/(a{65535}){65535}/g' input.txt",
+    "sed -f replace.sed input.txt",
+    "sed -E 's/[/](a{2}){2}/g' bracket.txt",
+    "sed 's/alpha/literal\\/{5000};still replacement/g' input.txt",
+    "sed -e 's/alpha/{5000}/' -e 's/beta/{6000}/' input.txt",
+    "sed -n '1,+1!p' input.txt",
+  ]) await compare(shells, cmd);
+  assert.deepEqual(shells.mismatches, [], "sed admission must preserve upstream results");
+  // Extracting a replacement must never hide a hostile search pattern or a
+  // later command. Refusal remains fatal even behind a successful pipeline.
+  for (const script of [
+    "s/(a{65535}){65535}/literal{5000}/g",
+    // Upstream keeps the first slash inside the bracket expression, and also
+    // accepts an unterminated replacement. The apparent replacement is regex.
+    "s/[/](a{65535}){65535}/g",
+    "s/alpha/literal{5000}/;s/(a{65535}){65535}/x/",
+    "s/alpha/literal{5000}/\ns/(a{65535}){65535}/x/",
+    "s/alpha/literal{5000}/;/(a{65535}){65535}/p",
+  ]) {
+    const cmd = `sed -E ${quote(script)} input.txt | head -c 40; echo unexpected > forbidden.txt`;
+    const observed = publicResult(await shells.runtime.tool.handler({ cmd }, context()));
+    trace({ cmd, expected: "fatal precompile admission and no following write", observed });
+    assert.notEqual(observed.exit_code, 0);
+    assert.match(observed.output, /compilation\/work admission/);
+    await assert.rejects(shells.runtime.filesystem.readFile("forbidden.txt"));
+    await recovery(shells.runtime);
+  }
+}
+
 async function publicFixture() {
   const path = process.env.NANOCODEX_SEARCH_PUBLIC_FIXTURE;
   const input = await readFile(path);
@@ -572,5 +617,5 @@ function memoryWorkspace() {
 // Hoisted via a function rather than a const so direct child execution works.
 function getJourneys() {
   return { semantics, fallback, smartCase, oneMiB: () => largeScan(1024 * 1024),
-    thirteenMiB: () => largeScan(13 * 1024 * 1024), cancellation, admission, hostBoundary, publicFixture, sourceBudget, fatalAdmission, streamRegex, streamSemantics };
+    thirteenMiB: () => largeScan(13 * 1024 * 1024), cancellation, admission, hostBoundary, publicFixture, sourceBudget, fatalAdmission, streamRegex, streamSemantics, sedAdmission };
 }

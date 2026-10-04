@@ -1,5 +1,19 @@
 import type { ShellBinaryIO } from "./shell-binary.mjs";
-import type { NamedTool, Workspace } from "./types.mjs";
+import type { NamedTool, Workspace, ToolContext } from "./types.mjs";
+
+export type JustBashExecutionEvent = Readonly<{
+  phase: "queued" | "started" | "finished";
+  /** Fixed allowlist label; other includes dynamic or unrecognized first words. */
+  command: string;
+  command_scope: "first_literal";
+  queue_ms?: number;
+  duration_ms?: number;
+  status?: "success" | "error";
+  exit_code?: number | null;
+  category?: "none" | "search_admission" | "resource_limit" | "timeout" | "cancelled" | "syntax" | "command_not_found" | "command_exit" | "input_validation" | "exception";
+  output_truncated?: boolean;
+}>;
+export type JustBashExecutionObserver = (event: JustBashExecutionEvent, context?: ToolContext) => void;
 
 export type JustBashFetch = (
   url: string,
@@ -83,6 +97,8 @@ export function justBash(options: {
   /** Host-specific standalone module loader; defaults to the package entry. */
   loadInterpreter?: (() => Promise<Pick<typeof import("just-bash/browser"), "Bash" | "defineCommand">>) | undefined;
   binaryIO?: ShellBinaryIO | undefined;
+  /** Content-safe lifecycle telemetry; observer failures never alter execution. */
+  onExecution?: JustBashExecutionObserver | undefined;
   executionTimeoutMs?: number | undefined;
   /** Finite resource ceilings; overrides must match the host memory envelope. */
   executionLimits?: Readonly<Record<string, number>> | undefined;

@@ -71,6 +71,13 @@ export async function createManagedComputerRuntime(options: Readonly<{
       filesystem,
       refreshFilesystemBeforeExec: options.filesystem !== undefined,
       lazyInitialize: true,
+      onExecution: (event, context) => console.info({
+        type: "managed.just_bash", ...event,
+        tool_call_id: context?.callId,
+        parent_tool_call_id: context?.parentCallId,
+        turn_id: context?.turnId,
+        thread_id: context?.sessionId,
+      }),
       // Cooperative hot-loop deadlines plus finite fallback admission; not a
       // promise race pretending to preempt synchronous interpreter execution.
       executionTimeoutMs: 30_000,

@@ -74,7 +74,7 @@ async function boundedCommand(command, name, args, ctx, plan) {
   // Stream programs are already isolated from operands and options above.
   // A filename such as report{5000}.txt is not regex source.
   const cost = policy.safe ? 1 : name === "sed" || name === "awk"
-    ? fallbackCost(programs) : Math.max(fallbackCost(args), fallbackCost(programs));
+    ? Math.max(sourceBytes, fallbackCost(policy.costSources ?? programs)) : Math.max(fallbackCost(args), fallbackCost(programs));
   if (cost >= FALLBACK_WORK) return refusal(ctx, name, "synchronous regex compilation/work admission; simplify the pattern or use a native Hand");
   const cap = Math.min(ctx.limits.maxInputBytes, Math.max(1, Math.floor((policy.safe ? ctx.limits.maxInputBytes : FALLBACK_WORK) / cost)));
   const reason = () => `synchronous regex input/work admission (${cap} bytes); use a native Hand`;
@@ -425,8 +425,19 @@ function programPolicy(name, programs, plan) {
     // Numeric addressing and these no-argument operations cannot compile a
     // user regex. Other sed programs use conservative regex work admission.
     const safe = programs.every((source) => source.split(/[;\n]/).every((part) => !part.trim()
-      || /^\s*(?:(?:\d+|\$)(?:\s*,\s*(?:\d+|\$))?\s*)?!?\s*[pdnNhHgGx=DPlq]\s*\d*\s*$/.test(part)));
-    return { safe };
+      || /^\s*(?:(?:\d+(?:\s*~\s*\d+)?|\$)(?:\s*,\s*(?:\+?\d+|\$))?\s*)?!?\s*[pdnNhHgGx=DPlq]\s*\d*\s*$/.test(part)));
+    // Recognize only one complete slash-delimited substitution with a nonempty
+    // pattern and ordinary flags. Replacement braces are literal output, not
+    // repetition counts. Empty-pattern reuse, addresses, extra commands and
+    // other delimiters retain the conservative whole-program cost. Bracket
+    // expressions also stay conservative: upstream ignores slash delimiters
+    // inside them, so a delimiter-only scan cannot identify their replacement.
+    // Keep the full source length as a work floor at the call site.
+    const costSources = programs.map((source) => {
+      const substitution = source.match(/^\s*s\/((?:\\[^\r\n]|[^/\\\r\n])+)\/((?:\\[^\r\n]|[^/\\\r\n])*)\/[gp]*\s*$/);
+      return substitution && !substitution[1].includes("[") ? substitution[1] : source;
+    });
+    return { safe, costSources };
   }
   if (!plan.separatorsSafe) return { uncertain: true };
   const noRegex = (source) => !/[\/~@|]/.test(source)
