@@ -45,3 +45,92 @@ Checkpoints survive observer disconnects and turn archival. They are intermediat
 previews, not completion receipts. The final immutable artifact publication excludes
 the `checkpoints` directory; agents must still publish the requested final outputs.
 Session deletion removes retained snapshots and fences pending reads.
+
+## App-scoped conversations
+
+Apps can explicitly request `urn:nanocodex:agent:threads:app` in the signed
+`capabilities.auth.resources` array and set
+`capabilities.agent.conversationHistory: true`. Connect displays this permission
+as **App conversations**. The resulting grant contains `agent.threads.app` and
+`agent.history.read`. This cannot be combined with a single `conversationId`.
+Existing grants do not acquire multi-thread authority from history or trace
+access alone; they require a fresh approval with the new resource.
+
+Send the captured grant bearer token, `X-Nanocodex-App-Id`, and exact approved
+`Origin`, as for other grant routes. Under `/v1/grants/:grantId`:
+
+| Method | Path | Body | Response |
+| --- | --- | --- | --- |
+| GET | `/threads` | — | `{ threads, next_cursor? }` |
+| POST | `/threads` | `{ operation_id, title? }` | 201 `{ thread, connection }` |
+| GET | `/threads/:threadId` | — | `{ thread, connection }` |
+| PATCH | `/threads/:threadId` | `{ title }` | `{ thread }` |
+| DELETE | `/threads/:threadId` | — | 204 |
+
+A thread is `{ id, title, created_at, updated_at }`. Its ID is a UUIDv4;
+timestamps are epoch milliseconds. Titles contain 1–200 characters and are
+trimmed. A missing creation title becomes `New conversation`. Listing returns
+at most 100 storage rows per page in ID order; follow `?cursor=next_cursor` until
+omitted, including when a page contains no live rows. Deletion tombstones can
+occupy a page. `updated_at` records creation, rename, or deletion, not message
+activity. Apps may sort the complete list by that timestamp.
+
+`connection` is the normal Connect wire response, preserving the grant ID and
+bearer token while selecting `agent_id` and `grant.conversation_id`. The managed
+agent ID is distinct from the thread UUID. A client using published SDK 0.6.6 can
+call these endpoints through authenticated `client.fetch`, adapt the normal wire
+response to `Connection`, and pass that selected connection to
+`client.agent.create({ connection, tools })`. Capture that connection and its
+token in each agent transport; a mutable global selection must never retarget
+an existing agent instance. The initial grant's default agent is not an app
+thread: list/open or create a thread before using the app-thread agent API.
+
+The server chooses a persistent namespace from the exact app ID, exact origin,
+broker account, and authenticating owner. Wallet addresses are case-normalized;
+host owners include issuer, tenant and principal ID. Host sessions are validated
+live, while new valid sessions for the same owner can reopen that owner's
+threads. Callers cannot provide a namespace, owner, or agent ID when creating a
+thread. Different linked wallets or host principals sharing a broker account
+remain isolated. Existing private account conversations and legacy Connect
+agents are not imported into this namespace.
+
+Every agent relay and WebSocket ticket checks the selected agent's live thread
+membership. Ticket redemption checks it again; ongoing grant socket checks
+also revalidate membership. SSE relays check before their first event and at most
+every five seconds thereafter, including idle streams, and close on token
+revocation, expiry, host-session invalidation or deleted membership. Revoking/expiring the grant removes authority without
+deleting its owner's conversations. A new explicitly approved grant in the same
+scope can reopen conversation history, read agent state, and send new turns.
+Reconnect the SDK tool host using the current grant and approved app-tool catalog
+before sending those turns. The managed runtime binds each tool-host route to
+its grant ID and catalog digest; a socket from the previous grant cannot serve
+a new grant's turn. Existing managed-runtime
+per-grant fences still apply to idempotent replay, steering/withdrawal receipts,
+artifacts and checkpoints from turns issued by another grant; this endpoint does
+not substitute an old grant's authority for the active one. Plain turn cancellation
+uses the managed runtime's existing authorization behavior. Missing and foreign
+IDs both return `404`.
+
+Deletion revokes membership before managed-agent cleanup. A cleanup failure
+returns `503 thread_delete_unavailable`; retrying the same DELETE is safe and
+completes the cleanup. The hidden thread cannot be reopened or used meanwhile.
+Creation requires a client-generated UUIDv4 `operation_id`, retained for the
+intended creation until it resolves. Repeat the same ID and original title after
+an uncertain result; the operation is reserved durably before provisioning. Only
+the first reservation dispatches creation, with a scope-derived managed
+idempotency key as an additional fence. A pending or unknown creation returns
+`503 thread_creation_unresolved`; replays only check for a published receipt and
+never repeat upstream provisioning. If the first dispatch cannot publish its
+receipt, the operation remains fenced and requires operator reconciliation;
+automatic retries cannot recover it by creating a new operation. Concurrent
+retries can return this pending response until the first request publishes. A changed title for
+the same operation returns `409 thread_operation_conflict`; retrying creation
+after that thread was deleted returns `410 thread_deleted`. Use a fresh operation
+only for a new intended thread. Replays return 201 with the same thread and the
+current grant's connection wire.
+
+Run `node --test test/appThreadsWorker.test.mjs` from this package (Node 24).
+The journey starts an actual local workerd HTTP listener and real Durable Object
+storage. Synthetic external identity and managed-agent providers exercise the
+Connect trust boundary without live accounts or model calls. HTTP status traces
+are emitted as test diagnostics; capture generated evidence under root `output/`.

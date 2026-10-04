@@ -98,6 +98,7 @@ export type VisibilityPermission = Readonly<{
     | "Memory read"
     | "Memory write"
     | "Conversation"
+    | "App conversations"
     | "App tools"
     | "Cloud sandbox"
     | "Browser cookie sync";
@@ -515,6 +516,10 @@ export function appVisibilityPermissions(resources: unknown): readonly Visibilit
   if (requested.has("urn:nanocodex:agent:execution:sandbox")) {
     visibility.push({ resource: "urn:nanocodex:agent:execution:sandbox", label: "Cloud sandbox",
       detail: "Run code and install packages in Cloudflare sandboxes dedicated to this app approval" });
+  }
+  if (requested.has("urn:nanocodex:agent:threads:app")) {
+    visibility.push({ resource: "urn:nanocodex:agent:threads:app", label: "App conversations",
+      detail: "Create, read, rename and delete your conversations for this app on this exact site" });
   }
   const conversations = [...requested].filter((resource) => resource.startsWith(agentConversationResourcePrefix));
   if (conversations.length === 1

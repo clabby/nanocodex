@@ -1,4 +1,5 @@
 import { Handler, Kv } from "accounts/server";
+import { appThreadStorage, type AppThread } from "./appThreads.mts";
 import { withManagedAccess } from "nanocodex/managed";
 import { custom } from "viem";
 import { KeyAuthorization } from "ox/tempo";
@@ -114,6 +115,9 @@ type AtomicNonceStorage = Kv.NonceStorage.State["storage"] & {
 export class ConnectNonceStorage extends Kv.NonceStorage {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/app-threads") {
+      return appThreadStorage(request, this.state.storage as unknown as Parameters<typeof appThreadStorage>[1]);
+    }
     if (url.pathname === "/delete-if-value") {
       if (request.method !== "POST") {
         return Response.json({ error: "method not allowed" }, { status: 405 });
@@ -216,6 +220,8 @@ const AGENT_VISIBILITY_RESOURCES = {
   "urn:nanocodex:agent:trace:read": "agent.trace.read",
 } as const;
 const AGENT_VISIBILITY_RESOURCE_PREFIX = "urn:nanocodex:agent:visibility:";
+const APP_THREADS_RESOURCE = "urn:nanocodex:agent:threads:app";
+const APP_THREADS_CAPABILITY = "agent.threads.app";
 const AGENT_CONVERSATION_RESOURCE_PREFIX = "urn:nanocodex:agent:conversation:";
 const AGENT_CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HOSTED_HISTORY_RESOURCE = "urn:nanocodex:history:read";
@@ -2092,6 +2098,10 @@ async function createConnection(
     ...mcpConnections.map((connection) => `mcp:${connection.id}`),
   ];
   const conversationId = approvedAgentConversationId(approval.resources);
+  if (grantCapabilities.includes(APP_THREADS_CAPABILITY)
+    && (conversationId || !grantCapabilities.includes("agent.history.read"))) {
+    throw new ApiFailure(403, "app_threads_not_approved", "App threads require conversation history and cannot select a single conversation.");
+  }
   const grantAssertion: ManagedGrantAssertion = {
     brokerUserId: identity.userId,
     capabilities: grantCapabilities,
@@ -2545,7 +2555,14 @@ async function handleGrantRoute(
   if (!grantRoute) return undefined;
   const grantId = grantRoute[1] as `0x${string}`;
   const action = grantRoute[2];
-  const { grant, token } = await authenticatedGrant(request, env, grantId);
+  let { grant, token } = await authenticatedGrant(request, env, grantId);
+  if (action === "threads" || action?.startsWith("threads/")) {
+    return handleAppThreads(request, env, grant, token, action, url);
+  }
+  const selectedAgent = action?.match(/^agents\/([^/]+)/)?.[1];
+  if (selectedAgent && grant.capabilities.includes(APP_THREADS_CAPABILITY)) {
+    grant = await appThreadAgentGrant(env, grant, decodeURIComponent(selectedAgent));
+  }
 
   if (action === undefined && request.method === "GET") {
     return Response.json(connectionWire(grant, token));
@@ -2664,6 +2681,123 @@ async function handleGrantRoute(
     return proxyManagedAgent(request, env, grant, action.slice("agents/".length));
   }
   throw new ApiFailure(405, "method_not_allowed", "Unsupported grant operation.");
+}
+
+function requireAppThreads(grant: GrantRecord): void {
+  if (grant.status !== "active" || grant.expiresAt <= Math.floor(Date.now() / 1000)) {
+    throw new ApiFailure(401, "grant_inactive", "This connection has expired or was revoked.");
+  }
+  if (!grant.capabilities.includes(APP_THREADS_CAPABILITY) || !grant.capabilities.includes("agent.history.read")) {
+    throw new ApiFailure(403, "app_threads_not_granted", "Approve app threads and conversation history before managing threads.");
+  }
+}
+
+async function appThreadScope(grant: GrantRecord): Promise<string> {
+  // Broker account alone is insufficient: linked wallets and host principals can
+  // share one broker account. Bind to the authenticating owner and exact origin.
+  const owner = grant.hostPrincipal
+    ? ["host", grant.hostPrincipal.issuer, grant.hostPrincipal.tenant, grant.hostPrincipal.id]
+    : ["account", grant.accountAddress!.toLowerCase()];
+  return digestHex(JSON.stringify([grant.appId, grant.appOrigin, grant.brokerUserId, owner]));
+}
+
+async function appThreadState(env: Env, grant: GrantRecord, body: Record<string, unknown>): Promise<Response> {
+  const scope = await appThreadScope(grant);
+  return env.CONNECT_STATE.get(env.CONNECT_STATE.idFromName(`app-threads:${scope}`)).fetch(
+    "https://do.invalid/app-threads", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+}
+
+async function readAppThread(env: Env, grant: GrantRecord, body: Record<string, unknown>): Promise<AppThread> {
+  const response = await appThreadState(env, grant, body);
+  if (response.status === 404) throw new ApiFailure(404, "thread_not_found", "The app thread was not found.");
+  if (!response.ok) throw new ApiFailure(503, "thread_state_unavailable", "The app thread could not be read.");
+  return response.json() as Promise<AppThread>;
+}
+
+async function appThreadAgentGrant(env: Env, grant: GrantRecord, agentId: string): Promise<GrantRecord> {
+  requireAppThreads(grant);
+  const thread = await readAppThread(env, grant, { operation: "agent", agent_id: agentId });
+  return { ...grant, agentId: thread.agent_id, conversationId: thread.id };
+}
+
+function appThreadWire(thread: AppThread) {
+  return { id: thread.id, title: thread.title, created_at: thread.created_at, updated_at: thread.updated_at };
+}
+
+async function handleAppThreads(
+  request: Request, env: Env, grant: GrantRecord, token: string, action: string, url: URL,
+): Promise<Response> {
+  requireGrantAppOrigin(request, grant);
+  requireAppThreads(grant);
+  const id = action === "threads" ? undefined : action.slice("threads/".length);
+  if (id !== undefined && !AGENT_CONVERSATION_ID.test(id)) {
+    throw new ApiFailure(400, "invalid_thread_id", "A lowercase thread UUID is required.");
+  }
+  const listing = !id && request.method === "GET";
+  const cursor = url.searchParams.get("cursor");
+  if (url.search && (!listing || url.searchParams.size !== 1 || !cursor || !AGENT_CONVERSATION_ID.test(cursor))) {
+    throw new ApiFailure(400, "invalid_thread_request", "Only thread listing accepts a cursor query.");
+  }
+  const reply = (value: unknown, status = 200) => Response.json(value, { status, headers: { "cache-control": "private, no-store" } });
+  if (listing) {
+    const response = await appThreadState(env, grant, { operation: "list", ...(cursor ? { cursor } : {}) });
+    if (!response.ok) throw new ApiFailure(503, "thread_state_unavailable", "App threads could not be listed.");
+    const page = await response.json() as { threads: AppThread[]; next_cursor?: string };
+    return reply({ ...page, threads: page.threads.map(appThreadWire) });
+  }
+  if ((!id && request.method === "POST") || (id && request.method === "PATCH")) {
+    requireJsonContentType(request);
+    const body = await boundedJson(request, 4096, "thread");
+    if (Object.keys(body).some(key => key !== "title" && (id || key !== "operation_id"))
+      || (body.title !== undefined && (typeof body.title !== "string" || !body.title.trim() || body.title.length > 200))
+      || (id && body.title === undefined)) {
+      throw new ApiFailure(400, "invalid_thread_title", "Provide a title of 1 to 200 characters.");
+    }
+    if (!id && (typeof body.operation_id !== "string" || !AGENT_CONVERSATION_ID.test(body.operation_id))) {
+      throw new ApiFailure(400, "invalid_thread_operation", "Thread creation requires a stable UUIDv4 operation_id.");
+    }
+    const title = typeof body.title === "string" ? body.title.trim() : "New conversation";
+    if (id) return reply({ thread: appThreadWire(await readAppThread(env, grant, { operation: "rename", id, title })) });
+    const operationId = body.operation_id as string;
+    const creationResult = async (response: Response): Promise<Omit<AppThread, "agent_id"> & { agent_id?: string }> => {
+      if (response.status === 409) throw new ApiFailure(409, "thread_operation_conflict", "The operation_id was already used with a different title.");
+      if (response.status === 410) throw new ApiFailure(410, "thread_deleted", "The thread created by this operation was deleted.");
+      if (response.status === 425) throw new ApiFailure(503, "thread_creation_unresolved", "Thread creation is pending or its outcome is unknown. Keep the same operation_id; do not automatically create another operation.");
+      if (!response.ok) throw new ApiFailure(503, "thread_state_unavailable", "Retry thread creation with the same operation_id.");
+      return response.json();
+    };
+    const reserved = await creationResult(await appThreadState(env, grant, { operation: "begin_create", operation_id: operationId, title }));
+    let thread: AppThread;
+    if (reserved.agent_id) {
+      thread = { ...reserved, agent_id: reserved.agent_id };
+    } else {
+      // The durable reservation admits one upstream dispatch. Keep a stable
+      // managed key as an additional fence; an unknown reply is never replayed.
+      const key = await digestHex(`app-thread:${await appThreadScope(grant)}:${operationId}`);
+      const agentId = await createManagedAgent(env, managedGrantAssertion(grant), key);
+      const published = await creationResult(await appThreadState(env, grant, { operation: "create", operation_id: operationId,
+        thread: { ...reserved, agent_id: agentId } }));
+      if (!isConnectAgentId(published.agent_id)) throw new ApiFailure(503, "thread_state_unavailable", "Retry thread creation with the same operation_id.");
+      thread = { ...published, agent_id: published.agent_id };
+    }
+    return reply({ thread: appThreadWire(thread), connection: connectionWire({ ...grant, agentId: thread.agent_id, conversationId: thread.id }, token) }, 201);
+  }
+  if (id && request.method === "GET") {
+    const thread = await readAppThread(env, grant, { operation: "get", id });
+    return reply({ thread: appThreadWire(thread), connection: connectionWire({ ...grant, agentId: thread.agent_id, conversationId: thread.id }, token) });
+  }
+  if (id && request.method === "DELETE") {
+    // Tombstone first: concurrent/future requests immediately lose membership.
+    // Keep it for idempotent retries if deletion upstream fails or is uncertain.
+    const thread = await readAppThread(env, grant, { operation: "delete", id });
+    const response = await managedAccountsFetch(env, new Request(`https://nanocodex.internal/v1/agents/${encodeURIComponent(thread.agent_id)}`, {
+      method: "DELETE", headers: managedGrantHeaders(managedGrantAssertion(grant)),
+    }));
+    if (!response.ok && response.status !== 404) throw new ApiFailure(503, "thread_delete_unavailable", "The thread is hidden; retry to complete deletion.");
+    await response.body?.cancel();
+    return new Response(null, { status: 204, headers: { "cache-control": "private, no-store" } });
+  }
+  throw new ApiFailure(405, "method_not_allowed", "Unsupported app thread operation.");
 }
 
 async function connectManagedAgent(
@@ -2891,10 +3025,10 @@ function managedAccountsFetch(env: Env, request: Request): Promise<Response> {
   return transport(request);
 }
 
-async function createManagedAgent(env: Env, assertion: ManagedGrantAssertion): Promise<string> {
+async function createManagedAgent(env: Env, assertion: ManagedGrantAssertion, operationId?: string): Promise<string> {
   const response = await managedAccountsFetch(env, new Request("https://nanocodex.internal/v1/agents", {
     method: "POST",
-    headers: managedGrantHeaders(assertion),
+    headers: { ...managedGrantHeaders(assertion), ...(operationId ? { "idempotency-key": operationId } : {}) },
   }));
   const body = await response.json().catch(() => undefined) as unknown;
   if (!response.ok || !isRecord(body) || !isConnectAgentId(body.agent_id)) {
@@ -3007,7 +3141,79 @@ async function proxyManagedAgent(
     body: upstreamMethod === "GET" || upstreamMethod === "HEAD" ? undefined : request.body,
     signal: request.signal,
   }));
+  if (upstream.ok && upstream.body && upstream.headers.get("content-type")?.startsWith("text/event-stream")) {
+    const body = supervisedManagedStream(upstream.body, grant, async () => {
+      const { grant: current } = await authenticatedGrant(request, env, grant.id);
+      if (current.status !== "active" || current.expiresAt <= Math.floor(Date.now() / 1000)
+        || JSON.stringify(current.capabilities) !== JSON.stringify(grant.capabilities)) return false;
+      const selected = current.capabilities.includes(APP_THREADS_CAPABILITY)
+        ? await appThreadAgentGrant(env, current, grant.agentId) : current;
+      return selected.agentId === grant.agentId;
+    });
+    return projectManagedResponse(new Response(body, upstream), grant, suffix);
+  }
   return projectManagedResponse(upstream, grant, suffix);
+}
+
+/** Idle SSE sockets lose authority within five seconds, as WebSocket relays do.
+ * Recheck before the first chunk and after every elapsed interval as well, so a
+ * delayed timer never releases an unchecked chunk. Cancellation reaches upstream.
+ */
+function supervisedManagedStream(
+  source: ReadableStream<Uint8Array>, grant: GrantRecord, active: () => Promise<boolean>,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let ended = false;
+  let checkedAt = 0;
+  let checking: Promise<boolean> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const check = () => checking ??= active().catch(() => false).then(ok => {
+    checkedAt = Date.now(); checking = undefined; return ok;
+  });
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      const stop = () => {
+        if (ended) return;
+        ended = true;
+        if (timer !== undefined) clearTimeout(timer);
+        controller.close();
+        void reader.cancel().catch(() => {});
+      };
+      const schedule = () => {
+        timer = setTimeout(() => { void check().then(ok => {
+          if (ended) return;
+          if (!ok) stop(); else schedule();
+        }); }, Math.max(0, Math.min(5000, grant.expiresAt * 1000 - Date.now())));
+      };
+      schedule();
+    },
+    async pull(controller) {
+      try {
+        const chunk = await reader.read();
+        if (ended) return;
+        if (chunk.done || (Date.now() - checkedAt >= 5000 && !await check())) {
+          if (ended) return;
+          ended = true;
+          if (timer !== undefined) clearTimeout(timer);
+          controller.close();
+          await reader.cancel();
+          return;
+        }
+        if (!ended) controller.enqueue(chunk.value);
+      } catch (cause) {
+        if (ended) return;
+        ended = true;
+        if (timer !== undefined) clearTimeout(timer);
+        controller.error(cause);
+        void reader.cancel().catch(() => {});
+      }
+    },
+    async cancel(reason) {
+      ended = true;
+      if (timer !== undefined) clearTimeout(timer);
+      await reader.cancel(reason);
+    },
+  });
 }
 
 async function projectManagedResponse(
@@ -3805,7 +4011,10 @@ async function openGrantToolHostWebSocket(
   if (!isToolHostTicket(ticket)) {
     throw new ApiFailure(403, "invalid_tool_host_ticket", "The one-time tool host ticket is invalid or expired.");
   }
-  const grant = await store.get<GrantRecord>(`grant:${grantId}`);
+  let grant = await store.get<GrantRecord>(`grant:${grantId}`);
+  if (isGrantRecord(grant) && grant.capabilities.includes(APP_THREADS_CAPABILITY)) {
+    grant = await appThreadAgentGrant(env, grant, agentId);
+  }
   if (!isGrantRecord(grant)
     || grant.status !== "active"
     || grant.id.toLowerCase() !== grantId.toLowerCase()
@@ -3840,7 +4049,9 @@ async function openGrantToolHostWebSocket(
   server.accept();
   superviseGrantSocket(env, store, grant, server, upstream, async (current) => (
     current.id.toLowerCase() === grantId.toLowerCase()
-    && current.agentId === agentId
+    && (current.capabilities.includes(APP_THREADS_CAPABILITY)
+      ? (await appThreadAgentGrant(env, current, agentId)).agentId === agentId
+      : current.agentId === agentId)
     && current.appId === grant.appId
     && current.appOrigin === grant.appOrigin
     && (await grantToolHostFingerprint(current)).toLowerCase() === fingerprint.toLowerCase()
@@ -3878,7 +4089,10 @@ async function openGrantRealtimeWebSocket(
   const callId = realtimeCallId(url.searchParams.get("call_id"));
   const voiceSessionId = voiceSessionIdentifier(url.searchParams.get("voice_session_id"));
   const ticketValue = boundedIdentifier(url.searchParams.get("ticket"), "ticket", 64);
-  const grant = await store.get<GrantRecord>(`grant:${grantId}`);
+  let grant = await store.get<GrantRecord>(`grant:${grantId}`);
+  if (isGrantRecord(grant) && grant.capabilities.includes(APP_THREADS_CAPABILITY)) {
+    grant = await appThreadAgentGrant(env, grant, agentId);
+  }
   if (!isGrantRecord(grant)
     || grant.status !== "active"
     || grant.agentId !== agentId
@@ -4053,6 +4267,8 @@ function superviseGrantSocket(
         && current.status === "active"
         && current.expiresAt > Math.floor(Date.now() / 1000)
         && await authorized(current)
+        && (!grant.capabilities.includes(APP_THREADS_CAPABILITY) || !grant.conversationId
+          || (await appThreadAgentGrant(env, current, grant.agentId)).agentId === grant.agentId)
         && await activeHostPrincipalGrant(env, current);
       if (!active) {
         close(1008, "Nanocodex Connect grant inactive");
@@ -5937,6 +6153,7 @@ function resourceValues(resources: readonly string[], prefix: string): string[] 
 
 function approvedAgentCapabilities(resources: readonly string[]): string[] {
   const approved = new Set(resources);
+  const threads = approved.has(APP_THREADS_RESOURCE) ? [APP_THREADS_CAPABILITY] : [];
   const sandbox = approved.has("urn:nanocodex:agent:execution:sandbox") ? ["agent.execution.sandbox"] : [];
   const portability = approved.has(agentPortabilityResource)
     ? ["agent.durability.portability"]
@@ -5945,7 +6162,7 @@ function approvedAgentCapabilities(resources: readonly string[]): string[] {
     .filter((resource) => resource.startsWith(AGENT_VISIBILITY_RESOURCE_PREFIX))
     .flatMap((resource) => resource.slice(AGENT_VISIBILITY_RESOURCE_PREFIX.length).split(",")));
   if (approved.has("urn:nanocodex:agent:trace:read") || compact.has("traces")) {
-    return [...new Set([...Object.values(AGENT_VISIBILITY_RESOURCES), ...portability, ...sandbox])];
+    return [...new Set([...Object.values(AGENT_VISIBILITY_RESOURCES), ...portability, ...sandbox, ...threads])];
   }
   const legacy = Object.entries(AGENT_VISIBILITY_RESOURCES)
     .filter(([resource]) => approved.has(resource))
@@ -5953,7 +6170,7 @@ function approvedAgentCapabilities(resources: readonly string[]): string[] {
   const combined = Object.entries(AGENT_VISIBILITY_NAMES)
     .filter(([name]) => compact.has(name))
     .map(([, capability]) => capability);
-  return [...new Set([...legacy, ...combined, ...portability, ...sandbox])];
+  return [...new Set([...legacy, ...combined, ...portability, ...sandbox, ...threads])];
 }
 
 function approvedAgentConversationId(resources: readonly string[]): string | undefined {
