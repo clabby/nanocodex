@@ -95,3 +95,76 @@ artifact/receipt checks, current-master guards and deployed health remain active
 `CI_TESTS_ENABLED=false` suppresses image runtime smoke suites; manual/local image
 builds default to running them. Live validation is manual-only. Re-enable the test
 conditions and image test flag together when the pause ends.
+
+## Native PR Worker Previews
+
+`node scripts/cloudflare/preview-workers.mjs --name pr-123` deploys native
+Cloudflare Worker Previews for managed, Connect API/dialog/playground, then account.
+Run after restoring/building the same-revision Worker artifacts. It uses root
+Wrangler (minimum 4.135), existing production container image references, and
+server-side Previews Base configuration. It does not deploy production code,
+create databases/buckets, apply migrations, or export production secrets.
+
+Set `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and `GITHUB_SHA` (or
+`PREVIEW_REVISION`, a full commit SHA). `PREVIEW_NAME` is an alternative to
+`--name`. `--check-only` performs metadata preflight without provisioning or
+uploading. `--component assets` selects only dialog/playground; individual names
+are also accepted. Account and managed are always deployed together because their
+private bridge key rotates together. Manual workflow dispatch with `preview_component=assets` publishes the Connect
+asset Previews independently. PR checks require the full application preflight.
+
+All selected Workers must pass preflight before code uploads. Every current
+production secret **name** must exist in that Worker's Preview Base. Values are
+never read from production or written to the manifest. Provision secrets privately
+with `wrangler preview base-config secret put NAME --worker-name WORKER`, or supply
+the optional encrypted CI secret `NANOCODEX_PREVIEW_BASE_SECRETS_JSON`: a JSON object
+keyed by Worker name whose values are secret-name/string-value maps. The script
+validates names against production metadata and PATCHes only supplied Base entries.
+It never prints those values, puts them in command arguments/files, or passes the
+seed JSON to Wrangler. Check-only never applies this seed, but validates supplied names and counts them toward new-Preview readiness. Base updates affect new
+Previews only: an existing Preview missing a secret must be provisioned separately
+with `wrangler preview secret put NAME --name pr-123 --worker-name WORKER`.
+
+Production storage is not implicitly reused. For every D1, R2, KV, and AI Search
+binding, preprovision a separate resource in Preview Base. D1 schemas must already
+be migrated. Preflight rejects matching production resource identifiers and checks
+existing Preview resources still match Base. Additional storage kinds require an
+explicit script policy. Enable workers.dev Preview URLs on the parent Workers
+before uploading; the script will not deploy production merely to enable URLs.
+See [Cloudflare Preview configuration](https://developers.cloudflare.com/workers/previews/configuration/)
+and [resource isolation](https://developers.cloudflare.com/workers/previews/resources/).
+
+The account/managed HTTP bridge receives a fresh random shared secret over the
+Wrangler child's stdin (`--secrets-file /dev/stdin`, Linux CI), with both expected
+origins configured. No bridge secret is saved in temporary configs or artifacts.
+The account Preview omits its three direct production managed-DO fast paths.
+Other service bindings and foreign Durable Objects still target production; the
+manifest records these boundaries. Local Durable Objects and containers are
+isolated by Cloudflare, while account identity/subscriptions/connectors are not
+copied into those namespaces. A successful upload therefore does not claim a
+fully isolated backend or a completed authenticated E2E journey.
+
+Temporary Wrangler configs are adjacent to their original configs to preserve
+relative bundle/asset paths, and removed in `finally`. Wrangler stdout/stderr is
+withheld because binding output can include values. Safe deployment receipts,
+revision, URLs, image references, preflight names, and production boundaries are
+written to `output/cloudflare-previews/pr-123/manifest.json` and the GitHub step
+summary. A later failed component leaves completed receipts in that manifest;
+unknown uploads are not retried automatically. Repeated uploads rotate the bridge
+key and can briefly reject requests between the managed and account deployments.
+
+Workflow entry points are `preview-workers.mjs deploy --name pr-N`,
+`preview-workers.mjs check --name pr-N`, and `preview-workers.mjs delete --name pr-N`.
+The earlier flag-only deploy and `--check-only` forms remain accepted. Cleanup
+removes only the selected named Previews and verifies absence, preserving parent
+Workers and Base configuration; deletion removes each Preview's isolated DO state.
+`base-secrets-missing.json` is emitted alongside the manifest when preflight
+completes, including on missing-secret failure. Successful account deployment
+sets the `url` and `preview-url` GitHub outputs as well as `preview-manifest`.
+
+After each upload, read-only HTTP probes retry for at most 30 seconds per Worker.
+Account and asset roots must return HTTP 200 with HTML content type; account
+`/v1/me` must reject an unauthenticated request with 401/403, and direct managed
+root access must return 403. Bridge 503 responses fail readiness. The manifest
+retains probe statuses alongside the deployment receipt, including failures.
+Connect API remains receipt-only. These probes do not establish authenticated E2E.

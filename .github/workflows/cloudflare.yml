@@ -4,6 +4,7 @@ permissions: {}
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, closed]
     paths:
       - "js/**"
       - "!js/desktop-runtime/**"
@@ -72,6 +73,11 @@ on:
         default: preview
         type: choice
         options: [preview, production]
+      preview_component:
+        description: Preview the full application or only the Connect assets
+        type: choice
+        options: [all, assets]
+        default: all
       validate_images:
         description: Also validate container images independently of Worker uploads
         type: boolean
@@ -88,7 +94,7 @@ jobs:
     name: build Cloudflare Worker artifacts
     if: >-
       vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' &&
-      ((github.event_name == 'pull_request' &&
+      ((github.event_name == 'pull_request' && github.event.action != 'closed' &&
         github.event.pull_request.head.repo.full_name == github.repository) ||
        (github.event_name == 'workflow_dispatch' && inputs.target == 'preview'))
     runs-on: ubuntu-latest
@@ -214,13 +220,15 @@ jobs:
     needs: worker-build
     if: >-
       vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' &&
-      ((github.event_name == 'pull_request' &&
+      ((github.event_name == 'pull_request' && github.event.action != 'closed' &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'workflow_dispatch' && inputs.target == 'preview'))
-    name: validate Workers and publish asset previews
+    name: deploy and verify PR Worker previews
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    environment: cloudflare-preview
+    environment:
+      name: cloudflare-preview
+      url: ${{ steps.preview.outputs.url }}
     concurrency:
       group: cloudflare-preview-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
@@ -230,6 +238,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       DEPLOY_MESSAGE: GitHub Actions preview ${{ github.sha }}
+      PREVIEW_NAME: pr-${{ github.event.pull_request.number || github.run_id }}
+      PREVIEW_COMPONENT: ${{ inputs.preview_component == 'assets' && 'assets' || '' }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -253,15 +263,16 @@ jobs:
           path: .ci-worker-build
       - name: Restore same-revision Worker outputs
         run: node scripts/cloudflare/worker-build.mjs restore
-      # Publish ready assets before unrelated Worker validation.
-      - name: Upload Connect dialog preview version
-        working-directory: js/connect-dialog
-        run: npx wrangler versions upload --config wrangler.jsonc --preview-alias "pr-${{ github.event.pull_request.number || github.run_id }}" --message "$DEPLOY_MESSAGE"
-      - name: Upload Connect playground preview version
-        working-directory: js/connect-playground
-        run: npx wrangler versions upload --config wrangler.jsonc --preview-alias "pr-${{ github.event.pull_request.number || github.run_id }}" --message "$DEPLOY_MESSAGE"
-      # Cloudflare does not issue preview URLs for Durable Object or container
-      # Workers. Dry-run those and publish previews only for asset Workers.
+      - name: Test authenticated Preview routing
+        run: pnpm --filter nanocodex-managed-service run test:preview-bridge
+      - name: Check Preview production-secret availability
+        env:
+          NANOCODEX_PREVIEW_BASE_SECRETS_JSON: ${{ secrets.NANOCODEX_PREVIEW_BASE_SECRETS_JSON }}
+        run: |
+          args=(check --name "$PREVIEW_NAME")
+          if [ -n "$PREVIEW_COMPONENT" ]; then args+=(--component "$PREVIEW_COMPONENT"); fi
+          node scripts/cloudflare/preview-workers.mjs "${args[@]}"
+      # Validate code before publishing actual Preview environments.
       - name: Validate egress Worker
         working-directory: js/egress
         run: npx wrangler deploy --dry-run --config wrangler.broker.jsonc
@@ -303,6 +314,54 @@ jobs:
       - name: Validate account Worker
         working-directory: js/account
         run: npx wrangler deploy --dry-run --config dist/nanocodex/wrangler.json
+      - name: Publish runnable Worker previews
+        id: preview
+        env:
+          NANOCODEX_PREVIEW_BASE_SECRETS_JSON: ${{ secrets.NANOCODEX_PREVIEW_BASE_SECRETS_JSON }}
+        run: |
+          args=(deploy --name "$PREVIEW_NAME")
+          if [ -n "$PREVIEW_COMPONENT" ]; then args+=(--component "$PREVIEW_COMPONENT"); fi
+          node scripts/cloudflare/preview-workers.mjs "${args[@]}"
+      - name: Retain Preview manifest and readiness report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cloudflare-preview-manifest
+          path: output/cloudflare-previews/
+          if-no-files-found: error
+          retention-days: 7
+
+  preview-cleanup:
+    name: delete closed PR Worker previews
+    if: >-
+      vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' &&
+      github.event_name == 'pull_request' && github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: cloudflare-preview
+    concurrency:
+      group: cloudflare-preview-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      PREVIEW_NAME: pr-${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Delete only this PR's Preview environments
+        run: node scripts/cloudflare/preview-workers.mjs delete --name "$PREVIEW_NAME"
+
 
   preview-success:
     name: Cloudflare preview success
@@ -311,7 +370,7 @@ jobs:
     if: >-
       always() &&
       vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' &&
-      ((github.event_name == 'pull_request' &&
+      ((github.event_name == 'pull_request' && github.event.action != 'closed' &&
         github.event.pull_request.head.repo.full_name == github.repository) ||
        (github.event_name == 'workflow_dispatch' && inputs.target == 'preview'))
     runs-on: ubuntu-latest
