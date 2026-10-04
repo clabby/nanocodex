@@ -1,4 +1,5 @@
 import type { Dialog } from "nanocodex/connect";
+import type { ConnectorProvider } from "./connectorPolicy.mjs";
 
 export type McpConnectionStatus =
   | "authorization_required"
@@ -22,7 +23,7 @@ type WalletRequestBase = Readonly<{
   requestedMcpConnections?: readonly McpConnection[] | undefined;
   focusMcpConnection?: string | undefined;
   hostPrincipalExchange?: string | undefined;
-  returnedConnector?: "github" | "google" | "slack" | "x" | "spotify" | "soundcloud" | "link" | undefined;
+  returnedConnector?: Exclude<ConnectorProvider, "chatgpt"> | undefined;
   returnedConnectorResult?: "connected" | "cancelled" | "failed" | undefined;
   returnedMcpConnection?: string | undefined;
   returnedMcpResult?: "connected" | "cancelled" | "failed" | undefined;

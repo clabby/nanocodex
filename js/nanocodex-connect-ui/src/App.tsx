@@ -23,10 +23,10 @@ import { connectorCompletionFor } from "./connectorCompletion.js";
 import {
   connectorAttemptedCapabilitiesConnected,
   connectorCapabilityLabel,
+  connectorCapabilityIds,
   connectorControlsForCapabilities,
   connectorProviderFor,
   connectorStatusesFromWire,
-  googleConnectorCapabilities,
   type ConnectorCapability,
   type ConnectorControl as ConnectorControlProjection,
   type ConnectorConnection,
@@ -102,16 +102,7 @@ export async function logoutAccount() {
   }
 }
 
-const connectorIds = [
-  "github",
-  ...googleConnectorCapabilities,
-  "slack",
-  "x",
-  "spotify",
-  "soundcloud",
-  "link",
-  "chatgpt",
-] as const satisfies readonly ConnectorCapability[];
+const connectorIds = connectorCapabilityIds;
 const connectDialogRoutingHeaders = { "x-nanocodex-connect-client": "onboarding" } as const;
 const connectDeviceRoutingHeaders = { "x-nanocodex-connect-client": "device" } as const;
 const connectorResourcePrefix = "urn:nanocodex:connector:";
@@ -2319,6 +2310,7 @@ function requestedMcpConnectionsFromRequest(
 }
 
 function connectorDefinition(id: ConnectorId) {
+  if (id === "cloudflare") return { id, name: "Cloudflare", detail: "Workers, analytics, and account resources" };
   if (id === "github") return { id, name: "GitHub", detail: "Repositories and workflows" };
   if (id === "gmail") return { id, name: "Gmail", detail: "Read and send email" };
   if (id === "gdrive") return { id, name: "Google Drive", detail: "Read and create files" };
@@ -2416,6 +2408,7 @@ function connectorCapabilitiesForProvider(
 }
 
 function connectorProviderLabel(provider: ConnectorProvider): string {
+  if (provider === "cloudflare") return "Cloudflare";
   if (provider === "google") return "Google Workspace";
   if (provider === "github") return "GitHub";
   if (provider === "slack") return "Slack";

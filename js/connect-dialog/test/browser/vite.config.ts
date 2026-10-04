@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { connectorCapabilities, publicConnectorStatus } from "../../../connect-api/src/connectorPolicy.mts";
 import { fileURLToPath } from "node:url";
 
 // Only external account/SMS services are synthetic. Components and fetch transport are real.
@@ -9,7 +10,8 @@ export default defineConfig({
     name: "synthetic-account-transport",
     configureServer(server) {
       let granted: string[] = [];
-      const connectors = () => ({ github: { connected: true, label: "atlas-demo" }, gmail: { connected: granted.includes("gmail"), label: granted.includes("gmail") ? "alex@example.com" : undefined }, gcalendar: { connected: granted.includes("gcalendar") } });
+      const brokerStatuses = () => Object.fromEntries(connectorCapabilities.map(capability => [capability, publicConnectorStatus({ connected: true, connections: [{ id: "c".repeat(43), label: "Synthetic account", capabilities: [capability] }] })]));
+      const connectors = () => ({ ...brokerStatuses(), github: { connected: true, label: "atlas-demo" }, gmail: { connected: granted.includes("gmail"), label: granted.includes("gmail") ? "alex@example.com" : undefined }, gcalendar: { connected: granted.includes("gcalendar") } });
       server.middlewares.use(async (req, res, next) => {
         if (!req.url?.startsWith("/v1/")) return next();
         let raw = "";
@@ -36,7 +38,7 @@ export default defineConfig({
           case "/v1/fixture/google-complete": granted = body.capabilities; result = { ok: true }; break;
           case "/v1/hosted-authorizations": granted = []; result = {
             account_address: address, approval_id: "a".repeat(43), token: "synthetic-token",
-            connectors: body.resources?.includes("urn:nanocodex:connectors:github,gmail,gcalendar") ? connectors() : {}, mcp_connections: [], profile: { linked: true },
+            connectors: body.resources?.includes("urn:nanocodex:connectors:github,gmail,gcalendar") ? connectors() : brokerStatuses(), mcp_connections: [], profile: { linked: true },
           }; break;
           default: status = 404; result = { error: "unexpected_fixture_endpoint" };
         }

@@ -11,7 +11,7 @@ export default defineConfig({
   timeout: 30_000,
   use: {
     baseURL: "http://modal.nanocodex.localhost:4198",
-    launchOptions: { args: ["--host-resolver-rules=MAP *.nanocodex.localhost 127.0.0.1"] },
+    launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE, args: ["--host-resolver-rules=MAP *.nanocodex.localhost 127.0.0.1"] },
     trace: "on",
     screenshot: "only-on-failure",
   },

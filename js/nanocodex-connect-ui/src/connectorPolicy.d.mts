@@ -1,4 +1,5 @@
 export type ConnectorCapability =
+  | "cloudflare"
   | "github"
   | "gmail"
   | "gdrive"
@@ -14,7 +15,7 @@ export type ConnectorCapability =
   | "soundcloud" | "link"
   | "chatgpt";
 
-export type ConnectorProvider = "github" | "google" | "slack" | "x" | "spotify" | "soundcloud" | "link" | "chatgpt";
+export type ConnectorProvider = "cloudflare" | "github" | "google" | "slack" | "x" | "spotify" | "soundcloud" | "link" | "chatgpt";
 
 export type ConnectorConnection = Readonly<{
   id: string;

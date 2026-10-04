@@ -205,3 +205,22 @@ test("scope diagnostics survive the public status and Google identity merge", ()
     }] } }));
   }
 });
+
+test("every broker connector status survives the hosted approval decoder", async () => {
+  const { connectorCapabilities } = await import("../../connect-api/src/connectorPolicy.mts");
+  const { connectorCapabilityIds } = await import("nanocodex-connect-ui/connectorPolicy.mjs");
+  assert.deepEqual([...connectorCapabilityIds].sort(), [...connectorCapabilities].sort());
+  for (const connected of [false, true]) {
+    const wire = Object.fromEntries(connectorCapabilities.map(capability => [capability,
+      publicConnectorStatus(connected ? { connected, connections: [{
+        id: "a".repeat(43), label: "Synthetic account", capabilities: [capability],
+      }] } : { connected })]));
+    const decoded = connectorStatusesFromWire(wire);
+    assert.equal(decoded.cloudflare.connected, connected);
+    assert.equal(decoded.chatgpt.connected, connected);
+    assert.deepEqual(connectorStatusesFromWire(decoded), decoded);
+    const controls = connectorControlsForCapabilities(["chatgpt"], decoded);
+    assert.deepEqual(controls.map(control => control.provider), ["chatgpt"]);
+    assert.equal(controls[0].connected, connected);
+  }
+});

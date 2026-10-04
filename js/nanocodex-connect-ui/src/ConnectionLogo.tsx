@@ -1,4 +1,5 @@
 export type ConnectionLogoId =
+  | "cloudflare"
   | "chatgpt"
   | "openai"
   | "github"
@@ -28,6 +29,7 @@ export function ConnectionLogo({ id }: Readonly<{ id: ConnectionLogoId }>) {
       </span>
     );
   }
+  if (id === "cloudflare") return <span className="connector-logo" aria-hidden="true">☁</span>;
   if (id === "link") return <span className="connector-logo" aria-hidden="true">↗</span>;
   if (id === "github") {
     return (
