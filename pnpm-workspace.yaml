@@ -4,6 +4,8 @@ packages:
   - "examples/react-vite"
 
 overrides:
+  # Pending DO I/O eviction protection requires an October 2026 runtime.
+  workerd: "1.20261002.1"
   "@microsoft/dev-tunnels-ssh": "3.12.40"
 
 allowBuilds:

@@ -18,6 +18,7 @@
     "test:apps": "vitest run --config vitest.apps.config.ts",
     "test:apps:native": "node --test test/native-app-validation-journey.test.mjs",
     "test:discovery-cache": "node --test test/account-discovery-isolates.test.mjs",
+    "test:pending-io:live": "node --test test/pending-io-live.mjs",
     "test:rpc-lifecycle": "node --test test/rpc-lifecycle.test.mjs",
     "typecheck": "tsc --noEmit",
     "phone:bridge": "node scripts/phone-bridge.mjs",

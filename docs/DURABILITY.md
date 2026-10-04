@@ -8,6 +8,34 @@ The protocol protects the entire execution lifecycle: prompt admission, model
 requests, warmup, compaction, tool effects, checkpoint commits, cancellation,
 terminal results, and recovery. It is not a tool-only mechanism.
 
+## Cloudflare execution lifetime
+
+Managed and managed2 enable `durable_object_io_tasks_prevent_eviction` while
+keeping their existing compatibility dates. Pending service-binding requests,
+DO RPC, `ctx.waitUntil()` promises, and timers protect live execution from idle
+eviction after the client disconnects. Each operation protects at most its first
+15 minutes; operations started later can extend residency. A single unresolved
+turn promise is not an unlimited execution lease. Protected residency incurs
+normal duration charges, so completed operations must release their timers.
+
+Persisted turn state, effect receipts, and recovery alarms remain necessary for
+process loss and deployments. The existing 60-second managed and 10-second
+managed2 recovery schedules are unchanged; they determine recovery latency,
+not whether a healthy operation can continue without its client.
+
+The workspace pins workerd to a version that recognizes this compatibility
+flag. Run the hosted disconnected-client journey with
+`pnpm --filter nanocodex-managed-service run test:pending-io:live`. It uses
+Wrangler authorization to deploy a temporary workers.dev Worker, leaves the
+client disconnected for 160 seconds across service fetch, DO RPC, and timer
+waits, then deletes the Worker. Receipts and deployment/cleanup logs are saved
+in a unique directory under `output/pending-io/`. This is a live test: local
+workerd did not preserve residency in the same long-wait journey and is not
+used as evidence of hosted eviction protection. Run `test:recovery` separately
+for process-loss recovery.
+
+See [Cloudflare's lifecycle contract](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/).
+
 ## Local CLI crash testing
 
 The headless CLI can attach the real portable durability engine to a local
