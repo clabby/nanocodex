@@ -38,13 +38,16 @@ export class GmailPushMailbox {
   }
 
   fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    // A wake checks current archive authorization through this status endpoint.
+    // Read the last durable configuration without waiting on the delivery queue:
+    // delivery itself is awaiting that wake, so serializing reads deadlocks it.
+    if (request.method === "GET" && (path === "/status" || path === "/configure")) {
+      return this.state.storage.get<Mailbox>("mailbox").then(box => Response.json(box ? { enabled: true, ...box.config, cursor: box.cursor, targetHistoryId: box.target,
+        archive_non_actionable:box.config.archive_non_actionable === true, lastPushAt:box.lastPushAt ?? null, lastHistoryAt:box.lastHistoryAt ?? null, pending: !!box.pending || !!box.page, renewAt: box.renewAt, expiration: box.expiration, lastError: box.lastError ?? null, renewalError: box.renewalError ?? null } : { enabled: false }));
+    }
     return this.serial(async () => {
-      const path = new URL(request.url).pathname;
       let box = await this.state.storage.get<Mailbox>("mailbox");
-      if (request.method === "GET" && (path === "/status" || path === "/configure")) {
-        return Response.json(box ? { enabled: true, ...box.config, cursor: box.cursor, targetHistoryId: box.target,
-          archive_non_actionable:box.config.archive_non_actionable === true, lastPushAt:box.lastPushAt ?? null, lastHistoryAt:box.lastHistoryAt ?? null, pending: !!box.pending || !!box.page, renewAt: box.renewAt, expiration: box.expiration, lastError: box.lastError ?? null, renewalError: box.renewalError ?? null } : { enabled: false });
-      }
       if (path === "/configure" && request.method === "DELETE") {
         if (request.body !== null) {
           let expected: unknown;

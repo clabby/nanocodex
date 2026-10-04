@@ -56,6 +56,18 @@ const config = { userId: "user-test", connectionId: "connection-test", agentId: 
 const notify = { emailAddress: config.email, historyId: "12" };
 
 describe("Gmail push history protocol", () => {
+  it("allows the delivered wake to recheck archive authorization without deadlocking", async () => {
+    const f = fixture();
+    await f.request("/configure", "POST", {...config, archive_non_actionable:true});
+    await f.request("/notify", "POST", notify);
+    f.env.MANAGED_AGENT_OWNERSHIP.fetch = (async () => {
+      expect(await (await f.request("/status")).json()).toMatchObject({enabled:true,archive_non_actionable:true,pending:true});
+      return Response.json({status:"accepted"});
+    }) as typeof f.env.MANAGED_AGENT_OWNERSHIP.fetch;
+    await f.alarmRun();
+    expect(await (await f.request("/status")).json()).toMatchObject({cursor:"12",pending:false});
+  });
+
   it("verifies the real mailbox and uses only the configured topic and connection", async () => {
     const f = fixture();
     expect((await f.request("/configure", "POST", { ...config, email: "other@example.test" })).status).toBe(409);

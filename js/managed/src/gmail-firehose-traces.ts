@@ -50,7 +50,7 @@ export function validGmailDecisionTrace(input: GmailDecisionTrace): boolean {
     if (input.outcome === "reply" || input.reason === "explicit_reply" || input.reply_probability !== null) return false;
     if ((input.outcome === "action_review") !== actionReason) return false;
     if (input.outcome === "action_review" && (input.classifier_outcome !== "success"
-      || input.confidence === null || input.confidence < 0.95)) return false;
+      || input.confidence === null || input.confidence < (input.policy_version === GMAIL_BOOKING_TRACE_POLICY ? 0.90 : 0.95))) return false;
   }
   return true;
 }

@@ -228,7 +228,10 @@ export async function classifyBookingRequest(ai: RoutingAi, message: Message): P
       && [probs.booking_review,probs.no_action].every(p=>typeof p === "number" && Number.isFinite(p) && p >= 0 && p <= 1)
       && Math.abs((probs.booking_review as number)+(probs.no_action as number)-1)<=0.01) {
       confidence=answer.confidence; choice=answer.choice;
-      if(confidence<0.95 || (probs[answer.choice] as number)<0.95) reason="low_confidence";
+      // A read-only review may surface at 90%; preparation still grounds every
+      // date and checks calendars. Negative classification remains stricter.
+      const threshold = choice === "booking_review" ? 0.90 : 0.95;
+      if(confidence<threshold || (probs[answer.choice] as number)<threshold) reason="low_confidence";
       else if(choice==="booking_review") {outcome="action_review";reason="booking_review";}
       else {outcome="no_reply";reason="no_reply";}
     }
