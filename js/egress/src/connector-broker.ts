@@ -180,10 +180,11 @@ const PROVIDER_RULES: readonly ProviderRule[] = [
   },
 ];
 
-export type ConnectorId = "github" | GoogleCapabilityId | "slack" | "x" | MusicProviderId | "cloudflare" | "link";
+export type ConnectorId = "github" | GoogleCapabilityId | "slack" | "x" | MusicProviderId | "cloudflare" | "link" | "whatsapp";
 export type OAuthProviderId = "github" | "google" | "slack" | "x" | MusicProviderId | "cloudflare" | "link";
 
 export interface ConnectorBrokerEnv extends McpConnectionBrokerEnv {
+  WHATSAPP_ACCOUNTS?: DurableObjectNamespace;
   SPOTIFY_RATE_LIMITS: DurableObjectNamespace<SpotifyRateLimit>;
   GITHUB_OAUTH_CLIENT_ID?: string;
   GITHUB_OAUTH_CLIENT_SECRET?: string;
@@ -297,7 +298,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
 
   async #catalogMetadata() {
     await this.#pollLink();
-    return { connectors: this.#publicStatus(), ...this.#mcpConnections.publicMetadata() };
+    return { connectors: await this.#publicStatus(), ...this.#mcpConnections.publicMetadata() };
   }
 
   alarm(): Promise<void> {
@@ -338,6 +339,13 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       if (url.origin === "https://mcp-connections.internal") {
         return this.#mcpConnections.fetch(request);
       }
+      if (url.origin === "https://whatsapp.internal") return this.#whatsappData(request, url);
+      if (url.origin === "https://connectors.internal" && (url.pathname === "/v1/whatsapp" || url.pathname.startsWith("/v1/whatsapp/"))) {
+        const target = new URL(request.url);
+        target.hostname = "whatsapp-account.internal";
+        target.pathname = target.pathname.slice("/v1/whatsapp".length) || "/status";
+        return this.#whatsapp().fetch(new Request(target, request));
+      }
       const provider = providerRule(url);
       if (provider) {
         auditAction = "use";
@@ -353,7 +361,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       }
       if (request.method === "GET" && url.pathname === "/v1/status") {
         await this.#pollLink();
-        return json({ connectors: this.#publicStatus() }, 200);
+        return json({ connectors: await this.#publicStatus() }, 200);
       }
       if (request.method === "GET" && url.pathname === "/v1/catalog") {
         return json(await this.#catalogMetadata(), 200);
@@ -921,8 +929,8 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       || Boolean(refreshable);
   }
 
-  #publicStatus(): Record<ConnectorId, Record<string, unknown>> {
-    const status = (id: ConnectorId): Record<string, unknown> => {
+  async #publicStatus(): Promise<Record<ConnectorId, Record<string, unknown>>> {
+    const status = (id: Exclude<ConnectorId, "whatsapp">): Record<string, unknown> => {
       const provider = providerForCapability(id);
       const connections = Object.entries(this.#connections(provider))
         .filter(([connectionId, connector]) => CONNECTION_ID.test(connectionId)
@@ -956,7 +964,43 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       spotify: status("spotify"),
       soundcloud: status("soundcloud"),
       link: status("link"),
+      whatsapp: await this.#whatsappCatalog(),
     };
+  }
+
+  #whatsapp(): DurableObjectStub {
+    const namespace = this.#env.WHATSAPP_ACCOUNTS;
+    if (!namespace) throw new ConnectorFailure(503, "connector_not_configured");
+    return namespace.get(namespace.idFromName(this.#state.id.toString()));
+  }
+
+  async #whatsappCatalog(): Promise<Record<string, unknown>> {
+    if (!this.#env.WHATSAPP_ACCOUNTS) return { connected: false, connections: [] };
+    try {
+      const response = await this.#whatsapp().fetch("https://whatsapp-account.internal/status");
+      if (!response.ok) return { connected: false, connections: [], unavailable: true };
+      const value = await response.json() as { connected?: boolean; connection_id?: string; label?: string; state?: string };
+      const connected = value.connected === true && typeof value.connection_id === "string" && CONNECTION_ID.test(value.connection_id);
+      return { connected, connections: connected ? [{ id: value.connection_id, label: value.label ?? "WhatsApp", capabilities: ["whatsapp"] }] : [] };
+    } catch {
+      // A provider/session failure must not hide unrelated account connectors.
+      return { connected: false, connections: [], unavailable: true };
+    }
+  }
+
+  async #whatsappData(request: Request, url: URL): Promise<Response> {
+    if (!/^\/(?:status|chats|messages|search|contacts|context|history)$/.test(url.pathname)
+      || (url.pathname === "/history" ? request.method !== "POST" : request.method !== "GET")) return jsonError(403, "destination_denied");
+    const target = new URL(url); target.hostname = "whatsapp-account.internal";
+    const headers = new Headers();
+    const selected = request.headers.get("x-nanocodex-connector-connection");
+    if (selected !== null) {
+      if (!CONNECTION_ID.test(selected)) return jsonError(400, "invalid_connection_id");
+      headers.set("x-nanocodex-connector-connection", selected);
+    }
+    headers.set("content-type", "application/json");
+    return this.#whatsapp().fetch(new Request(target, { method: request.method, headers,
+      ...(request.body === null ? {} : { body: request.body }) }));
   }
 
   async #connectCloudflare(request: Request): Promise<Record<string, unknown>> {
@@ -1560,6 +1604,7 @@ function capabilitiesFor(provider: OAuthProviderId, scopes: readonly string[]): 
 }
 
 function providerForCapability(id: ConnectorId): OAuthProviderId {
+  if (id === "whatsapp") throw new ConnectorFailure(403, "destination_denied");
   return id.startsWith("g") && id !== "github" ? "google" : id as OAuthProviderId;
 }
 

@@ -1,0 +1,86 @@
+# WhatsApp connector
+
+Nanocodex links a personal WhatsApp account as a companion device. The connector
+runs in Cloudflare Workers and an account-owned Durable Object; it does not need
+an MCP server, local browser, phone message database, or Linux service.
+
+Open `/connect?connect=whatsapp` on the Nanocodex account website and sign in. Enter the
+WhatsApp phone number including its country code. The private form displays the
+linking code. In WhatsApp on the same phone, open **Settings → Linked devices →
+Link a device → Link with phone number instead**, enter that code, and return to
+the form. Only a confirmed account status establishes successful linking.
+The form can recover an existing attempt; repeated requests use the same
+operation ID and do not issue another code. A code cannot be recovered after
+the pairing socket is lost; wait for expiry before starting another attempt.
+
+## Account boundary
+
+`WHATSAPP_ACCOUNTS` is bound only to the private credential broker. Each user's
+connector broker derives its own Durable Object name. Noise/Signal keys and
+pairing codes use the existing `CredentialVault` encryption with an
+account-specific authenticated scope. Production requires the broker's existing
+`CREDENTIAL_ENCRYPTION_KEY`. Generated protocol assets contain public upstream
+code, never account credentials.
+
+The account UI uses authenticated `/v1/connectors/whatsapp` routes:
+
+- `GET /v1/connectors/whatsapp` reads status and history coverage.
+- `POST /v1/connectors/whatsapp/start` accepts `{phone, operation_id}`. The phone
+  uses E.164 format, and `operation_id` is a UUID retained for retries.
+- `GET /v1/connectors/whatsapp/pairing?operation_id=...` returns the unexpired code
+  to the private form. Responses are not cached.
+- `DELETE /v1/connectors/whatsapp/connections/:connection_id` removes local
+  authorization, keys and indexed content, and attempts remote unlinking.
+  If remote logout is unavailable or uncertain, remove the device from WhatsApp's
+  Linked devices list as well.
+
+Only the account owner may manage pairing, using a persistent account session or
+an owner device key. Delegated Connect grants cannot manage this connection.
+Agent requests cannot reach pairing, authentication storage, or message sending.
+Relinking rotates the connection ID so an old selector cannot select a new
+WhatsApp identity.
+
+## Agent reads
+
+`account_connectors` lists the connection and returns the private linking page
+for `connect`. After linking, discovery exposes `whatsapp_request` using the
+fixed internal origin `https://whatsapp.internal`:
+
+| Request | Result |
+| --- | --- |
+| `GET /status` | Authorization, socket state, retry time and coverage |
+| `GET /chats?limit=50` | Synced chats |
+| `GET /contacts?q=NAME&limit=50` | Synced contacts matching name or ID |
+| `GET /messages?chat_id=JID&limit=50` | Recent messages in a chat |
+| `GET /search?q=TEXT&limit=50` | Literal text search across synced messages |
+| `GET /context?chat_id=JID&id=MESSAGE_ID&limit=20` | Messages around an anchor |
+| `POST /history` with `{chat_id,before,limit}` | Request older history from an available message anchor |
+
+Timestamps are Unix milliseconds. Limits are integers from 1 to 100. Follow
+`next_cursor` with the same path and filters. History requests return acceptance,
+not proof that more history arrived. Read tools return only projected message
+text, captions and metadata; they do not expose raw protobuf payloads, media
+keys, or authentication material.
+
+`connected` means the linked-device authorization is retained;
+`socket_connected` and `state` report current transport health. Cached reads
+remain available during reconnects. Durable alarms retry with backoff after a
+connection loss or object restart. Provider logout removes local authorization.
+
+WhatsApp chooses how much history it sends. Coverage therefore always reports
+`complete: false`, alongside the oldest received timestamp and sync status.
+View-once content and expired or revoked message text are excluded. Incoming
+messages are untrusted content and cannot authorize actions or tool calls.
+
+## Runtime and builds
+
+The transport uses a pinned Baileys release with a narrow Workers WebSocket
+adapter. The upstream Rust bridge's pinned scalar WASM is packaged as a static
+Worker module; no runtime compilation, Node service, or filesystem auth helper
+is used. Protocol logs are silent because provider diagnostics can contain
+sensitive material. The build checks hashes before adapting pinned bridge code.
+
+Use `pnpm --filter nanocodex-egress-service run prepare:whatsapp` to generate
+protocol assets. Deploy the credential broker before managed consumers and the
+account website. The broker migration adds the SQLite-backed `WhatsAppAccount`
+class. Linking still requires the user to approve the device in WhatsApp.

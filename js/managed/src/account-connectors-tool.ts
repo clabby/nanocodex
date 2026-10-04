@@ -32,6 +32,7 @@ const PROVIDER_CAPABILITIES: Readonly<Record<ConnectorProviderId, readonly Conne
   spotify: ["spotify"],
   soundcloud: ["soundcloud"],
   link: ["link"],
+  whatsapp: ["whatsapp"],
 };
 const CONNECTOR_NAMES: Readonly<Record<ConnectorProviderId, string>> = Object.freeze({
   cloudflare: "Cloudflare",
@@ -42,8 +43,9 @@ const CONNECTOR_NAMES: Readonly<Record<ConnectorProviderId, string>> = Object.fr
   spotify: "Spotify",
   soundcloud: "SoundCloud",
   link: "Stripe Link",
+  whatsapp: "WhatsApp",
 });
-const AUTHORIZATION_ENDPOINTS: Readonly<Record<ConnectorProviderId, {
+const AUTHORIZATION_ENDPOINTS: Readonly<Record<Exclude<ConnectorProviderId, "whatsapp">, {
   origin: string;
   pathname: string;
   pkce: boolean;
@@ -97,7 +99,7 @@ export function accountConnectorsTool(
     description: [
       "List, connect, reconnect, or disconnect account connectors without exposing credentials.",
       "Google Workspace is one authorization identity whose connections list the exact Gmail, Drive, Calendar, Tasks, Docs, Sheets, Slides, and Contacts capabilities granted. Google connections also expose granted OAuth scopes; Gmail being connected does not imply settings consent. Inspect scopes before requesting a reconnect.",
-      "Supports Cloudflare, GitHub, Google Workspace, Slack, X, Spotify, SoundCloud and Stripe Link. For Cloudflare, use secure Vault intake for a user or account API token, then connect with the explicitly authorized vault_id. Account-owned tokens also require the Cloudflare account_id. Never pass token values to tools. Disconnect removes the broker copy; revoke the token at Cloudflare separately. Use tool_search for each service’s API tools. Stripe Link requests user spend approvals. Spotify and SoundCloud connect open the native Nanocodex app; other providers return authorization URLs.",
+      "Supports WhatsApp, Cloudflare, GitHub, Google Workspace, Slack, X, Spotify, SoundCloud and Stripe Link. WhatsApp pairs privately in Nanocodex on the user’s phone and runs on Workers; pairing codes never enter chat. It provides read access to available synced history. For Cloudflare, use secure Vault intake for a user or account API token, then connect with the explicitly authorized vault_id. Account-owned tokens also require the Cloudflare account_id. Never pass token values to tools. Disconnect removes the broker copy; revoke the token at Cloudflare separately. Use tool_search for each service’s API tools. Stripe Link requests user spend approvals. Spotify and SoundCloud connect open the native Nanocodex app; other providers return authorization URLs.",
       "Connect returns a provider authorization URL. Give that exact URL to the user as a link; the provider may still require consent.",
       "Disconnect revokes one exact listed connection_id and is allowed only when the user explicitly asks to remove or replace it.",
     ].join(" "),
@@ -202,6 +204,14 @@ export async function manageAccountConnectors(
     return { ok: true, status: "connected", connector: "cloudflare", connection_id: value.connection_id };
   }
 
+  if (operation.provider === "whatsapp") {
+    return {
+      ok: true, status: "authorization_required", connector: "whatsapp", name: "WhatsApp",
+      authorization_url: new URL("/connect?connect=whatsapp", options.publicOrigin).href,
+      message: "Open the private WhatsApp linking page and sign in to your Nanocodex account if needed. Enter your WhatsApp phone number in the private form, then approve the displayed code in WhatsApp > Settings > Linked Devices > Link a Device > Link with phone number instead. Pairing codes stay in that private view. Verify connected=true with list afterwards.",
+    };
+  }
+
   if (operation.provider === "spotify" || operation.provider === "soundcloud") {
     const name = CONNECTOR_NAMES[operation.provider];
     return {
@@ -260,6 +270,7 @@ function safeAuthorizationUrl(
   callback: string,
   provider: ConnectorProviderId,
 ): boolean {
+  if (provider === "whatsapp") return false;
   if (provider === "link") return ["https://link.com", "https://app.link.com", "https://login.link.com"].includes(authorization.origin)
     && !authorization.username && !authorization.password && !authorization.hash;
   const endpoint = AUTHORIZATION_ENDPOINTS[provider];

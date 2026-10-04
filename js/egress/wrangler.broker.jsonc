@@ -4,7 +4,9 @@
   "main": "src/egress.ts",
   "compatibility_date": "2026-07-29",
   "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
+  "build": { "command": "node scripts/prepare-whatsapp.mjs" },
   "alias": {
+    "@whiskeysockets/baileys": "./src/whatsapp-generated/baileys.js",
     "node-rsa": "../nanocodex/tools/browser/unsupportedNodeRsa.mjs"
   },
   "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm", "nanocodex/wasm"], "fallthrough": true }],
@@ -38,6 +40,7 @@
   "durable_objects": {
     "bindings": [
       { "name": "GMAIL_PUSH_MAILBOXES", "class_name": "GmailPushMailbox" },
+      { "name": "WHATSAPP_ACCOUNTS", "class_name": "WhatsAppAccount" },
       {
         "name": "USER_CREDENTIALS",
         "class_name": "UserCredentialBroker"
@@ -97,7 +100,8 @@
       "tag": "v6",
       "new_sqlite_classes": ["SpotifyRateLimit"]
     },
-    { "tag": "v7", "new_sqlite_classes": ["GmailPushMailbox"] }
+    { "tag": "v7", "new_sqlite_classes": ["GmailPushMailbox"] },
+    { "tag": "v8", "new_sqlite_classes": ["WhatsAppAccount"] }
   ],
   "env": {
     "development": {
@@ -117,6 +121,7 @@
       "durable_objects": {
         "bindings": [
           { "name": "GMAIL_PUSH_MAILBOXES", "class_name": "GmailPushMailbox" },
+          { "name": "WHATSAPP_ACCOUNTS", "class_name": "WhatsAppAccount" },
           { "name": "USER_CREDENTIALS", "class_name": "UserCredentialBroker" },
           { "name": "AGENT_SUBJECTS", "class_name": "AgentSubjectDirectory" },
           { "name": "SPOTIFY_RATE_LIMITS", "class_name": "SpotifyRateLimit" },

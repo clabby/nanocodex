@@ -1,0 +1,11 @@
+.whatsapp-connection { min-width: 0; scroll-margin-top: 24px; }
+.whatsapp-connection > .connection-card { width: 100%; }
+.whatsapp-pairing { display: grid; gap: 12px; padding: 12px 14px; font-size: 14px; overflow-wrap: anywhere; }
+.whatsapp-pairing form { display: grid; gap: 10px; }
+.whatsapp-pairing p { margin: 0; color: var(--text-muted); }
+.whatsapp-pairing ol { margin: 0; padding-left: 20px; display: grid; gap: 10px; }
+.whatsapp-pairing input, .whatsapp-pairing button { min-width: 0; min-height: 44px; border: 1px solid var(--border-soft); border-radius: 8px; padding: 8px 12px; color: inherit; background: transparent; font: inherit; }
+.whatsapp-pairing input { width: 100%; box-sizing: border-box; font-size: 16px; }
+.whatsapp-pairing button { cursor: pointer; }
+.whatsapp-pairing button:disabled { opacity: .5; cursor: default; }
+.whatsapp-pairing output { font-family: monospace; font-size: 28px; letter-spacing: .12em; user-select: all; text-align: center; }

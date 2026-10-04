@@ -32,6 +32,12 @@ For a bounded comparison on one deployed version, `sample` selects RPC for
 even-ending voice session UUIDs and HTTP for odd-ending UUIDs. Egress timing logs
 include the voice session ID and selected transport so samples can be matched.
 
+## WhatsApp
+
+The [personal WhatsApp connector](../../docs/whatsapp-connector.md) keeps its
+linked-device session in an account-owned Durable Object and exposes read-only
+message tools. Phone pairing runs through the private account UI.
+
 ## Credential boundary
 
 The broker owns per-user provider credentials, connector OAuth state, MCP

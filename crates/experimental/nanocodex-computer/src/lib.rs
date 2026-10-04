@@ -147,7 +147,10 @@ impl ComputerConfig {
             return self;
         };
         let text = text.to_string_lossy();
-        if matches!(text.trim().to_ascii_lowercase().as_str(), "off" | "none" | "0") {
+        if matches!(
+            text.trim().to_ascii_lowercase().as_str(),
+            "off" | "none" | "0"
+        ) {
             self.upstream_confirmation_policies()
         } else {
             self.confirmation_policies(text.into_owned())
@@ -812,8 +815,8 @@ mod confirmation_policy_tests {
     fn blank_override_text_is_ignored_because_upstream_treats_it_as_defaults() {
         // Blank must never replace a configured policy: upstream reads a blank
         // value as "use the defaults" and would restore the built-in policy.
-        let configured = ComputerConfig::mcp("/fixture/cua-provider")
-            .confirmation_policies("Custom policy.");
+        let configured =
+            ComputerConfig::mcp("/fixture/cua-provider").confirmation_policies("Custom policy.");
         assert_eq!(
             configured
                 .clone()
