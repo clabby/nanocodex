@@ -1,8 +1,8 @@
 //! Provider-specific Messages agent loop. No OpenAI transport or CLI credentials.
 use crate::{
-    ClaudeClient, ClaudeToolSpec, ContentBlock, ContentDelta, Message, MessagesRequest, Role,
-    ServerToolDefinition, StopReason, StreamEvent, ToolDefinition, ToolResultContent, Usage,
-    collect_stream,
+    ClaudeClient, ClaudeError, ClaudeToolSpec, ContentBlock, ContentDelta, Message,
+    MessagesRequest, Role, ServerToolDefinition, StopReason, StreamEvent, ToolDefinition,
+    ToolResultContent, Usage, collect_stream,
 };
 use futures_util::StreamExt;
 use nanocodex_agent::{
@@ -29,8 +29,13 @@ use std::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 use tokio::sync::{Mutex, Notify, oneshot};
+#[cfg(not(target_family = "wasm"))]
+use tokio::time::sleep;
+#[cfg(target_family = "wasm")]
+use wasmtimer::tokio::sleep;
 use web_time::Instant;
 
 fn estimate_text_tokens(text: &str) -> u64 {
@@ -1915,92 +1920,148 @@ impl State {
             completed(&response, 0, 0, None);
             return Ok(response);
         }
-        if cancel.flag.load(Ordering::SeqCst) {
-            return Err(NanocodexError::TurnCancelled.into());
-        }
-        let mut stream = tokio::select! {
-            result = client.stream(&request) => match result {
-                Ok(stream) => stream,
-                Err(error) => {
-                    // A rejected request has no remote effect. A transport or
-                    // server failure can occur after the provider admitted it.
-                    let uncertain = matches!(&error,
-                        crate::ClaudeError::Transport(_) | crate::ClaudeError::StreamError { .. }
-                        | crate::ClaudeError::IncompleteStream
-                    ) || matches!(&error, crate::ClaudeError::Http { status, .. } if *status >= 500);
-                    return Err(ResponseFailure {
-                        error: provider_error(error),
-                        recovery: if uncertain { recovery } else { None },
-                    });
-                }
-            },
-            () = cancel.cancelled() => return Err(ResponseFailure {
-                error: NanocodexError::TurnCancelled, recovery,
-            }),
-        };
-        let mut captured = Vec::new();
-        let mut first_event = None;
-        let mut first_output = None;
+
+        // Each live execution has one transient retry budget. Committed receipts
+        // skip network requests; unfinished effects use the policy's crash semantics.
+        let max_attempts = if context.disable_tools { 3 } else { 5 };
+        let mut attempt = 0;
         loop {
-            let event = tokio::select! {
-                event = stream.next() => event,
+            if cancel.flag.load(Ordering::SeqCst) {
+                return Err(NanocodexError::TurnCancelled.into());
+            }
+            attempt += 1;
+            let mut accepted = false;
+            let mut published_text = false;
+            let mut first_event = None;
+            let mut first_output = None;
+            let opened = tokio::select! {
+                biased;
                 () = cancel.cancelled() => return Err(ResponseFailure {
                     error: NanocodexError::TurnCancelled, recovery,
                 }),
+                result = client.stream(&request) => result,
             };
-            match event {
-                Some(Ok(event)) => {
-                    first_event.get_or_insert_with(&elapsed_ns);
-                    if matches!(event, StreamEvent::ContentBlockDelta { .. }) {
-                        first_output.get_or_insert_with(&elapsed_ns);
-                    }
-                    if let Some(recovery) = &mut recovery {
-                        recovery.observe(&event);
-                    }
-                    if let (
-                        Some(events),
-                        StreamEvent::ContentBlockDelta {
-                            delta: ContentDelta::TextDelta { text },
-                            ..
-                        },
-                    ) = (events, &event)
-                    {
-                        self.emit(events,AgentEventKind::AssistantDelta,json!({"model_call_index":index,"item_id":null,"phase":null,"text":text}));
-                    }
-                    let terminal = matches!(event, StreamEvent::MessageStop);
-                    captured.push(Ok(event));
-                    if terminal {
-                        break;
+            let result = match opened {
+                Err(error) => Err(error),
+                Ok(mut stream) => {
+                    accepted = true;
+                    let mut captured = Vec::new();
+                    loop {
+                        let event = tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => return Err(ResponseFailure {
+                                error: NanocodexError::TurnCancelled, recovery,
+                            }),
+                            event = stream.next() => event,
+                        };
+                        let event = match event {
+                            Some(Ok(event)) => event,
+                            Some(Err(error)) => break Err(error),
+                            None => break Err(ClaudeError::IncompleteStream),
+                        };
+                        first_event.get_or_insert_with(&elapsed_ns);
+                        if matches!(event, StreamEvent::ContentBlockDelta { .. }) {
+                            first_output.get_or_insert_with(&elapsed_ns);
+                        }
+                        if let Some(recovery) = &mut recovery {
+                            recovery.observe(&event);
+                        }
+                        if let (
+                            Some(events),
+                            StreamEvent::ContentBlockDelta {
+                                delta: ContentDelta::TextDelta { text },
+                                ..
+                            },
+                        ) = (events, &event)
+                        {
+                            published_text = true;
+                            self.emit(events,AgentEventKind::AssistantDelta,json!({"model_call_index":index,"item_id":null,"phase":null,"text":text}));
+                        }
+                        let terminal = matches!(event, StreamEvent::MessageStop);
+                        captured.push(event);
+                        if terminal {
+                            let first = captured.remove(0);
+                            break collect_stream(
+                                first,
+                                futures_util::stream::iter(captured.into_iter().map(Ok)),
+                            )
+                            .await;
+                        }
                     }
                 }
-                Some(Err(error)) => {
-                    return Err(ResponseFailure {
-                        error: provider_error(error),
-                        recovery,
-                    });
+            };
+            let error = match result {
+                Ok(response) => {
+                    if let Some(effect) = &context.effect {
+                        effect
+                            .complete(serde_json::to_value(&response).map_err(provider_error)?)
+                            .await?;
+                    }
+                    completed(
+                        &response,
+                        attempt,
+                        first_event.unwrap_or_default(),
+                        first_output,
+                    );
+                    return Ok(response);
                 }
-                None => {
-                    return Err(ResponseFailure {
-                        error: provider_error("stream ended without message_stop"),
-                        recovery,
-                    });
-                }
+                Err(error) => error,
+            };
+
+            // Server execution may precede every observed block. Only an explicit
+            // rejection proves that a server-enabled request had no remote effects.
+            let uncertain = accepted
+                || matches!(
+                    &error,
+                    ClaudeError::Transport(_)
+                        | ClaudeError::StreamError { .. }
+                        | ClaudeError::IncompleteStream
+                )
+                || matches!(&error, ClaudeError::Http { status, .. } if *status >= 500);
+
+            let retry_after = match &error {
+                ClaudeError::Http { retry_after, .. } => *retry_after,
+                _ => None,
+            };
+            let jitter = 90 + (u64::from(index) * 31 + u64::from(attempt) * 17) % 21;
+            let backoff = Duration::from_millis(200 * 2_u64.pow(attempt - 1) * jitter / 100);
+            let delay = retry_after.map_or(backoff, |delay| delay.max(backoff));
+
+            // Published deltas cannot be withdrawn. Private fragments are dropped
+            // with the failed attempt; handlers and usage require a complete result.
+            // Long server hints fail instead of being shortened into an early retry.
+            if attempt >= max_attempts
+                || !error.is_transient()
+                || published_text
+                || (uncertain && recovery.is_some())
+                || delay > Duration::from_secs(60)
+            {
+                return Err(ResponseFailure {
+                    error: provider_error(error),
+                    recovery: if uncertain { recovery } else { None },
+                });
+            }
+            if let Some(events) = events {
+                self.emit(
+                    events,
+                    AgentEventKind::ModelAttemptRetrying,
+                    json!({
+                        "model_call_index":index,
+                        "attempt":attempt,
+                        "next_attempt":attempt + 1,
+                        "max_attempts":max_attempts,
+                        "delay_ns":u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX),
+                        "server_requested_delay":retry_after.is_some(),
+                        "error":error.to_string(),
+                    }),
+                );
+            }
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(NanocodexError::TurnCancelled.into()),
+                () = sleep(delay) => {},
             }
         }
-        let first = captured.remove(0).map_err(provider_error)?;
-        let response = collect_stream(first, futures_util::stream::iter(captured))
-            .await
-            .map_err(|error| ResponseFailure {
-                error: provider_error(error),
-                recovery,
-            })?;
-        if let Some(effect) = &context.effect {
-            effect
-                .complete(serde_json::to_value(&response).map_err(provider_error)?)
-                .await?;
-        }
-        completed(&response, 1, first_event.unwrap_or_default(), first_output);
-        Ok(response)
     }
     async fn run(
         &self,

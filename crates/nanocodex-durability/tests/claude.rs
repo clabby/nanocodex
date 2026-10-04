@@ -540,6 +540,189 @@ enum CompactionJourney {
     ExhaustionAfterRecovery,
 }
 
+#[tokio::test]
+async fn transient_retry_model_receipt_survives_commit_acknowledgement_loss() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    for after_commit in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let armed = Arc::new(AtomicBool::new(false));
+        let (client, requests, server) = server({
+            let armed = armed.clone();
+            move |index, request| {
+                if index == 1 {
+                    return "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n".into();
+                }
+                if index == 2 {
+                    // Interrupt the model receipt write on either side of commit.
+                    armed.store(true, Ordering::SeqCst);
+                }
+                if request["messages"].to_string().contains("tool_result") {
+                    sse(text("completed after retry"), "end_turn", 10)
+                } else {
+                    sse(signed_round(), "tool_use", 10)
+                }
+            }
+        }).await;
+        let state = DurableSession::open(
+            FaultStore {
+                inner: SqliteStore::open(&path).unwrap(),
+                writes: Arc::new(AtomicUsize::new(0)),
+                fail_at: None,
+                after_commit,
+                fail_when_armed: Some(armed),
+            },
+            "claude-synthetic",
+        )
+        .await
+        .unwrap();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let counter = effects.clone();
+        let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "original-model"))
+            .tool(tool(), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("committed once".into()) }
+            })
+            .durability(state)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        let request = || PromptRequest::new("perform effect once").request_id("retry-receipt");
+        let error = agent
+            .prompt(request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap_err();
+        assert!(
+            error.execution_policy_disposition().is_some(),
+            "receipt write must cause the interruption: {error}"
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "transient failure must reach the receipt cut"
+        );
+        assert_eq!(
+            effects.load(Ordering::SeqCst),
+            0,
+            "receipt must precede client effects"
+        );
+        let _ = agent.shutdown().await;
+        drop((agent, events));
+
+        for completed_replay in [false, true] {
+            let counter = effects.clone();
+            let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "changed-model"))
+                .system("changed after reopen")
+                .max_tokens(128)
+                .tool(tool(), move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    async { Ok("committed once".into()) }
+                })
+                .durability(reopen(&path).await)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            let before = requests.lock().unwrap().len();
+            let result = agent
+                .prompt(request())
+                .await
+                .unwrap()
+                .result()
+                .await
+                .unwrap();
+            assert_eq!(result.final_message(), "completed after retry");
+            assert_eq!(result.usage().unwrap().total_tokens(), 30);
+            assert_eq!(effects.load(Ordering::SeqCst), 1);
+            let log = requests.lock().unwrap().clone();
+            if completed_replay {
+                assert_eq!(
+                    log.len(),
+                    before,
+                    "terminal replay must skip all model attempts"
+                );
+            } else {
+                assert_eq!(log.len(), if after_commit { 3 } else { 4 });
+                assert_eq!(log[0], log[1], "live retry preserves the frozen request");
+                if !after_commit {
+                    assert_eq!(
+                        log[0], log[2],
+                        "unsettled model replay preserves the frozen request"
+                    );
+                }
+                assert!(
+                    log.iter()
+                        .all(|request| request["model"] == "original-model"
+                            && request.get("system").is_none())
+                );
+            }
+            eprintln!(
+                "retry receipt after_commit={after_commit} terminal_replay={completed_replay}: requests={}, client_effects=1, usage=30",
+                log.len()
+            );
+            agent.shutdown().await.unwrap();
+            drop((agent, events));
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn cancelled_and_exhausted_retries_remain_terminal_after_reopen() {
+    use futures_util::StreamExt;
+    use nanocodex_agent::events::AgentEventKind;
+    for cancel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let (client, requests, server) = server(|_, _| "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n".into()).await;
+        let request = || PromptRequest::new("bounded retry").request_id("terminal-retry");
+        for replay in [false, true] {
+            let (agent, mut events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+                .durability(reopen(&path).await)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            let result = match agent.prompt(request()).await {
+                Ok(turn) => {
+                    if cancel && !replay {
+                        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                            loop {
+                                if events.next().await.unwrap().kind
+                                    == AgentEventKind::ModelAttemptRetrying
+                                {
+                                    break;
+                                }
+                            }
+                        })
+                        .await
+                        .unwrap();
+                        turn.cancel().await.unwrap();
+                    }
+                    turn.result().await
+                }
+                Err(error) => Err(error),
+            };
+            let error = result.unwrap_err();
+            if !cancel {
+                assert!(error.to_string().contains("overloaded_error"));
+            }
+            assert_eq!(requests.lock().unwrap().len(), if cancel { 1 } else { 5 });
+            eprintln!(
+                "retry terminal cancel={cancel} replay={replay}: requests={}, error={error}",
+                requests.lock().unwrap().len()
+            );
+            agent.shutdown().await.unwrap();
+            drop((agent, events));
+        }
+        server.abort();
+    }
+}
+
 async fn denied_tool_recovery(fail_at: Option<usize>, after_commit: bool) -> (usize, usize) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
