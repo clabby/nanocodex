@@ -95,3 +95,60 @@ artifact/receipt checks, current-master guards and deployed health remain active
 `CI_TESTS_ENABLED=false` suppresses image runtime smoke suites; manual/local image
 builds default to running them. Live validation is manual-only. Re-enable the test
 conditions and image test flag together when the pause ends.
+
+## PR previews using the production backend
+
+PRs publish the branch's account app and Connect assets as native Cloudflare
+Previews. The default `--backend production` sends account API, authentication,
+credential, streaming, and mutation requests through a service binding to the
+existing production account Worker. That Worker uses the production managed
+service and credential broker. Existing broker credentials stay in the broker;
+no secret export, duplicate credentials, or Preview Base storage setup is needed.
+The preview uses production account data and operations. It does not test branch
+changes inside the managed backend or production Durable Objects.
+
+Run `node scripts/cloudflare/preview-workers.mjs deploy --name pr-123` after
+building/restoring the same-revision artifacts. Set `CLOUDFLARE_ACCOUNT_ID`,
+`CLOUDFLARE_API_TOKEN`, and `GITHUB_SHA` (or `PREVIEW_REVISION`). `check` performs
+read-only readiness checks. `--component assets` publishes only Connect assets.
+The authenticated backend receives the original URL, cookies, bearer token,
+origin, body, and WebSocket upgrade; the proxy does not assert a user identity or
+bypass authentication. A missing production service fails closed with 503.
+A preview hostname has its own browser cookies; opening it is not automatic login.
+
+The default mode publishes no branch backend and requires no duplicate production
+secrets. The account Preview wraps the built entry point, retaining branch app
+rendering and assets. Backend routes run in production, including login and
+credential-broker operations. The wrapper is generated beside the built entry
+point, then removed after upload. It does not deploy production code.
+
+### Optional isolated backend
+
+Manual dispatch `preview_backend=isolated` (CLI `--backend isolated`) retains
+account-to-managed branch routing with a per-deployment authenticated HTTP bridge.
+This mode needs Preview Base secrets and separately provisioned storage. Local
+Durable Objects/containers are isolated, while foreign service/DO bindings target
+production and are recorded in the manifest. It does not automatically copy
+existing identity or subscription records into its new namespaces.
+
+Only isolated mode requires matching production secret names in Preview Base.
+The optional encrypted CI secret `NANOCODEX_PREVIEW_BASE_SECRETS_JSON` maps Worker
+names to secret-name/value objects; it is validated and applied privately without
+logging values. Existing Previews do not inherit later Base secret changes.
+Isolated mode also checks separate D1/R2/KV/AI Search Base resources. It does not
+create storage or run migrations. Parent Worker Preview URLs must be enabled.
+
+### Verification and cleanup
+
+Same-revision artifacts, deployment receipts, HTTP serving probes and boundary
+metadata are retained in `output/cloudflare-previews/pr-N/manifest.json` and CI
+artifacts. Account root must return HTML and `/v1/credentials` must reject unauthenticated
+requests. These probes verify serving and authentication rejection, not a signed-in
+model turn. Real workerd routing journeys additionally exercise credential
+metadata, authentication failure, mutation origins, streaming and upgrades using
+synthetic fixtures. No real credentials or authenticated responses are logged.
+
+On PR close, `preview-workers.mjs delete --name pr-N` deletes named native Previews
+and verifies absence. It leaves production Workers, broker credentials, and data
+untouched. Individual deployment failure leaves completed receipts in the manifest.
+Wrangler output is suppressed because binding output can contain values.

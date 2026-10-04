@@ -4,7 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-29",
   "compatibility_flags": [
-    "nodejs_compat"
+    "nodejs_compat",
+    "durable_object_io_tasks_prevent_eviction"
   ],
   "workers_dev": true,
   "alias": { "node-rsa": "../nanocodex/tools/browser/unsupportedNodeRsa.mjs" },

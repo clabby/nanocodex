@@ -1,3 +1,4 @@
+import { forwardManagedPreview, previewBridgeEnabled, type PreviewBridgeEnv } from "../../managed/src/preview-bridge.ts";
 import { consumeRpcData } from "nanocodex/cloudflare/rpc";
 import { apiKeyDigest, apiKeyPrincipal } from "nanocodex/cloudflare/managed-auth";
 import { nativeLiveRequest, liveAgentSettings, liveAgentFailure, liveAgentRequest, newManagedAgentId } from "nanocodex/cloudflare/managed-live";
@@ -5,7 +6,7 @@ import { durablePlacementOptions, ingressColo } from "nanocodex/cloudflare/durab
 
 import { MANAGED_ACCESS_HEADER, MANAGED_ACCESS_TTL_MS, isHandViewerUpgrade, readManagedAccess, handRequestFailure, handBrokerRequest } from "nanocodex/cloudflare/managed-access";
 
-export type ManagedProxyEnv = {
+export type ManagedProxyEnv = PreviewBridgeEnv & {
   NANOCODEX_BACKEND?: Fetcher;
   NANOCODEX_ACCESS_SECRET?: string;
   NANOCODEX_HAND_BROKER?: DurableObjectNamespace;
@@ -60,6 +61,14 @@ async function routeMeasuredManaged(
     && url.pathname !== "/v1/responses" && url.pathname !== "/v1/models"
     && url.pathname !== "/v1/inference" && !url.pathname.startsWith("/v1/inference/")) {
     return json({ error: "inference_key_scope" }, { status: 403 });
+  }
+  // Preview routing must precede every production service and foreign-DO fast path.
+  if (previewBridgeEnabled(env)) {
+    if (url.pathname === "/api/router") {
+      const target = new URL(request.url); target.pathname = "/v1/router";
+      request = new Request(target, request);
+    }
+    return forwardManagedPreview(request, env);
   }
   if (!env.NANOCODEX_BACKEND) {
     return json({ error: "managed_service_unavailable" }, { status: 503 });

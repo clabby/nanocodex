@@ -1,3 +1,4 @@
+import { receiveManagedPreview, type PreviewBridgeEnv } from "./preview-bridge.ts";
 import { cleanupGmailInbox } from "./gmail-firehose-cleanup";
 import { observeClaudeRelease } from "./claude-lifecycle.mjs";
 import { mcpPayment } from "nanocodex/tempo";
@@ -435,6 +436,7 @@ const MEMORY_TEAM_ASSERTION = "x-nanocodex-team-id";
 const MEMORY_SUBJECT_ASSERTION = "x-nanocodex-subject-id";
 const USER_DATA_USER_ASSERTION = "x-nanocodex-user-id";
 export interface Env extends
+  PreviewBridgeEnv,
   InferenceApiEnv,
   MeetingPreviewEnv,
   ProviderProbeEnvironment,
@@ -3606,7 +3608,10 @@ function agentCreationResponse(url: URL, agentId: string, settings: ManagedAgent
 }
 
 export default {
-  fetch: managedFetch,
+  async fetch(...[request, env, ctx, ...rest]: Parameters<typeof managedFetch>) {
+    const incoming = await receiveManagedPreview(request, env);
+    return incoming instanceof Response ? incoming : managedFetch(incoming, env, ctx, ...rest);
+  },
   scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
     if (env.NANOCODEX_PROVIDER_PROBES === "true" && env.NANOCODEX_PROVIDER_PROBE_COORDINATOR) {
       ctx.waitUntil(env.NANOCODEX_PROVIDER_PROBE_COORDINATOR.getByName(PROBE_OWNER).tick(event.scheduledTime));
