@@ -840,6 +840,24 @@ jobs:
             --filter nanocodex-web
           npm run typecheck --prefix examples/astra-mpp-trial
           npm run build --prefix examples/astra-mpp-trial
+      - name: Test page-aware private browser input in Chromium
+        timeout-minutes: 8
+        run: |
+          pnpm --filter nanocodex-web exec playwright-core install --with-deps chromium
+          CHROME_PATH=$(node --input-type=module -e 'import {createRequire} from "node:module"; const require = createRequire(new URL("./js/account/package.json", import.meta.url)); process.stdout.write(require("playwright-core").chromium.executablePath());')
+          export CHROME_PATH
+          mkdir -p output/private-native-fields
+          node --experimental-transform-types js/managed/test/browser-vault-takeover.chrome.mjs 2>&1 | tee output/private-native-fields/ci-browser-journey.log
+          node --experimental-transform-types js/managed/test/browser-vault-continuation.chrome.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: private-native-input-journeys
+          path: |
+            output/private-native-fields/*.json
+            output/private-native-fields/*.png
+            output/private-native-fields/ci-browser-journey.log
+          if-no-files-found: warn
       - name: Test private Claude connection and model picker
         if: needs.changes.outputs.tests == 'true'
         run: |

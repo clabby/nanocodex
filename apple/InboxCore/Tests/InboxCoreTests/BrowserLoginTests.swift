@@ -28,6 +28,7 @@ final class BrowserLoginTests: XCTestCase {
             XCTAssertEqual(request.headers["cache-control"], "no-store")
             XCTAssertEqual(request.json["challenge_id"] as? String, self.requestID)
             switch request.json["action"] as? String {
+            case "describe": return FixtureReply(body: self.hint.pretty)
             case "approve": return FixtureReply(body: #"{"status":"approved"}"#)
             case "type":
                 XCTAssertEqual(request.json["text"] as? String, "synthetic-password")
@@ -40,13 +41,43 @@ final class BrowserLoginTests: XCTestCase {
         defer { fixture.close() }
         let client = ManagedClient(credential: try AccountCredential(origin: fixture.origin, apiKey: fixtureKey))
         defer { client.close() }
+        let approved = try await client.browserLoginApproved(intake: intake, configuration: fixture.configuration)
+        XCTAssertFalse(approved)
         guard case .approved = try await client.browserTakeover(intake: intake, action: ["action": .string("approve")], configuration: fixture.configuration) else { return XCTFail("approval") }
         guard case .loginActive(_, _, _, let origin) = try await client.browserTakeover(intake: intake, action: ["action": .string("type"), "text": .string("synthetic-password")], configuration: fixture.configuration) else { return XCTFail("private frame") }
         XCTAssertEqual(origin, "https://auth.example.com")
         guard case .finished = try await client.browserTakeover(intake: intake, action: ["action": .string("finish")], configuration: fixture.configuration) else { return XCTFail("finish") }
         guard case .cancelled = try await client.browserTakeover(intake: intake, action: ["action": .string("cancel")], configuration: fixture.configuration) else { return XCTFail("cancel") }
         let receipt = "{\"type\":\"browser_login_receipt\",\"status\":\"finished\",\"request_id\":\"\(requestID)\"}"
-        XCTAssertEqual(BrowserReceiptPresentation.summary(receipt), "Private sign-in finished; verification pending")
+        XCTAssertEqual(BrowserReceiptPresentation.summary(receipt), "Private browser handed back; verification pending")
+    }
+
+    func testFollowupToolChecksApprovedSessionOverPrivateTransportAndCorrelatesFreshReceipt() async throws {
+        let nextID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        guard case .object(var metadata) = hint else { return XCTFail("fixture") }
+        metadata["request_id"] = .string(nextID); metadata["challenge_id"] = .string(nextID)
+        metadata["approved"] = .bool(true)
+        let followup = JSON.object(metadata)
+        var tool = ToolPresentation(name: "request_browser_login_input", arguments: .null)
+        tool.finish(followup)
+        let intake = try XCTUnwrap(tool.vaultIntake)
+        XCTAssertEqual(intake.challengeID, nextID)
+        let fixture = try HTTPFixture { request in
+            XCTAssertEqual(request.json["challenge_id"] as? String, nextID)
+            XCTAssertEqual(request.headers["cache-control"], "no-store")
+            switch request.json["action"] as? String {
+            case "describe": return FixtureReply(body: followup.pretty)
+            case "finish": return FixtureReply(body: "{\"type\":\"browser_login_receipt\",\"status\":\"finished\",\"request_id\":\"\(nextID)\"}")
+            default: return FixtureReply(status: 400, body: "{}")
+            }
+        }
+        defer { fixture.close() }
+        let client = ManagedClient(credential: try AccountCredential(origin: fixture.origin, apiKey: fixtureKey))
+        defer { client.close() }
+        let approved = try await client.browserLoginApproved(intake: intake, configuration: fixture.configuration)
+        XCTAssertTrue(approved, "Only the private describe response may skip repeat site review")
+        guard case .finished = try await client.browserTakeover(intake: intake, action: ["action": .string("finish")], configuration: fixture.configuration)
+        else { return XCTFail("Expected receipt for the fresh input request") }
     }
 
     func testUnapprovedSiteAndWrongReceiptCannotEnterNativePane() async throws {

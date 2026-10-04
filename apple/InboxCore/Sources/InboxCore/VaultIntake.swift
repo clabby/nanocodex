@@ -38,6 +38,7 @@ public struct VaultIntake: Codable, Equatable, Sendable {
     public let agentID: String?
     public var expiresAt: Double? = nil
     public var allowedOrigins: [String]? = nil
+    public var browserApproved: Bool? = nil
 
     public func isCurrentBrowserRequest(agentID: String, now: Date = Date()) -> Bool {
         guard operation == "browser_takeover" || operation == "browser_verification" || operation == "browser_login",
@@ -56,12 +57,16 @@ public struct VaultIntake: Codable, Equatable, Sendable {
                   (try? ManagedClient.agentPath(value["agent_id"].string)) != nil,
                   case .number(let expiry) = value["expires_at"], expiry.isFinite, expiry > 0,
                   case .array(let origins) = value["allowed_origins"], (1...8).contains(origins.count) else { return nil }
+            if let approved = fields["approved"] {
+                guard case .bool = approved else { return nil }
+            }
             let sites = origins.map(\.string)
             guard Set(sites).count == sites.count, sites.contains(value["origin"].string), sites.allSatisfy({ site in
                 parse(.object(["type": .string("vault_intake"), "status": .string("input_required"), "kind": .string("login"), "origin": .string(site)]))?.origin != nil
             }) else { return nil }
             return .init(kind: "login", name: "", origin: value["origin"].string, operation: "browser_login", vaultID: nil,
-                         challengeID: value["request_id"].string, agentID: value["agent_id"].string, expiresAt: expiry, allowedOrigins: sites)
+                         challengeID: value["challenge_id"].string, agentID: value["agent_id"].string, expiresAt: expiry, allowedOrigins: sites,
+                         browserApproved: fields["approved"].map { $0 == .bool(true) })
         }
         if ["browser_vault_challenge", "browser_vault_takeover"].contains(value["type"].string), value["status"].string == "input_required" {
             guard case .object(let fields) = value,
@@ -176,33 +181,73 @@ public struct BrowserInputRegion: Sendable, Equatable {
     public let keyboard: BrowserKeyboardHint
 }
 /// Value-free metadata from the private, authenticated browser transport.
+public struct BrowserNativeOption: Sendable, Equatable, Identifiable {
+    public let index: Int
+    public let label: String
+    public var id: Int { index }
+}
 public struct BrowserNativeField: Sendable, Equatable, Identifiable {
     public let id: String
     public let label: String
     public let type: String
     public let multiline: Bool
+    public let autocomplete: String?
+    public let inputmode: String?
+    public let options: [BrowserNativeOption]
+    public let checked: Bool?
 }
 public struct BrowserNativeForm: Sendable, Equatable, Identifiable {
     public let id: String
     public let fields: [BrowserNativeField]
+    public let reason: String?
 
     static func parse(_ value: JSON) throws -> Self {
-        guard case .object(let form) = value, Set(form.keys) == Set(["document_id", "fields"]),
+        guard case .object(let form) = value, Set(form.keys).isSubset(of: ["document_id", "fields", "reason"]),
               case .string(let id) = value["document_id"], UUID(uuidString: id) != nil,
               case .array(let entries) = value["fields"], (1...32).contains(entries.count) else { throw APIError.invalidResponse }
+        if let reason = form["reason"] {
+            guard case .string(let text) = reason, !text.isEmpty, text.utf16.count <= 500,
+                  !text.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw APIError.invalidResponse }
+        }
         var fields: [BrowserNativeField] = []
         for entry in entries {
             guard case .object(let field) = entry,
-                  Set(field.keys) == Set(["ref", "label", "type", "multiline"]),
+                  Set(field.keys).isSubset(of: ["ref", "label", "type", "multiline", "autocomplete", "inputmode", "options", "checked"]),
                   case .string(let fieldID) = entry["ref"], UUID(uuidString: fieldID) != nil,
                   !fields.contains(where: { $0.id == fieldID }),
                   case .string(let label) = entry["label"], !label.isEmpty, label.utf16.count <= 160,
                   !label.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
-                  case .string(let type) = entry["type"], ["text", "email", "url", "tel", "number", "password"].contains(type),
+                  case .string(let type) = entry["type"], ["text", "email", "url", "tel", "number", "password", "select", "checkbox"].contains(type),
                   case .bool(let multiline) = entry["multiline"], !multiline || type == "text" else { throw APIError.invalidResponse }
-            fields.append(.init(id: fieldID, label: label, type: type, multiline: multiline))
+            let autocompleteValues = ["username", "current-password", "new-password", "one-time-code", "email", "tel", "cc-number", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-csc", "name", "given-name", "family-name", "street-address", "postal-code"]
+            let inputmodeValues = ["text", "email", "url", "tel", "numeric", "decimal", "search"]
+            if let value = field["autocomplete"] {
+                guard case .string(let hint) = value, autocompleteValues.contains(hint) else { throw APIError.invalidResponse }
+            }
+            if let value = field["inputmode"] {
+                guard case .string(let hint) = value, inputmodeValues.contains(hint) else { throw APIError.invalidResponse }
+            }
+            var options: [BrowserNativeOption] = []
+            if type == "select" {
+                guard case .array(let entries) = entry["options"], entries.count <= 200 else { throw APIError.invalidResponse }
+                for option in entries {
+                    guard case .object(let object) = option, Set(object.keys) == Set(["index", "label"]),
+                          case .number(let index) = option["index"], index.isFinite, index.rounded() == index, index >= 0, index < 200,
+                          options.last.map({ $0.index < Int(index) }) ?? true,
+                          case .string(let label) = option["label"], label.utf16.count <= 160,
+                          !label.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw APIError.invalidResponse }
+                    options.append(.init(index: Int(index), label: label))
+                }
+            } else if field["options"] != nil { throw APIError.invalidResponse }
+            var checked: Bool?
+            if type == "checkbox" {
+                guard case .bool(let value) = entry["checked"] else { throw APIError.invalidResponse }
+                checked = value
+            } else if field["checked"] != nil { throw APIError.invalidResponse }
+            fields.append(.init(id: fieldID, label: label, type: type, multiline: multiline,
+                                autocomplete: field["autocomplete"]?.string, inputmode: field["inputmode"]?.string, options: options, checked: checked))
         }
-        return .init(id: id, fields: fields)
+        return .init(id: id, fields: fields, reason: form["reason"]?.string)
     }
 
     /// Build one fill-only request from the current discovery. Never submits the website form.
@@ -210,6 +255,11 @@ public struct BrowserNativeForm: Sendable, Equatable, Identifiable {
         guard !values.isEmpty, Set(values.keys).isSubset(of: Set(fields.map(\.id))),
               values.values.allSatisfy({ $0.utf16.count <= 4096 && !$0.contains("\0") }),
               values.values.reduce(0, { $0 + $1.utf8.count }) <= 32768 else { throw APIError.invalidResponse }
+        for field in fields {
+            guard let value = values[field.id] else { continue }
+            if field.type == "select", !field.options.contains(where: { String($0.index) == value }) { throw APIError.invalidResponse }
+            if field.type == "checkbox", value != "true" && value != "false" { throw APIError.invalidResponse }
+        }
         return ["action": .string("fill_fields"), "document_id": .string(id),
                 "fields": .array(fields.compactMap { field in
                     values[field.id].map { .object(["ref": .string(field.id), "value": .string($0)]) }
@@ -218,6 +268,7 @@ public struct BrowserNativeForm: Sendable, Equatable, Identifiable {
 }
 
 public enum BrowserTakeoverFrame: Sendable {
+    case staleForm(origin: String?)
     case active(image: Data, width: Int, height: Int)
     case activeWithForm(image: Data, keyboard: BrowserKeyboardHint?, inputs: [BrowserInputRegion], form: BrowserNativeForm, origin: String?)
     case activeWithInput(image: Data, width: Int, height: Int, keyboard: BrowserKeyboardHint?, inputs: [BrowserInputRegion])
@@ -227,7 +278,7 @@ public enum BrowserTakeoverFrame: Sendable {
         if finishing, fields.count == 1, response["status"].string == "finished" { return .finished }
         let prefix = "data:image/png;base64,", encoded = response["image"].string
         guard case .number(let width) = response["width"], case .number(let height) = response["height"],
-              !finishing, Set(fields.keys).isSubset(of: ["status", "image", "width", "height", "keyboard", "inputs", "native_form"]),
+              !finishing, Set(fields.keys).isSubset(of: ["status", "image", "width", "height", "keyboard", "inputs", "native_form", "native_form_status"]),
               response["status"].string == "active", encoded.hasPrefix(prefix),
               width.isFinite, height.isFinite, width >= 1, width <= 16384, height >= 1, height <= 16384,
               width.rounded() == width, height.rounded() == height,
@@ -252,6 +303,10 @@ public enum BrowserTakeoverFrame: Sendable {
                 inputs.append(.init(x: x, y: y, width: w, height: h, keyboard: keyboard))
             }
         }
+        if let status = fields["native_form_status"] {
+            guard status == .string("stale"), fields["native_form"] == nil else { throw APIError.invalidResponse }
+            return .staleForm(origin: nil)
+        }
         if let value = fields["native_form"] {
             return .activeWithForm(image: data, keyboard: keyboard, inputs: inputs, form: try BrowserNativeForm.parse(value), origin: nil)
         }
@@ -266,6 +321,18 @@ public enum BrowserTakeoverFrame: Sendable {
     case loginActive(image: Data, keyboard: BrowserKeyboardHint?, inputs: [BrowserInputRegion], origin: String)
 }
 extension ManagedClient {
+    /// Check current consent over the private transport before skipping the native site review.
+    public func browserLoginApproved(intake: VaultIntake, configuration: URLSessionConfiguration = .ephemeral) async throws -> Bool {
+        guard intake.operation == "browser_login", let challenge = intake.challengeID, let agent = intake.agentID else { throw APIError.invalidResponse }
+        let response = try await vaultIntakeJSON(path: Self.agentPath(agent) + "/browser-vault/takeover", method: "POST",
+            body: .object(["challenge_id": .string(challenge), "action": .string("describe")]), configuration: configuration)
+        guard let current = VaultIntake.parse(response), current.operation == "browser_login",
+              current.challengeID == challenge, current.agentID == agent,
+              current.origin == intake.origin, current.allowedOrigins == intake.allowedOrigins,
+              current.isCurrentBrowserRequest(agentID: agent), let approved = current.browserApproved else { throw APIError.invalidResponse }
+        return approved
+    }
+
     public func browserTakeover(intake: VaultIntake, action: [String: JSON], configuration: URLSessionConfiguration = .ephemeral) async throws -> BrowserTakeoverFrame {
         guard ["browser_takeover", "browser_login"].contains(intake.operation ?? ""), let challenge = intake.challengeID, let agent = intake.agentID else { throw APIError.invalidResponse }
         var body = action; body["challenge_id"] = .string(challenge)
@@ -286,6 +353,7 @@ extension ManagedClient {
             let origin = fields.removeValue(forKey: "origin")?.string ?? ""
             guard intake.allowedOrigins?.contains(origin) == true else { throw APIError.invalidResponse }
             switch try BrowserTakeoverFrame.parse(.object(fields)) {
+            case .staleForm: return .staleForm(origin: origin)
             case .activeWithForm(let data, let keyboard, let inputs, let form, _): return .activeWithForm(image: data, keyboard: keyboard, inputs: inputs, form: form, origin: origin)
             case .active(let data, _, _): return .loginActive(image: data, keyboard: nil, inputs: [], origin: origin)
             case .activeWithInput(let data, _, _, let keyboard, let inputs): return .loginActive(image: data, keyboard: keyboard, inputs: inputs, origin: origin)
@@ -305,7 +373,7 @@ public enum BrowserReceiptPresentation {
         if value["type"].string == "browser_login_receipt" {
             guard Set(fields.keys) == Set(["type", "status", "request_id"]), UUID(uuidString: value["request_id"].string) != nil else { return nil }
             switch value["status"].string {
-            case "finished": return "Private sign-in finished; verification pending"
+            case "finished": return "Private browser handed back; verification pending"
             case "cancelled": return "Private sign-in cancelled"
             default: return nil
             }

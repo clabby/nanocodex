@@ -1,8 +1,8 @@
 import { browserLoginIdentity } from "./browser-login";
-import { PrivateBrowserNoActiveTouch, isBrowserVaultOrigin, type BrowserVaultIdentity, type PrivateBrowserCdp } from "./browser-vault";
+import { NATIVE_FORM_STATE, PrivateBrowserNoActiveTouch, isBrowserVaultOrigin, type BrowserVaultIdentity, type PrivateBrowserCdp } from "./browser-vault";
 
 export type BrowserVaultTakeoverAction =
-  | { action: "observe"; native_fields?: boolean; viewport?: { width: number; height: number; mobile: boolean } }
+  | { action: "observe"; native_fields?: boolean; native_field_hints?: boolean; native_field_controls?: boolean; viewport?: { width: number; height: number; mobile: boolean } }
   | { action: "click"; x: number; y: number }
   | { action: "type"; text: string }
   | { action: "fill_fields"; document_id: string; fields: { ref: string; value: string }[] }
@@ -10,10 +10,12 @@ export type BrowserVaultTakeoverAction =
   | { action: "touch"; phase: "start" | "move" | "end" | "cancel"; x?: number; y?: number }
   | { action: "key"; key: "Enter" | "Tab" | "Backspace" | "Escape" }
   | { action: "scroll"; delta_y: number };
-export type BrowserVaultTouchState = { active?: boolean; uncertain?: boolean; nativeFields?: boolean; nativeForm?: { documentId: string; contextId: number; frameId: string; loaderId: string; origin: string } };
+export type BrowserVaultTouchState = { active?: boolean; uncertain?: boolean; nativeFields?: boolean; nativeFieldHints?: boolean; nativeFieldControls?: boolean; nativeSelection?: string; nativeForm?: { documentId: string; contextId: number; frameId: string; loaderId: string; origin: string } };
 export type BrowserVaultKeyboard = { type: "text" | "email" | "url" | "tel" | "number" | "password"; multiline: boolean };
-export type BrowserVaultNativeForm = { document_id: string; fields: (BrowserVaultKeyboard & { ref: string; label: string })[] };
-export type BrowserVaultTakeoverResult = { native_form?: BrowserVaultNativeForm; status: "active"; image: string; width: number; height: number; keyboard?: BrowserVaultKeyboard; inputs?: (BrowserVaultKeyboard & { x: number; y: number; width: number; height: number })[] };
+const NATIVE_AUTOCOMPLETE = ["username", "current-password", "new-password", "one-time-code", "email", "tel", "cc-number", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-csc", "name", "given-name", "family-name", "street-address", "postal-code"] as const;
+const NATIVE_INPUTMODES = ["text", "email", "url", "tel", "numeric", "decimal", "search"] as const;
+export type BrowserVaultNativeForm = { document_id: string; reason?: string; fields: {type: BrowserVaultKeyboard["type"] | "select" | "checkbox"; multiline: boolean; ref: string; label: string; options?: {index:number;label:string}[]; checked?: boolean; autocomplete?: typeof NATIVE_AUTOCOMPLETE[number]; inputmode?: typeof NATIVE_INPUTMODES[number] }[] };
+export type BrowserVaultTakeoverResult = { native_form?: BrowserVaultNativeForm; native_form_status?: "stale"; status: "active"; image: string; width: number; height: number; keyboard?: BrowserVaultKeyboard; inputs?: (BrowserVaultKeyboard & { x: number; y: number; width: number; height: number })[] };
 
 /** Register before dispatch: browser value sanitization may finish even if CDP
  * loses its reply. Keep raw and all supported native-input normalization variants
@@ -37,13 +39,15 @@ export function validateBrowserVaultTakeoverAction(value: BrowserVaultTakeoverAc
   switch (value.action) {
     case "observe":
       if (value.native_fields !== undefined && typeof value.native_fields !== "boolean") throw new Error();
+      if (value.native_field_hints !== undefined && (typeof value.native_field_hints !== "boolean" || value.native_fields !== true)) throw new Error();
+      if (value.native_field_controls !== undefined && (typeof value.native_field_controls !== "boolean" || value.native_fields !== true)) throw new Error();
       if (value.viewport !== undefined) {
         const v = value.viewport;
         if (!v || typeof v !== "object" || Array.isArray(v) || typeof v.mobile !== "boolean"
           || ![v.width,v.height].every(n => Number.isInteger(n) && n >= 240 && n <= 1920)
           || Object.keys(v).some(k => !["width","height","mobile"].includes(k))) throw new Error();
       }
-      allowed = ["action", "viewport", "native_fields"]; break;
+      allowed = ["action", "viewport", "native_fields", "native_field_hints", "native_field_controls"]; break;
     case "click":
       if (![value.x, value.y].every(n => Number.isFinite(n) && n >= 0 && n <= 1)) throw new Error();
       allowed = ["action", "x", "y"]; break;
@@ -134,6 +138,8 @@ export async function privateVaultTakeover(
     await check();
     if (action.action === "observe") {
       touch.nativeFields = action.native_fields === true;
+      touch.nativeFieldHints = touch.nativeFields && action.native_field_hints === true;
+      touch.nativeFieldControls = touch.nativeFields && action.native_field_controls === true;
       // Observation is explicit recovery after an ambiguous gesture, never a replay.
       await check();
       // Chrome rejects touchCancel when no touch sequence has started.
@@ -266,24 +272,36 @@ export async function privateVaultTakeover(
     // Only opted-in clients receive new metadata; older clients reject unknown keys.
     // Separate optional discovery keeps the viewport usable for custom controls and iframes.
     if (touch.nativeFields) try {
-      const world = await cdp.send("Page.createIsolatedWorld", { frameId, worldName: "nanocodex-private-native-form", grantUniveralAccess: false }, sid);
+      const world = await cdp.send("Page.createIsolatedWorld", { frameId, worldName: touch.nativeSelection ? "nanocodex-vault-continuation" : "nanocodex-private-native-form", grantUniveralAccess: false }, sid);
       if (Number.isInteger(world?.executionContextId) && loaderId) {
         const documentId = crypto.randomUUID();
         const refs = Array.from({length:32}, () => crypto.randomUUID());
         const result = await cdp.send("Runtime.callFunctionOn", {
           executionContextId: world.executionContextId, returnByValue: true, silent: true,
           functionDeclaration: NATIVE_FORM_DISCOVER,
-          arguments: [documentId, currentOrigin, refs].map(value => ({value})),
+          arguments: [documentId, currentOrigin, refs, touch.nativeFieldHints === true, touch.nativeFieldControls === true, touch.nativeSelection ?? null].map(value => ({value})),
         }, sid);
-        const fields = result?.result?.value;
+        const discovered = result?.result?.value;
+        const fields = discovered?.fields;
         if (!result?.exceptionDetails && Array.isArray(fields) && fields.length > 0 && fields.length <= 32
           && fields.every((f: any, i: number) => f && f.ref === refs[i] && typeof f.label === "string" && f.label.length <= 160
-            && ["text","email","url","tel","number","password"].includes(f.type) && typeof f.multiline === "boolean")) {
-          nativeForm = { document_id: documentId, fields: fields.map((f: any) => ({ref:f.ref,label:f.label,type:f.type,multiline:f.multiline})) };
+            && ["text","email","url","tel","number","password",...(touch.nativeFieldControls ? ["select","checkbox"] : [])].includes(f.type) && typeof f.multiline === "boolean"
+            && (f.autocomplete === undefined || NATIVE_AUTOCOMPLETE.includes(f.autocomplete))
+            && (f.inputmode === undefined || NATIVE_INPUTMODES.includes(f.inputmode))
+            && (f.type !== "checkbox" || typeof f.checked === "boolean")
+            && (f.type !== "select" || Array.isArray(f.options) && f.options.length <= 200 && f.options.every((o:any,i:number) =>
+              Number.isInteger(o.index) && o.index >= 0 && o.index < 200 && (i === 0 || o.index > f.options[i-1].index) && typeof o.label === "string" && o.label.length <= 160)))) {
+          nativeForm = { document_id: documentId, ...(touch.nativeFieldControls && typeof discovered.reason === "string" ? {reason:discovered.reason.slice(0,500)} : {}), fields: fields.map((f: any) => ({ref:f.ref,label:f.label,type:f.type,multiline:f.multiline,
+            ...(touch.nativeFieldHints && f.autocomplete ? {autocomplete:f.autocomplete} : {}),
+            ...(touch.nativeFieldHints && f.inputmode ? {inputmode:f.inputmode} : {}),
+            ...(f.type === "select" ? {options:f.options} : {}), ...(f.type === "checkbox" ? {checked:f.checked} : {})})) };
           touch.nativeForm = {documentId,contextId:world.executionContextId,frameId,loaderId,origin:currentOrigin};
         }
       }
-    } catch { /* Native forms are optional. Never forward provider errors. */ }
+    } catch { /* Never forward provider errors. */ }
+    // A confirmed fill may legitimately rerender the form. Its success receipt
+    // must not be mistaken for a stale request that still needs user input.
+    const nativeFormStale = action.action !== "fill_fields" && touch.nativeFields === true && !!touch.nativeSelection && !nativeForm;
     await check();
     const screenshot = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false }, sid);
     await check();
@@ -295,7 +313,7 @@ export async function privateVaultTakeover(
     const dimension = (offset: number) => [...header.slice(offset, offset + 4)].reduce((n, c) => n * 256 + c.charCodeAt(0), 0);
     const imageWidth = dimension(16), imageHeight = dimension(20);
     if (!imageWidth || !imageHeight || imageWidth > 8192 || imageHeight > 8192 || imageWidth * imageHeight > 16_777_216) throw new Error();
-    return { status: "active", image: `data:image/png;base64,${data}`, width: imageWidth, height: imageHeight, ...(keyboard ? { keyboard } : {}), ...(inputs ? { inputs } : {}), ...(nativeForm ? {native_form:nativeForm} : {}) };
+    return { status: "active", image: `data:image/png;base64,${data}`, width: imageWidth, height: imageHeight, ...(keyboard ? { keyboard } : {}), ...(inputs ? { inputs } : {}), ...(nativeForm ? {native_form:nativeForm} : {}), ...(touch.nativeFieldControls && nativeFormStale ? {native_form_status:"stale" as const} : {}) };
   } catch { delete touch.nativeForm; throw new Error("Private browser takeover could not be completed safely"); }
   finally {
     if (sid && !cdp.attachTarget) {
@@ -326,53 +344,122 @@ export async function releasePrivateVaultTakeover(cdp: Pick<PrivateBrowserCdp, "
 
 // Kept entirely in an isolated world. Neither DOM handles nor field values leave
 // this world during discovery. The host remembers only a document/context binding.
-const NATIVE_FORM_VISIBLE = `e => (e instanceof HTMLInputElement || e instanceof HTMLTextAreaElement)
+const NATIVE_FORM_VISIBLE = `e => (e instanceof HTMLInputElement || e instanceof HTMLTextAreaElement || controls && e instanceof HTMLSelectElement && !e.multiple && e.options.length <= 200 && [...e.options].some(o => !o.disabled && !o.hidden && !o.closest('optgroup[disabled],optgroup[hidden]')))
   && e.ownerDocument === document && e.getRootNode() === document && e.isConnected
   && !e.disabled && !e.matches(':disabled') && !e.readOnly
-  && (e instanceof HTMLTextAreaElement || ["text","search","email","url","tel","number","password"].includes(e.type))
+  && (e instanceof HTMLTextAreaElement || controls && e instanceof HTMLSelectElement || ["text","search","email","url","tel","number","password",...(controls ? ["checkbox"] : [])].includes(e.type))
   && !e.closest('[inert],[hidden],[aria-hidden="true"]')
   && e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})
   && (() => {
     const r = e.getBoundingClientRect();
-    return r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0
-      && r.right <= innerWidth && r.bottom <= innerHeight
-      && document.elementFromPoint(r.left + r.width/2, r.top + r.height/2) === e;
+    if (r.width <= 0 || r.height <= 0) return false;
+    if (r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight) return controls;
+    const x = (Math.max(0,r.left)+Math.min(innerWidth,r.right))/2, y = (Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2;
+    return (controls || r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight)
+      && e.contains(document.elementFromPoint(x,y));
   })()`;
-const NATIVE_FORM_DISCOVER = `function(documentId, origin, refs) {
+const NATIVE_FIELD_STATE = `e => [e.outerHTML, 'value' in e ? e.value : null,
+  'checked' in e ? e.checked : null, e instanceof HTMLSelectElement ? [...e.options].map(o => o.selected) : null]`;
+const NATIVE_FIELD_LABEL = `e => [(e.getAttribute('aria-labelledby') || '').trim().split(/\\s+/).slice(0,16)
+  .map(id => document.getElementById(id)?.textContent || '').join(' ').trim(), e.getAttribute('aria-label'),
+  Array.from(e.labels || [], l => l.textContent || '').join(' ').trim(), e.getAttribute('placeholder')]`;
+const NATIVE_FORM_DISCOVER = `function(documentId, origin, refs, hints, controls, selectionId) {
   if (window.top !== window || location.origin !== origin) return null;
-  const visible = ${NATIVE_FORM_VISIBLE};
+  const visible = ${NATIVE_FORM_VISIBLE}, fieldState = ${NATIVE_FIELD_STATE};
+  const formState = ${NATIVE_FORM_STATE}, fieldLabel = ${NATIVE_FIELD_LABEL};
+  const selection = selectionId ? globalThis.__nanocodexNativeSelection : null;
+  if (selectionId && (!selection || selection.id !== selectionId || selection.document !== document || selection.href !== location.href || !selection.valid()
+    || !selection.entries.every(b => visible(b.el) && JSON.stringify(fieldState(b.el)) === b.state && (b.el.form || b.el.closest('form')) === b.form && formState(b.form) === b.formState))) return {stale:true};
   const entries = [], fields = [];
-  for (const e of document.querySelectorAll('input,textarea')) {
+  const candidates = selection ? selection.entries.map(b => b.el) : document.querySelectorAll(controls ? 'input,textarea,select' : 'input,textarea');
+  for (const e of candidates) {
     if (entries.length === refs.length) break;
     if (!visible(e)) continue;
     const ref = refs[entries.length], multiline = e instanceof HTMLTextAreaElement;
-    const type = multiline || e.type === 'search' ? 'text' : e.type;
-    const label = (Array.from(e.labels || [], l => l.textContent || '').join(' ').trim()
-      || e.getAttribute('aria-label') || e.getAttribute('placeholder') || (type === 'password' ? 'Password' : 'Field ' + (entries.length + 1)))
+    const type = e instanceof HTMLSelectElement ? 'select' : multiline || e.type === 'search' ? 'text' : e.type;
+    const labelledBy = (e.getAttribute('aria-labelledby') || '').trim().split(/\\s+/).slice(0,16)
+      .map(id => document.getElementById(id)?.textContent || '').join(' ').trim();
+    const label = (selection?.entries[entries.length].requestedLabel || labelledBy || e.getAttribute('aria-label') || Array.from(e.labels || [], l => l.textContent || '').join(' ').trim()
+      || e.getAttribute('placeholder') || (type === 'password' ? 'Password' : 'Field ' + (entries.length + 1)))
       .replace(/[\\u0000-\\u001f\\u007f]/g, ' ').slice(0,160);
-    entries.push({ref,element:e,type:e.type,form:e.form,name:e.name});
-    fields.push({ref,label,type,multiline});
+    // Export only recognized purpose hints, never arbitrary attribute contents.
+    // A trailing webauthn token is not an assertion of passkey support.
+    const tokens = (e.autocomplete || '').toLowerCase().trim().split(/\\s+/);
+    if (tokens[tokens.length - 1] === 'webauthn') tokens.pop();
+    const autocomplete = tokens[tokens.length - 1], inputmode = e.inputMode;
+    entries.push({ref,element:e,type:e.type,form:e.form,name:e.name,autocomplete:e.autocomplete,inputmode:e.inputMode,
+      markup:e.outerHTML,labelState:JSON.stringify(fieldLabel(e)),state:JSON.stringify(fieldState(e)),formState:formState(e.form)});
+    fields.push({ref,label,type,multiline,
+      ...(type === 'select' ? {options:[...e.options].flatMap((o,index) => o.disabled || o.hidden || o.closest('optgroup[disabled],optgroup[hidden]') ? [] : [{index,label:o.label.replace(/[\\u0000-\\u001f\\u007f]/g, ' ').slice(0,160)}])} : {}),
+      ...(type === 'checkbox' ? {checked:e.checked} : {}),
+      ...(hints && ${JSON.stringify(NATIVE_AUTOCOMPLETE)}.includes(autocomplete) ? {autocomplete} : {}),
+      ...(hints && ${JSON.stringify(NATIVE_INPUTMODES)}.includes(inputmode) ? {inputmode} : {})});
   }
-  globalThis.__nanocodexNativeForm = {documentId,document,origin,entries};
-  return fields;
+  globalThis.__nanocodexNativeForm = {documentId,document,origin,href:location.href,entries,controls,selectionId};
+  return {fields,...(selection?.reason ? {reason:selection.reason} : {})};
 }`;
 const NATIVE_FORM_FILL = `function(documentId, origin, fields) {
   const bound = globalThis.__nanocodexNativeForm;
   delete globalThis.__nanocodexNativeForm;
-  if (!bound || bound.documentId !== documentId || bound.document !== document
+  if (!bound || bound.documentId !== documentId || bound.document !== document || bound.href !== location.href
     || bound.origin !== origin || location.origin !== origin || window.top !== window) return false;
-  const visible = ${NATIVE_FORM_VISIBLE};
+  const selection = bound.selectionId ? globalThis.__nanocodexNativeSelection : null;
+  if (bound.selectionId && (!selection || selection.id !== bound.selectionId || !selection.valid())) return false;
+  const controls = bound.controls, visible = ${NATIVE_FORM_VISIBLE}, fieldState = ${NATIVE_FIELD_STATE};
+  const formState = ${NATIVE_FORM_STATE}, fieldLabel = ${NATIVE_FIELD_LABEL};
   const valid = b => b && visible(b.element) && b.element.type === b.type
-    && b.element.form === b.form && b.element.name === b.name && location.origin === origin;
+    && b.element.form === b.form && b.element.name === b.name && JSON.stringify(fieldLabel(b.element)) === b.labelState
+    && b.element.autocomplete === b.autocomplete && b.element.inputMode === b.inputmode && location.origin === origin;
   const selected = fields.map(f => ({field:f,binding:bound.entries.find(b => b.ref === f.ref)}));
-  if (!selected.every(s => valid(s.binding))) return false;
+  const validValue = (e, value) => {
+    if (e instanceof HTMLSelectElement) {
+      if (!/^(0|[1-9][0-9]{0,2})$/.test(value)) return false;
+      const o = e.options[Number(value)];
+      return !!o && !o.disabled && !o.hidden && !o.closest('optgroup[disabled],optgroup[hidden]');
+    }
+    return e.type !== 'checkbox' || ['true','false'].includes(value);
+  };
+  if (!selected.every(s => valid(s.binding) && validValue(s.binding.element,s.field.value)
+    && (!controls || JSON.stringify(fieldState(s.binding.element)) === s.binding.state && formState(s.binding.form) === s.binding.formState))) return false;
+  // Only the submitted controls may advance the selected sheet's baseline.
+  // An input handler that changes hidden state or destinations must stale it.
+  const expectedForms = new Map();
+  if (selection) for (const b of selection.entries) if (b.form && !expectedForms.has(b.form))
+    expectedForms.set(b.form, {state:JSON.parse(b.formState), elements:[...b.form.elements]});
   for (const {field,binding} of selected) {
-    if (!valid(binding)) return false;
+    if (!valid(binding) || controls && binding.element.outerHTML !== binding.markup) return false;
     const e = binding.element;
-    const prototype = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(e, field.value);
+    if (e.type === 'checkbox') {
+      const checked = field.value === 'true';
+      // Frameworks such as React derive controlled checkbox changes from click.
+      // Native activation dispatches the matching input/change events once;
+      // this is a field operation, never a coordinate click or form submission.
+      if (e.checked !== checked) HTMLElement.prototype.click.call(e);
+      if (!valid(binding) || e.checked !== checked) return false;
+      continue;
+    }
+    const prototype = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : e instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+    const property = e instanceof HTMLSelectElement ? 'selectedIndex' : 'value';
+    const value = e instanceof HTMLSelectElement ? Number(field.value) : field.value;
+    Object.getOwnPropertyDescriptor(prototype, property).set.call(e, value);
     e.dispatchEvent(new Event('input', {bubbles:true,composed:true}));
+    if (!valid(binding)) return false;
     e.dispatchEvent(new Event('change', {bubbles:true}));
+  }
+  if (selection) {
+    for (const b of selection.entries) {
+      const previous = JSON.parse(b.state), current = fieldState(b.el);
+      if (previous[0] !== current[0]) continue;
+      b.state = JSON.stringify(current);
+      if (!b.form) continue;
+      const expected = expectedForms.get(b.form);
+      for (const {binding} of selected) {
+        const index = expected.elements.indexOf(binding.element);
+        if (index >= 0 && expected.state[1][index][0] === binding.element.outerHTML)
+          expected.state[1][index] = fieldState(binding.element);
+      }
+      if (JSON.stringify(expected.state) === formState(b.form)) b.formState = formState(b.form);
+    }
   }
   return true;
 }`;

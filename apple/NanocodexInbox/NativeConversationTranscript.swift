@@ -231,7 +231,16 @@ struct NativeConversationTranscript: UIViewRepresentable {
             let insetChanged = view.contentInset.top != next.topInset || view.contentInset.bottom != next.bottomInset
             let structural = ids != newIDs
             let contentChanged = next.rows.contains { hostedRows[$0.id]?.revision != $0.revision }
-            if structural { retainSurvivingReadingPoint(in: Set(newIDs)) }
+            if structural {
+                // A gesture can settle after its last scrolling callback. Keep
+                // the currently visible position when history is prepended,
+                // rather than restoring an earlier overscroll/bounce offset.
+                if case .reading = viewport,
+                   !view.isTracking, !view.isDragging, !view.isDecelerating {
+                    captureReadingPoint()
+                }
+                retainSurvivingReadingPoint(in: Set(newIDs))
+            }
             // Commit row models at the data source transaction boundary, keeping
             // cell providers and layout delegates on the same snapshot.
             let commitRows = { [self] in

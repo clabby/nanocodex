@@ -158,8 +158,8 @@ fn socket_path(root: &Path) -> PathBuf {
     }
     digest.update(std::env::var("COMPUTERNAME").unwrap_or_default().as_bytes());
     PathBuf::from(format!(
-        r"\\.\pipe\nanocodex-recording-{:x}",
-        digest.finalize()
+        r"\\.\pipe\nanocodex-recording-{}",
+        hex::encode(digest.finalize())
     ))
 }
 

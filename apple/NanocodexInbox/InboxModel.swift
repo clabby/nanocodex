@@ -1956,6 +1956,18 @@ final class InboxModel: ObservableObject {
         guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
         return receipt
     }
+    func browserLoginApproved(intake: VaultIntake, account: UUID) async throws -> Bool {
+        #if DEBUG && targetEnvironment(simulator)
+        if ProcessInfo.processInfo.arguments.contains("--browser-native-form-ui-fixture") {
+            guard generation == account else { throw APIError.invalidCredential }
+            return try await BrowserNativeFormUITransport.shared.loginApproved(intake: intake)
+        }
+        #endif
+        guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
+        let approved = try await client.browserLoginApproved(intake: intake)
+        guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
+        return approved
+    }
     func browserTakeover(intake: VaultIntake, action: [String: JSON], account: UUID) async throws -> BrowserTakeoverFrame {
         #if DEBUG && targetEnvironment(simulator)
         if ProcessInfo.processInfo.arguments.contains("--browser-native-form-ui-fixture") {
@@ -1973,14 +1985,25 @@ final class InboxModel: ObservableObject {
         try await client.submitBrowserVerification(intake: intake, code: code)
         guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
     }
-    func publishBrowserVerificationReceipt(intake: VaultIntake, agentID: String, account: UUID, cancelled: Bool = false) {
+    func publishBrowserVerificationReceipt(intake: VaultIntake, agentID: String, account: UUID, cancelled: Bool = false, inputOutcome: String? = nil) {
+        #if DEBUG && targetEnvironment(simulator)
+        if ProcessInfo.processInfo.arguments.contains("--browser-native-form-ui-fixture") {
+            BrowserNativeFormUITransport.shared.inputOutcome = inputOutcome ?? "finished"
+            return
+        }
+        #endif
         guard generation == account, connected, !isDemo, intake.agentID == agentID,
               let challenge = intake.challengeID, cards.contains(where: { $0.id == agentID }) else { return }
-        let value: JSON = intake.operation == "browser_login" ? .object(["type": .string("browser_login_receipt"), "request_id": .string(challenge), "status": .string(cancelled ? "cancelled" : "finished")]) : .object(["type": .string(intake.operation == "browser_takeover" ? "browser_vault_takeover_receipt" : "browser_vault_challenge_receipt"),
+        var value: JSON = intake.operation == "browser_login" ? .object(["type": .string("browser_login_receipt"), "request_id": .string(challenge), "status": .string(cancelled ? "cancelled" : "finished")]) : .object(["type": .string(intake.operation == "browser_takeover" ? "browser_vault_takeover_receipt" : "browser_vault_challenge_receipt"),
             "status": .string(intake.operation == "browser_takeover" ? "finished" : "submitted"), "challenge_id": .string(challenge)])
+        if inputOutcome == "page_changed", !cancelled, case .object(var receipt) = value {
+            receipt["input_outcome"] = .string("page_changed")
+            value = .object(receipt)
+        }
         let predecessor = pending.last(where: { $0.agentID == agentID })?.id ?? (focused?.id == agentID ? focusedTurn : "")
         let message = PendingMessage(agentID: agentID, input: value.pretty, predecessor: predecessor,
-            id: intake.operation == "browser_login" ? "browser-login-\(challenge)-\(cancelled ? "cancelled" : "finished")" : UUID().uuidString)
+            id: intake.operation == "browser_login" ? "browser-login-\(challenge)-\(cancelled ? "cancelled" : "finished")"
+                : intake.operation == "browser_takeover" ? "browser-takeover-\(challenge)-finished" : UUID().uuidString)
         guard !pending.contains(where: { $0.id == message.id }) else { return }
         pending.append(message); busy.insert(agentID); persist()
         Task { await submit(message, epoch: account) }

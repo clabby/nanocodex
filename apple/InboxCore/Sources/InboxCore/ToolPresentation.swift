@@ -54,7 +54,7 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
         generatedIsComputerScreen = Self.isComputerCapture(name: attributedName, family: family, arguments: Self.decoded(arguments))
         secureInputEligible = family == "request_secure_input"
         nativeSecureInputEligible = family == "request_native_secure_input"
-        vaultIntakeEligible = family == "request_browser_login" || family == "request_vault_intake" || family == "browser_vault_request_challenge" || family == "browser_vault_request_takeover"
+        vaultIntakeEligible = family == "request_browser_login" || family == "request_browser_login_input" || family == "request_vault_intake" || family == "browser_vault_request_challenge" || family == "browser_vault_request_takeover"
         terminalCommand = ["exec_command", "write_stdin"].contains(family)
         generatedIncludesText = ["exec", "wait"].contains(family)
         generatedIsInspection = ToolOutputVisibility.isInspection(name: family, arguments: arguments.string.isEmpty ? arguments.pretty : arguments.string)

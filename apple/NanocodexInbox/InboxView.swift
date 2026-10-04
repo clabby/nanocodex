@@ -3602,14 +3602,14 @@ private struct VaultIntakeCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(intake.operation == "browser_login" ? "Sign in privately" : intake.operation == "browser_takeover" ? "Control browser privately" : intake.operation == "browser_verification" ? (verificationSubmitted ? "Code submitted" : "Verify browser login") : (receipt == nil ? "Add to Vault securely" : "Saved to Vault"), systemImage: "lock.shield")
+            Label(intake.operation == "browser_login" ? "Sign in privately" : intake.operation == "browser_takeover" ? "Continue privately" : intake.operation == "browser_verification" ? (verificationSubmitted ? "Code submitted" : "Verify browser login") : (receipt == nil ? "Add to Vault securely" : "Saved to Vault"), systemImage: "lock.shield")
                 .font(.headline)
             if verificationSubmitted { Text("Browser verification is pending.") } else if let receipt {
                 Text(receipt.name).font(.subheadline)
             } else {
                 if !intake.name.isEmpty { Text(intake.name).font(.subheadline) }
                 if let origin = intake.origin { Text(origin).font(.caption).textSelection(.enabled) }
-                Text(intake.operation == "browser_login" ? "Sign in in the secure pane. Your password and codes stay out of chat and are not saved to Vault." : intake.operation == "browser_takeover" ? "Control the browser privately. The screen and input stay out of chat." : intake.operation == "browser_verification" ? "The code goes directly to this browser session. It stays out of chat and is not saved to Vault." : "Your information goes directly to your encrypted Vault. It stays out of chat.")
+                Text(intake.operation == "browser_login" ? "Enter sign-in details in the secure form. Your password and codes stay out of chat and are not saved to Vault." : intake.operation == "browser_takeover" ? "Enter the requested details in a secure form, then hand back to the agent. Your input stays out of chat." : intake.operation == "browser_verification" ? "The code goes directly to this browser session. It stays out of chat and is not saved to Vault." : "Your information goes directly to your encrypted Vault. It stays out of chat.")
                     .font(.subheadline).foregroundStyle(.secondary)
                 Button("Open secure form") { receiptAgentID = model.focused?.id ?? ""; showingForm = true }
                     .buttonStyle(.borderedProminent)
@@ -3625,11 +3625,8 @@ private struct VaultIntakeCard: View {
                 showingForm = true
             }
         }
-        .fullScreenCover(isPresented: Binding(get: { showingForm && intake.operation == "browser_takeover" }, set: { showingForm = $0 })) {
-            BrowserTakeoverSheet(model: model, intake: intake)
-        }
-        .sheet(isPresented: Binding(get: { showingForm && intake.operation != "browser_takeover" }, set: { showingForm = $0 })) {
-            if intake.operation == "browser_login" {
+        .sheet(isPresented: $showingForm) {
+            if intake.operation == "browser_login" || intake.operation == "browser_takeover" {
                 BrowserTakeoverSheet(model: model, intake: intake)
             } else if intake.operation == "browser_verification" {
                 BrowserVerificationSheet(model: model, intake: intake, agentID: receiptAgentID) { verificationSubmitted = true }
@@ -3816,32 +3813,81 @@ private struct BrowserTakeoverSheet: View {
     @State private var drafts: [String: String] = [:]
     @State private var editingFields = false
     @State private var prefersViewport = false
+    @State private var detent: PresentationDetent = .medium
+    @State private var fieldsFilled = false
+    @State private var nativeFieldControlsEnabled = true
+    @State private var nativeFieldHintsEnabled = true
+    @State private var staleForm = false
     @State private var nativeFieldsEnabled = true
     @State private var nativeFieldsConfirmed = false
     @State private var failure: String?
     @State private var queue: [[String: JSON]] = []
     @State private var submission: Task<Void, Never>?
     @State private var observing: Task<Void, Never>?
+    @State private var responseContinuation: CheckedContinuation<Bool, Never>?
+    @State private var responseScenePhase: ScenePhase = .inactive
     @State private var generation = UUID()
     @State private var viewport = CGSize(width: 390, height: 700)
     @State private var finishing = false
     @State private var touching = false
     @State private var reviewed = false
+    @State private var loginStateConfirmed = false
     @State private var currentOrigin: String?
     private var login: Bool { intake.operation == "browser_login" }
 
     private func clear() {
         generation = UUID(); submission?.cancel(); submission = nil
+        responseContinuation?.resume(returning: false); responseContinuation = nil
         queue.removeAll(); screen = nil; keyboard = nil; inputs = []; keyboardVisible = false
         nativeForm = nil; drafts.removeAll(); editingFields = false; prefersViewport = false
         currentOrigin = nil; finishing = false; touching = false
     }
     private var busy: Bool { submission != nil || !queue.isEmpty || finishing }
+    private func pause() {
+        clear()
+        if failure == nil {
+            failure = fieldsFilled ? "Fields were filled. Hand back to continue without refilling." : "Private view paused. Refresh to continue."
+        }
+    }
+    // AutoFill and other system UI can make the scene inactive while HTTP
+    // completes. Keep the result and its busy state until active, so follow-up
+    // observe/finish actions cannot be silently dropped by enqueue's guard.
+    // Backgrounding/disappearance invalidates the generation and wakes the
+    // suspended task through clear(), without replaying an uncertain action.
+    @MainActor private func readyToApplyResponse(_ token: UUID) async -> Bool {
+        guard !Task.isCancelled, generation == token, responseScenePhase != .background,
+              account == model.vaultIntakeAccount else { return false }
+        while responseScenePhase == .inactive {
+            let resumed = await withCheckedContinuation { continuation in
+                responseContinuation = continuation
+            }
+            guard resumed, !Task.isCancelled, generation == token,
+                  account == model.vaultIntakeAccount else { return false }
+        }
+        return !Task.isCancelled && generation == token && responseScenePhase == .active
+            && account == model.vaultIntakeAccount
+    }
+    private func checkLoginState() {
+        guard !busy, scenePhase == .active else { return }
+        failure = nil
+        let token = generation
+        submission = Task { @MainActor in
+            do {
+                let approved = try await model.browserLoginApproved(intake: intake, account: account)
+                guard await readyToApplyResponse(token) else { return }
+                reviewed = approved; loginStateConfirmed = true; submission = nil
+                if approved { observe(configureViewport: true) }
+            } catch {
+                guard await readyToApplyResponse(token) else { return }
+                clear(); failure = "Couldn’t check this browser session. Try again to continue."
+            }
+        }
+    }
     private func receiveForm(_ form: BrowserNativeForm?) {
         if nativeForm != form { drafts.removeAll() }
         nativeForm = form
         if form != nil { nativeFieldsConfirmed = true }
-        if form == nil { editingFields = false; prefersViewport = false }
+        if form == nil { editingFields = false }
         else if !prefersViewport && !touching && queue.isEmpty {
             editingFields = true; keyboardVisible = false
         }
@@ -3850,13 +3896,22 @@ private struct BrowserTakeoverSheet: View {
         Binding(get: { drafts[field.id] ?? "" }, set: { value in
             guard editingFields, !busy, scenePhase == .active,
                   account == model.vaultIntakeAccount, nativeForm?.fields.contains(field) == true else { return }
-            drafts[field.id] = value
+            if field.type == "select" && value.isEmpty { drafts.removeValue(forKey: field.id) }
+            else { drafts[field.id] = value }
         })
     }
+    private func submissionValues(_ form: BrowserNativeForm) -> [String: String] {
+        var values = drafts
+        // The fill button explicitly confirms the displayed checkbox state, even unchanged.
+        for field in form.fields where field.type == "checkbox" && values[field.id] == nil {
+            values[field.id] = field.checked == true ? "true" : "false"
+        }
+        return values
+    }
     private func fillFields() {
-        guard !busy, let form = nativeForm, editingFields else { return }
+        guard !busy, !fieldsFilled, let form = nativeForm, editingFields else { return }
         do {
-            let action = try form.fillAction(values: drafts)
+            let action = try form.fillAction(values: submissionValues(form))
             drafts.removeAll()
             enqueue(action)
         } catch {
@@ -3864,13 +3919,19 @@ private struct BrowserTakeoverSheet: View {
         }
     }
     private func showViewport() {
+        guard !busy else { return }
         drafts.removeAll(); editingFields = false; prefersViewport = true; keyboardVisible = false
+        detent = .large
     }
     private func observe(configureViewport: Bool = false) {
-        guard !editingFields else { return }
+        guard !editingFields, !fieldsFilled, !staleForm else { return }
         // Poll pixels without resizing the remote page as the native keyboard opens.
         var action: [String: JSON] = ["action": .string("observe")]
-        if nativeFieldsEnabled { action["native_fields"] = .bool(true) }
+        if nativeFieldsEnabled {
+            action["native_fields"] = .bool(true)
+            if nativeFieldHintsEnabled { action["native_field_hints"] = .bool(true) }
+            if nativeFieldControlsEnabled { action["native_field_controls"] = .bool(true) }
+        }
         if configureViewport {
             action["viewport"] = .object([
                 "width": .number(Double(min(1920, max(240, viewport.width)).rounded())),
@@ -3902,11 +3963,15 @@ private struct BrowserTakeoverSheet: View {
         submission = Task { @MainActor in
             do {
                 let frame = try await model.browserTakeover(intake: intake, action: action, account: account)
-                guard !Task.isCancelled, generation == token, scenePhase == .active,
-                      account == model.vaultIntakeAccount else { return }
+                guard await readyToApplyResponse(token) else { return }
                 if action["action"] == .string("observe"), action["native_fields"] == .bool(true) { nativeFieldsConfirmed = true }
-                if action["action"] == .string("fill_fields") { showViewport() }
                 switch frame {
+                case .staleForm(let origin):
+                    clear(); currentOrigin = origin
+                    if action["action"] == .string("fill_fields") { fieldsFilled = true }
+                    else { staleForm = true }
+                    enqueue(["action": .string("finish")])
+                    return
                 case .approved:
                     guard login, action["action"] == .string("approve") else { throw APIError.invalidResponse }
                     reviewed = true; failure = nil; submission = nil; observe(configureViewport: true); return
@@ -3925,7 +3990,7 @@ private struct BrowserTakeoverSheet: View {
                     if hint != nil { keyboardVisible = true }
                 case .finished:
                     guard action["action"] == .string("finish") else { throw APIError.invalidResponse }
-                    model.publishBrowserVerificationReceipt(intake: intake, agentID: intake.agentID ?? "", account: account)
+                    model.publishBrowserVerificationReceipt(intake: intake, agentID: intake.agentID ?? "", account: account, inputOutcome: staleForm ? "page_changed" : nil)
                     clear(); dismiss(); return
                 case .active(let data, _, _):
                     guard let image = UIImage(data: data) else { throw APIError.invalidResponse }
@@ -3935,119 +4000,243 @@ private struct BrowserTakeoverSheet: View {
                     screen = image; keyboard = hint; inputs = regions; receiveForm(nil)
                     if hint != nil { keyboardVisible = true }
                 }
+                if action["action"] == .string("fill_fields") {
+                    // Only a confirmed fill can hand the existing session back to the agent.
+                    // Finish releases user control; it does not submit or verify sign-in.
+                    fieldsFilled = true
+                    submission = nil
+                    enqueue(["action": .string("finish")])
+                    return
+                }
                 submission = nil; drain()
             } catch {
-                guard generation == token, !Task.isCancelled else { return }
+                guard await readyToApplyResponse(token) else { return }
                 // Old workers reject the new observation key before taking any action.
-                // Retry only this read-only capability probe, once for this lease.
+                // Downgrade only the read-only probe: controls, hints, then native fields.
+                // Capability choices survive refresh for the lifetime of this sheet.
                 if nativeFieldsEnabled, !nativeFieldsConfirmed,
                    action["action"] == .string("observe"), action["native_fields"] == .bool(true),
                    (error as? APIError) == .http(400) {
-                    nativeFieldsEnabled = false
+                    var legacy = action
+                    if action["native_field_controls"] == .bool(true) {
+                        nativeFieldControlsEnabled = false
+                        legacy.removeValue(forKey: "native_field_controls")
+                    } else if action["native_field_hints"] == .bool(true) {
+                        nativeFieldHintsEnabled = false
+                        legacy.removeValue(forKey: "native_field_hints")
+                    } else {
+                        nativeFieldsEnabled = false
+                        legacy.removeValue(forKey: "native_fields")
+                    }
                     clear()
-                    var legacy = action; legacy.removeValue(forKey: "native_fields")
                     enqueue(legacy)
                     return
                 }
-                clear(); failure = "Couldn’t confirm the action. Refresh before continuing."
+                clear()
+                failure = staleForm ? "The website changed, but handoff wasn’t confirmed. Hand back again so the agent can refresh the request." : fieldsFilled
+                    ? "Fields were filled, but handoff wasn’t confirmed. Hand back again to continue without refilling."
+                    : "Couldn’t confirm the action. Refresh before continuing."
             }
         }
     }
-    private func nativeKeyboardType(_ type: String) -> UIKeyboardType {
-        switch type {
+    private func nativeKeyboardType(_ field: BrowserNativeField) -> UIKeyboardType {
+        switch field.inputmode ?? field.type {
         case "email": return .emailAddress
         case "url": return .URL
         case "tel": return .phonePad
-        case "number": return .decimalPad
+        case "numeric": return .numberPad
+        case "number", "decimal": return .decimalPad
         default: return .default
+        }
+    }
+    private func nativeContentType(_ field: BrowserNativeField) -> UITextContentType? {
+        switch field.autocomplete {
+        case "username": return .username
+        case "current-password": return .password
+        case "new-password": return .newPassword
+        case "one-time-code": return .oneTimeCode
+        case "email": return .emailAddress
+        case "tel": return .telephoneNumber
+        case "cc-number": return .creditCardNumber
+        case "cc-exp": return .creditCardExpiration
+        case "cc-exp-month": return .creditCardExpirationMonth
+        case "cc-exp-year": return .creditCardExpirationYear
+        case "cc-csc": return .creditCardSecurityCode
+        case "name": return .name
+        case "given-name": return .givenName
+        case "family-name": return .familyName
+        case "street-address": return .fullStreetAddress
+        case "postal-code": return .postalCode
+        default:
+            switch field.type {
+            case "password": return .password
+            case "email": return .emailAddress
+            case "tel": return .telephoneNumber
+            case "url": return .URL
+            default: return nil
+            }
         }
     }
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if login && !reviewed {
+                if login && !loginStateConfirmed {
+                    Form {
+                        Section {
+                            Label(intake.origin ?? "Private browser", systemImage: "lock.shield")
+                            if failure == nil { ProgressView("Opening secure form…") }
+                            else { Button("Try again", action: checkLoginState).disabled(busy) }
+                            Button("Cancel") { enqueue(["action": .string("cancel")]) }.disabled(busy)
+                        }
+                    }
+                } else if login && !reviewed {
                     BrowserLoginReview(origin: intake.origin ?? "", sites: intake.allowedOrigins ?? [], busy: submission != nil,
                         approve: { failure = nil; enqueue(["action": .string("approve")]) },
                         cancel: { enqueue(["action": .string("cancel")]) })
+                } else if fieldsFilled {
+                    Form {
+                        Section {
+                            Label("Fields filled", systemImage: "checkmark.circle")
+                            Text("Hand back to the agent to continue in this browser. Sign-in still needs verification.")
+                                .foregroundStyle(.secondary)
+                            Button("Hand back to agent") { enqueue(["action": .string("finish")]) }
+                                .disabled(busy || scenePhase != .active)
+                                .accessibilityIdentifier("browser-native-handback")
+                        }
+                    }
+                } else if staleForm {
+                    Form {
+                        Section {
+                            Label("The website changed", systemImage: "arrow.triangle.2.circlepath")
+                            Text(busy ? "Handing back so the agent can check the current page…" : "Hand back so the agent can check the current page and request the right fields.")
+                                .foregroundStyle(.secondary)
+                            Button("Hand back to agent") { enqueue(["action": .string("finish")]) }
+                                .disabled(busy || scenePhase != .active)
+                                .accessibilityIdentifier("browser-stale-handback")
+                        }
+                    }
                 } else if editingFields, let form = nativeForm {
                     Form {
                         Section {
+                            Label(currentOrigin ?? intake.origin ?? "Private browser", systemImage: "lock.shield")
+                                .font(.subheadline).textSelection(.enabled)
+                        } header: { Text("Website") }
+                        if let reason = form.reason {
+                            Section("Agent request") { Text(reason).fixedSize(horizontal: false, vertical: true) }
+                        }
+                        Section {
                             ForEach(form.fields) { field in
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text(field.label).font(.subheadline)
-                                    if field.type == "password" {
+                                    if field.type != "select" && field.type != "checkbox" { Text(field.label).font(.subheadline) }
+                                    if field.type == "select" {
+                                        Picker(field.label, selection: fieldBinding(field)) {
+                                            Text("Choose…").tag("")
+                                            ForEach(field.options) { option in
+                                                Text(option.label.isEmpty ? "Option \(option.index + 1)" : option.label).tag(String(option.index))
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .accessibilityIdentifier("browser-native-choice:" + field.label)
+                                    } else if field.type == "checkbox" {
+                                        Toggle(field.label, isOn: Binding(
+                                            get: { drafts[field.id].map { $0 == "true" } ?? field.checked ?? false },
+                                            set: { fieldBinding(field).wrappedValue = $0 ? "true" : "false" }))
+                                            .accessibilityIdentifier("browser-native-check:" + field.label)
+                                    } else if field.type == "password" {
                                         SecureField(field.label, text: fieldBinding(field))
-                                            .textContentType(.password)
+                                            .textContentType(nativeContentType(field))
+                                            .keyboardType(nativeKeyboardType(field))
                                     } else if field.multiline {
                                         TextEditor(text: fieldBinding(field)).frame(minHeight: 88)
                                             .accessibilityLabel(field.label)
+                                            .textContentType(nativeContentType(field))
+                                            .keyboardType(nativeKeyboardType(field))
                                     } else {
                                         TextField(field.label, text: fieldBinding(field))
-                                            .keyboardType(nativeKeyboardType(field.type))
+                                            .keyboardType(nativeKeyboardType(field))
+                                            .textContentType(nativeContentType(field))
                                             .submitLabel(.next)
                                     }
                                 }
                                 .autocorrectionDisabled().textInputAutocapitalization(.never)
                             }
                         } footer: {
-                            Text("Fill these fields, then use the website’s button to continue. Values stay out of chat and are not saved to Vault.")
+                            Text("Details go directly to this website and stay out of chat. They are not saved to Vault. The agent will continue in the same browser and check the result.")
                         }
                         Section {
-                            Button("Fill fields", action: fillFields)
-                                .disabled(drafts.isEmpty)
+                            Button("Fill & hand back", action: fillFields)
+                                .disabled((try? form.fillAction(values: submissionValues(form))) == nil)
                                 .accessibilityIdentifier("browser-native-fill")
-                            Button("Use website instead", action: showViewport)
+                            Button("Show website", action: showViewport)
+                                .accessibilityIdentifier("browser-show-website")
                         }
                     }
                     .disabled(busy || scenePhase != .active)
                     .accessibilityIdentifier("browser-native-form")
+                } else if prefersViewport {
+                    GeometryReader { geometry in
+                        PrivateBrowserCanvas(image: screen, keyboard: keyboard, inputs: inputs,
+                            keyboardVisible: keyboardVisible && failure == nil && !finishing && scenePhase == .active,
+                            enabled: screen != nil && failure == nil && !finishing && scenePhase == .active,
+                            send: enqueue, showKeyboard: { hint in keyboard = hint; keyboardVisible = true })
+                            .onAppear { viewport = geometry.size }
+                            .onChange(of: geometry.size) { _, size in if !keyboardVisible { viewport = size } }
+                    }
                 } else {
-                GeometryReader { geometry in
-                    PrivateBrowserCanvas(image: screen, keyboard: keyboard, inputs: inputs,
-                        keyboardVisible: keyboardVisible && failure == nil && !finishing && scenePhase == .active,
-                        enabled: screen != nil && failure == nil && !finishing && scenePhase == .active,
-                        send: enqueue, showKeyboard: { hint in keyboard = hint; keyboardVisible = true })
-                        .onAppear { viewport = geometry.size }
-                        .onChange(of: geometry.size) { _, size in if !keyboardVisible { viewport = size } }
-                }
+                    Form {
+                        Section {
+                            Label(currentOrigin ?? intake.origin ?? "Private browser", systemImage: "lock.shield")
+                            if screen != nil {
+                                Text("No supported fields are available here. Show the website for a CAPTCHA or another website-only step.")
+                                    .foregroundStyle(.secondary)
+                                Button("Show website", action: showViewport)
+                                    .disabled(busy || failure != nil)
+                                    .accessibilityIdentifier("browser-show-website")
+                            } else if failure == nil { ProgressView("Opening secure form…") }
+                        }
+                    }
                 }
                 if let failure { Text(failure).font(.footnote).foregroundStyle(.red).padding(8) }
             }
-            .background(editingFields || (login && !reviewed) ? Color(uiColor: .systemBackground) : Color.black).privacySensitive()
+            .background(prefersViewport ? Color.black : Color(uiColor: .systemBackground)).privacySensitive()
             .overlay {
-                if screen == nil && failure == nil && (!login || reviewed) {
+                if prefersViewport && screen == nil && failure == nil && (!login || reviewed) {
                     ProgressView("Opening private browser…").tint(.white).foregroundStyle(.white)
                 }
             }
-            .navigationTitle(currentOrigin ?? (login && !reviewed ? "Private sign-in" : intake.origin ?? "Private browser"))
+            .navigationTitle(prefersViewport ? (currentOrigin ?? intake.origin ?? "Private browser") : (login ? "Private sign-in" : "Private input"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    if !login || reviewed { Button("Done") { enqueue(["action": .string("finish")]) }
+                    if (!login || reviewed) && !fieldsFilled { Button("Hand back") { enqueue(["action": .string("finish")]) }
                         .disabled(busy || scenePhase != .active) }
                 }
                 ToolbarItemGroup(placement: .bottomBar) {
-                    if !login || reviewed {
-                    if login { Button("Cancel") { enqueue(["action": .string("cancel")]) }.disabled(busy) }
-                    Button { guard submission == nil else { return }; failure = nil; observe(configureViewport: true) } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }.disabled(busy || touching || editingFields)
+                    if login && reviewed { Button("Cancel") { enqueue(["action": .string("cancel")]) }.disabled(busy) }
+                    if (!login || reviewed) && !fieldsFilled && !staleForm {
+                        Button { guard submission == nil else { return }; failure = nil; observe(configureViewport: true) } label: {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }.disabled(busy || touching || editingFields)
+                    }
                     Spacer()
                     if nativeForm != nil && !editingFields {
-                        Button("Fields") { editingFields = true; keyboardVisible = false }
+                        Button("Fields") { editingFields = true; prefersViewport = false; keyboardVisible = false }
                             .disabled(busy || touching || failure != nil)
                     }
-                    Button { keyboardVisible.toggle() } label: { Label("Keyboard", systemImage: "keyboard") }
-                        .disabled(screen == nil || failure != nil || finishing || editingFields)
+                    if prefersViewport {
+                        Button { keyboardVisible.toggle() } label: { Label("Keyboard", systemImage: "keyboard") }
+                            .disabled(screen == nil || failure != nil || finishing || editingFields)
                     }
                 }
             }
             .overlay { if scenePhase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
         }
-        .presentationDetents([.large]).presentationDragIndicator(.hidden)
+        .presentationDetents([.medium, .large], selection: $detent).presentationDragIndicator(.visible)
         .interactiveDismissDisabled()
         .task {
-            account = model.vaultIntakeAccount; if !login { observe(configureViewport: true) }
+            account = model.vaultIntakeAccount
+            responseScenePhase = scenePhase
+            if login { checkLoginState() } else { observe(configureViewport: true) }
             observing = Task { @MainActor in
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(1))
@@ -4058,7 +4247,22 @@ private struct BrowserTakeoverSheet: View {
         }
         .onDisappear { observing?.cancel(); clear() }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { clear(); if failure == nil { failure = "Private view paused. Refresh to continue." } }
+            responseScenePhase = phase
+            if phase == .background { pause() }
+            else if phase == .active {
+                let continuation = responseContinuation
+                responseContinuation = nil
+                continuation?.resume(returning: true)
+                if !busy && failure == nil && screen == nil {
+                    if login && !loginStateConfirmed { checkLoginState() }
+                    else if !login || reviewed { observe(configureViewport: true) }
+                }
+            }
+        }
+        // Clear only after backgrounding; transient AutoFill/system UI must
+        // preserve drafts while the inactive privacy overlay hides them.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            pause()
         }
         .onChange(of: model.vaultIntakeAccount) { _, _ in clear(); dismiss() }
         .onChange(of: model.connected) { _, connected in if !connected { clear(); dismiss() } }
@@ -4082,9 +4286,9 @@ private struct BrowserLoginReview: View {
                 ForEach(sites, id: \.self) { Text($0) }
             }
             Section {
-                Text("When you tap Done, the agent checks your sign-in and continues in this browser.")
+                Text("Fill the secure form and hand back. The agent continues in this browser and checks whether sign-in succeeded.")
                     .font(.footnote).foregroundStyle(.secondary)
-                Button("Continue to private login", action: approve).disabled(busy)
+                Button("Continue to secure form", action: approve).disabled(busy)
                     .accessibilityIdentifier("browser-login-approve")
                 Button("Cancel", role: .cancel, action: cancel).disabled(busy)
                     .accessibilityIdentifier("browser-login-cancel")
@@ -4729,38 +4933,85 @@ private struct SecureBrowserField: View {
 struct BrowserNativeFormUIFixture: View {
     @ObservedObject private var transport = BrowserNativeFormUITransport.shared
     @State private var showing = false
-    private let intake = VaultIntake.parse(.object([
+    @Environment(\.scenePhase) private var scenePhase
+    private var intake: VaultIntake {
+        if ProcessInfo.processInfo.arguments.contains("--browser-native-form-login") {
+            return VaultIntake.parse(BrowserNativeFormUITransport.loginDescription)!
+        }
+        return VaultIntake.parse(.object([
         "type": .string("browser_vault_takeover"), "status": .string("input_required"),
         "challenge_id": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "agent_id": .string("fixture"),
         "origin": .string("https://example.com"), "expires_at": .number(4_000_000_000_000)
     ]))!
-    var body: some View {
-        Button("Open native browser form") { showing = true }
-            .sheet(isPresented: $showing) {
-                BrowserTakeoverSheet(model: .shared, intake: intake)
-                    .safeAreaInset(edge: .top) {
-                        VStack {
-                            Text("Observations: \(transport.observations)").accessibilityIdentifier("native-fixture-observations")
-                            Text("Capability probes: \(transport.probes)").accessibilityIdentifier("native-fixture-probes")
-                            Text("Fills: \(transport.fills) · Site submits: \(transport.submits)")
-                                .accessibilityIdentifier("native-fixture-actions")
-                            if transport.filled { Text("Synthetic fields matched").accessibilityIdentifier("native-fixture-filled") }
-                        }.font(.caption).padding(4).background(.background)
-                    }
+    }
+    private var evidence: some View {
+        VStack {
+            if ProcessInfo.processInfo.arguments.contains("--browser-native-form-inactive-response") {
+                Text("Responses delivered inactive: \(transport.inactiveResponses)")
+                    .accessibilityIdentifier("native-fixture-inactive-responses")
+                HStack {
+                    Button("Fixture inactive") { transport.phaseOverride = .inactive }
+                    Button("Fixture active") { transport.phaseOverride = .active }
+                    Button("Fixture background") { transport.phaseOverride = .background }
+                }.font(.caption2)
             }
+            Text("Input outcome: \(transport.inputOutcome)").accessibilityIdentifier("native-fixture-outcome")
+            Text("Observations: \(transport.observations)").accessibilityIdentifier("native-fixture-observations")
+            Text("Capability probes: \(transport.probes)").accessibilityIdentifier("native-fixture-probes")
+            Text("Fills: \(transport.fills) · Site submits: \(transport.submits) · Handoffs: \(transport.finishes)")
+                .accessibilityIdentifier("native-fixture-actions")
+            if transport.filled { Text("Synthetic fields matched").accessibilityIdentifier("native-fixture-filled") }
+            Text(transport.actions.joined(separator: " → ")).accessibilityIdentifier("native-fixture-sequence")
+        }.font(.caption).padding(4).background(.background)
+    }
+    var body: some View {
+        VStack {
+            if !showing {
+                Button("Open native browser form") { showing = true }
+                evidence
+            }
+        }
+        .sheet(isPresented: $showing) {
+            BrowserTakeoverSheet(model: .shared, intake: intake)
+                .environment(\.scenePhase, transport.phaseOverride ?? scenePhase)
+                .safeAreaInset(edge: .top) { evidence }
+        }
     }
 }
 
 @MainActor final class BrowserNativeFormUITransport: ObservableObject {
     static let shared = BrowserNativeFormUITransport()
+    @Published var phaseOverride: ScenePhase?
+    @Published var inactiveResponses = 0
+    private var login: Bool { ProcessInfo.processInfo.arguments.contains("--browser-native-form-login") }
+    static var loginDescription: JSON { .object([
+        "type": .string("browser_login"), "status": .string("input_required"),
+        "request_id": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        "challenge_id": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "agent_id": .string("fixture"),
+        "origin": .string("https://example.com"), "allowed_origins": .array([.string("https://example.com")]),
+        "approved": .bool(true), "expires_at": .number(4_000_000_000_000)
+    ]) }
+    func loginApproved(intake: VaultIntake) async throws -> Bool {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [BrowserNativeFormUIProtocol.self]
+        return try await client.browserLoginApproved(intake: intake, configuration: configuration)
+    }
     @Published private(set) var observations = 0
     @Published private(set) var probes = 0
     private var legacy: Bool { ProcessInfo.processInfo.arguments.contains("--browser-native-form-legacy") }
+    private var hints = false
+    private var controls = false
+    private var mixed: Bool { ProcessInfo.processInfo.arguments.contains("--browser-native-form-mixed") }
+    private var checkboxOnly: Bool { ProcessInfo.processInfo.arguments.contains("--browser-native-form-checkbox") }
+    @Published var inputOutcome = "none"
+    private var otp: Bool { ProcessInfo.processInfo.arguments.contains("--browser-native-form-otp") }
     @Published private(set) var fills = 0
+    @Published private(set) var finishes = 0
+    @Published private(set) var actions: [String] = []
     @Published private(set) var submits = 0
     @Published private(set) var filled = false
     private var documentID = UUID().uuidString.lowercased()
-    private var refs = (0..<2).map { _ in UUID().uuidString.lowercased() }
+    private var refs = (0..<4).map { _ in UUID().uuidString.lowercased() }
     private let client = ManagedClient(credential: try! AccountCredential(
         origin: "https://native-form-fixture.invalid", apiKey: "ncx_live_abcdefgh1234_" + String(repeating: "x", count: 43)))
 
@@ -4771,42 +5022,81 @@ struct BrowserNativeFormUIFixture: View {
     }
     func reply(_ action: JSON) -> (Int, JSON) {
         let mode = action["action"].string
+        if mode != "observe" && mode != "describe" { actions.append(mode) }
         switch mode {
+        case "describe": return (200, Self.loginDescription)
         case "observe":
             if action["native_fields"] == .bool(true) {
                 probes += 1
-                if legacy { return (400, .object([:])) }
+                if legacy || (action["native_field_hints"] == .bool(true) && ProcessInfo.processInfo.arguments.contains("--browser-native-form-no-hints")) { return (400, .object([:])) }
+                if action["native_field_controls"] == .bool(true), ProcessInfo.processInfo.arguments.contains("--browser-native-form-no-controls") { return (400, .object([:])) }
+                controls = action["native_field_controls"] == .bool(true)
+                hints = action["native_field_hints"] == .bool(true)
             } else if !legacy { return (400, .object([:])) }
             observations += 1
         case "fill_fields":
             fills += 1
             guard !ProcessInfo.processInfo.arguments.contains("--browser-native-form-fill-fails"),
                   action["document_id"].string == documentID,
-                  action["fields"] == .array([
-                    .object(["ref": .string(refs[0]), "value": .string("synthetic@example.com")]),
-                    .object(["ref": .string(refs[1]), "value": .string("synthetic-password")])
-                  ]) else { return (409, .object([:])) }
+                  action["fields"] == .array(checkboxOnly
+                    ? [.object(["ref": .string(refs[0]), "value": .string("true")])]
+                    : mixed ? [.object(["ref": .string(refs[0]), "value": .string("2")]),
+                               .object(["ref": .string(refs[1]), "value": .string("Line one\nLine two")]),
+                               .object(["ref": .string(refs[2]), "value": .string("true")])]
+                    : otp
+                    ? [.object(["ref": .string(refs[0]), "value": .string("123456")])]
+                    : [.object(["ref": .string(refs[0]), "value": .string("synthetic@example.com")]),
+                       .object(["ref": .string(refs[1]), "value": .string("synthetic-password")])])
+            else { return (409, .object([:])) }
             filled = true
         case "touch":
             if action["phase"] == .string("end"), filled { submits += 1 }
-        case "finish": return (200, .object(["status": .string("finished")]))
+        case "finish":
+            finishes += 1
+            if ProcessInfo.processInfo.arguments.contains("--browser-native-form-finish-fails"), finishes == 1 {
+                return (503, .object([:]))
+            }
+            if login {
+                return (200, .object(["type": .string("browser_login_receipt"), "status": .string("finished"),
+                    "request_id": .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")]))
+            }
+            return (200, .object(["status": .string("finished")]))
         default: return (400, .object([:]))
         }
         // Like the service, every observation/action invalidates the previous refs.
         documentID = UUID().uuidString.lowercased()
-        refs = (0..<2).map { _ in UUID().uuidString.lowercased() }
+        refs = (0..<4).map { _ in UUID().uuidString.lowercased() }
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: 390, height: 700))
         let image = renderer.pngData { context in
             UIColor.systemBackground.setFill(); context.fill(CGRect(x: 0, y: 0, width: 390, height: 700))
             let title = filled ? "Fields filled. Tap to sign in." : "Synthetic website"
             (title as NSString).draw(at: CGPoint(x: 30, y: 300), withAttributes: [.font: UIFont.systemFont(ofSize: 20), .foregroundColor: UIColor.label])
         }
-        let fields: [JSON] = [("Email", "email"), ("Password", "password")].enumerated().map { index, field in
-            .object(["ref": .string(refs[index]), "label": .string(field.0), "type": .string(field.1), "multiline": .bool(false)])
+        let descriptions = otp ? [("Verification code", "text")] : [("Email", "email"), ("Password", "password")]
+        var fields: [JSON] = descriptions.enumerated().map { index, field in
+            var metadata: [String: JSON] = ["ref": .string(refs[index]), "label": .string(field.0), "type": .string(field.1), "multiline": .bool(false)]
+            if hints {
+                metadata["autocomplete"] = .string(otp ? "one-time-code" : index == 0 ? "username" : "current-password")
+                if otp { metadata["inputmode"] = .string("numeric") }
+            }
+            return .object(metadata)
+        }
+        if controls && (mixed || checkboxOnly) {
+            fields = checkboxOnly ? [.object(["ref": .string(refs[0]), "label": .string("Keep preference"), "type": .string("checkbox"), "multiline": .bool(false), "checked": .bool(true)])] : [
+                .object(["ref": .string(refs[0]), "label": .string("Country"), "type": .string("select"), "multiline": .bool(false), "options": .array([
+                    .object(["index": .number(0), "label": .string("Canada")]), .object(["index": .number(2), "label": .string("Greece")])])]),
+                .object(["ref": .string(refs[1]), "label": .string("Notes"), "type": .string("text"), "multiline": .bool(true)]),
+                .object(["ref": .string(refs[2]), "label": .string("Send updates"), "type": .string("checkbox"), "multiline": .bool(false), "checked": .bool(false)])]
         }
         var response: [String: JSON] = ["status": .string("active"), "image": .string("data:image/png;base64," + image.base64EncodedString()),
             "width": .number(390), "height": .number(700)]
-        if !legacy { response["native_form"] = .object(["document_id": .string(documentID), "fields": .array(fields)]) }
+        if login { response["origin"] = .string("https://example.com") }
+        if !legacy {
+            var form: [String: JSON] = ["document_id": .string(documentID), "fields": .array(fields)]
+            if controls && mixed { form["reason"] = .string("Complete the profile fields on this page.") }
+            if controls && (ProcessInfo.processInfo.arguments.contains("--browser-native-form-stale") || (filled && ProcessInfo.processInfo.arguments.contains("--browser-native-form-after-fill-stale"))) { response["native_form_status"] = .string("stale") }
+            else { response["native_form"] = .object(form) }
+        }
         return (200, .object(response))
     }
 }
@@ -4831,7 +5121,16 @@ private final class BrowserNativeFormUIProtocol: URLProtocol, @unchecked Sendabl
         }
         pending = Task { @MainActor in
             let (status, reply) = BrowserNativeFormUITransport.shared.reply(action)
-            if action["action"] == .string("fill_fields") { try? await Task.sleep(for: .milliseconds(400)) }
+            if ProcessInfo.processInfo.arguments.contains("--browser-native-form-inactive-response"),
+               action["action"] == .string("fill_fields") || action["action"] == .string("describe") {
+                // Deterministic lifecycle boundary: real ManagedClient parsing and
+                // production sheet handlers, with only HTTP and scene input controlled.
+                BrowserNativeFormUITransport.shared.phaseOverride = .inactive
+                try? await Task.sleep(for: .milliseconds(200))
+                BrowserNativeFormUITransport.shared.inactiveResponses += 1
+            } else if action["action"] == .string("fill_fields") {
+                try? await Task.sleep(for: .milliseconds(400))
+            }
             guard !Task.isCancelled, let url = request.url,
                   let data = try? JSONEncoder().encode(reply) else { return }
             client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: status,
