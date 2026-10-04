@@ -231,3 +231,15 @@ describe("opted-in contextual archive journey",()=>{
   expect(labels).toContain("UNREAD");
  }));
 });
+
+it("compares attachment content metadata rather than refreshed Gmail fetch IDs",async()=>{
+ const thread={id:"thread",connection_id:connection,messages:[{id:"message",thread_id:"thread",body_text:"Confirmed stay",attachments:[{id:"fetch-token-one",filename:"image.png",mime_type:"image/png",size:120}]}]};
+ const fingerprint=await todoMailContextFingerprint(thread);
+ thread.messages[0]!.attachments[0]!.id="fetch-token-two";
+ expect(await todoMailContextFingerprint(thread)).toBe(fingerprint);
+ thread.messages[0]!.attachments[0]!.size=121;
+ expect(await todoMailContextFingerprint(thread)).not.toBe(fingerprint);
+ thread.messages[0]!.attachments[0]!.size=120;
+ thread.messages[0]!.body_text="Changed stay";
+ expect(await todoMailContextFingerprint(thread)).not.toBe(fingerprint);
+});
