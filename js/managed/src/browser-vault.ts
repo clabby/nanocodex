@@ -697,10 +697,14 @@ export const browserVaultInputSelectionProperties = {
   reason:{type:"string",maxLength:500},
 };
 export function parseBrowserVaultInputSelection(v: Record<string,unknown>, secrets: readonly string[]): BrowserVaultInputSelection | undefined {
-  if (v.snapshot_id === undefined && v.fields === undefined && v.reason === undefined) return undefined;
+  if (v.reason !== undefined && (typeof v.reason !== "string" || !v.reason.trim() || v.reason.length > 500)) {
+    throw new Error("Provide a non-empty input reason of at most 500 characters");
+  }
+  // A reason describes either native input or browser takeover. Only actual
+  // field selection requires a snapshot; partial selections must still fail.
+  if (v.snapshot_id === undefined && v.fields === undefined) return undefined;
   if (typeof v.snapshot_id !== "string" || !/^[0-9a-f-]{36}$/i.test(v.snapshot_id)
-    || !Array.isArray(v.fields) || !v.fields.length || v.fields.length > 32
-    || (v.reason !== undefined && (typeof v.reason !== "string" || !v.reason.trim() || v.reason.length > 500))) throw new Error("Provide a current snapshot_id and native input refs");
+    || !Array.isArray(v.fields) || !v.fields.length || v.fields.length > 32) throw new Error("Provide a current snapshot_id and native input refs");
   const refs = new Set<string>();
   const fields = v.fields.map(field => {
     if (!field || typeof field !== "object" || Array.isArray(field) || Object.keys(field).some(k => !["ref","label"].includes(k))

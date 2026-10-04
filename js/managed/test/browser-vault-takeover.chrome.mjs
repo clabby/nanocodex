@@ -276,10 +276,10 @@ try {
   await loginPage.locator('#otp').waitFor();
   const beforeReentry=structuredClone(durable.get('browser-login:fixture-agent'));
   const reentryOperation=crypto.randomUUID();
-  const followup=await tool('request_browser_login_input',{request_id:operation,operation_id:reentryOperation});
+  const followup=await tool('request_browser_login_input',{request_id:operation,operation_id:reentryOperation,reason:'Use the private browser to complete sign-in.'});
   assert.equal(followup.status,'input_required');assert.equal(followup.approved,true);
   assert.notEqual(followup.request_id,operation);assert.equal(followup.request_id,followup.challenge_id);
-  assert.deepEqual(await tool('request_browser_login_input',{operation_id:reentryOperation,request_id:operation}),followup,'reordered retry replays the same fresh panel');
+  assert.deepEqual(await tool('request_browser_login_input',{operation_id:reentryOperation,request_id:operation,reason:'Use the private browser to complete sign-in.'}),followup,'reordered retry replays the same fresh panel');
   assert.equal(allocations,1,'reentry reuses the original browser');
   const afterReentry=durable.get('browser-login:fixture-agent');
   assert.equal(afterReentry.sessionId,beforeReentry.sessionId);assert.equal(afterReentry.targetId,beforeReentry.targetId);
@@ -351,6 +351,16 @@ try {
   const requestSelection=snapshot=>({request_id:activeId,operation_id:crypto.randomUUID(),snapshot_id:snapshot.snapshot_id,fields:selectedFields(snapshot),reason});
   const invalid=requestSelection(profileSnapshot);invalid.fields[0].value='must-not-accept';
   await assert.rejects(tool('request_browser_login_input',invalid),'model cannot send field values');
+  const invalidSelections=[
+    {snapshot_id:profileSnapshot.snapshot_id},
+    {fields:selectedFields(profileSnapshot)},
+    {snapshot_id:profileSnapshot.snapshot_id,fields:[]},
+    {snapshot_id:null}, {fields:null}, {reason:''}, {reason:42}, {reason:'x'.repeat(501)},
+  ];
+  for(const selection of invalidSelections) {
+    await assert.rejects(tool('request_browser_login_input',{request_id:activeId,operation_id:crypto.randomUUID(),...selection}));
+    assert.equal(durable.get('browser-login:fixture-agent').phase,'prepared','invalid selection cannot acquire user control');
+  }
   const staleRequest=requestSelection(profileSnapshot);
   await loginPage.locator('#country option').nth(1).evaluate(e=>e.textContent='Changed country');
   const stale=await tool('request_browser_login_input',staleRequest);
@@ -601,8 +611,29 @@ try {
   }
   writeFileSync(new URL('otp-countdown-journey.json',profileOutput),JSON.stringify(countdownEvidence,null,2));
   console.log('PASS: native OTP draft survives form countdown; hidden value, destination, method, target, label, purpose, node replacement and selected-option changes reject before filling');
-  const lease=await vaultTool('browser_vault_request_takeover');
+  for(const selection of invalidSelections) {
+    await assert.rejects(vaultTool('browser_vault_request_takeover',{operation_id:crypto.randomUUID(),...selection}));
+    assert.equal(vaultData.has('browser-vault-takeover:private:cloudflare:vault-fixture'),false,'invalid selection cannot acquire a Vault lease');
+  }
+  const fallbackArgs={operation_id:crypto.randomUUID(),reason:'Use the private browser because the native sheet is unavailable.'};
+  const lease=await vaultTool('browser_vault_request_takeover',fallbackArgs);
+  assert.deepEqual(await vaultTool('browser_vault_request_takeover',fallbackArgs),lease,'fallback retries retain their lease');
+  await assert.rejects(vaultTool('browser_vault_snapshot'),'model remains blocked during browser fallback');
   const vaultIntake={operation:'browser_takeover',kind:'login',agent_id:'vault-fixture',challenge_id:lease.challenge_id};
+  const fallbackFrame=await browserTakeover(vaultIntake,{action:'observe'},requestPrivate);
+  assert.equal(fallbackFrame.status,'active');
+  assert.ok(fallbackFrame.image,'browser fallback returns its private viewport');
+  assert.equal(fallbackFrame.native_form,undefined,'legacy browser fallback needs no native sheet');
+  const fallbackInput=await page.locator('#countdown-otp').boundingBox();
+  await browserTakeover(vaultIntake,{action:'click',x:(fallbackInput.x+fallbackInput.width/2)/fallbackFrame.width,y:(fallbackInput.y+fallbackInput.height/2)/fallbackFrame.height},requestPrivate);
+  await browserTakeover(vaultIntake,{action:'type',text:'synthetic-fallback-code'},requestPrivate);
+  assert.ok((await page.locator('#countdown-otp').inputValue()).endsWith('synthetic-fallback-code'),'private browser keyboard input reaches the existing page');
+  writeFileSync(new URL('browser-fallback-journey.json',profileOutput),JSON.stringify({
+    login:{request:{operation_id:reentryOperation,request_id:operation,reason:'Use the private browser to complete sign-in.'},status:followup.status,same_session:true,replay:true},
+    vault:{request:fallbackArgs,status:lease.status,viewport:{width:fallbackFrame.width,height:fallbackFrame.height},native_form:false,private_keyboard_input:true,replay:true},
+    rejected_selections:invalidSelections,model_observation_blocked:true,
+  },null,2));
+  console.log('PASS: reason-only fallback for login and Vault; partial native selections rejected; private HTTPS viewport and keyboard work with model observation blocked');
   const lostFinish=async(url,init)=>{const response=await requestPrivate(url,init);assert.equal(response.status,200);await response.body.cancel();throw Error('Synthetic lost Finish response');};
   await assert.rejects(browserTakeover(vaultIntake,{action:'finish'},lostFinish));
   assert.equal((await browserTakeover(vaultIntake,{action:'finish'},requestPrivate)).status,'finished');

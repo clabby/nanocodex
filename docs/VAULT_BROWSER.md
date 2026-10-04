@@ -170,7 +170,9 @@ sheet retains origin review before input is allowed.
 
 After any later handback, use the same snapshot/selection flow for text, multiline
 notes, selects, checkboxes, passwords, or verification codes. Omitting selection
-retains automatic field discovery and private browser fallback. The request
+retains automatic field discovery and private browser fallback, including when a
+`reason` is supplied without fields. A partial native selection (only a snapshot
+or only fields) is rejected. The request
 retains the same browser and redaction state and returns a fresh
 `request_id == challenge_id`; use that new ID for subsequent operations. The
 fresh ID opens a new native sheet and invalidates controls from the earlier
