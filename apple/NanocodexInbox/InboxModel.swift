@@ -451,7 +451,6 @@ final class InboxModel: ObservableObject {
     #if os(iOS)
     static let handRefreshIdentifier = "xyz.paradigm.centaur.hand.refresh"
     private var handBackgroundTask: UIBackgroundTaskIdentifier = .invalid
-    private var handBackgroundDeadline: Task<Void, Never>?
     private var handRefreshing = false
     #endif
     @Published private(set) var remoteService: RemoteService?
@@ -2166,16 +2165,9 @@ final class InboxModel: ObservableObject {
         let wasActive = isActive
         isActive = active
         if active { endHandBackgroundTime() }
+        else if wasActive { prepareHandForBackground() }
         guard wasActive != active else { return }
         updateDeviceHand()
-        #if os(iOS)
-        if !active, handBackgroundTask != .invalid {
-            handBackgroundDeadline = Task { [weak self] in
-                do { try await Task.sleep(for: .seconds(25)) } catch { return }
-                self?.endHandBackgroundTime(); self?.updateDeviceHand()
-            }
-        }
-        #endif
         if active && restoringAccount && restorationError != nil {
             Task { await restoreSavedAccount() }
         }
@@ -2284,7 +2276,6 @@ final class InboxModel: ObservableObject {
     }
     private func endHandBackgroundTime() {
         #if os(iOS)
-        handBackgroundDeadline?.cancel(); handBackgroundDeadline = nil
         let identifier = handBackgroundTask; handBackgroundTask = .invalid
         if identifier != .invalid { UIApplication.shared.endBackgroundTask(identifier) }
         if !isActive { handTasks.suspendWithoutRuntime() }
@@ -3549,10 +3540,16 @@ final class InboxModel: ObservableObject {
         if let index = cards.firstIndex(where: { $0.id == card.id }) { cards[index].noteSubmittedPrompt(request, at: Date().timeIntervalSince1970 * 1000) }
         pending.append(message); drafts[card.id] = ""; selectedContext[card.id] = nil; excludedContext[card.id] = nil; busy.insert(card.id); notice = nil; persist()
         let epoch = generation
-        // Ordinary chat runs in the cloud. Continued-processing runtime has its
-        // own system failure UI and is reserved for the explicit device shortcut.
-        if target != nil { startSteering(message.id) }
-        else { Task { await submit(message, epoch: epoch) } }
+        // Request continued runtime synchronously with the user's foreground
+        // action, before the screen can lock. Steering observes its existing
+        // turn; it must never submit a second copy of that turn.
+        if let target {
+            if deviceHandEnabled, isActive, !isDemo {
+                let observed = PendingMessage(agentID: card.id, input: "", predecessor: "", id: target)
+                startHandTask(observed, epoch: epoch, submitMessage: false)
+            }
+            startSteering(message.id)
+        } else { submitChatWithHand(message, epoch: epoch) }
         return true
     }
     func retryPending(_ id: String) {
@@ -3562,17 +3559,24 @@ final class InboxModel: ObservableObject {
         pending[index].phase = .submitting; pending[index].error = nil
         let message = pending[index], epoch = generation
         busy.insert(message.agentID); persist()
-        Task { await submit(message, epoch: epoch) }
+        submitChatWithHand(message, epoch: epoch)
+    }
+
+    private func submitChatWithHand(_ message: PendingMessage, epoch: UUID) {
+        if deviceHandEnabled, isActive, !isDemo {
+            startHandTask(message, epoch: epoch)
+        } else { Task { await submit(message, epoch: epoch) } }
     }
 
     @discardableResult
     private func startHandTask(_ message: PendingMessage, epoch: UUID,
                                progress: Progress = Progress(totalUnitCount: 1),
-                               runtimeProvided: Bool = false) -> Task<String, Error> {
+                               runtimeProvided: Bool = false,
+                               submitMessage: Bool = true) -> Task<String, Error> {
         handTasks.start(id: message.id, title: cards.first(where: { $0.id == message.agentID })?.title ?? "Agent working",
                         progress: progress, runtimeProvided: runtimeProvided) { [weak self] progress in
             guard let self, self.generation == epoch else { throw CancellationError() }
-            await self.submit(message, epoch: epoch)
+            if submitMessage { await self.submit(message, epoch: epoch) }
             try Task.checkCancellation()
             guard self.generation == epoch, let client = self.client else { throw CancellationError() }
             if let failed = self.pending.first(where: { $0.id == message.id && $0.phase == .failed }) {
