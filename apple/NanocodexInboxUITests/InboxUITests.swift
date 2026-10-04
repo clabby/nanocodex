@@ -542,6 +542,38 @@ final class InboxUITests: XCTestCase {
         }
     }
 
+    func testHeaderControlsRespondOutsideTheirIcons() {
+        let app = launch(["NANOCODEX_DEMO_PROFILE": UUID().uuidString])
+        let drawer = app.descendants(matching: .any)["conversation-list"].firstMatch
+        // Tap transparent label space, away from the centered SF Symbol.
+        func tapCorner(_ identifier: String) {
+            let button = app.buttons[identifier]
+            XCTAssertTrue(button.waitForExistence(timeout: 5), identifier)
+            XCTAssertGreaterThanOrEqual(button.frame.width, 44 - 0.01, identifier)
+            XCTAssertGreaterThanOrEqual(button.frame.height, 44 - 0.01, identifier)
+            button.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: 5, dy: 5)).tap()
+        }
+        tapCorner("conversation-drawer-open")
+        XCTAssertTrue(drawer.waitForExistence(timeout: 5))
+        tapCorner("conversation-drawer-close")
+        gone(drawer)
+        tapCorner("running-agents")
+        XCTAssertTrue(drawer.waitForExistence(timeout: 5))
+        tapCorner("conversation-drawer-close")
+        gone(drawer)
+        tapCorner("new-conversation")
+        XCTAssertEqual(self.selectedConversationTab(app).label, "New agent")
+        tapCorner("conversation-drawer-open")
+        XCTAssertTrue(drawer.waitForExistence(timeout: 5))
+        tapCorner("drawer-new-conversation")
+        gone(drawer)
+        XCTAssertEqual(self.selectedConversationTab(app).label, "New agent")
+        tapCorner("app-menu")
+        XCTAssertTrue(app.buttons["inbox-scheduled-jobs"].waitForExistence(timeout: 5))
+        capture(app, "header-controls-corner-taps")
+    }
+
     // Failures: compressed touch targets, truncated controls, landscape safe-area
     // clipping, and a drawer that loses its controls after a size change.
     func testAdaptiveChromeFitsRotationAndLargeText() {

@@ -750,13 +750,13 @@ struct InboxView: View {
                     showRunningAgents = true
                     setConversationsVisible(true)
                 } label: {
-                    Image(systemName: "circle.grid.2x2").frame(width: 44, height: 44)
+                    Image(systemName: "circle.grid.2x2").frame(width: 44, height: 44).contentShape(Rectangle())
                 }
                 .accessibilityLabel("Running agents")
                 .accessibilityValue("\(model.cards.filter(\.isRunningInSidebar).count)")
                 .accessibilityIdentifier("running-agents")
                 Button(action: createAgent) {
-                    Image(systemName: "square.and.pencil").frame(width: 44, height: 44)
+                    Image(systemName: "square.and.pencil").frame(width: 44, height: 44).contentShape(Rectangle())
                 }.accessibilityLabel("New conversation").accessibilityIdentifier("new-conversation")
                     .keyboardShortcut("n", modifiers: .command)
                 appMenu
@@ -1072,11 +1072,11 @@ private struct ConversationDrawerContent: View, Equatable {
                     .padding(.leading, 12)
                 Spacer()
                 Button(action: create) {
-                    Image(systemName: "square.and.pencil").frame(width: 44, height: 44)
+                    Image(systemName: "square.and.pencil").frame(width: 44, height: 44).contentShape(Rectangle())
                 }
                 .accessibilityLabel("New conversation").accessibilityIdentifier("drawer-new-conversation")
                 Button(action: close) {
-                    Image(systemName: "sidebar.left").frame(width: 44, height: 44)
+                    Image(systemName: "sidebar.left").frame(width: 44, height: 44).contentShape(Rectangle())
                 }
                 .accessibilityLabel("Return to conversation").accessibilityIdentifier("conversation-drawer-close")
             }
