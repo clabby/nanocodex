@@ -477,10 +477,13 @@ struct InboxView: View {
         InboxNavigationLayout {
             navigationTabs
             if model.focused != nil && (mainSurface == .chat || mainSurface == .todo) {
-                MobileModelControls(model: model) {
+                MobileModelControls(model: model, openConnections: {
                     composerFocused = false
                     showConnectors = true
-                }
+                }, newConversation: {
+                    selectMainSurface(.chat)
+                    createAgent()
+                })
             }
         }
         .padding(.horizontal, 5).padding(.vertical, 3)
@@ -4341,12 +4344,22 @@ private struct NativeAppUpdateSection: View {
 private struct MobileModelControls: View {
     @ObservedObject var model: InboxModel
     let openConnections: () -> Void
+    let newConversation: () -> Void
     var body: some View {
         if let card = model.focused {
             let selected = (model.isDemo ? ModelChoice.all : model.availableModels).first(where: { $0.id == card.model })
             let waiting = model.modelSettingsBusy.contains(card.id)
             let effort = card.thinking.isEmpty ? "low" : card.thinking
             Menu {
+                if card.modelLocked {
+                    Section {
+                        Text("The model is pinned after a chat starts.")
+                        Button("New chat to choose a model", action: newConversation)
+                            .accessibilityIdentifier("model-new-conversation")
+                    }
+                } else if waiting || model.modelChoiceLocked {
+                    Text(waiting ? "Saving model settings…" : "Model selection is unavailable while messages are pending.")
+                }
                 Section("Model") {
                     ForEach(model.isDemo ? ModelChoice.all : model.availableModels) { choice in
                         Button { model.chooseModel(choice.id) } label: {
@@ -4354,6 +4367,7 @@ private struct MobileModelControls: View {
                             else { Text(choice.name) }
                         }
                         .disabled(model.modelChoiceLocked || waiting)
+                        .accessibilityIdentifier("model-choice:" + choice.id)
                     }
                     if model.availableModels.isEmpty && !model.isDemo { Text("Connect a model subscription to choose a model") }
                     if let error = model.modelCatalogError {
@@ -4407,7 +4421,7 @@ private struct MobileModelControls: View {
             }
             .accessibilityLabel("Chat model: \(selected?.name ?? card.model)")
             .accessibilityValue(card.routingAutomatic ? "Automatic routing" : "Thinking: \(ModelChoice.effortName(effort))")
-            .accessibilityHint("Choose model, thinking effort, or automatic routing for the selected Chat conversation")
+            .accessibilityHint(card.modelLocked ? "This chat's model is pinned. Open settings to start a new chat with another model." : "Choose model, thinking effort, or automatic routing for the selected Chat conversation")
             .accessibilityIdentifier("model-picker")
             .task { await model.refreshModelCatalog() }
             .multilineTextAlignment(.center)

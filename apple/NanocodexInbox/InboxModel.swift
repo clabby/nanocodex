@@ -4199,7 +4199,27 @@ final class InboxModel: ObservableObject {
             defer { modelSettingsBusy.remove(localID); modelSettingsBusy.remove(id) }
             do {
                 id = try await readyAgent(localID)
-                guard generation == epoch, let client else { throw CancellationError() }
+                guard generation == epoch else { throw CancellationError() }
+                // Demo conversations have no account client. Apply the selection
+                // after creation rebinds the draft ID, just like other demo actions.
+                if isDemo {
+                    guard let index = cards.firstIndex(where: { $0.id == id }) else { return }
+                    switch selection {
+                    case .manual(let model, let thinking):
+                        cards[index].model = model
+                        cards[index].thinking = thinking
+                        cards[index].routingEnabled = true
+                        cards[index].routingAutomatic = false
+                    case .automatic:
+                        if cards[index].model.isEmpty { cards[index].model = ModelChoice.all[0].id }
+                        cards[index].routingEnabled = true
+                        cards[index].routingAutomatic = true
+                    case .effort(let thinking):
+                        cards[index].thinking = thinking
+                    }
+                    return
+                }
+                guard let client else { throw CancellationError() }
                 modelSettingsBusy.insert(id)
                 try await client.updateModelSelection(id, selection: selection)
                 let current = try await client.state(id)
