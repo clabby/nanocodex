@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "deploy": "wrangler deploy --env=\"\" --config wrangler.jsonc",
     "test": "node --test test/*.test.mjs && vitest run test/*.test.tsx",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "test:browser": "playwright test --config test/browser/playwright.config.ts"
   },
   "dependencies": {
     "nanocodex": "workspace:*",
@@ -18,6 +19,7 @@
     "wata": "0.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",

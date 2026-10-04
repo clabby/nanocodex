@@ -1,4 +1,5 @@
 import { useId, useState, type ReactNode } from "react";
+import { RequestIdentity } from "./RequestIdentity.js";
 import { normalizeSmsPhone } from "./smsPhone.js";
 
 const OTP_REQUEST_TIMEOUT_MS = 25_000;
@@ -28,7 +29,9 @@ type OtpChallenge = Readonly<{
 
 export function AccountChooser({
   confirmationCode,
-  description = "Sign in with the code sent to your phone.",
+  appName,
+  appOrigin,
+  description,
   disabled,
   failure,
   requestContext,
@@ -36,6 +39,8 @@ export function AccountChooser({
   onChooseAccount,
   authOrigin = "",
 }: Readonly<{
+  appName?: string;
+  appOrigin?: string;
   authOrigin?: string | undefined;
   confirmationCode?: string | undefined;
   description?: string | undefined;
@@ -49,7 +54,6 @@ export function AccountChooser({
 }>) {
   const phoneId = useId();
   const codeId = useId();
-  const phoneHintId = useId();
   const codeHintId = useId();
   const failureId = useId();
   const [phone, setPhone] = useState("");
@@ -147,12 +151,10 @@ export function AccountChooser({
     <div className="wizard-page wizard-account-page">
       <section className="sms-auth-panel" aria-labelledby={`${phoneId}-heading`}>
         <header className="wizard-intro">
+          <RequestIdentity name={appName ?? "Nanocodex"} origin={appOrigin} />
           <div className="wizard-app">
-            <span>Nanocodex account · Step {challenge ? "2" : "1"} of 2</span>
-            <h1 id={`${phoneId}-heading`}>{challenge ? "Enter your code" : "Enter your phone number"}</h1>
-            <p>{challenge
-              ? "Use the six-digit code from the text message to finish signing in."
-              : description}</p>
+            <h1 id={`${phoneId}-heading`}>{challenge ? "Check your messages" : `Sign in to ${appName ?? "Nanocodex"}`}</h1>
+            {challenge ? <p>Enter the code sent to {maskedPhone(challenge.phone)}.</p> : description ? <p>{description}</p> : null}
           </div>
           {confirmationCode ? (
             <div className="wizard-terminal-code" role="status">
@@ -168,15 +170,14 @@ export function AccountChooser({
         {requestContext ? <div className="wizard-sections">{requestContext}</div> : null}
 
         {!challenge ? (
-          <form className="sms-otp-form" noValidate onSubmit={(event) => {
+          <form key="phone" className="sms-otp-form" aria-busy={operation === "send"} noValidate onSubmit={(event) => {
           event.preventDefault();
           void sendCode();
         }}>
           <label htmlFor={phoneId}>Mobile number</label>
-          <p id={phoneHintId}>Include the country code. We’ll text you a one-time code.</p>
           <div className="sms-otp-input-row">
             <input
-              aria-describedby={`${phoneHintId}${visibleFailure ? ` ${failureId}` : ""}`}
+              aria-describedby={visibleFailure ? failureId : undefined}
               aria-invalid={localFailure ? true : undefined}
               autoComplete="tel"
               autoFocus
@@ -187,7 +188,7 @@ export function AccountChooser({
                 setPhone(event.target.value);
                 setLocalFailure(undefined);
               }}
-              placeholder="+30 697 123 4567"
+              placeholder="+1 202 555 0100"
               required
               type="tel"
               value={phone}
@@ -196,15 +197,14 @@ export function AccountChooser({
               {operation === "send" ? "Sending…" : "Text me a code"}
             </button>
           </div>
-          <p>By continuing, you agree to receive an automated one-time account code. Message and data rates may apply.</p>
         </form>
       ) : (
-        <form className="sms-otp-form" noValidate onSubmit={(event) => {
+        <form key="code" className="sms-otp-form" aria-busy={operation === "verify"} noValidate onSubmit={(event) => {
           event.preventDefault();
           void verifyCode();
         }}>
           <label htmlFor={codeId}>6-digit code</label>
-          <p id={codeHintId}>Sent to {maskedPhone(challenge.phone)}. It expires at {new Date(challenge.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.</p>
+          <p id={codeHintId}>Code expires at {new Date(challenge.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.</p>
           <div className="sms-otp-input-row">
             <input
               aria-describedby={`${codeHintId}${visibleFailure ? ` ${failureId}` : ""}`}
@@ -240,13 +240,7 @@ export function AccountChooser({
           >Use a different number</button>
         </form>
       )}
-        <div className="sms-auth-security" aria-label="Security note">
-          <span aria-hidden="true">✓</span>
-          <p>Your wallet key stays encrypted in your account vault.</p>
-        </div>
-        {onCancel ? (
-          <button className="wizard-cancel" disabled={unavailable} onClick={onCancel} type="button">Cancel</button>
-        ) : null}
+        {onCancel ? <button className="auth-close" aria-label="Cancel" disabled={unavailable} onClick={onCancel} type="button">Cancel</button> : null}
       </section>
     </div>
   );

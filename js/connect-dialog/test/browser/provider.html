@@ -1,0 +1,12 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Test provider authorization</title>
+<h1>Synthetic provider</h1><p>Local test only. No Google account is accessed.</p>
+<button id="approve">Approve Gmail and Calendar</button><button id="partial">Approve Gmail only</button><button id="cancel">Cancel</button>
+<script type="module">
+async function complete(capabilities) {
+ await fetch('/v1/fixture/google-complete', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({capabilities})});
+ window.opener.postMessage({type:'nanocodex:connector-complete',connector:'google',result:'success'},location.origin);
+}
+document.querySelector('#approve').onclick=()=>complete(['gmail','gcalendar']);
+document.querySelector('#partial').onclick=()=>complete(['gmail']);
+document.querySelector('#cancel').onclick=()=>window.opener.postMessage({type:'nanocodex:connector-complete',connector:'google',result:'error',error:'access_denied',message:'Google connection cancelled.'},location.origin);
+</script></html>

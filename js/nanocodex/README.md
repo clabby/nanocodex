@@ -1449,3 +1449,33 @@ against the Connect Worker with fixture provider responses, covering reads,
 writes, pagination, rate limits, and revoked grants. Worker tests cover routing
 and service denial for all 13 API connectors. SDKs that hardcode their API host need a custom transport instead of only
 a base URL setting.
+
+
+## Connect dialog appearance
+
+Pass visual tokens when creating an embedded or popup Connect dialog:
+
+```js
+import { Client, Dialog } from "nanocodex/connect";
+
+const appearance = {
+  theme: "system",
+  accentColor: "#635bff",
+  fontFamily: '"Open Sans", system-ui, sans-serif',
+  borderRadius: 12,
+};
+const client = Client.create({
+  appId: "your-app-id",
+  dialog: Dialog.iframe({ appearance }),
+});
+// Dialog.popup({ appearance }) accepts the same options for account authorization.
+```
+
+All fields are optional. `theme` accepts `light`, `dark`, or `system`;
+`accentColor` requires six hex digits; `fontFamily` accepts an installed or
+self-hosted font list of at most 160 characters; `borderRadius` is a number from
+0 to 24 pixels. Arbitrary CSS, CSS functions, and unknown options are rejected.
+The SDK snapshots the configuration when the dialog is created and carries it
+in the `nanocodex_appearance` URL parameter to wallet and funding iframes or the
+account popup. The hosted dialog limits the JSON value to 1,024 characters and
+uses native defaults for malformed values. Omit `appearance` for native defaults.

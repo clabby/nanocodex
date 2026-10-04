@@ -1,0 +1,6 @@
+<!doctype html><html><head><title>Connect popup host</title></head><body><button id="connect">Connect account</button><script type="module">
+import { Dialog } from "nanocodex/connect";
+const appearance = new URLSearchParams(location.search).has("themed") ? {theme:"dark",accentColor:"#c4b5fd",fontFamily:"system-ui",borderRadius:6} : undefined;
+const dialog = Dialog.popup({ appearance, host: new URL("/?connections=1", location.href).href }).setup({ appId: "modal-journey" });
+document.querySelector("#connect").onclick = () => dialog.showWallet();
+</script></body></html>

@@ -60,7 +60,18 @@ Client.create({
   dialog: Dialog.memory(),
   transport: mock(),
 });
-Dialog.popup({ target: "nanocodex-connect", features: "popup=yes" });
+const appearance: Dialog.Appearance = {
+  theme: "system",
+  accentColor: "#635bff",
+  fontFamily: '"Open Sans", system-ui',
+  borderRadius: 12,
+};
+Dialog.iframe({ appearance });
+Dialog.popup({ target: "nanocodex-connect", features: "popup=yes", appearance });
+// @ts-expect-error Only the supported theme modes are accepted.
+Dialog.iframe({ appearance: { theme: "auto" } });
+// @ts-expect-error Arbitrary CSS is not part of the appearance contract.
+Dialog.popup({ appearance: { css: "body { display:none }" } });
 
 const explicitClient: Client.Client = Client.create({
   appId: "explicit-client-type-probe",

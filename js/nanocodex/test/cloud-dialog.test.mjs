@@ -99,6 +99,101 @@ test("popup URLs overwrite caller-controlled routing parameters", () => {
   }
 });
 
+test("appearance travels to wallet, replacement wallet, funding iframe, and reset", async () => {
+  const browser = createBrowserHarness();
+  const previousDocument = globalThis.document;
+  const previousWindow = globalThis.window;
+  globalThis.document = browser.document;
+  globalThis.window = browser.window;
+  const appearance = { theme: "dark", accentColor: "#AABBCC", fontFamily: '"Open Sans", sans-serif', borderRadius: 12 };
+  const readAppearance = (source) => JSON.parse(new URL(source).searchParams.get("nanocodex_appearance"));
+  const walletFrames = () => browser.document.body.children
+    .flatMap(modal => modal.children).filter(child => child.dataset.testid === "nanocodex-connect-wallet");
+
+  try {
+    const dialog = Dialog.iframe({ appearance }).setup({ appId: "appearance-iframe" });
+    assert.deepEqual(readAppearance(dialog.host), appearance);
+    assert.deepEqual(readAppearance(walletFrames().at(-1).src), appearance);
+    // A fresh Accounts URL must not drop or override the developer's options.
+    dialog.walletTarget({ host: `${DEFAULT_HOST}?app_id=appearance-iframe&nanocodex_appearance=bad` });
+    assert.deepEqual(readAppearance(walletFrames().at(-1).src), appearance);
+
+    const request = { id: "appearance-funding", type: "machineUsdFund" };
+    const result = dialog.open(request);
+    const frame = browser.document.body.children
+      .find(modal => modal.attributes.get("aria-label") === "Nanocodex Connect permissions").children[0];
+    assert.deepEqual(readAppearance(frame.src), appearance);
+    frame.dispatch("load");
+    await Promise.resolve();
+    assert.equal(frame.contentWindow.messages[0].message.request.type, "machineUsdFund");
+    browser.window.dispatchMessage({
+      data: { type: "nanocodex:response", id: request.id, result: { funded: true } },
+      origin: DEFAULT_ORIGIN,
+      source: frame.contentWindow,
+    });
+    assert.deepEqual(await result, { funded: true });
+
+    await dialog.resetWallet();
+    const ready = dialog.waitForWallet();
+    assert.deepEqual(readAppearance(walletFrames().at(-1).src), appearance);
+    walletFrames().at(-1).dispatch("load");
+    await ready;
+    const other = Dialog.iframe({ appearance: { theme: "light" } }).setup({ appId: "appearance-iframe" });
+    assert.notEqual(other, dialog, "differently themed dialogs must not share cached instances");
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.window = previousWindow;
+  }
+});
+
+test("popup appearance is snapshotted, replaces stale URL values, and survives reopening", () => {
+  const previousWindow = globalThis.window;
+  const opened = [];
+  globalThis.window = {
+    location: { origin: "https://consumer.example" },
+    open(source) {
+      opened.push(source);
+      return { closed: false, close() { this.closed = true; }, focus() {} };
+    },
+  };
+  try {
+    const appearance = { theme: "system", accentColor: "#112233", fontFamily: "system-ui", borderRadius: 0 };
+    const configured = Dialog.popup({ host: `${DEFAULT_HOST}?nanocodex_appearance=bad`, appearance });
+    appearance.theme = "light";
+    const dialog = configured.setup({ appId: "appearance-popup" });
+    dialog.showWallet();
+    dialog.hideWallet();
+    dialog.showWallet();
+    assert.equal(opened.length, 2);
+    for (const source of opened) {
+      const parameters = new URL(source).searchParams;
+      assert.equal(parameters.get("mode"), "popup");
+      assert.equal(parameters.getAll("nanocodex_appearance").length, 1);
+      assert.deepEqual(JSON.parse(parameters.get("nanocodex_appearance")), { ...appearance, theme: "system" });
+      assert.ok(parameters.get("nanocodex_appearance").length <= 1024);
+    }
+    const native = Dialog.popup({ host: `${DEFAULT_HOST}?nanocodex_appearance=bad` }).setup({ appId: "appearance-default" });
+    assert.equal(new URL(native.host).searchParams.has("nanocodex_appearance"), false);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test("appearance rejects malformed values and arbitrary CSS before browser setup", () => {
+  for (const appearance of [
+    null, [], "dark", { theme: "auto" }, { accentColor: "red" },
+    { accentColor: "#ffffff; color:red" }, { fontFamily: "url(https://example.com/font)" },
+    { fontFamily: "serif; display:none" }, { fontFamily: "a".repeat(161) }, { fontFamily: " " },
+    { borderRadius: -1 }, { borderRadius: 25 }, { borderRadius: Infinity },
+    { borderRadius: "12" }, { css: "body { display: none }" },
+  ]) {
+    for (const factory of [Dialog.iframe, Dialog.popup]) {
+      assert.throws(() => factory({ appearance }), /Dialog appearance/);
+    }
+  }
+  assert.doesNotThrow(() => Dialog.iframe({ appearance: { theme: "light", borderRadius: 24 } }));
+});
+
 function createBrowserHarness() {
   const windowListeners = new Map();
   const body = createElement("body");

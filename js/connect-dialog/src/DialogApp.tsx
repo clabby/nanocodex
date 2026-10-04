@@ -2,6 +2,7 @@ import { useCallback, useSyncExternalStore } from "react";
 
 import { ConnectOnboarding } from "nanocodex-connect-ui/App";
 import { parentDialog } from "./protocol";
+import { appearanceFromSearch } from "./appearance";
 
 export function App() {
   const subscribe = useCallback(
@@ -10,5 +11,6 @@ export function App() {
   );
   const getSnapshot = useCallback(() => parentDialog.getRequest?.(), []);
   const request = useSyncExternalStore(subscribe, getSnapshot, () => undefined);
-  return <ConnectOnboarding host={parentDialog} request={request} />;
+  const appearance = appearanceFromSearch(window.location.search);
+  return <ConnectOnboarding appearance={appearance} host={parentDialog} request={request} />;
 }

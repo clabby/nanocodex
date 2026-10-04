@@ -1,5 +1,16 @@
 export const DEFAULT_HOST: "https://nanocodex.gakonst.workers.dev/connect-dialog/";
 
+/** Visual tokens for the hosted dialog. Arbitrary CSS is not supported. */
+export type Appearance = Readonly<{
+  theme?: "light" | "dark" | "system" | undefined;
+  /** Six-digit hex color, for example #635bff. */
+  accentColor?: `#${string}` | undefined;
+  /** Installed or self-hosted font list, at most 160 characters. No CSS functions. */
+  fontFamily?: string | undefined;
+  /** Control corner radius in pixels, from 0 to 24. */
+  borderRadius?: number | undefined;
+}>;
+
 export type Request = ConnectionRequest | FundingRequest;
 
 export type ConnectionRequest = Readonly<{
@@ -93,12 +104,14 @@ export function from<const type extends string>(parameters: Readonly<{
 }>): Dialog<type>;
 
 export function iframe(options?: Readonly<{
+  appearance?: Appearance | undefined;
   host?: string | undefined;
   key?: string | undefined;
   name?: string | undefined;
 }>): Dialog<"iframe">;
 
 export function popup(options?: Readonly<{
+  appearance?: Appearance | undefined;
   host?: string | undefined;
   key?: string | undefined;
   name?: string | undefined;

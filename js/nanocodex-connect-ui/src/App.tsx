@@ -1,3 +1,5 @@
+import { appearanceStyle, type ConnectAppearance } from "./appearance.js";
+export type { ConnectAppearance } from "./appearance.js";
 import { Provider, Storage, webAuthn } from "accounts";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { Dialog } from "nanocodex/connect";
@@ -42,7 +44,6 @@ import {
   requestManagedWalletConnect,
   requestManagedWalletRevocation,
 } from "./walletWorker.mjs";
-import { AppVisibilityPermissions } from "./AppVisibilityPermissions.js";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
@@ -155,11 +156,13 @@ export type ConnectOnboardingHost = Readonly<{
 }>;
 
 export function ConnectOnboarding({
+  appearance,
   host,
   presentation = "dialog",
   request,
 }: Readonly<{
   host: ConnectOnboardingHost;
+  appearance?: ConnectAppearance | undefined;
   presentation?: "dialog" | "wizard";
   request: ConnectRequest | undefined;
 }>) {
@@ -332,7 +335,9 @@ export function ConnectOnboarding({
         if (finishConnectorAttempt(attempt)) {
           setFailure({
             id: attempt.requestId,
-            message: completion.error ?? completion.message ?? "The account provider did not complete the connection.",
+            message: completion.error === "access_denied"
+              ? "Connection cancelled. You can try again."
+              : completion.message ?? "The account provider did not complete the connection.",
           });
         }
         return;
@@ -1334,16 +1339,12 @@ export function ConnectOnboarding({
   return (
     <section
       className={`connect-onboarding ${wizard ? "connect-wizard" : "dialog-shell"}`}
+      style={appearanceStyle(appearance)}
       data-presentation={presentation}
       data-request={request.type}
       data-testid={wizard ? "device-connect-wizard" : "remote-connect-dialog"}
     >
-      {!wizard ? <header className="dialog-header">
-        <span className="wordmark">Nanocodex Connect</span>
-          <span className="secure-label"><span aria-hidden="true" /> {hostPrincipalRequest
-            ? "host identity"
-            : "SMS account"}</span>
-      </header> : null}
+      {!wizard && request.type !== "walletConnect" ? <header className="dialog-header"><span className="wordmark">Nanocodex Connect</span></header> : null}
 
       {request.type === "walletConnect" ? (
         <>
@@ -1399,7 +1400,7 @@ export function ConnectOnboarding({
                   || (pendingApproval !== undefined && !connectedAccessReady)}
                 onClick={pendingApproval ? approveConnectedAccess : () => void approve()}
               >
-                {!pendingApproval || connectedAccessReady ? "Approve access" : "Connect requested accounts"}
+                Allow access
               </button>
             ) : null}
           </div>}
@@ -1613,15 +1614,16 @@ function ConnectionWizard({
     : undefined;
   const deferredChatGptImport = request.connectPolicy.chatGptCredentialImport;
   const requester = presentation === "wizard" ? "Nanocodex CLI" : request.app.name;
-  const hostedAuthorization = request.auth.resources.includes(hostedAuthorizationResource);
   if (!request.hostPrincipalExchange && !connectorStatuses && !accountAddress) {
     return (
       <AccountChooser
         authOrigin={nanocodexOriginFor(request.apiUrl)}
         confirmationCode={confirmationCode}
+        appName={requester}
+        appOrigin={request.app.origin}
         description={reauthenticationRequired
-          ? `Your session expired. Sign in to continue to ${requester}. You’ll review its requested access next.`
-          : `Sign in to continue to ${requester}. You’ll review its requested access next.`}
+          ? "Your session expired. Sign in again."
+          : undefined}
         disabled={disabled}
         onCancel={onCancel}
         onChooseAccount={onChooseAccount}
@@ -1631,14 +1633,13 @@ function ConnectionWizard({
 
   return (
     <AccountConnectionSurface
+      requester={requester}
+      origin={request.app.origin}
+      accountLabel={selectedAccount?.label ?? (accountAddress ? shortAddress(accountAddress) : undefined)}
       confirmationCode={confirmationCode}
       description={completed && deferredChatGptImport
         ? <DeferredChatGptImportStatus approved />
-        : <>{accountAddress
-            ? `Signed in as ${shortAddress(accountAddress)}. `
-            : selectedAccount
-              ? `${selectedAccount.mode === "register" ? "Create" : "Use"} ${selectedAccount.label}. `
-            : ""}{focused
+        : <>{focused
                 ? focused.id === "chatgpt" && deferredChatGptImport
                   ? <DeferredChatGptImportStatus approved={false} />
                   : focusedControl?.connected
@@ -1655,23 +1656,23 @@ function ConnectionWizard({
                       ? `Continue in ${focusedMcp.name}. You’ll return here when it is connected.`
                       : request.hostPrincipalExchange ? "Approve with your host identity." : "Continue with SMS verification."
                 : presentation === "dialog"
-                  ? `Connect any missing accounts, then approve ${requester}’s requested access.`
+                  ? null
                   : `Review ${requester}’s hosted access.`}</>}
       footer={completed && presentation === "wizard" ? (
         <div className="completion-actions">
           <a href="/connect">Connect more accounts</a>
         </div>
       ) : undefined}
-      title={focused ? `Connect ${connectorProviderLabel(requiredConnectorProvider(focused.id))}` : focusedMcp ? `Connect ${focusedMcp.name}` : `Authorize ${requester}`}
+      title={focused ? `Connect ${connectorProviderLabel(requiredConnectorProvider(focused.id))}` : focusedMcp ? `Connect ${focusedMcp.name}` : `Connect to ${requester}`}
     >
         {request.permission.connectors.length ? <AccountConnectionSection
           eyebrow="Service"
-          meta={focused ? `Requested by ${requester}` : `${request.permission.connectors.length} requested by ${requester}`}
-          title={focusedProvider ? connectorProviderLabel(focusedProvider) : "Connections"}
+          meta={undefined}
+          title={focusedProvider ? connectorProviderLabel(focusedProvider) : "Account access"}
           titleId="wizard-services-heading"
         >
-          <p>{requester} and its agents can read and make changes through the services you approve here, using only the selected accounts and each service’s permissions.</p>
           <WizardConnectorList connectorAction={connectorAction} connectorStatuses={connectorStatuses} disabled={disabled} onConnectConnector={onConnectConnector} request={request} />
+          {connectorAction ? <p className="section-description" role="status">{connectorAction === "spotify" || connectorAction === "soundcloud" ? `Finish connecting ${connectorProviderLabel(connectorAction)} in the Nanocodex app.` : `Finish connecting ${connectorProviderLabel(connectorAction)} in the opened window.`}</p> : null}
           {deviceCode ? (
             <a className="wizard-device-code" href={deviceCode.url} rel="noreferrer" target="_blank">
               <span>Continue in ChatGPT with code</span>
@@ -1697,10 +1698,8 @@ function ConnectionWizard({
 
         {!focused && !focusedMcp ? <AccountConnectionSection
           eyebrow="Access"
-          meta={hostedAuthorization
-            ? "No delegated key"
-            : request.accessKey ? "30-day key" : "Active key"}
-          title={`${requester} access`}
+          meta={undefined}
+          title="App permissions"
           titleId="wizard-access-heading"
         >
           <WizardRequestSummary appVisibility={appVisibility} request={request} />
@@ -1789,45 +1788,26 @@ function WizardRequestSummary({ appVisibility, request }: Readonly<{
   appVisibility: ReturnType<typeof appVisibilityPermissions>;
   request: ConnectionView;
 }>) {
-  const hostedAuthorization = request.auth.resources.includes(hostedAuthorizationResource);
   return (
-    <section className="wizard-request-summary" aria-labelledby="wizard-request-heading">
-      <h2 className="sr-only" id="wizard-request-heading">Installation capabilities</h2>
-      <div className="wizard-visibility" role="list" aria-label="App sees">
-        <AppVisibilityPermissions permissions={appVisibility} />
-        {request.mpp ? (
-          <div role="listitem">
-            <span>✓</span>
-            <div>
-              <strong>MACH spend</strong>
-              <small>{formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} per request · {formatToken(request.mpp.limit, request.mpp.symbol)} per day{request.mpp.recipient ? ` · to ${shortAddress(request.mpp.recipient)}` : ""}</small>
-            </div>
-          </div>
-        ) : null}
+    <section className="wizard-request-summary" aria-label="App permissions">
+      <div className="permission-icons">
+        {request.auth.resources.includes("urn:nanocodex:agent:run") ? <PermissionIcon label="Run agents" detail="Start tasks using the approved access." kind="agent" /> : null}
+        {appVisibility.map(permission => <PermissionIcon key={permission.resource} label={permission.label === "Reply" ? "Read replies" : permission.label === "Actions" ? "View tool calls" : permission.label} detail={permission.detail} kind={permission.label === "Reply" ? "reply" : "actions"} />)}
       </div>
-      <details className="advanced-details">
-        <summary>Technical details</summary>
-        <dl className="key-details">
-          <Detail label="App" value={request.app.origin} />
-          {request.mpp ? <Detail label="Spend" value={`${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} / request · ${formatToken(request.mpp.limit, request.mpp.symbol)} / day`} /> : null}
-          {request.mpp?.recipient ? <Detail label="Recipient" value={request.mpp.recipient} /> : null}
-          {hostedAuthorization ? (
-            <Detail label="Key" value="None — no spending or contract authority" />
-          ) : request.accessKey ? (
-            <>
-              <Detail label="Key" value={request.accessKey.keyId} />
-              <Detail label="Expires" value={formatExpiry(request.accessKey.expiry)} />
-            </>
-          ) : <Detail label="Key" value="Reuse the app's active delegated signer" />}
-        </dl>
-        <ul className="resource-list" aria-label="Connect capability resources">
-          {request.auth.resources
-            .filter((resource) => !resource.startsWith("urn:nanocodex:host-principal:exchange:"))
-            .map((resource) => <li key={resource}>{resource}</li>)}
-        </ul>
-      </details>
+      {request.mpp ? <p className="section-description">Spend: {formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} / request · {formatToken(request.mpp.limit, request.mpp.symbol)} / day{request.mpp.recipient ? ` · to ${shortAddress(request.mpp.recipient)}` : ""}</p> : null}
     </section>
   );
+}
+
+function PermissionIcon({label, detail, kind}: {label: string; detail: string; kind: string}) {
+  return <span className="permission-icon">
+    <button type="button" aria-label={`${label}: ${detail}`}>
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        {kind === "agent" ? <><path d="m13 3-8 11h6l-1 7 9-12h-6z" /></> : kind === "reply" ? <><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z" /><path d="M7 9h10M7 13h6" /></> : <><path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-14-2 16" /></>}
+      </svg>
+    </button>
+    <span className="permission-tooltip" role="tooltip">{label}<small>{detail}</small></span>
+  </span>;
 }
 
 type FundingAttempt = Readonly<{
@@ -2411,14 +2391,9 @@ function connectorControlDetail(
     }
   }
   if (control.provider === "google") {
-    const granted = connected.length
-      ? connected.map(connectorCapabilityLabel).join(", ")
-      : "None yet";
-    const remainder = missing.length
-      ? ` Still needed: ${missing.map(connectorCapabilityLabel).join(", ")}.`
-      : "";
-    const identities = labels.length ? ` ${labels.join(" · ")}.` : "";
-    return `Granted: ${granted}.${remainder}${identities}`;
+    const granted = connected.length ? `${connected.map(connectorCapabilityLabel).join(", ")} connected` : "";
+    const remainder = missing.length ? `${missing.map(connectorCapabilityLabel).join(", ")} requested` : "";
+    return [...labels, granted, remainder].filter(Boolean).join(" · ");
   }
   if (connected.length === 0) return control.detail;
   if (control.provider === "slack") {

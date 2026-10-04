@@ -1,5 +1,6 @@
-import { useId, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 
+import { RequestIdentity } from "./RequestIdentity.js";
 import { ConnectionLogo } from "./ConnectionLogo.js";
 import type { McpConnection, McpConnectionStatus } from "./connectTypes.js";
 
@@ -9,6 +10,9 @@ export const chatGptCredentialImportApproved = "Approved. Return to the terminal
 
 export function AccountConnectionSurface({
   children,
+  requester,
+  origin,
+  accountLabel,
   confirmationCode,
   confirmationLabel = "Confirm this matches your terminal",
   description,
@@ -16,19 +20,31 @@ export function AccountConnectionSurface({
   title,
 }: Readonly<{
   children: ReactNode;
+  requester?: string;
+  origin?: string;
+  accountLabel?: string;
   confirmationCode?: string | undefined;
   confirmationLabel?: string | undefined;
   description: ReactNode;
   footer?: ReactNode;
   title: string;
 }>) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    const content = heading.current?.closest(".dialog-content");
+    if (!content) return;
+    content.scrollTop = 0;
+    heading.current?.focus({ preventScroll: true });
+  }, []);
   return (
     <div className="wizard-page wizard-review-page">
       <header className="wizard-intro">
+        {requester ? <RequestIdentity name={requester} origin={origin} /> : null}
         <div className="wizard-app">
-          <h1>{title}</h1>
-          <p>{description}</p>
+          <h1 ref={heading} tabIndex={-1}>{title}</h1>
+          {description ? <p>{description}</p> : null}
         </div>
+        {accountLabel ? <div className="consent-account"><svg aria-hidden="true" viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4"><circle cx="10" cy="6" r="3" /><path d="M4 17v-2a6 6 0 0 1 12 0v2" /></svg><span>{accountLabel}</span></div> : null}
         {confirmationCode ? (
           <div className="wizard-terminal-code" role="status">
             <span>{confirmationLabel}</span>
@@ -44,7 +60,6 @@ export function AccountConnectionSurface({
 
 export function AccountConnectionSection({
   children,
-  eyebrow,
   meta,
   title,
   titleId,
@@ -58,7 +73,7 @@ export function AccountConnectionSection({
   return (
     <section className="wizard-section" aria-labelledby={titleId}>
       <header className="wizard-section-title">
-        <div><span>{eyebrow}</span><h2 id={titleId}>{title}</h2></div>
+        <div><h2 id={titleId}>{title}</h2></div>
         {meta === undefined ? null : <small>{meta}</small>}
       </header>
       {children}
@@ -91,6 +106,7 @@ export function AccountConnectionCard({
     <div className="wizard-connector-card" role="listitem">
       <button
         className={`connection-card${connected ? " is-connected" : ""}`}
+        title={detail}
         disabled={disabled}
         onClick={onClick}
         type="button"
@@ -98,7 +114,7 @@ export function AccountConnectionCard({
         {logo}
         <span className="connection-card-copy">
           <strong>{title}</strong>
-          <span>{detail}</span>
+          <span className="sr-only">{detail}</span>
         </span>
         <span className="connection-card-action">{action}</span>
       </button>
@@ -194,7 +210,7 @@ export function McpConnectionCard({
       )}
       <span className={account ? "connection-card-copy" : "mcp-connection-copy"}>
         <strong>{connection.name}</strong>
-        <span>{status}</span>
+        <span className="sr-only">{status}</span>
         {error ? <small className="mcp-connection-error" role="alert">{error}</small> : null}
       </span>
       <span className="mcp-connection-actions">
