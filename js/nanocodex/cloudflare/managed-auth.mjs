@@ -71,6 +71,12 @@ export function forwardPrincipalAssertions(headers, principal) {
     headers.set(SESSION_TEAM_ASSERTION, principal.teamId);
     headers.set(SESSION_AUTHORIZATION_EPOCH_ASSERTION, String(principal.authorizationEpoch));
     headers.set(SESSION_CAPABILITIES_ASSERTION, JSON.stringify(principal.capabilities));
+    // A non-secret identity for permission requests, written only after live
+    // authentication. Never retain a caller's claimed key identity.
+    headers.delete("x-nanocodex-api-key-id");
+    if (principal.kind === "api_key" && /^[A-Za-z0-9_-]{12}$/.test(principal.credentialId ?? "")) {
+        headers.set("x-nanocodex-api-key-id", principal.credentialId);
+    }
     for (const name of [
         CONNECT_USER_HEADER,
         CONNECT_GRANT_ID_HEADER,

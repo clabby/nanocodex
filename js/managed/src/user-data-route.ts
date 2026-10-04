@@ -40,7 +40,10 @@ export async function routeUserDataRequest(
     const operation = parseUserDataOperation(await readUserDataRequest(request));
     const capability = isUserDataMutation(operation) ? "data:write" : "data:read";
     if (!principal.capabilities.includes(capability)) {
-      return json({ error: "forbidden", message: `request lacks ${capability} capability` }, 403);
+      return json({ error: "forbidden", message: `request lacks ${capability} capability`,
+        required_capabilities: [capability],
+        ...(principal.kind === "api_key" ? { permission_request_endpoint: "/v1/permission-requests" } : {}),
+      }, 403);
     }
     const originFailure = requireSameOriginMutation(request, url, principal);
     if (originFailure) return originFailure;

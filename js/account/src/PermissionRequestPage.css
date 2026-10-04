@@ -1,0 +1,11 @@
+.permission-request-page { max-width: 40rem; margin: 0 auto; padding: 2rem 1rem; color: var(--text, inherit); }
+.permission-request-page h1 { font-size: 1.6rem; }
+.permission-request-page h2 { font-size: 1.25rem; }
+.permission-request-page h3 { font-size: 1rem; }
+.permission-request-page p, .permission-request-page li { overflow-wrap: anywhere; line-height: 1.5; }
+.permission-request-page li { margin-block: .75rem; }
+.permission-request-page code { font-size: .875em; }
+.permission-request-reason { white-space: pre-wrap; }
+.permission-request-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-block: 1.5rem; }
+.permission-request-page button { min-height: 44px; padding: .5rem 1rem; cursor: pointer; }
+.permission-request-page button:disabled { cursor: default; opacity: .5; }

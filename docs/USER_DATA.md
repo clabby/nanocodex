@@ -121,8 +121,40 @@ translation layer, which keeps device integrations and agent behavior on one con
 
 Reads require `data:read`; puts and deletes require `data:write`. Newly issued owner
 API keys include these capabilities. Existing API keys and Connect grants retain
-their previously issued capabilities; deploying this feature does not expand them.
-Issue a new key or authorize a new grant when data access is needed.
+their previously issued capabilities; deployment does not silently expand them.
+
+For an existing direct login, the agent can call `request_permissions`:
+
+```json
+{"operation":"request","operation_id":"22cb21f6-c22d-4fa1-8386-5508e73d23a9","capabilities":["data:read","data:write"],"reason":"Save and read this app's records and files."}
+```
+
+The user reviews the exact permissions and target login in the native app or the
+returned account-page link. The authenticated account page approves or denies. The tool has no
+approval operation. Approval adds only the requested permissions to the existing
+key; its value and account stay unchanged. All clients using that key gain the
+approved access. Decisions require the owner's persistent browser account session
+with `api_keys:write`; an API key cannot approve its own expansion, even if it
+contains that capability. An already signed-in browser needs no fresh login.
+Legacy native-only logins must verify the owner in the browser if no account
+session exists there. The app keeps its existing key throughout this step.
+Current account membership still limits every approval.
+
+Pending, denied and expired requests grant nothing. Reuse `operation_id` with the
+same arguments after uncertain delivery; use `{"operation":"status","request_id":"…"}`
+to read the actual receipt. An approved status refreshes the current root turn;
+a new user turn on an already-open chat socket also revalidates the same key.
+Retained jobs, replayed turns and existing subagents do not automatically inherit new authority.
+No storage operation is automatically repeated by consent.
+
+The equivalent public API is `POST /v1/permission-requests` with the request body
+above minus `operation`, `GET /v1/permission-requests/:keyID/:requestID`, and
+`POST /v1/permission-requests/:keyID/:requestID/approve` or `/deny`. Decisions
+require an exact same-origin `Origin` header and the authenticated owner authority
+described above. Requests expire after 15 minutes; replay receipts are retained
+for seven days, with at most 128 retained requests per key. Revoked keys and stale
+membership epochs fail closed. API-key and organization administration scopes
+cannot be requested through this flow.
 
 Connect apps can request the exact resources `urn:nanocodex:data:read` and
 `urn:nanocodex:data:write`; the broker binds the app and grant identity before

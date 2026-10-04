@@ -2913,6 +2913,14 @@ private struct ConversationContentView: View {
                     }))
                 }
             }
+            for activity in content.activity where activity.tool?.permissionRequest != nil {
+                if let request = activity.tool?.permissionRequest {
+                    rows.append(.init(id: item.id + ":permission:" + activity.id, revision: cellRevision, content: {
+                        AnyView(PermissionRequestCard(model: model, request: request)
+                            .id("\(activity.id):\(model.vaultIntakeAccount)"))
+                    }))
+                }
+            }
             // Intake prompts remain reachable even when their group is collapsed.
             for activity in content.activity where activity.tool?.vaultIntake != nil {
                 if let intake = activity.tool?.vaultIntake {
@@ -3589,6 +3597,126 @@ private struct ToolActivityView: View {
                 }
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct PermissionRequestCard: View {
+    @ObservedObject var model: InboxModel
+    let request: PermissionRequest
+    @State private var showingReview = false
+    @State private var agentID = ""
+    @State private var status: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Account access request", systemImage: "lock.shield").font(.headline)
+            if let status { Text("Request " + status).font(.subheadline) }
+            Text("Review the permissions for your current account before deciding.")
+                .font(.subheadline).foregroundStyle(.secondary)
+            Button("Review permissions") { agentID = model.focused?.id ?? ""; showingReview = true }
+                .buttonStyle(.borderedProminent).disabled(!model.connected)
+                .accessibilityIdentifier("permission-request-open")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
+        .background(Ink.surface, in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityIdentifier("permission-request-card")
+        .sheet(isPresented: $showingReview) {
+            PermissionRequestSheet(model: model, request: request, agentID: agentID) { status = $0 }
+        }
+    }
+}
+
+private struct PermissionRequestSheet: View {
+    @ObservedObject var model: InboxModel
+    let request: PermissionRequest
+    let agentID: String
+    let completed: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var account = UUID()
+    @State private var review: PermissionRequestReview?
+    @State private var busy = false
+    @State private var receiptSent = false
+    @State private var failure: String?
+    @State private var browserURL: URL?
+    @State private var operation: Task<Void, Never>?
+
+    private func refresh() {
+        guard account == model.vaultIntakeAccount, model.connected, !busy else { return }
+        busy = true; failure = nil; review = nil
+        operation = Task { @MainActor in
+            defer { busy = false }
+            do {
+                let result = try await model.permissionRequestReview(request, account: account)
+                guard !Task.isCancelled, account == model.vaultIntakeAccount else { return }
+                review = result
+                if result.status != "pending" { completed(result.status) }
+            } catch {
+                guard !Task.isCancelled, account == model.vaultIntakeAccount else { return }
+                failure = "Couldn’t verify this request. Refresh its status or review it in your browser."
+            }
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let review {
+                    Section("API key") {
+                        Text(review.keyLabel.isEmpty ? "Unnamed key" : review.keyLabel)
+                        Text(review.request.keyID).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Section("Reason") { Text(review.reason) }
+                    Section("Requested permissions") {
+                        ForEach(review.capabilities) { capability in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(capability.id).font(.headline)
+                                Text(capability.description).font(.subheadline)
+                            }
+                        }
+                    }
+                    Section {
+                        Text("Expires " + review.expiresAt.formatted())
+                        Text("Status: " + (review.status == "pending" && !review.isPending ? "expired" : review.status))
+                        Text("Approval adds these permissions to this API key until they are removed or the key is revoked. Every client using this key gains the same access.")
+                        if review.isPending {
+                            Text("Review and approve or deny this request in your authenticated account browser.")
+                        } else if review.status != "pending" {
+                            Button(receiptSent ? "Result sent" : "Send result to chat") {
+                                guard !receiptSent, account == model.vaultIntakeAccount, model.connected else { return }
+                                receiptSent = true
+                                model.publishPermissionReceipt(review, agentID: agentID, account: account)
+                            }.disabled(receiptSent).accessibilityIdentifier("permission-request-send-receipt")
+                        }
+                    }.disabled(busy || account != model.vaultIntakeAccount)
+                }
+                if busy { ProgressView("Checking request…") }
+                if let failure { Text(failure).foregroundStyle(.secondary) }
+                if !busy {
+                    Button("Refresh status") { refresh() }.accessibilityIdentifier("permission-request-refresh")
+                    if (review == nil || review?.isPending == true), let browserURL {
+                        Button("Review in browser") {
+                            guard account == model.vaultIntakeAccount, model.connected else { return }
+                            openURL(browserURL)
+                        }.accessibilityIdentifier("permission-request-browser")
+                    }
+                }
+            }
+            .navigationTitle("Review permissions")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+            .overlay { if scenePhase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
+        }
+        .interactiveDismissDisabled(busy)
+        .task {
+            account = model.vaultIntakeAccount
+            browserURL = try? model.permissionRequestApprovalURL(request, account: account)
+            refresh()
+        }
+        .onDisappear { operation?.cancel() }
+        .onChange(of: model.vaultIntakeAccount) { _, _ in operation?.cancel(); review = nil; browserURL = nil; dismiss() }
+        .onChange(of: model.connected) { _, connected in if !connected { operation?.cancel(); dismiss() } }
     }
 }
 

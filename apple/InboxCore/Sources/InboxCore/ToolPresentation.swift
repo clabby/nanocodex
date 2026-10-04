@@ -26,6 +26,8 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
     public var secureInput: SecureInputRequest?
     var secureInputEligible: Bool?
     var nativeSecureInputEligible: Bool?
+    public var permissionRequest: PermissionRequest?
+    var permissionRequestEligible: Bool?
     public var vaultIntake: VaultIntake?
     var vaultIntakeEligible: Bool?
     var terminalCommand: Bool?
@@ -52,6 +54,7 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
         if family.hasPrefix("mcp__") { family = family.components(separatedBy: "__").dropFirst(2).joined(separator: "_") }
         if family.hasPrefix("functions.") { family = String(family.dropFirst(10)) }
         generatedIsComputerScreen = Self.isComputerCapture(name: attributedName, family: family, arguments: Self.decoded(arguments))
+        permissionRequestEligible = family == "request_permissions"
         secureInputEligible = family == "request_secure_input"
         nativeSecureInputEligible = family == "request_native_secure_input"
         vaultIntakeEligible = family == "request_browser_login" || family == "request_browser_login_input" || family == "request_vault_intake" || family == "browser_vault_request_challenge" || family == "browser_vault_request_takeover"
@@ -99,6 +102,7 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
             secureInputEligible = presentation.secureInputEligible
             nativeSecureInputEligible = presentation.nativeSecureInputEligible
             vaultIntakeEligible = presentation.vaultIntakeEligible
+            permissionRequestEligible = presentation.permissionRequestEligible
             generatedIsComputerScreen = generatedIsComputerScreen == true || presentation.generatedIsComputerScreen == true
             title = presentation.title; generatedIncludesText = presentation.generatedIncludesText
             generatedIsInspection = generatedIsInspection == true || presentation.generatedIsInspection == true
@@ -108,6 +112,7 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
            request.isNative ? nativeSecureInputEligible == true : secureInputEligible == true {
             secureInput = request
         }
+        permissionRequest = permissionRequestEligible == true && status == "Completed" ? (PermissionRequest.parse(value) ?? PermissionRequest.parse(rawResult)) : nil
         vaultIntake = vaultIntakeEligible == true && status == "Completed" ? (VaultIntake.parse(value) ?? VaultIntake.parse(rawResult)) : nil
         var displayedResult = result
         if terminalCommand == true, case .object(var fields) = result {
@@ -126,6 +131,8 @@ public struct ToolPresentation: Codable, Equatable, Sendable {
     mutating func applyCompletion(_ result: Self, metadata: JSON) {
         generatedIsComputerScreen = generatedIsComputerScreen == true || result.generatedIsComputerScreen == true
         status = result.status; output = result.output; generatedResults = result.generatedResults
+        permissionRequest = result.permissionRequest
+        permissionRequestEligible = result.permissionRequestEligible
         vaultIntake = result.vaultIntake
         vaultIntakeEligible = result.vaultIntakeEligible
         generatedIncludesText = generatedIncludesText == true || result.generatedIncludesText == true

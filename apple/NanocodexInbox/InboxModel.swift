@@ -1938,6 +1938,26 @@ final class InboxModel: ObservableObject {
         pending.append(message); busy.insert(intake.agentID); persist()
         Task { await submit(message, epoch: account) }
     }
+    func permissionRequestReview(_ request: PermissionRequest, account: UUID) async throws -> PermissionRequestReview {
+        guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
+        let review = try await client.permissionRequestReview(request)
+        guard generation == account, connected, !Task.isCancelled else { throw APIError.invalidCredential }
+        return review
+    }
+    func permissionRequestApprovalURL(_ request: PermissionRequest, account: UUID) throws -> URL {
+        guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
+        return try client.permissionRequestApprovalURL(request)
+    }
+    func publishPermissionReceipt(_ review: PermissionRequestReview, agentID: String, account: UUID) {
+        guard generation == account, connected, !isDemo, review.status != "pending",
+              cards.contains(where: { $0.id == agentID }) else { return }
+        let predecessor = pending.last(where: { $0.agentID == agentID })?.id ?? (focused?.id == agentID ? focusedTurn : "")
+        let message = PendingMessage(agentID: agentID, input: review.receipt.pretty, predecessor: predecessor,
+            id: "permission-request-\(review.request.requestID)-\(review.status)")
+        guard !pending.contains(where: { $0.id == message.id }) else { return }
+        pending.append(message); busy.insert(agentID); persist()
+        Task { await submit(message, epoch: account) }
+    }
     func saveVaultItem(kind: String, values: [String: String], account: UUID) async throws -> VaultIntakeReceipt {
         guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
         let receipt = try await client.saveVaultItem(kind: kind, values: values)

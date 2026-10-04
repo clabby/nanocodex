@@ -254,6 +254,175 @@ type StoredApiKey = ApiKeyBase & Readonly<{
   authorizationEpoch: number;
 }>;
 
+/** A server-bound API key identity, never populated from tool arguments. */
+export type PermissionRequestIdentity = Readonly<{
+  userId: string;
+  organizationId: string;
+  teamId: string;
+  authorizationEpoch: number;
+  keyId: string;
+}>;
+
+export type ApiKeyPermissionRequest = Readonly<{
+  type: "permission_request";
+  request_id: string;
+  key_id: string;
+  status: "pending" | "approved" | "denied" | "expired";
+  capabilities: readonly OrganizationCapability[];
+  reason: string;
+  key_label: string;
+  expires_at: number;
+}>;
+
+const REQUESTABLE_CAPABILITIES: readonly OrganizationCapability[] = [
+  "agents:read", "agents:write", "agents:portability", "data:read", "data:write",
+  "history:read", "memory:read", "memory:write", "tools:use",
+];
+const PERMISSION_CAPABILITY_DESCRIPTIONS: Partial<Record<OrganizationCapability, string>> = {
+  "agents:read": "Read agents and conversations",
+  "agents:portability": "Export and move agents",
+  "agents:write": "Create and change agents and conversations",
+  "data:read": "Read your saved app data",
+  "data:write": "Create, change and delete your saved app data",
+  "history:read": "Read conversation history",
+  "memory:read": "Read saved memories",
+  "memory:write": "Create, change and delete saved memories",
+  "tools:use": "Use tools",
+};
+const PERMISSION_REQUEST_TTL_MS = 15 * 60_000;
+// Retain terminal receipts for seven days, including expired requests. An
+// operation ID cannot be reused with different arguments within that window.
+const PERMISSION_REQUEST_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const MAX_PERMISSION_REQUESTS = 128;
+const permissionRequestStorageKey = (id: string) => `permissionRequest:${id}`;
+
+export type PermissionRequestInput = Readonly<{
+  operation_id: string;
+  capabilities: readonly OrganizationCapability[];
+  reason: string;
+}>;
+
+function permissionRequestInput(value: unknown): PermissionRequestInput | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some((key) => !["operation_id", "capabilities", "reason"].includes(key))
+    || !isUuid(input.operation_id)
+    || !Array.isArray(input.capabilities) || input.capabilities.length === 0
+    || input.capabilities.length > REQUESTABLE_CAPABILITIES.length
+    || input.capabilities.some((capability) => !REQUESTABLE_CAPABILITIES.includes(capability))
+    || new Set(input.capabilities).size !== input.capabilities.length
+    || typeof input.reason !== "string" || !input.reason.trim() || input.reason.length > 1_000) return undefined;
+  return { operation_id: input.operation_id, capabilities: [...input.capabilities].sort(), reason: input.reason.trim() };
+}
+
+function permissionIdentity(principal: Principal, keyId = principal.credentialId): PermissionRequestIdentity {
+  return { userId: principal.userId, organizationId: principal.organizationId,
+    teamId: principal.teamId, authorizationEpoch: principal.authorizationEpoch, keyId };
+}
+
+async function permissionKey(env: AccountAuthEnv, identity: PermissionRequestIdentity) {
+  if (!isUserId(identity.userId) || !isUuid(identity.organizationId) || !isUuid(identity.teamId)
+    || !Number.isSafeInteger(identity.authorizationEpoch) || identity.authorizationEpoch < 1
+    || !/^[A-Za-z0-9_-]{12}$/.test(identity.keyId)) return undefined;
+  const found = await env.NANOCODEX_USERS.getByName(identity.userId, durablePlacementOptions(env.trustedClientIngressColo))
+    .fetch(`https://user.internal/api-keys/${identity.keyId}`);
+  if (!found.ok) { await found.body?.cancel(); return undefined; }
+  const key = await found.json<ApiKeyMetadata & { digest: string }>();
+  return key.id === identity.keyId && /^[A-Za-z0-9_-]{43}$/.test(key.digest)
+    ? env.NANOCODEX_API_KEYS.getByName(key.digest, durablePlacementOptions(env.trustedClientIngressColo))
+    : undefined;
+}
+
+/** Used by the managed tool with the identity captured from its authenticated turn. */
+export async function requestApiKeyPermissions(
+  env: AccountAuthEnv,
+  identity: PermissionRequestIdentity,
+  input: PermissionRequestInput,
+): Promise<Response> {
+  const parsed = permissionRequestInput(input);
+  if (!parsed) return json({ error: "invalid_permission_request" }, { status: 400 });
+  const key = await permissionKey(env, identity);
+  if (!key) return json({ error: "not_found" }, { status: 404 });
+  return key.fetch("https://api-key.internal/permission-requests", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ identity, input: parsed, actor: "api_key" }),
+  });
+}
+
+/** Re-read the key's live grants for a running turn; never return key material. */
+export async function resolvePermissionKey(
+  env: AccountAuthEnv,
+  identity: PermissionRequestIdentity,
+): Promise<{ capabilities: readonly OrganizationCapability[] } | undefined> {
+  const key = await permissionKey(env, identity);
+  if (!key) return undefined;
+  const record = consumeRpcData(await key.resolveAuthorizedKey());
+  if (!record || record.id !== identity.keyId || record.userId !== identity.userId
+    || record.organizationId !== identity.organizationId || record.teamId !== identity.teamId
+    || record.authorizationEpoch !== identity.authorizationEpoch) return undefined;
+  return { capabilities: record.capabilities };
+}
+
+/** Read only this turn's own key request, revalidating its current authority. */
+export async function getApiKeyPermissionRequest(
+  env: AccountAuthEnv,
+  identity: PermissionRequestIdentity,
+  id: string,
+): Promise<Response> {
+  if (!isUuid(id)) return json({ error: "invalid_permission_request" }, { status: 400 });
+  const key = await permissionKey(env, identity);
+  if (!key) return json({ error: "not_found" }, { status: 404 });
+  return key.fetch("https://api-key.internal/permission-requests", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ identity, actor: "api_key", requestId: id }),
+  });
+}
+
+async function routePermissionRequest(request: Request, env: AccountAuthEnv, url: URL): Promise<Response> {
+  const match = url.pathname.match(/^\/v1\/permission-requests\/([A-Za-z0-9_-]{12})\/([0-9a-f-]{36})(?:\/(approve|deny))?$/);
+  const create = url.pathname === "/v1/permission-requests";
+  if (!create && (!match || !isUuid(match[2]))) return json({ error: "not_found" }, { status: 404 });
+  const decision = match?.[3];
+  if (request.method !== (create || decision ? "POST" : "GET")) return methodNotAllowed();
+  // Always resolve live credentials, even if an ingress access assertion exists.
+  const principal = await authenticateLive(request, env, url);
+  if (!principal) return unauthorized();
+  if (create) {
+    if (principal.kind !== "api_key") return json({ error: "forbidden" }, { status: 403 });
+    const body = await readJson(request, 4_096);
+    if (body instanceof Response) return body;
+    const input = permissionRequestInput(body);
+    if (!input) return json({ error: "invalid_permission_request" }, { status: 400 });
+    const response = await requestApiKeyPermissions(env, permissionIdentity(principal), input);
+    if (!response.ok) return response;
+    const result = await response.json<ApiKeyPermissionRequest>();
+    const approvalUrl = new URL("/", url.origin);
+    approvalUrl.searchParams.set("permission_request", result.request_id);
+    approvalUrl.searchParams.set("key_id", result.key_id);
+    return json({ ...result, approval_url: approvalUrl.toString() }, { status: response.status });
+  }
+  if (principal.kind === "account_session") {
+    const account = await readAccount(env, principal.userId);
+    if (!account?.persistent) return json({ error: "forbidden" }, { status: 403 });
+  } else if (principal.kind !== "api_key" || principal.credentialId !== match![1] || decision) {
+    return json({ error: "forbidden" }, { status: 403 });
+  }
+  if (decision) {
+    if (!principal.capabilities.includes("api_keys:write")) return json({ error: "forbidden" }, { status: 403 });
+    const originFailure = requireBrowserOrigin(request, url);
+    if (originFailure) return originFailure;
+    const site = request.headers.get("sec-fetch-site");
+    if (site && site !== "same-origin") return json({ error: "forbidden_origin" }, { status: 403 });
+  }
+  const identity = permissionIdentity(principal, match![1]!);
+  const key = await permissionKey(env, identity);
+  if (!key) return json({ error: "not_found" }, { status: 404 });
+  return key.fetch("https://api-key.internal/permission-requests", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ identity, actor: principal.kind, requestId: match![2], decision }),
+  });
+}
+
 export type AgentSummary = Readonly<{
   id: string;
   title: string;
@@ -448,6 +617,9 @@ export async function routeAccountRequest(
       }));
     }
     return methodNotAllowed();
+  }
+  if (url.pathname === "/v1/permission-requests" || url.pathname.startsWith("/v1/permission-requests/")) {
+    return routePermissionRequest(request, env, url);
   }
   if (url.pathname === "/v1/api-keys") {
     const principal = request.method === "GET"
@@ -2264,6 +2436,95 @@ export class Organization extends DurableObject<AccountAuthEnv> {
 }
 
 export class ApiKeyRecord extends DurableObject<AccountAuthEnv> {
+  private async permissionRequest(request: Request): Promise<Response> {
+    const body = await request.json<{
+      identity: PermissionRequestIdentity;
+      actor: "api_key" | "account_session";
+      input?: PermissionRequestInput;
+      requestId?: string;
+      decision?: "approve" | "deny";
+    }>();
+    const record = await this.ctx.storage.get<StoredApiKey>("record");
+    const identity = body.identity;
+    if (!isStoredApiKey(record) || !identity || record.id !== identity.keyId
+      || record.userId !== identity.userId || record.organizationId !== identity.organizationId
+      || record.teamId !== identity.teamId) return json({ error: "not_found" }, { status: 404 });
+    if (record.authorizationEpoch !== identity.authorizationEpoch
+      || !await apiKeyAuthorized(this.env, record)) return json({ error: "stale_authorization" }, { status: 409 });
+    const account = await readAccount(this.env, record.userId);
+    const grant = account ? await resolveOrganizationGrant(this.env, account) : undefined;
+    if (!account || !grant || account.organizationId !== record.organizationId
+      || grant.teamId !== record.teamId || grant.authorizationEpoch !== record.authorizationEpoch) {
+      return json({ error: "stale_authorization" }, { status: 409 });
+    }
+    if (body.actor !== "api_key" && body.actor !== "account_session") return json({ error: "forbidden" }, { status: 403 });
+    if (body.actor === "account_session" && !account.persistent) return json({ error: "forbidden" }, { status: 403 });
+    const actorCanDecide = body.actor === "account_session" && account.persistent
+      && grant.capabilities.includes("api_keys:write");
+    if (body.decision && !actorCanDecide) return json({ error: "forbidden" }, { status: 403 });
+    const now = Date.now();
+    const requestRecords = await this.ctx.storage.list<ApiKeyPermissionRequest>({ prefix: "permissionRequest:", limit: MAX_PERMISSION_REQUESTS + 1 });
+    const input = body.input ? permissionRequestInput(body.input) : undefined;
+    if (body.input && (!input || body.actor !== "api_key")) return json({ error: "invalid_permission_request" }, { status: 400 });
+    const requestId = input?.operation_id ?? body.requestId;
+    if (!isUuid(requestId)) return json({ error: "invalid_permission_request" }, { status: 400 });
+    let current = requestRecords.get(permissionRequestStorageKey(requestId));
+    if (input) {
+      if (current && (current.reason !== input.reason
+        || JSON.stringify(current.capabilities) !== JSON.stringify(input.capabilities))) {
+        return json({ error: "operation_conflict" }, { status: 409 });
+      }
+      if (!current) {
+        if (input.capabilities.some((capability) => !grant.capabilities.includes(capability))) {
+          return json({ error: "forbidden_capability" }, { status: 403 });
+        }
+        const retired: string[] = [];
+        for (const [key, value] of requestRecords) {
+          if (value.expires_at + PERMISSION_REQUEST_RETENTION_MS <= now) {
+            retired.push(key);
+            requestRecords.delete(key);
+          }
+        }
+        if (retired.length) await this.ctx.storage.delete(retired);
+        if (requestRecords.size >= MAX_PERMISSION_REQUESTS) {
+          return json({ error: "permission_request_limit" }, { status: 429 });
+        }
+        current = { type: "permission_request", request_id: requestId, key_id: record.id,
+          status: "pending", capabilities: input.capabilities, reason: input.reason,
+          key_label: record.label, expires_at: now + PERMISSION_REQUEST_TTL_MS };
+      }
+    }
+    if (!current) return json({ error: "not_found" }, { status: 404 });
+    if (current.status === "pending" && current.expires_at <= now) current = { ...current, status: "expired" };
+    const view = () => json({ ...current,
+      can_decide: actorCanDecide && current!.status === "pending"
+        && current!.capabilities.every((capability) => grant.capabilities.includes(capability)),
+      capability_descriptions: Object.fromEntries(current!.capabilities.map((capability) =>
+        [capability, PERMISSION_CAPABILITY_DESCRIPTIONS[capability] ?? capability])),
+    });
+    if (body.decision && current.status === "pending") {
+      if (current.capabilities.some((capability) => !REQUESTABLE_CAPABILITIES.includes(capability)
+        || !grant.capabilities.includes(capability))) return json({ error: "forbidden_capability" }, { status: 403 });
+      current = { ...current, status: body.decision === "approve" ? "approved" : "denied" };
+      // One storage transaction commits the receipt and the exact capability
+      // union. The surrounding concurrency gate prevents concurrent revocation
+      // or another decision from interleaving with the live authority checks.
+      const committed = await this.ctx.storage.transaction(async (storage) => {
+        if (!sameStoredApiKey(await storage.get("record"), record)) return false;
+        if (body.decision === "approve") {
+          await storage.put("record", { ...record,
+            capabilities: [...new Set([...record.capabilities, ...current!.capabilities])] });
+        }
+        await storage.put(permissionRequestStorageKey(requestId), current);
+        return true;
+      });
+      if (!committed) return json({ error: "stale_authorization" }, { status: 409 });
+      return view();
+    }
+    await this.ctx.storage.put(permissionRequestStorageKey(requestId), current);
+    return view();
+  }
+
   /** No credentials are read or written: same-Worker cold DO dispatch control. */
   async activationProbe(): Promise<number> {
     const enteredAt = Date.now();
@@ -2288,6 +2549,9 @@ export class ApiKeyRecord extends DurableObject<AccountAuthEnv> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/permission-requests" && request.method === "POST") {
+      return this.ctx.blockConcurrencyWhile(() => this.permissionRequest(request));
+    }
     if (url.pathname === "/resolve" && request.method === "GET") {
       const record = await this.ctx.storage.get<StoredApiKey>("record");
       if (!isStoredApiKey(record)) return json({ error: "not_found" }, { status: 404 });

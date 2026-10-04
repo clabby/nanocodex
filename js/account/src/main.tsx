@@ -9,6 +9,7 @@ import { ArtifactRuntime } from "./artifactRuntime";
 import type { PreparedDirectRoute } from "./routeLoaders";
 import { surfaceFromUrl } from "./navigation";
 
+const PermissionRequestPage = lazy(() => import("./PermissionRequestPage").then(module => ({ default: module.PermissionRequestPage })));
 const BrowserLoginPage = lazy(() => import("./BrowserLoginPage").then(module => ({default:module.BrowserLoginPage})));
 const SharedThreadView = lazy(() => import("./SharedThreadView").then((module) => ({ default: module.SharedThreadView })));
 const directUrl = new URL(window.location.href);
@@ -70,7 +71,7 @@ function BrowserApplication({ url }: { url: URL }) {
       <BrowserRouter useTransitions={false}>
         <Suspense fallback={null}>
           <AccountSessionProvider>
-            {url.pathname === "/browser-login" ? <BrowserLoginPage url={url} /> : <NanocodexApp preparedRoute={preparedRoute} />}
+            {url.pathname === "/" && url.searchParams.has("permission_request") ? <PermissionRequestPage url={url} /> : url.pathname === "/browser-login" ? <BrowserLoginPage url={url} /> : <NanocodexApp preparedRoute={preparedRoute} />}
           </AccountSessionProvider>
         </Suspense>
       </BrowserRouter>
