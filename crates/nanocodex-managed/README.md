@@ -62,3 +62,41 @@ timezone, prompt, enabled state, and `CronSessionMode` (`New` or `Continue`).
 The client validates identifiers and input bounds; the managed service validates
 schedule syntax and timezone semantics. `put_trigger` replaces a named schedule
 using PUT. Schedule receipts include delivery timestamps and the last agent/turn.
+
+`ManagedClient::vault_request(&VaultRequest)` sends one authenticated
+`POST /v1/vault/request`. Supply only an opaque saved `vault_id` and public HTTPS
+request templates; the broker resolves credentials and computes optional HMAC,
+PKCS#8 signatures or JWTs at the outbound boundary. `VaultSigning` contains the
+algorithm and public message or JWT claims, never the key. The response is a
+closed `VaultRequestReceipt { status, ok }` with no destination body, headers,
+cookies, signature or token. The client bounds requests to 96 KiB and receipts
+to 4 KiB, rejects malformed receipts, projects fixed error codes, and never
+retries. An unknown outcome may have executed; reconcile before another call.
+The server requires direct account authority and rejects Connect grants.
+
+The CLI uses the existing account login and reads the same public request JSON
+from a file or stdin:
+
+```sh
+nanocodex2 vault request --file request.json
+nanocodex2 vault request --stdin < request.json
+```
+
+For example, `request.json` can contain a synthetic saved-item reference and
+an authorized destination:
+
+```json
+{
+  "vault_id": "abcdefghijklmnopqrstuv",
+  "url": "https://example.com/authorized",
+  "method": "POST",
+  "headers": { "authorization": "Bearer {{NANOCODEX_VAULT_API_KEY}}" },
+  "body": "public-payload"
+}
+```
+
+Successful dispatch prints only `{"status":201,"ok":true}` (with the actual
+destination status). A valid destination failure such as HTTP 403 still returns
+a receipt with `ok:false`; CLI failure means input, authorization, transport or
+receipt validation failed. This operation does not export secrets to native
+processes or implement multi-step native login protocols such as xtool SRP.

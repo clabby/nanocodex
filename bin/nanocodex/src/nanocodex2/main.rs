@@ -67,6 +67,7 @@ mod skill;
 mod startup_timing;
 #[allow(dead_code, unused_imports)]
 mod tui;
+mod vault;
 #[allow(dead_code)]
 #[path = "../version.rs"]
 mod version;
@@ -145,6 +146,8 @@ enum Command {
     /// Manage account credentials (also available as login, status, and logout).
     #[command(visible_alias = "auth")]
     Account(nanocodex_cli_auth::Account),
+    /// Use saved Vault items through broker-owned HTTP requests.
+    Vault(vault::Vault),
     /// Attach this machine's workspace to an existing managed agent.
     Attach(Attach),
     /// Connect this computer as a Hand; optionally run a VM or Docker Hand.
@@ -791,6 +794,7 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         ) => {
             unreachable!("handled before managed client setup")
         }
+        Some(Command::Vault(command)) => command.run(&client).await,
         Some(Command::Voice(command)) => voice::run(&client, command).await,
         Some(Command::Attach(command)) => {
             attach_tui(&client, command.agent.map(|agent| agent.agent_id)).await

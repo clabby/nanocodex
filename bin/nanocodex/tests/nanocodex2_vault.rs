@@ -1,0 +1,263 @@
+//! Real CLI/HTTP journeys; all identities and request templates are synthetic.
+use std::{
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use axum::{
+    Router,
+    body::Body,
+    http::{HeaderMap, Response, StatusCode},
+    routing::post,
+};
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const ID: &str = "abcdefghijklmnopqrstuv";
+const PRIVATE: &str = "synthetic-secret-must-not-be-reflected";
+
+fn command(home: &std::path::Path, origin: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"));
+    command
+        .env_clear()
+        .current_dir(home)
+        .env("HOME", home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("NANOCODEX_HOME", home)
+        .env("NANOCODEX_DISABLE_HAND", "1")
+        .env("NANOCODEX_COMPUTER", "off")
+        .env("NANOCODEX_MANAGED_URL", origin)
+        .env(
+            "NANOCODEX_API_KEY",
+            format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43)),
+        )
+        .args(["vault", "request"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
+async fn invoke(origin: &str, input: &str, from_file: bool) -> std::process::Output {
+    let home = tempfile::tempdir().unwrap();
+    let mut command = command(home.path(), origin);
+    if from_file {
+        let file = home.path().join("request.json");
+        std::fs::write(&file, input).unwrap();
+        command.arg("--file").arg(file);
+    } else {
+        command.arg("--stdin").stdin(Stdio::piped());
+    }
+    let mut child = command.spawn().unwrap();
+    if !from_file {
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).await.unwrap();
+        stdin.shutdown().await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+fn template() -> Value {
+    json!({"vault_id": ID, "url": "https://example.com/authorized", "method": "POST",
+        "headers": {"authorization": "Bearer {{NANOCODEX_VAULT_API_KEY}}"},
+        "body": "public-payload"})
+}
+
+#[tokio::test]
+async fn vault_cli_status_errors_privacy_and_single_dispatch() {
+    let input = template();
+    let cases = [
+        (
+            400,
+            json!({"error":"invalid_vault_signing_placeholder"}).to_string(),
+            false,
+            "invalid_vault_signing_placeholder",
+        ),
+        (200, json!({"status":201,"ok":true}).to_string(), true, ""),
+        (200, json!({"status":403,"ok":false}).to_string(), true, ""),
+        (
+            403,
+            json!({"error":"forbidden"}).to_string(),
+            false,
+            "forbidden",
+        ),
+        (
+            502,
+            json!({"error":"vault_request_outcome_unknown"}).to_string(),
+            false,
+            "outcome_unknown",
+        ),
+        (
+            503,
+            json!({"error": PRIVATE, "message": PRIVATE}).to_string(),
+            false,
+            "outcome_unknown",
+        ),
+        (
+            200,
+            json!({"status":200,"ok":true,"password":PRIVATE}).to_string(),
+            false,
+            "outcome_unknown",
+        ),
+        (
+            200,
+            json!({"status":403,"ok":true}).to_string(),
+            false,
+            "outcome_unknown",
+        ),
+        (
+            200,
+            json!({"status":600,"ok":false}).to_string(),
+            false,
+            "outcome_unknown",
+        ),
+        (200, "x".repeat(4097), false, "outcome_unknown"),
+        (200, PRIVATE.into(), false, "outcome_unknown"),
+        (302, "".into(), false, "outcome_unknown"),
+    ];
+    for (http_status, body, success, expected_error) in cases {
+        let expected_receipt = success.then(|| serde_json::from_str::<Value>(&body).unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let expected = input.clone();
+        let app = Router::new()
+            .route(
+                "/v1/vault/request",
+                post(
+                    move |headers: HeaderMap, axum::Json(value): axum::Json<Value>| {
+                        let count = count.clone();
+                        let body = body.clone();
+                        let expected = expected.clone();
+                        async move {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            assert_eq!(
+                                headers["authorization"],
+                                format!("Bearer ncx_live_{}_{}", "a".repeat(12), "b".repeat(43))
+                            );
+                            assert_eq!(value, expected);
+                            Response::builder()
+                                .status(http_status)
+                                .header("location", "/must-not-follow")
+                                .body(Body::from(body))
+                                .unwrap()
+                        }
+                    },
+                ),
+            )
+            .fallback(|| async {
+                panic!("CLI followed a redirect or used a different endpoint");
+                #[allow(unreachable_code)]
+                StatusCode::INTERNAL_SERVER_ERROR
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let output = invoke(&origin, &input.to_string(), false).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "HTTP {http_status}");
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(!stderr.contains(PRIVATE) && !stdout.contains(PRIVATE));
+        assert!(!stderr.contains("ncx_live_") && !stdout.contains("ncx_live_"));
+        if success {
+            let receipt: Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(receipt.as_object().unwrap().len(), 2);
+            assert_eq!(Some(receipt), expected_receipt);
+            assert!(stderr.is_empty());
+        } else {
+            assert!(stdout.is_empty());
+            assert!(stderr.contains(expected_error), "{stderr}");
+        }
+        println!("vault CLI HTTP {http_status}: success={success}, dispatches=1, output projected");
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn vault_cli_file_signing_defaults_and_local_rejection() {
+    let mut input = json!({"vault_id": ID, "url":"https://example.com/authorized", "headers":{
+        "authorization":"Bearer {{NANOCODEX_VAULT_JWT}}"},
+        "signing":{"algorithm":"ES256","jwt":{"header":{},"payload":{"aud":"public-audience"}}}});
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let mut expected = input.clone();
+    expected["method"] = "GET".into();
+    let app = Router::new().route(
+        "/v1/vault/request",
+        post(move |axum::Json(value): axum::Json<Value>| {
+            let count = count.clone();
+            let expected = expected.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(value, expected);
+                axum::Json(json!({"status":204,"ok":true}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let output = invoke(&origin, &input.to_string(), true).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"status":204,"ok":true})
+    );
+    input["signing"]["message"] = "incompatible".into();
+    for invalid in [
+        input.to_string(),
+        PRIVATE.into(),
+        json!({"vault_id":ID,"url":"https://example.com", "unexpected":PRIVATE}).to_string(),
+        "x".repeat(96 * 1024 + 1),
+    ] {
+        let output = invoke(&origin, &invalid, true).await;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(PRIVATE));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    println!(
+        "vault CLI --file: ES256 JWT template transmitted with GET default; four invalid inputs rejected before dispatch"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn vault_cli_dropped_connection_is_not_retried() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            count.fetch_add(1, Ordering::SeqCst);
+            let mut buffer = [0; 8192];
+            let _ = socket.read(&mut buffer).await;
+            socket.shutdown().await.unwrap();
+        }
+    });
+    let output = invoke(&origin, &template().to_string(), false).await;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("outcome_unknown"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    println!("vault CLI dropped response: outcome_unknown, one connection, no retry");
+    server.abort();
+}

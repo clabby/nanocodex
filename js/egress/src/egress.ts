@@ -1,3 +1,4 @@
+import { signVaultRequest, transformVaultBody, validateVaultSigning, type VaultSigning } from "./vault-signing";
 import { handleGmailPush, gmailMailboxName, type GmailPushIngressEnv } from "./gmail-push-ingress";
 export { GmailPushMailbox } from "./gmail-push";
 import { cachedAccountMetadata, validDiscoveryOptions } from "./metadata-cache";
@@ -124,7 +125,7 @@ type ConnectorOperation = Readonly<{
 }>;
 
 type VaultPlaceholder = "API_KEY" | "USERNAME" | "PASSWORD" | "BASIC" | "CARD_NUMBER"
-  | "EXPIRY_MONTH" | "EXPIRY_YEAR" | "CVV" | "BILLING_ZIP";
+  | "EXPIRY_MONTH" | "EXPIRY_YEAR" | "CVV" | "BILLING_ZIP" | "SIGNATURE" | "JWT";
 
 type VaultEgressEnvelope = Readonly<{
   vaultId: string;
@@ -132,6 +133,8 @@ type VaultEgressEnvelope = Readonly<{
   method: string;
   headers: ReadonlyMap<string, string>;
   body?: string;
+  bodyEncoding: "raw" | "json" | "form";
+  signing?: VaultSigning;
   placeholders: ReadonlySet<VaultPlaceholder>;
 }>;
 
@@ -537,6 +540,18 @@ async function handleMeasuredEgressWithOwner(
     return handleVaultEgress(request, url, env, started, upstreamFetch);
   }
 
+  // Owner-authenticated account API only; the model gateway cannot route this
+  // private origin. Ownership is supplied by the trusted service binding, never
+  // a user-controlled header or a fabricated agent-subject registration.
+  const vaultOwnerRoute = /^\/v1\/users\/([^/]+)\/request$/.exec(url.pathname);
+  if (url.origin === "https://vault-egress.internal" && vaultOwnerRoute && !url.search) {
+    let owner: string;
+    try { owner = decodeURIComponent(vaultOwnerRoute[1]); }
+    catch { return jsonError(400, "invalid_user_id"); }
+    if (!USER_ID.test(owner)) return jsonError(400, "invalid_user_id");
+    return handleVaultEgress(request, url, env, started, upstreamFetch, owner);
+  }
+
   if (url.protocol === "https:" && url.hostname === "ssh.internal" && !url.port
     && url.pathname === "/v1/execute" && !url.search) {
     return handleSshEgress(request, url, env, started);
@@ -833,12 +848,13 @@ async function handleVaultEgress(
   env: EgressEnv,
   started: number,
   upstreamFetch: typeof fetch,
+  trustedOwner?: string,
 ): Promise<Response> {
   if (request.method !== "POST") {
     return auditedError(403, "method_denied", request, url, "vault", started);
   }
   const subject = request.headers.get(SUBJECT_HEADER);
-  if (!subject || !SUBJECT.test(subject)) {
+  if (trustedOwner === undefined && (!subject || !SUBJECT.test(subject))) {
     return auditedError(403, "agent_subject_required", request, url, "vault", started);
   }
   if (!isJsonContentType(request.headers.get("content-type"))
@@ -861,9 +877,16 @@ async function handleVaultEgress(
   }
 
   try {
-    const userId = await resolveSubject(env, subject);
+    const userId = trustedOwner ?? await resolveSubject(env, subject!);
     const entry = await resolveVaultEntry(env, userId, envelope.vaultId);
-    const replacements = vaultReplacements(entry, envelope.placeholders);
+    const requested = new Set([...envelope.placeholders].filter(name => name !== "SIGNATURE" && name !== "JWT"));
+    const replacements = new Map(vaultReplacements(entry, requested));
+    if (envelope.signing) {
+      if (entry.kind !== "api_key") throw new EgressFailure(403, "vault_entry_kind_mismatch");
+      try {
+        replacements.set(envelope.signing.jwt ? "JWT" : "SIGNATURE", await signVaultRequest(entry.api_key, envelope.signing));
+      } catch { throw new EgressFailure(400, "vault_signing_failed"); }
+    }
     const headers = new Headers();
     let injectedHeaderBytes = 0;
     for (const [name, template] of envelope.headers) {
@@ -878,7 +901,7 @@ async function handleVaultEgress(
     }
     const body = envelope.body === undefined
       ? undefined
-      : substituteVaultTemplate(envelope.body, replacements);
+      : transformVaultBody(envelope.body, envelope.bodyEncoding, value => substituteVaultTemplate(value, replacements));
     if (body !== undefined
       && new TextEncoder().encode(body).byteLength > MAX_VAULT_EGRESS_REQUEST_BODY_BYTES) {
       throw new EgressFailure(413, "vault_request_too_large");
@@ -909,7 +932,9 @@ async function handleVaultEgress(
 function validateVaultEgressEnvelope(value: unknown): VaultEgressEnvelope {
   if (!isRecord(value)) throw new EgressFailure(400, "invalid_vault_request");
   const hasBody = Object.prototype.hasOwnProperty.call(value, "body");
-  const expected = ["vault_id", "url", "method", "headers", ...(hasBody ? ["body"] : [])];
+  const expected = ["vault_id", "url", "method", "headers", ...(hasBody ? ["body"] : []),
+    ...(Object.hasOwn(value, "body_encoding") ? ["body_encoding"] : []),
+    ...(Object.hasOwn(value, "signing") ? ["signing"] : [])];
   const keys = Object.keys(value);
   if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))
     || typeof value.vault_id !== "string" || !VAULT_ENTRY_ID.test(value.vault_id)
@@ -923,8 +948,18 @@ function validateVaultEgressEnvelope(value: unknown): VaultEgressEnvelope {
   if ((value.method === "GET" || value.method === "HEAD") && hasBody) {
     throw new EgressFailure(400, "invalid_vault_request");
   }
+  const bodyEncoding = value.body_encoding ?? "raw";
+  if (!["raw", "json", "form"].includes(String(bodyEncoding))
+    || (Object.hasOwn(value, "body_encoding") && !hasBody)
+    || (Object.hasOwn(value, "body_encoding") && typeof value.body_encoding !== "string")) {
+    throw new EgressFailure(400, "invalid_vault_request");
+  }
+  const signing = Object.hasOwn(value, "signing") ? validateVaultSigning(value.signing) : undefined;
   let target: URL;
-  try { target = vaultEgressTarget(new URL(value.url)); }
+  try {
+    target = vaultEgressTarget(new URL(value.url));
+    if (target.protocol !== "https:") throw new Error("credential transport requires HTTPS");
+  }
   catch { throw new EgressFailure(403, "vault_destination_denied"); }
 
   const entries = Object.entries(value.headers);
@@ -967,7 +1002,15 @@ function validateVaultEgressEnvelope(value: unknown): VaultEgressEnvelope {
     if (new TextEncoder().encode(body).byteLength > MAX_VAULT_EGRESS_REQUEST_BODY_BYTES) {
       throw new EgressFailure(413, "vault_request_too_large");
     }
-    for (const placeholder of vaultTemplatePlaceholders(body)) placeholders.add(placeholder);
+    transformVaultBody(body, bodyEncoding as "raw" | "json" | "form", template => {
+      for (const placeholder of vaultTemplatePlaceholders(template)) placeholders.add(placeholder);
+      return template;
+    });
+  }
+  if ((signing && (!placeholders.has(signing.jwt ? "JWT" : "SIGNATURE")
+      || placeholders.has(signing.jwt ? "SIGNATURE" : "JWT")))
+    || (!signing && (placeholders.has("SIGNATURE") || placeholders.has("JWT")))) {
+    throw new EgressFailure(400, "invalid_vault_signing_placeholder");
   }
   if (![...placeholders].some((placeholder) => placeholder !== "USERNAME")) {
     throw new EgressFailure(400, "vault_secret_placeholder_required");
@@ -979,6 +1022,8 @@ function validateVaultEgressEnvelope(value: unknown): VaultEgressEnvelope {
     headers,
     ...(body === undefined ? {} : { body }),
     placeholders,
+    bodyEncoding: bodyEncoding as "raw" | "json" | "form",
+    ...(signing ? { signing } : {}),
   };
 }
 
@@ -986,16 +1031,18 @@ function validVaultPrivateHeader(name: string, value: string): boolean {
   if (name === "authorization") {
     return value === "Basic {{NANOCODEX_VAULT_BASIC}}"
       || value === "Bearer {{NANOCODEX_VAULT_API_KEY}}"
-      || value === "Bearer {{NANOCODEX_VAULT_PASSWORD}}";
+      || value === "Bearer {{NANOCODEX_VAULT_PASSWORD}}"
+      || value === "Bearer {{NANOCODEX_VAULT_JWT}}"
+      || value === "Bearer {{NANOCODEX_VAULT_SIGNATURE}}";
   }
-  return /^\{\{NANOCODEX_VAULT_(?:PASSWORD|API_KEY|BASIC|CARD_NUMBER|EXPIRY_MONTH|EXPIRY_YEAR|CVV|BILLING_ZIP)\}\}$/.test(value);
+  return /^\{\{NANOCODEX_VAULT_(?:PASSWORD|API_KEY|BASIC|CARD_NUMBER|EXPIRY_MONTH|EXPIRY_YEAR|CVV|BILLING_ZIP|SIGNATURE|JWT)\}\}$/.test(value);
 }
 
 function vaultTemplatePlaceholders(template: string): Set<VaultPlaceholder> {
   const placeholders = new Set<VaultPlaceholder>();
   const supported = new Set<VaultPlaceholder>([
     "API_KEY", "USERNAME", "PASSWORD", "BASIC", "CARD_NUMBER", "EXPIRY_MONTH", "EXPIRY_YEAR",
-    "CVV", "BILLING_ZIP",
+    "CVV", "BILLING_ZIP", "SIGNATURE", "JWT",
   ]);
   for (const match of template.matchAll(VAULT_PLACEHOLDER)) {
     if (!supported.has(match[1] as VaultPlaceholder)) {
@@ -3411,7 +3458,7 @@ function audit(
     rule,
     method: request.method,
     host: url.host,
-    path: connector ? "/provider-api" : url.pathname,
+    path: connector ? "/provider-api" : rule === "vault" ? "/v1/request" : url.pathname,
     duration_ms: Date.now() - started,
     ...safeDetail,
   });

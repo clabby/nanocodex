@@ -49,7 +49,11 @@ pub use sse::{
     EventCursor, ManagedEventFuture, ManagedEventSource, ManagedEventStream, ManagedEvents,
 };
 pub use types::*;
-pub use vault::VaultLogin;
+pub use vault::{
+    VAULT_REQUEST_MAX_BYTES, VaultBodyEncoding, VaultJwt, VaultKeyEncoding, VaultLogin,
+    VaultRequest, VaultRequestMethod, VaultRequestReceipt, VaultSignatureEncoding, VaultSigning,
+    VaultSigningAlgorithm,
+};
 
 #[cfg(feature = "tools")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tools")))]

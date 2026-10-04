@@ -142,3 +142,7 @@ result-large-err = "allow"
 [[test]]
 name = "nanocodex2_continue"
 path = "../tests/nanocodex2_continue.rs"
+
+[[test]]
+name = "nanocodex2_vault"
+path = "../tests/nanocodex2_vault.rs"

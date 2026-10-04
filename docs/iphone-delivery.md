@@ -140,6 +140,8 @@ Linux can generate a protected private key and public certificate signing reques
 Apple must issue the matching certificate and profiles for the app, share and
 widget extensions, covering the intended iPhone. Generating another local key
 does not issue Apple credentials. A browser login does not authenticate xtool.
+Saved Vault use is described in the [Vault request API](vault-requests.md); its HTTP/JWT operations do not implement
+xtool's GrandSlam password authentication or native artifact signing.
 The linked guide describes the required local signing inputs and `build-signed`.
 
 Linux OTA staging checks provisioning and signature integrity, but does not prove

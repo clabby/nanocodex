@@ -221,6 +221,12 @@ For a brokered request, supply the entry ID in `x-nanocodex-vault-id` and use
 the final fetch. Existing destination policy and status-only responses apply;
 API-key entries cannot satisfy login/password placeholders.
 
+The [Vault request API](../../docs/vault-requests.md) exposes the same broker to
+Code Mode and the authenticated native CLI/SDK, with structured body escaping
+and broker-side HMAC, PKCS8 signatures and JWTs. Keys and generated credentials
+remain inside egress; only a status receipt is returned. Deploy egress, then
+managed, then account before using the new native request route.
+
 ### Spotify OAuth
 
 The native iPhone Spotify flow uses ncspot's public PKCE registration and its
