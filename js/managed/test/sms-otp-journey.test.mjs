@@ -61,8 +61,14 @@ test("SMS OTP accepts immediate resends without local phone/IP limits and preser
         return Response.json({ sid, status: "pending" }, { status: 201 });
       }
       assert.equal(url.pathname, `/v2/Services/${serviceSid}/VerificationCheck`);
-      assert.ok(verificationSids.has(form.get("VerificationSid")), "checks use an issued provider verification");
+      const sid = form.get("VerificationSid");
+      if (!verificationSids.has(sid)) {
+        trace.push({ provider: "Twilio check", observed: 404 });
+        return Response.json({ error: "verification not found" }, { status: 404 });
+      }
       const approved = form.get("Code") === code;
+      // Twilio deletes approved verifications; retries cannot approve this SID again.
+      if (approved) verificationSids.delete(sid);
       trace.push({ provider: "Twilio check", observed: 200, approved });
       return Response.json({ status: approved ? "approved" : "pending" });
     },
