@@ -1,3 +1,4 @@
+import { routeNativeInputDiscovery } from "./native-input-discovery";
 import { receiveManagedPreview, type PreviewBridgeEnv } from "./preview-bridge.ts";
 import { cleanupGmailInbox } from "./gmail-firehose-cleanup";
 import { observeClaudeRelease } from "./claude-lifecycle.mjs";
@@ -1649,6 +1650,8 @@ async function managedFetchRoute(
 ): Promise<Response> {
     env = withIngressPlacement(env, clientIngressColo);
     const url = new URL(request.url);
+    const nativeInputDiscovery = await routeNativeInputDiscovery(request, env, url);
+    if (nativeInputDiscovery) return nativeInputDiscovery;
     if (url.pathname === "/v1/calendar-push/callback" && !url.search) {
       if (!env.NANOCODEX_CRM || !env.NANOCODEX_CALENDAR_PUSH) return new Response(null, { status: 503 });
       return receiveCalendarPush(env.NANOCODEX_CRM, request, (source, agent) => env.NANOCODEX_CALENDAR_PUSH!.getByName(source).enqueue(source, agent));

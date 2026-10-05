@@ -26,6 +26,25 @@ Complete independent backend pinning of the printed **public** helper identity,
 then locally install the reviewed systemd unit and enable it. No production
 installation/enrollment is performed by tests or this implementation task.
 
+The backend approval public key is available at
+`GET https://<independently-trusted-account-origin>/.well-known/nanocodex-native-input`.
+Retrieve it directly on a trusted administrator device with normal HTTPS
+certificate verification. Check `protocol: "nanocodex-secure-sudo"`, `version: 1`,
+the standard-base64 65-byte P256 X9.63 `approval_public_key`, and the lowercase
+hex SHA256 `approval_public_key_sha256` of the decoded key. Compare that
+fingerprint with an independently authenticated operator reference; the key
+and fingerprint in one response do not independently authenticate each other.
+The document derives only from the managed backend signing key and never
+contains its private scalar or helper pins. Missing/invalid keys fail with HTTP 503;
+responses are not cacheable. Only exact GET without a query is accepted, and
+HEAD returns HTTP 405. See the [discovery and HTTPS retrieval procedure](../../docs/architecture/secure-input.md#public-approval-key-discovery).
+
+This read-only document does not perform enrollment or change either pin.
+Do not treat an agent transcript or ordinary Hand output as the independent
+channel, and do not accept an untrusted Hand's suggested origin. The trusted
+local admin still selects the transport/authentication UID pair and invokes the
+reviewed enrollment procedure; backend helper identity pinning remains separate.
+
 **linux-paradigm's uid998 `nanocodex` service cannot authenticate with the `ubuntu`
 user's password.** Sudo/PAM authenticates the invoking UID. Socket peer UID is
 SO_PEERCRED-bound and must equal root-enrolled `transport_uid`. Sudo invokes the

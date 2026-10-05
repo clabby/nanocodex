@@ -1,3 +1,4 @@
+import { routeNativeInputDiscoveryProxy } from "./nativeInputDiscoveryProxy.ts";
 import { retryAfterAdvice, type RetryAfterAdvice } from "../../nanocodex/runtime/retry-after.mjs";
 import { routeElevenLabs, type ElevenLabsEnv } from "./elevenLabs.ts";
 import { webSearchRequest } from "./webSearchRequest.ts";
@@ -157,6 +158,8 @@ export default {
     }
     const insecure = enforceHttps(request, env, url);
     if (insecure) return insecure;
+    const nativeInputDiscovery = await routeNativeInputDiscoveryProxy(request, env, url);
+    if (nativeInputDiscovery) return nativeInputDiscovery;
     // Only this fixed public path reaches the egress Pub/Sub JWT verifier.
     if (/^\/v1\/gmail-push\/[^/]+\/[^/]+$/.test(url.pathname)) {
       if (!env.GMAIL_PUSH_EGRESS) return json({ error: "gmail_push_unavailable" }, { status: 503 });
