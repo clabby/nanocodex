@@ -5,7 +5,7 @@ import { formatDollars } from "./walletFunding";
 
 export function TempoWalletConnectionCard({
   address, balance, fundingAmountCents, fundingAvailable, fundingError,
-  fundingOperation, fundingLoading, fundingErrorSource, onFund,
+  fundingOperation, fundingLoading, fundingErrorSource, checkoutUrl, fundingMessage, onFund,
 }: Readonly<{
   address?: string;
   balance: string;
@@ -15,6 +15,8 @@ export function TempoWalletConnectionCard({
   fundingErrorSource?: "order" | "configuration" | null;
   fundingOperation: "prepare" | "payment" | null;
   fundingLoading: boolean;
+  checkoutUrl?: string | null;
+  fundingMessage?: string | null;
   onFund(): void;
 }>) {
   const [copyResult, setCopyResult] = useState<{ address: string; status: "copied" | "failed" } | null>(null);
@@ -34,16 +36,16 @@ export function TempoWalletConnectionCard({
   const fundingStatus = fundingOperation === "prepare"
     ? "Preparing secure checkout…"
     : fundingOperation === "payment"
-      ? "Complete payment in Stripe."
+      ? "Open Stripe checkout in a new tab. Keep this page open while we check for funds."
       : fundingError
         ? fundingErrorSource === "order"
-          ? "Couldn’t start checkout. Please try adding funds again."
+          ? fundingError
           : `Adding funds is temporarily unavailable.${balanceReassurance} Please try again later.`
         : fundingLoading
           ? "Checking funding availability…"
           : !fundingAvailable
             ? `Adding funds is currently unavailable.${balanceReassurance}`
-            : null;
+            : fundingMessage;
   return (
     <div className="wizard-connector-card tempo-wallet-connection" id="wallet" role="listitem">
       <div className={`connection-card tempo-wallet-card${address ? " is-connected" : " is-unavailable"}`}>
@@ -55,8 +57,9 @@ export function TempoWalletConnectionCard({
         </div>
         <span className="tempo-wallet-card-actions">
           <button disabled={!address || !fundingAvailable || fundingLoading || busy} onClick={onFund} type="button">
-            {busy ? "Opening checkout…" : `Add ${formatDollars(fundingAmountCents)}`}
+            {busy ? "Checking funding…" : `Add ${formatDollars(fundingAmountCents)}`}
           </button>
+          {checkoutUrl ? <a href={checkoutUrl} target="_blank" rel="noopener noreferrer">Open Stripe checkout</a> : null}
         </span>
           {address ? <div className="tempo-wallet-address">
             <span>Wallet address</span>
