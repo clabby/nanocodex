@@ -1531,7 +1531,7 @@ async function createHostedAuthorization(
   }
 
   const [status, mcpConnections] = await Promise.all([
-    connectorStatuses(env, identity.user_id),
+    connectorStatuses(env, identity.user_id, connectors),
     materializeApprovedMcpConnections(env, store, app, identity.user_id, resources),
   ]);
   const approvalId = randomSubject();
@@ -2051,7 +2051,7 @@ async function createConnection(
   // Provisioning a credential is not approval consumption. Recheck every live
   // connector and MCP immediately after broker success, then consume the
   // approval before creating any grant state.
-  const liveConnectorStatuses = (await connectorStatuses(env, identity.userId)).connectors;
+  const liveConnectorStatuses = (await connectorStatuses(env, identity.userId, requested)).connectors;
   let connectorConnections: ConnectorConnectionSnapshot | undefined;
   let legacyConnectorCapabilities: readonly ConnectorCapability[];
   try {
@@ -4656,8 +4656,9 @@ async function chargeGrant(
 async function connectorStatuses(
   env: Env,
   brokerUserId: string,
+  requested: readonly ConnectorCapability[] = CONNECTOR_IDS,
 ): Promise<{ connectors: Record<ConnectorCapability, ConnectorStatus> }> {
-  const { connectorValue, credentialValue } = await brokerAccountValues(env, brokerUserId);
+  const { connectorValue, credentialValue } = await brokerAccountValues(env, brokerUserId, requested);
   return connectorStatusProjection(connectorValue, credentialValue);
 }
 
@@ -4672,15 +4673,23 @@ async function brokerAccountSnapshot(
   };
 }
 
-async function brokerAccountValues(env: Env, brokerUserId: string) {
+async function brokerAccountValues(
+  env: Env,
+  brokerUserId: string,
+  requested: readonly ConnectorCapability[] = CONNECTOR_IDS,
+) {
+  // Grant paths know their approved/requested capabilities. Skip unrelated
+  // metadata sources, while account status and Vault snapshots keep full reads.
   const [connectorValue, credentialValue] = await Promise.all([
-    brokerJson(env, `/users/${encodeURIComponent(brokerUserId)}/connectors`),
-    brokerJson(
+    requested.some((connector) => connector !== "chatgpt")
+      ? brokerJson(env, `/users/${encodeURIComponent(brokerUserId)}/connectors`)
+      : Promise.resolve({} as Record<string, unknown>),
+    requested.includes("chatgpt") ? brokerJson(
       env,
       `/users/${encodeURIComponent(brokerUserId)}/credentials`,
       undefined,
       MAX_BROKER_CREDENTIALS_BODY_BYTES,
-    ),
+    ) : Promise.resolve({} as Record<string, unknown>),
   ]);
   return { connectorValue, credentialValue };
 }

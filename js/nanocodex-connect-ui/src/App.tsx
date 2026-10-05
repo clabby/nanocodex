@@ -1,6 +1,5 @@
 import { appearanceStyle, type ConnectAppearance } from "./appearance.js";
 export type { ConnectAppearance } from "./appearance.js";
-import { Provider, Storage, webAuthn } from "accounts";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { Dialog } from "nanocodex/connect";
 
@@ -19,6 +18,7 @@ import {
   McpConnectionCard,
 } from "./AccountConnectionSurface.js";
 import { ConnectionLogo } from "./ConnectionLogo.js";
+import { RequestIdentity } from "./RequestIdentity.js";
 import { connectorCompletionFor } from "./connectorCompletion.js";
 import {
   connectorAttemptedCapabilitiesConnected,
@@ -83,7 +83,7 @@ const emptyProviderStore = Object.freeze({
   subscribe: (_listener: () => void) => () => undefined,
 });
 const browserLocalWebAuthn = usesBrowserLocalWebAuthn(window.location.origin);
-const provider = browserLocalWebAuthn ? createLocalProvider() : undefined;
+const provider = browserLocalWebAuthn ? await createLocalProvider() : undefined;
 const providerStore = provider ? (provider as unknown as {
   store: {
     getState(): { activeAccount: number; accounts: readonly ProviderStoreAccount[] };
@@ -571,20 +571,10 @@ export function ConnectOnboarding({
       let managedAddress: `0x${string}` | undefined;
       let managedAuthToken: string | undefined;
       if (authenticatedBrowserAccount) {
-        // Recheck on consent: an earlier render (or a saved account label) is not
-        // authority after sign-out, expiry, or an account change in another tab.
-        const session = await readBrowserAccountSession();
-        requireCurrentRequest(activeRequest.id);
-        if (!session || activeRequest.type !== "walletConnect"
-          || !reusableBrowserAccount(session, walletConnectContext(activeRequest).resources)) {
-          throw new BrowserAccountReauthenticationRequiredError();
-        }
-        if (session.address !== selectedAccount?.address) {
-          setBrowserAccountState(session);
-          setWizardAccount(undefined);
-          throw new Error("Your signed-in account changed. Review access for this account and approve again.");
-        }
-        result = { accounts: [{ address: session.address }] };
+        // The authorization POST validates the current cookie and canonical
+        // account together. A separate /v1/me read adds latency and still races
+        // with a subsequent sign-out; refresh only if that POST rejects it.
+        result = { accounts: [{ address: selectedAccount!.address! }] };
       } else {
         try {
           if (activeRequest.type === "walletConnect"
@@ -870,7 +860,18 @@ export function ConnectOnboarding({
       }),
     });
     const authorized = await authorize.json() as Record<string, unknown>;
+    requireCurrentRequest(activeRequest.id);
     if (authorize.status === 401) throw new BrowserAccountReauthenticationRequiredError();
+    if (authorize.status === 403 && authorized.error === "account_address_mismatch") {
+      const session = await readBrowserAccountSession();
+      requireCurrentRequest(activeRequest.id);
+      if (!reusableBrowserAccount(session, resources)) {
+        throw new BrowserAccountReauthenticationRequiredError();
+      }
+      setBrowserAccountState(session);
+      setWizardAccount(undefined);
+      throw new Error("Your signed-in account changed. Review access for this account and approve again.");
+    }
     if (!authorize.ok) {
       throw new Error(apiError(authorized, "Unable to authorize this hosted Nanocodex account."));
     }
@@ -1439,26 +1440,17 @@ export function ConnectOnboarding({
             >
               Cancel
             </button>
-            {sessionConsent ? <button
-              type="button"
-              disabled={approvalDisabled}
-              onClick={() => {
-                invalidateBrowserSession();
-                setBrowserAccountState(null);
-                setWizardAccount(undefined);
-                setFailure(undefined);
-              }}
-            >Use a different account</button> : null}
             {!wizard || sessionConsent ? (
               <button
                 type="button"
+                aria-busy={ceremonyActive}
                 disabled={approvalDisabled
                   || connectorAction !== undefined
                   || mcpConnectionAction !== undefined
                   || (pendingApproval !== undefined && !connectedAccessReady)}
                 onClick={pendingApproval ? approveConnectedAccess : sessionConsent ? approveBrowserAccount : () => void approve()}
               >
-                Allow access
+                {ceremonyActive ? "Connecting…" : "Allow access"}
               </button>
             ) : null}
           </div>}
@@ -1705,17 +1697,23 @@ function ConnectionWizard({
   const deferredChatGptImport = request.connectPolicy.chatGptCredentialImport;
   const requester = presentation === "wizard" ? "Nanocodex CLI" : request.app.name;
   if (!request.hostPrincipalExchange && !connectorStatuses && !accountAddress && !browserAccount) {
-    if (browserAccountUnavailable) {
+    if (browserAccountUnavailable || checkingBrowserAccount) {
       return <div className="wizard-page wizard-account-page">
-        <p>We couldn’t check your account session.</p>
-        <button type="button" onClick={onRetryBrowserAccount} disabled={disabled}>Try again</button>
-        <button type="button" onClick={onCancel} disabled={disabled}>Cancel</button>
-      </div>;
-    }
-    if (checkingBrowserAccount) {
-      return <div className="wizard-page wizard-account-page">
-        <p role="status">Checking your account session…</p>
-        <button type="button" onClick={onCancel} disabled={disabled}>Cancel</button>
+        <section className="sms-auth-panel session-check" aria-busy={checkingBrowserAccount}>
+          <div className="sms-auth-content">
+            <header className="wizard-intro">
+              <RequestIdentity name={requester} origin={request.app.origin} />
+              <div className="wizard-app"><h1>Connect to {requester}</h1></div>
+            </header>
+            <p className="session-check-status" role="status">
+              {browserAccountUnavailable ? "We couldn’t check your account session." : "Checking your account…"}
+            </p>
+          </div>
+          {browserAccountUnavailable ? <div className="sms-auth-actions">
+            <button type="button" onClick={onCancel} disabled={disabled}>Cancel</button>
+            <button type="button" onClick={onRetryBrowserAccount} disabled={disabled}>Try again</button>
+          </div> : null}
+        </section>
       </div>;
     }
     return (
@@ -2245,7 +2243,8 @@ async function clearPortableCredential(apiUrl: string): Promise<void> {
   }
 }
 
-function createLocalProvider() {
+async function createLocalProvider() {
+  const { Provider, Storage, webAuthn } = await import("accounts");
   return Provider.create({
     adapter: webAuthn({
       name: "Nanocodex",

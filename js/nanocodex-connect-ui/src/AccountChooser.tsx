@@ -54,6 +54,7 @@ export function AccountChooser({
 }>) {
   const phoneId = useId();
   const codeId = useId();
+  const formId = useId();
   const codeHintId = useId();
   const failureId = useId();
   const [phone, setPhone] = useState("");
@@ -150,6 +151,7 @@ export function AccountChooser({
   return (
     <div className="wizard-page wizard-account-page">
       <section className="sms-auth-panel" aria-labelledby={`${phoneId}-heading`}>
+        <div className="sms-auth-content">
         <header className="wizard-intro">
           <RequestIdentity name={appName ?? "Nanocodex"} origin={appOrigin} />
           <div className="wizard-app">
@@ -170,7 +172,7 @@ export function AccountChooser({
         {requestContext ? <div className="wizard-sections">{requestContext}</div> : null}
 
         {!challenge ? (
-          <form key="phone" className="sms-otp-form" aria-busy={operation === "send"} noValidate onSubmit={(event) => {
+          <form id={formId} key="phone" className="sms-otp-form" aria-busy={operation === "send"} noValidate onSubmit={(event) => {
           event.preventDefault();
           void sendCode();
         }}>
@@ -193,13 +195,10 @@ export function AccountChooser({
               type="tel"
               value={phone}
             />
-            <button disabled={unavailable} type="submit">
-              {operation === "send" ? "Sending…" : "Text me a code"}
-            </button>
           </div>
         </form>
       ) : (
-        <form key="code" className="sms-otp-form" aria-busy={operation === "verify"} noValidate onSubmit={(event) => {
+        <form id={formId} key="code" className="sms-otp-form" aria-busy={operation === "verify"} noValidate onSubmit={(event) => {
           event.preventDefault();
           void verifyCode();
         }}>
@@ -224,23 +223,16 @@ export function AccountChooser({
               required
               value={code}
             />
-            <button disabled={unavailable} type="submit">
-              {operation === "verify" ? "Checking…" : "Continue"}
-            </button>
           </div>
-          <button
-            className="sms-otp-change"
-            disabled={unavailable}
-            onClick={() => {
-              setChallenge(undefined);
-              setCode("");
-              setLocalFailure(undefined);
-            }}
-            type="button"
-          >Use a different number</button>
         </form>
       )}
-        {onCancel ? <button className="auth-close" aria-label="Cancel" disabled={unavailable} onClick={onCancel} type="button">Cancel</button> : null}
+        </div>
+        <div className="sms-auth-actions">
+          {onCancel ? <button disabled={unavailable} onClick={onCancel} type="button">Cancel</button> : null}
+          <button disabled={unavailable} form={formId} type="submit">
+            {operation === "send" ? "Sending…" : operation === "verify" ? "Checking…" : challenge ? "Continue" : "Text me a code"}
+          </button>
+        </div>
       </section>
     </div>
   );

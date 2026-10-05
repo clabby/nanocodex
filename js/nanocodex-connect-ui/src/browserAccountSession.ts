@@ -11,10 +11,17 @@ export class BrowserAccountReauthenticationRequiredError extends Error {
   }
 }
 
+let pendingBrowserSession: Promise<BrowserAccountSession | null> | undefined;
+
 export function readBrowserAccountSession(
   fetcher: typeof fetch = fetch,
 ): Promise<BrowserAccountSession | null> {
-  return readSession(fetcher, true);
+  if (fetcher !== fetch) return readSession(fetcher, true);
+  // Coalesce simultaneous consumers (including StrictMode's effect replay),
+  // but never retain a resolved identity across requests or account changes.
+  return pendingBrowserSession ??= readSession(fetcher, true).finally(() => {
+    pendingBrowserSession = undefined;
+  });
 }
 
 export async function logoutBrowserAccountSession(

@@ -10,7 +10,7 @@ pnpm --filter @nanocodex/connect-dialog run test:browser
 
 The Vite fixture imports the built public `ConnectOnboarding` component and the shared stylesheet. It uses a synthetic request and host response callback. Only the account/SMS and external provider service transport is replaced by local HTTP endpoints; no SMS, account creation, or external authorization occurs. The `modal.nanocodex.localhost` hostname exercises the managed SMS flow instead of the loopback-only WebAuthn path. Playwright supplies its host resolution rule.
 
-The journeys cover invalid phone input, a delivery failure and recovery, malformed and rejected codes, changing the number, successful sign-in, explicit consent, consent cancellation, initial cancellation, and Escape. Light/dark desktop, mobile, and short viewports assert edge-to-edge full-page geometry, no horizontal overflow, input/button keyboard focus, and consent heading focus with reset scroll position. Synthetic HTTP requests, host receipts, screenshots, and traces are written to the ignored repository `output/connect-full-page/` directory.
+The journeys cover invalid phone input, a delivery failure and recovery, malformed and rejected codes, successful sign-in, explicit consent, consent cancellation, initial cancellation, and Escape. Light/dark desktop, mobile, short, and 320×360 keyboard-sized viewports assert edge-to-edge full-page geometry, no horizontal overflow, input/button keyboard focus, consent heading focus with reset scroll position, and mobile action footers that remain at the viewport bottom while content scrolls. Phone/code and consent omit account-switch actions. Synthetic HTTP requests, host receipts, screenshots, and traces are written to the ignored repository `output/connect-full-page/` directory.
 
 This verifies the real React rendering and user flow. It does not test the external SMS provider, production account backend, or the SDK iframe transport. A separate journey opens the real SDK popup and verifies the centered two-column desktop authorization layout.
 
@@ -26,8 +26,8 @@ Malformed CSS-bearing values fall back to native defaults.
 Existing-session journeys use a fixture-only HttpOnly cookie and server-owned
 session states. A persistent session with a canonical address opens app consent
 without SMS in the dialog, SDK popup, and wizard. No authorization POST or host
-approval occurs before Allow access. Coverage includes cancellation, choosing a
-different account, an account change in another tab requiring new consent,
+approval occurs before Allow access. Coverage includes cancellation,
+consent without account-switch actions, an account change in another tab requiring new consent,
 initial expiry, expiry during approval, unavailable-session retry, anonymous or
 address-less sessions, spending/fresh-auth policy gates, complete permission
 visibility for focused requests, and request replacement during delayed hosted

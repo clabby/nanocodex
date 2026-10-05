@@ -42,7 +42,7 @@ async function signIn(page: Page) {
 for (const presentation of ["dialog", "wizard"]) {
   test(`persistent session opens ${presentation} consent without SMS or automatic authorization`, async ({ context, page }, info) => {
     await session(context, "persistent");
-    if (presentation === "dialog") await page.setViewportSize({ width: 390, height: 844 });
+    await page.setViewportSize({ width: 390, height: 844 });
     const observed = observe(page, info);
     await page.goto(presentation === "wizard" ? "/?wizard=1" : "/");
     await consent(page);
@@ -55,21 +55,23 @@ for (const presentation of ["dialog", "wizard"]) {
       await consent(page);
       observed.requests.splice(0, observed.requests.length - 1);
     }
-    if (presentation === "dialog") await page.setViewportSize({ width: 320, height: 568 });
+    await page.setViewportSize({ width: 320, height: 360 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    const buttons = page.locator(".dialog-actions button");
-    if (presentation === "dialog") {
-      for (const button of await buttons.all()) {
-        const box = await button.boundingBox();
-        expect(box!.x).toBeGreaterThanOrEqual(0);
-        expect(box!.x + box!.width).toBeLessThanOrEqual(320);
-      }
+    const footer = page.locator(".dialog-actions, .wizard-actions");
+    const footerBox = await footer.boundingBox();
+    expect(footerBox!.y + footerBox!.height).toBe(360);
+    const buttons = footer.getByRole("button");
+    for (const button of await buttons.all()) {
+      const box = await button.boundingBox();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+      await expect(button).toBeInViewport();
     }
     await observed.evidence();
     await page.getByRole("button", { name: "Allow access", exact: true }).click();
     await expect(page.getByRole("status")).toHaveText("Request approved");
     expect(observed.requests.map(request => request.path)).toEqual([
-      "/v1/me", "/v1/me", "/v1/connect/hosted-authorization/authorize", "/v1/hosted-authorizations",
+      "/v1/me", "/v1/connect/hosted-authorization/authorize", "/v1/hosted-authorizations",
     ]);
     expect(await page.evaluate(() => (window as any).__hostReceipt.result.accounts[0])).toEqual({
       address: "0x1111111111111111111111111111111111111111",
@@ -189,13 +191,13 @@ test("unavailable session checks can retry without starting SMS", async ({ conte
   await observed.evidence();
 });
 
-test("signed-in user can choose another account without authorizing the current account", async ({ context, page }, info) => {
+test("signed-in consent has only the requested decision actions and cancellation never authorizes", async ({ context, page }, info) => {
   await session(context, "persistent");
   const observed = observe(page, info);
   await page.goto("/");
   await consent(page);
-  await page.getByRole("button", { name: "Use a different account", exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "Mobile number" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Use a different account", exact: true })).toHaveCount(0);
+  await expect(page.locator(".dialog-actions button")).toHaveCount(2);
   expect(observed.requests.filter(request => request.method === "POST")).toEqual([]);
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.getByRole("status")).toHaveText("Request cancelled");
@@ -211,8 +213,14 @@ for (const stage of ["authorization", "exchange"]) {
     const path = stage === "authorization" ? "/v1/connect/hosted-authorization/authorize" : "/v1/hosted-authorizations";
     const started = page.waitForRequest(request => new URL(request.url()).pathname === path);
     const finished = page.waitForResponse(response => new URL(response.url()).pathname === path);
-    await page.getByRole("button", { name: "Allow access", exact: true }).click();
+    const allow = page.getByRole("button", { name: "Allow access", exact: true });
+    const before = await allow.boundingBox();
+    await allow.click();
     await started;
+    const connecting = page.getByRole("button", { name: "Connecting…", exact: true });
+    await expect(connecting).toBeDisabled();
+    await expect(connecting).toHaveAttribute("aria-busy", "true");
+    expect(await connecting.boundingBox()).toEqual(before);
     await page.getByRole("button", { name: "Replace request", exact: true }).click();
     await (await finished).finished();
     await page.evaluate(() => new Promise(requestAnimationFrame));
@@ -252,7 +260,8 @@ test("account changed in another tab requires new consent with the new account l
   await consent(page);
   await expect(page.locator(".consent-account")).not.toHaveText(previousLabel!);
   await expect(page.locator(".consent-account")).toContainText("2222");
-  expect(observed.requests.filter(request => request.method === "POST")).toEqual([]);
+  expect(observed.requests.filter(request => request.method === "POST").map(request => request.path)).toEqual(["/v1/connect/hosted-authorization/authorize"]);
+  expect(await page.evaluate(() => (window as any).__hostReceipt)).toBeUndefined();
   await page.getByRole("button", { name: "Allow access", exact: true }).click();
   await expect(page.getByRole("status")).toHaveText("Request approved");
   expect(await page.evaluate(() => (window as any).__hostReceipt.result.accounts[0].address)).toBe("0x2222222222222222222222222222222222222222");

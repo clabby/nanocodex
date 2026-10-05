@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { chatGptCredentialImportResource } from "../src/chatGptCredentialImport.mts";
+import { cliApp } from "../src/devicePolicy.mts";
 
 const appId = "djbooth";
 const appOrigin = "https://djbooth-library.gakonst.workers.dev";
@@ -45,6 +47,10 @@ test("generic hosted apps exchange non-spending approvals into bound agent grant
   let exchanged = 0;
   let expectedSandbox = "true";
   let rejectAccount = false;
+  let connectorMetadata = { connectors: {} };
+  let credentialMetadata = { chatgpt: { connected: true } };
+  const metadataReads = [];
+  let importedAccountId;
   const dataRequests = [];
   let dataReply = () => Response.json({ preserved: true });
   const env = {
@@ -60,6 +66,9 @@ test("generic hosted apps exchange non-spending approvals into bound agent grant
         if (rejectAccount) return new Response(null, { status: 403 });
         return Response.json({ linked: true, user_id: accountAddress, account_address: accountAddress, resources: body.resources });
       }
+      if (url.pathname === "/connect/account-links/resolve") {
+        return Response.json({ linked: true, user_id: agentId });
+      }
       if (url.pathname === "/v1/data") {
         dataRequests.push(request.clone());
         return dataReply();
@@ -71,8 +80,21 @@ test("generic hosted apps exchange non-spending approvals into bound agent grant
     } },
     EGRESS: { fetch: async (request) => {
       const url = new URL(request.url);
-      if (url.pathname.endsWith("/connectors")) return Response.json({ connectors: {} });
-      if (url.pathname.endsWith("/credentials")) return Response.json({ chatgpt: { connected: true } });
+      if (url.pathname.endsWith("/credentials/chatgpt")) {
+        assert.equal(request.method, "PUT");
+        metadataReads.push("import");
+        const imported = await request.json();
+        credentialMetadata = { chatgpt: { connected: true, account_id: importedAccountId ?? imported.account_id } };
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith("/connectors")) {
+        metadataReads.push("connectors");
+        return Response.json(connectorMetadata);
+      }
+      if (url.pathname.endsWith("/credentials")) {
+        metadataReads.push("credentials");
+        return Response.json(credentialMetadata);
+      }
       if (url.pathname.startsWith("/subjects/")) return new Response(null, { status: 204 });
       assert.fail(`Unexpected broker request: ${url.pathname}`);
     } },
@@ -88,6 +110,7 @@ test("generic hosted apps exchange non-spending approvals into bound agent grant
   assert.equal(approvalResponse.status, 200, await approvalResponse.clone().text());
   const approval = await approvalResponse.json();
   assert.equal(exchanged, 1);
+  assert.deepEqual(metadataReads, ["credentials"], "ChatGPT approval skips connector metadata");
   assert.deepEqual(entries.get(`connect-approval:${approval.approval_id}`).value.resources, resources);
   const connect = (fields = {}, origin = appOrigin) => worker.fetch(new Request("https://connect.test/v1/connections", {
     method: "POST",
@@ -107,9 +130,11 @@ test("generic hosted apps exchange non-spending approvals into bound agent grant
     assert.equal(response.status, 403, await response.clone().text());
     assert.equal((await response.json()).error.code, code);
   }
+  assert.deepEqual(metadataReads, ["credentials"], "rejected scope expansions do not read metadata");
   const connected = await connect();
   assert.equal(connected.status, 201, await connected.clone().text());
   const connection = await connected.json();
+  assert.deepEqual(metadataReads, ["credentials", "credentials"], "grant still revalidates ChatGPT live");
   const grants = [...entries].filter(([key]) => key.startsWith("grant:"));
   assert.equal(grants.length, 1);
   const grant = grants[0][1].value;
@@ -237,6 +262,118 @@ test("generic hosted apps exchange non-spending approvals into bound agent grant
   assert.deepEqual(await conflict.json(), { error: "revision_conflict" });
   assert.equal(conflict.headers.has("set-cookie"), false);
   t.diagnostic("Hosted approval -> scoped grant -> /v1/data: all 12 operations forwarded with authenticated owner; unsigned, cross-app, expired, revoked and mismatched-owner calls blocked; upstream redirects and malformed JSON rejected.");
+  await t.test("scoped approval and grant reads preserve live validation and full account status", async (t) => {
+    expectedSandbox = "true";
+    const spotifyId = "s".repeat(43);
+    const spotify = { connected: true, connections: [{ id: spotifyId, label: "Fixture Spotify" }] };
+    const github = { connected: true, connections: [{ id: "g".repeat(43), label: "Unrequested GitHub" }] };
+    connectorMetadata = { connectors: { spotify, github } };
+    credentialMetadata = { chatgpt: { connected: true, access_token: "synthetic-private-token" } };
+    const scopedResources = requested => [
+      ...resources.filter(resource => !resource.startsWith("urn:nanocodex:connector:")),
+      ...requested.map(connector => `urn:nanocodex:connector:${connector}`),
+    ];
+    const scopedApproval = async requested => {
+      const response = await authorize(scopedResources(requested));
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.equal((await response.clone().text()).includes("synthetic-private-token"), false);
+      return response.json();
+    };
+    for (const [requested, reads] of [
+      [["chatgpt"], ["credentials"]],
+      [["spotify"], ["connectors"]],
+      [["spotify", "chatgpt"], ["connectors", "credentials"]],
+      [[], []],
+    ]) {
+      metadataReads.length = 0;
+      const approved = await scopedApproval(requested);
+      assert.deepEqual(metadataReads, reads, `approval reads for ${requested}`);
+      const response = await connect({ approval_id: approved.approval_id, requested_connectors: requested });
+      assert.equal(response.status, 201, await response.clone().text());
+      assert.deepEqual(metadataReads, [...reads, ...reads], `live grant reads for ${requested}`);
+      const latest = [...entries].filter(([key]) => key.startsWith("grant:")).at(-1)[1].value;
+      assert.deepEqual(latest.capabilities.filter(capability => ["chatgpt", "spotify", "github"].includes(capability)), requested);
+      assert.equal(latest.connectorConnections?.github, undefined, "unrequested identities never enter grant");
+      if (requested.includes("spotify")) assert.deepEqual(latest.connectorConnections.spotify, [spotifyId]);
+      t.diagnostic(`${requested.join("+") || "no connectors"}: approval + grant metadata reads=${metadataReads.length}; paths=${metadataReads.join(",") || "none"}`);
+    }
+
+    for (const requested of [["chatgpt"], ["spotify"]]) {
+      const malformed = { connected: true, connections: [{ id: "invalid", label: "Fixture" }] };
+      const setRequestedMetadata = value => {
+        if (requested[0] === "chatgpt") credentialMetadata = { chatgpt: value };
+        else connectorMetadata = { connectors: { spotify: value } };
+      };
+      setRequestedMetadata(malformed);
+      const badApproval = await authorize(scopedResources(requested));
+      assert.equal(badApproval.status, 502, await badApproval.clone().text());
+      assert.equal((await badApproval.json()).error.code, "connector_broker_invalid");
+      setRequestedMetadata(requested[0] === "chatgpt" ? { connected: true } : spotify);
+      const approved = await scopedApproval(requested);
+      const grantCount = [...entries.keys()].filter(key => key.startsWith("grant:")).length;
+      setRequestedMetadata(malformed);
+      const badGrant = await connect({ approval_id: approved.approval_id, requested_connectors: requested });
+      assert.equal(badGrant.status, 502, await badGrant.clone().text());
+      assert.equal((await badGrant.json()).error.code, "connector_broker_invalid");
+      setRequestedMetadata(undefined);
+      const missing = await connect({ approval_id: approved.approval_id, requested_connectors: requested });
+      assert.equal(missing.status, 403, await missing.clone().text());
+      assert.equal((await missing.json()).error.code, "connector_not_connected");
+      assert.equal([...entries.keys()].filter(key => key.startsWith("grant:")).length, grantCount);
+      assert(entries.has(`connect-approval:${approved.approval_id}`), "failed live checks preserve the approval");
+      setRequestedMetadata(requested[0] === "chatgpt" ? { connected: true } : spotify);
+      const recovered = await connect({ approval_id: approved.approval_id, requested_connectors: requested });
+      assert.equal(recovered.status, 201, await recovered.clone().text());
+    }
+
+    const importCredential = {
+      access_token: "synthetic-access-token", refresh_token: "synthetic-refresh-token",
+      account_id: "fixture-chatgpt", expires_at: Date.now() + 60_000, fedramp: false,
+    };
+    const importResources = [
+      ...scopedResources(["chatgpt"]).filter(resource => !resource.startsWith("urn:nanocodex:app:") && !resource.startsWith("urn:nanocodex:origin:")),
+      `urn:nanocodex:app:${cliApp.id}`, `urn:nanocodex:origin:${encodeURIComponent(cliApp.origin)}`,
+      await chatGptCredentialImportResource(importCredential),
+    ];
+    const cliAuthorization = await authorize(importResources, { app_id: cliApp.id, app_origin: cliApp.origin });
+    assert.equal(cliAuthorization.status, 200, await cliAuthorization.clone().text());
+    const cliApproval = await cliAuthorization.json();
+    const importConnection = () => worker.fetch(new Request("https://connect.test/v1/connections", {
+      method: "POST",
+      headers: { origin: cliApp.origin, "content-type": "application/json", "x-nanocodex-app-id": cliApp.id },
+      body: JSON.stringify({ app_id: cliApp.id, account_address: accountAddress, approval_id: cliApproval.approval_id,
+        authorization_mode: "hosted", permission: "agent.run", requested_connectors: ["chatgpt"],
+        requested_app_tool_catalog_digest: digest, chatgpt_credential_import: importCredential }),
+    }), env, context);
+    metadataReads.length = 0;
+    importedAccountId = "another-account";
+    const mismatchedImport = await importConnection();
+    assert.equal(mismatchedImport.status, 409, await mismatchedImport.clone().text());
+    assert.equal((await mismatchedImport.json()).error.code, "chatgpt_credential_mismatch");
+    assert.deepEqual(metadataReads, ["import", "credentials"], "import must precede fresh credential metadata");
+    assert(entries.has(`connect-approval:${cliApproval.approval_id}`));
+    importedAccountId = undefined;
+    metadataReads.length = 0;
+    const imported = await importConnection();
+    assert.equal(imported.status, 201, await imported.clone().text());
+    assert.deepEqual(metadataReads, ["import", "credentials"]);
+    const publicImportResult = await imported.text();
+    assert.equal(publicImportResult.includes(importCredential.access_token), false);
+    assert.equal(publicImportResult.includes(importCredential.refresh_token), false);
+    t.diagnostic("CLI import -> fresh credential read ordering retained; wrong account rejected with 409 before approval consumption; correct import creates grant without credential exposure.");
+
+    // The public account status route must retain both sources by default.
+    metadataReads.length = 0;
+    const full = await worker.fetch(new Request("https://connect.test/v1/connectors", {
+      headers: { origin: "https://nanocodex.gakonst.workers.dev", authorization: `Bearer ${approval.token}` },
+    }), env, context);
+    assert.equal(full.status, 200, await full.clone().text());
+    assert.deepEqual(metadataReads, ["connectors", "credentials"]);
+    const fullStatus = await full.json();
+    assert.equal(fullStatus.connectors.spotify.connected, true);
+    assert.equal(fullStatus.connectors.chatgpt.connected, true);
+    t.diagnostic("Malformed requested metadata rejected at approval and grant; missing live capability rejected before consumption; corrected metadata recovers; full /v1/connectors still reads both sources.");
+  });
   rejectAccount = true;
   assert.equal((await authorize()).status, 403, "account service still must approve the exact resources");
   await Promise.all(pending);

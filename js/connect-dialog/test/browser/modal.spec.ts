@@ -7,6 +7,7 @@ const sizes = [
   { name: "desktop", width: 1280, height: 900 },
   { name: "mobile", width: 390, height: 844 },
   { name: "short", width: 390, height: 440 },
+  { name: "narrow-keyboard", width: 320, height: 360 },
 ];
 
 async function contained(page: Page) {
@@ -32,6 +33,19 @@ async function contained(page: Page) {
   expect(geometry.bottom).toBe(geometry.height);
   expect(geometry.horizontalOverflow).toEqual([]);
   return geometry;
+}
+
+async function mobileActions(page: Page, primary: string) {
+  if ((page.viewportSize()?.width ?? 1280) > 620) return;
+  const button = page.getByRole("button", { name: primary, exact: true });
+  await expect(button).toBeInViewport();
+  const footer = page.locator(".sms-auth-actions, .dialog-actions");
+  const box = await footer.boundingBox();
+  expect(Math.abs(box!.y + box!.height - page.viewportSize()!.height)).toBeLessThanOrEqual(1);
+  const before = await button.boundingBox();
+  await page.locator(".sms-auth-content, .dialog-content").evaluateAll(elements => elements.forEach(element => { element.scrollTop = element.scrollHeight; }));
+  expect(await button.boundingBox()).toEqual(before);
+  await page.locator(".sms-auth-content, .dialog-content").evaluateAll(elements => elements.forEach(element => { element.scrollTop = 0; }));
 }
 
 async function screenshot(page: Page, info: TestInfo, name: string) {
@@ -68,6 +82,7 @@ for (const theme of ["light", "dark"] as const) {
       expect(Math.abs(form!.x - intro!.x)).toBeLessThan(1);
       expect(form!.width).toBeLessThanOrEqual(372);
       expect(await page.locator("h1").evaluate(el => getComputedStyle(el).fontFamily)).toBe(await phone.evaluate(el => getComputedStyle(el).fontFamily));
+      await mobileActions(page, "Text me a code");
       await screenshot(page, info, "phone");
       await phone.fill("123456");
       await phone.press("Enter");
@@ -79,6 +94,8 @@ for (const theme of ["light", "dark"] as const) {
       await expect(page.getByRole("alert")).toContainText("could not be delivered");
       await phone.fill("+1 202 555 0100");
       await phone.press("Tab");
+      await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+      await page.keyboard.press("Tab");
       const send = page.getByRole("button", { name: "Text me a code" });
       await expect(send).toBeFocused();
       expect(await send.evaluate(el => getComputedStyle(el).outlineStyle)).not.toBe("none");
@@ -87,6 +104,8 @@ for (const theme of ["light", "dark"] as const) {
       await expect(code).toBeVisible();
       await expect(code).toBeFocused();
       await contained(page);
+      await mobileActions(page, "Continue");
+      await expect(page.getByRole("button", { name: "Use a different number" })).toHaveCount(0);
       await screenshot(page, info, "code");
       await code.fill("12");
       await code.press("Enter");
@@ -97,12 +116,6 @@ for (const theme of ["light", "dark"] as const) {
       await expect(page.getByRole("alert")).toContainText("invalid or expired");
       await contained(page);
       await screenshot(page, info, "invalid-code");
-      await page.getByRole("button", { name: "Use a different number" }).click();
-      await expect(phone).toBeVisible();
-      await expect(phone).toBeFocused();
-      await expect(page.getByRole("alert")).toHaveCount(0);
-      await phone.fill("+1 202 555 0101");
-      await phone.press("Enter");
       await code.fill("123456");
       await code.press("Enter");
       const approve = page.getByRole("button", { name: "Allow access" });
@@ -111,6 +124,8 @@ for (const theme of ["light", "dark"] as const) {
       expect(await page.locator(".dialog-content").evaluate(el => el.scrollTop)).toBe(0);
       expect(await page.evaluate(() => (window as any).__hostReceipt)).toBeUndefined();
       const geometry = await contained(page);
+      await mobileActions(page, "Allow access");
+      await expect(page.getByRole("button", { name: "Use a different account" })).toHaveCount(0);
       await screenshot(page, info, "consent");
       await approve.focus();
       await page.keyboard.press("Enter");
@@ -119,7 +134,7 @@ for (const theme of ["light", "dark"] as const) {
       expect(receipt.kind).toBe("approved");
       expect(receipt.result.accounts[0].capabilities.auth.mode).toBe("hosted");
       expect(requests.filter(r => r.path.endsWith("/sms/start")).map(r => r.body)).toEqual([
-        { phone: "+12025550000" }, { phone: "+12025550100" }, { phone: "+12025550101" },
+        { phone: "+12025550000" }, { phone: "+12025550100" },
       ]);
       expect(errors).toEqual([]);
       await writeFile(resolve(evidence, `${theme}-${size.name}-receipt.json`), JSON.stringify({ theme, viewport: size, geometry, requests, receipt, errors }, null, 2));
@@ -293,4 +308,31 @@ test("SDK popup forwards developer appearance into hosted parser and UI", async 
   await expect(popup.locator(".connect-onboarding")).toHaveCSS("font-family", "system-ui");
   await popup.getByRole("button", {name:"Cancel",exact:true}).click();
   await expect(popup.getByRole("status")).toHaveText("Request cancelled");
+});
+
+test("session lookup keeps request identity visible without a standalone Cancel screen", async ({ page }, info) => {
+  await page.setViewportSize({ width: 320, height: 360 });
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const writes: string[] = [];
+  page.on("request", request => { if (request.method() === "POST") writes.push(request.url()); });
+  await page.route("**/v1/me", async route => { await pending; await route.continue(); });
+  try {
+    await page.goto("/");
+    await expect(page.locator(".request-identity")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Connect to Atlas Workspace" })).toBeVisible();
+    await expect(page.getByRole("status")).toContainText("Checking your account");
+    await expect(page.getByRole("button", { name: "Cancel", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Allow access", exact: true })).toHaveCount(0);
+    expect(writes).toEqual([]);
+    expect(await page.evaluate(() => (window as any).__hostReceipt)).toBeUndefined();
+    await contained(page);
+    await screenshot(page, info, "session-check");
+  } finally {
+    release();
+  }
+  await expect(page.getByRole("textbox", { name: "Mobile number" })).toBeFocused();
+  await mobileActions(page, "Text me a code");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("Request cancelled");
 });

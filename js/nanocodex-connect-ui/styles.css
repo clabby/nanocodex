@@ -71,10 +71,13 @@
   .sms-otp-input-row input:focus-visible { outline: 2px solid color-mix(in srgb, var(--text) 35%, transparent); outline-offset: 2px; }
   .sms-otp-input-row input[aria-invalid="true"] { border-color: var(--negative); }
   .sms-otp-input-row input[autocomplete="one-time-code"] { height: 56px; text-align: center; font-size: 24px; font-variant-numeric: tabular-nums; letter-spacing: .32em; }
-  .sms-otp-input-row button { height: 46px; border: 0; border-radius: var(--connect-radius, 10px); background: var(--connect-accent, var(--text)); color: var(--connect-on-accent, var(--surface)); font-weight: 500; }
-  .sms-otp-input-row button:hover:not(:disabled) { opacity: .88; }
+  .sms-auth-actions button:last-child { height: 46px; border: 0; border-radius: var(--connect-radius, 10px); background: var(--connect-accent, var(--text)); color: var(--connect-on-accent, var(--surface)); font-weight: 500; }
+  .sms-auth-actions button:last-child:hover:not(:disabled) { opacity: .88; }
   .sms-otp-form .auth-terms { font-size: 11px; text-align: center; margin-top: 8px; line-height: 1.55; }
-  .sms-otp-change { justify-self: center; min-height: 44px; border: 0; background: transparent; font-size: 13px; }
+  .sms-auth-actions { display: flex; gap: 10px; margin-top: 20px; }
+  .sms-auth-actions button { min-height: 46px; padding: 10px 16px; border: 1px solid var(--border-strong); border-radius: var(--connect-radius, 10px); background: var(--surface); font-size: 13px; font-weight: 500; }
+  .sms-auth-actions button:last-child { flex: 1; }
+  .session-check-status { color: var(--muted); text-align: center; font-size: 13px; }
   .auth-boundary { margin-top: 16px; text-align: center; color: var(--muted); font-size: 12px; }
   .auth-brand { display: flex; gap: 5px; justify-content: center; align-items: center; padding-top: 16px; color: var(--muted); font-size: 11px; font-weight: 500; }
   .auth-brand span { font-weight: 400; }
@@ -165,18 +168,22 @@
   .wizard-account-avatar { border-radius: 8px; background: var(--surface-raised); display: grid; place-items: center; width: 32px; height: 32px; }
   .wizard-cancel { min-height: 44px; background: transparent; border: 0; }
   @media (max-width: 620px) {
-    .wizard-review-page { gap: 20px; }
-
-
+    :scope.dialog-shell { justify-content: flex-start; padding: 0; }
+    .dialog-content { flex: 1 1 auto; padding-top: max(24px, env(safe-area-inset-top)); }
+    .dialog-content:has(.wizard-account-page) { display: flex; flex-direction: column; overflow: hidden; padding-top: 0; }
+    .dialog-content:has(.wizard-account-page) > .dialog-error { order: -1; flex: 0 0 auto; }
+    .wizard-account-page { display: flex; flex: 1 1 auto; min-height: 0; }
+    .sms-auth-panel { display: flex; flex-direction: column; min-height: 0; padding: 0; }
+    .sms-auth-content { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) 16px max(24px, env(safe-area-inset-left)); scroll-padding-block: 16px; }
+    .sms-auth-actions, .dialog-actions { flex: 0 0 auto; margin-top: auto; width: 100%; padding: 16px max(24px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); background: var(--surface); border-top: 1px solid var(--border); }
+    .wizard-review-page { gap: 20px; padding-bottom: 16px; }
     .wizard-review-page .wizard-app { gap: 10px; }
-    :scope.dialog-shell { padding-bottom: max(24px, env(safe-area-inset-bottom)); }
     .dialog-actions button:last-child { flex: 1; }
-    .sms-auth-panel { padding-inline: 24px; }
   }
-  @media (max-height: 520px) {
-
-    .sms-auth-panel .wizard-intro { gap: 16px; margin-bottom: 20px; }
-    .dialog-actions { padding-block: 10px; }
+  @media (max-width: 620px) and (max-height: 520px) {
+    .sms-auth-content { padding-top: 16px; }
+    .sms-auth-panel .wizard-intro { gap: 10px; margin-bottom: 16px; }
+    .sms-auth-actions, .dialog-actions { padding-top: 10px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
   }
   @media (prefers-reduced-motion: reduce) { button { transition: none; } }
 }
@@ -191,5 +198,20 @@
     .wizard-review-page h1 { font-size: 24px; font-weight: 500; line-height: 1.22; }
     .dialog-actions { width: min(800px, 100%); padding: 20px 40px 24px calc(min(800px, 100vw) / 2 + 18px); }
 
+  }
+}
+
+@scope (.connect-onboarding) {
+  @media (max-width: 620px) {
+    :scope.connect-wizard { display: flex; flex-direction: column; height: calc(100dvh - var(--header-height, 0px)); min-height: 0; overflow: hidden; }
+    :scope.connect-wizard .wizard-content { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+    :scope.connect-wizard .wizard-content:has(.wizard-account-page) { display: flex; flex-direction: column; overflow: hidden; }
+    :scope.connect-wizard .wizard-account-page { width: 100%; margin: 0; padding: 0; }
+    :scope.connect-wizard .sms-auth-panel { padding: 0; border: 0; border-radius: 0; }
+    :scope.connect-wizard .sms-otp-input-row input { font-size: 16px; }
+    :scope.connect-wizard .wizard-content > .dialog-error { order: -1; flex: 0 0 auto; }
+    :scope.connect-wizard .wizard-actions { display: flex; flex: 0 0 auto; gap: 10px; width: 100%; margin: 0; padding: 16px max(24px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); border-top: 1px solid var(--border); background: var(--surface); }
+    :scope.connect-wizard .wizard-actions button { min-width: 0; min-height: 46px; padding: 10px 16px; border: 1px solid var(--border-strong); border-radius: var(--connect-radius, 10px); background: var(--surface); }
+    :scope.connect-wizard .wizard-actions button:last-child { flex: 1; color: var(--connect-on-accent, var(--surface)); background: var(--connect-accent, var(--text)); border-color: transparent; }
   }
 }
