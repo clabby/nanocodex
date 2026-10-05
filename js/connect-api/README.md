@@ -189,6 +189,46 @@ that should support funding:
   binds to `OnrampApi` inside MACH's account. See
   [MACH relay setup](https://github.com/tempoxyz/mach/blob/main/docs/nanocodex-onramp-relay.md).
 
+Production operators use the manual **Configure MACH onramp relay** workflow
+(`mach-onramp-config.yml`) on `master`. In the existing `cloudflare-production`
+environment, securely provision `MACH_ONRAMP_RELAY_TOKEN` with the same value as
+the issuer relay, and set the nonsecret variable `MACH_ONRAMP_RELAY_HOST` to the
+exact `workers.dev` hostname from the verified issuer deployment receipt. The
+workflow reuses `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`; credentials
+must never be supplied as workflow inputs, command arguments or files.
+
+Dispatch with `action=configure` and `relay_origin=https://<verified-host>`
+(without a trailing slash). Before writing, the operator checks the account's
+`gakonst` subdomain, the existing `nanocodex-connect-api` Worker and its local
+`CONNECT_STATE` / `ConnectNonceStorage` binding, anonymous relay
+rejection, and authenticated canonical MACH configuration. It writes only
+`MACH_ONRAMP_RELAY_TOKEN` and `MACH_ONRAMP_RELAY_URL` as `secret_text` bindings,
+then checks the fixed public Connect config endpoint. The URL is intentionally
+stored as a secret binding so normal Wrangler deployments preserve it along
+with the token ([Cloudflare configuration](https://developers.cloudflare.com/workers/wrangler/configuration/#source-of-truth));
+do not duplicate either binding in Wrangler `vars` or a regular
+deployment's secret payload. Configuration shares the production deployment
+concurrency group and does not build or redeploy source.
+
+The workflow reports HTTP status and bounded result codes only. It never creates
+orders or payments. Writes are sequential, not atomic, and never automatically
+retried. After an interrupted or unconfirmed write, dispatch `action=verify`
+first: this checks relay and public configuration without writing. A failed
+verification does not prove a write failed; inspect Cloudflare deployment and
+secret-name metadata without reading values before explicitly repairing a
+partial configuration. A public config check can also fail during propagation;
+use `verify` again instead of repeating writes. Successful verification means
+authentication is required and public config enables canonical MACH on chain
+4217, token `0x20c000000000000000000000f37de3740adec032`, bounds 500–10000
+USD cents, and a `pk_live_` publishable key; it does not prove checkout or
+issuance works. The issuer omits `onramp_enabled`; the public SDK normalizes its
+absence to `onrampEnabled: true`. An explicit disabled or malformed flag fails
+verification.
+
+Run the synthetic HTTP operator journeys with
+`node --test scripts/cloudflare/configure-mach-onramp.test.mjs` from the repository
+root. No production credentials are needed.
+
 The private binding takes precedence. An absent or invalid transport returns
 `503 machine_usd_unavailable`; there is no public-endpoint fallback. Adding a
 binding name without provisioning its target does not enable funding. Relay
