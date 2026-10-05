@@ -145,7 +145,7 @@ export type VaultEntryPayload =
       card_number: string;
       expiry_month: string;
       expiry_year: string;
-      cvv: string;
+      cvv?: string;
       billing_zip: string;
     }>
   | Readonly<{
@@ -1044,6 +1044,20 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
             kind,
           );
           if (!payload) return jsonError(400, "invalid_vault_entry");
+          const operation = request.headers.get("x-nanocodex-operation-id");
+          if (operation !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(operation)) return jsonError(400, "invalid_operation_id");
+          const operationKey = operation ? `vault-create-operation:${operation.toLowerCase()}` : undefined;
+          const priorId = operationKey ? await this.#state.storage.get<string>(operationKey) : undefined;
+          if (priorId) {
+            const prior = await this.#state.storage.get<StoredRow>(vaultEntryStorageKey(priorId));
+            if (!prior) return jsonError(410, "vault_entry_deleted");
+            const opened = await this.#entryVault(priorId).open<VaultEntry>(prior.envelope);
+            const retained = validateStoredVaultEntry(priorId, opened.value);
+            if (!retained) return jsonError(409, "vault_operation_unavailable");
+            const { id: _id, createdAt: _created, ...previous } = retained;
+            if (JSON.stringify(previous) !== JSON.stringify(payload)) return jsonError(409, "vault_operation_conflict");
+            return json(publicVaultEntry(retained), 201);
+          }
           if (Object.keys(this.#credentials.vault ?? {}).length >= MAX_VAULT_ENTRIES) {
             return jsonError(409, "vault_entry_limit_reached");
           }
@@ -1062,6 +1076,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
           ]);
           await this.#state.storage.transaction(async (transaction) => {
             await transaction.put(STATE_KEY, { envelope: stateEnvelope } satisfies StoredRow);
+            if (operationKey) await transaction.put(operationKey, generatedId);
             await transaction.put(vaultEntryStorageKey(generatedId), {
               envelope: entryEnvelope,
             } satisfies StoredRow);
@@ -2478,7 +2493,7 @@ export function validateVaultEntryPayload(
   kind: VaultKind,
 ): VaultEntryPayload | undefined {
   if (!isRecord(value)) return undefined;
-  const expected = vaultPayloadKeys(kind, Object.prototype.hasOwnProperty.call(value, "address_line_2"), Object.prototype.hasOwnProperty.call(value, "browser_origin"));
+  const expected = vaultPayloadKeys(kind, Object.prototype.hasOwnProperty.call(value, "address_line_2"), Object.prototype.hasOwnProperty.call(value, "browser_origin"), Object.prototype.hasOwnProperty.call(value, "cvv"));
   const keys = Object.keys(value);
   if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))) {
     return undefined;
@@ -2505,14 +2520,14 @@ export function validateVaultEntryPayload(
     const cvv = typeof value.cvv === "string" && /^[0-9]{3,4}$/.test(value.cvv)
       ? value.cvv : undefined;
     const billingZip = vaultText(value.billing_zip, 32);
-    return cardNumber && expiryMonth && expiryYear && cvv && billingZip
+    return cardNumber && expiryMonth && expiryYear && (value.cvv === undefined || cvv) && billingZip
       ? {
           kind,
           name,
           card_number: cardNumber,
           expiry_month: expiryMonth,
           expiry_year: expiryYear,
-          cvv,
+          ...(cvv ? {cvv} : {}),
           billing_zip: billingZip,
         }
       : undefined;
@@ -2542,12 +2557,12 @@ export function validateVaultEntryPayload(
   return phoneNumber ? { kind, name, phone_number: phoneNumber } : undefined;
 }
 
-function vaultPayloadKeys(kind: VaultKind, hasAddressLine2 = false, hasBrowserOrigin = false): readonly string[] {
+function vaultPayloadKeys(kind: VaultKind, hasAddressLine2 = false, hasBrowserOrigin = false, hasCvv = true): readonly string[] {
   switch (kind) {
     case "api_key": return ["name", "api_key"];
     case "login": return ["name", "username", "password", ...(hasBrowserOrigin ? ["browser_origin"] : [])];
     case "card": return [
-      "name", "card_number", "expiry_month", "expiry_year", "cvv", "billing_zip",
+      "name", "card_number", "expiry_month", "expiry_year", ...(hasCvv ? ["cvv"] : []), "billing_zip",
     ];
     case "address": return [
       "name", "address_line_1",
@@ -2567,6 +2582,7 @@ function validateStoredVaultEntry(id: string, value: unknown): VaultEntry | unde
     kind,
     Object.prototype.hasOwnProperty.call(value, "address_line_2"),
     Object.prototype.hasOwnProperty.call(value, "browser_origin"),
+    Object.prototype.hasOwnProperty.call(value, "cvv"),
   );
   const payload = Object.fromEntries(
     payloadKeys.map((key) => [key, value[key]]),

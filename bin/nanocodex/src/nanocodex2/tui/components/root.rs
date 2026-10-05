@@ -275,6 +275,10 @@ impl RestoredSessionProjection {
             if observation.completed_tokens.is_some() {
                 self.context_tokens = observation.completed_tokens;
             }
+            if let Some(r) = crate::tui::secure_input::request(&record) {
+                self.seen_vault_requests
+                    .insert(format!("private:{}:{}", r.agent(), r.id()));
+            }
             if let Some((key, _)) = crate::tui::vault::request(&record) {
                 self.seen_vault_requests.insert(key);
             }
@@ -310,7 +314,7 @@ pub(crate) enum RootEffect {
     Voice(crate::voice::Command),
     ShowAgentId,
     Vault(crate::tui::vault::Command),
-    SecureInput(Option<nanocodex_managed::NativeSecureInputRequest>),
+    SecureInput(Option<crate::tui::secure_input::Request>),
     Share(crate::tui::share::Command),
     ApproveVault(crate::tui::vault::Review),
     Submit(Submission),
@@ -3128,12 +3132,24 @@ impl RootNode {
                             agent.clone(),
                         )
                         .ok()
+                        .map(crate::tui::secure_input::Request::Sudo)
                     }
                     _ => self.transcript.component().secure_input_request(&command),
                 };
                 vec![RootEffect::SecureInput(request)]
             }
             Some(ComposerEffect::Vault(command)) => {
+                if command == crate::tui::vault::Command::Latest
+                    && let Some(r @ crate::tui::secure_input::Request::Private(_)) = self
+                        .transcript
+                        .component()
+                        .secure_input_request(&crate::tui::secure_input::Command::Latest)
+                {
+                    return ComponentUpdate {
+                        effects: vec![RootEffect::SecureInput(Some(r))],
+                        render: RenderRequest::Immediate,
+                    };
+                }
                 let command = if command == crate::tui::vault::Command::Latest {
                     self.transcript
                         .component()
@@ -3999,8 +4015,24 @@ impl RootNode {
                 .component_mut()
                 .replace(self.context_diagnostics.clone());
         }
-        let vault = crate::tui::vault::request(&record);
+        let private = crate::tui::secure_input::request(&record);
+        // A recognized private intake exclusively owns this request, including echoes.
+        let vault = if private.is_none() {
+            crate::tui::vault::request(&record)
+        } else {
+            None
+        };
         let mut update = self.update_transcript(TranscriptEvent::Record(record));
+        if let Some(request) = private
+            && self.seen_vault_requests.insert(format!(
+                "private:{}:{}",
+                request.agent(),
+                request.id()
+            ))
+        {
+            update.effects.push(RootEffect::SecureInput(Some(request)));
+            update.render = RenderRequest::Immediate;
+        }
         if let Some((key, command)) = vault
             && self.seen_vault_requests.insert(key)
         {
@@ -5390,8 +5422,44 @@ mod live_control_tests {
             root.update(RootEvent::Transcript(create))
                 .effects
                 .as_slice(),
-            [RootEffect::Vault(crate::tui::vault::Command::Open)]
+            [RootEffect::SecureInput(Some(
+                crate::tui::secure_input::Request::Private(_)
+            ))]
         ));
+        let private_hint = json!({"type":"browser_login","status":"input_required",
+            "request_id":"11111111-1111-4111-8111-111111111111","challenge_id":"11111111-1111-4111-8111-111111111111",
+            "agent_id":"agent","origin":"https://example.com","allowed_origins":["https://example.com"],"expires_at":9000000000000_u64});
+        let nested = record(
+            5,
+            "exec",
+            json!({"content":[{"type":"text","text":format!("Script completed\nWall time: 1s\nOutput:\n{}",json!({"content":[{"type":"text","text":private_hint.to_string()}],"structuredContent":private_hint}))}]}),
+        );
+        let mut live = root_with_draft("untouched draft");
+        assert!(matches!(
+            live.update(RootEvent::Transcript(nested.clone()))
+                .effects
+                .as_slice(),
+            [RootEffect::SecureInput(Some(
+                crate::tui::secure_input::Request::Private(_)
+            ))]
+        ));
+        assert!(
+            live.update(RootEvent::Transcript(nested.clone()))
+                .effects
+                .is_empty()
+        );
+        let mut replay = root_with_draft("untouched draft");
+        replay.replay_history(RootNode::project_open_session(
+            ReasoningEffort::default(),
+            vec![nested.clone()],
+        ));
+        assert!(
+            replay
+                .update(RootEvent::Transcript(nested))
+                .effects
+                .is_empty()
+        );
+        assert_eq!(replay.composer.component().draft(), "untouched draft");
         let invalid = record(
             4,
             "request_vault_intake",

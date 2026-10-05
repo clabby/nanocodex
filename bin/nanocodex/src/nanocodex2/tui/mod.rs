@@ -18,6 +18,7 @@ mod history;
 mod links;
 mod managed2;
 mod pane;
+mod private_input;
 mod prompt;
 mod scheduler;
 mod screen;
@@ -26,6 +27,7 @@ mod session;
 mod share;
 mod shell;
 mod spinner;
+mod sudo_input;
 mod terminal;
 mod theme;
 mod tmux;
@@ -2482,17 +2484,21 @@ async fn run_inner(
             Some(completion) = runtime.secure_input_tasks.join_next(), if !runtime.secure_input_tasks.is_empty() => {
                 if let Ok((agent_id, generation, request_id, outcome)) = completion {
                     if !vault::scope_matches(&agent_id, generation, &runtime.agent_id, runtime.connection_generation) { continue; }
-                    if let secure_input::Outcome::Status(status) = &outcome {
+                    if let secure_input::Outcome::Sudo(sudo_input::Outcome::Status(status)) = &outcome {
                         let update = app.update(AppEvent::SecureInputReceipt { pane: PaneId::Main, request_id: request_id.clone(), status: *status });
                         stopping |= apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
                     }
+                    if let secure_input::Outcome::Private(private_input::Outcome::Receipt(receipt,_))=&outcome {
+                        let update=app.update(AppEvent::VaultReceipt{pane:PaneId::Main,receipt:receipt.clone()});
+                        stopping |= apply_update(update,&mut app,&mut runtime,&mut terminal,&mut scheduler).await?;
+                    }
                     if let Some(flow) = &mut runtime.secure_input
-                        && flow.request.request_id == request_id && flow.generation == generation {
+                        && flow.request().id() == request_id && flow.generation() == generation {
                         flow.finish(outcome);
                         scheduler.request_immediate(Instant::now());
                     }
                 } else if let Some(flow) = &mut runtime.secure_input {
-                    flow.finish(secure_input::Outcome::Status(secure_input::Status::Unknown));
+                    flow.cancel_local();
                     scheduler.request_immediate(Instant::now());
                 }
             }
@@ -3904,7 +3910,8 @@ async fn apply_update(
                     }
                     RootEffect::SecureInput(request) => {
                         runtime.cancel_secure_input();
-                        let Some(request) = request.filter(|request| request.agent_id == runtime.agent_id && request.is_current() && !runtime.secure_input_attempted.contains(&request.request_id)) else {
+                        let request=request.map(|mut r|{if let secure_input::Request::Private(p)=&mut r && matches!(p.kind,nanocodex_managed::PrivateInputKind::Vault(_)){p.agent_id=runtime.agent_id.clone();}r});
+                        let Some(request) = request.filter(|request| request.agent() == runtime.agent_id && request.is_current() && !runtime.secure_input_attempted.contains(request.id())) else {
                             absorb(app.update(AppEvent::NotifyError { pane, error: secure_input::HELP.into() }), &mut effects, scheduler);
                             continue;
                         };
@@ -3921,8 +3928,11 @@ async fn apply_update(
                         let generation = runtime.connection_generation;
                         runtime.secure_input = Some(secure_input::Flow::loading(request.clone(), generation, pane));
                         runtime.secure_input_tasks.spawn(async move {
-                            let outcome = client.describe_native_secure_input(&request).await.map(secure_input::Outcome::Description).unwrap_or(secure_input::Outcome::Status(secure_input::Status::Unavailable));
-                            (agent, generation, request.request_id, outcome)
+                            let outcome=match &request {
+                                secure_input::Request::Sudo(r)=>secure_input::Outcome::Sudo(client.describe_native_secure_input(r).await.map(sudo_input::Outcome::Description).unwrap_or(sudo_input::Outcome::Status(secure_input::Status::Unavailable))),
+                                secure_input::Request::Private(r)=>secure_input::Outcome::Private(private_input::describe(&client,r).await),
+                            };
+                            (agent, generation, request.id().to_owned(), outcome)
                         });
                         scheduler.request_immediate(Instant::now());
                     }
@@ -4882,27 +4892,33 @@ impl DriverRuntime {
         let Some(flow) = &mut self.secure_input else {
             return;
         };
-        let request = flow.request.clone();
-        let generation = flow.generation;
-        flow.cancel_local(); // zeroize first; retain a private quarantine panel
-        if !self
-            .secure_input_attempted
-            .insert(request.request_id.clone())
-        {
+        let request = flow.request();
+        let generation = flow.generation();
+        flow.cancel_local();
+        if !self.secure_input_attempted.insert(request.id().into()) {
             return;
         }
         let client = self.client.clone();
         self.secure_input_tasks.spawn(async move {
-            let outcome = client
-                .cancel_native_secure_input(&request)
-                .await
-                .map(|_| secure_input::Status::Cancelled)
-                .unwrap_or(secure_input::Status::Unknown);
+            let outcome = match &request {
+                secure_input::Request::Sudo(r) => {
+                    secure_input::Outcome::Sudo(sudo_input::Outcome::Status(
+                        client
+                            .cancel_native_secure_input(r)
+                            .await
+                            .map(|_| secure_input::Status::Cancelled)
+                            .unwrap_or(secure_input::Status::Unknown),
+                    ))
+                }
+                secure_input::Request::Private(r) => secure_input::Outcome::Private(
+                    private_input::run(&client, r, private_input::Operation::Cancel).await,
+                ),
+            };
             (
-                request.agent_id,
+                request.agent().into(),
                 generation,
-                request.request_id,
-                secure_input::Outcome::Status(outcome),
+                request.id().into(),
+                outcome,
             )
         });
     }
@@ -4911,47 +4927,72 @@ impl DriverRuntime {
             secure_input::Action::None => {}
             secure_input::Action::Cancel => self.cancel_secure_input(),
             secure_input::Action::Dismiss => {
-                if self
-                    .secure_input
-                    .as_ref()
-                    .is_some_and(|flow| flow.can_dismiss())
-                {
+                if self.secure_input.as_ref().is_some_and(|f| f.can_dismiss()) {
                     self.secure_input.take();
                 }
             }
-            secure_input::Action::Submit(envelope) => {
+            secure_input::Action::Browser => {
+                if let Some(flow) = &self.secure_input
+                    && let secure_input::Request::Private(r) = flow.request()
+                    && let Ok(destination) = self.client.private_input_browser_url(&r)
+                {
+                    let client = self.client.clone();
+                    let agent = self.agent_id.clone();
+                    self.links.spawn(async move {
+                        (
+                            PaneId::Main,
+                            links::open(&client, &agent, &destination).await,
+                        )
+                    });
+                }
+            }
+            action => {
                 let Some(flow) = &self.secure_input else {
                     return;
                 };
-                let request = flow.request.clone();
+                let request = flow.request();
+                let generation = flow.generation();
+                let terminal = matches!(
+                    &action,
+                    secure_input::Action::Sudo(_)
+                        | secure_input::Action::Private(
+                            private_input::Operation::Submit(_) | private_input::Operation::Finish
+                        )
+                );
                 if !flow.is_sending()
-                    || request.agent_id != self.agent_id
-                    || flow.generation != self.connection_generation
+                    || request.agent() != self.agent_id
+                    || generation != self.connection_generation
                     || !request.is_current()
-                    || !self
-                        .secure_input_attempted
-                        .insert(request.request_id.clone())
+                    || (terminal && !self.secure_input_attempted.insert(request.id().into()))
                 {
                     self.cancel_secure_input();
                     return;
                 }
                 let client = self.client.clone();
-                let generation = flow.generation;
                 self.secure_input_tasks.spawn(async move {
-                    let outcome = match client.submit_native_secure_input(&request, envelope).await
-                    {
-                        Ok(receipt) => match receipt.status.as_str() {
-                            "completed" => secure_input::Status::Completed,
-                            "failed" => secure_input::Status::Failed,
-                            _ => secure_input::Status::Unknown,
-                        },
-                        Err(_) => secure_input::Status::Unknown,
+                    let outcome = match (&request, action) {
+                        (secure_input::Request::Sudo(r), secure_input::Action::Sudo(envelope)) => {
+                            let status = match client.submit_native_secure_input(r, envelope).await
+                            {
+                                Ok(v) => match v.status.as_str() {
+                                    "completed" => secure_input::Status::Completed,
+                                    "failed" => secure_input::Status::Failed,
+                                    _ => secure_input::Status::Unknown,
+                                },
+                                Err(_) => secure_input::Status::Unknown,
+                            };
+                            secure_input::Outcome::Sudo(sudo_input::Outcome::Status(status))
+                        }
+                        (secure_input::Request::Private(r), secure_input::Action::Private(op)) => {
+                            secure_input::Outcome::Private(private_input::run(&client, r, op).await)
+                        }
+                        _ => secure_input::Outcome::Private(private_input::Outcome::Failed),
                     };
                     (
-                        request.agent_id,
+                        request.agent().into(),
                         generation,
-                        request.request_id,
-                        secure_input::Outcome::Status(outcome),
+                        request.id().into(),
+                        outcome,
                     )
                 });
             }

@@ -1,3 +1,4 @@
+import { validVaultFields, materializeVaultFields } from "./vault-fields";
 import { signVaultRequest, transformVaultBody, validateVaultSigning, type VaultSigning } from "./vault-signing";
 import { handleGmailPush, gmailMailboxName, type GmailPushIngressEnv } from "./gmail-push-ingress";
 export { GmailPushMailbox } from "./gmail-push";
@@ -91,7 +92,7 @@ const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const VAULT_EGRESS_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const VAULT_ENTRY_ID = /^[A-Za-z0-9_-]{22,64}$/;
-const VAULT_PLACEHOLDER = /\{\{NANOCODEX_VAULT_([A-Z_]+)\}\}/g;
+const VAULT_PLACEHOLDER = /\{\{NANOCODEX_VAULT_([A-Z_0-9]+)\}\}/g;
 const VAULT_PLACEHOLDER_MARKER = "NANOCODEX_VAULT_";
 const VAULT_PRIVATE_HEADER = /(?:^|[-_])(?:auth(?:orization)?|cookie|credential|password|proxy|secret|token|api[-_]?key)(?:$|[-_]|\d)/i;
 const VAULT_FORBIDDEN_HEADERS = new Set([
@@ -125,7 +126,7 @@ type ConnectorOperation = Readonly<{
 }>;
 
 type VaultPlaceholder = "API_KEY" | "USERNAME" | "PASSWORD" | "BASIC" | "CARD_NUMBER"
-  | "EXPIRY_MONTH" | "EXPIRY_YEAR" | "CVV" | "BILLING_ZIP" | "SIGNATURE" | "JWT";
+  | "EXPIRY_MONTH" | "EXPIRY_YEAR" | "CVV" | "BILLING_ZIP" | "SIGNATURE" | "JWT" | "ADDRESS_LINE_1" | "ADDRESS_LINE_2" | "CITY" | "STATE" | "ZIP" | "COUNTRY" | "PHONE_NUMBER";
 
 type VaultEgressEnvelope = Readonly<{
   vaultId: string;
@@ -510,6 +511,18 @@ async function handleMeasuredEgressWithOwner(
     return handlePublicEgress(request, env, upstreamFetch);
   }
 
+  // Human private-input saving uses the trusted binding, never model HTTP.
+  if (url.origin === "https://browser-vault.internal" && url.pathname === "/v1/save" && !url.search) {
+    const subject = request.headers.get(SUBJECT_HEADER);
+    if (request.method !== "POST" || !subject || !SUBJECT.test(subject) || !isJsonContentType(request.headers.get("content-type"))) return jsonError(403, "vault_browser_denied");
+    try {
+      const body = JSON.parse(await readBoundedText(request, MAX_VAULT_BODY_BYTES));
+      if (!isRecord(body) || Object.keys(body).length !== 3 || !["login","api_key","card","address","phone"].includes(String(body.kind)) || typeof body.operation_id !== "string") return jsonError(400, "invalid_request");
+      const owner = await resolveSubject(env, subject);
+      return userBroker(env, owner).fetch(`https://credentials.internal/v1/vault/${body.kind}`, {method:"POST", headers:{"content-type":"application/json","x-nanocodex-operation-id":body.operation_id}, body:JSON.stringify(body.payload)});
+    } catch { return jsonError(503, "vault_save_unavailable"); }
+  }
+
   // Service-binding only. The model HTTP gateway never routes this origin.
   if (url.origin === "https://browser-vault.internal" && url.pathname === "/v1/login" && !url.search) {
     if (request.method !== "POST") return jsonError(405, "method_not_allowed");
@@ -531,6 +544,22 @@ async function handleMeasuredEgressWithOwner(
       return Response.json({ username: entry.username, password: entry.password }, {
         headers: { "cache-control": "no-store" },
       });
+    } catch { return jsonError(403, "vault_browser_denied"); }
+  }
+
+  // Private service binding only, like /v1/login. Selected fields stay inside the
+  // owning host's browser transport; the model gateway denies this entire origin.
+  if (url.origin === "https://browser-vault.internal" && url.pathname === "/v1/fields" && !url.search) {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed");
+    const subject = request.headers.get(SUBJECT_HEADER);
+    if (!subject || !SUBJECT.test(subject) || !isJsonContentType(request.headers.get("content-type"))) return jsonError(403, "vault_browser_denied");
+    try {
+      const body: unknown = JSON.parse(await readBoundedText(request, 4096));
+      if (!isRecord(body) || Object.keys(body).length !== 3
+        || typeof body.vault_id !== "string" || !VAULT_ENTRY_ID.test(body.vault_id)
+        || !validBrowserOrigin(body.expected_origin) || !validVaultFields(body.fields)) return jsonError(400, "invalid_request");
+      const entry = await resolveVaultEntry(env, await resolveSubject(env, subject), body.vault_id);
+      return Response.json({ kind: entry.kind, values: materializeVaultFields(entry, body.fields) }, { headers: { "cache-control": "no-store" } });
     } catch { return jsonError(403, "vault_browser_denied"); }
   }
 
@@ -1058,6 +1087,7 @@ function vaultTemplatePlaceholders(template: string): Set<VaultPlaceholder> {
   const supported = new Set<VaultPlaceholder>([
     "API_KEY", "USERNAME", "PASSWORD", "BASIC", "CARD_NUMBER", "EXPIRY_MONTH", "EXPIRY_YEAR",
     "CVV", "BILLING_ZIP", "SIGNATURE", "JWT",
+    "ADDRESS_LINE_1", "ADDRESS_LINE_2", "CITY", "STATE", "ZIP", "COUNTRY", "PHONE_NUMBER",
   ]);
   for (const match of template.matchAll(VAULT_PLACEHOLDER)) {
     if (!supported.has(match[1] as VaultPlaceholder)) {
@@ -1206,9 +1236,17 @@ function vaultReplacements(
       ["CARD_NUMBER", entry.card_number],
       ["EXPIRY_MONTH", entry.expiry_month],
       ["EXPIRY_YEAR", entry.expiry_year],
-      ["CVV", entry.cvv],
+      ...(entry.cvv ? [["CVV", entry.cvv] as [VaultPlaceholder, string]] : []),
       ["BILLING_ZIP", entry.billing_zip],
     ]);
+
+  } else if (entry.kind === "address") {
+    replacements = new Map([
+      ["ADDRESS_LINE_1", entry.address_line_1], ["ADDRESS_LINE_2", entry.address_line_2 ?? ""],
+      ["CITY", entry.city], ["STATE", entry.state], ["ZIP", entry.zip], ["COUNTRY", entry.country],
+    ]);
+  } else if (entry.kind === "phone") {
+    replacements = new Map([["PHONE_NUMBER", entry.phone_number]]);
   } else {
     throw new EgressFailure(403, "vault_entry_kind_mismatch");
   }
@@ -2398,7 +2436,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
     );
     return userBroker(env, userId).fetch(target, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(request.headers.has("x-nanocodex-operation-id") ? {"x-nanocodex-operation-id":request.headers.get("x-nanocodex-operation-id")!} : {}) },
       body: JSON.stringify(forwarded),
     });
   }

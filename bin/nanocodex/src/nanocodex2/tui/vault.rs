@@ -99,7 +99,7 @@ pub(crate) fn intake_summary(value: &Value) -> Option<String> {
             ))
         }
         "create" if intake.vault_id.is_none() => Some(format!(
-            "Add {} to Vault\nYour secure Vault opens automatically. Reopen with /vault open\nEnter credential values only in the Vault web form. After saving, return here and tell the agent to refresh Vault metadata.",
+            "Add {} to Vault\nPrivate input opens automatically. Reopen with /secure-input.\nEnter values only in the guarded private panel; a confirmed save sends a safe receipt to the agent.",
             intake.name.unwrap_or_else(|| intake.kind.replace('_', " "))
         )),
         _ => None,
@@ -119,12 +119,22 @@ pub(crate) fn receipt_summary(text: &str) -> Option<String> {
         return None;
     }
     let invalid = || Some("Vault receipt could not be verified.".to_owned());
-    let Some(name) = value
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|s| safe_name(s))
-    else {
-        return invalid();
+    let name = match value.get("name") {
+        Some(name) => match name.as_str().filter(|s| safe_name(s)) {
+            Some(name) => name,
+            None => return invalid(),
+        },
+        None if value.get("operation").and_then(Value::as_str) == Some("create") => {
+            match value.get("kind").and_then(Value::as_str) {
+                Some("login") => "login",
+                Some("api_key") => "API key",
+                Some("card") => "card",
+                Some("address") => "address",
+                Some("phone") => "phone number",
+                _ => return invalid(),
+            }
+        }
+        None => return invalid(),
     };
     if value.get("status").and_then(Value::as_str) != Some("saved")
         || !value

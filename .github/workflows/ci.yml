@@ -128,17 +128,16 @@ jobs:
         if: needs.changes.outputs.tests == 'true'
         run: cargo nextest run --locked --profile ci -p nanocodex-remote -p nanocodex-tui-control
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        # Required only by the paused JavaScript lifecycle tests below.
-        if: needs.changes.outputs.tests == 'true'
+        # Private-input journeys run on Linux even while broader tests are paused.
+        if: needs.changes.outputs.tests == 'true' || runner.os == 'Linux'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        # Required only by the paused JavaScript lifecycle tests below.
-        if: needs.changes.outputs.tests == 'true'
+        # Private-input journeys run on Linux even while broader tests are paused.
+        if: needs.changes.outputs.tests == 'true' || runner.os == 'Linux'
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-        # Re-enable dependency setup together with the lifecycle tests.
-        if: needs.changes.outputs.tests == 'true'
+        if: needs.changes.outputs.tests == 'true' || runner.os == 'Linux'
       - name: Check CUA bridge and native host lifecycle
         # Temporarily disabled: CI tests are paused.
         if: needs.changes.outputs.tests == 'true' && runner.os == 'macOS'
@@ -161,6 +160,24 @@ jobs:
           node-version: 24
       - name: Exercise Managed2 CLI through HTTP and WebSocket
         run: node bin/nanocodex/tests/managed2_cli_e2e.mjs
+      - name: Exercise private TUI input and encrypted Vault reuse
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          pnpm --filter nanocodex-web exec playwright-core install --with-deps chromium
+          CHROME_PATH=$(node --input-type=module -e 'import {createRequire} from "node:module"; const require = createRequire(new URL("./js/account/package.json", import.meta.url)); process.stdout.write(require("playwright-core").chromium.executablePath());')
+          export CHROME_PATH
+          node --experimental-transform-types js/managed/test/private-input-tui.chrome.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && runner.os == 'Linux'
+        with:
+          name: private-tui-vault-journeys
+          path: |
+            output/private-input-tui/*.json
+            output/private-input-tui/*.txt
+            output/private-input-tui/*.log
+          if-no-files-found: warn
       - name: Run real CLI/app sharing against a local account server
         # Temporarily disabled: CI tests are paused.
         if: needs.changes.outputs.tests == 'true'
@@ -692,6 +709,31 @@ jobs:
           pnpm --filter @nanocodex/x-api run typecheck
           pnpm exec turbo run build --filter nanocodex-connect-protocol
           pnpm --filter nanocodex-managed-service run prepare:code-evaluator
+      - name: Exercise private-input account admission
+        timeout-minutes: 5
+        run: node js/managed/test/private-input-admission-journey.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: private-input-account-admission
+          path: output/private-input-tui/admission-trace.json
+          if-no-files-found: warn
+      - name: Exercise all Vault kinds in private browser fields
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          pnpm --filter nanocodex-web exec playwright-core install --with-deps chromium
+          CHROME_PATH="$(pnpm --filter nanocodex-web exec node --input-type=module -e 'import { chromium } from "playwright-core"; console.log(chromium.executablePath())' | tail -n 1)"
+          export CHROME_PATH
+          node --experimental-transform-types js/managed/test/browser-injection.chrome.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: private-browser-vault-injection
+          path: |
+            output/browser-injection/*.json
+            output/browser-injection/*.log
+          if-no-files-found: warn
       - name: Typecheck connector SDK and computer adapters
         run: |
           pnpm --filter @nanocodex/connect-api run typecheck

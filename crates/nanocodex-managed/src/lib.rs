@@ -13,6 +13,7 @@ mod driver;
 mod error;
 mod model;
 mod native_secure_input;
+mod private_input;
 mod share;
 mod sse;
 mod types;
@@ -43,6 +44,10 @@ pub use nanocodex_agent::{Model, ReasoningMode, Thinking};
 pub use native_secure_input::{
     NativeSecureInputDescription, NativeSecureInputEnvelope, NativeSecureInputReceipt,
     NativeSecureInputRequest, NativeSecureInputStatus,
+};
+pub use private_input::{
+    PrivateInputBody, PrivateInputKind, PrivateInputRequest, PrivateVaultItem,
+    private_input_output_text,
 };
 pub use share::{CreatedShareLink, ShareLink, SharePermission};
 pub use sse::{
