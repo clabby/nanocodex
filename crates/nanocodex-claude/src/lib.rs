@@ -1812,5 +1812,8 @@ fn is_user_turn_start(message: &Message) -> bool {
 mod agent;
 pub use agent::{Claude, ClaudeBuilder, ClaudeToolInvocation, ClaudeToolReply, ClaudeTools};
 
+mod images;
+pub use images::MAX_TOOL_IMAGE_DIMENSION;
+
 /// Portable durability integration with provider-native state.
 pub mod execution;

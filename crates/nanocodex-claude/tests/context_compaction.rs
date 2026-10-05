@@ -150,7 +150,7 @@ async fn retained_tool_suffix_survives_compaction_failed_followup_and_recovery()
     let receipt = json!({"type":"text","text":"receipt".repeat(500)});
     let returned = vec![
         receipt,
-        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}}),
+        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"}}),
     ];
     let results = returned.clone();
     let (agent, _) = Nanocodex::builder(Claude::latest(client))

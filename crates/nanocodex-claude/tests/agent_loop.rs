@@ -790,7 +790,7 @@ async fn claude_client_tool_can_return_multimodal_blocks_without_codex_result_sh
     );
     let (agent,_)=Nanocodex::builder(Claude::new(client,"test"))
         .tool_blocks(ToolDefinition { name:"ReadImage".into(), description:"Test image".into(), input_schema:json!({"type":"object"}),strict:None,defer_loading:false }, |_| async {
-            Ok(vec![json!({"type":"text","text":"image follows"}),json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}})])
+            Ok(vec![json!({"type":"text","text":"image follows"}),json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"}})])
         }).build().unwrap();
     assert_eq!(
         agent
@@ -806,7 +806,7 @@ async fn claude_client_tool_can_return_multimodal_blocks_without_codex_result_sh
     let log = requests.lock().unwrap();
     assert_eq!(
         log[1]["messages"][2]["content"][0]["content"][1]["source"]["data"],
-        "cG5n"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"
     );
     assert_eq!(log[1]["messages"][2]["content"][0]["type"], "tool_result");
     server.abort();

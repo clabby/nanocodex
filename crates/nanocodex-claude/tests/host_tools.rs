@@ -264,7 +264,7 @@ async fn host_bridge_waits_for_user_and_preserves_real_identity_and_failures() {
 
 // A real one-pixel PNG; no provider credentials or external URLs are used.
 const PIXEL: &str =
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC";
 struct MediaHost;
 impl ClaudeHost for MediaHost {
     async fn execute(

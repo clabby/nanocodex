@@ -419,6 +419,10 @@ impl ClaudeBuilder {
     }
     /// Register a Claude client tool that returns text, image, or document
     /// blocks in a single user tool_result. The caller owns capability checks.
+    /// Inline images are prepared for the direct API before joining request
+    /// history; unprocessable images become text omissions. URL/file sources
+    /// and opaque blocks remain caller-owned. Durable tool receipts retain the
+    /// original output independently of the prepared provider history.
     pub fn tool_blocks<F, Fut>(mut self, definition: ToolDefinition, function: F) -> Self
     where
         F: Fn(Value) -> Fut + Send + Sync + 'static,
@@ -2829,9 +2833,10 @@ impl State {
                 content: response.content,
             });
             if response.stop_reason == Some(StopReason::ToolUse) {
-                pending.push(Message::tool_results(
-                    results.into_iter().map(Option::unwrap).collect(),
-                ));
+                let results =
+                    crate::images::prepare(results.into_iter().map(Option::unwrap).collect())
+                        .await?;
+                pending.push(Message::tool_results(results));
                 // Commit completed effects and explicit unknown-outcome receipts
                 // before returning cancellation or making another provider call.
                 // Process-restart durability still belongs to the embedding host.

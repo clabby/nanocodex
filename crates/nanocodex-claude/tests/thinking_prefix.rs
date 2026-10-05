@@ -122,7 +122,7 @@ async fn compaction_replaces_stale_thinking_and_preserves_new_reasoning_and_rece
     let counter = effects.clone();
     let receipt = vec![
         json!({"type":"text","text":"committed receipt"}),
-        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}}),
+        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"}}),
     ];
     let returned = receipt.clone();
     let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))

@@ -122,7 +122,7 @@ async fn caller_native_mcp_preserves_transport_results_and_live_catalog_failures
                 "tools/call" => match request["params"]["arguments"]["mode"].as_str() {
                     Some("deny") => return Json(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32001,"message":"host authorization denied"}})),
                     Some("removed") => json!({"removed":true}),
-                    _ => json!({"content":[{"type":"text","text":"remote failure"},{"type":"image","mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="},{"type":"audio","mimeType":"audio/wav","data":"UklGRg=="}],"isError":true,"structuredContent":request["params"]["arguments"],"_meta":{"receipt":"actual-remote-receipt"}}),
+                    _ => json!({"content":[{"type":"text","text":"remote failure"},{"type":"image","mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"},{"type":"audio","mimeType":"audio/wav","data":"UklGRg=="}],"isError":true,"structuredContent":request["params"]["arguments"],"_meta":{"receipt":"actual-remote-receipt"}}),
                 },
                 _ => panic!("unexpected RPC method"),
             };
@@ -156,7 +156,7 @@ async fn caller_native_mcp_preserves_transport_results_and_live_catalog_failures
     );
     assert_eq!(output.content, nanocodex_claude_tools::ToolContent::Blocks(vec![
         ToolResultBlock::Text { text: "remote failure".into() },
-        ToolResultBlock::Image { source: ImageSource::Base64 { media_type: "image/png".into(), data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=".into() } },
+        ToolResultBlock::Image { source: ImageSource::Base64 { media_type: "image/png".into(), data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC".into() } },
         ToolResultBlock::UnsupportedMedia { media_type: "audio/wav".into() },
     ]));
     let count = requests.lock().unwrap().len();

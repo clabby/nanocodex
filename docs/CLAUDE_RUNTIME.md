@@ -72,6 +72,14 @@ Portable capability contracts, tasks, Bash and web adapters are available on
 WASM; filesystem/notebook execution and the builder's native adapters remain
 native-target-only.
 
+Base64 images returned by client tools are decoded with bounded resources and
+limited to a 3000-pixel long edge before entering provider history. Applying the
+direct API's many-image ceiling from the first request keeps earlier image bytes
+stable as the conversation grows. Unprocessable images become text omissions;
+other result blocks remain intact. URL and file sources remain caller-owned and
+are not fetched during preparation. The low-level Messages client preserves the
+caller's image payloads without this high-level preparation.
+
 `ClaudeMcp` intentionally requires a caller implementation of
 `ClaudeMcpProvider`, returning `McpToolDefinition` schemas and native
 `ToolOutput` results. The old OpenAI `DynamicToolProvider` bridge is not retained
@@ -140,6 +148,16 @@ The [SQLite integration suite](../crates/nanocodex-durability/tests/claude.rs) r
 Reproduce that coverage with `cargo test -p nanocodex-durability --features claude,sqlite --test claude`. The separate [host adapter tests](../crates/nanocodex-claude-tools/src/host_tests.rs) cover pending questions, host-owned background task identity/stop, and denied or unsupported input. The [native caller MCP journey](../crates/nanocodex-claude/tests/mcp_native.rs) uses actual loopback JSON-RPC HTTP to exercise intact input/context, live schema refresh/removal, error status, structured results, metadata and ordered media. The caller owns discovery/transport; this does not establish automatic dynamic-catalog wiring into the builder or full MCP transport parity. The [builder-level host integration tests](../crates/nanocodex-claude/tests/host_tools.rs) also exercise real Messages continuations: answers stay pending until the host responds, host failures remain error results, structured results and metadata survive on tool events, image output becomes Claude image content, and unsupported audio returns an explicit error. These synthetic journeys establish boundary behavior, not a deployed product's host services or live provider parity.
 
 The [canonical tools-feature checkpoint regression](../crates/nanocodex-claude/tests/tools_checkpoint.rs) runs with `cargo test -p nanocodex-claude --no-default-features --features tools --test tools_checkpoint`. It writes a provider-native task checkpoint to a temporary file through a synthetic host execution policy and reopens a fresh board/builder, continuing through actual Messages/SSE TaskGet and TaskCreate calls to check task content, next-ID watermark and sequential durable dispatch. Synthetic request/checkpoint transcripts are written to local ignored evidence. It does not depend on activating the `workspace-files` alias and does not replace the SQLite store/fencing integration suite.
+
+The [image admission journeys](../crates/nanocodex-claude/tests/image_admission.rs)
+decode image dimensions at the HTTP boundary, cross twenty accumulated images,
+and check malformed media and prefix stability. Run them with
+`cargo test -p nanocodex-claude --test image_admission -- --nocapture`.
+The [image durability journeys](../crates/nanocodex-durability/tests/claude_images.rs)
+cover a lost receipt acknowledgement and SQLite reopen: the original completed
+output remains exact, its newly admitted provider images meet the size limit,
+and the handler is not invoked again. Run them with
+`cargo test -p nanocodex-durability --features claude,sqlite --test claude_images -- --nocapture`.
 
 The Claude backend and shared durability adapter compile for `wasm32-unknown-unknown`; provider streaming, auth futures and clock handling have WASM paths. The additive [JavaScript API](CLAUDE_JAVASCRIPT.md) exposes explicit host-owned authentication and tools through a separate `Nanoclaude` WASM handle while reusing the common JS lifecycle and shared durability store. The standalone SDK does not switch existing managed agents or install ambient host capabilities. The [managed integration](CLAUDE_MANAGED.md) adds a separate private account connection, native tool catalog and subscription-backed routing. Browser Claude runs in the current isolate rather than silently creating the Codex module Worker. Actual synthetic WASM execution evidence is recorded separately from compilation and prior live native subscription measurements.
 

@@ -4,6 +4,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, VecDeque},
     io::Cursor,
+    num::NonZeroU32,
     path::Path,
     sync::{Arc, LazyLock, Mutex},
 };
@@ -55,6 +56,16 @@ const ORIGINAL_DETAIL_LIMITS: PromptImageResizeLimits = PromptImageResizeLimits 
 struct PromptImageResizeLimits {
     max_dimension: u32,
     max_patches: u32,
+}
+
+impl PromptImageResizeLimits {
+    const fn for_detail(detail: ImageDetail) -> Result<Self, ImagePreparationError> {
+        match detail {
+            ImageDetail::Auto | ImageDetail::High => Ok(HIGH_DETAIL_LIMITS),
+            ImageDetail::Original => Ok(ORIGINAL_DETAIL_LIMITS),
+            ImageDetail::Low => Err(ImagePreparationError::UnsupportedLowDetail),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -282,6 +293,7 @@ pub async fn prepare_user_input(input: &PromptInput) -> Vec<ContentItem> {
     }
 }
 
+#[cfg(feature = "code-mode")]
 pub(crate) fn prepare_embedded_output_images(output: &mut ToolOutputBody) {
     if let ToolOutputBody::Content(content) = output {
         *content = prepare_content(std::mem::take(content));
@@ -289,6 +301,7 @@ pub(crate) fn prepare_embedded_output_images(output: &mut ToolOutputBody) {
     output.replace_invalid_image_envelopes();
 }
 
+#[cfg(feature = "code-mode")]
 pub(crate) fn prepare_embedded_user_input(input: &PromptInput) -> Vec<ContentItem> {
     let input = match input {
         PromptInput::Text(text) => vec![UserInput::Text { text: text.clone() }],
@@ -422,15 +435,32 @@ fn prepare_image(image_url: &mut String, detail: ImageDetail) -> Result<(), Imag
     if !is_data_url(image_url) {
         return Ok(());
     }
-    let limits = match detail {
-        ImageDetail::Auto | ImageDetail::High => HIGH_DETAIL_LIMITS,
-        ImageDetail::Original => ORIGINAL_DETAIL_LIMITS,
-        ImageDetail::Low => return Err(ImagePreparationError::UnsupportedLowDetail),
-    };
+    let limits = PromptImageResizeLimits::for_detail(detail)?;
     let bytes = decode_data_url(image_url, MAX_PROMPT_IMAGE_INPUT_BYTES)?;
     *image_url =
         load_for_prompt_bytes(Path::new("<data-url-image>"), bytes, limits)?.into_data_url();
     Ok(())
+}
+
+/// Prepares inline image bytes with a provider's additional dimension ceiling.
+///
+/// Returns base64 data and its detected MIME type, or a bounded model-visible
+/// omission message. Detail limits, decode budgets, and the cache are shared
+/// with prompt and tool images. Native async callers must offload this CPU work.
+pub fn prepare_base64_image(
+    data: &str,
+    detail: ImageDetail,
+    max_dimension: NonZeroU32,
+) -> Result<(String, &'static str), &'static str> {
+    let prepare = || {
+        let mut limits = PromptImageResizeLimits::for_detail(detail)?;
+        limits.max_dimension = limits.max_dimension.min(max_dimension.get());
+        let bytes = decode_base64(data, MAX_PROMPT_IMAGE_INPUT_BYTES)?;
+        load_for_prompt_bytes(Path::new("<base64-image>"), bytes, limits)
+    };
+    prepare()
+        .map(|image| (BASE64_STANDARD.encode(image.bytes), image.mime))
+        .map_err(|error| error.placeholder())
 }
 
 fn is_remote_image_url(image_url: &str) -> bool {
@@ -465,6 +495,10 @@ fn decode_data_url(
             "only base64 data URLs are supported".to_owned(),
         ));
     }
+    decode_base64(encoded, max_input_bytes)
+}
+
+fn decode_base64(encoded: &str, max_input_bytes: usize) -> Result<Vec<u8>, ImagePreparationError> {
     if encoded.len() > max_input_bytes {
         return Err(ImagePreparationError::ImageTooLarge {
             representation: "base64 payload",
@@ -577,17 +611,13 @@ fn load_for_prompt_bytes(
     Ok(image)
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 pub(super) fn load_for_prompt_data_url(
     path: &Path,
     file_bytes: Vec<u8>,
     detail: ImageDetail,
 ) -> Result<String, String> {
-    let limits = match detail {
-        ImageDetail::Auto | ImageDetail::High => HIGH_DETAIL_LIMITS,
-        ImageDetail::Original => ORIGINAL_DETAIL_LIMITS,
-        ImageDetail::Low => return Err("image detail `low` is not supported".to_owned()),
-    };
+    let limits = PromptImageResizeLimits::for_detail(detail).map_err(|error| error.to_string())?;
     load_for_prompt_bytes(path, file_bytes, limits)
         .map(EncodedImage::into_data_url)
         .map_err(|error| error.to_string())

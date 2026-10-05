@@ -191,7 +191,7 @@ async fn completed_effect_and_opaque_compaction_suffix_survive_reopen() {
     let effects = Arc::new(AtomicUsize::new(0));
     let receipt = vec![
         json!({"type":"text","text":"effect committed"}),
-        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}}),
+        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"}}),
     ];
     for recovery in [false, true] {
         let counter = effects.clone();
@@ -2473,7 +2473,7 @@ async fn legacy_compacted_snapshot_recovers_and_retains_new_thinking_after_reope
         "type":"tool_result","tool_use_id":"effect-once",
         "content":[
             {"type":"text","text":"effect committed"},
-            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}}
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"}}
         ],
         "opaque":{"receipt":"original"}
     });
