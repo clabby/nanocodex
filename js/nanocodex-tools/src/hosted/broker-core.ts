@@ -109,6 +109,7 @@ type HostedToolsSocketAttachment = {
   appToolCatalogDigest?: `0x${string}`;
   connectGrantId?: string;
   expectedAttachmentId?: string;
+  publisherIdentity?: Readonly<{ machineId: string; runtimeId: string }>;
   maximumLeaseExpiresAt?: number;
   fixedRouteId?: string;
   renewalToken?: string;
@@ -356,6 +357,21 @@ export type HostedToolsBrokerCoreOptions = Readonly<{
   /** @deprecated Control frames are handled by the WebSocket platform. */
   heartbeatObservationIntervalMs?: number;
   onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
+  /**
+   * Admit a fully validated candidate before it becomes visible. A returned
+   * synchronous guard must still authorize publication immediately before ready;
+   * owners can use it to fence an admission superseded during asynchronous I/O.
+   */
+  beforeCatalogPublish?: (candidate: Readonly<{
+    routeId: string;
+    attachmentId: string | undefined;
+    runtimeId: string | undefined;
+    publisherIdentity: Readonly<{ machineId: string; runtimeId: string }> | undefined;
+    machine: HostedMachine | undefined;
+    definitions: readonly HostedToolsCatalogCandidate[];
+    generation: number;
+    leaseId: string;
+  }>) => Promise<(() => boolean) | void>;
   entryAllowed?: (
     entry: HostedToolCatalogEntry,
     connectGrantId?: string,
@@ -393,6 +409,7 @@ export class HostedToolsBrokerCore {
   readonly #maxCallsPerGeneration: number;
   readonly #persistence: HostedToolsBrokerPersistence;
   readonly #onCatalogChanged: ((definitions: readonly HostedToolsProviderDefinition[]) => void) | undefined;
+  readonly #beforeCatalogPublish: HostedToolsBrokerCoreOptions["beforeCatalogPublish"];
   readonly #entryAllowed: (
     entry: HostedToolCatalogEntry,
     connectGrantId?: string,
@@ -427,6 +444,7 @@ export class HostedToolsBrokerCore {
     }
     this.#persistence = options.persistence;
     this.#onCatalogChanged = options.onCatalogChanged;
+    this.#beforeCatalogPublish = options.beforeCatalogPublish;
     this.#entryAllowed = options.entryAllowed ?? (() => true);
     this.#renewLeasedAttachment = options.renewLeasedAttachment;
     const now = this.#now();
@@ -541,19 +559,43 @@ export class HostedToolsBrokerCore {
     for (const state of this.#persistence.states()) this.#retireState(state, reason, "owner_shutdown");
   }
 
-  /** Fences one attachment only when its exact durable route is still current. */
-  revokeRoute(routeId: string, reason: string): boolean {
+  /**
+   * Retire the current route without prohibiting a later ownership admission.
+   * Dispatched calls remain ambiguous in the ledger; they are never reassigned
+   * to a successor. Owners must separately fence pending asynchronous admissions
+   * with the beforeCatalogPublish guard, including routes not yet published.
+   */
+  retireRoute(routeId: string, reason: string, closeCode: 1000 | 1008 | 1012 = 1008): boolean {
     const state = this.#persistence.state(routeId) ?? emptyState(routeId);
     const active = state.lease_id !== null;
     if (active) {
       const socket = this.#socketForState(state);
-      if (socket) this.#fence(socket, reason, 1008, "route_revoked");
+      if (socket) this.#fence(socket, reason, closeCode, "route_revoked");
       else this.#retireState(state, reason, "route_revoked");
     }
+    // clearHost retains discovery metadata for transient reconnects. Explicit
+    // retirement must remove it even when the retained route has no live lease.
+    const retired = this.#persistence.state(routeId) ?? state;
+    const catalogChanged = retired.catalog_json !== null || retired.machines_json !== null;
+    this.#persistence.replaceHost({
+      ...retired,
+      host_id: null,
+      lease_id: null,
+      lease_expires_at: 0,
+      catalog_json: null,
+      machines_json: null,
+    });
+    if (catalogChanged) this.#notifyCatalogChanged();
+    return active;
+  }
+
+  /** Permanently revoke this exact route, including pending admissions. */
+  revokeRoute(routeId: string, reason: string): boolean {
+    const active = this.retireRoute(routeId, reason);
     // Revocation can race ahead of catalog publication in another Durable
     // Object. Retain an exact route tombstone so a previously validated socket
     // cannot publish after its control-plane fence has completed.
-    const retired = this.#persistence.state(routeId) ?? state;
+    const retired = this.#persistence.state(routeId) ?? emptyState(routeId);
     this.#persistence.replaceHost({
       ...retired,
       host_id: null,
@@ -596,6 +638,11 @@ export class HostedToolsBrokerCore {
    * Admission still rechecks grants, durable ownership, renewal and generation
    * in the prepared handler; the view is discovery, not cached authority.
    */
+  /** Names reserved by live attachments and retained native catalogs, without discovery filtering. */
+  reservedToolNames(): readonly string[] {
+    return this.#publicCatalogBindings(undefined, true).map(binding => binding.entry.definition.name);
+  }
+
   catalogSnapshot(): HostedToolsCatalogSnapshot {
     const bindings = this.#catalogBindings();
     const publicBindings = new Map<string, HostedToolsCatalogBinding>();
@@ -738,6 +785,7 @@ export class HostedToolsBrokerCore {
     appToolCatalogDigest?: `0x${string}`,
     connectGrantId?: string,
     leasedAttachment?: HostedToolsLeasedAttachmentPolicy,
+    publisherIdentity?: Readonly<{ machineId: string; runtimeId: string }>,
   ): void {
     if (allowedMcpIds !== undefined && !isConnectGrantId(connectGrantId)) {
       throw new TypeError("Connect Hosted Tools requires an exact grant ID");
@@ -750,6 +798,11 @@ export class HostedToolsBrokerCore {
       || !Number.isSafeInteger(leasedAttachment.maximumLeaseExpiresAt))) {
       throw new TypeError("leased Hosted Tools requires one complete ordinary-route policy");
     }
+    if (publisherIdentity !== undefined && (connectGrantId !== undefined
+      || typeof publisherIdentity.machineId !== "string" || publisherIdentity.machineId.length === 0
+      || typeof publisherIdentity.runtimeId !== "string" || publisherIdentity.runtimeId.length === 0)) {
+      throw new TypeError("Hosted Tools publisher identity requires an account machine and runtime ID");
+    }
     this.context.writeAttachment(socket, {
       kind: SOCKET_TAG,
       connectionId: crypto.randomUUID(),
@@ -757,6 +810,7 @@ export class HostedToolsBrokerCore {
       ...(allowedMcpIds === undefined ? {} : { allowedMcpIds: [...allowedMcpIds] }),
       ...(appToolCatalogDigest === undefined ? {} : { appToolCatalogDigest }),
       ...(connectGrantId === undefined ? {} : { connectGrantId }),
+      ...(publisherIdentity === undefined ? {} : { publisherIdentity: { ...publisherIdentity } }),
       ...(leasedAttachment === undefined ? {} : {
         expectedAttachmentId: leasedAttachment.expectedAttachmentId,
         maximumLeaseExpiresAt: leasedAttachment.maximumLeaseExpiresAt,
@@ -1043,7 +1097,7 @@ export class HostedToolsBrokerCore {
         );
       }
     }
-    let state = this.#persistence.state(routeId) ?? emptyState(routeId);
+    let state = { ...(this.#persistence.state(routeId) ?? emptyState(routeId)) };
     if (state.lease_id === null && state.lease_expires_at === REVOKED_ROUTE_LEASE_EXPIRES_AT) {
       throw new HostedToolsProtocolError(
         "route_revoked",
@@ -1055,7 +1109,7 @@ export class HostedToolsBrokerCore {
       const expiredSocket = this.#socketForState(state);
       if (expiredSocket) this.#fence(expiredSocket, "Hosted Tools lease expired", 1012, "lease_expired");
       else this.#retireState(state, "Hosted Tools lease expired", "lease_expired");
-      state = this.#persistence.state(routeId) ?? emptyState(routeId);
+      state = { ...(this.#persistence.state(routeId) ?? emptyState(routeId)) };
     }
     const activeSocket = this.#socketForState(state);
     const activeGrantId = activeSocket === undefined
@@ -1110,6 +1164,13 @@ export class HostedToolsBrokerCore {
       if ((frame.machines?.length ?? 0) > 0
         && (frame.machines?.length !== 1 || frame.attachment_id !== frame.machines[0]?.id)) {
         throw new Error("an account machine route requires one machine whose id equals attachment_id");
+      }
+      if (initial.publisherIdentity !== undefined
+        && (frame.attachment_id !== initial.publisherIdentity.machineId
+          || frame.machines?.length !== 1
+          || frame.machines[0]?.id !== initial.publisherIdentity.machineId
+          || frame.runtime_id !== initial.publisherIdentity.runtimeId)) {
+        throw new Error("catalog must match the publisher's connect-time machine and runtime identity");
       }
       if (initial.expectedAttachmentId !== undefined
         && (frame.attachment_id !== initial.expectedAttachmentId
@@ -1185,12 +1246,64 @@ export class HostedToolsBrokerCore {
         `candidate catalog is incompatible with the managed tool route: ${errorMessage(error)}`,
       );
     }
+    let commitGuard: (() => boolean) | void = undefined;
+    if (this.#beforeCatalogPublish) {
+      try {
+        commitGuard = await this.#beforeCatalogPublish({
+          routeId,
+          attachmentId: frame.attachment_id,
+          runtimeId: frame.runtime_id,
+          publisherIdentity: initial.publisherIdentity,
+          machine,
+          definitions: candidateDefinitions,
+          generation,
+          leaseId,
+        });
+      } catch (error) {
+        throw new HostedToolsProtocolError(
+          "catalog_contract_mismatch",
+          `candidate catalog admission failed: ${errorMessage(error)}`,
+        );
+      }
+    }
+    // Only this route's ownership matters. An unrelated attachment may have
+    // retired while admission awaited its owner directory.
+    const current = this.#persistence.state(routeId) ?? emptyState(routeId);
+    if ((current.lease_id === null && current.lease_expires_at === REVOKED_ROUTE_LEASE_EXPIRES_AT)
+      || current.lease_id !== state.lease_id || current.generation !== state.generation
+      || current.catalog_json !== state.catalog_json) {
+      throw new HostedToolsProtocolError("route_revoked", "tool attachment ownership changed before publication");
+    }
+    const currentCandidate = this.#attachment(socket);
+    if (socket.readyState !== OPEN || currentCandidate?.routeId !== routeId
+      || currentCandidate.leaseId !== leaseId || currentCandidate.generation !== generation
+      || currentCandidate.active === true) {
+      throw new HostedToolsProtocolError("stale_socket", "candidate socket disconnected or changed before publication");
+    }
     const now = this.#now();
+    if (expiresAt <= now) {
+      throw new HostedToolsProtocolError("route_revoked", "tool attachment lease expired before publication");
+    }
     const replaced = !resumes && state.lease_id ? state : undefined;
     const oldSockets = this.context.sockets().filter(existing => {
       const old = this.#attachment(existing);
       return existing !== socket && old?.active && old.leaseId === state.lease_id && old.generation === state.generation;
     });
+    // Publications are queued within this broker, but admission may await an
+    // external owner. Recheck exposed names before committing that admission.
+    const currentExposedNames = new Set(this.#publicCatalogBindings(routeId, true)
+      .map(binding => binding.entry.definition.name));
+    const conflictingDefinition = candidateDefinitions.find(entry => currentExposedNames.has(entry.definition.name));
+    if (conflictingDefinition) {
+      throw new HostedToolsProtocolError(
+        "catalog_contract_mismatch",
+        `tool name ${conflictingDefinition.definition.name} is already exposed by another attachment`,
+      );
+    }
+    // No asynchronous work may occur between this owner fence and publication.
+    if (commitGuard && !commitGuard()) {
+      throw new HostedToolsProtocolError("route_revoked", "tool attachment admission was superseded before publication");
+    }
     // Fence the physical attachment before ready; the ownership epoch may stay unchanged.
     for (const old of oldSockets) this.context.writeAttachment(old, { ...this.#attachment(old), active: false });
     try { this.#send(socket, { type: "ready" }); }

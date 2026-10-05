@@ -164,8 +164,10 @@ import {
 } from "./hosted-tools-broker";
 import {
   AccountHostedTools,
+  AccountHostedToolsCallRoutes,
   AccountHostedToolsProvider,
 } from "./account-hosted-tools";
+import { RegionalHandRelay, routeRegionalToolHost } from "./regional-hand-relay";
 import { VmHostPool } from "./vm-host-pool";
 import { initializeEmptyVmHostScope, initializeVmHostScopeSchema, markVmHostScopeRegistration, shouldProbeAgentVmHostScope } from "./vm-host-scope";
 import { isVmFactoryName } from "./vm-factory-name";
@@ -388,6 +390,7 @@ import { MemoryScope, MEMORY_INITIALIZE_ASSERTION } from "./memory-scope";
 export { MemoryScope } from "./memory-scope";
 export { UserDataScope } from "./user-data-scope";
 export { AccountHostedTools } from "./account-hosted-tools";
+export { RegionalHandRelay } from "./regional-hand-relay";
 export { VmHostPool } from "./vm-host-pool";
 export { ApiKeyRecord, NonceStorage, Organization, UserAccount } from "./account-auth";
 
@@ -471,6 +474,8 @@ export interface Env extends
   NANOCODEX_PERFORMANCE_TRACE?: string;
   NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
   NANOCODEX_ACCOUNT_TOOLS: DurableObjectNamespace<AccountHostedTools>;
+  NANOCODEX_HAND_RELAYS?: DurableObjectNamespace<RegionalHandRelay>;
+  NANOCODEX_REGIONAL_HAND_RELAYS?: string;
   NANOCODEX_TURN_KEY_ID?: string;
   NANOCODEX_TURN_API_TOKEN?: string;
   NANOCODEX_PHONE_BRIDGE_URL?: string;
@@ -1808,6 +1813,39 @@ async function managedFetchRoute(
         handBrokerRequest(request, principal),
       ));
     }
+    if (url.pathname === "/v1/account/hand-relays") {
+      if (request.method !== "GET" || url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
+      const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
+      if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+      if (principal.connectGrant
+        || !principal.capabilities.includes("agents:read")
+        || !principal.capabilities.includes("tools:use")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      const headers = new Headers(request.headers);
+      forwardPrincipalAssertions(headers, principal);
+      return env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
+        new Request("https://account-tools.internal/regional/status", new Request(request, { headers })),
+      );
+    }
+    if (url.pathname === "/v1/account/hand-relays/retire") {
+      if (request.method !== "POST" || url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
+      const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
+      if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+      if (principal.connectGrant
+        || !principal.capabilities.includes("agents:write")
+        || !principal.capabilities.includes("tools:use")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      if (principal.kind !== "api_key" && request.headers.get("origin") !== url.origin) {
+        return json({ error: "forbidden_origin" }, { status: 403 });
+      }
+      const headers = new Headers(request.headers);
+      forwardPrincipalAssertions(headers, principal);
+      return env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
+        new Request("https://account-tools.internal/regional/retire", new Request(request, { headers })),
+      );
+    }
     if (url.pathname === "/v1/account/tool-host") {
       if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
       if (request.method !== "GET" || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
@@ -1825,10 +1863,7 @@ async function managedFetchRoute(
       }
       const headers = new Headers(request.headers);
       forwardPrincipalAssertions(headers, principal);
-      return env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
-        "https://account-tools.internal/tool-host",
-        new Request(request, { headers }),
-      );
+      return routeRegionalToolHost(new Request(request, { headers }), principal.userId, env);
     }
     if (url.pathname === "/v1/vault/request") {
       const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
@@ -1839,7 +1874,7 @@ async function managedFetchRoute(
       const validator = principal ? nativeAppValidator(env.NANOCODEX_ACCOUNT_TOOLS, principal.userId,
         { sessionId: "apps:" + crypto.randomUUID(), callId: crypto.randomUUID(), signal: request.signal },
         () => principal.kind !== "connect_grant" && principal.connectGrant === undefined
-          && principal.capabilities.includes("tools:use") && principal.capabilities.includes("agents:write")) : undefined;
+          && principal.capabilities.includes("tools:use") && principal.capabilities.includes("agents:write"), env.NANOCODEX_HAND_RELAYS) : undefined;
       return (await import("./prompt-apps-http")).routeAppsRequest(request, env.NANOCODEX_CRM, principal, validator);
     }
     if (url.pathname === "/v1/crm" || url.pathname.startsWith("/v1/crm/")) {
@@ -4966,7 +5001,7 @@ export class DurableAgentSession extends DurableComputerObject {
           const context = {sessionId:`native-input-${crypto.randomUUID()}`,callId:crypto.randomUUID(),signal:request.signal};
           this.#fileReadAuthorizations.set(context.sessionId, turnAuthorization);
           try {
-            const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id);
+            const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id, this.env.NANOCODEX_HAND_RELAYS, new AccountHostedToolsCallRoutes(this.ctx.storage));
             await provider.refresh();
             return json(await this.#nativeSecureInput(session.session_id).submit(payload, context,
               (machine, ctx) => this.#hostedTools.machineTool(machine, "native_secure_input", ctx)
@@ -4996,7 +5031,7 @@ export class DurableAgentSession extends DurableComputerObject {
         if (path.startsWith("/brain/")) return await downloadBrainFile(this.#brainBucket(), session.session_id, path);
         // This provider is scoped to the authenticated HTTP read, independent of
         // whichever model turn may currently be running (or absent).
-        const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id);
+        const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id, this.env.NANOCODEX_HAND_RELAYS, new AccountHostedToolsCallRoutes(this.ctx.storage));
         await provider.refresh();
         const mounts = this.#managedMounts().filter(mount => executionMountOwner(mount) === undefined);
         const discovered = [...this.#hostedTools.machines(), ...provider.machines()];
@@ -5004,7 +5039,7 @@ export class DurableAgentSession extends DurableComputerObject {
           ? [`cf:${mount.provider_resource_id}`] : [vmHostMountAllocation(mount)?.machine_id].filter((id): id is string => id !== undefined)));
         const machines = discovered.filter(machine => !leased.has(machine.id)
           && discovered.filter(candidate => candidate.id === machine.id).length === 1);
-        const roots = this.#handPaths.assign(machines, mounts.map(mount => mount.root));
+        const roots = this.#handPaths.assign(machines, mounts.map(mount => mount.root), provider.machineRoots());
         const root = `/${path.split("/")[1]}`;
         const mount = mounts.find(mount => mount.root === root);
         const machine = machines.find(machine => roots.get(machine.id) === root || machineMountRoot(machine.id) === root);
@@ -9301,6 +9336,8 @@ export class DurableAgentSession extends DurableComputerObject {
           : this.#authorizationForToolContext(context),
       ),
       session.session_id,
+      this.env.NANOCODEX_HAND_RELAYS,
+      new AccountHostedToolsCallRoutes(this.ctx.storage),
     );
     this.ctx.waitUntil(performanceStage("account.hosted_tools", () => this.#accountHostedTools!.refreshOptional(MANAGED_ACCESS_TTL_MS))
       .catch((error) => {
@@ -9738,7 +9775,7 @@ export class DurableAgentSession extends DurableComputerObject {
       const authorization = this.#authorizationForToolContext(context);
       if (!this.#canUseExecutionNamespace(authorization)) return [];
       const userHands = this.#hasFullAccountAuthority(authorization) ? this.#userHandMachines(context) : [];
-      const roots = this.#handPaths.assign(userHands, this.#managedMounts().map(mount => mount.root));
+      const roots = this.#handPaths.assign(userHands, this.#managedMounts().map(mount => mount.root), this.#accountHostedTools?.machineRoots());
       return [
         ...this.#availableManagedMounts(authorization).map((mount) => ({
           id: `sandbox:${mount.id}`,
@@ -10067,7 +10104,7 @@ export class DurableAgentSession extends DurableComputerObject {
           const auth = this.#authorizationForToolContext(context);
           return this.#hasFullAccountAuthority(auth) && auth!.capabilities.includes("tools:use")
             && auth!.capabilities.includes("agents:write");
-        }),
+        }, this.env.NANOCODEX_HAND_RELAYS, new AccountHostedToolsCallRoutes(this.ctx.storage)),
       })),
       ...(multiplayer ? [] : crmTools({
         db: this.env.NANOCODEX_CRM, ownerId: session.owner_id,
@@ -11422,7 +11459,7 @@ export class DurableAgentSession extends DurableComputerObject {
   ): readonly AccountMachine[] {
     if (!this.#canUseExecutionNamespace(authorization)) return [];
     const userHands = this.#hasFullAccountAuthority(authorization) ? this.#userHandMachines(context) : [];
-    const roots = this.#handPaths.assign(userHands, this.#managedMounts().map(mount => mount.root));
+    const roots = this.#handPaths.assign(userHands, this.#managedMounts().map(mount => mount.root), this.#accountHostedTools?.machineRoots());
     return Object.freeze(projectHandProviders([
       ...this.#availableManagedMounts(authorization).map((mount) => {
         const hostMachine = mount.provider === "host" ? this.#hostMachineForMount(mount) : undefined;
