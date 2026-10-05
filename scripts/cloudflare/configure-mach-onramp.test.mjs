@@ -21,7 +21,7 @@ const config = { chain_id: 4217, token_address: '0x20c000000000000000000000f37de
 async function journey(t, overrides = {}, behavior = {}) {
   const requests = [];
   const logs = [];
-  const bindings = new Map();
+  const bindings = new Map((behavior.existingBindings ?? []).map(binding => [binding.name, binding.name === 'MACH_ONRAMP_RELAY_TOKEN' ? env.MACH_ONRAMP_RELAY_TOKEN : env.MACH_ONRAMP_RELAY_URL]));
   const server = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -34,13 +34,13 @@ async function journey(t, overrides = {}, behavior = {}) {
       assert.equal(req.headers['x-nanocodex-mach-relay-token'], undefined);
       if (req.url.endsWith('/subdomain')) return json(200, { success: true, result: { subdomain: behavior.wrongAccount ? 'other' : 'gakonst' } });
       assert.match(req.url, /\/scripts\/nanocodex-connect-api\/(settings|secrets)$/);
-      if (req.url.endsWith('/settings')) return json(behavior.missingWorker ? 404 : 200, { success: true, result: { bindings: [{ name: 'CONNECT_STATE', type: 'durable_object_namespace', class_name: 'ConnectNonceStorage', ...behavior.binding }] } });
+      if (req.url.endsWith('/settings')) return json(behavior.missingWorker ? 404 : 200, { success: true, result: { bindings: [{ name: 'CONNECT_STATE', type: 'durable_object_namespace', class_name: 'ConnectNonceStorage', ...behavior.binding }, ...(behavior.existingBindings ?? [])] } });
       assert.equal(req.method, 'PUT');
       assert.equal(body.type, 'secret_text');
       bindings.set(body.name, body.text);
       if (behavior.disconnectWrite) return req.socket.destroy();
       if (behavior.rejectOrigin && body.name === 'MACH_ONRAMP_RELAY_URL') return json(500, { error: env.MACH_ONRAMP_RELAY_TOKEN });
-      return json(200, { success: true, result: { ...body } }); // Even an echo must never be logged.
+      return json(behavior.writeStatus ?? 200, behavior.writeResponse ?? { success: true, result: { ...body } }); // Even an echo must never be logged.
     }
     assert.equal(req.method, 'GET');
     assert.equal(req.headers.authorization, undefined);
@@ -138,4 +138,64 @@ test('partial configuration and disabled public config remain failures without a
   assert.equal(disabled.code, 1);
   assert.equal(disabled.writes.length, 2);
   assert.match(disabled.output, /public_config_invalid_or_disabled/);
+});
+
+const existingToken = [{ name: 'MACH_ONRAMP_RELAY_TOKEN', type: 'secret_text' }];
+test('HTTP 201 secret creation succeeds only with a valid matching result', async t => {
+  const success = await journey(t, {}, { writeStatus: 201 });
+  assert.equal(success.code, 0);
+  assert.equal(success.writes.length, 2);
+  assert.match(success.output, /write_token: http_201/);
+  assert.match(success.output, /write_origin: http_201/);
+  for (const writeResponse of [
+    { success: false, result: { name: 'MACH_ONRAMP_RELAY_TOKEN', type: 'secret_text' } },
+    { success: true, result: { name: 'OTHER', type: 'secret_text' } },
+    { success: true, result: { name: 'MACH_ONRAMP_RELAY_TOKEN', type: 'plain_text' } },
+    { success: true },
+  ]) {
+    const result = await journey(t, {}, { writeStatus: 201, writeResponse });
+    assert.equal(result.code, 1);
+    assert.equal(result.writes.length, 1);
+    assert.match(result.output, /write_token_unconfirmed_do_not_retry/);
+  }
+});
+test('origin-only recovery reconciles token metadata and writes only origin once', async t => {
+  const result = await journey(t, { MACH_ONRAMP_ACTION: 'configure-origin' }, {
+    existingBindings: existingToken, writeStatus: 201,
+  });
+  assert.equal(result.code, 0);
+  assert.deepEqual(result.writes.map(r => r.body.name), ['MACH_ONRAMP_RELAY_URL']);
+  assert.equal(result.requests.length, 7);
+});
+test('origin-only recovery refuses any existing origin and missing or nonsecret token', async t => {
+  for (const type of ['secret_text', 'plain_text']) {
+    const result = await journey(t, { MACH_ONRAMP_ACTION: 'configure-origin' }, {
+      existingBindings: [...existingToken, { name: 'MACH_ONRAMP_RELAY_URL', type }],
+    });
+    assert.equal(result.code, 1);
+    assert.equal(result.writes.length, 0);
+    assert.equal(result.requests.length, 2);
+    assert.match(result.output, /origin_already_bound_run_verify/);
+  }
+  for (const existingBindings of [[], [{ name: 'MACH_ONRAMP_RELAY_TOKEN', type: 'plain_text' }]]) {
+    const result = await journey(t, { MACH_ONRAMP_ACTION: 'configure-origin' }, { existingBindings });
+    assert.equal(result.code, 1);
+    assert.equal(result.writes.length, 0);
+    assert.equal(result.requests.length, 2);
+    assert.match(result.output, /recovery_requires_existing_secret_token/);
+  }
+});
+test('origin-only recovery still requires authenticated canonical relay and never retries unknown writes', async t => {
+  for (const behavior of [{ publicRelay: true }, { redirect: true }, { relayConfig: { chain_id: 1 } }]) {
+    const result = await journey(t, { MACH_ONRAMP_ACTION: 'configure-origin' }, { existingBindings: existingToken, ...behavior });
+    assert.equal(result.code, 1);
+    assert.equal(result.writes.length, 0);
+  }
+  const result = await journey(t, { MACH_ONRAMP_ACTION: 'configure-origin' }, {
+    existingBindings: existingToken, disconnectWrite: true,
+  });
+  assert.equal(result.code, 1);
+  assert.deepEqual(result.writes.map(r => r.body.name), ['MACH_ONRAMP_RELAY_URL']);
+  assert.equal(result.requests.length, 5);
+  assert.match(result.output, /write_origin_outcome_unknown_do_not_retry/);
 });
