@@ -1,4 +1,6 @@
 import { Handler, Kv } from "accounts/server";
+import { oauthMcp, type McpGrant, type McpOAuthHooks, oauthJson } from "./oauthMcp.mts";
+import { mcpServer } from "./mcpServer.mts";
 import { appThreadStorage, type AppThread } from "./appThreads.mts";
 import { withManagedAccess } from "nanocodex/managed";
 import { custom } from "viem";
@@ -115,6 +117,24 @@ type AtomicNonceStorage = Kv.NonceStorage.State["storage"] & {
 export class ConnectNonceStorage extends Kv.NonceStorage {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/mcp-public-rate") {
+      const { key, kind } = await request.json() as { key: string; kind: string };
+      if (!/^[0-9a-f]{64}$/.test(key) || !["register", "authorize"].includes(kind)) return new Response(null, { status: 400 });
+      const allowed = await (this.state.storage as AtomicNonceStorage).transaction(async storage => {
+        const hour = Math.floor(Date.now() / 3_600_000);
+        const current = await storage.get<{ hour: number; count: number; actors: Record<string, number> }>(`mcp-rate:${kind}`);
+        // Two bounded rolling maps avoid permanent per-IP or per-client rows.
+        const state = current?.hour === hour ? current : { hour, count: 0, actors: {} };
+        const limit = kind === "register" ? 20 : 100, global = kind === "register" ? 200 : 1000;
+        const actorCount = state.actors[key] ?? 0;
+        if (state.count >= global || actorCount >= limit) return false;
+        state.count += 1;
+        state.actors[key] = actorCount + 1;
+        await storage.put(`mcp-rate:${kind}`, state);
+        return true;
+      });
+      return Response.json({ allowed });
+    }
     if (url.pathname === "/app-threads") {
       return appThreadStorage(request, this.state.storage as unknown as Parameters<typeof appThreadStorage>[1]);
     }
@@ -488,6 +508,15 @@ export default {
     try {
       const url = new URL(request.url);
       const store = Kv.durableObject(env.CONNECT_STATE);
+
+      const oauthHooks = mcpOAuthHooks(env, store, context);
+      const oauth = await oauthMcp(request, store, oauthHooks);
+      if (oauth) return cors(oauth, request);
+      if (url.pathname === "/mcp") {
+        return cors(await mcpServer(request, store, oauthHooks, {
+          call: (name, args, grant, source) => callMcpTool(env, store, name, args, grant, source),
+        }), request);
+      }
 
       if ((request.method === "POST" && url.pathname === "/v1/host-principal/exchanges")
         || (request.method === "DELETE" && url.pathname === "/v1/host-principal/sessions")) {
@@ -1466,12 +1495,131 @@ function isMcpIntent(value: unknown): value is McpIntent {
     && Number.isSafeInteger(value.expiresAt);
 }
 
+/** OAuth adapters use server-validated intent + authentic account approval.
+ * No browser Origin is synthesized, and the underlying Connect token never
+ * leaves the issuer. MCP bearer tokens cannot enter ordinary Connect routes. */
+function mcpOAuthHooks(env: Env, store: Kv.Kv, context: WorkerContext): McpOAuthHooks {
+  return {
+    requireDialog: requireDialogOrigin,
+    consentOrigin: request => isLocalDeviceOrigin(new URL(request.url).origin) ? new URL(request.url).origin : DIALOG_ORIGIN,
+    registrationAllowed: request => mcpPublicRate(env, "register", request.headers.get("cf-connecting-ip") ?? "local"),
+    authorizationAllowed: (_request, clientId) => mcpPublicRate(env, "authorize", clientId),
+    approve: async (request, authorization, body) => {
+      const approvalResponse = await createHostedAuthorization(request, env, store, {
+        account_address: body.account_address, code: body.code, resources: authorization.resources,
+        app_id: authorization.app_id, app_origin: authorization.app_origin,
+      });
+      const approval = await approvalResponse.json() as { approval_id: string; account_address: string };
+      const requested = [...approvedConnectors(authorization.resources)];
+      const connection = await createConnection(request, env, store, context, {
+        app: validateCallerApp(authorization.app_id, authorization.app_origin),
+        body: { app_id: authorization.app_id, approval_id: approval.approval_id, account_address: approval.account_address,
+          permission: "agent.run", authorization_mode: "hosted", requested_connectors: requested },
+      });
+      const wire = await connection.json() as { grant_token: string; grant: { id: string; expires_at: number }; agent_id: string };
+      const stored = await store.get<GrantRecord>(`grant:${wire.grant.id}`);
+      if (!stored) throw new ApiFailure(503, "grant_state_unavailable", "The approved grant could not be resolved.");
+      return { id: stored.id, token: wire.grant_token, appId: stored.appId, appOrigin: stored.appOrigin,
+        expiresAt: stored.expiresAt, capabilities: stored.capabilities, agentId: stored.agentId };
+    },
+    active: async grant => !!await mcpGrantRecord(store, grant),
+    revoke: async grant => {
+      const current = await mcpGrantRecord(store, grant);
+      if (current) await withGrantMutationLock(store, current.id, () => revokeGrant(env, store, current, grant.token));
+    },
+  };
+}
+async function mcpPublicRate(env: Env, kind: "register" | "authorize", actor: string): Promise<boolean> {
+  const key = (await digestHex(actor)).slice(2);
+  const stub = env.CONNECT_STATE.get(env.CONNECT_STATE.idFromName("default"));
+  const response = await stub.fetch("https://do.invalid/mcp-public-rate", {
+    method: "POST", body: JSON.stringify({ key, kind }),
+  });
+  return response.ok && (await response.json() as { allowed: boolean }).allowed;
+}
+async function mcpGrantRecord(store: Kv.Kv, reference: McpGrant): Promise<GrantRecord | undefined> {
+  const [grant, principal] = await Promise.all([
+    store.get<GrantRecord>(`grant:${reference.id}`), store.get<GrantPrincipal>(`grant-token:${reference.token}`),
+  ]);
+  if (!isGrantRecord(grant) || !isGrantPrincipal(principal) || grant.id !== reference.id || principal.grantId !== grant.id
+    || grant.appId !== reference.appId || grant.appOrigin !== reference.appOrigin || principal.appId !== grant.appId
+    || principal.appOrigin !== grant.appOrigin || !grantPrincipalOwnerMatches(grant, principal)
+    || JSON.stringify(grant.capabilities) !== JSON.stringify(reference.capabilities)
+    || grant.status !== "active" || grant.expiresAt <= Math.floor(Date.now() / 1000) || grant.hostPrincipal !== undefined) return undefined;
+  return grant;
+}
+async function callMcpTool(env: Env, store: Kv.Kv, name: string, args: Record<string, unknown>, reference: McpGrant, source: Request): Promise<Response> {
+  const grant = await mcpGrantRecord(store, reference);
+  if (!grant) throw new ApiFailure(401, "grant_inactive", "The Connect grant was revoked or expired.");
+  if (name === "nanocodex_connection") {
+    const connectors = CONNECTOR_IDS.filter(connector => connector !== "chatgpt" && grant.capabilities.includes(connector));
+    const status = connectors.length ? await brokerJson(env, `/users/${encodeURIComponent(grant.brokerUserId)}/connectors`) : undefined;
+    const projected = status ? projectGrantConnectorStatuses(connectorStatusProjection(status, {}), grant).connectors : {};
+    return oauthJson({ grant_id: grant.id, expires_at: grant.expiresAt, scope: reference.scope, agent_id: reference.scope?.split(" ").includes("agent:run") ? grant.agentId : undefined,
+      capabilities: grant.capabilities, connectors: Object.fromEntries(connectors.map(connector => [connector, projected[connector as keyof typeof projected]])) });
+  }
+  const connectorMatch = name.match(/^nanocodex_(.+)_request$/);
+  if (connectorMatch && isConnectorCapability(connectorMatch[1]) && connectorMatch[1] !== "chatgpt") {
+    const connector = connectorMatch[1];
+    const target = connectorTarget(connector, args.path);
+    const value = { ...args };
+    if (value.body !== undefined && typeof value.body !== "string") {
+      value.body = JSON.stringify(value.body);
+      const headers = new Headers(args.headers as Record<string, string> | undefined);
+      if (!headers.has("content-type")) headers.set("content-type", "application/json");
+      value.headers = Object.fromEntries(headers);
+    }
+    const response = await grantConnectorRequest(env, grant, connector, value, target, source.signal);
+    // Provider output is bounded and never interpreted as authority. Headers,
+    // cookies and credentials are not projected into MCP results.
+    const text = await boundedResponseText(response, 1024 * 1024);
+    if (!text && response.ok) return oauthJson({ status: response.status });
+    return new Response(text, { status: response.status,
+      headers: { "content-type": response.headers.get("content-type") ?? "text/plain" } });
+  }
+  if (name === "nanocodex_agent_start" || name === "nanocodex_agent_status") {
+    const start = name === "nanocodex_agent_start";
+    const suffix = start ? "/turns" : args.turn_id ? `/turns/${encodeURIComponent(String(args.turn_id))}` : "";
+    // Build an internal command from validated arguments, never caller headers.
+    const command = new Request(`https://nanocodex.internal/v1/agents/${grant.agentId}${suffix}`, {
+      method: start ? "POST" : "GET", headers: start ? { "content-type": "application/json", "idempotency-key": String(args.operation_id) } : {},
+      ...(start ? { body: JSON.stringify({ id: args.operation_id, input: args.prompt }) } : {}), signal: source.signal,
+    });
+    const response = await proxyManagedAgent(command, env, grant, `${grant.agentId}${suffix}`);
+    return safeManagedJsonResponse(response);
+  }
+  let path: string;
+  const body = { ...args };
+  if (name === "nanocodex_data_read" || name === "nanocodex_data_write") {
+    const capability = managedUserDataCapability(args.operation);
+    if (!capability || !grant.capabilities.includes(capability) || name !== `nanocodex_data_${capability.split(":")[1]}`) throw new ApiFailure(403, "data_not_granted", "This data operation was not approved.");
+    path = "/v1/data";
+  } else if (name === "nanocodex_memory_read" || name === "nanocodex_memory_write") {
+    const write = args.operation === "write" || args.operation === "add_ad_hoc_note";
+    if (!grant.capabilities.includes(write ? "memory:write" : "memory:read")) throw new ApiFailure(403, "memory_not_granted", "This memory operation was not approved.");
+    path = `/v1/memories/${String(args.operation)}`;
+    delete body.operation;
+    if (args.operation === "write") body.operation = args.write_operation;
+    delete body.write_operation;
+  } else if (name === "nanocodex_history_search" || name === "nanocodex_history_read") {
+    if (!grant.capabilities.includes("history:read")) throw new ApiFailure(403, "history_not_granted", "History access was not approved.");
+    path = name === "nanocodex_history_search" ? "/v1/history/sessions/search" : `/v1/history/sessions/${encodeURIComponent(String(args.session_id))}/read`;
+    delete body.session_id;
+  } else throw new ApiFailure(400, "unknown_tool", "Unknown MCP tool.");
+  const headers = new Headers(managedGrantHeaders(managedGrantAssertion(grant)));
+  headers.set("content-type", "application/json");
+  return safeManagedJsonResponse(await env.ACCOUNTS.fetch(new Request(new URL(path, "https://nanocodex.internal"), {
+    method: "POST", headers, body: JSON.stringify(body), signal: source.signal, redirect: "manual",
+  })), MAX_MANAGED_DATA_RESPONSE_BYTES);
+}
+
 async function createHostedAuthorization(
   request: Request,
   env: Env,
   store: Kv.Kv,
+  trustedBody?: Record<string, unknown>,
 ): Promise<Response> {
-  const body = await boundedJson(request, 16 * 1024, "hosted authorization");
+  const body = trustedBody ?? await boundedJson(request, 16 * 1024, "hosted authorization");
   const encodedResources = stringResources(body.resources);
   let hostExchange: ReturnType<typeof hostPrincipalExchangeFromResources>;
   try {
@@ -1950,13 +2098,15 @@ async function createConnection(
   env: Env,
   store: Kv.Kv,
   context: WorkerContext,
+  trusted?: { app: CallerApp; body: Record<string, unknown> },
 ): Promise<Response> {
   const startedAt = performance.now();
   const timings: Array<readonly [string, number]> = [];
   const mark = (name: string) => timings.push([name, performance.now()]);
-  const body = await connectionRequestBody(request);
+  const body = trusted?.body ?? await connectionRequestBody(request);
   const appId = requiredString(body.app_id, "app_id");
-  const app = requireCallerApp(request, appId);
+  const app = trusted?.app ?? requireCallerApp(request, appId);
+  if (app.appId !== appId) throw new ApiFailure(403, "app_identity_mismatch", "The approved app does not match this request.");
   const approvalId = requiredString(body.approval_id, "approval_id");
   const permission = requiredString(body.permission, "permission");
   if (permission !== "agent.run") {

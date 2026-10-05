@@ -1,0 +1,112 @@
+.connect-onboarding.oauth-consent .dialog-header,
+.connect-onboarding.oauth-consent .dialog-content,
+.connect-onboarding.oauth-consent .dialog-actions {
+  width: min(640px, 100%);
+  margin-inline: auto;
+}
+.connect-onboarding.oauth-consent .dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 0 24px 20px;
+}
+.connect-onboarding.oauth-consent .dialog-content {
+  display: grid;
+  gap: 24px;
+  padding: 0 24px;
+}
+.connect-onboarding.oauth-consent .request-title {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+.connect-onboarding.oauth-consent .oauth-permissions {
+  display: grid;
+  gap: 12px;
+}
+.connect-onboarding.oauth-consent .oauth-permissions > p {
+  color: var(--muted);
+  font-size: 13px;
+}
+.connect-onboarding.oauth-consent .oauth-scope-list {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.connect-onboarding.oauth-consent .oauth-scope-list label {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--connect-radius, 10px);
+  cursor: pointer;
+}
+.connect-onboarding.oauth-consent .oauth-scope-list input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--text);
+}
+.connect-onboarding.oauth-consent .oauth-scope-list code {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.connect-onboarding.oauth-consent .oauth-destinations {
+  display: grid;
+  gap: 12px;
+  padding-top: 8px;
+  font-size: 12px;
+}
+.connect-onboarding.oauth-consent .oauth-destinations dt {
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+.connect-onboarding.oauth-consent code {
+  overflow-wrap: anywhere;
+}
+.connect-onboarding.oauth-consent .oauth-account {
+  display: grid;
+  gap: 8px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.connect-onboarding.oauth-consent .oauth-account > code {
+  font-size: 12px;
+}
+.connect-onboarding.oauth-consent .oauth-account button {
+  justify-self: start;
+  min-height: 40px;
+  margin-top: 4px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--connect-radius, 10px);
+  background: var(--surface);
+  font-size: 13px;
+}
+.connect-onboarding.oauth-consent .dialog-actions {
+  padding: 20px 24px 0;
+}
+.connect-onboarding.oauth-consent .dialog-content > .dialog-error {
+  margin: 0;
+}
+@media (max-width: 600px) {
+  .connect-onboarding.oauth-consent .dialog-header {
+    padding-top: max(24px, env(safe-area-inset-top));
+  }
+  .connect-onboarding.oauth-consent .dialog-content {
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 24px;
+  }
+  .connect-onboarding.oauth-consent .dialog-actions {
+    padding: 16px 24px max(16px, env(safe-area-inset-bottom));
+  }
+}

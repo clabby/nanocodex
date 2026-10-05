@@ -178,6 +178,10 @@ keys are separate from `nanocodex auth` (ChatGPT provider credentials) and
 [CLI account sign-in guide](bin/nanocodex/nanocodex2/README.md#account-sign-in)
 for environment overrides, storage, and key revocation.
 
+To use Nanocodex capabilities from Codex, Claude, or another MCP client,
+connect to the [remote MCP server](docs/connect-mcp.md) and approve access through
+Nanocodex Connect.
+
 To connect multiple ChatGPT subscriptions, open **Connect → ChatGPT → Add account**
 on the web. Sign in to the additional ChatGPT account, enter the displayed code,
 then return to Nanocodex. The card lists every account ID, the default account,

@@ -15,7 +15,7 @@ export default defineConfig({
       const brokerStatuses = () => Object.fromEntries(connectorCapabilities.map(capability => [capability, publicConnectorStatus({ connected: true, connections: [{ id: "c".repeat(43), label: "Synthetic account", capabilities: [capability] }] })]));
       const connectors = () => ({ ...brokerStatuses(), github: { connected: true, label: "atlas-demo" }, gmail: { connected: granted.includes("gmail"), label: granted.includes("gmail") ? "alex@example.com" : undefined }, gcalendar: { connected: granted.includes("gcalendar") } });
       server.middlewares.use(async (req, res, next) => {
-        if (!req.url?.startsWith("/v1/")) return next();
+        if (!req.url?.startsWith("/v1/") && !req.url?.startsWith("/oauth/requests/")) return next();
         let raw = "";
         for await (const chunk of req) raw += chunk;
         const body = raw ? JSON.parse(raw) : {};
@@ -31,7 +31,39 @@ export default defineConfig({
           sessions.set(id, state);
           res.setHeader("set-cookie", `fixture-session=${id}; HttpOnly; SameSite=Lax; Path=/`);
         };
-        switch (req.url) {
+        const oauth = /^\/oauth\/requests\/([A-Za-z0-9_-]{43})(?:\/(approve|deny))?$/.exec(req.url ?? "");
+        if (oauth) {
+          const appId = `mcp:${"c".repeat(43)}`;
+          const redirect = "http://127.0.0.1:4198/oauth-callback?registered=kept";
+          const appOrigin = new URL(redirect).origin;
+          if (oauth[1] === "z".repeat(43)) {
+            status = 410; result = { error: "invalid_request" };
+          } else if (!oauth[2]) {
+            const baseResources = [
+              `urn:nanocodex:app:${encodeURIComponent(appId)}`,
+              `urn:nanocodex:origin:${encodeURIComponent(appOrigin)}`,
+              "urn:nanocodex:authorization:hosted", "urn:nanocodex:agent:run",
+            ];
+            const scopeResources = {
+              "agent:run": ["urn:nanocodex:connector:chatgpt", "urn:nanocodex:agent:output:final", "urn:nanocodex:agent:output:actions"],
+              "history:read": ["urn:nanocodex:history:read"],
+              "connector:gmail": ["urn:nanocodex:connector:gmail"],
+            };
+            result = {
+              client_id: "c".repeat(43), client_name: "Synthetic MCP Client", app_id: appId,
+              app_origin: appOrigin, redirect_uri: redirect,
+              scope: "agent:run history:read connector:gmail", resource: "https://nanocodex-connect-api.gakonst.workers.dev/mcp",
+              base_resources: baseResources, scope_resources: scopeResources,
+              resources: [...baseResources, ...Object.values(scopeResources).flat()],
+            };
+          } else if (oauth[2] === "approve" && body.code !== "s".repeat(43)) {
+            status = 403; result = { error: "invalid_approval" };
+          } else {
+            result = { redirect_uri: oauth[1] === "t".repeat(43)
+              ? "https://unexpected.example/callback?code=bad"
+              : `${redirect}&${oauth[2] === "approve" ? "code=synthetic-code" : "error=access_denied"}&state=original-state` };
+          }
+        } else switch (req.url) {
           case "/v1/fixture/session": setSession(body.state); result = { ok: true }; break;
           case "/v1/me":
             if (session === "expired") { status = 401; result = { error: "reauthentication_required" }; }
@@ -41,6 +73,7 @@ export default defineConfig({
               ...(session !== "anonymous" && session !== "missing-address" ? { address } : {}),
             } };
             break;
+          case "/v1/auth/logout": setSession("anonymous"); result = { ok: true }; break;
           case "/v1/auth/sms/start":
             await new Promise(resolve => setTimeout(resolve, 120));
             status = body.phone === "+12025550000" ? 503 : 200;

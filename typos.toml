@@ -46,7 +46,8 @@ extend-ignore-re = ['\btime_base\.numer\b']
 # Exact executable name used by the remote-screen hand.
 # Chromium's Page.createIsolatedWorld parameter has this exact wire spelling.
 # Preserve the exact Apple installation URL schemes.
-extend-ignore-re = ['\bwaymote-streamd\b', '\bgrantUniveralAccess\b', '\bitms-beta://', '\bitms-services\b', '\bDuPont\b']
+# Preserve combined ripgrep flags in the literal shell regression command.
+extend-ignore-re = ['\bwaymote-streamd\b', '\bgrantUniveralAccess\b', '\bitms-beta://', '\bitms-services\b', '\bDuPont\b', 'rg --ignore-case -Fo\b']
 
 # Apple SF Symbols uses this exact map-pin identifier.
 [type.swift.extend-identifiers]

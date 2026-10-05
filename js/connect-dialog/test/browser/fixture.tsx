@@ -1,3 +1,4 @@
+import { App } from "../../src/DialogApp";
 import { appearanceFromSearch } from "../../src/appearance";
 import { StrictMode, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -32,6 +33,10 @@ const request: ConnectRequest = {
 };
 
 function Fixture() {
+  return new URLSearchParams(location.search).has("oauth_request") ? <App /> : <WalletFixture />;
+}
+
+function WalletFixture() {
   const [outcome, setOutcome] = useState<string>();
   const [activeRequest, setActiveRequest] = useState(request);
   const [open, setOpen] = useState(true);

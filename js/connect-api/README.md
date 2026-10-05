@@ -134,3 +134,38 @@ The journey starts an actual local workerd HTTP listener and real Durable Object
 storage. Synthetic external identity and managed-agent providers exercise the
 Connect trust boundary without live accounts or model calls. HTTP status traces
 are emitted as test diagnostics; capture generated evidence under root `output/`.
+
+## Remote MCP with Connect OAuth
+
+The canonical account Worker forwards `/mcp`, `/.well-known/oauth-protected-resource/mcp`,
+`/.well-known/oauth-authorization-server`, and `/oauth/*` to this Worker. The public
+origin is preserved throughout discovery, consent, code redemption, and resource
+requests. See [client setup and supported tools](../../docs/connect-mcp.md).
+
+`oauthMcp.mts` owns public-client registration, exact redirect binding (with only
+RFC 8252's native loopback port exception), S256 PKCE, one-time authorization
+codes, resource-bound access tokens, rotating refresh tokens, and RFC 7009
+revocation. Registration metadata grants no account authority. The existing
+hosted account authorization service must exchange a user-approved code whose
+resources include this exact pending request. The user can select a nonempty
+subset of requested scopes; the signed resources and issued scope must match.
+
+MCP OAuth tokens are separate from internal Connect grant credentials. Every
+resource call resolves the token family and current grant; revocation, expiry,
+app/owner binding, and approved capabilities remain live checks. Refresh-token
+reuse fences the entire family before revoking its underlying grant. MCP tool
+adapters construct managed assertions internally and reuse the connector broker's
+provider and selected-identity enforcement. They never forward caller-supplied
+internal authorization headers or return the underlying Connect token.
+
+`mcpServer.mts` implements stateless JSON Streamable HTTP for MCP 2025-03-26,
+2025-06-18, and 2025-11-25. It advertises only implemented tools, accepts
+notifications without executing calls, and returns 405 for GET/DELETE. The
+newer 2026 transport and client-ID metadata documents are not advertised.
+
+Run `node --experimental-strip-types --test test/mcpServerWorker.test.mjs` from
+this package under Node 24. The journey exercises the shipped Worker on an
+actual workerd HTTP listener, real Durable Object storage, and the official
+MCP JavaScript client. Only the external account/provider services use synthetic
+fixtures. The test emits a bounded HTTP transcript and authorization/dispatch
+assertions; keep per-run evidence in ignored `output/`.
