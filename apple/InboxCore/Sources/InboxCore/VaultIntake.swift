@@ -355,6 +355,12 @@ public enum BrowserReceiptPresentation {
         guard text.utf8.count <= 1024, let data = text.data(using: .utf8),
               let value = try? JSONDecoder().decode(JSON.self, from: data),
               case .object(let fields) = value else { return nil }
+        if value["type"].string == "whatsapp_link_receipt" {
+            guard Set(fields.keys) == Set(["type", "status", "connector", "operation_id"]),
+                  value["status"].string == "connected", value["connector"].string == "whatsapp",
+                  UUID(uuidString: value["operation_id"].string) != nil else { return nil }
+            return "WhatsApp connection verified"
+        }
         if value["type"].string == "browser_login_receipt" {
             guard Set(fields.keys) == Set(["type", "status", "request_id"]), UUID(uuidString: value["request_id"].string) != nil else { return nil }
             switch value["status"].string {

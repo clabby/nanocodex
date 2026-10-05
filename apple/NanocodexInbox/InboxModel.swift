@@ -1887,6 +1887,42 @@ final class InboxModel: ObservableObject {
               let id = intake.challengeID else { return false }
         return presentedBrowserRequests.insert("\(generation):\(id)").inserted
     }
+    // Tracks only pasteboard ownership, never the copied private value.
+    private var whatsAppClipboard: (operationID: String, change: Int)?
+    func recordWhatsAppClipboard(operationID: String, account: UUID, change: Int) {
+        guard generation == account else { return }
+        whatsAppClipboard = (operationID, change)
+    }
+    func clearWhatsAppClipboard(operationID: String? = nil) {
+        guard let copied = whatsAppClipboard, operationID == nil || operationID == copied.operationID else { return }
+        #if os(iOS)
+        if UIPasteboard.general.changeCount == copied.change { UIPasteboard.general.items = [] }
+        #endif
+        whatsAppClipboard = nil
+    }
+    private var presentedWhatsAppLinks: Set<String> = []
+    private var completedWhatsAppLinks: Set<String> = []
+    func claimWhatsAppLinkPresentation(_ link: WhatsAppLink) -> Bool {
+        guard connected, !isDemo, link.agentID == focused?.id, link.expiresAt > Date().timeIntervalSince1970 * 1000 else { return false }
+        if let copied = whatsAppClipboard, copied.operationID != link.operationID { clearWhatsAppClipboard() }
+        return presentedWhatsAppLinks.insert("\(generation):\(link.operationID)").inserted
+    }
+    func refreshWhatsAppLink(_ controller: WhatsAppLinkController, account: UUID) async {
+        guard let client, connected, !isDemo, generation == account, controller.link.agentID == focused?.id else { controller.cancel(); return }
+        await controller.refresh(client: client, account: account)
+        guard generation == account, connected, controller.link.agentID == focused?.id else { controller.cancel(); return }
+    }
+    func publishWhatsAppLinkReceipt(_ controller: WhatsAppLinkController, agentID: String, account: UUID) {
+        guard generation == account, controller.account == account, controller.link.agentID == agentID, connected, !isDemo,
+              cards.contains(where: { $0.id == agentID }), let receipt = controller.safeReceipt,
+              completedWhatsAppLinks.insert("\(account):\(controller.link.operationID)").inserted else { return }
+        let predecessor = pending.last(where: { $0.agentID == agentID })?.id ?? (focused?.id == agentID ? focusedTurn : "")
+        let message = PendingMessage(agentID: agentID, input: receipt.pretty, predecessor: predecessor,
+                                     id: "whatsapp-link-\(controller.link.operationID)-connected")
+        guard !pending.contains(where: { $0.id == message.id }) else { return }
+        pending.append(message); busy.insert(agentID); persist()
+        Task { await submit(message, epoch: account) }
+    }
     var vaultIntakeAccount: UUID { generation }
     func cancelSecureInput(_ intake: SecureInputRequest, account: UUID) async throws -> SecureInputReceipt {
         guard let client, connected, !isDemo, generation == account else { throw APIError.invalidCredential }
@@ -2139,6 +2175,7 @@ final class InboxModel: ObservableObject {
         meetingLibrary?.activate(scope: nil, client: nil)
         voice.stop(); voice.clearHistory(); accountCredential = nil; unlistedAgents = []; unavailableAgents = []; historyCursors = [:]
         remoteService?.close(); remoteService = nil
+        clearWhatsAppClipboard()
         connectionAttempt = UUID(); generation = UUID(); observation = UUID(); polling?.cancel(); streaming?.cancel(); client?.close(); client = nil
         focusedState?.cancel(); focusedState = nil; focusedHistoryLoaded = false
         focusedHistoryRequest?.cancel(); focusedHistoryRequest = nil

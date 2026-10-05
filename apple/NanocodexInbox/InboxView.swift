@@ -2921,6 +2921,14 @@ private struct ConversationContentView: View {
                     }))
                 }
             }
+            for activity in content.activity where activity.tool?.whatsAppLink != nil {
+                if let link = activity.tool?.whatsAppLink {
+                    rows.append(.init(id: item.id + ":whatsapp:" + activity.id, revision: cellRevision, content: {
+                        AnyView(WhatsAppLinkCard(model: model, link: link)
+                            .id("\(activity.id):\(model.vaultIntakeAccount)"))
+                    }))
+                }
+            }
             // Intake prompts remain reachable even when their group is collapsed.
             for activity in content.activity where activity.tool?.vaultIntake != nil {
                 if let intake = activity.tool?.vaultIntake {
@@ -3717,6 +3725,134 @@ private struct PermissionRequestSheet: View {
         .onDisappear { operation?.cancel() }
         .onChange(of: model.vaultIntakeAccount) { _, _ in operation?.cancel(); review = nil; browserURL = nil; dismiss() }
         .onChange(of: model.connected) { _, connected in if !connected { operation?.cancel(); dismiss() } }
+    }
+}
+
+@MainActor private struct WhatsAppLinkCard: View {
+    @ObservedObject var model: InboxModel
+    let link: WhatsAppLink
+    @State private var showingSheet = false
+    @State private var agentID = ""
+    @State private var linked = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(linked ? "WhatsApp connected" : "Link WhatsApp privately", systemImage: "lock.shield").font(.headline)
+            Text(linked ? "The connection was verified." : "Your linking code is shown only in the private sheet. Enter it in WhatsApp on your phone.")
+                .font(.subheadline).foregroundStyle(.secondary)
+            if !linked {
+                Button("Show linking code") { agentID = link.agentID; showingSheet = true }
+                    .buttonStyle(.borderedProminent).disabled(link.agentID != model.focused?.id).accessibilityIdentifier("whatsapp-link-open")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
+        .background(Ink.surface, in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityIdentifier("whatsapp-link-card")
+        .task(id: link.operationID) {
+            if model.claimWhatsAppLinkPresentation(link) {
+                agentID = link.agentID; showingSheet = true
+            }
+        }
+        .sheet(isPresented: $showingSheet) {
+            WhatsAppLinkSheet(model: model, link: link, agentID: agentID) { linked = true }
+        }
+    }
+}
+
+@MainActor private struct WhatsAppLinkSheet: View {
+    @ObservedObject var model: InboxModel
+    let agentID: String
+    let completed: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var controller: WhatsAppLinkController
+    @State private var revision = 0
+    @State private var receiptSent = false
+
+    init(model: InboxModel, link: WhatsAppLink, agentID: String, completed: @escaping () -> Void) {
+        self.model = model; self.agentID = agentID; self.completed = completed
+        _controller = State(initialValue: WhatsAppLinkController(link: link, account: model.vaultIntakeAccount))
+    }
+    private func clearClipboard() {
+        model.clearWhatsAppClipboard(operationID: controller.link.operationID)
+    }
+    private var message: String {
+        switch controller.phase {
+        case .waiting: return "Waiting for your linking code…"
+        case .ready: return "In WhatsApp, open Settings → Linked Devices → Link a Device → Link with phone number instead, then enter this code."
+        case .connected: return "WhatsApp is connected. Your agent has been notified."
+        case .expired: return "This linking attempt expired. Ask the agent to start a new attempt."
+        case .unknown: return "The linking result is unknown. Checking this attempt; no new code has been requested."
+        case .unavailable: return "Couldn’t verify this linking attempt. Close this sheet and check the same attempt again."
+        case .cancelled: return "This private sheet has been closed."
+        }
+    }
+    var body: some View {
+        let _ = revision
+        NavigationStack {
+            Form {
+                Section {
+                    Text(message).accessibilityIdentifier("whatsapp-link-status")
+                    if scenePhase == .active, controller.active, controller.remainingSeconds() > 0,
+                       controller.account == model.vaultIntakeAccount, let code = controller.code {
+                        Text(code).font(.system(.largeTitle, design: .monospaced)).privacySensitive()
+                            .accessibilityIdentifier("whatsapp-link-code")
+                        Button("Copy code") {
+                            guard scenePhase == .active, controller.shouldPoll,
+                                  controller.account == model.vaultIntakeAccount,
+                                  controller.remainingSeconds() > 0, let current = controller.code else { return }
+                            UIPasteboard.general.setItems([["public.utf8-plain-text": current]], options: [
+                                .localOnly: true, .expirationDate: Date(timeIntervalSince1970: controller.expiresAt / 1000)
+                            ])
+                            model.recordWhatsAppClipboard(operationID: controller.link.operationID, account: controller.account, change: UIPasteboard.general.changeCount)
+                        }.accessibilityIdentifier("whatsapp-link-copy")
+                    } else if controller.shouldPoll { ProgressView() }
+                    if controller.shouldPoll {
+                        Text("Expires in \(controller.remainingSeconds()) seconds").font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("whatsapp-link-countdown")
+                    }
+                } footer: {
+                    Text("The code stays outside chat and is never saved. Enter it only in WhatsApp. Switching apps hides it; return here to check the same attempt.")
+                }
+            }
+            .navigationTitle("Link WhatsApp")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .overlay { if scenePhase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
+        }
+        .task {
+            // Keep expiry and masking responsive even while an HTTP read is in flight.
+            while !Task.isCancelled {
+                controller.expire(); revision += 1
+                if controller.phase != .waiting && controller.phase != .ready && controller.phase != .unknown { clearClipboard(); break }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+        .task(id: scenePhase == .active) {
+            guard scenePhase == .active else { controller.suspend(); return }
+            controller.activate(account: model.vaultIntakeAccount)
+            revision += 1
+            var tick = 0
+            while !Task.isCancelled, controller.shouldPoll {
+                controller.expire()
+                if tick % 2 == 0 { await model.refreshWhatsAppLink(controller, account: controller.account) }
+                guard !Task.isCancelled else { return }
+                revision += 1
+                if !controller.shouldPoll { break }
+                tick += 1
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            if !Task.isCancelled && controller.phase != .waiting && controller.phase != .ready && controller.phase != .unknown { clearClipboard() }
+            if controller.phase == .connected, !receiptSent, controller.account == model.vaultIntakeAccount {
+                receiptSent = true
+                model.publishWhatsAppLinkReceipt(controller, agentID: agentID, account: controller.account)
+                completed()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { controller.suspend(); revision += 1 }
+        }
+        .onChange(of: model.vaultIntakeAccount) { _, _ in controller.cancel(); clearClipboard(); dismiss() }
+        .onChange(of: model.focused?.id) { _, current in if current != agentID { controller.cancel(); clearClipboard(); dismiss() } }
+        .onDisappear { controller.cancel() }
     }
 }
 
