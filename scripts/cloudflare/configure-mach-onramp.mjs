@@ -33,7 +33,7 @@ export async function configure(env, transport = fetch, report = console.log) {
   // workflow input alone can never choose a destination for the credential.
   requireValue(/^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*\.workers\.dev$/.test(host ?? ''), 'invalid_verified_relay_host');
   requireValue(origin === `https://${host}`, 'relay_origin_not_allowlisted');
-  requireValue(env.MACH_ONRAMP_ACTION === 'configure' || env.MACH_ONRAMP_ACTION === 'verify', 'invalid_action');
+  requireValue(['configure', 'configure-origin', 'verify'].includes(env.MACH_ONRAMP_ACTION), 'invalid_action');
 
   async function request(url, init, stage) {
     let response;
@@ -65,6 +65,13 @@ export async function configure(env, transport = fetch, report = console.log) {
       && (binding.script_name === undefined || binding.script_name === worker)
       && binding.environment === undefined), 'wrong_production_worker');
 
+  if (env.MACH_ONRAMP_ACTION === 'configure-origin') {
+    requireValue(!body.result.bindings.some(binding => binding.name === 'MACH_ONRAMP_RELAY_URL'),
+      'origin_already_bound_run_verify');
+    requireValue(body.result.bindings.some(binding => binding.name === 'MACH_ONRAMP_RELAY_TOKEN'
+      && binding.type === 'secret_text'), 'recovery_requires_existing_secret_token');
+  }
+
   response = await request(`${origin}/v1/config`, {}, 'relay_anonymous');
   await response.body?.cancel();
   requireValue(response.status === 401, 'relay_must_require_authentication');
@@ -72,15 +79,18 @@ export async function configure(env, transport = fetch, report = console.log) {
   requireValue(response.status === 200, 'relay_authentication_failed');
   requireValue(validConfig(await json(response, 'relay_authenticated')), 'relay_config_invalid_or_disabled');
 
-  if (env.MACH_ONRAMP_ACTION === 'configure') {
-    for (const [name, text] of [['MACH_ONRAMP_RELAY_TOKEN', token], ['MACH_ONRAMP_RELAY_URL', origin]]) {
+  if (env.MACH_ONRAMP_ACTION !== 'verify') {
+    const secrets = env.MACH_ONRAMP_ACTION === 'configure-origin'
+      ? [['MACH_ONRAMP_RELAY_URL', origin]]
+      : [['MACH_ONRAMP_RELAY_TOKEN', token], ['MACH_ONRAMP_RELAY_URL', origin]];
+    for (const [name, text] of secrets) {
       const stage = name === 'MACH_ONRAMP_RELAY_TOKEN' ? 'write_token' : 'write_origin';
       response = await request(`${accountApi}/scripts/${worker}/secrets`, {
         method: 'PUT', headers: { ...auth, 'content-type': 'application/json' },
         body: JSON.stringify({ name, text, type: 'secret_text' }),
       }, stage);
       // Any non-success may follow an applied write. Do not retry automatically.
-      requireValue(response.status === 200, `${stage}_unconfirmed_do_not_retry`);
+      requireValue(response.status === 200 || response.status === 201, `${stage}_unconfirmed_do_not_retry`);
       body = await json(response, `${stage}_unconfirmed_do_not_retry`);
       requireValue(body.success === true && body.result?.name === name && body.result?.type === 'secret_text', `${stage}_unconfirmed_do_not_retry`);
     }
