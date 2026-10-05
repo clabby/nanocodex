@@ -203,7 +203,9 @@ Dispatch with `action=configure` and `relay_origin=https://<verified-host>`
 `CONNECT_STATE` / `ConnectNonceStorage` binding, anonymous relay
 rejection, and authenticated canonical MACH configuration. It writes only
 `MACH_ONRAMP_RELAY_TOKEN` and `MACH_ONRAMP_RELAY_URL` as `secret_text` bindings,
-then checks the fixed public Connect config endpoint. The URL is intentionally
+then checks the fixed public Connect config endpoint. Secret writes accept HTTP
+200 or 201 only with a successful response envelope and the matching binding
+name and `secret_text` type. The URL is intentionally
 stored as a secret binding so normal Wrangler deployments preserve it along
 with the token ([Cloudflare configuration](https://developers.cloudflare.com/workers/wrangler/configuration/#source-of-truth));
 do not duplicate either binding in Wrangler `vars` or a regular
@@ -216,7 +218,22 @@ retried. After an interrupted or unconfirmed write, dispatch `action=verify`
 first: this checks relay and public configuration without writing. A failed
 verification does not prove a write failed; inspect Cloudflare deployment and
 secret-name metadata without reading values before explicitly repairing a
-partial configuration. A public config check can also fail during propagation;
+partial configuration.
+
+For an applied token write with no origin binding, explicitly dispatch
+`action=configure-origin` with the same verified `relay_origin`. This recovery
+checks Worker settings metadata for an existing `MACH_ONRAMP_RELAY_TOKEN`
+`secret_text` binding and requires `MACH_ONRAMP_RELAY_URL` to be absent. It then
+checks anonymous rejection and authenticated canonical relay configuration,
+writes only the origin binding once, and verifies public config. It never reads
+secret values or rewrites the token. Metadata confirms the token binding's
+presence and type; successful public verification confirms the configured
+transport works. If any origin binding already exists, recovery refuses to
+write: use `verify`. Missing or incorrectly typed token bindings also stop
+before any write. An uncertain origin write must be reconciled through metadata
+and `verify`, never blindly repeated.
+
+A public config check can also fail during propagation;
 use `verify` again instead of repeating writes. Successful verification means
 authentication is required and public config enables canonical MACH on chain
 4217, token `0x20c000000000000000000000f37de3740adec032`, bounds 500–10000

@@ -8,10 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: Configure once, or verify without writing (including after an uncertain result)
+        description: Configure once, recover origin after token-only write, or verify without writing
         required: true
         type: choice
-        options: [verify, configure]
+        options: [verify, configure, configure-origin]
         default: verify
       relay_origin:
         description: Exact HTTPS origin from the verified issuer deployment receipt (no trailing slash)
