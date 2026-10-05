@@ -16,14 +16,14 @@ export function ChatGptAccounts({ status, disabled, onAdd, onDisconnect }: Reado
   return (
     <div className="wizard-connector-card chatgpt-accounts" id="chatgpt-accounts" role="listitem" ref={card}>
       <button className={`connection-card${status.connected ? " is-connected" : ""}`}
-        type="button" disabled={disabled || Boolean(status.login)} onClick={onAdd}>
+        type="button" disabled={disabled} onClick={onAdd}>
         <ConnectionLogo id="chatgpt" />
         <span className="connection-card-copy">
           <strong>ChatGPT</strong>
           <span>{status.accounts.length ? `${status.accounts.length} account${status.accounts.length === 1 ? "" : "s"} added`
             : "Use your ChatGPT subscription for model access"}</span>
         </span>
-        <span className="connection-card-action">{status.login ? "Signing in…" : status.accounts.length ? "Add account" : "Connect"}</span>
+        <span className="connection-card-action">{status.login ? "Restart sign-in" : status.accounts.length ? "Add account" : "Connect"}</span>
       </button>
       {status.accounts.length > 0 ? (
         <div className="chatgpt-account-details">
