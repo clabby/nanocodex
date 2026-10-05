@@ -374,6 +374,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/v1/wallet"
       && request.headers.get("accept") === "application/vnd.nanocodex.wallet-snapshot+json") return this.#walletSnapshot(request);
+    if (url.pathname === "/v1/wallet/connect") return this.#walletConnect(request);
     const queuedAt = Date.now();
     const measureCredential = request.method === "POST"
       && new URL(request.url).pathname === "/v1/credential";
@@ -429,6 +430,41 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       activation_ms: this.#activationMs,
       activation_age_ms: Date.now() - this.#activatedAt,
     };
+  }
+
+  /** Connect authentication reads this broker's credential status after verifying
+   * the wallet signature. Keep those callbacks outside the credential queue. */
+  async #walletConnect(request: Request): Promise<Response> {
+    const prepared = await this.#exclusive(async () => {
+      await this.#ready;
+      try {
+        if (request.method !== "POST") return jsonError(405, "method_not_allowed");
+        if (!isJsonContentType(request.headers.get("content-type"))) {
+          return jsonError(415, "invalid_content_type");
+        }
+        const requestBody = validateWalletConnectRequest(
+          await readJson(request, MAX_VAULT_BODY_BYTES),
+          this.#env,
+        );
+        if (!requestBody) return jsonError(400, "invalid_wallet_connect_request");
+        const wallet = Object.freeze({ ...await this.#ensureRootWallet() });
+        return { wallet, requestBody };
+      } catch (error) {
+        const problem = await this.#recoverFailedOperation(error);
+        return jsonError(problem.status, problem.code);
+      }
+    }, { operation: "http" });
+    if (prepared instanceof Response) return prepared;
+    try {
+      return json(await rootWalletProvider(prepared.wallet).request(prepared.requestBody as never), 200);
+    } catch (error) {
+      // Recovery mutates the retained credential snapshot, so it still joins the
+      // queue even though the failed authentication callback ran outside it.
+      return this.#exclusive(async () => {
+        const problem = await this.#recoverFailedOperation(error);
+        return jsonError(problem.status, problem.code);
+      }, { operation: "http" });
+    }
   }
 
   /** One live startup read. Network balance I/O must not hold credential rotation
@@ -863,19 +899,6 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
             ? jsonError(error.status, error.code)
             : jsonError(503, "mercator_outcome_unknown");
         }
-      }
-      if (url.pathname === "/v1/wallet/connect") {
-        if (request.method !== "POST") return jsonError(405, "method_not_allowed");
-        if (!isJsonContentType(request.headers.get("content-type"))) {
-          return jsonError(415, "invalid_content_type");
-        }
-        const requestBody = validateWalletConnectRequest(
-          await readJson(request, MAX_VAULT_BODY_BYTES),
-          this.#env,
-        );
-        if (!requestBody) return jsonError(400, "invalid_wallet_connect_request");
-        const wallet = await this.#ensureRootWallet();
-        return json(await rootWalletProvider(wallet).request(requestBody as never), 200);
       }
       if (url.pathname === "/v1/wallet/revoke-access-key") {
         if (request.method !== "POST") return jsonError(405, "method_not_allowed");
