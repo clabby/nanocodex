@@ -6458,7 +6458,7 @@ function cors(response: Response, request: Request) {
     }
     response.headers.set(
       "access-control-allow-headers",
-      "accept-payment, authorization, content-type, git-protocol, idempotency-key, last-event-id, mcp-protocol-version, mcp-session-id, payment-session, payment-session-snapshot, payment-signature, x-nanocodex-app-id, x-nanocodex-connect-client, x-nanocodex-connector-connection",
+      "accept-payment, authorization, content-type, git-protocol, idempotency-key, last-event-id, mcp-protocol-version, mcp-session-id, payment-session, payment-session-snapshot, payment-signature, x-nanocodex-app-id, x-nanocodex-client-context, x-nanocodex-connect-client, x-nanocodex-connector-connection, x-nanocodex-voice-session-id",
     );
     response.headers.set("access-control-allow-methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS");
     response.headers.set("access-control-max-age", "86400");
