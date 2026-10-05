@@ -2034,7 +2034,7 @@ impl State {
                 _ => None,
             };
             let jitter = 90 + (u64::from(index) * 31 + u64::from(attempt) * 17) % 21;
-            let backoff = Duration::from_millis(200 * 2_u64.pow(attempt - 1) * jitter / 100);
+            let backoff = Duration::from_millis(1_000 * 2_u64.pow(attempt - 1) * jitter / 100);
             let delay = retry_after.map_or(backoff, |delay| delay.max(backoff));
 
             // Published deltas cannot be withdrawn. Private fragments are dropped

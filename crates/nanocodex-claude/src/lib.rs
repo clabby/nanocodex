@@ -6,7 +6,8 @@
 //!
 //! Agent sessions retry transient model failures before publishing text or risking
 //! repeated server effects, with five attempts per model call and three per compaction.
-//! Backoff is cancellable and honors `Retry-After`; hints over 60 seconds end the call.
+//! Cancellable backoff grows through 1, 2, 4, and 8 seconds with 90–110% jitter.
+//! `Retry-After` is a minimum delay; hints over 60 seconds end the call.
 //! Direct [`ClaudeClient`] calls leave transient retry policy to their caller.
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 

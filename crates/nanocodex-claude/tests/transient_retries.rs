@@ -1,7 +1,10 @@
 //! Retry journeys through the public agent and a loopback Messages endpoint.
 use axum::{Router, body::Body, http::StatusCode, response::IntoResponse, routing::post};
 use futures_util::{StreamExt, stream};
-use nanocodex_agent::{Nanocodex, NanocodexError, events::AgentEventKind};
+use nanocodex_agent::{
+    Nanocodex, NanocodexError,
+    events::{AgentEventKind, TimedAgentEvent, monotonic_now_ns},
+};
 use nanocodex_claude::{Claude, ClaudeClient, ServerToolDefinition, ToolDefinition};
 use serde_json::{Value, json};
 use std::{
@@ -24,6 +27,7 @@ enum Reply {
 struct Fixture {
     client: ClaudeClient,
     requests: Arc<Mutex<Vec<String>>>,
+    request_times: Arc<Mutex<Vec<u64>>>,
     received: Arc<tokio::sync::Notify>,
     server: tokio::task::JoinHandle<()>,
 }
@@ -32,21 +36,25 @@ impl Fixture {
     async fn new(reply: impl Fn(usize) -> Reply + Send + Sync + 'static) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_times = Arc::new(Mutex::new(Vec::new()));
         let received = Arc::new(tokio::sync::Notify::new());
         let app = Router::new().route(
             "/v1/messages",
             post({
                 let requests = requests.clone();
+                let request_times = request_times.clone();
                 let received = received.clone();
                 let reply = Arc::new(reply);
                 move |body: String| {
                     let requests = requests.clone();
+                    let request_times = request_times.clone();
                     let received = received.clone();
                     let reply = reply.clone();
                     async move {
                         let index = {
                             let mut log = requests.lock().unwrap();
                             log.push(body);
+                            request_times.lock().unwrap().push(monotonic_now_ns());
                             log.len()
                         };
                         received.notify_one();
@@ -87,6 +95,7 @@ impl Fixture {
         Self {
             client: ClaudeClient::new(reqwest::Client::new(), endpoint, "synthetic"),
             requests,
+            request_times,
             received,
             server,
         }
@@ -100,6 +109,36 @@ impl Fixture {
         })
         .await
         .unwrap();
+    }
+
+    // Emission and loopback receipt share a monotonic clock, so queued event
+    // delivery cannot inflate the measured wait.
+    fn assert_retry_wait(&self, event: &TimedAgentEvent, first_request: usize) -> Duration {
+        let payload: Value = serde_json::from_str(event.event.payload.get()).unwrap();
+        let attempt = payload["attempt"].as_u64().unwrap();
+        let next_attempt = payload["next_attempt"].as_u64().unwrap();
+        assert_eq!(next_attempt, attempt + 1);
+        assert_eq!(payload["max_attempts"], 5);
+        let delay = Duration::from_nanos(payload["delay_ns"].as_u64().unwrap());
+        let scale = 2_u32.pow(u32::try_from(attempt - 1).unwrap());
+        assert!(delay >= Duration::from_millis(900) * scale);
+        if payload["server_requested_delay"] == false {
+            assert!(delay <= Duration::from_millis(1_100) * scale);
+        }
+        let request_index = first_request + usize::try_from(next_attempt).unwrap() - 1;
+        let received_ns = self.request_times.lock().unwrap()[request_index];
+        let waited =
+            Duration::from_nanos(received_ns.checked_sub(event.timing.emitted_ns).unwrap());
+        eprintln!(
+            "retry timing: call={}, attempt={attempt}->{next_attempt}, HTTP request={}, emitted_delay={delay:?}, observed_wait={waited:?}",
+            payload["model_call_index"],
+            request_index + 1,
+        );
+        assert!(
+            waited >= delay,
+            "next HTTP attempt arrived after {waited:?}, before emitted delay {delay:?}"
+        );
+        delay
     }
 }
 
@@ -146,14 +185,15 @@ fn completed(tool: bool) -> String {
 #[tokio::test]
 async fn retry_current_request_preserves_prior_effect_and_discards_failed_fragments() {
     let fixture = Fixture::new(|index| match index {
-        1 => Reply::Stream(completed(true)),
-        2 => Reply::Stream(frames(vec![
+        1 => Reply::Http(503),
+        2 => Reply::Stream(completed(true)),
+        3 => Reply::Stream(frames(vec![
             start(900),
             json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"discarded","name":"effect","input":{}}}),
             json!({"type":"content_block_stop","index":0}),
         ]) + &error("overloaded_error")),
-        3 => Reply::Http(429),
-        4 => Reply::Http(529),
+        4 => Reply::Http(429),
+        5 => Reply::Http(529),
         _ => Reply::Stream(completed(false)),
     }).await;
     let effects = Arc::new(AtomicUsize::new(0));
@@ -190,36 +230,48 @@ async fn retry_current_request_preserves_prior_effect_and_discards_failed_fragme
     assert_eq!(result.usage().unwrap().total_tokens(), 30);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     let log = fixture.requests.lock().unwrap().clone();
-    assert_eq!(log.len(), 5);
+    assert_eq!(log.len(), 6);
+    assert_eq!(log[0], log[1]);
     assert!(
-        log[1..].windows(2).all(|pair| pair[0] == pair[1]),
+        log[2..].windows(2).all(|pair| pair[0] == pair[1]),
         "every retry sends the identical current request"
     );
-    let request: Value = serde_json::from_str(&log[1]).unwrap();
+    let request: Value = serde_json::from_str(&log[2]).unwrap();
     assert_eq!(
         request["messages"][2]["content"][0]["content"],
         "committed once"
     );
-    assert!(!log[1].contains("discarded"));
+    assert!(!log[2].contains("discarded"));
     let mut text = String::new();
     let mut attempts = Vec::new();
     let mut retries = 0;
+    let mut retry_delays = [Vec::new(), Vec::new()];
     loop {
-        let event = events.next().await.unwrap();
+        let timed = events.recv_timed().await.unwrap();
+        let event = &timed.event;
         let payload: Value = serde_json::from_str(event.payload.get()).unwrap();
         match event.kind {
             AgentEventKind::AssistantDelta => text.push_str(payload["text"].as_str().unwrap()),
             AgentEventKind::ModelCallCompleted => {
                 attempts.push(payload["attempt"].as_u64().unwrap())
             }
-            AgentEventKind::ModelAttemptRetrying => retries += 1,
+            AgentEventKind::ModelAttemptRetrying => {
+                let call = usize::try_from(payload["model_call_index"].as_u64().unwrap()).unwrap();
+                assert_eq!(payload["attempt"], retry_delays[call].len() + 1);
+                let delay = fixture.assert_retry_wait(&timed, if call == 0 { 0 } else { 2 });
+                retry_delays[call].push(delay);
+                retries += 1;
+            }
             AgentEventKind::RunCompleted => break,
             _ => {}
         }
     }
     assert_eq!(text, "completed");
-    assert_eq!(attempts, [1, 4]);
-    assert_eq!(retries, 3);
+    assert_eq!(attempts, [2, 4]);
+    assert_eq!(retries, 4);
+    assert_eq!(retry_delays[0].len(), 1);
+    assert_eq!(retry_delays[1].len(), 3);
+    assert!(retry_delays[1].windows(2).all(|pair| pair[0] < pair[1]));
     agent.shutdown().await.unwrap();
 }
 
@@ -292,18 +344,32 @@ async fn transient_classification_and_exhaustion_are_bounded() {
         agent.shutdown().await.unwrap();
     }
     let fixture = Fixture::new(|_| Reply::Stream(error("overloaded_error"))).await;
-    let (agent, _) = Nanocodex::builder(Claude::new(fixture.client.clone(), "test"))
+    let (agent, mut events) = Nanocodex::builder(Claude::new(fixture.client.clone(), "test"))
         .build()
         .unwrap();
-    let error = agent
-        .prompt("exhaust retries")
+    let turn = agent.prompt("exhaust retries").await.unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(20), turn.result())
         .await
         .unwrap()
-        .result()
-        .await
         .unwrap_err();
     assert!(error.to_string().contains("overloaded_error"));
     assert_eq!(fixture.requests.lock().unwrap().len(), 5);
+    let mut delays = Vec::new();
+    loop {
+        let timed = events.recv_timed().await.unwrap();
+        match timed.event.kind {
+            AgentEventKind::ModelAttemptRetrying => {
+                let payload: Value = serde_json::from_str(timed.event.payload.get()).unwrap();
+                assert_eq!(payload["model_call_index"], 0);
+                assert_eq!(payload["attempt"], delays.len() + 1);
+                delays.push(fixture.assert_retry_wait(&timed, 0));
+            }
+            AgentEventKind::RunFailed => break,
+            _ => {}
+        }
+    }
+    assert_eq!(delays.len(), 4);
+    assert!(delays.windows(2).all(|pair| pair[0] < pair[1]));
     eprintln!(
         "transient HTTP/SSE/truncation recover; persistent overload stops after 5 attempts: {error}"
     );
@@ -456,7 +522,9 @@ async fn cancellation_stops_backoff_and_pending_retry() {
 #[tokio::test]
 async fn retry_after_is_respected_cancellable_and_bounded() {
     for hint in [
+        "0",
         "1",
+        "2",
         "60",
         "61",
         "184467440737095516160",
@@ -473,7 +541,6 @@ async fn retry_after_is_respected_cancellable_and_bounded() {
         let (agent, mut events) = Nanocodex::builder(Claude::new(fixture.client.clone(), "test"))
             .build()
             .unwrap();
-        let started = std::time::Instant::now();
         let turn = agent.prompt("respect server delay").await.unwrap();
         if hint == "60" {
             tokio::time::timeout(Duration::from_secs(2), async {
@@ -493,10 +560,28 @@ async fn retry_after_is_respected_cancellable_and_bounded() {
         let result = tokio::time::timeout(Duration::from_secs(3), turn.result())
             .await
             .unwrap();
-        if hint == "1" {
+        if matches!(hint, "0" | "1" | "2") {
             assert_eq!(result.unwrap().final_message(), "completed");
-            assert!(started.elapsed() >= Duration::from_secs(1));
             assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+            let mut retries = 0;
+            loop {
+                let timed = events.recv_timed().await.unwrap();
+                match timed.event.kind {
+                    AgentEventKind::ModelAttemptRetrying => {
+                        let payload: Value =
+                            serde_json::from_str(timed.event.payload.get()).unwrap();
+                        assert_eq!(payload["server_requested_delay"], true);
+                        assert!(
+                            fixture.assert_retry_wait(&timed, 0)
+                                >= Duration::from_secs(hint.parse().unwrap())
+                        );
+                        retries += 1;
+                    }
+                    AgentEventKind::RunCompleted => break,
+                    _ => {}
+                }
+            }
+            assert_eq!(retries, 1);
         } else {
             assert!(result.is_err());
             assert_eq!(

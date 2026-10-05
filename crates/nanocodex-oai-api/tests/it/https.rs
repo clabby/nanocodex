@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use eyre::{Result, eyre};
 use nanocodex_oai_api::{
     OpenAi,
@@ -152,8 +154,12 @@ async fn assert_https_turn_state_survives_retry(failure: HttpsRetryFailure) -> R
         );
         observed.push(turn_state(&continuation.headers));
         failure.fail(continuation.stream).await?;
+        let failed_at = Instant::now();
 
         let retry = read_http_json(&listener).await?;
+        let waited = failed_at.elapsed();
+        eprintln!("HTTPS retry receipt: wait={waited:?}");
+        assert!(waited >= Duration::from_millis(900));
         assert!(
             retry.body.get("previous_response_id").is_none(),
             "the SDK-owned retry must still switch to full-history replay"

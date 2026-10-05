@@ -100,11 +100,13 @@ ResponsesRetryPolicy
        -> ResponsesSocket | HTTPS/SSE request
 ```
 
-Generation and compaction receive at most five attempts. Transient connection,
-handshake, send, receive, idle, premature-close, rate-limit, overload, and
-server failures may retry. Authentication, malformed protocol, invalid request,
-policy, quota, usage-limit, and context failures remain terminal. Server delay
-hints override bounded exponential backoff.
+Generation receives at most five attempts and compaction at most three per
+transport. Transient connection, handshake, send, receive, idle, premature-close,
+rate-limit, overload, and server failures may retry. Authentication, malformed
+protocol, invalid request, policy, quota, usage-limit, and context failures remain
+terminal. Server delay hints override exponential backoff, whose ordinary retry
+delays are 1, 2, 4, and 8 seconds with 90–110% jitter. Missing-checkpoint recovery
+and transport fallback remain immediate.
 
 Reconnect preserves the stable prompt-cache key and client-owned history,
 drops a connection-local `previous_response_id`, and forces full-history
