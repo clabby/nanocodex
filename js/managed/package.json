@@ -67,7 +67,7 @@
     "@cloudflare/computer": "0.2.1",
     "@cloudflare/sandbox": "0.12.4",
     "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
-    "accounts": "0.16.2",
+    "accounts": "https://pkg.pr.new/tempoxyz/accounts@57cd1c5",
     "agents": "0.22.0",
     "ai": "7.0.90",
     "cron-parser": "5.6.0",
@@ -78,7 +78,7 @@
     "nanocodex-vite": "workspace:*",
     "quickjs-emscripten-core": "0.32.0",
     "ox": "0.14.36",
-    "viem": "^2.54.0",
+    "viem": "2.57.2",
     "zod": "4.5.4",
     "@cloudflare/containers": "0.3.7"
   },
