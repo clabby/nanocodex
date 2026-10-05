@@ -2316,13 +2316,15 @@ async function managedFetchRoute(
       const stub = env.NANOCODEX_SESSIONS.getByName(agentId, durablePlacementOptions(clientIngressColo));
       const ownershipTimeoutMs = managedOwnershipTimeoutMs(env);
       if (durabilityArchive === undefined) {
-        // This untrusted, invisible account hint starts before Session cold
-        // activation; Session alone performs the later publication commit.
-        // Keep the work alive beyond an ingress timeout and consume failures:
-        // publication remains correct even if this speculative RPC fails.
-        const registrationPreparation = prepareAgentRegistration(env, principal.userId, agentId, ownershipTimeoutMs)
-          .catch((error) => console.warn({ type: "managed.agent_registration_prepare_failed", error_kind: errorKind(error) }));
-        ctx.waitUntil(registrationPreparation);
+        // Fused creation needs no speculative registry hint: publication below
+        // commits directly and checks the authoritative tombstone. Session's
+        // durable preparation lease still owns cleanup after a failed create.
+        // Retain the older standalone protocol during rolling deployment.
+        if (!firstTurn) {
+          const registrationPreparation = prepareAgentRegistration(env, principal.userId, agentId, ownershipTimeoutMs)
+            .catch((error) => console.warn({ type: "managed.agent_registration_prepare_failed", error_kind: errorKind(error) }));
+          ctx.waitUntil(registrationPreparation);
+        }
         let created: Response;
         const sessionCreationStartedAt = performance.now();
         let sessionDispatchAt = Date.now();

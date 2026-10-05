@@ -26,6 +26,9 @@ export { DurableAgentSession, AccountHostedTools, Organization, ApiKeyRecord, No
 export class UserAccount extends RealUserAccount {
   constructor(state,env) { super(state,env); this.fixture=env.MODEL; }
   async fetch(request) {
+    if(request.method==='POST' && new URL(request.url).pathname.endsWith('/prepare')) {
+      await this.fixture.getByName('startup').fetch('https://fixture.internal/registry-prepare');
+    }
     if(request.method==='POST' && new URL(request.url).pathname.endsWith('/publish')) {
       const model=this.fixture.getByName('startup');
       const gate=await model.fetch('https://fixture.internal/publication');
@@ -58,6 +61,7 @@ export class FixtureModel extends DurableObject {
   async fetch(request) {
     const url=new URL(request.url);
     if(url.pathname==='/trace') return Response.json(this.events);
+    if(url.pathname==='/registry-prepare') { this.record('registry.prepare');return new Response(null,{status:204}); }
     if(url.pathname==='/publication') {
       this.record('publication.start');
       if(!this.catalogStarted) await new Promise(resolve=>{this.releasePublication=resolve;setTimeout(resolve,3000);});
@@ -177,6 +181,7 @@ test("normal public API overlaps account discovery with configured setup and ret
     const warmMs=performance.now()-warmStarted,trace=await(await backend.fetch("https://fixture.internal/__trace")).json();
     evidence={source_root:root,cold_public_completion_ms:coldMs,warm_public_completion_ms:warmMs,trace};
     const first=event=>trace.find(row=>row.event===event);
+    assert.equal(trace.filter(row=>row.event==="registry.prepare").length,0,"fused creation publishes directly without an unused registry preparation request");
     assert.equal(first("publication.catalog_observed")?.observed,true,"metadata read starts while registration is still pending");
     assert.equal(trace.filter(row=>row.event==="publication.fail").length,1,"fault injector fails the first publication before commit");
     assert.equal(trace.filter(row=>row.event==="publication.start").length,2,"the same public request safely retries registration");
@@ -196,7 +201,7 @@ test("normal public API overlaps account discovery with configured setup and ret
     assert.equal(trace.filter(row=>row.event==="setup.start").length,1,"warm turn never repeats setup side effects");
     evidence={source_root:root,cold_public_completion_ms:coldMs,warm_public_completion_ms:warmMs,setup_catalog_overlap_ms:first("catalog.finish").at-first("setup.start").at,
       setup_once:true,catalog_reads:1,provider_requests:3,prepared_file_read:true,tools_preserved:true,cross_owner_denied:true,
-      discovery_before_registration:true,failed_publication_retried:true,no_effect_before_registration:true,trace};
+      discovery_before_registration:true,failed_publication_retried:true,no_effect_before_registration:true,registry_prepare_requests:0,trace};
     // A second owner has no L1 snapshot. Delete the admitted turn while its
     // read-only metadata request is held, then release the old read. The public
     // deletion fence establishes ordering without a sleep-based race assertion.
