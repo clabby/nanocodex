@@ -30,7 +30,7 @@ const rows=[],runtime=[],providerCalls=[],buildInfo=[];
 const bootstrap=`import managed from './src/index.ts';export * from './src/index.ts';import {ensureAccount,createApiKey} from './src/account-auth.ts';export default {async fetch(request,env,ctx){if(new URL(request.url).pathname==='/__fixture/chatgpt'){const expires_at=(Math.ceil(Date.now()/1000)+3600)*1000;const payload={exp:Math.ceil(expires_at/1000),'https://api.openai.com/auth':{chatgpt_account_id:'synthetic-account',chatgpt_account_is_fedramp:false}};const jwt=btoa(JSON.stringify({alg:'none'})).replaceAll('=','')+'.'+btoa(JSON.stringify(payload)).replaceAll('=','')+'.fixture';return env.NANOCODEX.fetch('https://broker.internal/users/${owner}/credentials/chatgpt',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({access_token:jwt,refresh_token:'synthetic-refresh',account_id:'synthetic-account',expires_at,fedramp:false})});}if(new URL(request.url).pathname==='/__fixture/openai')return env.NANOCODEX.fetch('https://broker.internal/users/${owner}/credentials/openai',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({api_key:'sk-synthetic-openai-runtime'})});if(new URL(request.url).pathname==='/__fixture'){const {user,capabilities}=await request.json();await ensureAccount(env,user,true);const auth=await(await env.NANOCODEX_USERS.getByName(user).fetch('https://user.internal/authorization')).json();return Response.json(await createApiKey(env,{kind:'api_key',userId:user,...auth.grant,...(capabilities?{capabilities}:{}),subjectId:'fixture:'+user,credentialId:'fixture'},'synthetic-ttft'));}return managed.fetch(request,env,ctx);}};`;
 await mkdir(output,{recursive:true});
 const git=args=>{try{return execFileSync('git',['-C',root,...args],{encoding:'utf8'});}catch{return null;}};
-const config={label,root,mode,family,credential,samples:count,process_samples:processCount,command:[process.execPath,...process.argv.slice(1)],git_head:git(['rev-parse','HEAD'])?.trim(),node:process.version,curl:execFileSync('curl',['--version'],{encoding:'utf8'}).split('\n')[0],started_at:new Date().toISOString(),methodology:'Actual js/account routeManaged front proxy, normal js/managed and js/egress production workers, real account/API-key authorization, account and Session SQLite DOs, Rust WASM runtime and SessionModelEgress. Only synthetic account bootstrap and external OAuth/catalog/model HTTP are fixtures. No live inference, Internet/TLS, Cloudflare geography, production latency claim. Local workerd on loopback. Stopwatch begins before first curl spawn and ends on first nonempty current-turn assistant.delta.text. Headers and initial SSE receipt are not TTFT. Legacy fresh=POST create + POST turn + GET SSE; combined fresh=POST agent-runs JSON + GET SSE; stream fresh=one POST agent-runs SSE. Warm existing sessions use POST turn + GET SSE in every mode. Process samples restart workerd; account/key/OAuth setup excluded and warms API/account/Egress before first Session. Fresh-session samples reuse process after recorded untimed warmup; warm samples are second turns of paired fresh sessions. No synthetic latency added during timing. Contract-only disconnect case holds provider text 100ms to verify receipt precedes completion.'};
+const config={label,root,mode,family,credential,samples:count,process_samples:processCount,command:[process.execPath,...process.argv.slice(1)],git_head:git(['rev-parse','HEAD'])?.trim(),node:process.version,curl:execFileSync('curl',['--version'],{encoding:'utf8'}).split('\n')[0],started_at:new Date().toISOString(),methodology:'Actual js/account routeManaged front proxy, normal js/managed and js/egress production workers, real account/API-key authorization, account and Session SQLite DOs, Rust WASM runtime and SessionModelEgress. Only synthetic account bootstrap and external OAuth/catalog/model HTTP are fixtures. No live inference, Internet/TLS, Cloudflare geography, production latency claim. Local workerd on loopback. Stopwatch begins before first curl spawn and ends on first nonempty current-turn assistant.delta.text. Headers and initial SSE receipt are not TTFT. Legacy fresh=POST create + POST turn + GET SSE; combined fresh=POST agent-runs JSON + GET SSE; stream fresh=one POST agent-runs SSE. Warm existing sessions use one POST turn SSE in stream mode and POST turn + GET SSE otherwise. Process samples restart workerd; account/key/OAuth setup excluded and warms API/account/Egress before first Session. Fresh-session samples reuse process after recorded untimed warmup; warm samples are second turns of paired fresh sessions. No synthetic latency added during timing. Contract-only disconnect case holds provider text 100ms to verify receipt precedes completion.'};
 await writeFile(join(output,'config.json'),JSON.stringify(config,null,2));
 await writeFile(join(output,'harness.mjs'),await readFile(fileURLToPath(import.meta.url)));
 await writeFile(join(output,'source.patch'),git(['diff','--','js/managed/src','js/egress/src','js/nanocodex'])??'unavailable');
@@ -107,16 +107,16 @@ function curl(server,path,method,body,extra,onFrame){
 }
 async function sample(server,regime,index,existing){
  const key=randomUUID(),input=`BENCH_SAMPLE_${regime}_${index}: Reply with the synthetic benchmark text.`,start=performance.now();let agent=existing?.agent,turn,receipt,cursor=existing?.cursor??'0',firstText=null,firstTextValue,stream,rawFrames=[],calls=[];
- const observe=(value,at,frame)=>{rawFrames.push({at_ms:performance.now()-start,value});if(frame.includes('event: run')){receipt=value;agent=value.agent_id;turn=value.turn_id;}if(value.cursor)cursor=value.cursor;const message=value.message??value;if(message.type==='turn_accepted')turn??=message.id;if(message.type==='event'&&message.event?.type==='assistant.delta'&&typeof message.event.payload?.text==='string'&&message.event.payload.text.length>0&&value.turn_id===turn&&firstText===null){firstText=performance.now()-start;firstTextValue=message.event.payload.text;if(mode!=='stream'||existing)stream.child.kill();}};
+ const observe=(value,at,frame)=>{rawFrames.push({at_ms:performance.now()-start,value});if(frame.includes('event: run')){receipt=value;agent=value.agent_id;turn=value.turn_id;}if(value.cursor)cursor=value.cursor;const message=value.message??value;if(message.type==='turn_accepted')turn??=message.id;if(message.type==='event'&&message.event?.type==='assistant.delta'&&typeof message.event.payload?.text==='string'&&message.event.payload.text.length>0&&value.turn_id===turn&&firstText===null){firstText=performance.now()-start;firstTextValue=message.event.payload.text;if(mode!=='stream')stream.child.kill();}};
  try{
-  if(existing||mode==='legacy'){
+  if((existing&&mode!=='stream')||mode==='legacy'){
    if(!existing){const client=curl(server,'/v1/agents','POST',{settings},{'Idempotency-Key':key});const result=await client.done;calls.push(result);assert.equal(result.status,201,result.stdout);agent=JSON.parse(result.stdout).agent_id;}
    turn=randomUUID();const client=curl(server,`/v1/agents/${agent}/turns`,'POST',{id:turn,input},{'Idempotency-Key':key});const result=await client.done;calls.push(result);assert.equal(result.status,202,result.stdout);receipt=JSON.parse(result.stdout);turn=receipt.turn_id??turn;
   }else if(mode==='combined'){
    const client=curl(server,'/v1/agent-runs','POST',{input,settings},{'Idempotency-Key':key});const result=await client.done;calls.push(result);assert.equal(result.status,201,result.stdout);receipt=JSON.parse(result.stdout);agent=receipt.agent_id;turn=receipt.turn_id;
   }
-  stream=mode==='stream'&&!existing?curl(server,'/v1/agent-runs','POST',{input,settings},{'Idempotency-Key':key,Accept:'text/event-stream'},observe):curl(server,`/v1/agents/${agent}/events?cursor=${cursor}`,'GET',undefined,{Accept:'text/event-stream'},observe);
-  const result=await stream.done;calls.push(result);assert.ok(!result.headers.includes('x-nanocodex-run-phases'),'internal timing header leaked');if(mode==='stream'&&!existing)assert.equal(result.code,0,'finite stream must EOF: '+result.stderr);assert.ok([200,201].includes(result.status),result.stdout);assert.notEqual(firstText,null,'No assistant text: '+result.stdout);assert.equal(firstTextValue,text);
+  stream=mode==='stream'?curl(server,existing?`/v1/agents/${agent}/turns`:'/v1/agent-runs','POST',existing?{input}:{input,settings},{'Idempotency-Key':key,Accept:'text/event-stream'},observe):curl(server,`/v1/agents/${agent}/events?cursor=${cursor}`,'GET',undefined,{Accept:'text/event-stream'},observe);
+  const result=await stream.done;calls.push(result);assert.ok(!result.headers.includes('x-nanocodex-run-phases'),'internal timing header leaked');if(mode==='stream')assert.equal(result.code,0,'finite stream must EOF: '+result.stderr);assert.ok([200,201,202].includes(result.status),result.stdout);assert.notEqual(firstText,null,'No assistant text: '+result.stdout);assert.equal(firstTextValue,text);
   let completion;for(let n=0;n<200;n++){completion=await request(server,`/v1/agents/${agent}/turns/${turn}`);assert.equal(completion.status,200,JSON.stringify(completion));if(['completed','failed','cancelled'].includes(completion.value.state))break;await delay(10);}assert.equal(completion.value.state,'completed',JSON.stringify(completion));assert.match(JSON.stringify(completion.value),/BENCHMARK_ASSISTANT_TEXT/);
   const history=await request(server,`/v1/agents/${agent}/events/history?after=0&limit=256`);assert.equal(history.status,200);cursor=history.value.latest_cursor;
   const row={regime,index,process:server.process,agent,turn,key,input,ttft_ms:firstText,client_requests:calls.length,cursor,receipt,first_text:firstTextValue,stream_first_headers_ms:result.first_headers_ms,stream_first_body_ms:result.first_body_ms};rows.push(row);
@@ -148,7 +148,150 @@ async function verifyStreamContract(server){
  reconnect=curl(server,`/v1/agents/${accepted.agent_id}/events?cursor=${BigInt(accepted.accepted_cursor)-1n}`,'GET',undefined,{Accept:'text/event-stream'},value=>{reconnectFrames.push(value);if(value.type==='turn_completed'&&value.turn_id===accepted.turn_id)reconnect.child.kill();});
  const reconnected=await reconnect.done;assert.equal(reconnected.status,200);assert.ok(reconnectFrames.some(v=>v.type==='event'&&v.event?.type==='assistant.delta'&&v.turn_id===accepted.turn_id));assert.ok(reconnectFrames.some(v=>v.type==='turn_completed'&&v.turn_id===accepted.turn_id));
  const retained=await request(server,`/v1/agents/${accepted.agent_id}/turns/${accepted.turn_id}`);assert.equal(retained.value.state,'completed');checks.push({name:'disconnect after receipt leaves admitted turn durable and GET resumes through completion',accepted,detached,reconnected,reconnectFrames,retained});
+ await verifyWarmStreamContract(server, checks, seed, scoped, foreign);
  await writeFile(join(output,'contract-checks.json'),JSON.stringify(checks,null,2));console.log('Streaming contract checks passed: '+checks.length);
+}
+async function verifyWarmStreamContract(server, checks, seed, scoped, foreign) {
+ const path=`/v1/agents/${seed.agent}/turns`, accept={Accept:'text/event-stream'};
+ const check=async(name,body,status,headers={})=>{
+  const result=await request(server,path,'POST',body,headers);
+  assert.equal(result.status,status,name+': '+JSON.stringify(result));
+  checks.push({name,...result});return result;
+ };
+ const stream=async(name,body,status,headers={})=>{
+  const frames=[];
+  const result=await curl(server,path,'POST',body,{...accept,...headers},(value,at,frame)=>frames.push({value,at,frame})).done;
+  assert.equal(result.code,0,name+': '+result.stderr);assert.equal(result.status,status,result.stdout);
+  assert.match(result.headers,/content-type: text\/event-stream/i);
+  assert.ok(!result.headers.includes('x-nanocodex-turn-created'));
+  assert.ok(!result.headers.includes('x-nanocodex-turn-summary'));
+  assert.match(frames[0]?.frame??'',/^event: run/);
+  assert.equal(frames[0].value.agent_id,seed.agent);
+  assert.ok(result.headers.includes('x-nanocodex-turn-id: '+frames[0].value.turn_id));
+  checks.push({name,result,frames});return {result,frames,receipt:frames[0].value};
+ };
+ const waitDone=async id=>{
+  for(let n=0;n<200;n++){
+   const response=await request(server,path+'/'+id);
+   assert.equal(response.status,200,JSON.stringify(response));
+   if(response.value.state==='completed')return response;
+   await delay(10);
+  }
+  assert.fail('turn did not complete: '+id);
+ };
+ // Every rejected new identity must be absent and must never reach the provider.
+ const beforeRejected=providerCalls.length;
+ for(const [name,headers,status] of [
+  ['warm write-only cannot read stream',{...accept,authorization:'Bearer '+scoped},403],
+  ['warm malformed cursor cannot admit',{...accept,'Last-Event-ID':'not-a-number'},400],
+  ['warm wrong owner cannot admit',{...accept,authorization:'Bearer '+foreign},404],
+ ]){
+  const body={id:randomUUID(),input:'BENCH_SAMPLE_warm_rejected'};
+  await check(name,body,status,headers);
+  const missing=await request(server,path+'/'+body.id);assert.equal(missing.status,404);
+  checks.push({name:name+' has no admitted receipt',id:body.id,...missing});
+ }
+ assert.equal(providerCalls.length,beforeRejected,'rejections must not invoke the provider');
+ const jsonBody={id:randomUUID(),input:'BENCH_SAMPLE_warm_json'};
+ let before=providerCalls.length;
+ const jsonNew=await check('warm default JSON acceptance stays 202',jsonBody,202);
+ assert.equal(jsonNew.value.turn_id,jsonBody.id);await waitDone(jsonBody.id);
+ const jsonReplay=await check('warm JSON replay stays 200 with SSE q=0',jsonBody,200,{Accept:'text/event-stream;q=0'});
+ assert.equal(jsonReplay.value.turn_id,jsonBody.id);assert.equal(providerCalls.length,before+1);
+ // A key-only retry generates a different candidate internally: only the stored
+ // receipt identity may select stopAfter or appear in response headers.
+ const key=randomUUID(),keyBody={input:'BENCH_SAMPLE_warm_key_only'};
+ before=providerCalls.length;
+ const keyNew=await stream('warm key-only acceptance streams to terminal',keyBody,202,{'Idempotency-Key':key});
+ const keyReplay=await stream('warm key-only replay keeps actual turn identity',keyBody,200,{'Idempotency-Key':key});
+ assert.equal(keyNew.receipt.turn_id,keyReplay.receipt.turn_id);
+ assert.equal(keyReplay.receipt.turn_idempotency_key,key);
+ assert.ok(keyReplay.frames.some(f=>f.value.type==='turn_completed'&&f.value.turn_id===keyNew.receipt.turn_id));
+ assert.equal(providerCalls.length,before+1,'key-only new + replay invokes model once');
+ await check('warm changed key input conflicts',{input:keyBody.input+' changed'},409,{...accept,'Idempotency-Key':key});
+ const idBody={id:randomUUID(),input:'BENCH_SAMPLE_warm_id_only'};
+ before=providerCalls.length;
+ const idNew=await stream('warm id-only acceptance has no fabricated key',idBody,202);
+ const idReplay=await stream('warm id-only replay keeps identity without key',idBody,200);
+ for(const {receipt} of [idNew,idReplay]){assert.equal(receipt.turn_id,idBody.id);assert.ok(!Object.hasOwn(receipt,'turn_idempotency_key'));}
+ assert.equal(providerCalls.length,before+1,'id-only new + replay invokes model once');
+ await check('warm changed id input conflicts',{...idBody,input:idBody.input+' changed'},409,accept);
+ const terminal=idReplay.frames.find(f=>f.value.type==='turn_completed').value.cursor;
+ const terminalReplay=await stream('warm terminal cursor returns only receipt then EOF',idBody,200,{'Last-Event-ID':terminal});
+ assert.equal(terminalReplay.frames.length,1);
+ // Subscription validation can fail after acceptance. The exact original key
+ // still recovers that one turn and must not trigger a second provider request.
+ const aheadKey=randomUUID(),aheadBody={input:'BENCH_SAMPLE_warm_cursor_ahead'};
+ const summaryBefore=(await request(server,'/v1/agents')).value.summaries[seed.agent].turn_count;
+ before=providerCalls.length;
+ const ahead=await check('warm ahead cursor remains recoverable after admission',aheadBody,409,{...accept,'Idempotency-Key':aheadKey,'Last-Event-ID':'999999999'});
+ assert.equal(ahead.value.error,'cursor_ahead');
+ const recovered=await stream('warm cursor-ahead exact-key retry recovers admission',aheadBody,200,{'Idempotency-Key':aheadKey});
+ assert.ok(recovered.frames.some(f=>f.value.type==='turn_completed'&&f.value.turn_id===recovered.receipt.turn_id));
+ assert.equal(providerCalls.length,before+1);
+ const afterAhead=(await request(server,'/v1/agents')).value.summaries[seed.agent];
+ assert.equal(afterAhead.turn_count,summaryBefore+1,'failed subscription still updates account activity');
+ checks.push({name:'warm cursor-ahead admission updates visible account turn count once',before:summaryBefore,after:afterAhead});
+ const slots=[],slotControllers=[];
+ const limitKey=randomUUID(),limitBody={input:'BENCH_SAMPLE_warm_subscriber_limit'};
+ before=providerCalls.length;
+ try {
+  for(let i=0;i<32;i++) {
+   const controller=new AbortController();slotControllers.push(controller);
+   const response=await fetch(new URL(`/v1/agents/${seed.agent}/events`,server.base),{headers:{authorization:'Bearer '+server.token},signal:controller.signal});
+   assert.equal(response.status,200);slots.push(response);
+  }
+  const limited=await check('warm full subscriber pool rejects stream after admission',limitBody,429,{...accept,'Idempotency-Key':limitKey});
+  assert.equal(limited.value.error,'event_stream_limit');
+ } finally {
+  for(const controller of slotControllers)controller.abort();
+  await Promise.allSettled(slots.map(response=>response.body.cancel()));
+ }
+ // Give loopback HTTP cancellation time to release retained subscription slots.
+ await delay(100);
+ const limitRecovered=await stream('warm subscriber-limit exact-key retry recovers one turn',limitBody,200,{'Idempotency-Key':limitKey});
+ assert.ok(limitRecovered.frames.some(f=>f.value.type==='turn_completed'));
+ assert.equal(providerCalls.length,before+1);
+ const afterLimit=(await request(server,'/v1/agents')).value.summaries[seed.agent];
+ assert.equal(afterLimit.turn_count,afterAhead.turn_count+1);
+ checks.push({name:'warm subscriber-limit admission updates visible account count once',before:afterAhead.turn_count,after:afterLimit});
+ if(family==='codex') {
+  const grantHeaders={'x-nanocodex-connect-user':owner,'x-nanocodex-connect-grant-id':'0x'+'a'.repeat(64),
+   'x-nanocodex-connect-capabilities':JSON.stringify(['agents:read','agents:write','tools:use']),
+   'x-nanocodex-connect-connectors':'["chatgpt"]','x-nanocodex-connect-mcp-ids':'[]','content-type':'application/json',...accept};
+  const connectBody={id:randomUUID(),input:'BENCH_SAMPLE_warm_connect'};
+  before=providerCalls.length;
+  for(const [name,override,status] of [
+   ['Connect missing read rejected before admission',{'x-nanocodex-connect-capabilities':'["agents:write","tools:use"]'},403],
+   ['Connect missing connector rejected before admission',{'x-nanocodex-connect-connectors':'[]'},403],
+   ['Connect new streamed turn',{},202],['Connect streamed id replay',{},200],
+  ]) {
+   const response=await server.mf.dispatchFetch('https://nanocodex.internal'+path,{method:'POST',headers:{...grantHeaders,...override},body:JSON.stringify(connectBody)});
+   const raw=await response.text();assert.equal(response.status,status,raw);
+   if(status===403){assert.equal(providerCalls.length,before);assert.equal((await request(server,path+'/'+connectBody.id)).status,404);}
+   else {assert.match(raw,/event: run/);assert.match(raw,/event: turn_completed/);assert.ok(raw.includes(connectBody.id));}
+   checks.push({name,status:response.status,raw});
+  }
+  assert.equal(providerCalls.length,before+1,'Connect replay invokes provider only once');
+  const projected=await server.mf.dispatchFetch('https://nanocodex.internal/v1/agents',{headers:grantHeaders});
+  const listed=await projected.json();assert.equal(projected.status,200);assert.ok(!Object.hasOwn(listed.summaries[seed.agent],'may_have_scheduled_jobs'));
+  checks.push({name:'Connect account-list read projection is preserved',summary:listed.summaries[seed.agent]});
+ }
+ const disconnectKey=randomUUID(),disconnectBody={input:'BENCH_SAMPLE_disconnect: warm durable turn'},disconnectFrames=[];
+ before=providerCalls.length;let accepted;
+ const disconnected=curl(server,path,'POST',disconnectBody,{...accept,'Idempotency-Key':disconnectKey},(value,at,frame)=>{
+  disconnectFrames.push({value,at,frame});
+  if(frame.includes('event: run')){accepted=value;disconnected.child.kill();}
+ });
+ const detached=await disconnected.done;
+ assert.equal(detached.status,202);assert.ok(accepted?.turn_id);
+ assert.ok(!disconnectFrames.some(f=>f.value.type==='turn_completed'||f.value.event?.type==='assistant.delta'),'receipt arrives before held provider output');
+ const resumed=await stream('warm disconnect exact-key POST resumes the same durable turn',disconnectBody,200,{'Idempotency-Key':disconnectKey});
+ assert.equal(resumed.receipt.turn_id,accepted.turn_id);
+ assert.ok(resumed.frames.some(f=>f.value.type==='event'&&f.value.event?.type==='assistant.delta'&&f.value.turn_id===accepted.turn_id));
+ assert.ok(resumed.frames.some(f=>f.value.type==='turn_completed'&&f.value.turn_id===accepted.turn_id));
+ const retained=await waitDone(accepted.turn_id);assert.equal(providerCalls.length,before+1,'disconnect + reconnect invokes model once');
+ checks.push({name:'warm receipt precedes provider output; cancelled subscription preserves durable work',accepted,detached,disconnectFrames,retained,provider_invocations:providerCalls.length-before});
 }
 function summarize(values){const a=values.toSorted((a,b)=>a-b);return a.length?{n:a.length,min:a[0],p50:a[Math.ceil(a.length*.5)-1],p95:a[Math.ceil(a.length*.95)-1],max:a.at(-1),mean:a.reduce((s,v)=>s+v,0)/a.length}:{n:0};}
 let server;

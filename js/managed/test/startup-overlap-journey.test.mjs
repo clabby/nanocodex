@@ -141,7 +141,7 @@ test("normal public API overlaps account discovery with configured setup and ret
   const bundle=await build({stdin:{contents:source,resolveDir:root},bundle:true,write:false,metafile:true,format:"esm",platform:"node",conditions:["workerd"],target:"es2022",
     banner:{js:'import { createRequire } from "node:module"; const require=createRequire("/worker.mjs");'},external:["cloudflare:*","node:*"],
     alias:{"node-rsa":join(root,"../nanocodex/tools/browser/unsupportedNodeRsa.mjs")},plugins:[{name:"wasm",setup(builder){builder.onResolve({filter:/\.wasm$/},async args=>{
-      const name=`fixture-${assets.length}.wasm`;assets.push({type:"CompiledWasm",path:name,contents:await readFile(join(args.resolveDir,args.path))});return {path:`./${name}`,external:true};
+      const contents=await readFile(join(args.resolveDir,args.path)),name=`fixture-${assets.length}.wasm`;assets.push({type:"CompiledWasm",path:name,contents});return {path:`./${name}`,external:true};
     });}}],logLevel:"silent"});
   const modules=[{type:"ESModule",path:"worker.mjs",contents:bundle.outputFiles[0].text},...assets];
   const common={modules,compatibilityDate:"2026-07-30",compatibilityFlags:["nodejs_compat","enable_request_signal"]};

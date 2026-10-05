@@ -447,10 +447,9 @@ export default class Egress extends WorkerEntrypoint<EgressEnv> {
       return { schema: 1, status: 400, data: null, expiresAt: 0 };
     }
     const namespace = component === "catalog" ? this.env.USER_CONNECTORS : this.env.USER_CREDENTIALS;
-    return cachedAccountMetadata(namespace.idFromName(userId).toString(), component, options, async () => {
+    return cachedAccountMetadata(namespace.idFromName(userId).toString(), component, options, async deadline => {
       if (component === "catalog") {
-        const result = await this.readAccountCatalog(userId);
-        return { status: result.status, data: result.catalog };
+        return consumeRpcData(await connectorBroker(this.env, userId).readDiscoveryCatalog(options, deadline));
       }
       const result = await this.readAccountVault(userId);
       return { status: result.status, data: result.vault };

@@ -3060,8 +3060,10 @@ async function managedFetchRoute(
     if (resource === "turns") {
       if (request.method !== "POST")
         return json({ error: "method_not_allowed" }, { status: 405 });
+      const stream = acceptsAgentRunStream(request);
       if (!principal.capabilities.includes("agents:write")
-        || !principal.capabilities.includes("tools:use")) {
+        || !principal.capabilities.includes("tools:use")
+        || (stream && !principal.capabilities.includes("agents:read"))) {
         return json({ error: "forbidden" }, { status: 403 });
       }
       if (principal.connectGrant
@@ -3070,12 +3072,15 @@ async function managedFetchRoute(
       }
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
+      if (stream && parseCursor(request.headers.get("last-event-id")) === undefined)
+        return json({ error: "invalid_cursor" }, { status: 400 });
       const response = await stub.fetch(
         `https://session.internal/turns?${publicOrigin}`,
         {
           method: "POST",
           headers: sessionHeaders,
           body: request.body,
+          ...(stream ? { signal: request.signal } : {}),
         },
       );
       const created = response.headers.get("x-nanocodex-turn-created") === "1";
@@ -5353,7 +5358,27 @@ export class DurableAgentSession extends DurableComputerObject {
       if (this.#durabilityExported) {
         return json({ error: "durability_exported" }, { status: 409 });
       }
-      return this.#submitHttpTurn(request, turnAuthorization);
+      if (!acceptsAgentRunStream(request)) return this.#submitHttpTurn(request, turnAuthorization);
+      // This owner/Connect boundary alone opts into streaming. Shared guests keep
+      // their own projection, revocation and subscriber-limit handling.
+      if (!ownerAssertion || !turnAuthorization.capabilities.includes("agents:read")
+        || !turnAuthorization.capabilities.includes("agents:write")
+        || !turnAuthorization.capabilities.includes("tools:use"))
+        return json({ error: "forbidden" }, { status: 403 });
+      if (parseCursor(request.headers.get("last-event-id")) === undefined)
+        return json({ error: "invalid_cursor" }, { status: 400 });
+      const admitted = await this.#submitHttpTurn(request, turnAuthorization);
+      if (!admitted.ok) return admitted;
+      const receipt = await admitted.json<Record<string, unknown>>();
+      const events = await this.#streamHttpTurn(request, receipt, request.headers.get("idempotency-key"));
+      const headers = new Headers(events.headers);
+      // Ingress owns the activity update, including when subscription fails after
+      // durable acceptance (recover with the same id/key or GET /events).
+      for (const name of ["x-nanocodex-turn-created", "x-nanocodex-turn-summary"]) {
+        const value = admitted.headers.get(name);
+        if (value !== null) headers.set(name, value);
+      }
+      return new Response(events.body, { status: events.ok ? admitted.status : events.status, headers });
     }
     if (request.method === "POST" && url.pathname === "/turns/archive") {
       if (this.#deleting)
@@ -5846,17 +5871,8 @@ export class DurableAgentSession extends DurableComputerObject {
     catch { /* Best effort summary, never part of turn admission. */ }
     const admissionMs = roundMilliseconds(performance.now() - admitStartedAt);
     if (stream) {
-      // Both commits are durable before subscription. Use GET /events' retained
-      // log and archive paging without another auth/ownership/Session round trip.
-      const cursor = requestedCursor === null ? (BigInt(String(turnReceipt.accepted_cursor)) - 1n).toString()
-        : parseCursor(requestedCursor)!;
-      const events = this.#eventLog.streamWithPage(cursor,
-        this.#eventArchive.latestCursor(this.#eventLog),
-        this.#eventArchive.pageReader(this.#eventLog), request.signal, {
-          stopAfter: event => event.turn_id === turn.id
-            && ["turn_completed", "turn_failed", "turn_cancelled"].includes(event.message.type),
-        });
-      if (!events.ok || !events.body) return events;
+      const events = await this.#streamHttpTurn(request, turnReceipt, turn.key);
+      if (!events.ok) return events;
       if (admitted.headers.get("x-nanocodex-turn-created") === "1"
         && summary && typeof summary === "object" && !Array.isArray(summary)) {
         const { title, turnCount } = summary as { title?: unknown; turnCount?: unknown };
@@ -5866,37 +5882,54 @@ export class DurableAgentSession extends DurableComputerObject {
           }).catch((error) => console.warn({ type: "managed.agent_summary_update_failed", error_kind: errorKind(error) })));
         }
       }
-      const receipt = { agent_id: session.session_id, session_id: session.session_id,
-        turn_idempotency_key: turn.key, ...turnReceipt };
-      const reader = events.body.getReader();
-      // A reconnect at/after the retained terminal cursor needs only the receipt;
-      // there is no later event for this turn to wake and close the subscription.
-      if (typeof turnReceipt.terminal_cursor === "string"
-        && BigInt(cursor) >= BigInt(turnReceipt.terminal_cursor)) await reader.cancel();
-      const body = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(`event: run\ndata: ${JSON.stringify(receipt)}\n\n`));
-        },
-        async pull(controller) {
-          const next = await reader.read();
-          if (next.done) controller.close();
-          else controller.enqueue(next.value);
-        },
-        cancel(reason) { return reader.cancel(reason); },
-      });
       const headers = new Headers(events.headers);
-      headers.set("x-nanocodex-agent-id", session.session_id);
-      headers.set("x-nanocodex-turn-id", turn.id);
-      headers.set("location", `/v1/agents/${session.session_id}/events`);
       headers.set("x-nanocodex-run-phases", JSON.stringify({ ...phases,
         first_turn: { turn_id: turn.id, accepted_cursor: turnReceipt.accepted_cursor },
         first_turn_status: admitted.status, first_turn_admit_ms: admissionMs }));
-      return new Response(body, { status: admitted.status === 202 ? 201 : 200, headers });
+      return new Response(events.body, { status: admitted.status === 202 ? 201 : 200, headers });
     }
     return json({ ...phases, first_turn: turnReceipt, first_turn_status: admitted.status,
       first_turn_admit_ms: admissionMs,
       ...(admitted.headers.get("x-nanocodex-turn-created") === "1" ? { first_turn_summary: summary } : {}),
     });
+  }
+
+  /** Admission is durable; cancelling this wrapper only closes its subscription. */
+  async #streamHttpTurn(request: Request, turnReceipt: Record<string, unknown>, key: string | null): Promise<Response> {
+    const sessionId = this.#sessionId()!;
+    const turnId = String(turnReceipt.turn_id);
+    const requestedCursor = request.headers.get("last-event-id");
+    const cursor = requestedCursor === null ? (BigInt(String(turnReceipt.accepted_cursor)) - 1n).toString()
+      : parseCursor(requestedCursor)!;
+    const events = this.#eventLog.streamWithPage(cursor,
+      this.#eventArchive.latestCursor(this.#eventLog),
+      this.#eventArchive.pageReader(this.#eventLog), request.signal, {
+        stopAfter: event => event.turn_id === turnId
+          && ["turn_completed", "turn_failed", "turn_cancelled"].includes(event.message.type),
+      });
+    if (!events.ok || !events.body) return events;
+    const receipt = { agent_id: sessionId, session_id: sessionId,
+      ...(key === null ? {} : { turn_idempotency_key: key }), ...turnReceipt };
+    const reader = events.body.getReader();
+    // At/after the terminal cursor no later event can close this subscription.
+    if (typeof turnReceipt.terminal_cursor === "string"
+      && BigInt(cursor) >= BigInt(turnReceipt.terminal_cursor)) await reader.cancel();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`event: run\ndata: ${JSON.stringify(receipt)}\n\n`));
+      },
+      async pull(controller) {
+        const next = await reader.read();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+      cancel(reason) { return reader.cancel(reason); },
+    });
+    const headers = new Headers(events.headers);
+    headers.set("x-nanocodex-agent-id", sessionId);
+    headers.set("x-nanocodex-turn-id", turnId);
+    headers.set("location", `/v1/agents/${sessionId}/events`);
+    return new Response(body, { headers });
   }
 
   async #createHttp(request: Request, afterInitialize?: (session: SessionRow) => void): Promise<Response> {

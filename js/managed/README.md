@@ -655,6 +655,17 @@ inference, network geography or production cold activation.
   Agent routes create later turns, read state,
   cancel or steer work, delete an agent, and support explicit durability import
   and export. Stable `Idempotency-Key` values make create and turn retries safe.
+- `POST /v1/agents/:id/turns` also accepts `Accept: text/event-stream` to
+  admit a later turn and receive its output in one request. The default stays
+  JSON; both formats return `202` for new acceptance and `200` for replay. Supply
+  a stable body `id`, an `Idempotency-Key`, or both. Streaming requires
+  `agents:read`, `agents:write` and `tools:use` before admission. Its initial
+  `event: run` identifies the actual retained turn; `turn_idempotency_key` is
+  omitted when no key was supplied. The retained event cursor, terminal close,
+  and disconnect/reconnect behavior match `/v1/agent-runs` above. Malformed
+  `Last-Event-ID` is rejected before admission. A valid but ahead cursor or
+  subscriber limit can fail after durable acceptance: recover with the **same
+  input and id/key**, or use GET events, rather than submitting a new identity.
 - `POST /v1/agents/:id/forks` accepts an empty body and a required stable
   `Idempotency-Key`. Full account `agents:read`, `agents:write` and `tools:use`
   authority is required; Connect grants and configured/routed sessions are not
