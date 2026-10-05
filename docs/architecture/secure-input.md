@@ -187,12 +187,13 @@ curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
   'https://nanocodex.example/.well-known/nanocodex-native-input'
 ```
 
-Check the protocol/version and independently compare the decoded key's SHA256
-fingerprint with an operator-authenticated reference before passing the public
-key to the reviewed local enrollment procedure. The fingerprint in the same
-response checks key encoding; by itself it is not an independent trust source.
-An agent transcript, ordinary Hand output, or an origin supplied by an untrusted
-Hand does not establish trust. Discovery never enrolls a helper, changes either
+Check the protocol/version and decoded key's SHA256 fingerprint before passing
+the public key to the reviewed local enrollment procedure. For first enrollment,
+the administrator explicitly trusts the independently known account HTTPS
+origin. If an independently supplied fingerprint already exists, compare it and
+stop on mismatch. The fingerprint in the same response checks key encoding; it
+does not authenticate the origin. An agent transcript, ordinary Hand output, or
+an origin supplied by an untrusted Hand does not establish trust. Discovery never enrolls a helper, changes either
 pin, authorizes a command, or relaxes the private approval endpoint. Enrollment
 and backend helper-identity pinning remain separate administrator operations.
 

@@ -31,9 +31,10 @@ The backend approval public key is available at
 Retrieve it directly on a trusted administrator device with normal HTTPS
 certificate verification. Check `protocol: "nanocodex-secure-sudo"`, `version: 1`,
 the standard-base64 65-byte P256 X9.63 `approval_public_key`, and the lowercase
-hex SHA256 `approval_public_key_sha256` of the decoded key. Compare that
-fingerprint with an independently authenticated operator reference; the key
-and fingerprint in one response do not independently authenticate each other.
+hex SHA256 `approval_public_key_sha256` of the decoded key. For first enrollment,
+the administrator explicitly trusts the independently known account HTTPS
+origin. Compare any existing independently supplied fingerprint and stop on
+mismatch; the fingerprint in the response checks encoding, not origin trust.
 The document derives only from the managed backend signing key and never
 contains its private scalar or helper pins. Missing/invalid keys fail with HTTP 503;
 responses are not cacheable. Only exact GET without a query is accepted, and
