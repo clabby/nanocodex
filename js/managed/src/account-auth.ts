@@ -36,6 +36,7 @@ const PERSISTENT_SESSION_TTL_SECONDS = 365 * 24 * 60 * 60;
 const WEBAUTHN_CHALLENGE_TTL_SECONDS = 5 * 60;
 const OTP_CHALLENGE_TTL_SECONDS = 5 * 60;
 const OTP_PROVIDER_TIMEOUT_MS = 10_000;
+const OTP_ATTEMPT_LEASE_SECONDS = 30;
 const ACCOUNT_PROVISION_TIMEOUT_MS = 10_000;
 const MAX_WALLET_MUTATION_BODY_BYTES = 16 * 1024;
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -73,7 +74,63 @@ export function isUserId(value: unknown): value is string {
   return typeof value === "string" && USER_ID.test(value);
 }
 
-export const NonceStorage = Kv.NonceStorage;
+// Keep the SDK's nonce protocol and stored entries compatible. SMS transitions
+// additionally need a transaction spanning the active pointer and challenge.
+export class NonceStorage extends Kv.NonceStorage {
+  constructor(private readonly smsState: DurableObjectState, env: unknown) {
+    super(smsState as unknown as Kv.NonceStorage.State, env);
+  }
+
+  override async fetch(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname !== "/sms") return super.fetch(request);
+    const input = await request.json<SmsOtpTransition>();
+    const result = await this.smsState.storage.transaction(async storage => {
+      const now = Math.floor(Date.now() / 1_000);
+      const challengeKey = `challenge:${input.challengeId}`;
+      const activeKey = `active:${input.phoneDigest}`;
+      const put = (key: string, value: unknown, expiresAt?: number) =>
+        storage.put(key, { value, ...(expiresAt === undefined ? {} : { expiresAt: expiresAt * 1_000 }) });
+      if (input.operation === "publish") {
+        if (!isSmsOtpChallenge(input.challenge) || input.challenge.expiresAt <= now) return undefined;
+        await put(challengeKey, input.challenge, input.challenge.expiresAt);
+        await put(activeKey, input.challengeId, input.challenge.expiresAt);
+        return input.challenge;
+      }
+      const active = await storage.get<Kv.NonceStorage.Entry>(activeKey);
+      const entry = await storage.get<Kv.NonceStorage.Entry>(challengeKey);
+      if (active?.value !== input.challengeId || !isSmsOtpChallenge(entry?.value)
+        || entry.value.phoneDigest !== input.phoneDigest || entry.value.expiresAt <= now) return undefined;
+      let challenge = entry.value;
+      if (input.operation === "claim") {
+        if (challenge.attempt && challenge.attempt.expiresAt > now) return undefined;
+        if (challenge.approval && challenge.approval.codeDigest !== input.codeDigest) return undefined;
+        challenge = { ...challenge, attempt: { id: input.attemptId, expiresAt: now + OTP_ATTEMPT_LEASE_SECONDS } };
+      } else {
+        if (challenge.attempt?.id !== input.attemptId || challenge.attempt.expiresAt <= now) return undefined;
+        if (input.operation === "approve") {
+          const identityKey = `identity:${input.phoneDigest}`;
+          const existing = await storage.get<Kv.NonceStorage.Entry>(identityKey);
+          if (existing && !isSmsIdentity(existing.value)) return undefined;
+          const identity = existing?.value as SmsIdentity | undefined
+            ?? { userId: challenge.candidateUserId };
+          if (!existing) await put(identityKey, identity);
+          challenge = { ...challenge, approval: { codeDigest: input.codeDigest, userId: identity.userId } };
+        } else if (input.operation === "release") {
+          const { attempt: _attempt, ...released } = challenge;
+          challenge = released;
+        } else if (input.operation === "consume") {
+          if (!challenge.approval || challenge.approval.codeDigest !== input.codeDigest) return undefined;
+          await storage.delete(challengeKey);
+          await storage.delete(activeKey);
+          return challenge;
+        }
+      }
+      await put(challengeKey, challenge, challenge.expiresAt);
+      return challenge;
+    });
+    return Response.json({ challenge: result });
+  }
+}
 
 export interface AccountAuthEnv extends IngressPlacement {
   NANOCODEX_PERFORMANCE_TRACE?: string;
@@ -223,7 +280,28 @@ type SmsOtpChallenge = Readonly<{
   expiresAt: number;
   phoneDigest: string;
   verificationSid: string;
+  attempt?: Readonly<{ id: string; expiresAt: number }>;
+  approval?: Readonly<{ codeDigest: string; userId: string }>;
 }>;
+
+type SmsOtpTransition = Readonly<{
+  operation: "publish" | "claim" | "approve" | "release" | "consume";
+  challengeId: string;
+  phoneDigest: string;
+  attemptId: string;
+  codeDigest: string;
+  challenge?: SmsOtpChallenge;
+}>;
+
+async function transitionSmsOtp(env: AccountAuthEnv, input: SmsOtpTransition): Promise<SmsOtpChallenge | undefined> {
+  const stub = env.NANOCODEX_AUTH.get(env.NANOCODEX_AUTH.idFromName("sms-otp"));
+  const response = await stub.fetch("https://auth.internal/sms", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error("SMS storage unavailable");
+  return (await response.json<{ challenge?: SmsOtpChallenge }>()).challenge;
+}
 
 type PortableCredential = Readonly<{
   credentialId: string;
@@ -673,8 +751,6 @@ async function startSmsOtp(
   const phone = normalizedPhone(body.phone);
   if (!phone) return json({ error: "invalid_phone" }, { status: 400 });
 
-  const store = authStore(env, "sms-otp");
-  if (!store.create) return json({ error: "sms_otp_unavailable" }, { status: 503 });
   const phoneDigest = await keyedDigest(secret, `phone:${phone}`);
   const now = Math.floor(Date.now() / 1_000);
 
@@ -692,15 +768,13 @@ async function startSmsOtp(
       phoneDigest,
       verificationSid,
     };
-    await Promise.all([
-      store.set(`challenge:${challengeId}`, challenge, { ttl: OTP_CHALLENGE_TTL_SECONDS }),
-      store.set(`active:${phoneDigest}`, challengeId, { ttl: OTP_CHALLENGE_TTL_SECONDS }),
-    ]);
+    if (!await transitionSmsOtp(env, {
+      operation: "publish", challengeId, phoneDigest, challenge, attemptId: "", codeDigest: "",
+    })) throw new Error("SMS challenge expired");
   } catch {
-    await Promise.all([
-      store.delete(`challenge:${challengeId}`),
-      store.delete(`active:${phoneDigest}`),
-    ]);
+    // A failed send must not invalidate the previously delivered challenge.
+    // Publication is atomic; an uncertain storage outcome must not delete a
+    // newer resend's active pointer either.
     return json({ error: "sms_delivery_failed" }, { status: 503 });
   }
   return json({
@@ -728,81 +802,79 @@ async function verifySmsOtp(
     return json({ error: "invalid_otp" }, { status: 400 });
   }
 
-  const store = authStore(env, "sms-otp");
-  if (!store.take) return json({ error: "sms_otp_unavailable" }, { status: 503 });
   const phoneDigest = await keyedDigest(secret, `phone:${phone}`);
-  const active = await store.get<unknown>(`active:${phoneDigest}`);
-  const challenge = await store.take<unknown>(`challenge:${challengeId}`);
-  const now = Math.floor(Date.now() / 1_000);
-  if (active !== challengeId || !isSmsOtpChallenge(challenge)
-    || challenge.phoneDigest !== phoneDigest || challenge.expiresAt <= now) {
-    return json({ error: "invalid_or_expired_otp" }, { status: 400 });
-  }
-  let approved: boolean;
+  // Bind cached approval to this exact challenge and code without storing either
+  // the phone or the low-entropy code in plaintext (or an unkeyed hash).
+  const codeDigest = await keyedDigest(secret, `sms-approval:${phoneDigest}:${challengeId}:${code}`);
+  const attemptId = randomBase64Url(32);
+  const transition = (operation: SmsOtpTransition["operation"]) => transitionSmsOtp(env, {
+    operation, phoneDigest, challengeId, codeDigest, attemptId,
+  });
+  let challenge = await transition("claim");
+  const invalid = () => json({ error: "invalid_or_expired_otp" }, { status: 400 });
+  if (!challenge) return invalid();
+  let consumed = false;
   try {
-    approved = await checkTwilioSmsVerification(env, challenge.verificationSid, code);
-  } catch {
-    await store.set(`challenge:${challengeId}`, challenge, {
-      ttl: Math.max(1, challenge.expiresAt - now),
+    if (!challenge.approval) {
+      let approved: boolean;
+      try {
+        approved = await checkTwilioSmsVerification(env, challenge.verificationSid, code);
+      } catch {
+        return json({ error: "sms_verification_failed" }, { status: 503 });
+      }
+      if (!approved) return invalid();
+      // Persist proof before any provisioning. Twilio deletes approved SIDs;
+      // a wallet failure or worker restart must never require approving it twice.
+      // A lost Twilio response before this write still fails closed.
+      challenge = await transition("approve");
+      if (!challenge?.approval) return invalid();
+    }
+    const identity = challenge.approval;
+    let wallet: AccountWalletMetadata;
+    try {
+      [wallet] = await Promise.all([
+        ensureAccountWallet(env, identity.userId),
+        ensureAccount(env, identity.userId, true),
+      ]);
+    } catch {
+      return json({ error: "wallet_unavailable" }, { status: 503 });
+    }
+    const now = Math.floor(Date.now() / 1_000);
+    const token = `s_${randomBase64Url(32)}`;
+    const sessions = authStore(env, "account");
+    await sessions.set(accountSessionKey(token), {
+      authentication: "sms_otp",
+      userId: identity.userId,
+      issuedAt: now,
+      expiresAt: now + SESSION_TTL_SECONDS,
+    } satisfies AccountSessionPayload, { ttl: SESSION_TTL_SECONDS });
+    // Recheck expiry, current resend and attempt ownership atomically. Only the
+    // winner may disclose its session token; stale workers cannot consume a new
+    // attempt or delete a newer challenge's active pointer.
+    if (!await transition("consume")) {
+      await sessions.delete(accountSessionKey(token));
+      return invalid();
+    }
+    consumed = true;
+    const previousToken = cookieValue(request, ACCOUNT_COOKIE);
+    if (previousToken && (ANONYMOUS_SESSION_TOKEN.test(previousToken) || SMS_SESSION_TOKEN.test(previousToken))) {
+      // The new one-use login is committed. A cleanup outage must not discard
+      // its only response and strand the user behind a consumed challenge.
+      try { await sessions.delete(accountSessionKey(previousToken)); } catch { /* best-effort old-session cleanup */ }
+    }
+    return json({
+      user: { address: wallet.address, id: identity.userId, persistent: true },
+    }, {
+      headers: { "set-cookie": accountCookie(token, PERSISTENT_SESSION_TTL_SECONDS, url.protocol) },
     });
-    return json({ error: "sms_verification_failed" }, { status: 503 });
-  }
-  if (!approved) {
-    await store.set(`challenge:${challengeId}`, challenge, {
-      ttl: Math.max(1, challenge.expiresAt - now),
-    });
-    return json({ error: "invalid_or_expired_otp" }, { status: 400 });
-  }
-
-  const proposedIdentity: SmsIdentity = {
-    userId: challenge.candidateUserId,
-  };
-  const identityKey = `identity:${phoneDigest}`;
-  if (!store.create || !await store.create(identityKey, proposedIdentity)) {
-    const existing = await store.get<unknown>(identityKey);
-    if (!isSmsIdentity(existing)) {
-      return json({ error: "sms_identity_unavailable" }, { status: 503 });
+  } finally {
+    // This conditional release cannot resurrect a consumed/superseded challenge.
+    // If the worker disappears, the durable claim expires after 30 seconds while
+    // approval and the original challenge deadline remain intact.
+    if (!consumed) {
+      try { await transition("release"); } catch { /* the durable lease bounds recovery after a storage outage */ }
     }
   }
-  const identity = await store.get<unknown>(identityKey);
-  if (!isSmsIdentity(identity)) {
-    return json({ error: "sms_identity_unavailable" }, { status: 503 });
-  }
-  let wallet: AccountWalletMetadata;
-  try {
-    [wallet] = await Promise.all([
-      ensureAccountWallet(env, identity.userId),
-      ensureAccount(env, identity.userId, true),
-    ]);
-  } catch {
-    await store.set(`challenge:${challengeId}`, challenge, {
-      ttl: Math.max(1, challenge.expiresAt - now),
-    });
-    return json({ error: "wallet_unavailable" }, { status: 503 });
-  }
-  const previousToken = cookieValue(request, ACCOUNT_COOKIE);
-  if (previousToken && (ANONYMOUS_SESSION_TOKEN.test(previousToken) || SMS_SESSION_TOKEN.test(previousToken))) {
-    await authStore(env, "account").delete(accountSessionKey(previousToken));
-  }
-  const token = `s_${randomBase64Url(32)}`;
-  await authStore(env, "account").set(accountSessionKey(token), {
-    authentication: "sms_otp",
-    userId: identity.userId,
-    issuedAt: now,
-    expiresAt: now + SESSION_TTL_SECONDS,
-  } satisfies AccountSessionPayload, { ttl: SESSION_TTL_SECONDS });
-  await store.delete(`active:${phoneDigest}`);
-  return json({
-    user: {
-      address: wallet.address,
-      id: identity.userId,
-      persistent: true,
-    },
-  }, {
-    headers: {
-      "set-cookie": accountCookie(token, PERSISTENT_SESSION_TTL_SECONDS, url.protocol),
-    },
-  });
 }
 
 async function logoutAccountSession(

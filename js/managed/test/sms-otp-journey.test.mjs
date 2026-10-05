@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
 
@@ -16,13 +18,24 @@ export default { async fetch(request, env) {
 }};
 `;
 
-test("SMS OTP accepts immediate resends without local phone/IP limits and preserves login checks", { timeout: 120_000 }, async t => {
+test("SMS OTP recovers delivery and provisioning failures with durable code-bound one-use approval", { timeout: 120_000 }, async t => {
   const output = new URL("../../../output/sms-otp/", import.meta.url);
   const trace = [];
   const phone = "+12025550161", code = "654321";
   const address = "0x" + "1".repeat(40);
   const serviceSid = "VA" + "1".repeat(32);
-  let failDelivery = false, sends = 0;
+  let failDelivery = false, failWallet = false, sends = 0, checks = 0, provisions = 0, checkStatus = 200;
+  let sendGate, checkGate, walletGate;
+  const gates = [];
+  function gate() {
+    let entered, release;
+    const observed = new Promise(resolve => { entered = resolve; });
+    const blocked = new Promise(resolve => { release = resolve; });
+    const value = { observed, release, wait: async () => { entered(); await blocked; } };
+    gates.push(value);
+    return value;
+  }
+  const persistence = await mkdtemp(join(tmpdir(), "nanocodex-sms-journey-"));
   const verificationSids = new Set();
   const bundled = await build({
     stdin: { contents: source, resolveDir: fileURLToPath(new URL("..", import.meta.url)) },
@@ -30,7 +43,8 @@ test("SMS OTP accepts immediate resends without local phone/IP limits and preser
     external: ["cloudflare:workers", "node:*"],
     alias: { "node-rsa": "./node_modules/nanocodex/tools/browser/unsupportedNodeRsa.mjs" },
   });
-  const mf = new Miniflare({
+  const options = {
+    durableObjectsPersist: persistence,
     script: bundled.outputFiles[0].text, modules: true,
     compatibilityDate: "2026-07-29", compatibilityFlags: ["nodejs_compat"],
     bindings: {
@@ -38,7 +52,16 @@ test("SMS OTP accepts immediate resends without local phone/IP limits and preser
       TWILIO_ACCOUNT_SID: "AC" + "1".repeat(32), TWILIO_AUTH_TOKEN: "synthetic-twilio-token",
       TWILIO_VERIFY_SERVICE_SID: serviceSid,
     },
-    serviceBindings: { NANOCODEX: async () => Response.json({ address, created_at: 1 }) },
+    serviceBindings: { NANOCODEX: async request => {
+      assert.equal(request.method, "PUT");
+      provisions++;
+      const held = walletGate; walletGate = undefined;
+      if (held) await held.wait();
+      trace.push({ provider: "wallet provision", observed: failWallet ? 503 : 200 });
+      return failWallet
+        ? Response.json({ error: "synthetic wallet failure" }, { status: 503 })
+        : Response.json({ address, created_at: 1 });
+    } },
     durableObjects: {
       NANOCODEX_AUTH: { className: "NonceStorage", useSQLite: true },
       NANOCODEX_USERS: { className: "UserAccount", useSQLite: true },
@@ -49,18 +72,29 @@ test("SMS OTP accepts immediate resends without local phone/IP limits and preser
       const url = new URL(request.url);
       assert.equal(url.origin, "https://verify.twilio.com", "no live external services allowed");
       assert.equal(request.method, "POST");
+      const credential = options.bindings.TWILIO_API_KEY_SID
+        ? `${options.bindings.TWILIO_API_KEY_SID}:${options.bindings.TWILIO_API_KEY_SECRET}`
+        : `${options.bindings.TWILIO_ACCOUNT_SID}:${options.bindings.TWILIO_AUTH_TOKEN}`;
+      assert.equal(request.headers.get("authorization"), `Basic ${Buffer.from(credential).toString("base64")}`);
       const form = new URLSearchParams(await request.text());
       if (url.pathname === `/v2/Services/${serviceSid}/Verifications`) {
         sends++;
         assert.equal(form.get("Channel"), "sms");
         assert.match(form.get("To"), /^\+1202555\d{4}$/);
-        trace.push({ provider: "Twilio send", observed: failDelivery ? 503 : 201 });
-        if (failDelivery) return Response.json({ error: "synthetic delivery failure" }, { status: 503 });
+        const failed = failDelivery;
+        const held = sendGate; sendGate = undefined;
+        if (held) await held.wait();
+        trace.push({ provider: "Twilio send", observed: failed ? 503 : 201 });
+        if (failed) return Response.json({ error: "synthetic delivery failure" }, { status: 503 });
         const sid = "VE" + sends.toString(16).padStart(32, "0");
         verificationSids.add(sid);
         return Response.json({ sid, status: "pending" }, { status: 201 });
       }
       assert.equal(url.pathname, `/v2/Services/${serviceSid}/VerificationCheck`);
+      checks++;
+      const held = checkGate; checkGate = undefined;
+      if (held) await held.wait();
+      if (checkStatus !== 200) return Response.json({ error: "synthetic verification failure" }, { status: checkStatus });
       const sid = form.get("VerificationSid");
       if (!verificationSids.has(sid)) {
         trace.push({ provider: "Twilio check", observed: 404 });
@@ -72,7 +106,8 @@ test("SMS OTP accepts immediate resends without local phone/IP limits and preser
       trace.push({ provider: "Twilio check", observed: 200, approved });
       return Response.json({ status: approved ? "approved" : "pending" });
     },
-  });
+  };
+  let mf = new Miniflare(options);
   let base;
   async function http(label, path, { body, cookie, origin = "same", ip = "192.0.2.61", expected = 200 } = {}) {
     const response = await fetch(new URL(path, base), {
@@ -85,15 +120,15 @@ test("SMS OTP accepts immediate resends without local phone/IP limits and preser
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    const value = await response.json();
+    const value = response.status === 204 ? {} : await response.json();
     trace.push({ label, path, expected, observed: response.status,
       result: { error: value.error, challenge_issued: typeof value.challenge_id === "string",
         resend_after: value.resend_after, expires_in: value.expires_in,
         persistent: value.user?.persistent, authentication: value.authentication },
-      session_cookie_issued: response.headers.has("set-cookie"),
+      set_cookie_header: response.headers.has("set-cookie"),
     });
     assert.equal(response.status, expected, `${label}: ${value.error ?? "unexpected status"}`);
-    if (expected !== 200) assert.equal(response.headers.has("set-cookie"), false);
+    if (expected >= 400 && path.startsWith("/v1/auth/sms/")) assert.equal(response.headers.has("set-cookie"), false);
     return { value, headers: response.headers };
   }
   const start = (label, options = {}) => http(label, "/v1/auth/sms/start", { body: { phone }, expected: 202, ...options });
@@ -129,6 +164,14 @@ test("SMS OTP accepts immediate resends without local phone/IP limits and preser
     assert.equal((await verify("wrong code", latest, {
       body: { phone, challenge_id: latest, code: "000000" }, expected: 400,
     })).value.error, "invalid_or_expired_otp");
+    await verify("wrong phone cannot consume another phone's challenge", latest, {
+      body: { phone: "+12025550162", challenge_id: latest, code }, expected: 400,
+    });
+    checkStatus = 404;
+    await verify("missing provider verification fails closed", latest, { expected: 400 });
+    checkStatus = 503;
+    assert.equal((await verify("provider verification failure", latest, { expected: 503 })).value.error, "sms_verification_failed");
+    checkStatus = 200;
     const login = await verify("correct-code retry", latest);
     assert.equal(login.value.user.persistent, true);
     assert.equal(login.value.user.address, address);
@@ -148,6 +191,123 @@ test("SMS OTP accepts immediate resends without local phone/IP limits and preser
     assert.ok(!challenges.includes(recovery.value.challenge_id));
     const recoveredLogin = await verify("recovered challenge login", recovery.value.challenge_id);
     assert.equal(recoveredLogin.value.user.id, login.value.user.id, "same phone retains its account");
+    const stillValid = await start("challenge before failed resend");
+    failDelivery = true;
+    await start("failed resend preserves previously delivered code", { expected: 503 });
+    failDelivery = false;
+    await verify("previously delivered code succeeds after failed resend", stillValid.value.challenge_id);
+
+    const failureGate = sendGate = gate();
+    failDelivery = true;
+    const delayedFailure = start("delayed failed resend", { expected: 503 });
+    await failureGate.observed;
+    failDelivery = false;
+    const newDuringFailure = await start("new challenge while failed send is pending");
+    failureGate.release();
+    await delayedFailure;
+    await verify("failed send cannot erase a newer challenge", newDuringFailure.value.challenge_id);
+
+    const provisionRecovery = await start("challenge for provisioning recovery");
+    failWallet = true;
+    const checksBeforeRecovery = checks;
+    assert.equal((await verify("approved code with wallet unavailable", provisionRecovery.value.challenge_id, { expected: 503 })).value.error, "wallet_unavailable");
+    assert.equal(checks, checksBeforeRecovery + 1);
+    const provisionsBeforeWrong = provisions;
+    await verify("wrong code cannot reuse durable approval", provisionRecovery.value.challenge_id, {
+      body: { phone, challenge_id: provisionRecovery.value.challenge_id, code: "000000" }, expected: 400,
+    });
+    assert.equal(provisions, provisionsBeforeWrong, "wrong code never reaches wallet provisioning");
+    // Restart the actual worker and DOs over persisted SQLite, without modifying
+    // auth records or bypassing the public HTTP route.
+    await mf.dispose();
+    mf = new Miniflare(options);
+    base = await mf.ready;
+    failWallet = false;
+    const recoveryGate = walletGate = gate();
+    const recoveryVerify = verify("same approved code succeeds after worker restart", provisionRecovery.value.challenge_id);
+    await recoveryGate.observed;
+    await verify("concurrent approved-code retry is fenced", provisionRecovery.value.challenge_id, { expected: 400 });
+    recoveryGate.release();
+    const retry = await recoveryVerify;
+    assert.equal(retry.value.user.id, login.value.user.id);
+    assert.equal(checks, checksBeforeRecovery + 1, "approved SID is never checked twice");
+    await verify("recovered approval cannot be replayed", provisionRecovery.value.challenge_id, { expected: 400 });
+
+    const recoveredCookie = retry.headers.get("set-cookie").split(";")[0];
+    await http("SMS account logout", "/v1/auth/logout", { body: {}, cookie: recoveredCookie, expected: 204 });
+    const loggedOut = await http("revoked SMS session requires reauthentication", "/v1/me", { cookie: recoveredCookie, expected: 401 });
+    assert.equal(loggedOut.value.error, "reauthentication_required");
+
+    const concurrent = await start("challenge for concurrent verification");
+    const verificationGate = checkGate = gate();
+    const winningVerify = verify("first concurrent verifier", concurrent.value.challenge_id);
+    await verificationGate.observed;
+    await verify("second concurrent verifier is fenced", concurrent.value.challenge_id, { expected: 400 });
+    verificationGate.release();
+    await winningVerify;
+    await verify("concurrent winner cannot be replayed", concurrent.value.challenge_id, { expected: 400 });
+
+    const superseded = await start("challenge to supersede during provisioning");
+    const provisioningGate = walletGate = gate();
+    const staleVerify = verify("superseded in-flight verifier cannot issue a session", superseded.value.challenge_id, { expected: 400 });
+    await provisioningGate.observed;
+    const superseding = await start("resend during approved-code provisioning");
+    provisioningGate.release();
+    await staleVerify;
+    await verify("new challenge survives old verifier completion", superseding.value.challenge_id);
+
+    const anonymous = await http("anonymous account before SMS", "/v1/me");
+    const anonymousCookie = anonymous.headers.get("set-cookie").split(";")[0];
+    const freshPhone = "+12025550999";
+    const promote = await start("anonymous phone promotion", { body: { phone: freshPhone }, cookie: anonymousCookie });
+    failWallet = true;
+    await verify("anonymous promotion provisioning failure", promote.value.challenge_id, {
+      body: { phone: freshPhone, challenge_id: promote.value.challenge_id, code }, cookie: anonymousCookie, expected: 503,
+    });
+    failWallet = false;
+    const promoted = await verify("anonymous promotion recovery retains identity", promote.value.challenge_id, {
+      body: { phone: freshPhone, challenge_id: promote.value.challenge_id, code }, cookie: anonymousCookie,
+    });
+    assert.equal(promoted.value.user.id, anonymous.value.user.id);
+    const persistentCookie = promoted.headers.get("set-cookie").split(";")[0];
+    const separatePhone = "+12025550998";
+    const separate = await start("persistent login with a different phone", { body: { phone: separatePhone }, cookie: persistentCookie });
+    const separated = await verify("different phone does not alias persistent account", separate.value.challenge_id, {
+      body: { phone: separatePhone, challenge_id: separate.value.challenge_id, code }, cookie: persistentCookie,
+    });
+    assert.notEqual(separated.value.user.id, promoted.value.user.id);
+    await start("oversized phone rejected", { body: { phone: "+1" + "2".repeat(1100) }, expected: 413 });
+
+    // Exercise both supported provider credential configurations and ensure the
+    // development-only fixed-code switch cannot bypass production verification.
+    await mf.dispose();
+    options.bindings.TWILIO_API_KEY_SID = "SK" + "2".repeat(32);
+    options.bindings.TWILIO_API_KEY_SECRET = "synthetic-twilio-api-key";
+    options.bindings.NANOCODEX_MOCK_TWILIO_VERIFY_CODE = "111111";
+    options.bindings.ENVIRONMENT = "production";
+    mf = new Miniflare(options); base = await mf.ready;
+    const apiKey = await start("API-key delivery with normalized phone", { body: { phone: "+1 (202) 555-0161" } });
+    await verify("production ignores development fixed code", apiKey.value.challenge_id, {
+      body: { phone, challenge_id: apiKey.value.challenge_id, code: "111111" }, expected: 400,
+    });
+    await verify("API-key provider verification", apiKey.value.challenge_id);
+    await mf.dispose();
+    options.bindings.ENVIRONMENT = "development";
+    mf = new Miniflare(options); base = await mf.ready;
+    const checksBeforeDevelopment = checks, sendsBeforeDevelopment = sends;
+    const development = await start("explicit development fixed code start");
+    await verify("development wrong code", development.value.challenge_id, { expected: 400 });
+    await verify("explicit development fixed code login", development.value.challenge_id, {
+      body: { phone, challenge_id: development.value.challenge_id, code: "111111" },
+    });
+    assert.equal(checks, checksBeforeDevelopment);
+    assert.equal(sends, sendsBeforeDevelopment);
+    await mf.dispose();
+    options.bindings.ENVIRONMENT = "production";
+    delete options.bindings.TWILIO_VERIFY_SERVICE_SID;
+    mf = new Miniflare(options); base = await mf.ready;
+    await start("unconfigured production delivery fails closed", { expected: 503 });
+    trace.push({ assertion: "Failed resends preserve old/new challenges; durable exact-code approval survives wallet failure and worker restart; wrong code, replay and concurrent/superseded verifies cannot issue sessions; anonymous identity preserved", passed: true });
     passed = true;
     t.diagnostic(`${trace.length} redacted HTTP/provider observations saved to output/sms-otp/http-trace.json`);
   } finally {
@@ -155,9 +315,11 @@ test("SMS OTP accepts immediate resends without local phone/IP limits and preser
     await writeFile(new URL("http-trace.json", output), JSON.stringify({
       command: "node --test js/managed/test/sms-otp-journey.test.mjs", passed,
       inputs: "Synthetic phones, fixed test IPs, synthetic correct/wrong one-time codes; credentials, challenge IDs, user IDs and cookies omitted",
-      expected: "Immediate starts exceed former cooldown, 5/phone and 20/IP caps; resend_after=0; latest challenge permits wrong-code retry and one login; foreign origins fail; provider failure permits immediate recovery",
+      expected: "No resend throttle; failed resend preserves delivered challenge; approved code survives wallet failure/restart without rechecking deleted SID; exact-code binding, original identity, origin, concurrency, supersession and one-use checks hold",
       trace,
     }, null, 2));
+    for (const held of gates) held.release();
     await mf.dispose();
+    await rm(persistence, { recursive: true, force: true });
   }
 });
