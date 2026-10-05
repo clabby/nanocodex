@@ -48,8 +48,9 @@ change does not turn native process environment variables into secret values.
 
 Login items support `USERNAME`, `PASSWORD` and `BASIC`; API-key items support
 `API_KEY`; card items support `CARD_NUMBER`, `EXPIRY_MONTH`, `EXPIRY_YEAR`, `CVV`
-and `BILLING_ZIP`. Each is written as `{{NANOCODEX_VAULT_NAME}}` in a header or
-body template. Only the selected item's fields are available. The destination is
+and `BILLING_ZIP`. Address items support `ADDRESS_LINE_1`, `ADDRESS_LINE_2`,
+`CITY`, `STATE`, `ZIP` and `COUNTRY`; phone items support `PHONE_NUMBER`.
+Each is written as `{{NANOCODEX_VAULT_NAME}}` in a header or body template. Only the selected item's fields are available. The destination is
 fixed public HTTPS; redirects are not followed. Existing reserved provider
 boundaries remain in force.
 
@@ -88,6 +89,27 @@ expiry in the claims. The algorithm is bound to the signing request; conflicting
 `alg`, `crit` and `b64` headers are rejected. JWT and message modes are mutually
 exclusive. Neither the signature nor the JWT is exposed to the caller: the
 broker inserts it into the exact outbound request and returns only its status.
+
+## Private browser field injection
+
+`browser_login_inject_fields` uses a retained login request ID;
+`browser_vault_inject_fields` uses the existing named Vault browser identity.
+Both require a fresh private snapshot ID, a stable operation ID, and
+`fields: [{ref, vault_id, field}]`. Each mapping selects one safe snapshot reference
+and one field of an account-owned Vault item. Use the tool's declared field enum.
+All five item kinds are supported, subject to compatible visible browser controls.
+
+The broker and private browser host resolve and inject values without returning
+them to the model. The result is a fixed fill status. Re-read the private snapshot
+before taking a later action. Injection does not submit a form or authorize a
+purchase. Document changes, deleted items, wrong owners and incompatible field
+mappings fail closed. Replaying the same operation retrieves its receipt instead
+of injecting again. An uncertain outcome must not be retried with a new ID.
+
+The [terminal private overlay](architecture/tui-private-input.md) uses the same
+private destination bindings and can save newly entered reusable fields with a
+visible opt-out. Verification codes and card security codes are not automatically
+saved; a stored card without a security code cannot supply that field.
 
 ## Apple authentication and artifact signing
 

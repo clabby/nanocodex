@@ -554,6 +554,9 @@ importers:
       '@types/node':
         specifier: ^22.20.1
         version: 22.20.1
+      '@xterm/headless':
+        specifier: 5.5.0
+        version: 5.5.0
       esbuild:
         specifier: 0.28.1
         version: 0.28.1
@@ -3029,6 +3032,9 @@ packages:
 
   '@workflow/serde@4.1.0-beta.2':
     resolution: {integrity: sha512-8kkeoQKLDaKXefjV5dbhBj2aErfKp1Mc4pb6tj8144cF+Em5SPbyMbyLCHp+BVrFfFVCBluCtMx+jjvaFVZGww==}
+
+  '@xterm/headless@5.5.0':
+    resolution: {integrity: sha512-5xXB7kdQlFBP82ViMJTwwEc3gKCLGKR/eoxQm4zge7GPBl86tCdI0IdPJjoKd8mUSFXz5V7i/25sfsEkP4j46g==}
 
   abitype@1.2.3:
     resolution: {integrity: sha512-Ofer5QUnuUdTFsBRwARMoWKOH1ND5ehwYhJ3OJ/BQO+StkwQjHw0XyVh4vDttzHB7QOFhPHa/o413PJ82gU/Tg==}
@@ -7938,6 +7944,8 @@ snapshots:
   '@workflow/serde@4.1.0': {}
 
   '@workflow/serde@4.1.0-beta.2': {}
+
+  '@xterm/headless@5.5.0': {}
 
   abitype@1.2.3(typescript@5.9.3)(zod@4.5.4):
     optionalDependencies:

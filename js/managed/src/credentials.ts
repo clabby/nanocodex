@@ -109,7 +109,7 @@ export async function routeCredentialRequest(
   const response = await env.NANOCODEX.fetch(target, {
     method: polling ? "POST" : request.method,
     ...(vaultBody !== undefined ? {
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(request.headers.has("x-nanocodex-operation-id") ? {"x-nanocodex-operation-id":request.headers.get("x-nanocodex-operation-id")!} : {}) },
       body: vaultBody,
     } : request.body === null ? {} : {
       headers: { "content-type": request.headers.get("content-type") ?? "" },
@@ -231,7 +231,7 @@ function validateVaultPayload(
 ): Record<string, string> | undefined {
   if (!isRecord(value)) return undefined;
   const hasAddressLine2 = Object.prototype.hasOwnProperty.call(value, "address_line_2");
-  const expected = vaultKeys(kind, hasAddressLine2, Object.prototype.hasOwnProperty.call(value, "browser_origin"));
+  const expected = vaultKeys(kind, hasAddressLine2, Object.prototype.hasOwnProperty.call(value, "browser_origin"), Object.prototype.hasOwnProperty.call(value, "cvv"));
   const keys = Object.keys(value);
   if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))) {
     return undefined;
@@ -258,13 +258,13 @@ function validateVaultPayload(
     const cvv = typeof value.cvv === "string" && /^[0-9]{3,4}$/.test(value.cvv)
       ? value.cvv : undefined;
     const billingZip = boundedText(value.billing_zip, 32);
-    return cardNumber && expiryMonth && expiryYear && cvv && billingZip
+    return cardNumber && expiryMonth && expiryYear && (value.cvv === undefined || cvv) && billingZip
       ? {
           name,
           card_number: cardNumber,
           expiry_month: expiryMonth,
           expiry_year: expiryYear,
-          cvv,
+          ...(cvv ? {cvv} : {}),
           billing_zip: billingZip,
         }
       : undefined;
@@ -293,12 +293,12 @@ function validateVaultPayload(
   return phoneNumber ? { name, phone_number: phoneNumber } : undefined;
 }
 
-function vaultKeys(kind: VaultKind, hasAddressLine2: boolean, hasBrowserOrigin = false): readonly string[] {
+function vaultKeys(kind: VaultKind, hasAddressLine2: boolean, hasBrowserOrigin = false, hasCvv = true): readonly string[] {
   switch (kind) {
     case "api_key": return ["name", "api_key"];
     case "login": return ["name", "username", "password", ...(hasBrowserOrigin ? ["browser_origin"] : [])];
     case "card": return [
-      "name", "card_number", "expiry_month", "expiry_year", "cvv", "billing_zip",
+      "name", "card_number", "expiry_month", "expiry_year", ...(hasCvv ? ["cvv"] : []), "billing_zip",
     ];
     case "address": return [
       "name", "address_line_1",

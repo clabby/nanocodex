@@ -85,6 +85,7 @@
     "@cloudflare/vitest-pool-workers": "^0.19.0",
     "@cloudflare/workers-types": "^5.20260730.1",
     "@types/node": "^22.20.1",
+    "@xterm/headless": "5.5.0",
     "esbuild": "0.28.1",
     "miniflare": "4.20260730.0",
     "typescript": "5.9.3",
