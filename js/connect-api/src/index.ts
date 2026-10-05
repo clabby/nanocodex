@@ -1,3 +1,4 @@
+import { machOnramp, type MachOnrampEnv } from "./machOnramp";
 import { Handler, Kv } from "accounts/server";
 import { oauthMcp, type McpGrant, type McpOAuthHooks, oauthJson } from "./oauthMcp.mts";
 import { mcpServer } from "./mcpServer.mts";
@@ -404,7 +405,7 @@ type ConnectLogContext = Readonly<{
   connector?: ConnectorCapability | OAuthConnectorProvider;
 }>;
 
-type Env = Readonly<{
+type Env = MachOnrampEnv & Readonly<{
   ACCOUNTS: Fetcher;
   CONNECT_STATE: Kv.durableObject.Namespace;
   EGRESS: Fetcher;
@@ -613,13 +614,7 @@ export default {
         );
       }
       if (request.method === "GET" && url.pathname === "/v1/machine-usd/config") {
-        const upstream = await fetch(`${MERCATOR_ORIGIN}/v1/onramp/config`, {
-          headers: { accept: "application/json" },
-        });
-        return cors(new Response(upstream.body, {
-          status: upstream.status,
-          headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
-        }), request);
+        return cors(await machOnramp(request, env, "/v1/config"), request);
       }
       if (/^\/git\/thread-[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\/(?:info\/refs|git-upload-pack|git-receive-pack)$/.test(url.pathname)) {
         requirePlaygroundOrigin(request);
@@ -654,24 +649,12 @@ export default {
       }
       if (request.method === "POST" && url.pathname === "/v1/machine-usd/orders") {
         requireOnrampOrigin(request);
-        const upstream = await fetch(`${MERCATOR_ORIGIN}/v1/onramp/orders`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "idempotency-key": requiredHeader(request, "idempotency-key"),
-          },
-          body: await request.text(),
-        });
-        return cors(proxy(upstream), request);
+        return cors(await machOnramp(request, env, "/v1/orders"), request);
       }
       const machineUsdOrder = url.pathname.match(/^\/v1\/machine-usd\/orders\/([^/]+)$/);
       if (request.method === "GET" && machineUsdOrder) {
         requireOnrampOrigin(request);
-        const upstream = await fetch(
-          `${MERCATOR_ORIGIN}/v1/onramp/orders/${encodeURIComponent(machineUsdOrder[1]!)}`,
-          { headers: { authorization: requiredHeader(request, "authorization") } },
-        );
-        return cors(proxy(upstream), request);
+        return cors(await machOnramp(request, env, `/v1/orders/${machineUsdOrder[1]!}`), request);
       }
 
       const connectorCallback = url.pathname.match(
