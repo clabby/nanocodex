@@ -386,6 +386,8 @@ function AccountMenuContent({ inline }: { inline: boolean }) {
                 fundingError={walletFunding.error}
                 fundingErrorSource={walletFunding.errorSource}
                 fundingOperation={walletFunding.operation}
+                checkoutUrl={walletFunding.checkoutUrl}
+                fundingMessage={walletFunding.message}
                 fundingLoading={walletFunding.loading}
                 onFund={walletFunding.fund}
               />

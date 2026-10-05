@@ -169,3 +169,62 @@ actual workerd HTTP listener, real Durable Object storage, and the official
 MCP JavaScript client. Only the external account/provider services use synthetic
 fixtures. The test emits a bounded HTTP transcript and authorization/dispatch
 assertions; keep per-run evidence in ignored `output/`.
+
+## MACH wallet funding
+
+The account site's `/v1/machine-usd/config` and `/v1/machine-usd/orders` routes
+use MACH's private `OnrampApi` contract: `GET /v1/config`, `POST /v1/orders`,
+and `GET /v1/orders/ord_<32 lowercase hex digits>`. Mercator's public
+`/v1/onramp` routes are not an onramp transport.
+
+Configure one transport on the Connect Worker, including each preview environment
+that should support funding:
+
+- In the MACH Worker's Cloudflare account, add an optional `MACH_ONRAMP` service
+  binding to the MACH Worker with `entrypoint: "OnrampApi"`.
+- Across Cloudflare accounts, use MACH's authenticated onramp relay. Configure
+  `MACH_ONRAMP_RELAY_URL` as its fixed HTTPS origin (no path, query, or userinfo)
+  and provision the same secret of at least 32 characters as
+  `MACH_ONRAMP_RELAY_TOKEN` on both Workers using secret management. The relay
+  binds to `OnrampApi` inside MACH's account. See
+  [MACH relay setup](https://github.com/tempoxyz/mach/blob/main/docs/nanocodex-onramp-relay.md).
+
+The private binding takes precedence. An absent or invalid transport returns
+`503 machine_usd_unavailable`; there is no public-endpoint fallback. Adding a
+binding name without provisioning its target does not enable funding. Relay
+credentials never reach the browser, and account cookies never reach MACH.
+Only the three config/order routes cross the relay; redirects are rejected.
+A transport failure can mean order creation succeeded. Retain the exact body,
+capability and idempotency key when retrying.
+
+The account proxy resolves the persistent account's Worker-owned wallet through
+`/v1/me`, overwrites client-supplied recipients, requires the same browser Origin
+for creates, and scopes idempotency keys to the wallet. Status requires both the
+account session and order capability. Responses must match the wallet, amount,
+order ID and canonical MACH amount. Completion requires fulfilled issuance and
+a transaction hash, not payment success alone.
+
+The UI retains its account-bound intent in session storage before dispatch,
+opens Stripe through an explicit link in a new tab, and polls on the original
+Nanocodex page. Reloading or a temporary failure can be recovered by selecting
+Add funds again: the existing order is checked and identical create inputs are
+replayed when necessary. Closing checkout does not complete or cancel an order.
+Polling stops after 15 minutes and retains the intent for recovery. A fulfilled
+order refreshes the wallet balance. Hosted checkout's return destination is
+controlled by MACH; arbitrary browser return URLs are not forwarded.
+
+Validation (Node 24, installed workspace dependencies):
+
+```sh
+node --experimental-strip-types --test js/connect-api/test/machFunding.test.mjs
+MACH_RELAY_SOURCE=/absolute/path/to/mach/src/onramp-relay.ts \
+  node --experimental-strip-types --test js/connect-api/test/machFunding.test.mjs
+WALLET_BROWSER_CHANNEL=chrome node js/account/scripts/wallet-smoke.mjs
+```
+
+The HTTP journey bundles the shipped Connect Worker and runs the account handler
+over local HTTP, with synthetic account authentication and an external MACH
+provider fixture. `MACH_RELAY_SOURCE` adds the actual companion relay to that
+journey. The browser journey exercises the production funding hook and card with
+synthetic HTTP responses on desktop and mobile. Neither journey charges a card
+or deploys a Worker. Logs and browser screenshots belong under ignored `output/`.

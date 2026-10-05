@@ -154,7 +154,7 @@ test("SMS OTP accepts immediate resends without local phone/IP limits and preser
     await mkdir(output, { recursive: true });
     await writeFile(new URL("http-trace.json", output), JSON.stringify({
       command: "node --test js/managed/test/sms-otp-journey.test.mjs", passed,
-      inputs: "Synthetic phones, fixed test IPs, synthetic correct/wrong OTPs; credentials, challenge IDs, user IDs and cookies omitted",
+      inputs: "Synthetic phones, fixed test IPs, synthetic correct/wrong one-time codes; credentials, challenge IDs, user IDs and cookies omitted",
       expected: "Immediate starts exceed former cooldown, 5/phone and 20/IP caps; resend_after=0; latest challenge permits wrong-code retry and one login; foreign origins fail; provider failure permits immediate recovery",
       trace,
     }, null, 2));
