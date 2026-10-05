@@ -4,6 +4,8 @@ The managed TUI recognizes private browser login, browser takeover, verification
 code, bound browser form and Vault intake requests. A live request opens a local
 private overlay. `/secure-input` reopens the most recent pending request. Native
 sudo continues to use its separately enrolled, command-bound encrypted helper.
+Private terminal entry currently requires macOS or Linux process protection;
+other platforms reject private entry before allocating input buffers.
 
 The overlay intercepts input before the chat composer, history, transcript,
 clipboard and terminal control/export paths. Values are masked and sent directly
@@ -64,6 +66,9 @@ or purchases.
 The synthetic journey runs the built terminal in a PTY, drives the production
 private browser runtime against local Chromium, and writes to the real encrypted
 Vault broker in workerd. The model events and external website are fixtures.
+The terminal journey covers one-time browser login, named Vault takeover, named
+verification-code challenges, bound password and typed secure forms, all five
+Vault intake/reuse kinds, and mixed text/select/checkbox/multiline controls.
 Production account-to-managed HTTP admission is tested separately with synthetic
 account enrollment. Evidence includes terminal output, safe receipts, HTTP
 assertions and browser state checks; test values must remain absent from model

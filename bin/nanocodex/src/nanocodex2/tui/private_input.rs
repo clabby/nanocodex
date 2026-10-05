@@ -1064,13 +1064,12 @@ pub(crate) async fn run(c: &ManagedClient, r: &Request, operation: Operation) ->
                 if current != *r {
                     return Outcome::Failed;
                 }
-                if v.get("approved") == Some(&Value::Bool(false)) {
-                    if !post(c, r, r.control("approve"))
+                if v.get("approved") == Some(&Value::Bool(false))
+                    && !post(c, r, r.control("approve"))
                         .await
                         .is_some_and(|v| s(&v, "status") == "approved")
-                    {
-                        return Outcome::Failed;
-                    }
+                {
+                    return Outcome::Failed;
                 }
             }
             let mut body = r.control("observe");

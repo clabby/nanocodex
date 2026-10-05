@@ -554,7 +554,7 @@ mod tests {
             PrivateInputRequest::parse(&envelope, "agent"),
             PrivateInputRequest::parse(&h, "agent")
         );
-        let mut other = h.clone();
+        let mut other = h;
         other["origin"] = json!("https://other.test");
         other["allowed_origins"] = json!(["https://other.test"]);
         assert!(PrivateInputRequest::parse(&json!([envelope, other]), "agent").is_none());
