@@ -23,13 +23,14 @@ export function createSearchCommands({ Bash }) {
           try { if ((await ctx.fs.stat(ctx.fs.resolvePath(ctx.cwd, path))).isDirectory) directoryInput = true; } catch {}
         }
         const fallback = () => boundedCommand(command, name, args, ctx, searchArguments(name, args));
-        // Upstream smart-case checks ASCII capitals in the original pattern.
+        // Explicit -i and upstream smart-case share cooperative ASCII folding.
+        // Smart-case checks ASCII capitals in the original pattern.
         // Fold ASCII literals cooperatively, but leave Unicode case folding and
         // upstream's Unicode prefilter semantics with the original command.
-        const smartCase = name === "rg" && template && !/[A-Z]/.test(parsed.pattern);
+        const smartCase = name === "rg" && template && (parsed.ignoreCase || !/[A-Z]/.test(parsed.pattern));
         const asciiCase = smartCase && /^[\x00-\x7f]*$/.test(template.literal);
         if (template && (!smartCase || asciiCase) && !directoryInput && (parsed.files.length > 0 || ctx.stdin.length > 0 || name !== "rg")) {
-          return await search(name, parsed, template, ctx, asciiCase ? fallback : undefined);
+          return await search(name, parsed, asciiCase ? { ...template, literal: template.literal.toLowerCase() } : template, ctx, asciiCase ? fallback : undefined);
         }
         return await fallback();
       } catch (error) {
@@ -124,7 +125,7 @@ async function boundedCommand(command, name, args, ctx, plan) {
 }
 
 function parseArgs(name, args) {
-  const value = { mode: name === "fgrep" ? "fixed" : name === "egrep" || name === "rg" ? "extended" : "basic", files: [], pattern: undefined, only: false, number: false, count: false, filesWith: false, filesWithout: false, quiet: false, invert: false, filename: undefined, max: 0 };
+  const value = { mode: name === "fgrep" ? "fixed" : name === "egrep" || name === "rg" ? "extended" : "basic", files: [], pattern: undefined, ignoreCase: false, only: false, number: false, count: false, filesWith: false, filesWithout: false, quiet: false, invert: false, filename: undefined, max: 0 };
   let options = true;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
@@ -134,11 +135,12 @@ function parseArgs(name, args) {
       if (arg === "-m" || arg === "--max-count") { if (!/^\d+$/.test(args[index + 1] ?? "")) return; value.max = Number(args[++index]); continue; }
       const max = arg.match(/^(?:-m|--max-count=)(\d+)$/);
       if (max) { value.max = Number(max[1]); continue; }
-      const long = { "--only-matching": "o", "--line-number": "n", "--count": "c", "--files-with-matches": "l", "--files-without-match": "L", "--quiet": "q", "--silent": "q", "--no-filename": "h", "--with-filename": "H", "--invert-match": "v", "--fixed-strings": "F", "--extended-regexp": "E" };
+      const long = { "--ignore-case": "i", "--only-matching": "o", "--line-number": "n", "--count": "c", "--files-with-matches": "l", "--files-without-match": "L", "--quiet": "q", "--silent": "q", "--no-filename": "h", "--with-filename": "H", "--invert-match": "v", "--fixed-strings": "F", "--extended-regexp": "E" };
       const flags = arg.startsWith("--") ? long[arg] : arg.slice(1);
       if (!flags) return;
       for (const flag of flags) {
-        if (flag === "o") value.only = true;
+        if (flag === "i") { if (name !== "rg") return; value.ignoreCase = true; }
+        else if (flag === "o") value.only = true;
         else if (flag === "n") value.number = true;
         else if (flag === "c") value.count = true;
         else if (flag === "l") value.filesWith = true;

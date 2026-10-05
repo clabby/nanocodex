@@ -178,7 +178,7 @@ async function smartCase() {
     "report{5000}.txt": "alpha\n",
   });
   for (const pattern of ["foo", "Foo", "i", "k", "s", "σ", "é", "É", "ß", "𐐨"]) {
-    for (const flags of ["-on", "-Fon", "-n", "-vn", "-l", "-q"]) {
+    for (const flags of ["-on", "-Fon", "-n", "-vn", "-l", "-q", "-ion", "-iFon", "-ivn", "-il", "--ignore-case -q"]) {
       await compare(shells, `rg ${flags} ${quote(pattern)} case.txt unicode-case.txt`);
     }
   }
@@ -190,7 +190,7 @@ async function smartCase() {
   await shells.runtime.filesystem.writeFile("large-case.txt", text);
   await shells.baseline.fs.writeFile("/workspace/large-case.txt", text);
   trace({ fixture: "large-case.txt", bytes: text.length, generation: "x^65534 + fOo + x^1048576 + FOO + newline" });
-  for (const cmd of ["rg -on foo large-case.txt", "rg -Fon foo large-case.txt", "rg -on '.{0,2}foo.{0,2}' large-case.txt", "rg -on Foo large-case.txt", "rg -o missing large-case.txt"]) {
+  for (const cmd of ["rg -on foo large-case.txt", "rg -Fon foo large-case.txt", "rg -on '.{0,2}foo.{0,2}' large-case.txt", "rg -on Foo large-case.txt", "rg -o missing large-case.txt", "rg -ion FOO large-case.txt", "rg --ignore-case -Fo Foo large-case.txt", "rg -ion '.{0,2}FOO.{0,2}' large-case.txt"]) {
     let ticks = 0;
     const timer = setInterval(() => ticks++, 0);
     try { await compare(shells, cmd); } finally { clearInterval(timer); }
@@ -201,16 +201,16 @@ async function smartCase() {
   // Unicode still uses the upstream matcher and its conservative admission.
   // Do not silently relax that budget merely to accelerate ASCII literals.
   await shells.runtime.filesystem.writeFile("large-unicode.txt", text + "İ\n");
-  const refused = publicResult(await shells.runtime.tool.handler({ cmd: "rg -o foo large-unicode.txt" }, context()));
-  trace({ cmd: "rg -o foo large-unicode.txt", observed: refused, expected: "Unicode fallback retains admission" });
+  const refused = publicResult(await shells.runtime.tool.handler({ cmd: "rg -io FOO large-unicode.txt" }, context()));
+  trace({ cmd: "rg -io FOO large-unicode.txt", observed: refused, expected: "Unicode fallback retains admission" });
   assert.equal(refused.exit_code, 126);
   assert.match(refused.output, /admission/);
   const cancellation = new AbortController();
-  const running = shells.runtime.tool.handler({ cmd: "rg -o foo large-case.txt" }, context(cancellation.signal));
+  const running = shells.runtime.tool.handler({ cmd: "rg -io FOO large-case.txt" }, context(cancellation.signal));
   const timer = setTimeout(() => cancellation.abort(new Error("cancel ASCII scan")), 1);
   const cancelled = await running;
   clearTimeout(timer);
-  trace({ cmd: "rg -o foo large-case.txt", cancelled });
+  trace({ cmd: "rg -io FOO large-case.txt", cancelled });
   assert.equal(cancelled.exit_code, 124);
   await recovery(shells.runtime);
 }
