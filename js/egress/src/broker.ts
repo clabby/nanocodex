@@ -632,9 +632,11 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       advance("alarm_ms");
       // An existing alarm survives eviction. Rewriting it on every activation
       // adds a storage write and can postpone an alarm that woke this object.
-      if (await this.#state.storage.getAlarm() === null) {
-        const alarm = this.#nextAlarm();
-        if (alarm !== undefined) await this.#state.storage.setAlarm(alarm);
+      const alarm = this.#nextAlarm();
+      // OpenAI-only and vault-only accounts have no refresh work. They do not
+      // need an alarm read on the cold model/metadata path.
+      if (alarm !== undefined && await this.#state.storage.getAlarm() === null) {
+        await this.#state.storage.setAlarm(alarm);
       }
     } finally {
       this.#activationPhases[this.#activationPhase] = Date.now() - phaseStartedAt;

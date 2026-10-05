@@ -190,7 +190,7 @@ async function smartCase() {
   await shells.runtime.filesystem.writeFile("large-case.txt", text);
   await shells.baseline.fs.writeFile("/workspace/large-case.txt", text);
   trace({ fixture: "large-case.txt", bytes: text.length, generation: "x^65534 + fOo + x^1048576 + FOO + newline" });
-  for (const cmd of ["rg -on foo large-case.txt", "rg -Fon foo large-case.txt", "rg -on '.{0,2}foo.{0,2}' large-case.txt", "rg -on Foo large-case.txt", "rg -o missing large-case.txt", "rg -ion FOO large-case.txt", "rg --ignore-case -Fo Foo large-case.txt", "rg -ion '.{0,2}FOO.{0,2}' large-case.txt"]) {
+  for (const cmd of ["rg -on foo large-case.txt", "rg -Fon foo large-case.txt", "rg -on '.{0,2}foo.{0,2}' large-case.txt", "rg -on Foo large-case.txt", "rg -o missing large-case.txt", "rg -ion FOO large-case.txt", "rg --ignore-case -oF Foo large-case.txt", "rg -ion '.{0,2}FOO.{0,2}' large-case.txt"]) {
     let ticks = 0;
     const timer = setInterval(() => ticks++, 0);
     try { await compare(shells, cmd); } finally { clearInterval(timer); }

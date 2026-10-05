@@ -604,10 +604,54 @@ without rewriting baseline instructions, cache keys, or the conversation prefix.
 
 ## Public journeys and protocol boundaries
 
+Create an agent, durably admit its first turn, and stream its output in one request:
+
+```sh
+curl --no-buffer --fail-with-body "$NANOCODEX_ORIGIN/v1/agent-runs" \
+  -H "Authorization: Bearer $NANOCODEX_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -H 'Idempotency-Key: example-run-001' \
+  --data '{"input":"Reply with a short greeting.","settings":{"model":"gpt-6.1-sol","thinking":"low","reasoning_mode":"standard","fast_mode":false}}'
+```
+
+Reuse that key with the same body after an uncertain response. Choose a new key
+for a new run; the command exits after the requested turn's terminal event.
+Explicit GPT settings avoid the automatic model-selection catalog read. Omit
+settings to select from the account's available models. Credential authorization
+still occurs at dispatch.
+
+Run `node js/managed/benchmark/curl-ttft.mjs --mode=stream --family=codex` from
+the repository root to measure the normal account proxy, Managed API, Session
+and Egress path with curl against local workerd and a synthetic external provider.
+Use `--mode=combined` for the existing JSON-then-events path, `--mode=legacy`
+for separate create/submit/events, and `--root=/path/to/checkout` for a baseline.
+The harness records first assistant text, durable completion, source hashes and
+raw traces under ignored `output/managed-api-ttft/`; it does not measure live
+inference, network geography or production cold activation.
+
 - SMS OTP/account and API-key routes establish the account identity that owns
   agents, organizations, connectors, memory, and history.
 - `/v1/agents` lists or creates agents. `/v1/agent-runs` creates an agent and
   admits its first turn under one required stable key and one client request.
+  The default response remains JSON. Send `Accept: text/event-stream` to receive
+  the admission receipt and live output in that same POST; streaming additionally
+  requires `agents:read`. Both agent creation and turn acceptance are durable
+  before the response starts. The first `event: run` contains the JSON receipt
+  (`agent_id`, `session_id`, `turn_id`, `turn_idempotency_key`, `accepted_cursor`
+  and turn state); it has no event ID. Subsequent frames are the ordinary managed
+  durable events, starting with the accepted turn, with their original cursors.
+  The response is `201` for first acceptance and `200` for an idempotent replay;
+  validation/authorization failures remain JSON. `Location` points to the agent's
+  event endpoint and `x-nanocodex-agent-id` / `x-nanocodex-turn-id` identify the run.
+  A disconnect leaves the accepted turn running. Retry the same POST and key to
+  recover its receipt, or reconnect to `GET /v1/agents/:id/events`; both accept a
+  numeric `Last-Event-ID` and resume after that cursor. Without a cursor, a repeated
+  streaming POST replays from the first turn's acceptance. The POST stream closes
+  after delivering that turn's durable `turn_completed`, `turn_failed` or
+  `turn_cancelled` event, so curl exits normally. Resuming at/after a retained
+  terminal cursor returns the receipt then closes. The existing GET event stream
+  stays open. A changed input under the same key remains an idempotency conflict.
   Agent routes create later turns, read state,
   cancel or steer work, delete an agent, and support explicit durability import
   and export. Stable `Idempotency-Key` values make create and turn retries safe.

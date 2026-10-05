@@ -195,7 +195,7 @@ export class ToolRouter {
         const resolved = normalizeResolvedTool(definition.name, tool, candidate);
         sourceEntries.push({
           definition,
-          fingerprint: callableContractFingerprint(exactDefinition),
+          fingerprint: undefined,
           normalizedName: normalizeToolName(definition.name),
           source,
           sourceIndex,
@@ -506,7 +506,7 @@ function selectCollision(left, right) {
     if (cloud.source.kind !== "cloud") {
       throw collisionError(left, right, "attached overlays may only replace cloud tools");
     }
-    if (attached.definition.name !== cloud.definition.name || attached.fingerprint !== cloud.fingerprint) {
+    if (attached.definition.name !== cloud.definition.name || entryFingerprint(attached) !== entryFingerprint(cloud)) {
       throw collisionError(left, right, "attached/cloud catalog parity mismatch");
     }
     return { ...attached, fallback: cloud };
@@ -590,6 +590,12 @@ function normalizeResolvedTool(name, tool, candidate) {
     summary: candidate?.summary ?? tool.summary,
     timeoutMs: candidate?.timeout_ms ?? tool.timeoutMs,
   });
+}
+
+// Most tools never overlap. Only compute parity for an attached/cloud collision;
+// each entry owns an immutable definition, including across admitted snapshots.
+function entryFingerprint(entry) {
+  return entry.fingerprint ??= callableContractFingerprint(entry.definition);
 }
 
 function callableContractFingerprint(definition) {

@@ -2077,8 +2077,10 @@ async function managedFetchRoute(
       if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
       const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
       if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+      const stream = acceptsAgentRunStream(request);
       if (!principal.capabilities.includes("agents:write")
-        || !principal.capabilities.includes("tools:use")) {
+        || !principal.capabilities.includes("tools:use")
+        || (stream && !principal.capabilities.includes("agents:read"))) {
         return json({ error: "forbidden" }, { status: 403 });
       }
       if (principal.connectGrant
@@ -2096,6 +2098,9 @@ async function managedFetchRoute(
       }
       if (!IDEMPOTENCY_KEY.test(requestKey)) {
         return json({ error: "invalid_idempotency_key" }, { status: 400 });
+      }
+      if (stream && parseCursor(request.headers.get("last-event-id")) === undefined) {
+        return json({ error: "invalid_cursor" }, { status: 400 });
       }
       let run: ReturnType<typeof parseAgentRunBody>;
       try {
@@ -2119,10 +2124,23 @@ async function managedFetchRoute(
       const turnKey = `agent-run:${turnKeyHash}`;
       const created = await managedFetch(new Request(new URL("/v1/agents", url), {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": requestKey, origin: url.origin },
+        headers: { "content-type": "application/json", "idempotency-key": requestKey, origin: url.origin,
+          ...(stream ? { accept: "text/event-stream" } : {}),
+          ...(stream && request.headers.has("last-event-id") ? { "last-event-id": request.headers.get("last-event-id")! } : {}),
+        },
         body: run.creationBody,
+        signal: request.signal,
       }), env, ctx, principal, clientIngressColo, { id: turnId, key: turnKey, input: run.input });
       if (!created.ok) return created;
+      if (stream) {
+        if (!created.headers.get("content-type")?.startsWith("text/event-stream")
+          || created.headers.get("x-nanocodex-agent-id") !== expectedAgentId
+          || created.headers.get("x-nanocodex-turn-id") !== turnId) {
+          await created.body?.cancel();
+          return json({ error: "turn_admission_invalid_response" }, { status: 502 });
+        }
+        return created;
+      }
       let receipt: Record<string, unknown>;
       try {
         receipt = await created.json<Record<string, unknown>>();
@@ -2160,6 +2178,7 @@ async function managedFetchRoute(
       let creationSettings = DEFAULT_AGENT_SETTINGS;
       let settingsProvided = false;
       let creationConfiguration: AgentConfiguration = {};
+      let modelCatalog: Awaited<ReturnType<typeof availableManagedModels>> | undefined;
       try {
         const body = parseAgentCreateBody(await request.text());
         durabilityArchive = body.durability;
@@ -2191,7 +2210,7 @@ async function managedFetchRoute(
         }
         if (!settingsProvided && !creationConfiguration.settings && !creationConfiguration.model_routing && body.durability === undefined) {
           try {
-            const catalog = await availableManagedModels(env.NANOCODEX, principal.userId, principal.connectGrant ? {} : env);
+            const catalog = modelCatalog = await availableManagedModels(env.NANOCODEX, principal.userId, principal.connectGrant ? {} : env);
             if (catalog.default_model === null) return json({ error: "no_available_models" }, { status: 409 });
             if (catalog.default_model?.startsWith("claude-")) creationSettings = { ...DEFAULT_AGENT_SETTINGS, model: catalog.default_model };
           } catch { return json({ error: "model_availability_unavailable" }, { status: 503 }); }
@@ -2200,7 +2219,9 @@ async function managedFetchRoute(
           if (creationConfiguration.output_schema !== undefined || creationConfiguration.prompt_cache !== undefined || creationConfiguration.tools?.includes("WebSearch")) return json({ error: "claude_capability_unsupported" }, { status: 409 });
           if (principal.connectGrant) return json({ error: "claude_forbidden" }, { status: 403 });
           let catalog;
-          try { catalog = await availableManagedModels(env.NANOCODEX, principal.userId, principal.connectGrant ? {} : env); }
+          // Default selection may already have read this same live catalog.
+          // Reuse only within this request; no cross-request authorization cache.
+          try { catalog = modelCatalog ?? await availableManagedModels(env.NANOCODEX, principal.userId, principal.connectGrant ? {} : env); }
           catch { return json({ error: "model_availability_unavailable" }, { status: 503 }); }
           if (!catalog.data.some(model => model.id === creationSettings.model)) return json({ error: "claude_model_unavailable" }, { status: 409 });
         }
@@ -2274,7 +2295,11 @@ async function managedFetchRoute(
           created = await fetchCreateStage(stub, firstTurn
             ? "https://session.internal/create-run" : "https://session.internal/create", {
             method: "POST", headers: (() => { const headers = forwardManagedIngress(new Headers({ "content-type": "application/json" }), clientIngressColo);
-              if (firstTurn) forwardPrincipalAssertions(headers, principal);
+              if (firstTurn) {
+                forwardPrincipalAssertions(headers, principal);
+                if (acceptsAgentRunStream(request)) headers.set("accept", "text/event-stream");
+                if (request.headers.has("last-event-id")) headers.set("last-event-id", request.headers.get("last-event-id")!);
+              }
               return headers; })(),
             body: JSON.stringify({
               session_id: agentId, owner_id: principal.userId,
@@ -2286,7 +2311,7 @@ async function managedFetchRoute(
           }, ownershipTimeoutMs, "agent creation", 5, (attempt) => {
             sessionAttempts = attempt;
             sessionDispatchAt = Date.now();
-          });
+          }, { retryThrottled: !(firstTurn && acceptsAgentRunStream(request)) });
         } catch {
           if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
           return json({ error: "agent creation failed" }, { status: 503 });
@@ -2295,7 +2320,16 @@ async function managedFetchRoute(
           if (created.status >= 500 && requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
           return created;
         }
-        const phases = await created.json<Record<string, number> & { first_turn?: Record<string, unknown>; first_turn_status?: number; first_turn_summary?: unknown }>();
+        const streaming = firstTurn !== undefined && created.headers.get("content-type")?.startsWith("text/event-stream");
+        // Keep full input in the body; only bounded timing/identity metadata
+        // crosses this internal header on the streaming response.
+        const phases: Record<string, number> & { first_turn?: Record<string, unknown>; first_turn_status?: number; first_turn_summary?: unknown } = streaming
+          ? JSON.parse(created.headers.get("x-nanocodex-run-phases") ?? "null")
+          : await created.json();
+        if (!phases) {
+          await created.body?.cancel();
+          return json({ error: "turn_admission_invalid_response" }, { status: 502 });
+        }
         const sessionReceivedAt = Date.now();
         const sessionCreateMs = roundMilliseconds(performance.now() - sessionCreationStartedAt);
         const createMs = roundMilliseconds(performance.now() - creationStartedAt);
@@ -2357,7 +2391,11 @@ async function managedFetchRoute(
               }
             }
           }
-          response = json({ agent_id: agentId, session_id: agentId,
+          if (streaming) {
+            const headers = new Headers(created.headers);
+            headers.delete("x-nanocodex-run-phases");
+            response = new Response(created.body, { status: created.status, headers });
+          } else response = json({ agent_id: agentId, session_id: agentId,
             turn_idempotency_key: firstTurn.key, ...phases.first_turn },
           { status: phases.first_turn_status === 202 ? 201 : 200 });
         } else response = agentCreationResponse(url, agentId, creationSettings, true);
@@ -3582,6 +3620,15 @@ async function chiefManagedFailure(response: Response): Promise<Error> {
     await response.body?.cancel();
   }
   return new Error(`chief_managed_${code}`);
+}
+
+/** Explicit opt-in leaves the existing JSON representation unchanged. */
+function acceptsAgentRunStream(request: Request): boolean {
+  return (request.headers.get("accept") ?? "").split(",").some(part => {
+    const [type, ...parameters] = part.trim().toLowerCase().split(";");
+    const quality = parameters.map(value => value.trim()).find(value => value.startsWith("q="));
+    return type.trim() === "text/event-stream" && (quality === undefined || Number(quality.slice(2)) > 0);
+  });
 }
 
 function forkCreationResponse(url: URL, agentId: string, parentAgentId: string, settings: ManagedAgentSettings): Response {
@@ -5705,6 +5752,10 @@ export class DurableAgentSession extends DurableComputerObject {
       || typeof turn.id !== "string" || !TURN_ID.test(turn.id)
       || typeof turn.key !== "string" || !IDEMPOTENCY_KEY.test(turn.key))
       return json({ error: "invalid_request" }, { status: 400 });
+    const stream = acceptsAgentRunStream(request);
+    const requestedCursor = request.headers.get("last-event-id");
+    if (stream && parseCursor(requestedCursor) === undefined)
+      return json({ error: "invalid_cursor" }, { status: 400 });
     const asserted = forwardedPrincipal(request.headers);
     if (!asserted || asserted.ownerId !== initialization.owner_id
       || asserted.organizationId !== initialization.organization_id
@@ -5712,6 +5763,7 @@ export class DurableAgentSession extends DurableComputerObject {
       || asserted.authorizationEpoch !== initialization.authorization_epoch
       || !asserted.authorization.capabilities.includes("agents:write")
       || !asserted.authorization.capabilities.includes("tools:use")
+      || (stream && !asserted.authorization.capabilities.includes("agents:read"))
       || (asserted.authorization.connectGrant
         && !asserted.authorization.connectGrant.connectors.includes("chatgpt")))
       return json({ error: "not_found" }, { status: 404 });
@@ -5738,8 +5790,57 @@ export class DurableAgentSession extends DurableComputerObject {
     let summary: unknown;
     try { summary = JSON.parse(admitted.headers.get("x-nanocodex-turn-summary") ?? "null"); }
     catch { /* Best effort summary, never part of turn admission. */ }
+    const admissionMs = roundMilliseconds(performance.now() - admitStartedAt);
+    if (stream) {
+      // Both commits are durable before subscription. Use GET /events' retained
+      // log and archive paging without another auth/ownership/Session round trip.
+      const cursor = requestedCursor === null ? (BigInt(String(turnReceipt.accepted_cursor)) - 1n).toString()
+        : parseCursor(requestedCursor)!;
+      const events = this.#eventLog.streamWithPage(cursor,
+        this.#eventArchive.latestCursor(this.#eventLog),
+        this.#eventArchive.pageReader(this.#eventLog), request.signal, {
+          stopAfter: event => event.turn_id === turn.id
+            && ["turn_completed", "turn_failed", "turn_cancelled"].includes(event.message.type),
+        });
+      if (!events.ok || !events.body) return events;
+      if (admitted.headers.get("x-nanocodex-turn-created") === "1"
+        && summary && typeof summary === "object" && !Array.isArray(summary)) {
+        const { title, turnCount } = summary as { title?: unknown; turnCount?: unknown };
+        if (Number.isSafeInteger(turnCount) && Number(turnCount) > 0) {
+          this.ctx.waitUntil(recordAgentActivity(this.env, session.owner_id, session.session_id, {
+            title: typeof title === "string" ? title : "", turnCount: Number(turnCount),
+          }).catch((error) => console.warn({ type: "managed.agent_summary_update_failed", error_kind: errorKind(error) })));
+        }
+      }
+      const receipt = { agent_id: session.session_id, session_id: session.session_id,
+        turn_idempotency_key: turn.key, ...turnReceipt };
+      const reader = events.body.getReader();
+      // A reconnect at/after the retained terminal cursor needs only the receipt;
+      // there is no later event for this turn to wake and close the subscription.
+      if (typeof turnReceipt.terminal_cursor === "string"
+        && BigInt(cursor) >= BigInt(turnReceipt.terminal_cursor)) await reader.cancel();
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`event: run\ndata: ${JSON.stringify(receipt)}\n\n`));
+        },
+        async pull(controller) {
+          const next = await reader.read();
+          if (next.done) controller.close();
+          else controller.enqueue(next.value);
+        },
+        cancel(reason) { return reader.cancel(reason); },
+      });
+      const headers = new Headers(events.headers);
+      headers.set("x-nanocodex-agent-id", session.session_id);
+      headers.set("x-nanocodex-turn-id", turn.id);
+      headers.set("location", `/v1/agents/${session.session_id}/events`);
+      headers.set("x-nanocodex-run-phases", JSON.stringify({ ...phases,
+        first_turn: { turn_id: turn.id, accepted_cursor: turnReceipt.accepted_cursor },
+        first_turn_status: admitted.status, first_turn_admit_ms: admissionMs }));
+      return new Response(body, { status: admitted.status === 202 ? 201 : 200, headers });
+    }
     return json({ ...phases, first_turn: turnReceipt, first_turn_status: admitted.status,
-      first_turn_admit_ms: roundMilliseconds(performance.now() - admitStartedAt),
+      first_turn_admit_ms: admissionMs,
       ...(admitted.headers.get("x-nanocodex-turn-created") === "1" ? { first_turn_summary: summary } : {}),
     });
   }
@@ -9310,9 +9411,8 @@ export class DurableAgentSession extends DurableComputerObject {
       if (!session) throw new Error("session is not initialized");
       const configuration = this.#configuration();
       const complete = async (create?: (options: NonNullable<Parameters<typeof CloudflareAgent.create>[1]>) => Promise<CloudflareAgent.Agent>) => {
-        const accountMcpRefreshMs = await discovery;
         signal.throwIfAborted();
-        return this.#createPreparedAgent(accountMcpRefreshMs, create, signal, create ? preparation : undefined);
+        return this.#createPreparedAgent(discovery, create, signal, create ? preparation : { startedAt: preparation.startedAt });
       };
       // Routed and shared-room transports retain their existing admission path.
       if (session.runtime_profile !== "managed" || configuration.model_routing || this.#threadRoute() || this.#settings().model.startsWith("claude-")) return await complete();
@@ -9354,10 +9454,10 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   async #createPreparedAgent(
-    accountMcpRefreshMs: number,
+    discovery: Promise<number>,
     create?: (options: NonNullable<Parameters<typeof CloudflareAgent.create>[1]>) => Promise<CloudflareAgent.Agent>,
     signal?: AbortSignal,
-    preparation?: { startedAt: number; credentialBindingMs: number },
+    preparation?: { startedAt: number; credentialBindingMs?: number },
   ): Promise<CloudflareAgent.Agent> {
     const constructionStartedAt = performance.now();
     let phaseStartedAt = constructionStartedAt;
@@ -9400,8 +9500,19 @@ export class DurableAgentSession extends DurableComputerObject {
       sshIdentityAllowed: (_reference, context) => context !== undefined
         && this.#hasFullAccountAuthority(this.#authorizationForToolContext(context)),
     });
-    try { if (!multiplayer) await this.#prepareEnvironment(computer); }
-    catch (error) { computer.dispose(); throw error; }
+    let accountMcpRefreshMs: number;
+    let discoveryJoinMs = 0;
+    try {
+      // Account MCP discovery owns only the dynamic catalog. Browser metadata,
+      // workspace construction and configured setup do not consume it, so let
+      // those finish while its read is in flight. Join before capturing tools;
+      // failed or superseded discovery must still dispose this construction.
+      if (!multiplayer) await performanceStage("runtime.environment_setup", () => this.#prepareEnvironment(computer));
+      const discoveryJoinStartedAt = performance.now();
+      accountMcpRefreshMs = await performanceStage("runtime.discovery_join", () => discovery);
+      discoveryJoinMs = performance.now() - discoveryJoinStartedAt;
+      signal?.throwIfAborted();
+    } catch (error) { computer.dispose(); throw error; }
     const sharedBrainWorkspace = createSharedBrainReadWorkspace(
       this.#brainBucket(),
       session.session_id,
@@ -9418,7 +9529,7 @@ export class DurableAgentSession extends DurableComputerObject {
       images: this.env.NANOCODEX_ATTACHMENT_IMAGES,
       fallbackWorkspace: sharedBrainWorkspace, relativePathsUseBrain: !multiplayer,
     });
-    const computerRuntimeMs = performance.now() - phaseStartedAt;
+    const computerRuntimeMs = performance.now() - phaseStartedAt - discoveryJoinMs;
     const currentAccountInfo = async (context: ToolContext) => {
       await this.#accountHostedTools?.refresh();
       // Explicit environment/runtime inspection requests a fresh snapshot and
@@ -10292,6 +10403,7 @@ export class DurableAgentSession extends DurableComputerObject {
     }
     this.#logCapacity("agent_constructed", {
       account_mcp_refresh_ms: accountMcpRefreshMs,
+      discovery_join_ms: roundMilliseconds(discoveryJoinMs),
       credential_binding_ms: roundMilliseconds(credentialBindingMs),
       browser_runtime_ms: roundMilliseconds(browserRuntimeMs),
       workspace_ms: roundMilliseconds(workspaceMs),
@@ -10302,7 +10414,7 @@ export class DurableAgentSession extends DurableComputerObject {
       construction_ms: roundMilliseconds(performance.now() - constructionStartedAt),
       runtime_ready_ms:
         roundMilliseconds(preparation ? performance.now() - preparation.startedAt
-          : performance.now() - constructionStartedAt + accountMcpRefreshMs),
+          : performance.now() - constructionStartedAt),
     });
     return agent;
   }
@@ -13559,13 +13671,16 @@ async function fetchCreateStage(
   operation: string,
   attempts = 2,
   onAttemptStart?: (attempt: number) => void,
+  options: { retryThrottled?: boolean } = {},
 ): Promise<Response> {
   let failure: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       onAttemptStart?.(attempt + 1);
       const response = await fetchWithDeadline(binding, input, init, timeoutMs, operation);
-      if (response.status !== 408 && response.status !== 429 && response.status < 500) {
+      // A streaming create may have durably accepted the turn before finding
+      // its subscriber limit. Preserve that 429/Retry-After for a keyed retry.
+      if (response.status !== 408 && (response.status !== 429 || options.retryThrottled === false) && response.status < 500) {
         return response;
       }
       failure = new Error(`${operation} returned HTTP ${response.status}`);
