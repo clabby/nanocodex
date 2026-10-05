@@ -103,6 +103,24 @@ export function OAuthConsent() {
 
   const selectableScopes = selectedScopes.filter(scope => scopeAvailable(scope, connectors));
 
+  const requestedScopes = request?.scope.split(" ") ?? [];
+  const serviceScopes = requestedScopes.filter(scope => requiredConnector(scope));
+  const connectedScopes = serviceScopes.filter(scope => scopeAvailable(scope, connectors));
+  const unavailableScopes = serviceScopes.filter(scope => !scopeAvailable(scope, connectors));
+  const capabilityGroups = [...new Set(requestedScopes.filter(scope => !requiredConnector(scope)).map(scope => scope.split(":")[0]!))];
+  const allServicesSelected = connectedScopes.length > 0 && connectedScopes.every(scope => selectableScopes.includes(scope));
+
+  function scopeChoice(scope: string, compact = false) {
+    const available = scopeAvailable(scope, connectors);
+    return <label key={scope} className={compact ? "oauth-scope-chip" : "oauth-service-choice"}>
+      <input type="checkbox" checked={available && selectedScopes.includes(scope)}
+        disabled={busy || finished || !available} aria-label={scopeLabel(scope)}
+        onChange={event => setSelectedScopes(current => event.target.checked
+          ? [...new Set([...current, scope])] : current.filter(value => value !== scope))} />
+      <span>{compact ? scopeAction(scope) : serviceLabel(scope)}</span>
+    </label>;
+  }
+
   async function settle(approve: boolean) {
     if (!request || operation.current || finished || (approve && (!account?.address || !selectableScopes.length))) return;
     operation.current = true;
@@ -186,30 +204,13 @@ export function OAuthConsent() {
       {request ? <>
         <section className="request-title" aria-labelledby="oauth-heading">
           <h1 id="oauth-heading">Connect {request.client_name}</h1>
-          <p className="request-copy">This client name is provided by its developer and is not verified by Nanocodex.</p>
-        </section>
-        <section className="oauth-permissions" aria-label="Requested access">
-          <h2>Requested access</h2>
-          <p>Choose the permissions to share with this client.</p>
-          <ul className="oauth-scope-list">{request.scope.split(" ").map(scope => <li key={scope}>
-            <label><input type="checkbox" checked={selectedScopes.includes(scope)} disabled={busy || finished || !scopeAvailable(scope, connectors)}
-              onChange={event => setSelectedScopes(current => event.target.checked
-                ? [...current, scope] : current.filter(value => value !== scope))} />
-              <span>{scopeLabel(scope)}<code>{scope}</code>{requiredConnector(scope) && account && connectors && !scopeAvailable(scope, connectors) ? <small>Not connected in this account</small> : null}</span>
-            </label>
-          </li>)}</ul>
-          <p>Only the selected permissions are granted. Connector permissions require a connected account.</p>
-          {account && !connectors && !connectorFailure ? <p role="status">Checking connected accounts…</p> : null}
-          {connectorFailure ? <p role="alert">{connectorFailure}</p> : null}
-          <dl className="oauth-destinations">
-            <div><dt>MCP server</dt><dd><code>{request.resource}</code></dd></div>
-            <div><dt>Return address</dt><dd><code>{request.redirect_uri}</code></dd></div>
-          </dl>
+          <p className="oauth-callback">Returns to <strong>{new URL(request.redirect_uri).host}</strong></p>
+          <p className="request-copy">Choose what this client can access.</p>
         </section>
         {account === undefined && !failure ? <p role="status">Checking your account session…</p> : null}
         {account && !finished ? <section className="oauth-account" aria-label="Selected account">
-          <h2>Selected account</h2><code>{account.address}</code>
-          <button type="button" disabled={busy} onClick={() => void changeAccount()}>Use another account</button>
+          <div><h2>Account</h2><code>{account.address && account.address.length > 20 ? `${account.address.slice(0, 8)}…${account.address.slice(-6)}` : account.address}</code></div>
+          <button type="button" disabled={busy} onClick={() => void changeAccount()}>Switch account</button>
         </section> : null}
         {account === null && !finished ? <AccountChooser
           appName="Nanocodex"
@@ -222,11 +223,57 @@ export function OAuthConsent() {
             } else setFailure("Your account did not provide an address. Sign in again.");
           }}
         /> : null}
+        <section className="oauth-permissions" aria-label="Requested access">
+          <div className="oauth-section-heading"><h2>Choose access</h2><span>Only your selections are shared</span></div>
+          {capabilityGroups.length > 0 ? <section aria-labelledby="oauth-capabilities-heading">
+            <h3 id="oauth-capabilities-heading">Nanocodex capabilities</h3>
+            <div className="oauth-capabilities">{capabilityGroups.map(group => <div className="oauth-capability-row" key={group}>
+              <div><h4>{capabilityLabel(group)}</h4><p className="oauth-hint">{capabilityDescription(group)}</p></div>
+              <div className="oauth-scope-options" role="group" aria-label={capabilityLabel(group)}>
+                {requestedScopes.filter(scope => !requiredConnector(scope) && scope.split(":")[0] === group).map(scope => scopeChoice(scope, true))}
+              </div>
+            </div>)}</div>
+          </section> : null}
+          {serviceScopes.length > 0 ? <section className="oauth-services" aria-labelledby="oauth-services-heading">
+            <div className="oauth-section-heading">
+              <h3 id="oauth-services-heading">Connected services{connectors ? ` · ${connectedScopes.length}` : ""}</h3>
+              {connectedScopes.length > 0 ? <button className="oauth-text-action" type="button" disabled={busy || finished}
+                onClick={() => setSelectedScopes(current => allServicesSelected
+                  ? current.filter(scope => !connectedScopes.includes(scope))
+                  : [...new Set([...current, ...connectedScopes])])}>
+                {allServicesSelected ? "Clear services" : "Select all services"}
+              </button> : null}
+            </div>
+            <p className="oauth-hint">Access selected services using your existing account permissions.</p>
+            {account && !connectors && !connectorFailure ? <p role="status">Checking connected accounts…</p> : null}
+            {!account ? <p className="oauth-hint">Sign in to see your connected services.</p> : null}
+            {connectorFailure ? <p className="dialog-error" role="alert">{connectorFailure}</p> : null}
+            {connectedScopes.length > 0 ? <div className="oauth-service-grid">{connectedScopes.map(scope => scopeChoice(scope))}</div> : null}
+            {connectors && connectedScopes.length === 0 ? <p className="oauth-hint">None of the requested services are connected to this account.</p> : null}
+            {connectors && unavailableScopes.length > 0 ? <details className="oauth-disclosure">
+              <summary>Not connected <span>({unavailableScopes.length})</span></summary>
+              <p className="oauth-hint">These services can’t be granted in this connection.</p>
+              <div className="oauth-service-grid">{unavailableScopes.map(scope => scopeChoice(scope))}</div>
+            </details> : null}
+          </section> : null}
+          <details className="oauth-disclosure oauth-technical">
+            <summary>Connection details</summary>
+            <p className="oauth-hint">Client name supplied by its developer. Not verified by Nanocodex.</p>
+            <dl className="oauth-destinations">
+              {account?.address ? <div><dt>Account</dt><dd><code>{account.address}</code></dd></div> : null}
+              <div><dt>MCP server</dt><dd><code>{request.resource}</code></dd></div>
+              <div><dt>Return address</dt><dd><code>{request.redirect_uri}</code></dd></div>
+              <div><dt>Requested scopes</dt><dd><code>{request.scope}</code></dd></div>
+              <div><dt>Selected scopes</dt><dd><code>{selectableScopes.join(" ") || "None"}</code></dd></div>
+            </dl>
+          </details>
+        </section>
       </> : !failure ? <p role="status">Loading authorization request…</p> : null}
       {failure ? <p className="dialog-error" role="alert">{failure}</p> : null}
       {finished && !failure ? <p role="status">Returning to your MCP client…</p> : null}
     </div>
     {request && !finished ? <div className="dialog-actions">
+      <p className="oauth-selection-count" role="status">{selectableScopes.length} {selectableScopes.length === 1 ? "permission" : "permissions"} selected</p>
       <button type="button" disabled={busy} onClick={() => void settle(false)}>Deny</button>
       <button type="button" disabled={busy || !account?.address || selectableScopes.length === 0} aria-busy={busy} onClick={() => void settle(true)}>
         {busy ? "Working…" : "Allow access"}
@@ -285,26 +332,34 @@ function callbackUrl(value: string, expected: string): URL {
   return target;
 }
 
+const serviceNames: Record<string, string> = {
+  cloudflare: "Cloudflare", github: "GitHub", gmail: "Gmail", gdrive: "Google Drive",
+  gcalendar: "Google Calendar", gtasks: "Google Tasks", gdocs: "Google Docs", gsheets: "Google Sheets",
+  gslides: "Google Slides", gcontacts: "Google Contacts", slack: "Slack", x: "X",
+  spotify: "Spotify", soundcloud: "SoundCloud", link: "Stripe Link", whatsapp: "WhatsApp",
+};
+function serviceLabel(scope: string): string {
+  const name = scope.slice("connector:".length);
+  return serviceNames[name] ?? name;
+}
+function capabilityLabel(group: string): string {
+  return ({ agent: "Run agents", agents: "Agents", history: "Conversation history", memory: "Saved memory",
+    data: "Application data", tools: "Tools" } as Record<string, string>)[group] ?? group;
+}
+function capabilityDescription(group: string): string {
+  return ({ agent: "Run tasks with your connected ChatGPT account.",
+    agents: "Your agent configurations.", history: "Your previous conversations.", memory: "Context saved across conversations.",
+    data: "Records stored by your applications.", tools: "Tools authorized by this connection." } as Record<string, string>)[group] ?? "Review this permission in connection details.";
+}
+function scopeAction(scope: string): string {
+  const action = scope.split(":")[1] ?? scope;
+  return ({ read: "Read", write: "Write", run: "Allow", use: "Allow", portability: "Export" } as Record<string, string>)[action] ?? action;
+}
 function scopeLabel(scope: string): string {
-  const labels: Record<string, string> = {
-    "agent:run": "Run agents using your connected ChatGPT account and receive final answers and action details.",
-    "agents:read": "Read your agents.", "agents:write": "Create and update agents.",
-    "history:read": "Read conversation history.",
-    "memory:read": "Read saved memory.", "memory:write": "Save and update memory.",
-    "data:read": "Read application data.", "data:write": "Save and update application data.",
-    "tools:use": "Use tools authorized by this connection.",
-  };
-  if (scope.startsWith("connector:")) {
-    const capability = scope.slice("connector:".length);
-    const connectors: Record<string, string> = {
-      cloudflare: "Cloudflare", github: "GitHub", gmail: "Gmail", gdrive: "Google Drive",
-      gcalendar: "Google Calendar", gtasks: "Google Tasks", gdocs: "Google Docs", gsheets: "Google Sheets",
-      gslides: "Google Slides", gcontacts: "Google Contacts", slack: "Slack", x: "X",
-      spotify: "Spotify", soundcloud: "SoundCloud", link: "Stripe Link",
-    };
-    return `Use your connected ${connectors[capability] ?? capability} account through its authorized API.`;
-  }
-  return labels[scope] ?? "Permission:";
+  if (requiredConnector(scope)) return `Use ${serviceLabel(scope)}`;
+  if (scope === "agent:run") return "Run agents using your connected ChatGPT account";
+  if (scope === "tools:use") return "Use tools authorized by this connection";
+  return `${scopeAction(scope)} ${capabilityLabel(scope.split(":")[0]!).toLowerCase()}`;
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

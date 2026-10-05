@@ -39,7 +39,7 @@ test("MCP client consent displays identity and access before genuine hosted appr
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/?oauth_request=${requestId}`);
   await expect(page.getByRole("heading", { name: "Connect Synthetic MCP Client" })).toBeVisible();
-  await expect(page.getByText(/not verified by Nanocodex/)).toBeVisible();
+  await expect(page.getByText("Choose what this client can access.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Allow access" })).toBeEnabled();
   await expect.poll(() => observed.requests.map(request => request.path)).toEqual([requestPath, "/v1/me", "/v1/connectors"]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -117,7 +117,7 @@ test("current local issuer and account switching preserve a separate consent dec
   const observed = observe(page, info);
   await page.goto(`/?oauth_request=${requestId}&oauth_issuer=${encodeURIComponent("http://modal.nanocodex.localhost:4198")}`);
   await expect(page.getByRole("button", { name: "Allow access" })).toBeEnabled();
-  await page.getByRole("button", { name: "Use another account" }).click();
+  await page.getByRole("button", { name: "Switch account" }).click();
   await expect(page.getByRole("textbox", { name: "Mobile number" })).toBeVisible();
   await signIn(page);
   await expect(page.getByRole("button", { name: "Allow access" })).toBeEnabled();
@@ -129,15 +129,15 @@ test("scope narrowing signs only chosen direct connector access without ChatGPT 
   await setSession(context, "persistent");
   const observed = observe(page, info);
   await page.goto(`/?oauth_request=${requestId}`);
-  const agentScope = page.getByRole("checkbox", { name: /agent:run/ });
+  const agentScope = page.getByRole("checkbox", { name: /Run agents using/ });
   await expect(agentScope).toBeEnabled();
   await expect(agentScope).toBeChecked();
-  await expect(page.getByRole("checkbox", { name: /connector:slack/ })).toBeDisabled();
-  await expect(page.getByText("Not connected in this account")).toBeVisible();
-  await expect(page.getByRole("checkbox", { name: /connector:gmail/ })).not.toBeChecked();
+  await page.getByText("Not connected", { exact: false }).click();
+  await expect(page.getByRole("checkbox", { name: "Use Slack" })).toBeDisabled();
+  await expect(page.getByRole("checkbox", { name: "Use Gmail" })).not.toBeChecked();
   await agentScope.uncheck();
   await expect(page.getByRole("button", { name: "Allow access" })).toBeDisabled();
-  await page.getByRole("checkbox", { name: /connector:gmail/ }).check();
+  await page.getByRole("checkbox", { name: "Use Gmail" }).check();
   await page.getByRole("button", { name: "Allow access" }).click();
   await expect(page).toHaveURL(/code=synthetic-code/);
   const authorization = observed.requests.find(request => request.path === "/v1/connect/hosted-authorization/authorize")!.body as any;
@@ -157,12 +157,60 @@ test("hosted rejection explains the failure and permits a revised selection befo
   const observed = observe(page, info);
   await page.goto(`/?oauth_request=${requestId}`);
   await expect(page.getByRole("button", { name: "Allow access" })).toBeEnabled();
-  await page.getByRole("checkbox", { name: /history:read/ }).check();
+  await page.getByRole("checkbox", { name: "Read conversation history" }).check();
   await page.getByRole("button", { name: "Allow access" }).click();
   await expect(page.getByRole("alert")).toContainText("This permission is unavailable for this account.");
   expect(observed.requests.some(request => request.path.endsWith("/approve"))).toBe(false);
-  await page.getByRole("checkbox", { name: /history:read/ }).uncheck();
+  await page.getByRole("checkbox", { name: "Read conversation history" }).uncheck();
   await page.getByRole("button", { name: "Allow access" }).click();
   await expect(page).toHaveURL(/code=synthetic-code/);
+  await observed.evidence();
+});
+
+for (const viewport of [{ width: 320, height: 640 }, { width: 390, height: 844 }, { width: 1280, height: 900 }]) {
+  test(`full permission selection remains usable at ${viewport.width}px`, async ({ context, page }, info) => {
+    await setSession(context, "persistent");
+    await page.setViewportSize(viewport);
+    if (viewport.width === 320) await page.emulateMedia({ colorScheme: "dark" });
+    const observed = observe(page, info);
+    await page.goto(`/?oauth_request=${"f".repeat(43)}`);
+    const approve = page.getByRole("button", { name: "Allow access", exact: true });
+    await expect(approve).toBeEnabled();
+    await expect.poll(() => observed.requests.some(r => r.path === "/v1/connectors")).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const bounds = await approve.boundingBox();
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
+    await page.screenshot({ path: `../../output/connect-mcp-ux/consent-${viewport.width}.png` });
+    await observed.evidence();
+    await page.locator(".dialog-content").evaluate(el => { el.scrollTop = el.scrollHeight; });
+    const afterScroll = await approve.boundingBox();
+    expect(afterScroll!.y + afterScroll!.height).toBeLessThanOrEqual(viewport.height);
+    expect(afterScroll!.height).toBeGreaterThanOrEqual(44);
+    expect(observed.requests.some(r => r.path.endsWith("/approve"))).toBe(false);
+  });
+}
+
+test("bulk service selection never adds memory writes or unavailable services", async ({ context, page }, info) => {
+  await setSession(context, "persistent");
+  const observed = observe(page, info);
+  await page.goto(`/?oauth_request=${"f".repeat(43)}`);
+  await page.getByRole("button", { name: "Select all services", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "Use Gmail", exact: true })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "Write saved memory", exact: true })).not.toBeChecked();
+  await page.getByRole("button", { name: "Clear services", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "Use Gmail", exact: true })).not.toBeChecked();
+  const memory = page.getByRole("checkbox", { name: "Read saved memory", exact: true });
+  await memory.focus();
+  await page.keyboard.press("Space");
+  await expect(memory).toBeChecked();
+  await page.getByRole("checkbox", { name: /Run agents using/ }).uncheck();
+  await page.getByRole("button", { name: "Allow access", exact: true }).click();
+  await expect(page).toHaveURL(/code=synthetic-code/);
+  const approval = observed.requests.find(r => r.path.endsWith("/approve"))!.body as any;
+  expect(approval.scope).toBe("memory:read");
+  expect(approval.resources).toContain("urn:nanocodex:memory:read");
+  expect(approval.resources).not.toContain("urn:nanocodex:memory:write");
+  expect(approval.resources).not.toContain("urn:nanocodex:connector:slack");
   await observed.evidence();
 });

@@ -44,16 +44,19 @@ export default defineConfig({
               `urn:nanocodex:origin:${encodeURIComponent(appOrigin)}`,
               "urn:nanocodex:authorization:hosted", "urn:nanocodex:agent:run",
             ];
-            const scopeResources = {
+            const scopeResources: Record<string, string[]> = {
               "agent:run": ["urn:nanocodex:connector:chatgpt", "urn:nanocodex:agent:output:final", "urn:nanocodex:agent:output:actions"],
               "history:read": ["urn:nanocodex:history:read"],
               "connector:gmail": ["urn:nanocodex:connector:gmail"],
               "connector:slack": ["urn:nanocodex:connector:slack"],
             };
+            if (oauth[1] === "f".repeat(43)) {
+              for (const scope of ["memory:read", "memory:write", "data:read", "data:write", "connector:cloudflare", "connector:github", "connector:gdrive", "connector:gcalendar", "connector:gtasks", "connector:gdocs", "connector:gsheets", "connector:gslides", "connector:gcontacts", "connector:x", "connector:spotify", "connector:soundcloud", "connector:link"]) scopeResources[scope] = [`urn:nanocodex:${scope}`];
+            }
             result = {
               client_id: "c".repeat(43), client_name: "Synthetic MCP Client", app_id: appId,
               app_origin: appOrigin, redirect_uri: redirect,
-              scope: "agent:run history:read connector:gmail connector:slack", resource: "https://nanocodex-connect-api.gakonst.workers.dev/mcp",
+              scope: Object.keys(scopeResources).join(" "), resource: "https://nanocodex-connect-api.gakonst.workers.dev/mcp",
               base_resources: baseResources, scope_resources: scopeResources,
               resources: [...baseResources, ...Object.values(scopeResources).flat()],
             };
