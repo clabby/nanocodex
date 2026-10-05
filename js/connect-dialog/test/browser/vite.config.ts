@@ -63,7 +63,7 @@ export default defineConfig({
               ? "https://unexpected.example/callback?code=bad"
               : `${redirect}&${oauth[2] === "approve" ? "code=synthetic-code" : "error=access_denied"}&state=original-state` };
           }
-        } else switch (req.url) {
+        } else switch (new URL(req.url, "http://fixture.local").pathname) {
           case "/v1/fixture/session": setSession(body.state); result = { ok: true }; break;
           case "/v1/me":
             if (session === "expired") { status = 401; result = { error: "reauthentication_required" }; }

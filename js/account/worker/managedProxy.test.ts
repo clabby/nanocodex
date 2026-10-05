@@ -498,3 +498,25 @@ test("the exact user data route preserves account authorization and body", async
     assert.equal(await routeManaged(new Request(`https://account.test${path}`), env, new URL(`https://account.test${path}`)), undefined);
   }
 });
+
+
+test("Connect session discovery skips guest provisioning only for credential-free requests", async () => {
+  let calls = 0;
+  const env = { NANOCODEX_BACKEND: { fetch: async () => { calls++; return Response.json({ user: { id: "synthetic", persistent: true } }); } } } as unknown as Parameters<typeof routeManaged>[1];
+  const empty = new Request("https://account.test/v1/me?connect=1");
+  const response = await routeManaged(empty, env, new URL(empty.url));
+  assert.equal(response?.status, 401);
+  assert.equal(response?.headers.get("cache-control"), "no-store");
+  assert.equal(response?.headers.get("set-cookie"), null);
+  assert.equal(calls, 0);
+  for (const [path, headers] of [
+    ["/v1/me", {}],
+    ["/v1/me?connect=1", { cookie: "nanocodex_account=synthetic-existing-session" }],
+    ["/v1/me?connect=1", { authorization: "Bearer synthetic-key" }],
+    ["/v1/me?connect=1", { cookie: "other=preserve-backend-policy" }],
+  ] as const) {
+    const request = new Request("https://account.test" + path, { headers });
+    assert.equal((await routeManaged(request, env, new URL(request.url)))?.status, 200);
+  }
+  assert.equal(calls, 4, "existing identity and ordinary /me requests retain backend validation");
+});

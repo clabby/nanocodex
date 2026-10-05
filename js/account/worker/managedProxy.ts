@@ -41,6 +41,14 @@ export function isManagedRoutePath(pathname: string): boolean {
  */
 export async function routeManaged(...args: Parameters<typeof routeMeasuredManaged>): Promise<Response | undefined> {
   if (!isManagedRoutePath(args[2].pathname)) return undefined;
+  const [request, , url] = args;
+  // Connect only needs to discover an existing login. A cookie-free browser
+  // cannot have one; avoid provisioning an anonymous account and wallet merely
+  // to display the sign-in form. Existing cookies/authorization stay backend-owned.
+  if (request.method === "GET" && url.pathname === "/v1/me" && url.searchParams.get("connect") === "1"
+    && !request.headers.get("cookie") && !request.headers.get("authorization")) {
+    return Response.json({ error: "unauthorized" }, { status: 401, headers: { "cache-control": "no-store", "vary": "Cookie, Authorization" } });
+  }
   const native = await nativeTracing;
   if (!native) return routeMeasuredManaged(...args);
   const { tracing, setSpanAttributes } = native;

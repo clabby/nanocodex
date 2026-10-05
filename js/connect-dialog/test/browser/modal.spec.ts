@@ -316,7 +316,7 @@ test("session lookup keeps request identity visible without a standalone Cancel 
   const pending = new Promise<void>(resolve => { release = resolve; });
   const writes: string[] = [];
   page.on("request", request => { if (request.method() === "POST") writes.push(request.url()); });
-  await page.route("**/v1/me", async route => { await pending; await route.continue(); });
+  await page.route("**/v1/me*", async route => { await pending; await route.continue(); });
   try {
     await page.goto("/");
     await expect(page.locator(".request-identity")).toBeVisible();
