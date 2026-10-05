@@ -7,7 +7,7 @@ import { Claude } from 'nanocodex/worker';
 import { createManagedClaudeTools } from './claude-tools';
 import { managedClaudeTasks } from './claude-tasks';
 import type { Options as ClaudeOptions } from '../../nanocodex/runtime/claude.mjs';
-import { availableManagedModels } from "./model-catalog";
+import { availableManagedModels, selectDefaultManagedModel } from "./model-catalog";
 import { ManagedRecoverySafety, MANAGED_RECOVERY_UNKNOWN, createManagedCodeEffectJournal } from "./managed-recovery-safety";
 import { nativeAppValidator } from "./prompt-apps-native";
 import { gmailDecisionReceipts } from "./gmail-firehose-receipts";
@@ -2245,9 +2245,10 @@ async function managedFetchRoute(
         }
         if (!settingsProvided && !creationConfiguration.settings && !creationConfiguration.model_routing && body.durability === undefined) {
           try {
-            const catalog = modelCatalog = await availableManagedModels(env.NANOCODEX, principal.userId, principal.connectGrant ? {} : env);
-            if (catalog.default_model === null) return json({ error: "no_available_models" }, { status: 409 });
-            if (catalog.default_model?.startsWith("claude-")) creationSettings = { ...DEFAULT_AGENT_SETTINGS, model: catalog.default_model };
+            const selection = await selectDefaultManagedModel(env.NANOCODEX, principal.userId, principal.connectGrant ? {} : env);
+            modelCatalog = selection.catalog;
+            if (selection.default_model === null) return json({ error: "no_available_models" }, { status: 409 });
+            if (selection.default_model?.startsWith("claude-")) creationSettings = { ...DEFAULT_AGENT_SETTINGS, model: selection.default_model };
           } catch { return json({ error: "model_availability_unavailable" }, { status: 503 }); }
         }
         if (creationSettings.model.startsWith("claude-")) {
@@ -5787,6 +5788,12 @@ export class DurableAgentSession extends DurableComputerObject {
       || typeof turn.id !== "string" || !TURN_ID.test(turn.id)
       || typeof turn.key !== "string" || !IDEMPOTENCY_KEY.test(turn.key))
       return json({ error: "invalid_request" }, { status: 400 });
+    try { validatePromptInput(turn.input); }
+    catch (error) {
+      const protocol = error instanceof ProtocolError
+        ? error : new ProtocolError("invalid_request", errorMessage(error));
+      return json({ error: protocol.code, message: protocol.message }, { status: 400 });
+    }
     const stream = acceptsAgentRunStream(request);
     const requestedCursor = request.headers.get("last-event-id");
     if (stream && parseCursor(requestedCursor) === undefined)
@@ -5804,7 +5811,17 @@ export class DurableAgentSession extends DurableComputerObject {
       return json({ error: "not_found" }, { status: 404 });
     const created = await this.#createHttp(new Request("https://session.internal/create", {
       method: "POST", headers: request.headers, body: JSON.stringify(initialization),
-    }));
+    }), (session) => {
+      // Warm only the existing raw snapshots while registration commits. Normal
+      // admission still owns credential activation, runtime and model startup.
+      this.ctx.waitUntil(Promise.all([
+        this.#catalog(session),
+        this.#accountCatalog.vault(this.env.NANOCODEX, session.owner_id,
+          JSON.stringify([session.organization_id, session.team_id, session.authorization_epoch])),
+      ]).catch((error) => {
+        this.#observe("managed.creation_discovery_failed", { error_kind: errorKind(error) }, "warn");
+      }));
+    });
     if (!created.ok) return created;
     const phases = await created.json<Record<string, number>>();
     const session = this.#session();
@@ -5880,7 +5897,7 @@ export class DurableAgentSession extends DurableComputerObject {
     });
   }
 
-  async #createHttp(request: Request): Promise<Response> {
+  async #createHttp(request: Request, afterInitialize?: (session: SessionRow) => void): Promise<Response> {
     const handlerEnteredAt = Date.now();
     const handlerStartedAt = performance.now();
     const includeConstructor = this.#createConstructorPending;
@@ -5923,6 +5940,8 @@ export class DurableAgentSession extends DurableComputerObject {
     if (binding.status === "rejected" || !binding.value.ok) return json({ error: "credential_broker_unavailable" }, { status: 503 });
     if (initialized.status === "rejected" || !initialized.value.ok) return json({ error: "agent initialization failed" }, { status: 503 });
     const initializedAt = performance.now();
+    const session = this.#session();
+    if (session && !this.#durabilityExported && !this.#deleting && !this.#deleted) afterInitialize?.(session);
     const commitTiming: { attach_ms?: number; activate_ms?: number; alarm_ms?: number } = {};
     const committed = await this.#commitPreparedCredential(directCredential, commitTiming, true);
     if (!committed.ok) return json({ error: "agent cleanup commit failed" }, { status: 503 });

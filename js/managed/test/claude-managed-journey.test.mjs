@@ -40,7 +40,7 @@ async function bundle(source, cwd, name) {
     format:'esm', platform:'browser', target:'es2022', external:['cloudflare:*','node:*'],
     alias:{'node-rsa':resolve(repo,'js/nanocodex/tools/browser/unsupportedNodeRsa.mjs')},
     plugins:[{ name:'actual-wasm', setup(b) {
-      b.onResolve({filter:/^[a-z][a-z_]*$/}, args => builtinModules.includes(args.path) ? {path:'node:'+args.path,external:true} : undefined);
+      b.onResolve({filter:/^[a-z][a-z_]*(?:\/[a-z_]+)?$/}, args => builtinModules.includes(args.path) ? {path:'node:'+args.path,external:true} : undefined);
       b.onResolve({filter:/\.wasm$|^nanocodex\/wasm$/}, args => {
         const path = args.path === 'nanocodex/wasm' ? resolve(repo,'js/nanocodex/pkg-web/nanocodex_bg.wasm') : resolve(args.resolveDir,args.path);
         wasm.add(path); return {path,external:true};
@@ -69,7 +69,7 @@ function sse(block, stop, id) {
 }
 test('Managed native Claude and mixed-family public delegation, account gates, cancellation and recovery', {timeout:240_000}, async () => {
   await mkdir(evidence,{recursive:true});
-  const trace = [], upstream = [], providerErrors = []; let calls=0, summaries=0, writes=0, taskWrites=0, canonicalWrites=0, codexWrites=0, nestedWrites=0, allowResponses=false, sidebarCalls=0, holds=0, responsesAttempts=0, catalogOutage=false, catalogUnsupportedOnly=false, retainedTaskId, mf;
+  const trace = [], upstream = [], providerErrors = []; let calls=0, summaries=0, writes=0, taskWrites=0, canonicalWrites=0, codexWrites=0, nestedWrites=0, allowResponses=false, sidebarCalls=0, holds=0, responsesAttempts=0, catalogOutage=false, catalogUnsupportedOnly=false, catalogRequests=0, catalogHold, retainedTaskId, mf;
   const providerImpl = async request => {
     const url = new URL(request.url);
     if (url.origin === 'https://api.openai.com' || url.origin === 'https://chatgpt.com') {
@@ -144,6 +144,8 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
       return reply({content:'CLAUDE_TOOL_DONE_MIXED_CHILD'},'stop');
     }
     if (url.origin === 'https://api.anthropic.com' && url.pathname === '/v1/models') {
+      catalogRequests++;
+      if (catalogHold) await catalogHold;
       if(catalogOutage)return new Response('synthetic catalog unavailable',{status:503});
       assert.match(request.headers.get('authorization')??'',/^Bearer synthetic-claude-(?:managed-runtime|profile-uncertain)/);
       if(catalogUnsupportedOnly)return Response.json({data:[{id:'claude-gated-unverified',display_name:'Not supported'}],has_more:false});
@@ -303,6 +305,7 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
     mf=new Miniflare(options);
     token=(await call('/__fixture','POST',{user:identity})).token;
     assert.equal((await call('/v1/credentials')).claude.connected,false);
+    assert.equal((await call('/v1/agents','POST',{},409)).error,'no_available_models');
     for(const capabilities of [['agents:read'],['agents:write']]) {
       const scoped=(await call('/__fixture','POST',{user:identity,capabilities})).token;
       for(const [path,method,body] of [['/v1/credentials/claude/login','POST',undefined],['/v1/credentials/claude/login','GET',undefined],['/v1/credentials/claude/login/complete','POST',{code:'synthetic-denied'}],['/v1/credentials/claude','DELETE',undefined]])await call(path,method,body,401,{authorization:'Bearer '+scoped});
@@ -322,8 +325,14 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
     await call('/v1/agents','POST',{},409);
     await call('/v1/agents','POST',{settings:{model:'claude-sonnet-4-6',thinking:'low',reasoning_mode:'standard',fast_mode:false}},409);
     catalogUnsupportedOnly=false;
+    catalogOutage=true;
+    assert.equal((await call('/v1/models','GET',undefined,503)).error,'model_availability_unavailable');
+    assert.equal((await call('/v1/agents','POST',{},503)).error,'model_availability_unavailable');
+    catalogOutage=false;
     const catalog=await call('/v1/models');assert.equal(catalog.availability.claude.available,true);assert.deepEqual(catalog.data.map(m=>m.id),['claude-sonnet-4-6','claude-opus-4-6']);assert.equal(catalog.default_model,'claude-sonnet-4-6');
+    const beforeClaudeDefault=catalogRequests;
     const created=await call('/v1/agents','POST',{},201), agent=created.agent_id;
+    assert.equal(catalogRequests-beforeClaudeDefault,2,'Claude-only default and admission share one paginated live catalog');
     assert.equal((await call(`/v1/agents/${agent}`)).settings.model,'claude-sonnet-4-6');
     // The mobile picker uses /routing, whose body excludes settings-only fields.
     await call(`/v1/agents/${agent}/routing`,'POST',{model:'claude-opus-4-6',thinking:'medium'});
@@ -421,7 +430,28 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
     allowResponses=false;
     catalogOutage=true;
     assert.ok(!mixed.data.find(model=>model.id==='gpt-6-astra').thinking.includes('none'));assert.ok(mixed.data.find(model=>model.id==='gpt-6-luna').thinking.includes('none'));
+    const beforeMixedDefault=catalogRequests;
     const mixedDefault=await call('/v1/agents','POST',{},201);assert.equal((await call(`/v1/agents/${mixedDefault.agent_id}`)).settings.model,'gpt-6-astra');
+    assert.equal(catalogRequests,beforeMixedDefault,'default OpenAI admission skips the unavailable Claude catalog');
+    catalogOutage=false;
+    let releaseCatalog, deadline;
+    catalogHold=new Promise(resolve=>{releaseCatalog=resolve;});
+    try {
+      const heldDefault=await Promise.race([
+        call('/v1/agents','POST',{},201),
+        new Promise((_,reject)=>{deadline=setTimeout(()=>reject(new Error('default admission waited for the withheld Claude catalog')),5000);}),
+      ]);
+      assert.equal((await call(`/v1/agents/${heldDefault.agent_id}`)).settings.model,'gpt-6-astra');
+      assert.equal(catalogRequests,beforeMixedDefault,'default admission does not start an unrelated Claude lookup');
+      trace.push({scenario:'both providers, Claude catalog withheld',default_model:'gpt-6-astra',catalog_requests:catalogRequests-beforeMixedDefault,completed_before_catalog_release:true});
+    } finally { clearTimeout(deadline); releaseCatalog(); catalogHold=undefined; }
+    const fullMixed=await call('/v1/models');
+    assert.equal(fullMixed.partial,false);
+    assert.deepEqual(fullMixed.data.map(model=>model.id),['gpt-6-astra','gpt-6.1-sol','gpt-6-luna','claude-sonnet-4-6','claude-opus-4-6']);
+    assert.equal(fullMixed.default_model,'gpt-6-astra');
+    assert.equal(catalogRequests-beforeMixedDefault,2,'GET models still reads every Claude catalog page');
+    assert.equal((await call('/v1/agents','POST',{settings:{model:'claude-sonnet-5-5',thinking:'low',reasoning_mode:'standard',fast_mode:false}},409)).error,'claude_model_unavailable');
+    catalogOutage=true;
     await call('/v1/agents','POST',{settings:{model:'gpt-6-astra',thinking:'low',reasoning_mode:'standard',fast_mode:false}},201);
     await call('/v1/agents','POST',{settings:{model:'claude-sonnet-4-6',thinking:'low',reasoning_mode:'standard',fast_mode:false}},409);
     await mf.dispose();options.workers[0].bindings.NANOCODEX_THREAD_ROUTING='true';options.workers[0].bindings.OPENROUTER_API_KEY='synthetic-gateway-key';options.workers[0].ai={binding:'AI'};mf=new Miniflare(options);

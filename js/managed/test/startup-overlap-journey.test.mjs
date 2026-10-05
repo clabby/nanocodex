@@ -12,15 +12,31 @@ import { Miniflare } from "miniflare";
 // Just Bash, SDK and WASM. Only the external account catalog/model/HTTP target
 // are synthetic. The catalog waits for the configured shell HTTP request:
 // serialized startup fails the ordering assertion rather than passing by luck.
+// Registration fault injection wraps the actual UserAccount HTTP boundary: one
+// publish fails before commit, then all retries use the unchanged production DO.
 const candidateRoot = fileURLToPath(new URL("..", import.meta.url));
 const root = process.env.NANOCODEX_STARTUP_SOURCE_ROOT ?? candidateRoot;
 const output = join(candidateRoot, "../../output/startup-overlap-journey", `${Date.now()}-${process.pid}`);
 const source = `
 import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import worker, { DurableAgentSession, AccountHostedTools } from './src/index.ts';
-import { UserAccount, Organization, ApiKeyRecord, NonceStorage, ensureAccount, createApiKey } from './src/account-auth.ts';
+import { UserAccount as RealUserAccount, Organization, ApiKeyRecord, NonceStorage, ensureAccount, createApiKey } from './src/account-auth.ts';
 import { routeManaged } from '../account/worker/managedProxy.ts';
-export { DurableAgentSession, AccountHostedTools, UserAccount, Organization, ApiKeyRecord, NonceStorage };
+export { DurableAgentSession, AccountHostedTools, Organization, ApiKeyRecord, NonceStorage };
+export class UserAccount extends RealUserAccount {
+  constructor(state,env) { super(state,env); this.fixture=env.MODEL; }
+  async fetch(request) {
+    if(request.method==='POST' && new URL(request.url).pathname.endsWith('/publish')) {
+      const model=this.fixture.getByName('startup');
+      const gate=await model.fetch('https://fixture.internal/publication');
+      if(!gate.ok) return gate;
+      const response=await super.fetch(request);
+      if(response.ok) await model.fetch('https://fixture.internal/published');
+      return response;
+    }
+    return super.fetch(request);
+  }
+}
 const info=console.info.bind(console);
 console.info=(record,...rest)=>info(record && typeof record==='object'?JSON.stringify(record):record,...rest);
 export class FixtureEgress extends WorkerEntrypoint {
@@ -30,14 +46,31 @@ export class FixtureEgress extends WorkerEntrypoint {
     return {status:response.status,schema:1,expiresAt:Date.now()+900000,data:await response.json()};
   }
 }
+// No sandbox is allocated in this journey; cleanup still visits the external
+// container namespace to remove any possible retained legacy resource.
+export class FixtureSandbox extends DurableObject {
+  async clearRemoteDesktop() {}
+  async destroy() {}
+}
 export class FixtureModel extends DurableObject {
-  events=[]; setupStarted=false; catalogReleased=false; setupFinished=false; release;
+  events=[]; setupStarted=false; catalogStarted=false; catalogReleased=false; setupFinished=false; published=false; publicationAttempts=0; holdCatalog=false; catalogGate; release; releasePublication;
   record(event,extra={}) { const row={type:'fixture.startup',event,at:Date.now(),...extra};this.events.push(row);console.info(row); }
   async fetch(request) {
     const url=new URL(request.url);
     if(url.pathname==='/trace') return Response.json(this.events);
+    if(url.pathname==='/publication') {
+      this.record('publication.start');
+      if(!this.catalogStarted) await new Promise(resolve=>{this.releasePublication=resolve;setTimeout(resolve,3000);});
+      this.record('publication.catalog_observed',{observed:this.catalogStarted});
+      if(++this.publicationAttempts===1) { this.record('publication.fail');return new Response(null,{status:503}); }
+      return new Response(null,{status:204});
+    }
+    if(url.pathname==='/published') { this.published=true;this.record('publication.committed');return new Response(null,{status:204}); }
+    if(url.pathname==='/hold-catalog') { this.holdCatalog=true;return new Response(null,{status:204}); }
+    if(url.pathname==='/release-catalog') { this.holdCatalog=false;this.catalogGate?.();return new Response(null,{status:204}); }
     if(url.pathname==='/catalog') {
-      this.record('catalog.start');
+      this.catalogStarted=true;this.record('catalog.start');this.releasePublication?.();
+      if(this.holdCatalog) { this.record('catalog.held');await new Promise(resolve=>{this.catalogGate=resolve;}); }
       if(!this.setupStarted) await new Promise(resolve=>{this.release=resolve;setTimeout(resolve,3000);});
       this.record('catalog.setup_observed',{observed:this.setupStarted});
       await new Promise(resolve=>setTimeout(resolve,150));
@@ -46,12 +79,12 @@ export class FixtureModel extends DurableObject {
     }
     if(url.pathname==='/vault') { this.record('vault.read');return Response.json([]); }
     if(request.headers.get('x-nanocodex-target-url')==='https://startup-fixture.example/setup') {
-      this.setupStarted=true;this.record('setup.start');this.release?.();
+      this.setupStarted=true;this.record('setup.start',{published:this.published});this.release?.();
       await new Promise(resolve=>setTimeout(resolve,100));
       this.setupFinished=true;this.record('setup.finish');return new Response('SETUP_OK');
     }
     if(request.headers.get('upgrade')==='websocket') {
-      this.record('provider.connect');
+      this.record('provider.connect',{published:this.published});
       const [client,server]=Object.values(new WebSocketPair());server.accept();
       server.addEventListener('close',()=>server.close(1000));
       let effectiveTools=[],requestIndex=0;
@@ -86,6 +119,7 @@ export default {async fetch(request,env,ctx) {
       subjectId:'api_key:'+user,credentialId:'fixture',capabilities:auth.grant.capabilities},'synthetic startup'));
   }
   if(url.pathname==='/__trace') return env.MODEL.getByName('startup').fetch('https://fixture.internal/trace');
+  if(url.pathname==='/__hold-catalog' || url.pathname==='/__release-catalog') return env.MODEL.getByName('startup').fetch('https://fixture.internal/'+url.pathname.slice(3));
   return worker.fetch(request,env,ctx);
 }};
 `;
@@ -105,10 +139,10 @@ test("normal public API overlaps account discovery with configured setup and ret
   const mf=new Miniflare({port:0,handleRuntimeStdio(stdout,stderr){createInterface({input:stdout}).on("line",capture);createInterface({input:stderr}).on("line",capture);},
     durableObjectsPersist:join(output,"sqlite"),r2Persist:join(output,"r2"),workers:[
       {...common,name:"edge",bindings:{EDGE:true},serviceBindings:{NANOCODEX_BACKEND:"managed"}},
-      {...common,name:"managed",bindings:{NANOCODEX_PERFORMANCE_TRACE:"true",AGENT_IDLE_TIMEOUT_MS:"60000"},
+      {...common,name:"managed",bindings:{NANOCODEX_PERFORMANCE_TRACE:"true",MANAGED_AGENT_DIRECT_CREDENTIALS:"true",AGENT_IDLE_TIMEOUT_MS:"60000"},
         durableObjects:{NANOCODEX_SESSIONS:{className:"DurableAgentSession",useSQLite:true},NANOCODEX_USERS:{className:"UserAccount",useSQLite:true},NANOCODEX_ORGANIZATIONS:{className:"Organization",useSQLite:true},
           NANOCODEX_API_KEYS:{className:"ApiKeyRecord",useSQLite:true},NANOCODEX_AUTH:{className:"NonceStorage",useSQLite:true},NANOCODEX_ACCOUNT_TOOLS:{className:"AccountHostedTools",useSQLite:true},
-          MODEL:{className:"FixtureModel",useSQLite:true},NANOCODEX_MEMORY:{className:"FixtureModel",useSQLite:true}},
+          MODEL:{className:"FixtureModel",useSQLite:true},NANOCODEX_MEMORY:{className:"FixtureModel",useSQLite:true},NANOCODEX_SANDBOXES:{className:"FixtureSandbox",useSQLite:true}},
         serviceBindings:{NANOCODEX:{name:"managed",entrypoint:"FixtureEgress"}},r2Buckets:["NANOCODEX_HISTORY","NANOCODEX_WORKSPACES"]},
     ]});
   let failure, evidence={};
@@ -118,10 +152,12 @@ test("normal public API overlaps account discovery with configured setup and ret
     const {token}=await fixture(),other=(await fixture()).token;
     const call=async(path,method="GET",body,expected=200,credential=token,extra={})=>{
       const started=performance.now(),response=await fetch(new URL(path,base),{method,headers:{authorization:"Bearer "+credential,"content-type":"application/json",...extra},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(20000)});
-      const value=await response.json();http.push({path,method,status:response.status,elapsed_ms:performance.now()-started,value});assert.equal(response.status,expected,JSON.stringify(value));return value;
+      const raw=await response.text(),value=raw?JSON.parse(raw):null;http.push({path,method,status:response.status,elapsed_ms:performance.now()-started,value});assert.equal(response.status,expected,JSON.stringify(value));return value;
     };
     const settings={model:"gpt-6.1-sol",thinking:"low",reasoning_mode:"standard",fast_mode:false};
     const configuration={environment:{files:[{path:"/brain/setup-input.txt",content:"durable fixture"}],skills:[],setup_commands:["curl -fsS https://startup-fixture.example/setup > /brain/setup-output.txt"],network:{access:"enabled"}}};
+    await call("/v1/agent-runs","POST",{input:null,settings},400);
+    assert.equal((await (await backend.fetch("https://fixture.internal/__trace")).json()).length,0,"invalid input starts no metadata or model work");
     const started=performance.now();
     const run=await call("/v1/agent-runs","POST",{input:"Reply STARTUP_OK",settings,configuration},201,token,{"idempotency-key":"startup-overlap"});
     const waitTurn=async id=>{
@@ -136,6 +172,11 @@ test("normal public API overlaps account discovery with configured setup and ret
     const warmMs=performance.now()-warmStarted,trace=await(await backend.fetch("https://fixture.internal/__trace")).json();
     evidence={source_root:root,cold_public_completion_ms:coldMs,warm_public_completion_ms:warmMs,trace};
     const first=event=>trace.find(row=>row.event===event);
+    assert.equal(first("publication.catalog_observed")?.observed,true,"metadata read starts while registration is still pending");
+    assert.equal(trace.filter(row=>row.event==="publication.fail").length,1,"fault injector fails the first publication before commit");
+    assert.equal(trace.filter(row=>row.event==="publication.start").length,2,"the same public request safely retries registration");
+    assert.equal(first("setup.start").published,true,"no configured side effect before committed registration");
+    assert.equal(first("provider.connect").published,true,"no model capability before committed registration");
     assert.equal(first("catalog.setup_observed")?.observed,true,"configured setup must run while catalog is pending");
     assert.ok(first("setup.start").at<first("catalog.finish").at);
     const requests=trace.filter(row=>row.event==="provider.request");assert.equal(requests.length,3);
@@ -145,7 +186,36 @@ test("normal public API overlaps account discovery with configured setup and ret
     assert.equal(trace.filter(row=>row.event==="catalog.start").length,1,"warm turn reuses bounded discovery");
     assert.equal(trace.filter(row=>row.event==="setup.start").length,1,"warm turn never repeats setup side effects");
     evidence={source_root:root,cold_public_completion_ms:coldMs,warm_public_completion_ms:warmMs,setup_catalog_overlap_ms:first("catalog.finish").at-first("setup.start").at,
-      setup_once:true,catalog_reads:1,provider_requests:3,prepared_file_read:true,tools_preserved:true,cross_owner_denied:true,trace};
+      setup_once:true,catalog_reads:1,provider_requests:3,prepared_file_read:true,tools_preserved:true,cross_owner_denied:true,
+      discovery_before_registration:true,failed_publication_retried:true,no_effect_before_registration:true,trace};
+    // A second owner has no L1 snapshot. Delete the admitted turn while its
+    // read-only metadata request is held, then release the old read. The public
+    // deletion fence establishes ordering without a sleep-based race assertion.
+    await backend.fetch("https://fixture.internal/__hold-catalog");
+    const cancelled=await call("/v1/agent-runs","POST",{input:"Reply STARTUP_OK",settings},201,other,{"idempotency-key":"delete-pending-discovery"});
+    let deletion;
+    try {
+      for(let i=0;;i++) {
+        const pendingTrace=await (await backend.fetch("https://fixture.internal/__trace")).json();
+        if(pendingTrace.some(row=>row.event==="catalog.held"))break;
+        assert.ok(i<200,"second owner discovery did not start");await delay(10);
+      }
+      deletion=call(`/v1/agents/${cancelled.agent_id}`,"DELETE",undefined,204,other);
+      let fenced=false;
+      for(let i=0;i<200;i++) {
+        const response=await fetch(new URL(`/v1/agents/${cancelled.agent_id}`,base),{headers:{authorization:"Bearer "+other}});
+        const value=await response.json();
+        if(response.status===404 || response.status===409 && value.error==="agent_deleting"){fenced=true;break;}await delay(10);
+      }
+      assert.equal(fenced,true,"deletion hides the agent before the pending read is released");
+    } finally {
+      await backend.fetch("https://fixture.internal/__release-catalog");
+      if(deletion)await deletion;
+    }
+    await call(`/v1/agents/${cancelled.agent_id}`,"GET",undefined,404,other);
+    const finalTrace=await (await backend.fetch("https://fixture.internal/__trace")).json();
+    assert.equal(finalTrace.filter(row=>row.event==="provider.request").length,3,"late discovery never resurrects a deleted turn");
+    evidence={...evidence,invalid_input_no_work:true,deletion_during_discovery_fenced:true,trace:finalTrace};
     console.log("STARTUP_OVERLAP_EVIDENCE",JSON.stringify({...evidence,trace:undefined,output}));
   } catch(error) {failure=error;throw error;}
   finally {

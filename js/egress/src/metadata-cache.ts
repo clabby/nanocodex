@@ -1,4 +1,5 @@
 import type { CloudflareAccountDiscoveryOptions, CloudflareAccountDiscoveryResult, CloudflareAccountMetadataComponent } from "nanocodex/cloudflare/egress";
+import { GOOGLE_CAPABILITIES, GOOGLE_PROVIDER } from "./connectors/google";
 
 export const METADATA_CACHE_NAME = "nanocodex-account-discovery-v1";
 export const METADATA_TTL_MS = 15 * 60_000;
@@ -129,8 +130,13 @@ const shape = (fields: Record<string, Check>): Check => value => record(value) &
 const id: Check = value => typeof value === "string" && /^[A-Za-z0-9_-]{22,64}$/.test(value);
 const timestamp: Check = value => Number.isSafeInteger(value) && Number(value) >= 0;
 const capability = text(64);
-const connection = shape({ id, label: text(512), account_id: text(512), capabilities: list(32, capability) });
-const connector = shape({ connected: value => typeof value === "boolean", connections: list(100, connection) });
+const connectionFields = { id, label: text(512), account_id: text(512), capabilities: list(32, capability) };
+const connector = shape({ connected: value => typeof value === "boolean", connections: list(100, shape(connectionFields)) });
+// Match the broker's Google projection, including its allowlisted consent scopes.
+// Other providers keep their exact schema; new credential fields remain uncacheable.
+const googleConnector = shape({ connected: value => typeof value === "boolean", connections: list(100,
+  shape({ ...connectionFields, scopes: list(GOOGLE_PROVIDER.scopes.length,
+    value => typeof value === "string" && GOOGLE_PROVIDER.scopes.includes(value)) })) });
 const whatsappConnector = shape({ connected: value => typeof value === "boolean", connections: list(1,
   shape({ id, label: text(512), capabilities: value => Array.isArray(value) && value.length === 1 && value[0] === "whatsapp" })) });
 const mcp = shape({ id, name: text(512), status: text(64) });
@@ -140,7 +146,8 @@ export function safeMetadata(component: CloudflareAccountMetadataComponent, valu
   if (component === "catalog") {
     return record(value) && exact(value, ["connectors", "mcp_connections"])
       && record(value.connectors) && Object.keys(value.connectors).length <= 32
-      && Object.entries(value.connectors).every(([key, status]) => /^[a-z][a-z0-9_]{0,63}$/.test(key) && (key === "whatsapp" ? whatsappConnector(status) : connector(status)))
+      && Object.entries(value.connectors).every(([key, status]) => /^[a-z][a-z0-9_]{0,63}$/.test(key)
+        && (key === "whatsapp" ? whatsappConnector(status) : Object.hasOwn(GOOGLE_CAPABILITIES, key) ? googleConnector(status) : connector(status)))
       && list(256, mcp)(value.mcp_connections);
   }
   return list(100, vaultEntry)(value);

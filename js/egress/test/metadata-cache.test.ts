@@ -233,6 +233,45 @@ describe("discovery service RPC with real owning DOs", () => {
     expect(JSON.stringify(result)).not.toMatch(/access_token|refresh_token|github-connector-access/);
   });
 
+  it("caches actual Google OAuth scopes while disconnected credentials stay unusable", async () => {
+    const user = "discovery-google-owner", subject = "G".repeat(43);
+    const control = (path: string, method = "GET", body?: unknown) => SELF.fetch(`https://broker.internal${path}`, {
+      method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    });
+    const started = await control(`/users/${user}/connectors/google`, "POST", {
+      redirect_uri: "https://nanocodex.test/v1/connectors/callback", return_to: "/agent",
+    });
+    expect(started.status).toBe(200);
+    const state = new URL((await started.json<{ authorization_url: string }>()).authorization_url).searchParams.get("state");
+    const callback = await control(`/users/${user}/connectors/google/callback`, "POST", { code: "google-alpha-code", state });
+    expect(callback.status).toBe(200);
+    const { connection_id: connection } = await callback.json<{ connection_id: string }>();
+    const first = await service.readAccountDiscovery(user, "catalog", options);
+    const expectedConnection = { id: connection, label: "alpha@example.test", account_id: "google-alpha-account",
+      capabilities: ["gmail", "gdrive"], scopes: ["openid", "email", "https://mail.google.com/", "https://www.googleapis.com/auth/drive"] };
+    expect(first.data).toMatchObject({ connectors: {
+      gmail: { connected: true, connections: [expectedConnection] },
+      gdrive: { connected: true, connections: [expectedConnection] },
+    } });
+    await expectStoredMetadata(user, "catalog", first);
+    expect(JSON.stringify(first)).not.toMatch(/access_token|refresh_token|google-alpha-access|google-alpha-refresh/);
+    expect((await control(`/subjects/${subject}`, "PUT", { user_id: user })).status).toBe(200);
+    const headers = { authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL", "x-nanocodex-subject": subject,
+      "x-nanocodex-connector-connection": connection };
+    expect((await SELF.fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages", { headers })).status).toBe(200);
+    expect((await control(`/users/${user}/connectors/google/connections/${connection}`, "DELETE")).status).toBe(204);
+    // Discovery may be stale within its original TTL. Actual calls always resolve
+    // live credentials, even when a cached connection still appears connected.
+    expect(await service.readAccountDiscovery(user, "catalog", options)).toEqual(first);
+    const denied = await SELF.fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages", { headers });
+    expect(denied.status).toBe(404);
+    expect(await denied.json()).toEqual({ error: "connector_connection_not_found" });
+    const refreshed = await service.readAccountDiscovery(user, "catalog", { ...options, reload: true });
+    expect(refreshed.data).toMatchObject({ connectors: { gmail: { connected: false, connections: [] }, gdrive: { connected: false, connections: [] } } });
+    console.log("GOOGLE_DISCOVERY_JOURNEY_EVIDENCE", JSON.stringify({ oauthConnected: true, publicScopesCached: true,
+      unchangedCacheHitAfterDisconnect: true, liveInvocationDenied: true, explicitReloadDisconnected: true }));
+  });
+
   it("opts in explicitly, reloads backend changes, and leaves the default RPC and HTTP live", async () => {
     const user = "discovery-real-owner", id = "D".repeat(43);
     const first = await service.readAccountDiscovery(user, "catalog", options);
