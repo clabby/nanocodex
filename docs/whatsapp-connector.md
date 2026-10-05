@@ -7,17 +7,21 @@ an MCP server, local browser, phone message database, or Linux service.
 Ask the agent to connect WhatsApp and provide the phone number including its
 country code. The agent calls `account_connectors` with `operation: "connect"`,
 `connector: "whatsapp"`, the supplied `phone`, and a stable UUID `operation_id`.
-The Workers connector starts that attempt, and the native Nanocodex app opens a
-private code panel in the conversation. Copy its code, switch to WhatsApp on the
-same phone, and open **Settings → Linked devices → Link a device → Link with
+The Workers connector starts that attempt, and a compatible native Nanocodex app
+displays the private code inline in the tool result. No separate sheet opens.
+Copy the code, switch to WhatsApp on the same phone, and open **Settings → Linked devices → Link a device → Link with
 phone number instead**. Enter the code, then return to Nanocodex.
 
 The agent receives only attempt metadata. The native app fetches the code
 directly through the authenticated private endpoint; the code never enters the
-transcript, tool result, or agent context. The app confirms connected status
-before reporting completion. Account changes and backgrounding clear the visible
+serialized tool result, transcript, or agent context. The visible tool card is a
+native view with a separate private fetch; its code is not part of stored chat.
+The app confirms connected status before reporting completion. Account changes and backgrounding clear the visible
 code, and returning to the app recovers the same unexpired attempt. An updated
-native client with WhatsApp pairing support is required for this presentation.
+native client with inline WhatsApp pairing support is required for this presentation.
+The tool’s `ready` phase confirms that the server prepared a code; it does not
+confirm that the installed client displayed it. Check client support when the
+code is missing rather than starting repeated pairing attempts.
 
 Repeated tool requests must use the same operation ID and phone number. They do
 not request another code. A code cannot be recovered after its pairing socket is
@@ -40,7 +44,7 @@ The account UI uses authenticated `/v1/connectors/whatsapp` routes:
 - `POST /v1/connectors/whatsapp/start` accepts `{phone, operation_id}`. The phone
   uses E.164 format, and `operation_id` is a UUID retained for retries.
 - `GET /v1/connectors/whatsapp/pairing?operation_id=...` returns the unexpired code
-  to the private form. Responses are not cached.
+  to the private native view. Responses are not cached.
 - `DELETE /v1/connectors/whatsapp/connections/:connection_id` removes local
   authorization, keys and indexed content, and attempts remote unlinking.
   If remote logout is unavailable or uncertain, remove the device from WhatsApp's

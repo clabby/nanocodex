@@ -189,6 +189,50 @@ final class WhatsAppLinkTests: XCTestCase {
         }
     }
 
+    @MainActor func testInlineRecoveryAndReappearanceOnlyReadTheOriginalAttempt() async throws {
+        for failure in [503, 400] {
+            let link = try XCTUnwrap(WhatsAppLink.parse(hint()))
+            let capture = WhatsAppRequests()
+            let fixture = try HTTPFixture { request in
+                let index = capture.append(request)
+                if index == 0 { return FixtureReply(status: failure, body: "{}") }
+                if request.path.hasSuffix("/pairing") { return FixtureReply(body: self.code(link)) }
+                return FixtureReply(body: self.status(link, phase: index >= 5 ? "paired" : "ready", connected: index >= 5))
+            }
+            defer { fixture.close() }
+            let client = ManagedClient(credential: try AccountCredential(origin: fixture.origin, apiKey: fixtureKey))
+            defer { client.close() }
+            let controller = WhatsAppLinkController(link: link, account: UUID())
+            controller.activate(account: controller.account)
+            await controller.refresh(client: client, account: controller.account, configuration: fixture.configuration)
+            XCTAssertEqual(controller.phase, failure == 503 ? .retrying : .unavailable)
+            XCTAssertEqual(controller.shouldPoll, failure == 503)
+            XCTAssertNil(controller.code); XCTAssertNil(controller.safeReceipt)
+
+            // Returning to the card or checking an unavailable result uses the same operation.
+            controller.suspend()
+            await controller.refresh(client: client, account: controller.account, configuration: fixture.configuration)
+            XCTAssertEqual(capture.count, 1)
+            controller.activate(account: controller.account)
+            await controller.refresh(client: client, account: controller.account, configuration: fixture.configuration)
+            XCTAssertEqual(controller.phase, .ready); XCTAssertEqual(controller.code, "ABCD-1234")
+            controller.suspend()
+            XCTAssertNil(controller.code)
+            controller.activate(account: controller.account)
+            await controller.refresh(client: client, account: controller.account, configuration: fixture.configuration)
+            XCTAssertEqual(controller.code, "ABCD-1234")
+            await controller.refresh(client: client, account: controller.account, configuration: fixture.configuration)
+            XCTAssertEqual(controller.phase, .connected); XCTAssertNil(controller.code)
+            XCTAssertEqual(controller.safeReceipt?["operation_id"].string, operation)
+            XCTAssertEqual(capture.count, 6)
+            for request in capture.snapshot() {
+                XCTAssertEqual(request.method, "GET"); XCTAssertTrue(request.body.isEmpty)
+                XCTAssertTrue(["/v1/connectors/whatsapp", "/v1/connectors/whatsapp/pairing"].contains(request.path))
+                if request.path.hasSuffix("/pairing") { XCTAssertEqual(request.query, "operation_id=" + operation) }
+            }
+        }
+    }
+
     func testRealTranscriptEventsRequireAccountConnectorAttributionIncludingNestedCodeMode() throws {
         let safe = hint()
         func event(_ cursor: Int, _ type: String, _ call: String, _ tool: String, metadata: JSON = .null, result: JSON = .null) throws -> AgentEvent {

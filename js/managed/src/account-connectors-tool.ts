@@ -103,7 +103,7 @@ export function accountConnectorsTool(
     description: [
       "List, connect, reconnect, or disconnect account connectors without exposing credentials.",
       "Google Workspace is one authorization identity whose connections list the exact Gmail, Drive, Calendar, Tasks, Docs, Sheets, Slides, and Contacts capabilities granted. Google connections also expose granted OAuth scopes; Gmail being connected does not imply settings consent. Inspect scopes before requesting a reconnect.",
-      "Supports WhatsApp, Cloudflare, GitHub, Google Workspace, Slack, X, Spotify, SoundCloud and Stripe Link. WhatsApp pairs privately in Nanocodex on the user’s phone and runs on Workers; pairing codes never enter chat. For WhatsApp connect, use the known E.164 phone and one required stable operation_id UUID to start linking. The native app privately displays the code; never read or request pairing codes through tools or chat. Reuse identical phone and operation_id after uncertainty; never start a new operation to retry. Without a known phone, ask for it first. Only the account root agent can initiate linking. It provides read access to available synced history. For Cloudflare, use secure Vault intake for a user or account API token, then connect with the explicitly authorized vault_id. Account-owned tokens also require the Cloudflare account_id. Never pass token values to tools. Disconnect removes the broker copy; revoke the token at Cloudflare separately. Use tool_search for each service’s API tools. Stripe Link requests user spend approvals. Spotify and SoundCloud connect open the native Nanocodex app; other providers return authorization URLs.",
+      "Supports WhatsApp, Cloudflare, GitHub, Google Workspace, Slack, X, Spotify, SoundCloud and Stripe Link. WhatsApp pairs privately in Nanocodex on the user’s phone and runs on Workers; pairing codes never enter chat. For WhatsApp connect, use the known E.164 phone and one required stable operation_id UUID to start linking. A compatible native app privately displays the code inside the tool result, without a separate sheet. A ready phase confirms server readiness only; it does not prove the phone displayed the code or linked successfully. If the user cannot see the code, check native client support before creating another attempt. Never read or request pairing codes through tools or chat. Reuse identical phone and operation_id after uncertainty; never start a new operation to retry. Without a known phone, ask for it first. Only the account root agent can initiate linking. It provides read access to available synced history. For Cloudflare, use secure Vault intake for a user or account API token, then connect with the explicitly authorized vault_id. Account-owned tokens also require the Cloudflare account_id. Never pass token values to tools. Disconnect removes the broker copy; revoke the token at Cloudflare separately. Use tool_search for each service’s API tools. Stripe Link requests user spend approvals. Spotify and SoundCloud connect open the native Nanocodex app; other providers return authorization URLs.",
       "WhatsApp connect returns a native whatsapp_link input hint, without an authorization URL. When a provider authorization URL is returned, give that exact URL to the user as a link; the provider may still require consent.",
       "Disconnect revokes one exact listed connection_id and is allowed only when the user explicitly asks to remove or replace it.",
     ].join(" "),
@@ -312,7 +312,7 @@ function whatsappLinkHint(agentId: string, operationId: string, expiresAt: numbe
   return {
     ok: true, type: "whatsapp_link", status: "input_required", connector: "whatsapp",
     agent_id: agentId, operation_id: operationId, expires_at: expiresAt, phase,
-    message: "Continue WhatsApp linking in the private Nanocodex native sheet. Pairing codes stay in that sheet. If the outcome is unknown, reconcile with the same operation_id and phone; do not start a new attempt. Verify connected=true with list afterwards.",
+    message: "A compatible Nanocodex app displays the linking code privately inside this tool result. A ready phase means the code is prepared, not that it appeared on the phone. Pairing codes stay out of the transcript. If the outcome is unknown, reconcile with the same operation_id and phone; do not start a new attempt. Verify connected=true with list afterwards.",
   };
 }
 
@@ -321,7 +321,7 @@ async function whatsappFailure(response: Response) {
   return {
     ok: false, status: response.status === 409 ? "conflict" : "unavailable", connector: "whatsapp",
     message: response.status === 409
-      ? "WhatsApp linking conflicts with an existing attempt or connection. Reuse the original operation_id with its original phone, or check the private native sheet and list before changing the connection."
+      ? "WhatsApp linking conflicts with an existing attempt or connection. Reuse the original operation_id with its original phone, or check the private linking result and list before changing the connection."
       : "WhatsApp linking could not be started. Check account access and the phone number before continuing.",
   };
 }

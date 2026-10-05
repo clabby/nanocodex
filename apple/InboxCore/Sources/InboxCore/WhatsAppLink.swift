@@ -78,10 +78,10 @@ extension ManagedClient {
     }
 }
 
-/// The sheet owns this controller; nothing in it enters transcript/state caches.
+/// The inline native card owns this controller; nothing in it enters transcript/state caches.
 /// Generation checks reject late HTTP replies after suspension or account changes.
 @MainActor public final class WhatsAppLinkController {
-    public enum Phase: Equatable { case waiting, ready, connected, expired, unknown, unavailable, cancelled }
+    public enum Phase: Equatable { case waiting, ready, connected, expired, unknown, retrying, unavailable, cancelled }
     public let link: WhatsAppLink
     public let account: UUID
     public private(set) var phase: Phase = .waiting
@@ -92,13 +92,13 @@ extension ManagedClient {
     private var authoritativeExpiry: Double?
     private var reconciliationPending = false
     public var expiresAt: Double { authoritativeExpiry ?? link.expiresAt }
-    public var shouldPoll: Bool { active && (reconciliationPending || phase == .waiting || phase == .ready || phase == .unknown) }
+    public var shouldPoll: Bool { active && (reconciliationPending || phase == .waiting || phase == .ready || phase == .unknown || phase == .retrying) }
 
     public init(link: WhatsAppLink, account: UUID) { self.link = link; self.account = account }
 
     public func activate(account: UUID, now: Date = Date()) {
         guard account == self.account else { cancel(); return }
-        guard phase == .waiting || phase == .ready || phase == .unknown || phase == .expired else { return }
+        guard phase != .cancelled && phase != .connected else { return }
         guard expiresAt <= now.timeIntervalSince1970 * 1000 + 305_000 else { finish(.unavailable); return }
         active = true
         reconciliationPending = true
@@ -109,7 +109,7 @@ extension ManagedClient {
     }
     public func cancel() { finish(.cancelled) }
     public func expire(now: Date = Date()) {
-        if (phase == .waiting || phase == .ready || phase == .unknown) && now.timeIntervalSince1970 * 1000 >= expiresAt {
+        if (phase == .waiting || phase == .ready || phase == .unknown || phase == .retrying) && now.timeIntervalSince1970 * 1000 >= expiresAt {
             code = nil
             if reconciliationPending { phase = .expired } else { finish(.expired) }
         }
@@ -124,6 +124,15 @@ extension ManagedClient {
         guard phase == .connected else { return nil }
         return .object(["type": .string("whatsapp_link_receipt"), "status": .string("connected"),
                         "connector": .string("whatsapp"), "operation_id": .string(link.operationID)])
+    }
+    private static func isTemporaryTransportFailure(_ error: Error) -> Bool {
+        if let apiError = error as? APIError, case .http(let status) = apiError {
+            return status == 408 || status == 429 || (500...599).contains(status)
+        }
+        guard let error = error as? URLError else { return false }
+        return [.timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+                .dnsLookupFailed, .notConnectedToInternet, .internationalRoamingOff,
+                .callIsActive, .dataNotAllowed].contains(error.code)
     }
     public func refresh(client: ManagedClient, account: UUID, configuration: URLSessionConfiguration = .ephemeral) async {
         guard account == self.account else { cancel(); return }
@@ -167,6 +176,7 @@ extension ManagedClient {
             reconciliationPending = false
             if Date().timeIntervalSince1970 * 1000 >= expiresAt { finish(.expired) }
             else if error as? APIError == .http(409) { code = nil; phase = .waiting }
+            else if Self.isTemporaryTransportFailure(error) { code = nil; phase = .retrying }
             else { finish(.unavailable) }
         }
     }
