@@ -41,7 +41,7 @@ test("MCP client consent displays identity and access before genuine hosted appr
   await expect(page.getByRole("heading", { name: "Connect Synthetic MCP Client" })).toBeVisible();
   await expect(page.getByText(/not verified by Nanocodex/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Allow access" })).toBeEnabled();
-  expect(observed.requests.map(request => request.path)).toEqual([requestPath, "/v1/me"]);
+  expect(observed.requests.map(request => request.path)).toEqual([requestPath, "/v1/me", "/v1/connectors"]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await observed.evidence();
   await page.getByRole("button", { name: "Allow access" }).click();
@@ -130,7 +130,10 @@ test("scope narrowing signs only chosen direct connector access without ChatGPT 
   const observed = observe(page, info);
   await page.goto(`/?oauth_request=${requestId}`);
   const agentScope = page.getByRole("checkbox", { name: /agent:run/ });
+  await expect(agentScope).toBeEnabled();
   await expect(agentScope).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: /connector:slack/ })).toBeDisabled();
+  await expect(page.getByText("Not connected in this account")).toBeVisible();
   await expect(page.getByRole("checkbox", { name: /connector:gmail/ })).not.toBeChecked();
   await agentScope.uncheck();
   await expect(page.getByRole("button", { name: "Allow access" })).toBeDisabled();
@@ -145,5 +148,21 @@ test("scope narrowing signs only chosen direct connector access without ChatGPT 
   expect(approval.resources).not.toContain("urn:nanocodex:connector:chatgpt");
   expect(approval.resources).not.toContain("urn:nanocodex:agent:output:actions");
   expect(approval.resources).not.toContain("urn:nanocodex:history:read");
+  await observed.evidence();
+});
+
+
+test("hosted rejection explains the failure and permits a revised selection before exchange", async ({ context, page }, info) => {
+  await setSession(context, "persistent");
+  const observed = observe(page, info);
+  await page.goto(`/?oauth_request=${requestId}`);
+  await expect(page.getByRole("button", { name: "Allow access" })).toBeEnabled();
+  await page.getByRole("checkbox", { name: /history:read/ }).check();
+  await page.getByRole("button", { name: "Allow access" }).click();
+  await expect(page.getByRole("alert")).toContainText("This permission is unavailable for this account.");
+  expect(observed.requests.some(request => request.path.endsWith("/approve"))).toBe(false);
+  await page.getByRole("checkbox", { name: /history:read/ }).uncheck();
+  await page.getByRole("button", { name: "Allow access" }).click();
+  await expect(page).toHaveURL(/code=synthetic-code/);
   await observed.evidence();
 });

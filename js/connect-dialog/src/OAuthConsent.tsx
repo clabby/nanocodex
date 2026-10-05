@@ -32,6 +32,8 @@ export function OAuthConsent() {
   const [request, setRequest] = useState<ConsentRequest>();
   const [selectedScopes, setSelectedScopes] = useState<readonly string[]>([]);
   const [account, setAccount] = useState<BrowserAccountSession | null>();
+  const [connectors, setConnectors] = useState<Readonly<Record<string, unknown>>>();
+  const [connectorFailure, setConnectorFailure] = useState<string>();
   const [failure, setFailure] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [finished, setFinished] = useState(false);
@@ -74,12 +76,39 @@ export function OAuthConsent() {
     return () => abort.abort();
   }, [requestId, requestUrl, apiOrigin]);
 
+  useEffect(() => {
+    const abort = new AbortController();
+    setConnectors(undefined);
+    setConnectorFailure(undefined);
+    if (!account?.address) return;
+    void (async () => {
+      try {
+        const response = await fetch("/v1/connectors", {
+          credentials: "same-origin", cache: "no-store", signal: abort.signal,
+        });
+        const body: unknown = await response.json();
+        if (!response.ok || !isRecord(body) || !isRecord(body.connectors)) {
+          throw new Error("Connected accounts could not be checked. Reload this page to try again.");
+        }
+        if (abort.signal.aborted) return;
+        const statuses = body.connectors;
+        setConnectors(statuses);
+        setSelectedScopes(current => current.filter(scope => scopeAvailable(scope, statuses)));
+      } catch (error) {
+        if (!abort.signal.aborted) setConnectorFailure(errorMessage(error));
+      }
+    })();
+    return () => abort.abort();
+  }, [account?.address]);
+
+  const selectableScopes = selectedScopes.filter(scope => scopeAvailable(scope, connectors));
+
   async function settle(approve: boolean) {
-    if (!request || operation.current || finished || (approve && (!account?.address || !selectedScopes.length))) return;
+    if (!request || operation.current || finished || (approve && (!account?.address || !selectableScopes.length))) return;
     operation.current = true;
     setBusy(true);
     setFailure(undefined);
-    const scopes = request.scope.split(" ").filter(scope => selectedScopes.includes(scope));
+    const scopes = request.scope.split(" ").filter(scope => selectableScopes.includes(scope));
     const resources = [...new Set([...request.base_resources, ...scopes.flatMap(scope => request.scope_resources[scope]!)])];
     let submitted = false;
     try {
@@ -101,7 +130,7 @@ export function OAuthConsent() {
           throw new Error("Your account session changed or expired. Sign in again, then review and approve access.");
         }
         if (!authorization.ok || !isRecord(body) || typeof body.code !== "string" || !opaqueId.test(body.code)) {
-          throw new Error("Your account could not authorize this request. Try again.");
+          throw new Error(responseDescription(body) ?? "Your account could not authorize this request. Try again.");
         }
         code = body.code;
       }
@@ -163,13 +192,15 @@ export function OAuthConsent() {
           <h2>Requested access</h2>
           <p>Choose the permissions to share with this client.</p>
           <ul className="oauth-scope-list">{request.scope.split(" ").map(scope => <li key={scope}>
-            <label><input type="checkbox" checked={selectedScopes.includes(scope)} disabled={busy || finished}
+            <label><input type="checkbox" checked={selectedScopes.includes(scope)} disabled={busy || finished || !scopeAvailable(scope, connectors)}
               onChange={event => setSelectedScopes(current => event.target.checked
                 ? [...current, scope] : current.filter(value => value !== scope))} />
-              <span>{scopeLabel(scope)}<code>{scope}</code></span>
+              <span>{scopeLabel(scope)}<code>{scope}</code>{requiredConnector(scope) && account && connectors && !scopeAvailable(scope, connectors) ? <small>Not connected in this account</small> : null}</span>
             </label>
           </li>)}</ul>
-          <p>Only the selected permissions are granted.</p>
+          <p>Only the selected permissions are granted. Connector permissions require a connected account.</p>
+          {account && !connectors && !connectorFailure ? <p role="status">Checking connected accounts…</p> : null}
+          {connectorFailure ? <p role="alert">{connectorFailure}</p> : null}
           <dl className="oauth-destinations">
             <div><dt>MCP server</dt><dd><code>{request.resource}</code></dd></div>
             <div><dt>Return address</dt><dd><code>{request.redirect_uri}</code></dd></div>
@@ -197,7 +228,7 @@ export function OAuthConsent() {
     </div>
     {request && !finished ? <div className="dialog-actions">
       <button type="button" disabled={busy} onClick={() => void settle(false)}>Deny</button>
-      <button type="button" disabled={busy || !account?.address || selectedScopes.length === 0} aria-busy={busy} onClick={() => void settle(true)}>
+      <button type="button" disabled={busy || !account?.address || selectableScopes.length === 0} aria-busy={busy} onClick={() => void settle(true)}>
         {busy ? "Working…" : "Allow access"}
       </button>
     </div> : null}
@@ -280,4 +311,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The authorization is unavailable. Start a new connection from your MCP client.";
+}
+
+function requiredConnector(scope: string): string | undefined {
+  return scope === "agent:run" ? "chatgpt" : scope.startsWith("connector:") ? scope.slice("connector:".length) : undefined;
+}
+function scopeAvailable(scope: string, connectors: Readonly<Record<string, unknown>> | undefined): boolean {
+  const capability = requiredConnector(scope);
+  if (!capability) return true;
+  const status = connectors?.[capability];
+  return isRecord(status) && status.connected === true;
+}
+function responseDescription(body: unknown): string | undefined {
+  if (!isRecord(body)) return undefined;
+  const message = body.error_description ?? body.message;
+  return typeof message === "string" && message.length > 0 && message.length <= 1_000 ? message : undefined;
 }

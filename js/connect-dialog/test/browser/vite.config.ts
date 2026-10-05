@@ -48,11 +48,12 @@ export default defineConfig({
               "agent:run": ["urn:nanocodex:connector:chatgpt", "urn:nanocodex:agent:output:final", "urn:nanocodex:agent:output:actions"],
               "history:read": ["urn:nanocodex:history:read"],
               "connector:gmail": ["urn:nanocodex:connector:gmail"],
+              "connector:slack": ["urn:nanocodex:connector:slack"],
             };
             result = {
               client_id: "c".repeat(43), client_name: "Synthetic MCP Client", app_id: appId,
               app_origin: appOrigin, redirect_uri: redirect,
-              scope: "agent:run history:read connector:gmail", resource: "https://nanocodex-connect-api.gakonst.workers.dev/mcp",
+              scope: "agent:run history:read connector:gmail connector:slack", resource: "https://nanocodex-connect-api.gakonst.workers.dev/mcp",
               base_resources: baseResources, scope_resources: scopeResources,
               resources: [...baseResources, ...Object.values(scopeResources).flat()],
             };
@@ -89,10 +90,11 @@ export default defineConfig({
             if (session === "delayed-authorization") await new Promise(resolve => setTimeout(resolve, 500));
             if (!["persistent", "persistent-other", "delayed-authorization", "delayed-exchange"].includes(session)) { status = 401; result = { error: "unauthorized" }; }
             else if (body.account_address !== address) { status = 403; result = { error: "account_address_mismatch" }; }
+            else if (body.resources?.includes("urn:nanocodex:history:read")) { status = 400; result = { message: "This permission is unavailable for this account." }; }
             else result = { code: "s".repeat(43) };
             break;
           case "/v1/connectors/google": result = { authorization_url: "http://modal.nanocodex.localhost:4198/provider.html" }; break;
-          case "/v1/connectors": result = { connectors: connectors() }; break;
+          case "/v1/connectors": result = { connectors: req.headers.referer?.includes("oauth_request=") ? { ...connectors(), gmail: { connected: true }, slack: { connected: false } } : connectors() }; break;
           case "/v1/fixture/google-complete": granted = body.capabilities; result = { ok: true }; break;
           case "/v1/hosted-authorizations":
             if (session === "delayed-exchange") await new Promise(resolve => setTimeout(resolve, 500));
