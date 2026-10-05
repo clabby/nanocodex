@@ -391,6 +391,9 @@ importers:
 
   js/egress:
     dependencies:
+      '@noble/hashes':
+        specifier: 2.4.0
+        version: 2.4.0
       '@whiskeysockets/baileys':
         specifier: 7.0.0-rc14
         version: 7.0.0-rc14(sharp@0.35.4(@types/node@24.13.3))(supports-color@10.2.2)

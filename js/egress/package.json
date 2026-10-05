@@ -25,7 +25,8 @@
     "nanocodex": "workspace:*",
     "viem": "^2.54.0",
     "@whiskeysockets/baileys": "7.0.0-rc14",
-    "whatsapp-rust-bridge": "0.5.4"
+    "whatsapp-rust-bridge": "0.5.4",
+    "@noble/hashes": "2.4.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
