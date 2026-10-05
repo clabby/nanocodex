@@ -149,6 +149,58 @@ to the root-owned helper; arbitrary terminal input and native application fields
 remain unsupported. This requires the separately installed protected helper;
 an ordinary same-user process or FIFO is not a supported substitute.
 
+### Public approval-key discovery
+
+A trusted local administrator can retrieve the backend approval **public** key
+from the independently verified account HTTPS origin at
+`GET /.well-known/nanocodex-native-input`. No login is required. The account
+Worker forwards only this exact path to its managed backend service binding,
+without caller headers, query or body. The managed Worker derives the key only
+from its `NATIVE_SECURE_INPUT_SIGNING_KEY`; a key configured on the account
+Worker, a helper identity, or a caller-supplied value cannot select it.
+
+The response has exactly four fields:
+
+- `protocol`: `nanocodex-secure-sudo`.
+- `version`: `1`.
+- `approval_public_key`: standard base64 of the uncompressed 65-byte P256
+  X9.63 public key (`04 || x || y`).
+- `approval_public_key_sha256`: lowercase hex SHA256 of those decoded 65 bytes.
+
+The backend validates canonical 32-byte JWK coordinates and private scalar,
+imports the configured P256 signing key with its usage restrictions, and signs
+and verifies a fixed discovery-specific probe to reject inconsistent private
+and public components. Neither the private JWK, probe signature, helper pins,
+nor cryptographic errors are returned. Missing or invalid configuration returns
+HTTP 503 with `{"error":"native_input_unavailable"}`. Responses use
+`Cache-Control: no-store`. Queries (including a bare `?`) return HTTP 400; methods
+other than GET, including HEAD, return HTTP 405 with `Allow: GET`.
+
+For local enrollment, retrieve this document directly on an independently
+trusted administrator device using the operator-verified HTTPS origin. Verify
+TLS normally: do not disable certificate validation or follow an unreviewed
+redirect. For example, replacing the reserved example origin with the approved
+account origin:
+
+```sh
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+  'https://nanocodex.example/.well-known/nanocodex-native-input'
+```
+
+Check the protocol/version and decoded key's SHA256 fingerprint before passing
+the public key to the reviewed local enrollment procedure. For first enrollment,
+the administrator explicitly trusts the independently known account HTTPS
+origin. If an independently supplied fingerprint already exists, compare it and
+stop on mismatch. The fingerprint in the same response checks key encoding; it
+does not authenticate the origin. An agent transcript, ordinary Hand output, or
+an origin supplied by an untrusted Hand does not establish trust. Discovery never enrolls a helper, changes either
+pin, authorizes a command, or relaxes the private approval endpoint. Enrollment
+and backend helper-identity pinning remain separate administrator operations.
+
+The synthetic HTTP journey runs both shipped Worker entrypoints in workerd:
+`pnpm --filter nanocodex-managed-service test:native-input-discovery`. Its HTTP
+transcript and bundle inputs are saved under `output/native-enrollment/`.
+
 ## Remote Linux and local TUI boundary
 
 A live shell Hand is not sufficient to accept a sudo password. Linux needs the
