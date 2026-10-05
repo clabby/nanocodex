@@ -2143,7 +2143,9 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
       ? `https://credentials.internal/v1/wallet/${operation}`
       : "https://credentials.internal/v1/wallet";
     if (!operation && request.method === "GET") {
-      return userBroker(env, userId).fetch(target, { method: "GET" });
+      const headers = request.headers.get("accept") === "application/vnd.nanocodex.wallet-snapshot+json"
+        ? { accept: "application/vnd.nanocodex.wallet-snapshot+json" } : undefined;
+      return userBroker(env, userId).fetch(target, { method: "GET", ...(headers ? { headers } : {}), signal: request.signal });
     }
     if (!operation && request.method === "PUT") {
       if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");

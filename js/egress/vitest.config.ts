@@ -8,6 +8,8 @@ import { defineConfig } from "vitest/config";
 const transientGoogleRevocations = new Set<string>();
 const transientSpotifyIdentities = new Set<string>();
 const spotifyRateTestCalls = new Map<string, number>();
+// Controls only the external Tempo RPC fixture; production broker code is unchanged.
+const walletBalanceFixtures = new Map<string, { started: boolean; result: string; gate?: Promise<void>; release?: () => void }>();
 
 const TEST_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY";
 const REGIONAL_RELAY_CLASSES = ["ChatGptEgressWnam","ChatGptEgressEnam","ChatGptEgressWeur","ChatGptEgressEeur","ChatGptEgressApac","ChatGptEgressSam","ChatGptEgressOc"];
@@ -801,6 +803,19 @@ export default defineConfig({
             });
           }
           if (url.hostname === "rpc.tempo.xyz" && request.method === "POST") {
+            if (url.pathname === "/__wallet-balance-fixture") {
+              const control = await request.json() as { action: string; account: string; result?: string };
+              const account = control.account.toLowerCase();
+              if (control.action === "hold") {
+                const state: { started: boolean; result: string; gate?: Promise<void>; release?: () => void } = { started: false, result: "0x" + "0".repeat(63) + "1" };
+                state.gate = new Promise<void>(resolve => { state.release = resolve; });
+                walletBalanceFixtures.set(account, state);
+              }
+              const state = walletBalanceFixtures.get(account);
+              if (control.action === "release" && state) { state.result = control.result ?? state.result; state.release?.(); delete state.gate; }
+              if (control.action === "clear") { state?.release?.(); walletBalanceFixtures.delete(account); }
+              return Response.json({ started: state?.started ?? false });
+            }
             const body = await request.json() as { id?: unknown; method?: unknown; params?: unknown };
             if (body.method === "eth_chainId") return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x1079" });
             if (body.method === "eth_estimateGas") return Response.json({ jsonrpc: "2.0", id: body.id, result: "0x186a0" });
@@ -823,6 +838,12 @@ export default defineConfig({
               && !request.headers.has("cookie");
             if (!validCall) {
               return Response.json({ jsonrpc: "2.0", id: body.id, error: { message: "unexpected method" } });
+            }
+            const walletFixture = walletBalanceFixtures.get("0x" + String(call.data).slice(-40).toLowerCase());
+            if (walletFixture) {
+              walletFixture.started = true;
+              await walletFixture.gate;
+              return Response.json({ jsonrpc: "2.0", id: body.id, result: walletFixture.result });
             }
             return Response.json({
               jsonrpc: "2.0",

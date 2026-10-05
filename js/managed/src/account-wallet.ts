@@ -24,7 +24,9 @@ export async function accountWalletMetadata(
     controller.abort(reason); rejectDeadline(reason);
   }, 1500);
   const read = async (suffix: string): Promise<{ status: number; value: unknown }> => {
-    const response = await binding.fetch(`https://broker.internal/users/${encodeURIComponent(userId)}/wallet${suffix}`, { signal: controller.signal });
+    const response = await binding.fetch(`https://broker.internal/users/${encodeURIComponent(userId)}/wallet${suffix}`, { signal: controller.signal,
+      ...(suffix === "" ? { headers: { accept: "application/vnd.nanocodex.wallet-snapshot+json" } } : {}),
+    });
     try { return { status: response.status, value: response.ok || response.status === 404 ? await response.json() : undefined }; }
     finally { if (response.body && !response.bodyUsed) await response.body.cancel(); }
   };
@@ -36,7 +38,11 @@ export async function accountWalletMetadata(
       || typeof value.created_at !== "number" || !Number.isSafeInteger(value.created_at) || value.created_at < 0) return { status: "unavailable" };
     const base = { status: "ready", address: value.address, created_at: value.created_at, chain: "tempo", chain_id: 4217 } as const;
     try {
-      const result = await Promise.race([read("/balance"), deadline]);
+      // A rolling older Egress ignores the Accept preference and returns metadata only.
+      // A present null balance is a completed unavailable result, never a retry.
+      const result = Object.prototype.hasOwnProperty.call(value, "balance")
+        ? { status: 200, value: value.balance }
+        : await Promise.race([read("/balance"), deadline]);
       const b = result.value;
       if (result.status === 200 && isRecord(b) && typeof b.account === "string" && b.account.toLowerCase() === base.address.toLowerCase()
         && typeof b.balance === "string" && /^(0|[1-9][0-9]{0,77})$/.test(b.balance)

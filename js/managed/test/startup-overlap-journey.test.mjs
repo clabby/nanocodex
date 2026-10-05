@@ -78,6 +78,11 @@ export class FixtureModel extends DurableObject {
       return Response.json({connectors:{},mcp_connections:[]});
     }
     if(url.pathname==='/vault') { this.record('vault.read');return Response.json([]); }
+    if(url.pathname.endsWith('/wallet')) {
+      this.record('wallet.read',{combined:request.headers.get('accept')==='application/vnd.nanocodex.wallet-snapshot+json'});
+      return Response.json({address:'0x'+'1'.repeat(40),created_at:1,balance:{account:'0x'+'1'.repeat(40),balance:'12345678',decimals:6,symbol:'MACH',token:'0x20c000000000000000000000f37de3740adec032'}});
+    }
+    if(url.pathname.endsWith('/wallet/balance')) { this.record('wallet.redundant_balance_read');return new Response(null,{status:503}); }
     if(request.headers.get('x-nanocodex-target-url')==='https://startup-fixture.example/setup') {
       this.setupStarted=true;this.record('setup.start',{published:this.published});this.release?.();
       await new Promise(resolve=>setTimeout(resolve,100));
@@ -182,6 +187,10 @@ test("normal public API overlaps account discovery with configured setup and ret
     const requests=trace.filter(row=>row.event==="provider.request");assert.equal(requests.length,3);
     for(const request of requests){assert.equal(request.catalog_ready,true);assert.equal(request.setup_ready,true);assert.ok(request.tools.includes("exec"),JSON.stringify(request.tools));}
     assert.match(JSON.stringify(requests[0].input),/startup_context/);
+    assert.match(JSON.stringify(requests[0].input),/12345678/,"first prompt includes the combined live balance");
+    assert.equal(first("wallet.read")?.combined,true,"startup requests the combined snapshot");
+    assert.equal(trace.filter(row=>row.event==="wallet.read").length,1,"one live wallet read for first startup");
+    assert.equal(trace.filter(row=>row.event==="wallet.redundant_balance_read").length,0,"no sequential balance fetch");
     assert.match(JSON.stringify(requests[2].input),/SETUP_OK/,"real shell reads the R2 file created by setup");
     assert.equal(trace.filter(row=>row.event==="catalog.start").length,1,"warm turn reuses bounded discovery");
     assert.equal(trace.filter(row=>row.event==="setup.start").length,1,"warm turn never repeats setup side effects");

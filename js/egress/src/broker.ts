@@ -5,7 +5,7 @@ import type { CloudflareAccountVaultResult } from "nanocodex/cloudflare/egress";
 import { createSshKeyPair, sshPublicKey } from "nanocodex/tools/ssh";
 import { DurableObject } from "cloudflare:workers";
 import { Provider, ProviderRequest, secp256k1, Storage } from "accounts";
-import { http } from "viem";
+import { createClient, http } from "viem";
 import { Account as TempoAccount, Actions } from "viem/tempo";
 import { tempo } from "viem/tempo/chains";
 
@@ -371,6 +371,9 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   }
 
   fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/v1/wallet"
+      && request.headers.get("accept") === "application/vnd.nanocodex.wallet-snapshot+json") return this.#walletSnapshot(request);
     const queuedAt = Date.now();
     const measureCredential = request.method === "POST"
       && new URL(request.url).pathname === "/v1/credential";
@@ -426,6 +429,45 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       activation_ms: this.#activationMs,
       activation_age_ms: Date.now() - this.#activatedAt,
     };
+  }
+
+  /** One live startup read. Network balance I/O must not hold credential rotation
+   * or model resolution behind an unrelated read-only RPC. */
+  async #walletSnapshot(request: Request): Promise<Response> {
+    const wallet = await this.#exclusive(async () => {
+      await this.#ready;
+      return this.#credentials.wallet ? publicRootWallet(this.#credentials.wallet) : undefined;
+    }, { operation: "http" });
+    if (!wallet) return jsonError(404, "wallet_not_configured");
+    const controller = new AbortController();
+    const abort = () => controller.abort(request.signal.reason);
+    request.signal.addEventListener("abort", abort, { once: true });
+    if (request.signal.aborted) abort();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // Leave transport time within Managed's existing 1.5s startup deadline.
+      // Timeout retains the public identity and explicitly unavailable balance.
+      const deadline = new Promise<null>((resolve) => {
+        timer = setTimeout(() => { controller.abort(); resolve(null); }, 1_000);
+      });
+      const client = createClient({ chain: tempo, transport: http(TEMPO_RPC, {
+        retryCount: 0, timeout: 1_000, fetchOptions: { signal: controller.signal },
+      }) });
+      const balance = await Promise.race([
+        Actions.token.getBalance(client, { account: wallet.address as `0x${string}`, decimals: 6, token: MACHINE_USD })
+          .then((value) => ({ account: wallet.address, balance: value.amount.toString(),
+            decimals: 6, symbol: "MACH", token: MACHINE_USD }))
+          .catch(() => null),
+        deadline,
+      ]);
+      const response = json({ ...wallet, balance }, 200);
+      response.headers.set("content-type", "application/vnd.nanocodex.wallet-snapshot+json");
+      response.headers.set("vary", "Accept");
+      return response;
+    } finally {
+      clearTimeout(timer);
+      request.signal.removeEventListener("abort", abort);
+    }
   }
 
   /** Private service-binding RPC only: never expose this credential to account clients. */
