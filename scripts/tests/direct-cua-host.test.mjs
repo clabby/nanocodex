@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtemp, mkdir, rm, realpath, chmod, writeFile, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { readLines, checkManagedPolicy, policyReply, appConsent, configuration, runHost } from '../../crates/experimental/nanocodex-computer/src/direct-cua-host.mjs';
 
@@ -20,9 +21,9 @@ class Child extends EventEmitter {
   exit() { this.exitCode = 0; this.emit('exit', 0, null); }
 }
 async function root(t) {
-  // Native Mac Hands do not expose /brain; use the real short temp root
-  // (not its /tmp symlink) so the Unix socket stays within sockaddr_un.
-  const base = process.platform === 'darwin' ? '/private/tmp' : '/brain/tmp';
+  // Native Hands need not mount /brain. Resolve the OS temp directory's
+  // symlinks before the host checks its private socket's ancestors.
+  const base = await realpath(tmpdir());
   await mkdir(base, { recursive: true });
   const directory = await realpath(await mkdtemp(path.join(base, 'dcua-')));
   t.after(() => rm(directory, { recursive: true, force: true }));

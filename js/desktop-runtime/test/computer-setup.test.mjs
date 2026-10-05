@@ -25,7 +25,7 @@ for (const failSetup of [false, true]) {
         const runtimeRoot = path.join(process.env.NANOCODEX_DIR, 'runtimes/openai-cua');
         const executable = path.join(runtimeRoot, 'hosts/fixture/cua-provider');
         fs.mkdirSync(path.dirname(executable), { recursive: true }); fs.writeFileSync(executable, '', { mode: 0o755 });
-        const receipt = { status: 'installed', executable, transport: 'mcp', args: [], environment: {} };
+        const receipt = { status: 'installed', executable, transport: 'mcp', args: [], environment: {}, dependency_contract: 'nanocodex-native-no-codex-v1' };
         fs.writeFileSync(path.join(runtimeRoot, 'provider.json'), JSON.stringify(receipt));
         console.log(JSON.stringify(receipt));
       } else if (args.includes('--describe')) console.log(JSON.stringify(machine));

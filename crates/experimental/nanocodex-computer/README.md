@@ -7,8 +7,9 @@ macOS path has a small Nanocodex MCP/lifecycle host for application consent and
 native policy compatibility; it does not bundle or run the official Codex CLI
 or app server. Its default surface is native `computer` only: browser windows
 remain accessible through native UI, but dedicated Tab/DOM APIs and the Chrome
-native-messaging bridge are not included. Windows/opt-in Linux are not yet
-converted and still require their existing Codex CLI. Native protected-target
+native-messaging bridge are not included. Automatic Windows upstream setup is disabled pending native-helper verification.
+The opt-in Linux Sky host runs without the Codex CLI; it requires a compatible
+upstream runtime and an X11/Xwayland desktop. Native protected-target
 checks and OS permissions still apply.
 
 `ComputerConfig::discover_or_install()` uses the upstream provisioning path on
@@ -21,7 +22,9 @@ remain host operations.
 Managed macOS startup reuses a successful deep signature verification for at most
 one hour while a complete recursive filesystem fingerprint stays unchanged. The
 fingerprint includes inode/device, file type, permissions, ownership, size, mtime,
-ctime and internal symlink targets for every bundle entry. New or changed resources,
+ctime and internal symlink targets for every bundle entry, plus regular-file
+content hashes. Content scanning is bounded to 2 GiB; larger bundles use full
+verification without caching. New or changed resources,
 external symlinks, expiry and missing/invalid cache files trigger the original full
 signature, signing identity, supported-build and runtime checks. Cache records are
 private and bounded, and cache write failures do not prevent verified startup.
@@ -131,12 +134,6 @@ Controls:
   policy text; `off`, `none` or `0` restores the upstream built-in policy.
   It is read by the trusted discovery paths only and is never inherited by
   the provider process; the text travels as per-call `_meta`.
-
-The managed macOS launcher also exports
-`BROWSER_USE_DISABLE_TAB_CAPABILITIES=browserAuth`, which drops the
-`browserAuth` tab capability that otherwise forbids credential entry in
-browser tabs. It only takes effect when browser tab surfaces are enabled; the
-macOS launcher currently restricts surfaces to native `computer`.
 
 The removed layers exist to blunt prompt injection and accidental side
 effects. With them off, the agent follows the embedding host's instructions

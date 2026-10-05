@@ -17,12 +17,13 @@ await computer.close();
 ```
 
 `ensureComputer({ binary })` uses the installed `nanocodex2` or `nanocodex` helper
-to provision the official provider on macOS and Windows. `discoverComputer` is
+to provision the official provider on macOS. Automatic Windows setup is disabled
+pending native-helper verification. `discoverComputer` is
 read-only. Both honor `NANOCODEX_COMPUTER` as an explicit provider executable,
 and `off`, `none`, or `0` disable CUA. Neither searches for the retired companion
 in PATH, Cargo directories, source builds, or adjacent installations. Unsupported
 platforms return no provider unless an explicit MCP executable is configured.
-The managed receipt supplies its exact arguments and environment on both platforms.
+A supported managed receipt supplies its exact arguments and environment.
 Mac setup selects immutable host assets separately from the signed bundle. CUA
 then starts the direct MCP host, bundled Node/node_repl, and signed Sky helper,
 with no official Codex CLI or app server. Its default surface is native computer
@@ -74,7 +75,8 @@ adapter never derives a turn ID from a tool call ID.
 Native protected-target checks and OS permissions remain upstream/OS-owned.
 The managed Mac host supplies blanket application-access consent from trusted
 host policy; this is not authorization for external actions or audio/data forms.
-Windows/opt-in Linux retain their existing Codex dependencies. The attachment
+The opt-in Linux Sky host runs without Codex on X11/Xwayland; automatic Windows
+upstream setup remains unsupported. The attachment
 advertises no MCP client capabilities and responds to incoming provider RPC
 requests with standard method-not-found (`-32601`) errors. Provider notifications
 receive no response.

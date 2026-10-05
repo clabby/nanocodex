@@ -758,12 +758,8 @@ mod mac {
         // contracts. CODEX_BINARY_PATH is not supported by this upstream.
         // Enable only the native computer surface. Browser Tab/DOM APIs need
         // the official app-server proxy and are intentionally unsupported.
-        // BROWSER_USE_DISABLE_TAB_CAPABILITIES drops the browserAuth tab
-        // capability, which otherwise forbids credential entry in browser
-        // tabs. It only takes effect when browser tab surfaces are enabled;
-        // this launcher currently restricts surfaces to computer.
         Ok(format!(
-            "#!/bin/sh\nset -eu\nunset CODEX_CLI_PATH BROWSER_USE_TINYSKY_ENABLED\nexport CUA_REPL_NODE_REPL_PATH={}\nexport CUA_REPL_ENABLED_SURFACES=computer\nexport BROWSER_USE_DISABLE_TAB_CAPABILITIES=browserAuth\nexport NODE_REPL_NODE_PATH={}\nexport NODE_REPL_NODE_MODULE_DIRS={}\nexport NODE_REPL_TRUSTED_CODE_PATHS={}\nexport SKY_CUA_SERVICE_PATH={}\nexport NODE_REPL_UNTRUSTED_ENV_ALLOWLIST=\"${{NODE_REPL_UNTRUSTED_ENV_ALLOWLIST:+$NODE_REPL_UNTRUSTED_ENV_ALLOWLIST,}}SKY_CUA_SERVICE_PATH,SKY_CUA_SERVICE_NATIVE_PIPE_PATH\"\nexport PATH={}:\"$PATH\"\nexec {} {} \"$@\"\n",
+            "#!/bin/sh\nset -eu\nunset CODEX_CLI_PATH BROWSER_USE_TINYSKY_ENABLED\nexport CUA_REPL_NODE_REPL_PATH={}\nexport CUA_REPL_ENABLED_SURFACES=computer\nexport NODE_REPL_NODE_PATH={}\nexport NODE_REPL_NODE_MODULE_DIRS={}\nexport NODE_REPL_TRUSTED_CODE_PATHS={}\nexport SKY_CUA_SERVICE_PATH={}\nexport NODE_REPL_UNTRUSTED_ENV_ALLOWLIST=\"${{NODE_REPL_UNTRUSTED_ENV_ALLOWLIST:+$NODE_REPL_UNTRUSTED_ENV_ALLOWLIST,}}SKY_CUA_SERVICE_PATH,SKY_CUA_SERVICE_NATIVE_PIPE_PATH\"\nexport PATH={}:\"$PATH\"\nexec {} {} \"$@\"\n",
             quote(&runtime.join("bin/node_repl"))?,
             quote(&runtime.join("bin/node"))?,
             quote(&modules)?,

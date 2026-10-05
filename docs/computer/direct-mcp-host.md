@@ -91,8 +91,9 @@ native-messaging manifest is installed. Browser windows can still be controlled
 through native UI, but dedicated Tab/DOM/browser APIs are unsupported. The
 shipped Chrome native-messaging host contains an app-server proxy, so preserving
 that surface requires a separate port, not pointing it at the policy-only shim.
-Windows and the opt-in Linux Sky host are not converted by this macOS change and
-still require their existing Codex CLI dependencies.
+Automatic Windows upstream setup is disabled pending verification of its native
+helper contract. The opt-in Linux Sky host runs without the Codex CLI; see
+[the upstream runtime guide](upstream-provider.md#linux-native-host).
 
 The installer creates a new sparse, attested generation without `Resources/codex`.
 It does not delete or mutate an older generation that a running Hand may still be
@@ -125,5 +126,6 @@ native-only staged Rust smoke passes persistent JS but fails initial Finder
 observation with `cgWindowNotFound`; a separate own-app fixture also fails with
 that native error. Its cause is not established. Native input is **not** verified.
 This is a draft implementation, not full live native acceptance or an activated
-Hand upgrade. Dedicated browser surfaces and zero-Codex Windows/Linux ports are
-also unfinished.
+Hand upgrade. Dedicated browser surfaces remain unsupported. For current Windows and Linux
+support and their separate validation limits, see the
+[upstream runtime guide](upstream-provider.md).

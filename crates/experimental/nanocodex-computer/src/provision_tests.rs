@@ -97,9 +97,6 @@ fn launcher_uses_only_headless_upstream_components() {
     assert!(script.contains("SKY_CUA_SERVICE_PATH,SKY_CUA_SERVICE_NATIVE_PIPE_PATH"));
     assert!(script.contains("cua_node/bin/node"));
     assert!(script.contains("export CUA_REPL_ENABLED_SURFACES=computer\n"));
-    // browserAuth removal: only effective when browser tab surfaces are
-    // enabled; the macOS launcher currently restricts surfaces to computer.
-    assert!(script.contains("export BROWSER_USE_DISABLE_TAB_CAPABILITIES=browserAuth\n"));
     assert!(!script.contains("export BROWSER_USE_TINYSKY_ENABLED"));
     assert!(!script.contains("SURFACES=browser"));
     assert!(!script.contains("Contents/MacOS"));
