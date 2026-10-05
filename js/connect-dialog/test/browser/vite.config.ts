@@ -94,7 +94,7 @@ export default defineConfig({
             else result = { code: "s".repeat(43) };
             break;
           case "/v1/connectors/google": result = { authorization_url: "http://modal.nanocodex.localhost:4198/provider.html" }; break;
-          case "/v1/connectors": result = { connectors: req.headers.referer?.includes("oauth_request=") ? { ...connectors(), gmail: { connected: true }, slack: { connected: false } } : connectors() }; break;
+          case "/v1/connectors": result = { connectors: req.headers.referer?.includes("oauth_request=") ? { ...connectors(), chatgpt: undefined, gmail: { connected: true }, slack: { connected: false } } : connectors() }; break;
           case "/v1/fixture/google-complete": granted = body.capabilities; result = { ok: true }; break;
           case "/v1/hosted-authorizations":
             if (session === "delayed-exchange") await new Promise(resolve => setTimeout(resolve, 500));

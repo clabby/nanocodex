@@ -314,7 +314,7 @@ function errorMessage(error: unknown): string {
 }
 
 function requiredConnector(scope: string): string | undefined {
-  return scope === "agent:run" ? "chatgpt" : scope.startsWith("connector:") ? scope.slice("connector:".length) : undefined;
+  return scope.startsWith("connector:") ? scope.slice("connector:".length) : undefined;
 }
 function scopeAvailable(scope: string, connectors: Readonly<Record<string, unknown>> | undefined): boolean {
   const capability = requiredConnector(scope);

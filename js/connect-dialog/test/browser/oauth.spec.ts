@@ -41,7 +41,7 @@ test("MCP client consent displays identity and access before genuine hosted appr
   await expect(page.getByRole("heading", { name: "Connect Synthetic MCP Client" })).toBeVisible();
   await expect(page.getByText(/not verified by Nanocodex/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Allow access" })).toBeEnabled();
-  expect(observed.requests.map(request => request.path)).toEqual([requestPath, "/v1/me", "/v1/connectors"]);
+  await expect.poll(() => observed.requests.map(request => request.path)).toEqual([requestPath, "/v1/me", "/v1/connectors"]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await observed.evidence();
   await page.getByRole("button", { name: "Allow access" }).click();
