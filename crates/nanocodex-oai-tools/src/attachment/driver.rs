@@ -256,23 +256,23 @@ fn request(
     // Only account machine publishers support regional pre-upgrade routing.
     // Named/scoped attachments retain the legacy owner route. Metadata::machine
     // guarantees one machine whose exact ID is also the catalog attachment_id.
-    if regional_hand_relays && config.endpoint.path() == "/v1/account/tool-host" {
-        if let Some(machine) = config
+    if regional_hand_relays
+        && config.endpoint.path() == "/v1/account/tool-host"
+        && let Some(machine) = config
             .metadata
             .as_ref()
             .and_then(AttachmentMetadata::attached_machine)
-        {
-            request.headers_mut().insert(
-                "x-nanocodex-hand-machine-id",
-                http::HeaderValue::from_str(machine.id())
-                    .map_err(|_| AttachmentError::Transport("invalid machine identity".into()))?,
-            );
-            request.headers_mut().insert(
-                "x-nanocodex-hand-runtime-id",
-                http::HeaderValue::from_str(runtime_id)
-                    .map_err(|_| AttachmentError::Transport("invalid runtime identity".into()))?,
-            );
-        }
+    {
+        request.headers_mut().insert(
+            "x-nanocodex-hand-machine-id",
+            http::HeaderValue::from_str(machine.id())
+                .map_err(|_| AttachmentError::Transport("invalid machine identity".into()))?,
+        );
+        request.headers_mut().insert(
+            "x-nanocodex-hand-runtime-id",
+            http::HeaderValue::from_str(runtime_id)
+                .map_err(|_| AttachmentError::Transport("invalid runtime identity".into()))?,
+        );
     }
     Ok(request)
 }
