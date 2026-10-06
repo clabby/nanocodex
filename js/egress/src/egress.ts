@@ -2171,7 +2171,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   }
 
   const walletMatch = url.pathname.match(
-    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/wallet(?:\/(balance|connect|revoke-access-key|mercator\/credential))?$/,
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/wallet(?:\/(balance|identity|link|link\/poll|link\/cancel|unlink|connect|revoke-access-key|mercator\/credential))?$/,
   );
   if (walletMatch) {
     const userId = walletMatch[1]!;
@@ -2188,7 +2188,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
       if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
       return userBroker(env, userId).fetch(target, { method: "PUT" });
     }
-    if (operation === "balance" && request.method === "GET") {
+    if ((operation === "balance" || operation === "identity") && request.method === "GET") {
       return userBroker(env, userId).fetch(target, { method: "GET" });
     }
     if (operation && request.method === "POST") {
@@ -2389,6 +2389,14 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
         headers: { "content-type": request.headers.get("content-type") ?? "" },
         body: request.body,
       }),
+    });
+  }
+
+  const providerCapture = url.pathname.match(/^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials\/(provider-capture|provider-store|provider-card|provider-bindings)$/);
+  if (providerCapture) {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed");
+    return userBroker(env, providerCapture[1]!).fetch(`https://credentials.internal/v1/${providerCapture[2]}`, {
+      method: "POST", headers: { "content-type": "application/json", "x-nanocodex-provider-owner": providerCapture[1]! }, body: request.body,
     });
   }
 

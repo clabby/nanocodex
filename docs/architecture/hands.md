@@ -8,6 +8,19 @@ OS -> Hand daemon <--- outbound WebSocket ---> AccountHostedTools <- agent
        `-- VM factory helper -> VMs published as separate mountable Hands
 ```
 
+On macOS, CLI Hand setup also installs a standalone menu-bar companion. It
+shows local service status, verified account sign-in, connected Hands and
+Start/Stop/Restart controls without requiring the Nanocodex desktop app. A fresh
+installation keeps the companion running while signed out; its sign-in action
+opens the CLI account flow in Terminal. Network or permission failures remain
+separate from signed-out state, and screen-only connections are labeled separately
+from native Hands. Its separate login LaunchAgent observes the existing Hand; it
+never creates another Hand identity. Quitting the menu bar leaves the service
+running. `nanocodex hand menu-bar` installs, repairs, or reopens the icon;
+`nanocodex hand menu-status` returns the read-only status snapshot used by the menu.
+See the [menu-bar companion](../../macos/HandMenuBar/README.md) for build and lifecycle
+details.
+
 The broker durably claims each call before sending it once. The daemon owns execution; a socket carries requests and replies. Each admitted source call has one durable transport command ID. The living Hand keeps its running task or immutable terminal receipt until the broker records the result and acknowledges it.
 
 - Offline before dispatch: not started.
@@ -186,6 +199,28 @@ Its wire receipts and per-sample timings are retained in
 `output/native-shell-latency/`. Repeat baseline/candidate runs under comparable
 load and retain outliers. Local source improvements require a separately
 verified Hand build/update before being attributed to deployed machines.
+
+## CUA selection and recovery
+
+CUA discovery is scoped to the Hand's logical `workdir`. A workdir-only call
+returns `backend: "upstream"` for a complete JS/reset pair from an online
+publisher, or `backend: "native_screen"` for its published screen action API.
+Retained offline upstream catalogs do not take precedence over a live screen.
+An online upstream pair adds the `computer` capability even when the native
+publisher omitted that label. Shell connectivity and screen connectivity remain
+separate; capability labels alone do not prove that an input can be dispatched.
+
+Each Code Mode cell keeps its captured provider. A missing provider fails before
+input dispatch and directs the caller to rediscover the same Hand in a new
+cell. A disconnected or replaced screen does not redirect an admitted action to
+another screen or backend. Observe fresh state before issuing new input after
+an uncertain result. Native scroll actions require `x`, `y`, `deltaX`, and
+`deltaY`; a vertical scroll supplies `deltaX: 0`.
+
+Run `pnpm --filter nanocodex-managed-service test:cua-routing` for the public
+managed-turn journey through account discovery, Code Mode and the Hand
+transports. Evidence is written under `output/cua-routing-journey/`; the external
+model and native CUA/screen endpoints are synthetic.
 
 ## Native screen ownership
 
