@@ -10,6 +10,11 @@ use serde_json::json;
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_IMAGES: usize = 20;
 const MAX_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+/// Anthropic accepts PDFs up to 32 MB per request; bound each decoded document
+/// and every prompt's combined media below that after base64 expansion.
+const MAX_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_DOCUMENTS: usize = 5;
+const MAX_FILENAME_BYTES: usize = 255;
 
 fn invalid(message: impl Into<String>) -> NanocodexError {
     NanocodexError::InvalidRequest(message.into())
@@ -88,6 +93,64 @@ fn image_source(value: &str) -> Result<(serde_json::Value, usize)> {
     }
 }
 
+/// Maps an inline document data URL to a native Claude document source.
+/// PDFs stay base64; plain text is decoded into a text source.
+fn document_block(file_data: &str, filename: Option<&str>) -> Result<(ContentBlock, usize)> {
+    if file_data.len() > MAX_DOCUMENT_BYTES.div_ceil(3) * 4 + 64 {
+        return Err(invalid("Claude document exceeds 10 MiB"));
+    }
+    let (header, data) = file_data
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(','))
+        .ok_or_else(|| invalid("Claude documents require a base64 data URL"))?;
+    let media_type = header
+        .strip_suffix(";base64")
+        .ok_or_else(|| invalid("Claude document data URL must use base64"))?;
+    let bytes = STANDARD
+        .decode(data)
+        .map_err(|_| invalid("invalid Claude document base64"))?;
+    if bytes.is_empty() || bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err(invalid(
+            "Claude document must contain 1 byte through 10 MiB",
+        ));
+    }
+    let source = match media_type {
+        "application/pdf" => {
+            if !bytes.starts_with(b"%PDF-") {
+                return Err(invalid(
+                    "Claude document media type does not match its bytes",
+                ));
+            }
+            json!({"type":"base64","media_type":"application/pdf","data":data})
+        }
+        "text/plain" => {
+            let text = String::from_utf8(bytes.clone())
+                .map_err(|_| invalid("Claude text document must be UTF-8"))?;
+            json!({"type":"text","media_type":"text/plain","data":text})
+        }
+        _ => {
+            return Err(invalid(
+                "Claude documents support application/pdf and text/plain",
+            ));
+        }
+    };
+    let mut extra = std::collections::BTreeMap::new();
+    if let Some(name) = filename {
+        if name.trim().is_empty()
+            || name.len() > MAX_FILENAME_BYTES
+            || name
+                .chars()
+                .any(|c| c.is_control() || c == '/' || c == '\\')
+        {
+            return Err(invalid(
+                "Claude document filename must be 1-255 bytes without paths or control characters",
+            ));
+        }
+        extra.insert("title".to_owned(), json!(name));
+    }
+    Ok((ContentBlock::Document { source, extra }, bytes.len()))
+}
+
 #[cfg(not(target_family = "wasm"))]
 fn local_image(path: &std::path::Path) -> Result<String> {
     use std::io::Read as _;
@@ -140,8 +203,24 @@ pub(crate) fn freeze(mut prompt: Prompt) -> Result<Prompt> {
             return Err(invalid("Claude prompt exceeds 100 content items"));
         }
         let mut images = 0;
+        let mut documents = 0;
         let mut total = 0;
         for item in items {
+            if let UserInput::File {
+                file_data,
+                filename,
+            } = item
+            {
+                documents += 1;
+                if documents > MAX_DOCUMENTS {
+                    return Err(invalid("Claude prompt exceeds 5 documents"));
+                }
+                total += document_block(file_data, filename.as_deref())?.1;
+                if total > MAX_TOTAL_BYTES {
+                    return Err(invalid("Claude prompt exceeds 20 MiB of media data"));
+                }
+                continue;
+            }
             if matches!(item, UserInput::Image { .. } | UserInput::LocalImage { .. }) {
                 images += 1;
                 if images > MAX_IMAGES {
@@ -167,7 +246,7 @@ pub(crate) fn freeze(mut prompt: Prompt) -> Result<Prompt> {
             if let UserInput::Image { image_url, .. } = item {
                 total += image_source(image_url)?.1;
                 if total > MAX_TOTAL_BYTES {
-                    return Err(invalid("Claude prompt exceeds 20 MiB of image data"));
+                    return Err(invalid("Claude prompt exceeds 20 MiB of media data"));
                 }
             }
         }
@@ -197,6 +276,7 @@ pub(crate) fn messages(prompt: &Prompt) -> Result<Vec<Message>> {
                 return Err(invalid("Claude prompt exceeds 100 content items"));
             }
             let mut images = 0;
+            let mut documents = 0;
             let mut bytes = 0;
             let mut content = Vec::with_capacity(items.len());
             for item in items {
@@ -206,8 +286,15 @@ pub(crate) fn messages(prompt: &Prompt) -> Result<Vec<Message>> {
                         images += 1;
                         let (source, size) = image_source(image_url)?;
                         bytes += size;
-                        if images > MAX_IMAGES || bytes > MAX_TOTAL_BYTES { return Err(invalid("Claude prompt exceeds 20 images or 20 MiB of image data")); }
+                        if images > MAX_IMAGES || bytes > MAX_TOTAL_BYTES { return Err(invalid("Claude prompt exceeds 20 images or 20 MiB of media data")); }
                         ContentBlock::Image { source, extra: Default::default() }
+                    }
+                    UserInput::File { file_data, filename } => {
+                        documents += 1;
+                        let (block, size) = document_block(file_data, filename.as_deref())?;
+                        bytes += size;
+                        if documents > MAX_DOCUMENTS || bytes > MAX_TOTAL_BYTES { return Err(invalid("Claude prompt exceeds 5 documents or 20 MiB of media data")); }
+                        block
                     }
                     UserInput::LocalImage { .. } => return Err(invalid("Claude local image was not frozen before execution")),
                     UserInput::ImageFile { .. } => return Err(invalid("Claude cannot use opaque OpenAI image file IDs; supply an image URL or local image")),

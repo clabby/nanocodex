@@ -72,6 +72,11 @@ impl UserMessage {
                             message.push_str(&path.display().to_string());
                             message.push(']');
                         }
+                        UserInput::File { filename, .. } => {
+                            message.push_str("[Document: ");
+                            message.push_str(filename.as_deref().unwrap_or("attachment"));
+                            message.push(']');
+                        }
                     }
                 }
             }

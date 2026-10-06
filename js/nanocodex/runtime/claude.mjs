@@ -1,7 +1,7 @@
 import {
   CLOUDFLARE_SESSION_RESERVATION, activateCloudflareAgentSession, activateHost, bindHostSession, createAgentClient, createEventChannel, createSessionId,
   defineRuntime, loadDurabilityRuntime, registerDefinitionHost, releaseDefinitionHost,
-  releaseHostSession, prompt, compact, shutdown, getTurnHostId,
+  releaseHostSession, prompt, routePrompt, compact, shutdown, getTurnHostId,
 } from '../internal.mjs';
 import { watch } from '../actions/events.mjs';
 import { prepareHarnesses } from './harnesses.mjs';
@@ -167,12 +167,8 @@ export async function createClaude(options, load, type, harnessDefaults) {
     },
     async shutdown(raw) { host.cancelCodeTurn(raw.sessionId); await raw.shutdown(); },
     subscribe: events.subscribe,
-    decorate: (agent, raw) => agent.extend(() => ({
-      events: { watch: (options) => watch(agent, options) },
-      session: { compact: () => track(compact(agent)), cancel: () => { host.cancelCodeTurn(raw.sessionId); return raw.cancel(); }, shutdown: () => shutdown(agent) },
-      turn: { prompt: (options) => {
-        if (typeof options?.input !== 'string' || !options.input.trim()) throw new TypeError('Claude prompt requires non-empty text');
-        const turn = prompt(agent, options);
+    decorate: (agent, raw) => {
+      const own = (turn) => {
         const identity = getTurnHostId(turn);
         void identity.catch(() => {});
         // Observe every issued turn, even if the caller never requests its result.
@@ -194,8 +190,28 @@ export async function createClaude(options, load, type, harnessDefaults) {
             return turn.cancel();
           },
         });
-      } },
-    })),
+      };
+      return agent.extend(() => ({
+        events: { watch: (options) => watch(agent, options) },
+        session: { compact: () => track(compact(agent)), cancel: () => { host.cancelCodeTurn(raw.sessionId); return raw.cancel(); }, shutdown: () => shutdown(agent) },
+        turn: {
+          prompt: (options) => {
+            const input = options?.input;
+            if (typeof input === 'string' ? !input.trim() : !Array.isArray(input) || input.length === 0) {
+              throw new TypeError('Claude prompt requires non-empty text or content');
+            }
+            return own(prompt(agent, options));
+          },
+          // Live frontends (realtime voice) steer the active turn or start one.
+          // Steered input joins a turn that already owns its host routes.
+          route: async (options) => {
+            if (typeof options?.input !== 'string' || !options.input.trim()) throw new TypeError('Claude live input requires non-empty text');
+            const turn = await routePrompt(agent, options);
+            return turn === undefined ? undefined : own(turn);
+          },
+        },
+      }));
+    },
   });
   try { return await createAgentClient(runtime, { sessionId: config.sessionId }, reservation); }
   catch (error) { cleanup(); throw error; }
