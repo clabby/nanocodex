@@ -458,6 +458,48 @@ test("public regional Hand relays preserve discovery, process ownership and unce
     evidence.observed.regional_pending_retirement_rejected = true;
     evidence.observed.regional_retirement_clears_directory = true;
 
+    // A stopped process can never send its journal receipt. The owner can
+    // explicitly abandon that exact offline runtime, preserving an unknown
+    // command outcome instead of retaining a dead device forever.
+    for (const regional of [false, true]) {
+      const label = regional ? "abandon-regional" : "abandon-legacy";
+      const peer = await publish({ label, id: label, regional, reconnect: false });
+      await bind(label, peer.id);
+      const call = invoke(label, label + "-call", shell("printf ONCE > effect.log; while [ ! -f release-process ]; do sleep 0.02; done", 30000));
+      call.catch(() => {});
+      await waitFor(async () => { try { return await readFile(join(peer.workspace, "effect.log"), "utf8") === "ONCE"; }
+        catch (error) { if (error.code !== "ENOENT") throw error; } }, "abandonment native effect");
+      const collection = regional ? "regional" : "legacy";
+      const live = (await ok(request(inventoryPath)))[collection].find(row => row.machine_id === peer.id);
+      const identity = regional ? regionalIdentity(live) : { machine_id: peer.id, runtime_id: live.runtime_id };
+      assert.equal((await request(retirePath, { ...identity, abandon_pending: true })).status, 409, "abandonment cannot remove a live runtime");
+      peer.socket.terminate();
+      await peer.native.close();
+      await waitFor(async () => {
+        const row = (await ok(request(inventoryPath)))[collection].find(row => row.machine_id === peer.id);
+        return row && row.online === false && row.pending_calls === 1;
+      }, "stopped publisher retains pending journal call");
+      assert.equal((await request(retirePath, identity)).status, 409);
+      for (const value of [false, "true", 1]) assert.equal((await request(retirePath, { ...identity, abandon_pending: value })).status, 400);
+      assert.equal((await request(retirePath, { ...identity, runtime_id: crypto.randomUUID(), abandon_pending: true })).status, 409);
+      const abandoned = { ...identity, abandon_pending: true };
+      const receipt = await ok(request(retirePath, abandoned));
+      assert.equal(receipt.retired, true);
+      assert.equal((await call).structuredResult.status, "ambiguous");
+      assert.deepEqual(await ok(request(retirePath, abandoned)), receipt);
+      assert.equal((await ok(request(inventoryPath)))[collection].some(row => row.machine_id === peer.id), false);
+      const successorLabel = label + "-successor";
+      const successor = await publish({ label: successorLabel, id: peer.id, regional });
+      await bind(successorLabel, peer.id);
+      const replay = await invoke(label, label + "-call", shell("printf ONCE > effect.log; while [ ! -f release-process ]; do sleep 0.02; done", 30000));
+      assert.equal(replay.structuredResult.status, "ambiguous");
+      assert.equal(calls(successorLabel).length, 0, "an abandoned command is never dispatched to the successor");
+      assert.equal(await readFile(join(peer.workspace, "effect.log"), "utf8"), "ONCE");
+      await ok(request(retirePath, abandoned));
+      assert.equal(successor.client.connected, true, "old retirement receipt must preserve the successor");
+      evidence.observed[label + "_preserves_unknown_outcome"] = true;
+    }
+
     assert.ok(wire.filter(r => r.event === "upgrade").every(r => r.status === 101));
     console.log(JSON.stringify({ evidence: output, ...evidence.observed }));
   } catch (error) { failure = error; evidence.error = error.stack; throw error; }
