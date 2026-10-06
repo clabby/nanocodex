@@ -809,7 +809,7 @@ final class InboxModel: ObservableObject {
     var preparingAttachments: Bool { (attachmentImports[focused?.id ?? ""] ?? 0) > 0 }
     var attachmentError: String? { attachmentErrors[focused?.id ?? ""] }
     var focusedSupportsRichInput: Bool {
-        isDemo || focused.map { !$0.model.isEmpty && !$0.model.hasPrefix("claude-") } == true
+        isDemo || focused.map { !$0.model.isEmpty } == true
     }
     var canSend: Bool {
         focused != nil && !hasUnconfirmedMessage && !preparingAttachments
@@ -921,7 +921,7 @@ final class InboxModel: ObservableObject {
     private func beginAttachmentImport(count: Int, target: AttachmentTarget) -> Bool {
         guard generation == target.generation else { return false }
         guard let card = cards.first(where: { $0.id == resolvedAgentID(target.agentID) }),
-              !card.model.isEmpty, !card.model.hasPrefix("claude-") else { return false }
+              !card.model.isEmpty else { return false }
         guard count > 0 else { return false }
         attachmentImports[resolvedAgentID(target.agentID), default: 0] += 1; attachmentErrors[resolvedAgentID(target.agentID)] = nil
         return true
@@ -3531,8 +3531,10 @@ final class InboxModel: ObservableObject {
         let agentID = try await readyAgent(agentID)
         let current = try await client.state(agentID)
         guard generation == epoch, self.client === client else { throw CancellationError() }
-        guard !current["settings"]["model"].string.isEmpty, !current["settings"]["model"].string.hasPrefix("claude-") else {
-            throw ManagedError(code: "unsupported_claude_voice", message: "Claude managed chats support text messages only. Voice is not available.")
+        // GPT realtime voice is the frontend for every managed backend; Claude
+        // threads receive delegated turns through the same realtime route.
+        guard !current["settings"]["model"].string.isEmpty else {
+            throw ManagedError(code: "agent_settings_unavailable", message: "This chat is not ready for voice yet.")
         }
         try Task.checkCancellation()
         guard let card = cards.first(where: { $0.id == agentID }),
@@ -3545,10 +3547,6 @@ final class InboxModel: ObservableObject {
     // or another tap can change focus. The server owns the queued follow-up.
     func send() -> Bool {
         guard let card = focused, canSend else { return false }
-        if card.model.hasPrefix("claude-"), !focusedAttachments.isEmpty {
-            error = "Claude managed chats support text messages only. Remove attachments before sending."
-            return false
-        }
         let request = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !request.isEmpty || !focusedAttachments.isEmpty else { return false }
         refreshContext()
@@ -3712,8 +3710,8 @@ final class InboxModel: ObservableObject {
                 guard let client else { throw APIError.invalidCredential }
                 let current = try await client.state(resolvedAgentID(message.agentID))
                 guard generation == epoch, self.client === client else { throw CancellationError() }
-                guard !current["settings"]["model"].string.isEmpty, !current["settings"]["model"].string.hasPrefix("claude-") else {
-                    throw ManagedError(code: "unsupported_claude_attachments", message: "Claude managed chats support text messages only. Attachments are not available.")
+                guard !current["settings"]["model"].string.isEmpty else {
+                    throw ManagedError(code: "agent_settings_unavailable", message: "This chat is not ready for attachments yet.")
                 }
                 let store = try AttachmentStore(scope: scope)
                 guard generation == epoch,

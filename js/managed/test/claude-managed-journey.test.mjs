@@ -298,7 +298,7 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
         return sse({type:'text',text:`CLAUDE_TOOL_DONE_${calls}`},'end_turn',`message-${calls}`);
       }
       const prompt = JSON.stringify(latest.content);
-      if(prompt.includes('CRITICAL: Respond with TEXT ONLY')) {
+      if(prompt.includes('Produce a concise text-only handoff')) {
         summaries++; return sse({type:'text',text:'NATIVE_SUMMARY durable proof already written; never repeat Write'},'end_turn',`summary-${calls}`);
       }
       if(prompt.includes('Try forbidden Read')) {

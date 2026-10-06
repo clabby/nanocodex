@@ -7,7 +7,9 @@ export type PromptItem =
   | { type: "text"; text: string }
   | { type: "image"; image_url: string; file_id?: never; detail?: "auto" | "low" | "high" | "original" | undefined }
   | { type: "image"; file_id: string; image_url?: never; detail?: "auto" | "low" | "high" | "original" | undefined }
-  | { type: "audio"; audio_url: string };
+  | { type: "audio"; audio_url: string }
+  /** Inline document (`data:application/pdf;base64,…` or `data:text/plain;base64,…`); native Claude only. */
+  | { type: "file"; file_data: string; filename?: string | undefined };
 
 export type PromptInput = string | readonly PromptItem[];
 

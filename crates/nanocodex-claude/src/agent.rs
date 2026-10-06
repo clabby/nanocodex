@@ -2192,6 +2192,11 @@ impl State {
         let mut captured = Vec::new();
         let mut first_event = None;
         let mut first_output = None;
+        // Streamed text and the final assistant message must share one item
+        // identity. Clients fold the canonical message into the streamed row
+        // only when both identify the same provider message; a null delta ID
+        // beside a concrete final ID renders every Claude answer twice.
+        let mut message_id: Option<String> = None;
         loop {
             let event = tokio::select! {
                 event = stream.next() => event,
@@ -2208,6 +2213,9 @@ impl State {
                     if let Some(recovery) = &mut recovery {
                         recovery.observe(&event);
                     }
+                    if let StreamEvent::MessageStart { message } = &event {
+                        message_id = Some(message.id.clone());
+                    }
                     if let (
                         Some(events),
                         StreamEvent::ContentBlockDelta {
@@ -2216,7 +2224,7 @@ impl State {
                         },
                     ) = (events, &event)
                     {
-                        self.emit(events,AgentEventKind::AssistantDelta,json!({"model_call_index":index,"item_id":null,"phase":null,"text":text}));
+                        self.emit(events,AgentEventKind::AssistantDelta,json!({"model_call_index":index,"item_id":message_id,"phase":null,"text":text}));
                     }
                     let terminal = matches!(event, StreamEvent::MessageStop);
                     captured.push(Ok(event));
@@ -3805,8 +3813,34 @@ impl LifecycleBackend for Driver {
             receipt.await.unwrap_or(Err(NanocodexError::TurnStopped))
         })
     }
-    fn route(&self, _request: BackendPrompt) -> BackendFuture<Result<BackendPromptRoute>> {
-        Box::pin(async { Err(unsupported("Claude live route/steering is unsupported")) })
+    /// Live input (for example a realtime voice frontend) steers the earliest
+    /// accepted turn that still admits steering, or otherwise starts a turn.
+    /// The submission future is inert until polled, so a steered route never
+    /// admits a second operation.
+    fn route(&self, request: BackendPrompt) -> BackendFuture<Result<BackendPromptRoute>> {
+        let state = self.state.clone();
+        let prompt = request.prompt.clone();
+        let start = self.submit(request);
+        Box::pin(async move {
+            if state.stopped.load(Ordering::SeqCst) {
+                return Err(NanocodexError::AgentStopped);
+            }
+            {
+                let mut turns = state.steering.lock().await;
+                if let Some((_, turn)) = turns
+                    .iter_mut()
+                    .filter(|(_, turn)| turn.accepting)
+                    .min_by_key(|(key, _)| key.0)
+                {
+                    if turn.pending.len() >= 8 {
+                        return Err(unsupported("Claude steering queue is full"));
+                    }
+                    turn.pending.push_back(crate::prompt::freeze(prompt)?);
+                    return Ok(BackendPromptRoute::Steered);
+                }
+            }
+            start.await.map(BackendPromptRoute::Started)
+        })
     }
     fn steer(&self, key: BackendTurnKey, prompt: Prompt) -> BackendFuture<Result<()>> {
         let state = self.state.clone();

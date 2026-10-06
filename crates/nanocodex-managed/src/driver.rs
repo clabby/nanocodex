@@ -996,6 +996,9 @@ fn managed_prompt(prompt: Prompt) -> nanocodex_agent::Result<PromptInput> {
                         capability: "local_media",
                     })
                 }
+                UserInput::File { .. } => Err(NanocodexError::UnsupportedCapability {
+                    capability: "document_input",
+                }),
             })
             .collect::<nanocodex_agent::Result<Vec<_>>>()
             .map(PromptInput::Content),

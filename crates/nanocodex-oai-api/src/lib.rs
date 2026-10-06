@@ -584,6 +584,17 @@ pub enum UserInput {
         /// Path retained by the input contract.
         path: PathBuf,
     },
+    /// A document supplied inline as a base64 data URL, such as a PDF.
+    ///
+    /// Native Claude sends it as a document content block. Responses-backed
+    /// harnesses do not consume inline documents and receive a text notice.
+    File {
+        /// `data:<media type>;base64,<bytes>` document payload.
+        file_data: String,
+        /// Optional user-visible file name, never a filesystem path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
 }
 
 /// Image fidelity requested from the model.
@@ -610,7 +621,8 @@ impl UserInput {
             | Self::ImageFile { .. }
             | Self::LocalImage { .. }
             | Self::Audio { .. }
-            | Self::LocalAudio { .. } => 0,
+            | Self::LocalAudio { .. }
+            | Self::File { .. } => 0,
         }
     }
 
@@ -623,7 +635,8 @@ impl UserInput {
             | Self::ImageFile { .. }
             | Self::LocalImage { .. }
             | Self::Audio { .. }
-            | Self::LocalAudio { .. } => 0,
+            | Self::LocalAudio { .. }
+            | Self::File { .. } => 0,
         }
     }
 
@@ -636,7 +649,8 @@ impl UserInput {
             | Self::ImageFile { .. }
             | Self::LocalImage { .. }
             | Self::Audio { .. }
-            | Self::LocalAudio { .. } => false,
+            | Self::LocalAudio { .. }
+            | Self::File { .. } => false,
         }
     }
 }
@@ -882,6 +896,14 @@ enum UserInputFields {
     LocalAudio {
         /// Path retained by the input contract.
         path: PathBuf,
+    },
+    /// A document supplied inline as a base64 data URL.
+    File {
+        /// `data:<media type>;base64,<bytes>` document payload.
+        file_data: String,
+        /// Optional user-visible file name.
+        #[serde(default)]
+        filename: Option<String>,
     },
 }
 
